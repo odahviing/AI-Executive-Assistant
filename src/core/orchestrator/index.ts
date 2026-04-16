@@ -4,7 +4,7 @@ import { buildSystemPromptParts } from './systemPrompt';
 import { getSkillTools, executeSkillTool } from '../../skills/registry';
 import type { UserProfile } from '../../config/userProfile';
 import type { SkillContext, ChannelId } from '../../skills/types';
-import { auditLog, getPersonMemory, parseSocialTopics, type PersonNote, type PersonProfile, type PersonInteraction } from '../../db';
+import { auditLog, getPersonMemory, parseSocialTopics, getSummarySessionByThread, type PersonNote, type PersonProfile, type PersonInteraction } from '../../db';
 import { getActiveJobsForThread } from '../../tasks';
 import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
@@ -128,6 +128,14 @@ export interface OrchestratorInput {
    * to conversation history.
    */
   extraInstruction?: string;
+  /**
+   * Image content blocks attached to the current user message (v1.7.1).
+   * When present, the current turn is sent as a content array
+   * `[image, ..., text]` instead of a plain string. Sonnet sees the actual
+   * pixels (exact UI text, error messages, layout). Persisted to history as
+   * a `[Image] ...` placeholder by the caller; the bytes are not stored.
+   */
+  images?: Anthropic.ImageBlockParam[];
 }
 
 export interface SlackAction {
@@ -172,6 +180,28 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
     ? `${userMessage}\n\n[SYSTEM NOTE — not from ${profile.user.name.split(' ')[0]}: ${input.extraInstruction}]`
     : userMessage;
 
+  // Build the current turn. When images are attached (v1.7.1), the user
+  // message becomes a content array `[image, ..., text]` so Sonnet sees the
+  // actual pixels — much higher fidelity than a pre-described summary.
+  const hasImages = !!input.images && input.images.length > 0;
+  const currentTurn: Anthropic.MessageParam = hasImages
+    ? {
+        role: 'user',
+        content: [
+          ...(input.images as Anthropic.ImageBlockParam[]),
+          { type: 'text', text: effectiveUserMessage },
+        ],
+      }
+    : { role: 'user', content: effectiveUserMessage };
+
+  if (hasImages) {
+    logger.info('Orchestrator user message includes images', {
+      threadTs,
+      imageCount: input.images!.length,
+      captionPreview: effectiveUserMessage.slice(0, 80),
+    });
+  }
+
   // Build message list, then trim history to stay within token budget.
   // The current user message is always kept; older history is pruned by character count.
   const messages: Anthropic.MessageParam[] = trimHistory([
@@ -179,7 +209,7 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
       role: m.role as 'user' | 'assistant',
       content: m.content,
     })),
-    { role: 'user', content: effectiveUserMessage },
+    currentTurn,
   ]);
 
   // Model routing — Sonnet everywhere. We used to route colleagues to Haiku
@@ -247,6 +277,19 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
       if (!coordJobs.some(j => j.id === task.skill_ref) && !outreachJobs.some(j => j.id === task.skill_ref)) {
         lines.push(`• Task: "${task.title}" — ${task.status}`);
       }
+    }
+
+    // v1.7.2 — Summary session (one per thread). When present + iterating,
+    // tell Sonnet explicitly so it routes owner replies through the
+    // classify_summary_feedback tool rather than treating them as new requests.
+    const summarySession = getSummarySessionByThread(threadTs);
+    if (summarySession && summarySession.stage === 'iterating') {
+      const subject = summarySession.meeting_subject ?? '(untitled)';
+      lines.push(`• Summary session: "${subject}" — drafting/iterating. ANY reply from ${profile.user.name.split(' ')[0]} in this thread is feedback on the summary — call classify_summary_feedback first to route correctly (style rule / draft edit / share intent).`);
+    } else if (summarySession && summarySession.stage === 'shared') {
+      const subject = summarySession.meeting_subject ?? '(untitled)';
+      const shared = summarySession.shared_at ? ` (shared ${summarySession.shared_at})` : '';
+      lines.push(`• Summary session: "${subject}" — already shared${shared}. Draft text is no longer available; only the meta (subject/attendees/date) remains. If asked, recall what you can from the meta.`);
     }
 
     if (lines.length > 0) {

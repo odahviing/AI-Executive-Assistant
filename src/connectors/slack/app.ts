@@ -29,6 +29,13 @@ import {
   sendAudioMessage,
   shouldRespondWithAudio,
 } from '../../voice';
+import {
+  downloadSlackImage,
+  buildImageBlock,
+  type AnthropicImageBlock,
+} from '../../vision';
+import { scanImageForInjection } from '../../utils/imageGuard';
+import { shadowNotify } from '../../utils/shadowNotify';
 import logger from '../../utils/logger';
 
 /**
@@ -181,8 +188,9 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     isMpim?: boolean;
     mpimMemberIds?: string[];  // all non-bot member IDs when in MPIM
     voiceInput?: boolean;      // true if input came from a voice message
+    images?: AnthropicImageBlock[];  // v1.7.1 — image content blocks attached to this turn
   }): Promise<void> {
-    const { senderId, text, channelId, ts, threadTs, say, client, isChannel, isMpim, voiceInput, mpimMemberIds } = params;
+    const { senderId, text, channelId, ts, threadTs, say, client, isChannel, isMpim, voiceInput, mpimMemberIds, images } = params;
     const rawRole = getSenderRole(senderId);
 
     // ── Colleague-mode testing (owner only, DMs only) ────────────────────────
@@ -345,7 +353,13 @@ export function createSlackAppForProfile(profile: UserProfile): App {
 
 
     const dbHistory = getConversationHistory(threadTs);
-    appendToConversation(threadTs, channelId, { role: 'user', content: text, ts });
+    // v1.7.1 — when images are attached, prefix the persisted text with
+    // "[Image]" so future turns know an image was shared in this turn (the
+    // bytes themselves are never stored — see vision/index.ts).
+    const persistedText = images && images.length > 0
+      ? `[Image] ${text}`
+      : text;
+    appendToConversation(threadTs, channelId, { role: 'user', content: persistedText, ts });
 
     // ── Load actual Slack thread replies and merge with DB history ──────────
     // The DB only has messages Maelle processed. In channels/MPIMs she may have
@@ -477,7 +491,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         }
       }
 
-      logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length });
+      logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0 });
       const result = await runOrchestrator({
         userMessage,
         conversationHistory: history,
@@ -492,6 +506,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         isMpim,
         isOwnerInGroup,
         mpimMemberIds,
+        images,
       });
       logger.info('Orchestrator completed', { senderId, threadTs, hasApproval: result.requiresApproval, actionCount: result.slackActions?.length ?? 0 });
 
@@ -620,6 +635,115 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     }
   }
 
+  // ── Image file_share helper (v1.7.1) ──────────────────────────────────────
+  // Owner-only image input. Downloads each image, runs the injection guard
+  // (logs + shadow-notifies suspicious content but proceeds — owner is trusted),
+  // builds Anthropic image blocks, then hands off to processMessage with the
+  // images attached. Used by both the DM and MPIM handlers.
+  //
+  // Caps at 4 images per turn for sanity. Slack file_share usually has 1.
+  async function processImageFileShare(params: {
+    files: any[];
+    message: any;
+    channelId: string;
+    ts: string;
+    threadTs: string;
+    client: typeof app.client;
+    isMpim: boolean;
+    mpimMemberIds?: string[];
+  }): Promise<void> {
+    const { files, message, channelId, ts, threadTs, client, isMpim, mpimMemberIds } = params;
+
+    const imageFiles = files.filter((f: any) =>
+      typeof f.mimetype === 'string' && f.mimetype.startsWith('image/'),
+    );
+    if (imageFiles.length === 0) return;
+
+    const toProcess = imageFiles.slice(0, 4);
+    if (imageFiles.length > 4) {
+      logger.warn('Image file_share with >4 images — processing first 4 only', {
+        total: imageFiles.length,
+      });
+    }
+
+    const images: AnthropicImageBlock[] = [];
+    for (const f of toProcess) {
+      const dl = await downloadSlackImage(f.url_private, assistant.slack.bot_token, f.mimetype);
+      if ('error' in dl) {
+        logger.warn('Image download failed', {
+          error: dl.error, detail: dl.detail, filetype: f.filetype,
+        });
+        const friendly = dl.error === 'too_large'
+          ? `That image is a bit big for me to look at — could you try a smaller version?`
+          : dl.error === 'unsupported_type'
+          ? `I can only look at JPEG, PNG, GIF, or WebP images — that file type doesn't work for me.`
+          : `I couldn't open that image. Try sending it again?`;
+        try {
+          await client.chat.postMessage({
+            token: assistant.slack.bot_token,
+            channel: channelId,
+            thread_ts: threadTs,
+            text: friendly,
+          });
+        } catch (_) {}
+        return;
+      }
+
+      // Image guard: scan for instruction-like text. v1.7.1 owner path =
+      // log + shadow-notify but proceed (owner is trusted). When colleague
+      // path opens, flip this to refuse + notify.
+      const scan = await scanImageForInjection(dl);
+      if (scan.suspicious) {
+        logger.warn('⚠ SECURITY — image flagged as suspicious (v1.7.1 owner path: log + proceed)', {
+          senderId: message.user,
+          channelId,
+          reason: scan.reason,
+          extractedTextPreview: scan.extractedText?.slice(0, 200),
+        });
+        try {
+          await shadowNotify(app, profile, {
+            channel: channelId,
+            threadTs,
+            action: '⚠ Image guard: suspicious content',
+            detail: `Reason: ${scan.reason ?? 'unknown'}. Extract: "${scan.extractedText?.slice(0, 200) ?? '(none)'}"`,
+          });
+        } catch (_) {}
+      }
+
+      images.push(buildImageBlock(dl));
+    }
+
+    if (images.length === 0) return;
+
+    // Caption: Slack stuffs the user's typed text into event.text / message.text
+    const captionText = ((message.text as string | undefined) ?? '').trim();
+    const messageText = captionText || '(image attached, no caption)';
+
+    const sayFn = async (msgOrText: any) => {
+      const txt = typeof msgOrText === 'string' ? msgOrText : msgOrText.text;
+      await client.chat.postMessage({
+        token: assistant.slack.bot_token,
+        channel: channelId,
+        thread_ts: threadTs,
+        text: txt,
+      });
+    };
+
+    await processMessage({
+      senderId: message.user!,
+      text: messageText,
+      channelId,
+      ts,
+      threadTs,
+      say: sayFn,
+      client,
+      isChannel: false,
+      isMpim,
+      mpimMemberIds,
+      images,
+    });
+  }
+
   // ── Handler 1: Direct messages (1:1 DM) ──────────────────────────────────
   // Fires for every message in a 1:1 DM with Maelle — no mention needed
   app.message(async ({ message, say, client }) => {
@@ -637,15 +761,137 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     const senderRole1v1 = getSenderRole(message.user!);
     logger.info('1:1 DM received', { senderId: message.user, channelId, role: senderRole1v1, subtype: subtype ?? 'text' });
 
-    // Handle audio messages (file_share subtype)
+    // Handle audio + image + transcript file_shares
     if (subtype === 'file_share') {
-      logger.info('Audio message received', { channel: channelId, user: message.user });
       const files = (message as any).files as any[] | undefined;
+      const ts = message.ts;
+      const threadTs = ('thread_ts' in message && (message as any).thread_ts)
+        ? (message as any).thread_ts as string
+        : ts;
+
+      // Transcript branch (v1.7.2) — owner-only by convention (1:1 DM with the bot).
+      // Any .txt upload in DM is treated as a meeting transcript candidate. The
+      // SummarySkill helper classifies (transcript vs corrected summary) and
+      // creates / overrides / replaces the per-thread summary session.
+      const transcriptFile = files?.find((f: any) =>
+        f.mimetype === 'text/plain'
+        || f.filetype === 'text'
+        || f.filetype === 'txt'
+      );
+      if (transcriptFile && senderRole1v1 === 'owner') {
+        logger.info('Transcript file received in DM', {
+          channel: channelId,
+          user: message.user,
+          filetype: transcriptFile.filetype,
+          mimetype: transcriptFile.mimetype,
+          size: transcriptFile.size,
+        });
+        setImmediate(async () => {
+          try {
+            // Download the file via Slack's authenticated URL
+            const dl = await fetch(transcriptFile.url_private, {
+              headers: { Authorization: `Bearer ${assistant.slack.bot_token}` },
+            });
+            if (!dl.ok) {
+              logger.warn('Transcript download failed', { status: dl.status });
+              await client.chat.postMessage({
+                token: assistant.slack.bot_token,
+                channel: channelId,
+                thread_ts: threadTs,
+                text: `I couldn't open that file — try sending it again?`,
+              });
+              return;
+            }
+            const text = await dl.text();
+            if (text.trim().length < 50) {
+              await client.chat.postMessage({
+                token: assistant.slack.bot_token,
+                channel: channelId,
+                thread_ts: threadTs,
+                text: `That file looks empty — was the export complete?`,
+              });
+              return;
+            }
+
+            // Caption (if any) is the message text alongside the file
+            const caption = ((message as any).text as string | undefined)?.trim() ?? '';
+
+            // Hand off to the Summary skill ingestion helper
+            const { ingestTranscriptUpload } = await import('../../skills/summary');
+            const result = await ingestTranscriptUpload({
+              text,
+              caption,
+              ownerUserId: profile.user.slack_user_id,
+              threadTs,
+              channelId,
+              profile,
+            });
+
+            // Post the rendered draft into the thread + a one-line preface
+            // depending on which path the helper took
+            const preface = result.kind === 'created'
+              ? `Here's a draft — let me know what to change before we send it out.`
+              : result.kind === 'overridden_new_meeting'
+                ? `New transcript noted — replacing the previous one with this draft.`
+                : `Got your edits — here's the updated version.`;
+
+            await client.chat.postMessage({
+              token: assistant.slack.bot_token,
+              channel: channelId,
+              thread_ts: threadTs,
+              text: `${preface}\n\n${result.rendered}`,
+            });
+
+            // Persist the rendered draft into conversation history so future
+            // orchestrator turns in this thread see it as Maelle's prior turn.
+            appendToConversation(threadTs, channelId, {
+              role: 'assistant',
+              content: `[Summary draft posted]\n${result.rendered}`,
+              ts: undefined,
+            });
+          } catch (err) {
+            logger.error('Transcript ingestion failed', { err: String(err) });
+            try {
+              await client.chat.postMessage({
+                token: assistant.slack.bot_token,
+                channel: channelId,
+                thread_ts: threadTs,
+                text: `I hit an issue summarizing that — give me a moment and try again?`,
+              });
+            } catch (_) {}
+          }
+        });
+        return;
+      }
+
+      // Image branch (v1.7.1) — owner-only by convention (DM with the bot is
+      // owner-only in practice; the helper applies the injection guard regardless).
+      const hasImage = files?.some((f: any) =>
+        typeof f.mimetype === 'string' && f.mimetype.startsWith('image/'),
+      );
+      if (hasImage) {
+        logger.info('Image message received in DM', { channel: channelId, user: message.user });
+        setImmediate(() => {
+          processImageFileShare({
+            files: files!,
+            message,
+            channelId,
+            ts,
+            threadTs,
+            client,
+            isMpim: false,
+          }).catch(err => logger.error('Image handling error', { err: String(err) }));
+        });
+        return;
+      }
+
+      // Audio branch
+      logger.info('Audio message received', { channel: channelId, user: message.user });
       const audioFile = files?.find((f: any) =>
         f.mimetype?.startsWith('audio/') || f.filetype === 'mp4' || f.filetype === 'webm'
       );
       if (!audioFile) {
-        logger.warn('file_share but no audio file found', { files: files?.map((f:any) => f.filetype) });
+        logger.warn('file_share but no audio/image file found', { files: files?.map((f:any) => f.filetype) });
         return;
       }
       if (!config.OPENAI_API_KEY) {
@@ -657,10 +903,6 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           const text = await transcribeSlackAudio(audioFile.url_private, assistant.slack.bot_token, undefined, audioFile.mimetype);
           if (!text || text.length < 2) return;
           logger.info('Voice message transcribed', { preview: text.slice(0, 80) });
-          const ts = message.ts;
-          const threadTs = ('thread_ts' in message && (message as any).thread_ts)
-            ? (message as any).thread_ts as string
-            : ts;
           appendToConversation(threadTs, channelId, { role: 'user', content: `[Voice message]: ${text}`, ts });
           const sayFn = async (msgOrText: any) => {
             const txt = typeof msgOrText === 'string' ? msgOrText : msgOrText.text;
@@ -716,6 +958,72 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     // (e.g. "Yes, that works for me") are silently dropped.
     if (event.channel_type !== 'mpim' && event.channel_type !== 'channel') return;
     if (!('user' in event) || !event.user) return;
+
+    // ── Image file_share (v1.7.1) — OWNER ONLY in MPIM ───────────────────────
+    // Has to run BEFORE the text-empty check below: an image can arrive
+    // without a caption. Colleagues' images are silently dropped in v1.7.1.
+    if ('subtype' in event && event.subtype === 'file_share') {
+      const eventFiles = (event as any).files as any[] | undefined;
+      const hasImage = eventFiles?.some((f: any) =>
+        typeof f.mimetype === 'string' && f.mimetype.startsWith('image/'),
+      );
+      if (hasImage) {
+        if (event.user !== profile.user.slack_user_id) {
+          logger.info('MPIM image from non-owner — dropped (v1.7.1: owner-only)', {
+            senderId: event.user,
+            channelId: event.channel,
+            fileCount: eventFiles!.length,
+          });
+          return;
+        }
+        // Confirm this isn't a real channel masquerading as MPIM
+        if (event.channel_type === 'channel') {
+          try {
+            const ch = (await client.conversations.info({
+              token: assistant.slack.bot_token,
+              channel: event.channel as string,
+            })).channel as any;
+            if (ch?.is_mpim !== true) return;
+          } catch (err) {
+            logger.warn('conversations.info failed during MPIM image check — skipping', { err: String(err) });
+            return;
+          }
+        }
+
+        const ts = event.ts;
+        const threadTs = ('thread_ts' in event && event.thread_ts) ? event.thread_ts as string : ts;
+
+        // Load mpimMemberIds so the orchestrator knows the group composition
+        let mpimMemberIds: string[] | undefined;
+        try {
+          const membersRes = await client.conversations.members({
+            token: assistant.slack.bot_token,
+            channel: event.channel as string,
+          });
+          mpimMemberIds = ((membersRes.members as string[]) ?? []).filter(id => id !== botUserId);
+        } catch (err) {
+          logger.warn('Could not fetch MPIM members for image turn — proceeding without', { err: String(err) });
+        }
+
+        logger.info('Image message received in MPIM (owner)', {
+          channel: event.channel, user: event.user, fileCount: eventFiles!.length,
+        });
+        setImmediate(() => {
+          processImageFileShare({
+            files: eventFiles!,
+            message: event,
+            channelId: event.channel as string,
+            ts,
+            threadTs,
+            client,
+            isMpim: true,
+            mpimMemberIds,
+          }).catch(err => logger.error('MPIM image handling error', { err: String(err) }));
+        });
+        return;
+      }
+    }
+
     if (!('text' in event) || !event.text) return;
     if ('subtype' in event && event.subtype && event.subtype !== 'file_share') return;
 

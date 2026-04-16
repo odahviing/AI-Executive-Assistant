@@ -27,7 +27,11 @@ export type TaskType =
   | 'coord_nudge'        // 24-work-hour nudge to non-responders
   | 'coord_abandon'      // +4h after nudge, close coord if still stuck
   | 'approval_expiry'    // approval expires_at
-  | 'calendar_fix';      // re-check a calendar issue marked to_resolve
+  | 'calendar_fix'       // re-check a calendar issue marked to_resolve
+  // v1.7.2 — Summary skill action-item follow-ups. At due_at the dispatcher
+  // DMs the assignee asking for a status update; the reply flows back to the
+  // owner via the existing outreach reply pipeline.
+  | 'summary_action_followup';
 
 export type TaskStatus =
   | 'new'                // created, not started yet (may have a future due_at)
@@ -60,4 +64,7 @@ export interface Task {
   created_context?: string;    // 'dm' | 'mpim:{channel_id}' | 'channel:{channel_id}'
   routine_id?: string;         // links to routine that spawned this task
   skill_origin?: string;       // v1.6.0 — which skill created this task (e.g. 'meetings', 'calendar_health', 'outreach', 'tasks', 'memory', 'system')
+  // v1.7.2 — counterpart resolution for "what's open with X?" queries
+  target_slack_id?: string;    // 1:1 counterpart for outreach + summary_action_followup tasks
+  target_name?: string;        // display name of the counterpart
 }

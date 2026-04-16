@@ -395,6 +395,67 @@ function initSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN external_event_id TEXT`); } catch (_) {}
   try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN request_signature TEXT`); } catch (_) {}
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_coord_jobs_req_sig ON coord_jobs(request_signature, status)`); } catch (_) {}
+
+  // ── v1.7.2 — Summary skill ────────────────────────────────────────────────
+  // One row per per-thread summary session. `current_draft` holds the
+  // ephemeral in-progress JSON during stages 1–2; nulled at share or after
+  // 7 days idle so the full summary text is never persisted long-term.
+  // The other fields keep the meta we DO persist (date/time/attendees/subject).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS summary_sessions (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      owner_user_id     TEXT NOT NULL,
+      thread_ts         TEXT NOT NULL UNIQUE,   -- one session per thread
+      channel_id        TEXT NOT NULL,
+      stage             TEXT NOT NULL DEFAULT 'iterating',
+      -- iterating | shared | cancelled
+      current_draft     TEXT,                   -- ephemeral JSON; NULL after share / 7d idle
+      meeting_date      TEXT,                   -- YYYY-MM-DD if known (from calendar / transcript)
+      meeting_time      TEXT,                   -- HH:MM in owner-local if known
+      meeting_subject   TEXT,
+      main_topic        TEXT,
+      attendees         TEXT NOT NULL DEFAULT '[]',
+      -- JSON: [{slackId?, name, email?, internal: bool, source: 'calendar'|'transcript'}]
+      is_external       INTEGER NOT NULL DEFAULT 0,
+      transcript_chars  INTEGER,                -- for cost visibility on the summary call
+      shared_at         TEXT,
+      shared_to         TEXT                    -- JSON: [{type:'user'|'channel'|'mpim', id, name}]
+    );
+    CREATE INDEX IF NOT EXISTS idx_summary_sessions_owner ON summary_sessions(owner_user_id, stage);
+  `);
+
+  // ── v1.7.2 — tasks: target_slack_id / target_name ─────────────────────────
+  // Lets owner ask "what's open with Brett?" and get every 1:1 task back in
+  // one query. Populated for outreach tasks (1:1) and summary_action_followup
+  // tasks. Coord tasks (multi-party) leave these NULL.
+  try { db.exec(`ALTER TABLE tasks ADD COLUMN target_slack_id TEXT`); } catch (_) {}
+  try { db.exec(`ALTER TABLE tasks ADD COLUMN target_name TEXT`); } catch (_) {}
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_target ON tasks(target_slack_id, status)`); } catch (_) {}
+
+  // One-time backfill: existing outreach tasks get target_slack_id from their
+  // linked outreach_jobs.colleague_slack_id (and target_name from colleague_name).
+  // Idempotent — only updates rows where target_slack_id is still NULL.
+  try {
+    const updated = db.prepare(`
+      UPDATE tasks
+      SET target_slack_id = (
+            SELECT colleague_slack_id FROM outreach_jobs WHERE outreach_jobs.id = tasks.skill_ref
+          ),
+          target_name = (
+            SELECT colleague_name FROM outreach_jobs WHERE outreach_jobs.id = tasks.skill_ref
+          )
+      WHERE target_slack_id IS NULL
+        AND skill_ref IS NOT NULL
+        AND type IN ('outreach', 'outreach_send', 'outreach_expiry')
+    `).run();
+    if (updated.changes > 0) {
+      logger.info('Backfilled tasks.target_slack_id from outreach_jobs', { rows: updated.changes });
+    }
+  } catch (err) {
+    logger.warn('tasks.target_slack_id backfill skipped', { err: String(err) });
+  }
 }
 
 // ── Audit log helper ─────────────────────────────────────────────────────────

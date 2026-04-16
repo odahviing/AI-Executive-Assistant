@@ -7,3 +7,4 @@ export * from './events';
 export * from './requests';
 export * from './calendarIssues';
 export * from './approvals';
+export * from './summarySessions';

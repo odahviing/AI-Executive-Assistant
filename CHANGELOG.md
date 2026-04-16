@@ -2,6 +2,92 @@
 
 ---
 
+## 1.7.2 — SummarySkill: meeting transcript → summary → distribute
+
+Owner records meetings and needs summaries he can share. New togglable skill takes a transcript file, drafts a structured English summary, iterates with the owner, then distributes to named recipients with auto-tracked follow-ups for action items that have deadlines.
+
+Three deterministic stages (logged, traceable):
+- **Stage 1 (Drafting)** — `.txt` file uploaded in DM → calendar correlation (if caption hints at a time) → Sonnet drafts structured JSON (subject, main_topic, attendees, paragraphs, action_items, unresolved-speakers) → posted to thread.
+- **Stage 2 (Iterating)** — owner replies in the thread are routed by a Sonnet classifier into STYLE_RULE (persisted via `learn_summary_style` for all future summaries), DRAFT_EDIT (this summary only), or SHARE_INTENT (transition to Stage 3). Size-agnostic — small word swap or full rewrite, same flow.
+- **Stage 3 (Sharing)** — owner names recipients explicitly. Internals get DM/MPIM/channel posts via the new Slack messaging shim. External meeting attendees can't be Slack-DM'd (they're not in the workspace) — flagged honestly to the owner. Action items with internal Slack assignees + deadlines spawn `summary_action_followup` tasks firing 2pm in the assignee's local timezone.
+
+### Added
+- `src/skills/summary.ts` — the SummarySkill. Tools: `classify_summary_feedback`, `learn_summary_style`, `update_summary_draft`, `share_summary`, `list_speaker_unknowns`. Plus internal `ingestTranscriptUpload` helper called from the Slack file_share branch.
+- `src/db/summarySessions.ts` + `summary_sessions` DB table. One row per per-thread session. `current_draft` is the only ephemeral field (cleared on share / 7d idle). All meta (subject, attendees, date/time, main_topic, shared_to) is kept forever for reference.
+- `src/connections/slack/messaging.ts` — minimal Slack messaging shim with `sendDM`, `sendMpim`, `postToChannel`, `findUserByName`, `findChannelByName`. Foundation for the Connection-interface migration in issue #1. SummarySkill is the first consumer; outreach.ts and coord.ts will port over as that issue progresses.
+- New task type `summary_action_followup` + dispatcher `src/tasks/dispatchers/summaryActionFollowup.ts`. At due_at, Sonnet composes a one-line check-in DM in the assignee's preferred language (English fallback), sends it via the messaging shim, then creates an `outreach_jobs` row with `await_reply=1` so the colleague's reply routes back to the owner via the existing `handleOutreachReply` pipeline. No new reply machinery needed.
+- New `target_slack_id` and `target_name` columns on the `tasks` table (idempotent migration). Populated for outreach + summary_action_followup tasks. One-time backfill on startup fills existing outreach tasks from their linked `outreach_jobs.colleague_slack_id`.
+- `getOpenTasksWithPerson(ownerUserId, slackId)` query and `with_person` arg on the existing `get_my_tasks` tool. Owner asks "what's open with Brett?" → all 1:1 outreach + follow-ups in one list. Coord tasks (multi-party) excluded since `target_slack_id` is single-valued.
+- Active summary session injected into the orchestrator's `ACTIVE IN THIS THREAD` block so Sonnet routes owner replies through `classify_summary_feedback` instead of treating them as new requests.
+
+### Changed
+- Slack DM file_share handler in `src/connectors/slack/app.ts` extended with a transcript branch (text/plain, filetype=text|txt) ahead of the audio + image branches. Owner-only.
+- `OutreachCoreSkill` flow unchanged — summary follow-ups deliberately reuse it for the reply-routing path, not a parallel mechanism.
+
+### Security / privacy
+- External attendees never auto-resolved to Slack IDs (they're not in the workspace). Action items targeting externals stay as plain text; no follow-up DM, no task.
+- Summary distribution: meeting attendees are the default-allowed recipient set. Owner naming someone outside that set = explicit grant. Channel posts always require explicit owner naming.
+- Action items where assignee IS the owner are skipped for follow-ups (Maelle DM'ing the owner about his own commitment is weird).
+
+### Persistence rule
+- Full summary text is NEVER kept after share. Drafts wiped on Stage 3 transition and after 7 days idle.
+- Meta we KEEP forever per session: meeting_date, meeting_time, meeting_subject, main_topic, attendees JSON, is_external, shared_at, shared_to.
+- Style preferences via existing `user_preferences` table, category=`summary` — applied to all future summaries automatically.
+
+### Migration
+- Profile YAML: enable with `skills: { meeting_summaries: true }`. Schema already had this key (defaulted false); just flip to true on the profiles that want the skill.
+- DB migrations are idempotent — run on startup. Existing outreach tasks get `target_slack_id` backfilled from outreach_jobs (logged at INFO).
+- No new env vars.
+
+### Connection-interface progress (issue #1)
+- The new `src/connections/slack/messaging.ts` is the first piece of the Connection layer. SummarySkill never imports from `coordinator.ts` or `outreach.ts`. Updating issue #1 with what's left: port outreach.ts + coord.ts to the same primitives, define the formal `Connection` interface so email/whatsapp slot in.
+
+### New companion issue
+- "Send meeting summaries by email to external participants (waits on email Connection)" — opened so we don't lose the requirement.
+
+### Not changed
+- Audio path untouched.
+- Image path (1.7.1) untouched.
+- Existing skills (Meetings, CalendarHealth, Search, Research) untouched.
+- No new env vars; same `ANTHROPIC_API_KEY`.
+
+---
+
+## 1.7.1 — Vision: Maelle reads images
+
+Owner pasted a screenshot in DM and Maelle ignored it. Voice has been a first-class input modality for ages; images haven't. Adding them as a peer modality so "look at this bug" / "what does this calendar mean" / "is this email worth replying to" all work without the owner having to describe what's on the screen.
+
+Native multimodal — Sonnet sees the actual pixels (exact UI text, layout, error messages), not a pre-described summary. The "transcribe-then-discard" approach voice uses would lose too much for the bug-screenshot use case.
+
+### Added
+- New `src/vision/` module mirroring `src/voice/` shape. `downloadSlackImage` validates mimetype (jpeg/png/gif/webp) + size (5MB cap) and returns a typed error object instead of throwing — caller decides what to tell the owner. `buildImageBlock` emits an Anthropic `image` content block ready for the message array.
+- New `src/utils/imageGuard.ts` — Sonnet-based scanner that extracts any text from an image and flags injection-like content ("ignore previous instructions", fake system prompts, tool-call payloads). Strict-JSON output, fails open on parse / API errors. v1.7.1 owner path: log + shadow-notify but proceed (owner is trusted). The plumbing is ready to flip to refuse-and-notify the moment colleague paths open — single switch, no re-architecture.
+- VISION block in the owner system prompt, paired with the existing VOICE block. Tells Maelle to engage with what's in the image directly rather than narrating "I see you sent a screenshot".
+
+### Changed
+- `OrchestratorInput` now accepts `images?: Anthropic.ImageBlockParam[]`. When present, the current user turn is sent as a content array `[image, ..., text]` instead of a plain string. Subsequent tool-result turns are unchanged. Logged at INFO with image count + caption preview.
+- `processMessage` in `src/connectors/slack/app.ts` accepts an `images` field and plumbs it to the orchestrator. When images are attached, conversation history persists the user turn as `[Image] caption` so future turns know an image was shared (the bytes themselves are never stored).
+- DM handler dispatches image file_shares to a new shared `processImageFileShare` helper (same pattern as the audio branch).
+- MPIM handler also wired to the same helper, but **owner-gated**: colleagues' images are silently dropped in v1.7.1 to avoid opening an injection vector before the colleague-path guard policy is in place.
+
+### Security
+- Owner-only by design in v1.7.1 — channels and colleague MPIM messages are out of scope until the connection-interface work in #1 lands.
+- Image guard always runs even on the owner path. Cost is one Sonnet image call (~1.5k tokens) per image — negligible against the value of the audit trail.
+- Cap of 4 images per file_share event for sanity.
+
+### Not changed
+- Audio path untouched.
+- Voice's pre-existing "double append" pattern (helper appends marker, processMessage re-appends bare text) was left alone — image path uses the cleaner single-append.
+- No schema changes. No new env vars (uses the same `ANTHROPIC_API_KEY`).
+- `@anthropic-ai/sdk: ^0.24.0` already supports image content blocks; no SDK upgrade needed.
+
+### Known gaps (deliberate, deferred)
+- Channel @mention images: out until #1 brings the Connection interface so the same image guard policy can move from "log and proceed" to "refuse and notify" cleanly across surfaces.
+- Persisting images for re-reference in later turns: explicitly NOT done. Matches the "human EA remembers you showed her a screenshot, doesn't re-see it" model.
+- Image *output*: Maelle doesn't generate images.
+
+---
+
 ## 1.7.0 — Chapter close: 1.6 stabilization wave done, 1.7 begins
 
 1.6 started as a cleanup release and became a 14-patch stabilization wave — the first time Maelle was put under real QA with an owner + colleagues on a live Slack workspace. We found a lot, fixed most of it, and learned where the product ends up breaking under pressure. Closing the chapter here so the next set of changes has a clean starting line.

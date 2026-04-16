@@ -6,6 +6,7 @@ import {
   updateTask,
   getTask,
   getOpenTasksForOwner,
+  getOpenTasksWithPerson,
   getCompletedUninformedTasks,
   markTaskInformed,
   cancelTask,
@@ -116,10 +117,17 @@ Use when asked to:
       },
       {
         name: 'get_my_tasks',
-        description: 'Get all open tasks Maelle is currently working on or waiting on. Call this when the user asks "what tasks do you have?" or "what\'s pending?" or "what are you working on?"',
+        description: `Get all open tasks Maelle is currently working on or waiting on. Call this when the user asks "what tasks do you have?" or "what's pending?" or "what are you working on?"
+
+Optional with_person filter: pass a Slack user ID to scope results to 1:1 tasks involving that person (outreach + summary action follow-ups). Use when the user asks "what's open with Brett?" or "show me everything with @Yael". Coord tasks (multi-party meetings) are excluded from the filter since they don't have a single counterpart.`,
         input_schema: {
           type: 'object',
-          properties: {},
+          properties: {
+            with_person: {
+              type: 'string',
+              description: 'Optional Slack user ID (e.g. "U123ABC") to filter for tasks involving that specific person. Omit for all open tasks.',
+            },
+          },
           required: [],
         },
       },
@@ -398,7 +406,14 @@ Binding — how to pick the right approval_id:
         // hallucination). Also includes pending approvals + colleague
         // requests in one unified response so there's ONE authoritative
         // answer to "what's on my plate".
-        const tasks = getOpenTasksForOwner(ownerUserId);
+        // v1.7.2 — optional with_person filter scopes to 1:1 tasks (outreach
+        // + summary follow-ups) where target_slack_id matches.
+        const withPerson = typeof args.with_person === 'string' && args.with_person.trim()
+          ? args.with_person.trim()
+          : null;
+        const tasks = withPerson
+          ? getOpenTasksWithPerson(ownerUserId, withPerson)
+          : getOpenTasksForOwner(ownerUserId);
         const db = _getDb();
 
         const hydrate = (t: any): Record<string, unknown> => {
@@ -481,7 +496,8 @@ Binding — how to pick the right approval_id:
 
         // Pending approvals — direct from approvals table (not all have a
         // parent task visible in getOpenTasksForOwner).
-        const pendingApprovals = getPendingApprovalsForOwner(ownerUserId).map(a => {
+        // When filtering with_person, suppress global queries — they're not scoped to that person.
+        const pendingApprovals = withPerson ? [] : getPendingApprovalsForOwner(ownerUserId).map(a => {
           let payload: any = {};
           try { payload = JSON.parse(a.payload_json ?? '{}'); } catch (_) {}
           return {
@@ -495,7 +511,8 @@ Binding — how to pick the right approval_id:
         });
 
         // Open colleague requests (store_request)
-        const colleagueRequests = (() => {
+        // Also suppressed when filtering by person (request rows don't carry a slack_id reliably)
+        const colleagueRequests = withPerson ? [] : (() => {
           try {
             const rows = db.prepare(
               `SELECT id, requester, subject, priority, created_at, notes

@@ -61,6 +61,13 @@ function buildSkillMap(): Map<SkillId, Skill> {
         return new CalendarHealthSkill();
       },
     },
+    {
+      id: 'meeting_summaries',
+      loader: () => {
+        const { SummarySkill } = require('./summary');
+        return new SummarySkill();
+      },
+    },
   ];
 
   const map = new Map<SkillId, Skill>();

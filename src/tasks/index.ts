@@ -14,11 +14,13 @@ export function createTask(params: Omit<Task, 'id' | 'created_at' | 'updated_at'
     INSERT INTO tasks (
       id, owner_user_id, owner_channel, owner_thread_ts,
       type, status, title, description, due_at, skill_ref, context,
-      who_requested, pending_on, created_context, routine_id, skill_origin
+      who_requested, pending_on, created_context, routine_id, skill_origin,
+      target_slack_id, target_name
     ) VALUES (
       @id, @owner_user_id, @owner_channel, @owner_thread_ts,
       @type, @status, @title, @description, @due_at, @skill_ref, @context,
-      @who_requested, @pending_on, @created_context, @routine_id, @skill_origin
+      @who_requested, @pending_on, @created_context, @routine_id, @skill_origin,
+      @target_slack_id, @target_name
     )
   `).run({
     id,
@@ -37,6 +39,8 @@ export function createTask(params: Omit<Task, 'id' | 'created_at' | 'updated_at'
     created_context: params.created_context ?? null,
     routine_id: params.routine_id ?? null,
     skill_origin: params.skill_origin ?? null,
+    target_slack_id: params.target_slack_id ?? null,
+    target_name: params.target_name ?? null,
   });
   logger.info('Task created', {
     id,
@@ -46,8 +50,26 @@ export function createTask(params: Omit<Task, 'id' | 'created_at' | 'updated_at'
     skill_ref: params.skill_ref,
     due_at: params.due_at,
     status: params.status,
+    target_slack_id: params.target_slack_id,
   });
   return id;
+}
+
+/**
+ * v1.7.2 — "What's open with this person?" — every active 1:1 task whose
+ * target_slack_id matches. Used by get_my_tasks(with_person=...) and by
+ * weekly review flows. Coord tasks (multi-party) are excluded since
+ * target_slack_id is single-valued.
+ */
+export function getOpenTasksWithPerson(ownerUserId: string, targetSlackId: string): Task[] {
+  const db = getDb();
+  return db.prepare(`
+    SELECT * FROM tasks
+    WHERE owner_user_id = ?
+      AND target_slack_id = ?
+      AND status IN ('new', 'in_progress', 'pending_owner', 'pending_colleague', 'completed')
+    ORDER BY due_at ASC, created_at ASC
+  `).all(ownerUserId, targetSlackId) as Task[];
 }
 
 export function updateTask(id: string, updates: Partial<Omit<Task, 'id' | 'created_at'>>): void {

@@ -19,16 +19,18 @@ import { dispatchCoordNudge } from './coordNudge';
 import { dispatchCoordAbandon } from './coordAbandon';
 import { dispatchApprovalExpiry } from './approvalExpiry';
 import { dispatchCalendarFix } from './calendarFix';
+import { dispatchSummaryActionFollowup } from './summaryActionFollowup';
 
 export const DISPATCHERS: Partial<Record<Task['type'], TaskDispatcher>> = {
-  reminder:         dispatchReminder,
-  follow_up:        dispatchFollowUp,
-  research:         dispatchResearch,
-  routine:          dispatchRoutine,
-  outreach_send:    dispatchOutreachSend,
-  outreach_expiry:  dispatchOutreachExpiry,
-  coord_nudge:      dispatchCoordNudge,
-  coord_abandon:    dispatchCoordAbandon,
-  approval_expiry:  dispatchApprovalExpiry,
-  calendar_fix:     dispatchCalendarFix,
+  reminder:                 dispatchReminder,
+  follow_up:                dispatchFollowUp,
+  research:                 dispatchResearch,
+  routine:                  dispatchRoutine,
+  outreach_send:            dispatchOutreachSend,
+  outreach_expiry:          dispatchOutreachExpiry,
+  coord_nudge:              dispatchCoordNudge,
+  coord_abandon:            dispatchCoordAbandon,
+  approval_expiry:          dispatchApprovalExpiry,
+  calendar_fix:             dispatchCalendarFix,
+  summary_action_followup:  dispatchSummaryActionFollowup,
 };
