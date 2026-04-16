@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  maelle:
+    build: .
+    container_name: maelle
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - maelle_data:/app/data
+      - maelle_logs:/app/logs
+    environment:
+      - NODE_ENV=production
+      - DB_PATH=/app/data/maelle.db
+      - LOG_PATH=/app/logs
+    # No ports exposed — Slack uses Socket Mode (outbound only)
+    # This is intentional for security
+
+volumes:
+  maelle_data:
+    driver: local
+  maelle_logs:
+    driver: local

@@ -1,0 +1,40 @@
+# Secrets — NEVER commit
+.env
+*.pem
+*.key
+*.p12
+
+# User profiles — personal data, never commit
+config/users/
+# (config/users.example/ is safe to commit — it's a template)
+
+# Local / personal operational scripts — workplace names, hardcoded Slack IDs.
+# Only generic reusable scripts live under scripts/ and get committed
+# (e.g. purge-orphan-approvals.cjs). One-off fixers go under scripts/local/.
+scripts/local/
+scripts/backfill-*.cjs
+scripts/cancel-*.cjs
+scripts/inspect-*.cjs
+scripts/expire-*.cjs
+
+# Build output
+dist/
+
+# Runtime data
+data/
+logs/
+
+# Dependencies
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Claude Code — local-only permissions/settings
+.claude/settings.local.json

@@ -1,0 +1,247 @@
+import { App } from '@slack/bolt';
+import { DateTime } from 'luxon';
+import type { UserProfile } from '../config/userProfile';
+import { runOrchestrator } from './orchestrator';
+import { getConversationHistory, appendToConversation } from '../db';
+import { runDueTasks } from '../tasks/runner';
+import { materializeRoutineTasks } from '../tasks/routineMaterializer';
+import { ensureBriefingCron, updateBriefingCronChannel } from '../tasks/crons';
+import { backfillOrphanApprovals } from './approvals/orphanBackfill';
+import logger from '../utils/logger';
+
+// v1.5.1 — tightened scope: DM only, 24h window, reply in thread, last unread
+// message only. No more "I was offline" prompt injection hack.
+const LOOKBACK_HOURS = 24;
+
+// ── Background timer ─────────────────────────────────────────────────────────
+
+/**
+ * Starts the 5-minute background timer that runs all periodic tasks.
+ */
+export function startBackgroundTimer(
+  runningApps: Array<{ app: App; name: string }>,
+  profiles: Map<string, UserProfile>,
+): void {
+  // v1.5.1 — startup-once: recover any waiting_owner coords that never got
+  // an approval (pre-v1.5 orphans, lost approvals from earlier bugs). Runs
+  // after a small delay so Slack clients are fully warm.
+  setTimeout(() => {
+    const app = runningApps[0]?.app;
+    if (!app) return;
+    backfillOrphanApprovals(app, profiles).catch(err =>
+      logger.error('Orphan-approval backfill error', { err: String(err) })
+    );
+  }, 30_000);
+
+  // v1.6.0 — single-pipeline background loop. Every former sweep is now a
+  // scheduled task (outreach_send, outreach_expiry, coord_nudge, coord_abandon,
+  // approval_expiry, calendar_fix, routine). Materialize first so newly inserted
+  // routine tasks are visible to the runner in the same tick.
+  setInterval(() => {
+    const app = runningApps[0]?.app;
+    if (!app) return;
+    materializeRoutineTasks(profiles)
+      .then(() => runDueTasks(app, profiles))
+      .catch(err => logger.error('Routine→task pipeline error', { err: String(err) }));
+  }, 5 * 60 * 1000);
+}
+
+// ── Startup initialisation ───────────────────────────────────────────────────
+
+/**
+ * Runs at startup for each profile:
+ * 1. Ensures the system briefing cron exists
+ * 2. Sends any missed briefing from today
+ * 3. Catches up on missed messages (last 48h)
+ */
+export async function initProfile(
+  app: App,
+  profile: UserProfile,
+  dmChannel: string,
+): Promise<void> {
+  // Ensure briefing cron exists and set its DM channel
+  ensureBriefingCron(profile);
+  updateBriefingCronChannel(profile.user.slack_user_id, dmChannel);
+
+  // v1.5.1 — checkMissedBriefing is gone. If today's briefing was missed,
+  // the routine's next_run_at is in the past and the materializer will
+  // insert a task on the next 5-min tick; the runner's lateness policy
+  // decides run-or-skip. No startup special-case needed.
+
+  // Catch up on any messages sent while the bot was offline
+  await catchUpMissedMessages(app, profile, dmChannel);
+}
+
+// ── Catch-up on missed messages ──────────────────────────────────────────────
+
+/**
+ * On startup: scan the owner's 1:1 DM for messages that arrived while the bot
+ * was offline and never got a reply.
+ *
+ * v1.5.1 rules (tighter than v1.5):
+ *   - DM ONLY (the owner's 1:1 with Maelle). No MPIMs.
+ *   - 24h lookback (was 48h).
+ *   - Only the LAST unread user message is replied to.
+ *   - Reply is posted as a thread reply under that message — never top-level.
+ *   - No more "[Context: you were offline...]" prompt injection hack; the
+ *     orchestrator sees the raw message. The context block on the posted
+ *     reply ("↩ Catching up on your message from Xh ago") tells the owner
+ *     what they're looking at.
+ */
+async function catchUpMissedMessages(
+  app: App,
+  profile: UserProfile,
+  ownerChannel: string,
+): Promise<void> {
+  const botToken = profile.assistant.slack.bot_token;
+
+  let botUserId: string;
+  try {
+    const auth = await app.client.auth.test({ token: botToken });
+    botUserId = auth.user_id as string;
+  } catch (err) {
+    logger.warn('Catch-up: could not resolve bot user ID', { err: String(err) });
+    return;
+  }
+
+  const oldest = String((Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000) / 1000);
+
+  await processIfMissed({
+    app, profile, botToken, botUserId,
+    channelId: ownerChannel,
+    ownerId: profile.user.slack_user_id,
+    oldest,
+  });
+}
+
+interface CheckOpts {
+  app: App;
+  profile: UserProfile;
+  botToken: string;
+  botUserId: string;
+  channelId: string;
+  ownerId: string;
+  oldest: string;
+}
+
+async function processIfMissed(opts: CheckOpts): Promise<void> {
+  const { app, profile, botToken, botUserId, channelId, ownerId, oldest } = opts;
+
+  let messages: Array<Record<string, unknown>>;
+  try {
+    const result = await app.client.conversations.history({
+      token: botToken,
+      channel: channelId,
+      oldest,
+      limit: 200,
+    });
+    messages = (result.messages ?? []) as Array<Record<string, unknown>>;
+  } catch (err) {
+    logger.debug('Catch-up: skipping channel (no access)', { channelId });
+    return;
+  }
+
+  // DM-only catch-up — no mention gating; any user message in the 1:1 DM counts.
+  const latestUserMsg = messages.find(m => {
+    if (!m.user || m.bot_id || m.subtype) return false;
+    return true;
+  });
+
+  if (!latestUserMsg?.ts) return;
+
+  const userTs = parseFloat(latestUserMsg.ts as string);
+
+  const latestBotMsg = messages.find(m => m.bot_id || m.user === botUserId);
+  const botTs = latestBotMsg?.ts ? parseFloat(latestBotMsg.ts as string) : 0;
+  if (userTs <= botTs) return;
+
+  const msgTs = latestUserMsg.ts as string;
+  try {
+    const replies = await app.client.conversations.replies({
+      token: botToken,
+      channel: channelId,
+      ts: msgTs,
+      limit: 20,
+    });
+    const botThreadReply = (replies.messages ?? []).find(
+      m => (m.bot_id || m.user === botUserId) && parseFloat(m.ts as string) > userTs
+    );
+    if (botThreadReply) return;
+  } catch {
+    // No replies or no access — proceed with catchup
+  }
+
+  const hoursAgo = Math.round((Date.now() / 1000 - userTs) / 3600);
+  logger.info('Catching up missed message', {
+    user: profile.user.name,
+    channel: channelId,
+    hoursAgo,
+  });
+
+  const senderId  = latestUserMsg.user as string;
+  const rawText   = (latestUserMsg.text as string) ?? '';
+  const threadTs  = (latestUserMsg.thread_ts as string | undefined) ?? (latestUserMsg.ts as string);
+  const senderRole: 'owner' | 'colleague' = senderId === ownerId ? 'owner' : 'colleague';
+
+  const timeLabel = hoursAgo < 1 ? 'less than an hour ago' : `about ${hoursAgo}h ago`;
+
+  // v1.5.1 — the raw message goes to the orchestrator unchanged. The catch-up
+  // framing lives only in the posted reply's context block (below), not in the
+  // prompt. The old "[Context: you were offline...]" injection regularly
+  // produced over-apologetic or confused replies because the LLM would
+  // interpret it as owner instructions rather than scaffolding.
+  const history = getConversationHistory(threadTs);
+
+  let output;
+  try {
+    output = await runOrchestrator({
+      userMessage: rawText,
+      conversationHistory: history,
+      threadTs,
+      channelId,
+      userId: senderId,
+      senderRole,
+      channel: 'slack',
+      profile,
+      app,
+    });
+  } catch (err) {
+    logger.error('Catch-up: orchestrator failed', { channelId, err: String(err) });
+    return;
+  }
+
+  appendToConversation(threadTs, channelId, { role: 'user', content: rawText });
+  appendToConversation(threadTs, channelId, { role: 'assistant', content: output.reply });
+
+  const contextLine = `_↩ Catching up on your message from ${timeLabel}_`;
+  const msgPreviewShort = rawText.slice(0, 60) + (rawText.length > 60 ? '…' : '');
+
+  // Normalize markdown the LLM may have emitted (** → *, ## headings, leading "- ")
+  // so Slack renders bold/lists correctly. Same helper the live handler uses.
+  const { normalizeSlackText } = await import('../utils/slackFormat');
+  const cleanReply = normalizeSlackText(output.reply);
+
+  try {
+    await app.client.chat.postMessage({
+      token: profile.assistant.slack.bot_token,
+      channel: channelId,
+      // Always thread the catch-up reply under the user's original message so
+      // it visually belongs to what they wrote, even when that message was a
+      // top-level DM/channel post.
+      thread_ts: latestUserMsg.ts as string,
+      text: cleanReply,
+      blocks: [
+        {
+          type: 'context',
+          elements: [{ type: 'mrkdwn', text: `${contextLine}: _"${msgPreviewShort}"_` }],
+        },
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: cleanReply },
+        },
+      ],
+    });
+  } catch (err) {
+    logger.error('Catch-up: failed to post reply', { channelId, err: String(err) });
+  }
+}

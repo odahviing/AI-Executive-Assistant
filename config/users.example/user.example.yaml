@@ -1,0 +1,159 @@
+# ============================================================
+#  Executive Assistant — User Profile Template
+#  Copy this to config/users/<your-name>.yaml and fill in.
+#  This file is safe to commit (no personal data).
+#  config/users/ is gitignored — your filled profile stays private.
+# ============================================================
+
+# ── Identity ─────────────────────────────────────────────────
+user:
+  name: "Your Full Name"            # Must be a real first + last name. No nicknames, no placeholders.
+  email: "you@yourcompany.com"      # Your real company email
+  role: "CEO"                       # Your role — used in assistant context
+  slack_user_id: "UXXXXXXXXX"       # Slack → Settings → Profile → "Copy member ID"
+  timezone: "Asia/Jerusalem"        # IANA timezone string
+  language: "en"                    # en | he | fr | etc
+
+# ── Assistant identity ────────────────────────────────────────
+# The assistant will appear as a real employee. Name and email must be real.
+assistant:
+  name: "First Last"                # Name that will appear in Slack and invites — can be a single name for AI assistants
+  slack_display_name: "First"       # How they appear in Slack messages (usually first name)
+  email: "first.l@yourcompany.com"  # Real company email following your naming scheme
+  persona: |
+    You are a warm, polite, calm, and professional executive assistant.
+    You communicate like a real human — natural greetings, clear explanations,
+    and you always guide toward a resolution. You never sound robotic or verbose.
+
+  # Slack app credentials — create a dedicated app at https://api.slack.com/apps
+  # App name should match the assistant's name
+  # Each assistant needs their own Slack app so they appear as distinct people
+  slack:
+    bot_token: "xoxb-..."           # OAuth & Permissions → Bot User OAuth Token
+    app_token: "xapp-..."           # Socket Mode → App-Level Token (scope: connections:write)
+    signing_secret: "..."           # Basic Information → App Credentials → Signing Secret
+
+# ── Work schedule ─────────────────────────────────────────────
+schedule:
+  office_days:
+    days: ["Monday", "Wednesday", "Thursday"]
+    hours_start: "10:30"
+    hours_end: "19:00"
+    notes: "Best for important, multi-participant, external meetings"
+
+  home_days:
+    days: ["Sunday", "Tuesday"]
+    hours_start: "09:00"
+    hours_end: "15:30"
+    notes: "Better for internal, lighter, recurring meetings"
+
+  lunch:
+    preferred_start: "11:30"
+    preferred_end: "13:30"
+    duration_minutes: 45
+    can_skip: true
+
+  timezone_preferences:
+    local_participants: "morning"
+    remote_participants: "15:00-19:00"
+    note: "Strong preference, not a strict rule"
+
+# ── Meeting rules ─────────────────────────────────────────────
+meetings:
+  allowed_durations: [10, 25, 40, 55]
+  buffer_minutes: 5
+  free_time_per_office_day_hours: 2
+  free_time_per_home_day_hours: 1        # optional; if unset, home days use the office value
+  thinking_time_min_chunk_minutes: 30    # smallest block that counts as "thinking time"
+  min_slot_buffer_hours: 4               # don't offer coordination slots within this many hours from now
+  physical_meetings_require_office_day: true
+
+  protected:
+    - name: "Quarterly board meetings"
+      rule: "never_move"
+    - name: "Leadership sync"
+      rule: "never_override"
+      recurring: true
+
+# ── Meeting priorities ────────────────────────────────────────
+priorities:
+  highest:
+    - "customers"
+    - "prospects"
+    - "partners"
+  high:
+    - "external meetings"
+    - "board meetings"
+    - "internal meetings with 2+ managers (non-recurring)"
+    - "important internal strategic discussions"
+  medium:
+    - "internal non-recurring discussions"
+  low:
+    - "weekly recurring meetings"
+    - "bi-weekly recurring meetings"
+
+# ── VIP contacts ──────────────────────────────────────────────
+vip_contacts: []
+# Example:
+# vip_contacts:
+#   - name: "John Smith"
+#     email: "john@partner.com"
+#     priority: "highest"
+#     note: "Key investor — always prioritize if available"
+
+# ── Behavior ──────────────────────────────────────────────────
+behavior:
+  rescheduling_style: "balanced"    # conservative | balanced | proactive
+  adaptive_learning: false
+  escalate_after_days: 2
+  can_contact_others_via_slack: true
+  autonomous_meeting_creation: true
+
+# ── Rescheduling rules ────────────────────────────────────────
+# Three types:
+#   type: immutable        → cannot be moved under ANY circumstance (no approval can override)
+#   type: flexible         → can be moved within window, no approval needed
+#   type: approval_required → requires explicit user approval before any change
+rescheduling:
+  board_quarterly:
+    type: "immutable"
+    description: "Quarterly board meetings — never moved under any circumstance"
+
+  leadership_sync:
+    type: "immutable"
+    description: "Leadership sync — never overridden or suggested over"
+
+  weekly_meetings:
+    type: "flexible"
+    flexibility: "same_week"
+    description: "Weekly recurring meetings — coordinate within same week"
+
+  biweekly_meetings:
+    type: "flexible"
+    flexibility: "same_or_next_week"
+    description: "Bi-weekly meetings — flexible within same or next week"
+
+  important_meetings:
+    type: "approval_required"
+    description: "Important meetings — never move without explicit approval"
+
+# ── Skills ────────────────────────────────────────────────────
+skills:
+  scheduling: true
+  email_drafting: false
+  meeting_summaries: false
+  proactive_alerts: false
+  whatsapp: false
+  general_knowledge: true
+  calendar_health: true
+
+# ── Channels ──────────────────────────────────────────────────
+# Which communication surfaces the assistant is active on
+# Each channel can be toggled independently
+channels:
+  slack:
+    enabled: true     # DMs and @mentions in Slack
+  email:
+    enabled: false    # Mailbox monitoring and replies (Phase 2)
+  whatsapp:
+    enabled: false    # WhatsApp messaging (Future)

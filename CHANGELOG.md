@@ -1,0 +1,817 @@
+# Changelog
+
+---
+
+## 1.7.0 — Chapter close: 1.6 stabilization wave done, 1.7 begins
+
+1.6 started as a cleanup release and became a 14-patch stabilization wave — the first time Maelle was put under real QA with an owner + colleagues on a live Slack workspace. We found a lot, fixed most of it, and learned where the product ends up breaking under pressure. Closing the chapter here so the next set of changes has a clean starting line.
+
+### Where 1.6 left us — what's solid now
+
+**Honesty and truth-telling.** The orchestrator no longer fabricates confirmations. Empty replies trigger a recovery pass (grounded in actual tool history) instead of "Done." The claim-checker catches false action claims ("I sent it") and forces a retry turn with tool_choice. Delete-meeting is idempotent per-event-id with a confirm-before-delete protocol. The date verifier catches wrong weekday/date pairs and retries with a corrective nudge.
+
+**Human voice.** Maelle never says "the system / threshold / force / clear the check" when talking to the owner about his own preferences — the rules are his, narrated as such. Meeting-mode asked in plain words ("in person or online? where?"), not as a four-option enum. When ambiguous, she asks one clarifying question instead of going silent.
+
+**Task system is trustable.** `get_my_tasks` returns hydrated data (real subjects, message text, counterparts) from all relevant tables — no more stale ghosts, no more gap-filling from memory. `completed` tasks stay visible until the owner is informed. `updateCoordJob` owns the coord-terminal → approval-sync invariant (one gate, impossible to forget). Routine materializer picks the most recent viable missed firing instead of yesterday's dead one.
+
+**Memory is clean.** `people_memory.interaction_log` and `people_memory.notes` no longer accumulate operational state (raw outreach messages, in-flight coord subjects). History writes happen at terminal transitions only — past-tense, safe to read. Per-contact interaction cap: 10 default, 30 for people in the current chat.
+
+**Structure.** Four-layer model is respected. `runner.ts` split into one dispatcher per TaskType. `app.ts` reply pipeline extracted to `postReply.ts`. `coord.ts` pulled utils / approval-emit / booking into submodules. Every skill owns its own prompt rules via `getSystemPromptSection` — the base prompt holds only general honesty, identity, dynamic data.
+
+**Prompt budget.** Owner prompt went from ~20k tokens (pre-1.6.11) to ~12k. Colleague ~15k → ~9k. Pure pruning — no semantics lost.
+
+**Security posture.** Claim-checker replaced the reply verifier. Security-gate events go to WARN logs only (no more shadow Slack dumps). `#appr_<id>` tokens stopped being rendered. Maelle's self-memory row is seeded per profile. `scheduling` and `coordination` legacy YAML keys auto-migrate to `meetings`.
+
+### What 1.7 starts with — targets on the table
+
+- **Agent-vs-transport split.** `connectors/slack/coord.ts` + `coordinator.ts` still hold meetings-domain state-machine logic that happens to DM via Slack. A formal `Connection` interface + extracting the state machine to `skills/meetings/` is the stated next architectural pass — prereq for running Maelle on email / WhatsApp without editing the state machine.
+- **Model flexibility.** Gemini 3.1 swap is on the table; the claim-checker + recovery + date-verifier all have strict-JSON outputs specifically so a model change doesn't regress the honesty guarantees.
+- **External QA.** The first round with people outside the core test loop happens in 1.7. We expect new classes of bugs — tone under edge cases, timezone edge cases, foreign-language colleagues, surprise calendar patterns. Prompts vs code: prefer code (deterministic) for truth-critical guards (booking, deletion, date alignment), prompts for tone and judgment. Build new guards in whichever layer gives determinism where it matters.
+- **Multi-computer dev.** Deferred from 1.6; may land in 1.7 if it becomes friction.
+
+### Migration
+- No schema changes. Restart picks up the new version.
+- CHANGELOG entries for each 1.6.x patch remain below as the record of how we got here.
+
+---
+
+## 1.6.14 — Stop polluting people_memory.notes; focus-scoped interaction history
+
+The 1.6.13 prompt pruning cut rules from ~14k → 5k tokens but the owner prompt was still ~15k because of a SECOND pollution source we hadn't audited: `people_memory.notes`. Every inbound colleague message wrote `Sent a message to Maelle: "..."` into that contact's `notes` field — same anti-pattern as the v1.6.8 interaction_log fix, different field. Heavy contacts had 50+ note entries (~5kB each) loading into the prompt forever.
+
+### Changed
+- **Stopped writing message logs to `people_memory.notes`** (`src/connectors/slack/app.ts:318`). `notes` is for relational context (who they are, what we've learned), not a verbatim message log. Conversation history + outreach_jobs + audit log already preserve message content; the third copy in the prompt was pure cost. Removed the `appendPersonNote` call in the colleague-message handler; left the `logEvent` for briefings since that goes to a separate audit table.
+- **Per-contact interaction_log cap is now context-aware** (`src/db/people.ts` → `formatPeopleMemoryForPrompt`). Default: last 10 entries per contact (was 30). For contacts in the current chat (MPIM members), keep last 30 — full memory loaded for people Maelle is actively talking to. Empty MPIM list / 1:1 DM with Maelle → everyone capped at 10. Keeps memory rich where it matters, light where it doesn't.
+- **Threaded `focusSlackIds` through** `buildSystemPromptParts` → `buildSystemPrompt` → `formatPeopleMemoryForPrompt`. Orchestrator computes the set as `mpimMemberIds` minus owner when `isMpim` is true; undefined otherwise.
+
+### Added
+- **`scripts/purge-notes-pollution.cjs`** — one-shot DB cleanup. Strips entries matching operational patterns (`^Sent a message to ` / `^Maelle sent message on behalf of `) from every people_memory.notes. Owner-curated notes (from `note_about_person` tool) are preserved. Ran on dev DB: **146 entries removed across 11 contacts** (Yael −50, Ysrael −50, Oran −11, Michal −10, others smaller).
+
+### Numbers
+| Prompt | 1.6.13 | 1.6.14 | Cut |
+|---|---|---|---|
+| Owner 1:1 | 15.5k tok | **12.2k tok** | −21% |
+| Owner MPIM (1 focus contact) | 15.5k tok | 12.5k tok | −19% |
+| Colleague | 9.3k tok | 9.3k tok | (no notes load there) |
+
+Cumulative: owner is now **12.2k tokens vs the original 20k** in 1.6.11 — **−39%** total. The remaining bulk is real data the model needs (people contacts + learned prefs + date table + pending approvals).
+
+### Migration
+- No schema changes.
+- Run `node scripts/purge-notes-pollution.cjs` once to clean existing operational entries from notes. (Already done on dev: 146 entries removed.)
+- From this version forward, only owner-curated notes via `note_about_person` end up in `notes`.
+
+---
+
+## 1.6.13 — Prompt pruning: owner −22%, colleague −37%, skill-specific rules move to their skill
+
+Owner prompt had grown to ~20k tokens — 10× a healthy system prompt. Three root causes: meeting-specific HONESTY rules lived in the base prompt (every non-meeting turn pays for them), duplicated content (quarter-hour rule in 3 places, schedule numbers in 2), and verbose example blocks (3-4 Wrong/Right pairs where 1 suffices). The "every skill owns its own rules" principle wasn't being followed — future skills would inherit the same bloat pattern.
+
+### Changed — base prompt (`src/core/orchestrator/systemPrompt.ts`)
+- **Meeting-specific HONESTY rules moved to MeetingsSkill.** RULE 2a (never lie about bookings), RULE 5a (scheduling state requires tool call), RULE 5c (don't summarize unresolved), RULE 6 (calendar specifics) all left the base prompt and now live in a single MEETINGS HONESTY RULES block inside the MeetingsSkill section. These rules only matter when meetings are in play; they don't need to be loaded on every colleague turn or every memory-only turn.
+- **Colleague authorization block consolidated.** Was ~60 lines of overlapping bullets (content rules + calendar sharing + interviews + what colleagues can/cannot do + identity + injection defense + honesty rules). Now ~15 lines, same semantics, tighter prose. Colleague prompt dropped from 14.7k → 9.3k tokens.
+- **SOCIAL LAYER / HOW TO COMMUNICATE / HEBREW OUTPUT / GENDERED FORMS / PERSONA / OWNERSHIP / CALENDAR ISSUES / THREAD MEMORY / SLACK FORMATTING / RULES 3-8** all tightened: 3+ Wrong/Right examples → 1 where possible, bullet walls → single paragraphs where the rule is the same.
+
+### Changed — MeetingsSkill (`src/skills/meetings.ts`)
+- **Added MEETINGS HONESTY RULES block** (relocated from base). One paragraph each for: never lie about bookings, scheduling state requires tool call, don't summarize unresolved, calendar specifics.
+- **Removed "Slot rules (enforced automatically)" duplication** with the HARD SCHEDULE block — one source of truth now.
+- **Route 1/2, Duration, Location, Timezones, Calendar scope with colleagues, Subject rules, Work week, Re-verify availability** — all rewritten to be terse without losing semantics.
+
+### Numbers
+| Prompt | Before | After | Change |
+|---|---|---|---|
+| Owner  | ~20,000 tok | ~15,500 tok | −22% |
+| Colleague | ~14,700 tok | ~9,300 tok | −37% |
+| MeetingsSkill | ~4,820 tok | ~3,900 tok | −19% |
+
+Base dynamic (owner) went from 13.8k → 10.3k; most of the remaining dynamic content is DATA (people_memory contacts + their interaction_logs + learned prefs + pending approvals) which is context the LLM needs, not rules that could be trimmed.
+
+### Principle going forward
+Each skill owns its own rules. The base prompt keeps only:
+- Identity + persona
+- Dynamic data (date, people memory, prefs, approvals, timezone)
+- Authorization / colleague scope
+- GENERAL honesty rules (1-8)
+- Language + Slack formatting + tone
+New skills add their domain-specific rules to their own `getSystemPromptSection` — they never extend the base.
+
+### Migration
+- No schema, no profile, no code-interface changes. Pure prompt text movement.
+- All new rules added in 1.6.12 are preserved — just relocated to their correct layer.
+
+---
+
+## 1.6.12 — Prompt touchups: human-EA voice, quarter-hour universal, better empty-slot handling
+
+Six pure-prompt fixes from QA on the "book 40 min with Amazia, include Maayan + Onn" flow. No code changes.
+
+### Changed — MeetingsSkill prompt
+- **Empty-result behavior rewritten.** When find_available_slots returns 0–1 slots, DON'T default to "want me to look at early morning?" Instead: fetch the raw calendar, find the gaps that are ≥ the meeting duration, and offer them upfront with the SPECIFIC rule each breaks. ("Sunday 13:15–15:30 — home day, leaves 20 min of your 1h home focus.") Owner can accept or reject. Only when he rejects all normal-hour options do you propose extended hours.
+- **Universal quarter-hour rule.** Any slot START time Maelle proposes — from the slot finder OR narrated from a raw calendar gap — MUST be on :00/:15/:30/:45. A gap starting at 14:40 → propose 14:45. 13:10 → propose 13:15. The 5-min offset is fine; durations already bake in the buffer. ONLY exception: the owner explicitly names an off-grid time ("book at 14:40") — then use what he said.
+- **Parse rule for "meeting with A, include B and C"**. First clause = principal (participant whose timing matters). "Include / also / and" names = just_invite (added to calendar invite, no DM). "40 min with Amazia, include Maayan and Onn" → participant: Amazia, just_invite: Maayan + Onn. Only "meeting with the founders" (plural, no hierarchy) makes everyone a participant.
+
+### Changed — base honesty prompt
+- **RULE 7 strengthened.** Once the owner says go-ahead, new details discovered mid-flow (rule violations, constraints, fine print) are INPUT to the action, not new gates. Deliver as a heads-up line IN the action reply, not as a re-ask. "Book 14:45" → book → "Done. Heads up: eats into your 2h focus block." Not "the system blocks this, want me to force it?"
+- **"Owner names a time → skip find_available_slots".** Slot finder is for DISCOVERING options. When the owner already picked a specific time, go straight to the booking/outreach tool. Re-running the slot finder keeps bumping into the focus-time filter and produces false blocks.
+- **Never sound like a machine (new block under PERSONA BOUNDARY).** NEVER say "the system / threshold / policy / rule / constraint / force / clear the threshold / doesn't pass" when talking to the owner about his own preferences. The rules ARE his preferences — narrate them as such. "Your settings / you usually / tighter than your usual X / eats into your 2h focus block." Never "force" — nothing to force, it's his calendar. "Book it anyway" / "lock it in" / "go ahead despite X".
+- **One heads-up per rule per thread.** If the owner has already acknowledged a constraint in the same thread ("i'm ok / go ahead / do it / yes / check"), do NOT mention that constraint again. Repeating is nagging.
+
+### Not changed (deferred)
+- Prompt size audit: owner system prompt measures ~20k tokens, colleague ~15k. Big — worth a pruning pass later. See notes in the conversation / v1.6.12 QA round.
+
+---
+
+## 1.6.11 — Per-day-type focus-time threshold
+
+Owner wanted the 2-hour "protected focus time" rule to apply to OFFICE days only, and a shorter 1-hour threshold for home days. Before this, a single `free_time_per_office_day_hours` was applied across both.
+
+### Added
+- **Optional `meetings.free_time_per_home_day_hours`** in the profile YAML (zod schema in `src/config/userProfile.ts`). If unset, home days fall back to the office value — no behavior change for existing profiles that didn't opt in.
+
+### Changed
+- **`findAvailableSlots`** (`src/connectors/graph/calendar.ts`) now picks the threshold per slot based on whether its day is classified as office or home via the existing `classifyDay` helper. No threshold is applied to "other" days (shouldn't happen for valid work days anyway).
+- **`analyzeCalendar`** (`src/skills/_meetingsOps.ts`) evaluates the `no_buffer` issue using the day-type-specific threshold. Issue detail now says "on a office/home day" so the narrated reason matches the rule.
+- **Meetings skill prompt block** now lists both values separately so the LLM tells the owner the right number for each day type.
+- **`config/users/idan.yaml`** updated: `free_time_per_office_day_hours: 2`, `free_time_per_home_day_hours: 1`.
+- **`config/users.example/user.example.yaml`** gains the new optional field with a comment.
+
+### Migration
+- No schema required — field is optional with graceful fallback to the office value.
+- Restart Maelle to pick up the YAML change.
+
+---
+
+## 1.6.10 — Routine materializer picks the most recent viable firing; one briefing only
+
+Two bugs from QA. Maelle booted at 07:59 Thursday after an overnight downtime. Her daily health check had `next_run_at = yesterday 07:30`. The materializer: (1) created a task for YESTERDAY's slot (24h late → runner skipped as stale), and (2) fast-forwarded past TODAY's 07:30 slot (which was only 29 min late — perfectly viable) and set the routine's next run to Sunday. Net result: no briefing today, no health check today, three days of silence. Plus: we had TWO morning briefings running (one system, one user-created leftover from an earlier era).
+
+### Changed
+- **Materializer picks the most recent VIABLE missed firing** (`src/tasks/routineMaterializer.ts`). New algorithm: walk forward from `routine.next_run_at` through every missed slot. For each slot, run `assessLateness` — if within the cadence threshold, mark as candidate (and keep walking to find a MORE recent viable one). The cursor naturally lands on the first future firing. Materialize a task for the most recent viable missed firing (if any); advance `next_run_at` to the first future firing. This means: late-boot with today's slot still viable → today's slot runs; long downtime past all thresholds → nothing stale fires, clock advances cleanly; no more "materialize-then-skip-as-stale" noise in the logs.
+- **`create_routine` blocks briefing-like titles.** Morning briefing is a core system routine managed by `ensureBriefingCron` (one per owner, is_system=1). The tool now rejects any `create_routine` call whose title matches `/\b(morning|daily)?\s*brief(ing)?\b/i` with a clear error explaining that briefing is core and can't be duplicated. Owner can still ask for a DIFFERENT recurring report with a different name (e.g. "Afternoon recap") — only "briefing" is reserved.
+
+### Added
+- **`scripts/purge-duplicate-briefings.cjs`** — one-shot DB cleanup. Soft-deletes (status='deleted') any user-created routine with a briefing-like title, cancels any open routine-tasks linked to it. Ran against the local DB: 1 routine deleted (the leftover "Morning briefing" @ 08:00 that was coexisting with the system 09:00 briefing).
+
+### Migration
+- No schema changes.
+- Run `node scripts/purge-duplicate-briefings.cjs` once to clean existing duplicate briefings. (Already run on dev.)
+- The canonical briefing is `system_briefing_<ownerId>`, is_system=1, one per owner. Future changes to briefing time/schedule go through profile config, not a second routine.
+
+---
+
+## 1.6.9 — interaction_log logs HISTORY, not state
+
+Quick follow-up on 1.6.8. The cleanup was too aggressive — it stopped all writes of message_sent / coordination types, leaving Maelle with no memory that a past conversation happened at all. The owner wants her to remember "we talked with Ysrael yesterday about X" — what she doesn't want is her remembering "we're currently coordinating X" while it's still churning.
+
+The distinction is timing: **past-tense facts = yes, mid-flight state = no.**
+
+### Changed
+- **`updateCoordJob` writes `meeting_booked` / `conversation` entries to each key participant's interaction_log** on terminal transitions (`booked` / `cancelled` / `abandoned`). Summaries are past-tense and specific: `"Booked meeting 'Subject' for 2026-04-22 14:00 (55 min)"` / `"Tried to set up 'Subject' — was cancelled before booking"` / `"Tried to set up 'Subject' — didn't get a response, closed it out"`. Same terminal-only invariant that carries approval sync and approval_expiry cancellation, so one code path owns it all.
+- **`updateOutreachJob` writes `message_sent` entries** on terminal transitions (`replied` / `no_response`). Summaries capture the exchange: `"Exchange: sent '...' → replied: '...'"` / `"Reached out ('...') — no response after follow-ups"`. No write on `sent` (in-flight) or `cancelled` (purge / explicit cancel — not worth remembering).
+- **Removed the read-time type filter in `formatPeopleMemoryForPrompt`**. It was shielding against the old write path; with writes happening only at terminals now, every entry in the log IS past-tense history. Nothing to filter. Simpler and honest.
+
+### Why this shape
+The coord and outreach terminal transitions are the SAME invariant point as the approval-sync and approval_expiry-cancellation logic already in `updateCoordJob` (v1.6.2). Call-site code doesn't have to remember to log; the DB update gate owns it. Future regressions where a new caller forgets to log history are impossible by construction.
+
+### Migration
+- No schema changes.
+- Legacy operational entries in `interaction_log` were purged in 1.6.8 via `scripts/purge-interaction-log-pollution.cjs`. From 1.6.9 forward, new entries will be terminal-only and safe. No re-run needed.
+
+---
+
+## 1.6.8 — Task system: single source of truth, unpoisoned memory
+
+Fixes the task system's two structural bugs uncovered in QA:
+1. Fire-and-forget messages (message_colleague with await_reply=false) disappeared from "what tasks do you have" immediately, because the linked task row was created at `status='completed'` and get_my_tasks only showed earlier statuses. Result: the owner sends two messages and the system shows neither.
+2. `people_memory.interaction_log` was being polluted with operational state ("Sent message on behalf of X: '...'", "Coordinating 'Plans and Onboarding' with X"). Those entries persist forever and get injected into the owner's system prompt via `formatPeopleMemoryForPrompt` — so the LLM kept re-surfacing old coord subjects long after the underlying job was cancelled. This is the source of the "Plans and Onboarding" hallucination: the DB was clean after purge, but the person's interaction_log still carried the string.
+
+### Changed
+- **`getOpenTasksForOwner` includes `'completed'`** (`src/tasks/index.ts`). Tasks stay visible after they run, until the owner is actually informed (the existing `completed → informed` two-step). Fire-and-forget messages now appear in "what's on your plate" until briefed, then drop.
+- **`get_my_tasks` tool output is now enriched** (`src/tasks/skill.ts`). Every task row is hydrated by joining to its linked domain table:
+  - outreach tasks → colleague name, full message sent, sent_at, await_reply flag, reply if any
+  - coordination tasks → subject, participants, coord status, winning_slot
+  - approval_expiry tasks → kind, subject, expires_at
+  Also unifies pending_approvals and colleague_requests (store_request) into the same response. Result shape: `{ summary, pending_your_input, pending_approvals, colleague_requests, waiting_on_others, active_tasks, recently_done, ... }`. A `_note` field tells the LLM: describe only what's in this response; don't add context from conversation memory or people_memory.
+- **`message_colleague` no longer writes to `interaction_log`** (`src/core/outreach.ts`). The outreach_jobs + tasks rows track the message end-to-end already.
+- **`initiateCoordination` no longer writes to `interaction_log`** (`src/connectors/slack/coord.ts`). coord_jobs tracks it.
+- **`formatPeopleMemoryForPrompt` filters out operational interaction types at read time** (`src/db/people.ts`). Even if legacy rows carry them, they don't reach the prompt. Operational types dropped: `message_sent`, `message_received`, `coordination`, `meeting_booked`, `conversation`. Relational types kept: `social_chat`, `other`. Defense-in-depth so future regressions can't re-poison the prompt.
+
+### Added
+- **`scripts/purge-interaction-log-pollution.cjs`** — one-shot DB cleanup. Strips operational interaction entries from every people_memory row. Preview first, transaction commit. Idempotent.
+
+### Migration
+- No schema changes.
+- Run `node scripts/purge-interaction-log-pollution.cjs` once to clean the existing operational entries from the DB. (Already run on the local dev DB during this version bump — 9 rows touched, 21 entries removed.)
+
+---
+
+## 1.6.7 — Ambiguity → ask, not silence
+
+When the owner's request is genuinely ambiguous ("move simon and dina to weds" when weds is a vacation day, anchor meeting is on a different day), Maelle was going silent — no tools ran, no draft, recovery pass wrote `NO_REPLY`, nothing posted. Honest, but useless. v1.6.7 tells her to ASK instead.
+
+### Changed
+- **Base honesty rules — RULE 5 extended.** If the request is ambiguous (two reasonable interpretations, missing day / name / time, unparseable instruction), ASK ONE short clarifying question. "Not sure I follow — did you mean Tuesday or Wednesday?" beats a silent stall and beats a confident guess. Never go silent because you're confused.
+- **Recovery prompt restructured into three branches** (`orchestrator/index.ts`). When the orchestrator finishes with no reply, the recovery pass now chooses between: (A) describe what you did, grounded in tool results; (B) you did nothing because the request was ambiguous — say so plainly AND ask one specific clarifying question; (C) `NO_REPLY` as last resort only. Branch B is new — previously the recovery only offered A or NO_REPLY, which produced silence in the ambiguous case.
+
+### Migration
+- No schema changes.
+
+---
+
+## 1.6.6 — "What are my options" goes through the tool, buffer semantics corrected, date verifier
+
+Follow-up from the v1.6.5 QA round on the 55-min slot-finding flow. Three of Maelle's failures had one root cause: for "what are my options" questions she was reasoning from raw `get_calendar` output instead of calling `find_available_slots`, so schedule rules weren't applied and proposed times (like 17:05) were off-grid. The buffer semantics were also wrong: the allowed durations (10/25/40/55) already bake a 5-min trailing buffer into every meeting, so padding the busy blocks AGAIN in the search produced artefacts. And "Sunday 20 Apr" (when Sunday is 19 Apr) kept slipping through the DATE LOOKUP prompt rule, so we moved that guard to code.
+
+### Changed
+- **Buffer padding removed from `findAvailableSlots`.** The profile's `buffer_minutes` is no longer applied as padding around busy blocks in the isFree check (`cursor.getTime() < busy.end.getTime() + bufferMs` — gone). The rationale: the allowed durations (10/25/40/55) are designed so every meeting Maelle books ends 5 min short of the hour boundary, creating the buffer naturally. Applying it again in the search produced 17:05 after a 17:00 end. Connected meetings (start right after the previous one ends) are now valid and preferred. Travel buffer for `meeting_mode: 'custom'` stays.
+- **Prompt — options always go through the tool.** New rule in the MeetingsSkill section: for "what are my options / when am I free / find me a slot / do I have time for X" questions, call `find_available_slots`. Reasoning from `get_calendar` / `analyze_calendar` output to propose specific start times produces slots that don't honor buffer, lunch, thinking-time, or day-type rules. Two exceptions: (a) the owner asked for a non-standard duration, (b) the tool came back empty and the owner is pushing back — then narrating a raw gap with an explicit rule-violation flag is allowed.
+- **Prompt — terse option reports.** Lead with 2–3 concrete best bets, one line each. Don't walk through every day. Don't re-summarize reasoning. When nothing fits, ONE honest line: "Nothing clean next week — Tuesday 11:00 is the closest but it would leave you under 2h of focus time. Want me to book it anyway?" No enumeration of rejected slots.
+- **Prompt — name the actual rule when explaining a rejection.** Not "gaps too short." The real rules: "would leave under 2h of focus time" / "the only gap is inside your lunch window" / "it's a day off for you" / "nothing fits inside office hours (10:30–19:00)." If the reason isn't knowable, say "find_available_slots didn't find anything" — don't invent.
+- **Schedule prompt block updated** to say the buffer is baked into durations, not an extra gap before new meetings. Connecting a new meeting right after an old one is preferred; 15-min delay is an alternative, not the default.
+
+### Added
+- **Code-level date verifier (`src/utils/dateVerifier.ts`)** — builds the same 14-day weekday/date lookup the system prompt uses, then scans the draft reply for "Weekday N Mon" patterns (English + Hebrew). When a pair mismatches the lookup (e.g. "Sunday 20 Apr" when Sunday is 19 Apr), runs a single corrective orchestrator retry with a nudge listing the wrong pairs and the correct weekday for each date. Fails OPEN on any parse or retry error. Runs for BOTH owner and colleague paths — wrong dates break trust the same way regardless of recipient.
+- **Retry step in `postReply.ts`** between claim-checker and security gate: invokes `verifyDates` + `buildDateCorrectionNudge`; at most one retry, retry's output is not re-verified to avoid loops.
+
+### Migration
+- No schema changes.
+- The buffer change means slots right after a previous meeting (connected, zero-gap) are now returned by `find_available_slots`. Callers that relied on the 5-min padding will see tighter slot proposals — this is intentional per owner preference.
+
+---
+
+## 1.6.5 — Recovery pass for empty replies, human phrasing for meeting mode
+
+Two follow-ups from the v1.6.4 QA pass.
+
+### Changed
+- **Empty orchestrator reply → recovery pass instead of silence.** v1.6.4 returned nothing when the model ran tools but produced no text. That was honest but jarring. v1.6.5 runs ONE additional Claude call with a tight system prompt: "you just handled a turn but produced no text — describe what you did in one short sentence in the user's language, no tools, no markdown, write `NO_REPLY` if you really can't summarize." The recovery is grounded in the actual conversation history (the model has every tool call + result in front of it), so it can't fabricate, and the claim-checker still runs over the recovered reply in postReply.ts. Only if the recovery also returns empty (or `NO_REPLY`) do we silence and log — that case should now be very rare.
+- **Meeting-mode question is human, not robotic.** The find_available_slots tool description used to tell the LLM "ask the owner which of in_person | online | either | custom." That was the source of "Hmm, please tell me which meeting_mode you want" outputs — robot phrasing. New rule: ask TWO real questions ("In person or online?" and, if it's in-person somewhere external, "Where?" + "Roughly how long is the trip each way?"). The LLM picks the meeting_mode VALUE itself based on the answer:
+  - online / Teams / Zoom / video → `online`
+  - in person at the owner's office → `in_person`
+  - in person at a client / offsite / external link to join → `custom` + `travel_buffer_minutes` from the trip-time answer
+  - "whatever works" / "doesn't matter" → `either`
+  Same applies in both `meetings.ts` and `_meetingsOps.ts` tool definitions.
+
+### Migration
+- No schema, no profile changes.
+
+---
+
+## 1.6.4 — Calendar-review and slot-finding hardening from QA round
+
+Wave of fixes from the first end-to-end QA pass on the calendar review + booking flows. The pattern across most of these: the analyzer / slot finder was structurally correct, but the LLM was free to narrate over the structured result, propose times the schedule rules forbid, or fabricate confirmations after silent or destructive failures. This round closes those gaps with a mix of code guards (where determinism matters) and prompt rules (where context matters).
+
+### Added
+- **`meeting_mode` parameter on `find_available_slots`** — required, enum `'in_person' | 'online' | 'either' | 'custom'`. The LLM must know the mode before calling; otherwise it asks the owner. `in_person` restricts the search to office days only (hard constraint). `custom` (external venue, client site, external meeting link) accepts a `travel_buffer_minutes` that pads slots on both sides so a 1h-drive meeting doesn't crash into adjacent events. Coord internal callers (`coordinate_meeting`, renegotiation, outreach prep) all pass `'either'` since their location is auto-determined per slot later.
+- **Auto-expanding search window in `findAvailableSlots`** — when fewer than 3 candidates surface in the requested window, the function extends `searchTo` by +7 days and retries, capped at 21 days total from `searchFrom`. Stops early once 3 distinct-day slots are found. Internal coord callers opt out (`autoExpand: false`) since they have their own expansion loop.
+- **Day-type tag on returned slots** — `findAvailableSlots` results now include `day_type: 'office' | 'home' | 'other'` so callers can narrate "Monday in your office or Tuesday from home online" without re-deriving from day names.
+- **Delete-meeting idempotency guard in the orchestrator** — `delete_meeting` calls track executed `event_id`s per turn. A second call with the same id short-circuits to `{ ok: false, reason: 'already_deleted_this_turn' }`. The LLM sees the signal and corrects its narration. This is the code-level backstop behind the new confirm-before-delete prompt rule; the QA round caught a case where Maelle deleted one meeting but claimed to have deleted two.
+- **Schedule block injected into the Meetings system prompt section** — office hours, home hours, lunch window, buffer, allowed durations, physical-meetings-require-office-day, free-time-per-office-day. Before this, the LLM only saw the day-name lists and inferred everything else from tool descriptions; it could honestly say "I don't see a rule about office meetings before 10:30" because the rule was enforced silently in code. Now the rule is in the prompt and the LLM treats it as a hard constraint.
+- **`book_lunch` returns `{ ok, created, already_existed, ... }`** — when an existing event in the lunch window matches `/lunch/i` or category `Lunch`, the tool returns `created: false, already_existed: true` instead of silently double-booking. Lets the LLM narrate "lunch is already on your calendar" honestly when it's pre-existing, vs "booked you lunch" when it actually created it.
+
+### Changed
+- **Empty orchestrator reply → silence (was "Done.")** — `runOrchestrator` no longer fabricates fallback text when the model produces no final reply. The old "Done." / "Got it" / "I checked your calendar" placeholders looked human but had no grounding in what actually happened — when the owner saw "Done." with no context, the human-EA illusion broke. `postReply.ts` now skips the send entirely on empty reply and logs WARN with the tool summary. The owner sees nothing — clearer signal that something went wrong than a fake confirmation.
+- **Meetings skill prompt rules added** for: out-of-window proposals (must flag the violation explicitly and ask before calling create_meeting / book_lunch / finalize_coord_meeting), delete-meeting protocol (look up first, confirm with subject + time, handle multiple-delete requests one at a time, never narrate a delete that didn't return success), non-working days (silence is the default — never narrate personal events on a day off, never use "day off, you have a personal block in the evening" framing).
+- **Calendar-health skill prompt rule** — TRUST THE ANALYZER. If `analyze_calendar` / `check_calendar_health` returns no issue for a day, do not invent one (don't say "lunch is effectively blocked" because the gap looked tight, don't claim back-to-back when the analyzer respected the buffer). The analyzer already considers buffer, lunch window, work hours, free-time threshold; if it didn't flag it, it isn't an issue.
+
+### Migration
+- No schema, no profile changes. `meeting_mode` is required on the LLM-facing tool — old conversation-history references won't replay since each turn calls fresh.
+- The "Done."-style fallback removal means a model that previously stalled silently will now show NO reply at all in Slack. If you see threads where Maelle stops mid-conversation, check WARN logs for "Orchestrator ended without final reply".
+
+### Not changed (still deferred)
+- Agent-vs-transport split (coord state machine → skills/meetings/, formal `Connection` interface) is still the next architectural round. Not in this version.
+
+---
+
+## 1.6.3 — File-size split: runner dispatchers, reply pipeline, coord helpers
+
+Size-only cleanup before first public release. No behavior change — the same code runs in the same order. Files that were too large to navigate get broken along natural seams.
+
+### Changed
+- **Task runner split.** `src/tasks/runner.ts` went from 708 lines (one giant switch) to 68 (thin loop that looks up the right dispatcher). Each TaskType now has its own file in `src/tasks/dispatchers/`: `reminder.ts`, `followUp.ts`, `research.ts`, `routine.ts`, `outreachSend.ts`, `outreachExpiry.ts`, `coordNudge.ts`, `coordAbandon.ts`, `approvalExpiry.ts`, `calendarFix.ts`, plus a shared `types.ts` and an `index.ts` registry. Adding a new task type is now "add a dispatcher file and register it in `dispatchers/index.ts`" — no churn in the runner.
+- **Reply pipeline extracted.** `src/connectors/slack/postReply.ts` (new) owns everything between "orchestrator returned a draft" and "message landed in Slack": normalize markdown, owner claim-check (+ forced-retry), colleague security gate, audio-vs-text send, optional approval footer. `app.ts` shrank from 1188 to 1063 lines and the reply-path mechanics are no longer buried inside the Bolt handler closures.
+- **coord.ts size-only split.** From 1837 lines to 1244, pulling out three self-contained clusters:
+  - `coord/utils.ts` — `determineSlotLocation`, `interpretReplyWithAI`, `isCoordReplyByContext`.
+  - `coord/approval.ts` — `emitWaitingOwnerApproval` (extracted because both the state machine and the booking path call it; having it in its own file avoids a circular dep when booking moved out).
+  - `coord/booking.ts` — `bookCoordination` + `forceBookCoordinationByOwner`.
+  - `coord.ts` keeps the state-machine (initiate / handle-reply / resolve / ping-pong / renegotiation) and re-exports the extracted symbols so existing call sites continue to work unchanged.
+- **Repo hygiene.** `scripts/` gets a `.gitignore` rule for one-off operational scripts (`backfill-*.cjs`, `cancel-*.cjs`, `inspect-*.cjs`, `expire-*.cjs`, and a `scripts/local/` folder) so workplace names and hardcoded Slack IDs never reach a public repo. The generic `purge-orphan-approvals.cjs` stays committed.
+
+### Removed
+- `test-calendar.js` (root) — single-use diagnostic that hardcoded a real email. Move anything similar into `scripts/local/` in future.
+
+### Not changed (deferred — next round)
+- The deeper **agent-vs-transport split** is not in this version. coord.ts still contains meetings-domain state-machine logic that DMs via Slack directly. The 1.7 target is a formal `Connection` interface so the meetings skill can run on Slack, email, or WhatsApp without editing the state machine. That change deserves its own proposal + approval round — it's not "make the file smaller," it's "move the agent out of the transport layer."
+
+### Migration
+- No schema, no profile, no API changes. Restart is enough.
+
+---
+
+## 1.6.2 — Honesty gate rewritten, approvals invariant centralized, internal plumbing stops leaking to users
+
+A wave of fixes triggered by the first round of real owner+colleague usage after 1.6. Several distinct failures — Maelle claiming to message Idan without actually calling the tool, the reply verifier leaking its own reasoning as a reply, the security gate dumping its logs into the live Slack thread, the "heads up — this was pending your confirmation" reminder firing 24h after a meeting was already booked, the approval-reference token visible in every owner DM, Maelle forgetting facts Idan had taught her about herself — all land together because they share a single theme: the line between Maelle-the-person and the plumbing underneath was too thin. 1.7 redraws it.
+
+### Added
+- **Claim-checker (`src/utils/claimChecker.ts`)** — narrow Sonnet-backed truthfulness pass over owner-facing drafts. Strict JSON output, one question: "does the draft claim an action this turn that isn't backed by a tool call?" Never rewrites a reply itself; its caller decides what to do. Fails open on any parse / API error. Replaces the old reply verifier, which was asked to do two jobs at once (detect AND rewrite) and sometimes returned its own analysis prose as the "rewrite" — that prose then leaked verbatim into the owner's Slack thread.
+- **Claim-checker retry path in `runOrchestrator`** — when the checker flags a false claim, app.ts re-invokes the orchestrator once with a corrective nudge appended to the user message. For false "I messaged X" claims specifically, the retry sets Anthropic `tool_choice: { type: 'tool', name: 'message_colleague' }` so the model must actually call the tool. `OrchestratorInput` gains two optional fields: `forceToolOnFirstTurn` and `extraInstruction`, both one-shot.
+- **Assistant self-memory (`src/core/assistantSelf.ts`)** — Maelle is now a row in `people_memory` like every other colleague, keyed on a synthetic `SELF:<ownerSlackId>`. Seeded at startup per-profile. The existing `note_about_person` / `update_person_profile` tools work on her unchanged. A new "ABOUT YOU" block in the system prompt renders her notes in first person and ships in both owner and colleague prompts — her identity is not private, so when a colleague asks "why Maelle?" she can answer from what Idan has told her instead of deflecting. Only the owner sees the mutation hint (her slack_id, for the LLM to pass to note_about_person).
+- **`scripts/purge-orphan-approvals.cjs`** — one-shot destructive cleanup. Cancels every pending approval, every open approval-expiry / coord-nudge / coord-abandon / outreach-expiry / calendar-fix follow-up task, and every non-terminal coord_job. Previews before committing, commits in a transaction. Use when the table drifts from reality.
+
+### Changed
+- **Coord-terminal → approval sync is now a single invariant inside `updateCoordJob`** (`src/db/jobs.ts`). Whenever a coord transitions to `booked`, `cancelled`, or `abandoned`, every pending approval attached to that coord is auto-resolved (booked→approved, others→superseded) AND the associated `approval_expiry` task is cancelled, all in the same call. Before 1.7 this was a per-call-site mirroring pattern that `bookCoordination` had simply forgotten to replicate — producing the "heads up, pending your confirmation?" reminders firing 24h after the meeting was already on the calendar. The redundant sync block at the finalize_coord_meeting success path is removed (now redundant with the invariant).
+- **Approval-reference token no longer rendered to users.** The three sites that appended `_ref: #appr_<id>_` (italic) to DMs (`tasks/skill.ts`, `connectors/slack/coord.ts`, `core/approvals/orphanBackfill.ts`) no longer do. The orchestrator binds owner replies to approvals via the PENDING APPROVALS block in the system prompt — subject, timing, thread — which was already sufficient. The token remains as an optional explicit reference the model MAY use internally but is never shown.
+- **Language rule rewritten.** Removed the static `user.language` anchor that pinned Maelle toward a YAML default and let her drift between Hebrew and English mid-conversation. New rule is absolute and per-message: "reply in the exact language the person wrote in THIS turn — no inertia, no profile default, voice transcripts included."
+- **Persona block ("never fabricate personal history")** now points at the ABOUT YOU block as the source of truth for Maelle's own story, instead of forcing a deflection every time.
+- **Security-gate filter events** go to WARN logs only. Before 1.7 every trigger dumped "Triggers: ... / Original: ... / Sent: ..." into the owner's active Slack thread as a visible message, making the DM unreadable during attacker activity (Ysrael's morning injection runs filled the screen) and breaking the human-EA illusion for routine turns. Full detail is preserved in the daily-rotate log for audit.
+- **`formatPeopleMemoryForPrompt`** excludes `SELF:*` rows so Maelle doesn't appear as one of the owner's workspace contacts (her row is rendered by the dedicated ABOUT YOU block).
+
+### Removed
+- **`src/utils/replyVerifier.ts`.** Replaced by the narrower claim-checker above.
+
+### Migration
+- No schema changes.
+- No profile changes (no new required YAML fields; `user.language` remains readable but is no longer used for language pinning — can be left in without effect).
+- Run `node scripts/purge-orphan-approvals.cjs` once to clean the approvals/tasks/coord_jobs drift that accumulated through 1.6.x. The script previews what it will touch before committing; safe to abort.
+- Restart to seed Maelle's `people_memory` row for every profile.
+
+### Not changed (deferred)
+- Still no formal Connection interface; `connectors/slack/coord.ts` still hosts meetings-domain state-machine logic. Target for a later pass.
+- Free/busy / `findAvailableSlots` recurring-meeting-visibility bug (seen Apr 15 proposing 09:30 / 10:00 slots that overlapped a 09:15–10:15 recurring) is logged but not yet investigated.
+
+---
+
+## 1.6.1 — Layering cleanup: outreach extracted as core, scheduling helper moved out of skills/
+
+Supporting cleanup so the four-layer model (Core / Skills / Connections / Tools & Utilities) holds at the file level as well as conceptually.
+
+### Changed
+- **`src/core/outreach.ts` (new, core module).** `message_colleague` and `find_slack_channel` extracted from `src/core/assistant.ts` into a dedicated `OutreachCoreSkill`. Memory concerns (preferences, people, interactions, gender) stay in `AssistantSkill`; messaging concerns move here. Registered in `CORE_MODULES` alongside assistant / tasks / crons. `CoreModuleId` type gains `'outreach'`.
+- **`src/skills/scheduling.ts` → `src/skills/_meetingsOps.ts`.** The file still hosts direct calendar-op handlers that MeetingsSkill delegates to, but it was never a togglable skill — the leading underscore signals "internal helper, not loadable." Its `SchedulingSkill` class no longer `implements Skill` (doesn't need to; MeetingsSkill only calls `executeToolCall`). Dead `getSystemPromptSection` method removed; `getTools` kept for now with a TODO marker.
+- **Assistant skill description tightened** to reflect its memory-only scope.
+
+### Not changed (deferred to later)
+- Coord state machine (`connectors/slack/coord.ts`) still contains meetings-domain logic mixed with Slack I/O — to be extracted into a meetings submodule when we define a proper Connection interface.
+- No `Connection` interface or registry yet — today connectors are hand-wired per surface (Slack / Graph). Required if a profile ever runs on email-only without Slack.
+
+### Migration
+- No schema changes.
+- No profile changes.
+
+---
+
+## 1.6.0 — Skills boundaries rationalized; one unified task pipeline; sweeps retired
+
+Before 1.6, "where does one skill start and the other end" had no clear answer. Scheduling and Coordination had duplicate tools (`coordinate_meeting`, `find_slack_user`), separate YAML toggles, and overlapping system-prompt sections. Five parallel background sweeps (outreach scheduled send, outreach expiry, coord 3h stale nudge, coord 24h follow-up/abandon, approval expiry) each scanned their own table with their own logic, each with their own failure modes. And some subsystems (outreach send, calendar health) weren't backed by tasks at all — they ran as side effects on their own timers. 1.6.0 fixes all three at once.
+
+### Merged
+- **`scheduling` + `coordination` → `meetings`.** One skill, one YAML toggle, one system-prompt section. `src/skills/meetings.ts` owns every tool that touches the calendar — direct ops (create/move/update/delete/free-busy/find-slots/analyze) AND multi-party coord (coordinate_meeting, finalize_coord_meeting, check_join_availability, cancel_coordination, get_active_coordinations). The former SchedulingSkill is kept as a private helper (`_LegacyOpsSkill`) that MeetingsSkill delegates to for direct-ops handlers — its tool definitions are no longer exposed. Profile YAMLs with `scheduling: true` or `coordination: true` are auto-migrated to `meetings: true` at load time.
+- **Core module set reduced.** `CoordinationSkill` is no longer hardcoded in `CORE_MODULES` — it was never toggleable, now `MeetingsSkill` is. Core remains: memory (AssistantSkill), tasks (TasksSkill), routines (CronsSkill).
+- **Structured requests moved into TasksSkill.** `store_request`, `get_pending_requests`, `resolve_request`, `escalate_to_user` are now TasksSkill tools, not scheduling concerns. They sit next to `create_approval` / `resolve_approval`, which is where "decisions and requests" belong.
+
+### Unified — one background pipeline, no more sweeps
+Every former sweep is now a task of a specific type with a `due_at`. The 5-minute background loop does exactly two things: `materializeRoutineTasks` then `runDueTasks`.
+
+| Former sweep | New task type | Dispatcher behavior |
+|---|---|---|
+| `sendScheduledOutreach` | `outreach_send` | Post the DM, flip outreach_jobs to 'sent', auto-queue an `outreach_expiry` if await_reply |
+| `checkExpiredCoordinations` (outreach leg) | `outreach_expiry` | First expiry: send one follow-up, re-queue +3 work-hours. Second expiry: mark no_response, notify owner |
+| `runCoordFollowUps` (24h nudge) | `coord_nudge` | DM non-responders, queue `coord_abandon` +4h |
+| `runCoordFollowUps` (abandon) | `coord_abandon` | If still stuck, mark coord abandoned + notify |
+| `runApprovalExpirySweep` | `approval_expiry` | Expire approval, cascade task→cancelled + coord→abandoned + notify owner/requester |
+| *(new)* | `calendar_fix` | When owner marks an issue 'to_resolve', re-check in 1 day; auto-resolve if gone, re-ping if still there |
+| *(unchanged)* | `routine` | Routine firing materialized by `materializeRoutineTasks` |
+
+Task creation is wired at the source: `message_colleague` inserts `outreach_send`/`outreach_expiry` tasks; `initiateCoordination` inserts `coord_nudge`; `createApproval` inserts `approval_expiry`; `update_calendar_issue` with status='to_resolve' inserts `calendar_fix`.
+
+### Added
+- **`tasks.skill_origin` column** — every task records which skill created it (`'meetings'`, `'calendar_health'`, `'outreach'`, `'tasks'`, `'memory'`, `'system'`). Useful for briefings, filters, debugging.
+- **`UNIQUE (skill_ref, type)` semantics** — the new task types rely on per-(type,ref) uniqueness at the creator; since the runner completes or re-schedules its own follow-ups, double-creation is avoided without a DB-level constraint for now.
+- **Strong logs at every task creation, dispatch, and lifecycle transition** with `skill_origin`, `skill_ref`, `due_at`, and preview fields.
+
+### Deleted
+- `src/skills/coordination.ts` — contents moved to `meetings.ts`.
+- `src/skills/meeting-summary.ts` — stub, never referenced.
+- `src/core/orchestrator/tools.ts` — the `maelleTools` export had zero importers; definitions were duplicated in skills.
+- `src/connectors/slack/coordFollowUp.ts` — replaced by `coord_nudge`/`coord_abandon` task dispatchers.
+- `src/core/approvals/sweeper.ts` — replaced by `approval_expiry` task dispatcher.
+- `src/tasks/crons.runner.ts` — replaced by routineMaterializer (shipped 1.5.1, now the sole path).
+- `coordination_jobs` table + all helpers (`createCoordinationJob`, `updateCoordinationJob`, `getCoordinationJob`, `getJobByColleagueChannel`, `getJobsAwaitingResponse`, `getScheduledCoordinationJobs`, `getActiveJobsForOwner`, the `CoordinationJob` interface). Legacy single-colleague coord superseded by `coord_jobs`.
+- From `coordinator.ts`: `sendCoordinationDM`, `handleCoordinationReply`, `confirmAndBook`, `handleDecline`, `checkExpiredCoordinations`, `sendScheduledOutreach`, `isWithinWorkingHours`, `getClosingLine`. The file is now 550 lines (from 1308) and contains only the outreach reply handler + Slack utilities.
+
+### Migration
+- `ALTER TABLE tasks ADD COLUMN skill_origin TEXT`
+- `DROP TABLE IF EXISTS coordination_jobs`
+- Profile YAML: `scheduling`/`coordination` → `meetings` auto-migration at load time (in `registry.getActiveSkills`). No edits required for existing profiles.
+- `TaskType` gains: `outreach_send`, `outreach_expiry`, `coord_nudge`, `coord_abandon`, `approval_expiry`, `calendar_fix`. `TaskStatus` unchanged.
+
+### Not changed (intentionally)
+- `coord_jobs` state machine in `coord.ts` — still the source of truth for multi-participant coordination state. Tasks are the scheduling + visibility layer on top.
+- `handleOutreachReply` — still runs on the Slack event path (not on a timer), since it's triggered by a real colleague message arriving.
+- Approvals resolver and orphan backfill from 1.5.0/1.5.1 — unchanged, just plumbed differently at their expiry end.
+
+---
+
+## 1.5.1 — Routines as a thin layer over tasks; kill "offline mode"; approved-issue suppression; orphan approval backfill
+
+The night the bot woke at 03:04 and DM'd about the 07:30 health check (scheduled four hours later in Idan's local evening) made it clear the old routine scheduler had two disagreeing clocks: `next_run_at` on the routine row and a wall-clock "90-min from scheduled" guard. Every bot restart / offline stretch that spanned a scheduled firing produced one of: phantom "I was offline" DMs at the wrong hour, silent drops, or runs +hours late. 1.5.1 collapses this into a single model where routines are a thin layer over tasks.
+
+### Changed
+- **Routines → tasks (materializer pattern).** New `src/tasks/routineMaterializer.ts`. On the 5-min tick: for every active routine with `next_run_at <= now`, insert one `type='routine'` task with `due_at` = scheduled instant, then fast-forward `next_run_at` past stale occurrences to the next future firing. UNIQUE index `(routine_id, due_at)` prevents double-insert. Task runner does the actual work — the 90-min-circular-distance offline guard and the "I was offline at X, run now or skip?" DM are both gone.
+- **Cadence-based lateness policy.** `src/tasks/lateness.ts`. When the runner picks up a routine task, it compares lateness to a threshold derived from the routine cadence:
+  - Sub-daily (multiple firings per day): skip if > 5 min late
+  - Daily: run if ≤ 4h late, else skip (`status='stale'`)
+  - Every 2–6 days: 24h threshold
+  - Weekly (7–29 days): 48h
+  - Monthly (30+ days): 1 week
+  Skipping is silent — no DM, no "should I run it?" question. Stale tasks are marked for the briefing.
+- **`never_stale` flag on routines** (`routines.never_stale` INTEGER 0/1). When set, all thresholds are ignored — the routine always runs at the next opportunity no matter how late. Exposed on `create_routine` and `update_routine` tools.
+- **Catch-up of missed colleague messages** (`catchUpMissedMessages` in `core/background.ts`): scope narrowed from (DM + MPIMs, 48h, @mention-gated for MPIMs) to **DM only, 24h, last unread user message only, reply in thread**. The "[Context: you were offline when this message was sent…]" prompt-injection hack that prefixed every catch-up message is gone — the orchestrator sees the raw message; the catch-up framing lives only in the posted reply's context block.
+- **`checkMissedBriefing` on startup is gone.** Not needed: if today's briefing slot passed while the bot was down, the routine's `next_run_at` is already in the past, the materializer will insert a task on first tick, and the lateness policy will run-or-skip it based on how late it is. One code path for both "on time" and "just missed it".
+
+### Fixed
+- **Approved calendar issues no longer re-flagged every morning.** `skills/calendarHealth.ts` now pipes the detected `issues` array through `getDismissedIssueKeys` + `buildIssueKey` before returning. Previously `upsertCalendarIssue` skipped the DB insert for approved issues but the in-memory `issues` list kept them in the daily report, so the owner got re-asked about the same conflict every day no matter how many times they said "it's fine."
+- **Orphan approval backfill on startup** (`src/core/approvals/orphanBackfill.ts`). Runs once, ~30s after boot. Finds `coord_jobs` sitting in `waiting_owner` from the last 14 days that have no linked pending approval (pre-v1.5 orphans, approvals lost to earlier bugs). Reconstructs the ask from coord metadata — slot_pick if there's a winning_slot, duration_override if notes flag `needsDurationApproval`, freeform otherwise — creates the approval, DMs the owner, records the message ts. Opaque coords (no subject, no slot, no notes) are left alone. This recovers things like "Yael asked for a 30-min extension, Maelle said 'passed to Idan', Idan never saw it."
+- **Remaining Haiku call sites flipped to Sonnet.** `genderDetect.ts` was the last holdout. `claude-haiku` no longer appears anywhere under `src/`. One strong model end-to-end is worth more in behavior consistency than it costs in inference.
+
+### Migration
+- `ALTER TABLE routines ADD COLUMN never_stale INTEGER NOT NULL DEFAULT 0`
+- `CREATE UNIQUE INDEX idx_tasks_routine_due ON tasks(routine_id, due_at) WHERE routine_id IS NOT NULL`
+- `TaskType` gains `'routine'`; `TaskStatus` gains `'stale'`. No data migration — old rows pass through unchanged.
+
+### Removed
+- `src/tasks/crons.runner.ts` is still on disk but `runDueRoutines` and `checkMissedBriefing` are no longer wired into the background loop. Will be deleted in 1.5.2 once we've confirmed 1.5.1 holds through a week of traffic.
+
+---
+
+## 1.5.0 — Approvals as first-class structured decisions
+
+The fragile link in every scheduling flow was the moment we paused for the owner to decide. Before 1.5 that moment was a free-text DM + an LLM re-reading the thread next turn to figure out what to do — no binding between "what I asked" and "what Idan said", no expiry, no dedupe, no freshness re-check before booking, no structured notification back to the original requester. 1.5 replaces that with a typed `approvals` row that hangs off a parent task and flows through one canonical resolver.
+
+No buttons — per design. Idan replies in natural language; Sonnet binds the reply to the right approval using the pending-approvals list injected into the system prompt plus an `#appr_<id>` token appended to every ask.
+
+### Added
+- **`approvals` table + `src/db/approvals.ts`.** Every owner decision is a row: `{id, task_id, kind, status, payload_json, decision_json, expires_at, idempotency_key, ...}`. Always attached to a parent task (task stays the root arch). Kinds: `slot_pick`, `duration_override`, `policy_exception`, `lunch_bump`, `unknown_person`, `calendar_conflict`, `freeform`. Statuses: `pending | approved | rejected | amended | expired | superseded | cancelled`.
+- **`src/core/approvals/resolver.ts` — the one place decisions resolve.** Handles `verdict ∈ {approve, reject, amend}` for every kind. `amend` is first-class: when Idan says "no but 1:30 works", the approval closes as `amended` with the counter recorded and the orchestrator relays the alternative back to the requester. `slot_pick` runs a freshness re-check via `getFreeBusy` before booking — if the chosen slot went stale while waiting, it supersedes the approval and emits a `calendar_conflict` follow-up instead of booking into a now-conflicted slot.
+- **`src/core/approvals/sweeper.ts` + 5-minute cron tick.** Expired approvals → flip status to `expired`, cancel the parent task, mark the linked coord `abandoned`, DM the owner, and DM any external requester so nobody sits in limbo. `waiting_owner` now has the same expiry machinery every other state already had.
+- **Orchestrator tools: `create_approval`, `resolve_approval`, `list_pending_approvals`.** Registered in `TasksSkill`. `create_approval` DMs the owner with an appended `#appr_<id>` token so free-text replies can bind deterministically. Idempotent by `(task_id, kind, payload)`: creating the same approval twice returns the existing pending row.
+- **Pending approvals injected into the owner system prompt.** When Idan replies, Sonnet reads the list, picks the matching approval_id (explicit `#appr_…` first, then subject/thread/recency), and calls `resolve_approval`. Ambiguous multiple-pending cases: Sonnet is told to ask which one, naming them by subject.
+- **Requester loop closed structurally.** `coord_jobs.requesters` JSON column. On `booked` → DM any requester who isn't already a participant with a structured "all set" message. On expiry/abandonment → DM them too. No more "colleague who asked never heard back because Maelle forgot."
+- **Booking idempotency.** `coord_jobs.external_event_id` set from `createMeeting`'s returned Graph id. `bookCoordination` short-circuits if the coord already has an `external_event_id` at the same slot — safe under ts-node-dev respawn, approval retries, and double-taps.
+
+### Changed
+- **`coord.ts` `waiting_owner` sites → `emitWaitingOwnerApproval` helper.** Every path that previously posted a raw owner DM and flipped the coord to `waiting_owner` now goes through the helper: creates a typed approval, posts the ask with a binding token, records the message ts. Covers the all-agree-with-holdouts path, the calendar-conflict path, the duration-override path, the createMeeting-failure path, the ping-pong dead-end, and the round-2 preference-conflict path. Falls through to a plain DM only when no parent task is linked (legacy coord rows).
+- **`finalize_coord_meeting`** kept as a legacy tool but now auto-marks any linked pending approval as `approved` when it books successfully, so approval state stays consistent with coord state.
+- **All remaining colleague-path Haiku calls → Sonnet.** `coord.ts` (3 sites), `coordinator.ts` (2 sites), `relevance.ts`, `addresseeGate.ts`. Only `genderDetect.ts` stays on Haiku — it's a narrow name-classifier, not a colleague-facing behavior path.
+
+### Migration
+- `CREATE TABLE approvals (…)` with `idx_approvals_owner_status`, `idx_approvals_task`, `idx_approvals_expires`, `idx_approvals_skill_ref`.
+- `ALTER TABLE coord_jobs ADD COLUMN requesters TEXT NOT NULL DEFAULT '[]'`
+- `ALTER TABLE coord_jobs ADD COLUMN external_event_id TEXT`
+- `ALTER TABLE coord_jobs ADD COLUMN request_signature TEXT` + `idx_coord_jobs_req_sig`
+
+### Not yet wired (deliberate v1.5 scope)
+- `request_signature` column exists but merge-on-conflict for duplicate coord asks isn't turned on yet — add when we see a real duplicate in traffic.
+- `unknown_person` and `lunch_bump` kinds are defined but the orchestrator has to drive them from the prompt (no dedicated booking-side helper yet).
+- Non-scheduling approvals (preferences, calendar-health, etc.) are supported via `freeform` but not routed from those code paths — can be added without schema changes.
+
+---
+
+## 1.4.3 — Redesign candidate: LLM-driven output safety, Sonnet for conversation (on trial)
+
+> Kept on a patch bump until validated in real traffic. If the verifier + Sonnet routing prove stable across a few days of use, this gets promoted to 1.5.0 retroactively in the summary. If it regresses, the changes roll back without a minor-version ceremony.
+
+The v1.4 wave stabilized coordination by layering defensive patches on top of the LLM: regex backstops, Haiku judges, hardcoded fallback replies, tool-result guidance strings. Each patch had its own false-positive shape — the coord judge flagged our own `<<FROM…>>` wrapper as injection, the hallucination regex flagged "on your calendar" in analysis replies, the layer-1 refuse rejected salvageable coord calls, canned fallback rewrites turned analysis into fake failed bookings. 1.5.0 redesigns these layers to let the model do what a regex can't — reason about what happened.
+
+### Redesigned
+- **Hallucination backstop → `replyVerifier`** (`src/utils/replyVerifier.ts`). The old regex-and-canned-fallback in `app.ts` is gone. New path: when an owner-facing reply is non-trivial and no booking tool succeeded this turn, hand `{reply, toolSummaries, bookingOccurred}` to Sonnet and ask *"does this reply honestly reflect what happened? if not, rewrite it truthfully — same language, same tone, keep the useful analysis, fix only the false claims."* Sonnet either responds `OK` or supplies a corrected draft. Fails open on verifier error. Gated by `needsVerification()` (skips short replies and successful-booking turns) so cost stays bounded. Shadow-notify now audits rewrites with full before/after context instead of a single-line alert.
+- **Colleague orchestrator: Haiku → Sonnet.** `MODEL_COLLEAGUE` in `orchestrator/index.ts` is now `claude-sonnet-4-6`. Haiku produced subtler failure modes on colleague turns (malformed coord args, missed RULE 3 triggers, over-sensitive to idioms). The stable-solution bias is "one strong model everywhere" over a cost/behavior gap between owner and colleague paths.
+- **Coord judge: Haiku → Sonnet.** `coordGuard.judgeCoordRequest`. Haiku false-positived on natural multi-turn Hebrew conversations and on our own wrapper tags.
+- **Security gate rewriter: Haiku → Sonnet.** `securityGate.filterColleagueReply`. Still only fires on narrow regex triggers (cost-bounded), but when it does rewrite, Sonnet produces less stilted output.
+
+### Added
+- **`confirm_gender` tool** + `confirmPersonGender()` DB helper + `gender_confirmed` column. When a person answers Maelle's gender question (or volunteers it), Maelle calls `confirm_gender` — this locks `gender_confirmed=1` and no auto-detector (pronouns, image, name-LLM) can ever overwrite it. Colleagues can only confirm their own gender; owner can confirm any. System-prompt Hebrew section rewritten to direct Maelle to the new tool and to suppress re-asking when gender is already set.
+- **Hebrew/English name gender inference** — `detectGenderFromName()` in `genderDetect.ts` (still Haiku, narrow task). Runs as a third fallback after pronouns and image. Picks up names like Yael/Dana/Rachel → female, Idan/Moshe → male, returns `unknown` for genuinely ambiguous names (Noa, Alex, Yuval). Tentative guesses never override a confirmed value.
+- **Owner auto-inclusion for colleague-initiated coord.** `skills/coordination.ts` and `connectors/slack/coord.ts`. Replaces the old two-layer owner-must-include refuse. If a colleague asks Maelle to coordinate and the owner isn't in `participants`, he's silently injected (name/slack_id/email/tz from profile). Removes a whole class of "Maelle built the args wrong → coord refused → Maelle tells colleague she'll check with owner → never stored → orphan promise" failures.
+
+### Removed
+- **`<<FROM …>>` colleague-message wrapper** in `app.ts`. We used it to tell the orchestrator who was speaking; it's redundant with `senderName` + the authorization line, and every wrapper shape we tried collided with either the injection scanner (`[From: X]`) or the coord judge (`<<FROM X>>` flagged as "suspicious paste mimicking system syntax"). Now the raw colleague text goes through untouched; identity flows via `senderName` only.
+- **Layer-1 / Layer-2 owner-not-in-participants refuses** — replaced by auto-add above.
+- **BOOKING_CLAIM_RX / BOOKING_CLAIM_HE_RX** and the hardcoded fallback string *"I tried to lock this in but the booking didn't actually go through…"* — replaced by the Sonnet verifier.
+
+### Migration
+- `ALTER TABLE people_memory ADD COLUMN gender_confirmed INTEGER NOT NULL DEFAULT 0` (auto-applied on startup).
+
+---
+
+## 1.4.1 — Synchronous booking, hallucination backstop, follow-up cron, subject-level cooldown
+
+### New
+- **Synchronous `finalize_coord_meeting` (D3)** — the owner force-book tool now runs inline inside the skill and returns `{ok, status, reason, subject, slot}` to the LLM. The LLM reads the real outcome before narrating, which closes the race where "done — booked" was spoken before the calendar actually committed. `bookCoordination` gained a `suppressOwnerConfirm` option so the synchronous path doesn't double-post.
+- **Hallucination-reply backstop (D2)** — every outbound reply is scanned for booking-claim phrases (EN + HE: "booked", "invite sent", "calendar invite", "נקבעה", "הזמנתי"…). If the reply claims a booking but no `create_meeting` / `finalize_coord_meeting` succeeded this turn, the reply is rewritten to a safe fallback and a shadow-notify lands in the owner's DM with the original text. Narrow regex + the new `bookingOccurred` flag on `OrchestratorOutput`.
+- **Coord follow-up / abandon cron (Bug 1B)** — `coordFollowUp.ts`. Every 5 minutes: coord jobs with no participant activity in 24 *work-hours* (respecting office_days ∪ home_days — Fri/Sat count as zero for Israelis) get a single follow-up DM to non-responders. If still no reply 4 wall-clock hours after the nudge, the coord is marked `cancelled` with `abandoned_at` set and the owner gets a closing note. New columns: `last_participant_activity_at`, `follow_up_sent_at`, `abandoned_at`.
+- **Subject-level social cooldown (Bug 10)** — `SocialTopic` gained an optional free-form `subject` column alongside the enum `name`. Cooldown fires on `(topic + subject)` pairs, so "hobby:clair obscur game" can be on cooldown while "hobby:woodworking" is still available. `note_about_person` tool schema now has a required-in-practice `subject` field, and the system prompt tells the LLM to call `note_about_person` the moment it *initiates* a social question (not only when the person volunteers) — this is what arms the 24h gate.
+
+### Changed
+- **`handleCoordReply`** now writes `last_participant_activity_at = now` whenever a participant responds, feeding the follow-up cron.
+- **`forceBookCoordinationByOwner`** return type widened to `{ok, reason, status, subject, slot}` and honors a new `synchronous` flag that suppresses the in-function owner confirm message (so the LLM can narrate).
+- **SOCIAL CONTEXT prompt block** renders topic labels as `name:subject` and shows the INITIATION COOLDOWN list at subject granularity.
+- **Workspace-contacts block** (`formatPeopleMemoryForPrompt`) now shows subjects under each topic for readability in the context.
+- **RULE 2a** in the base honesty rules now specifies the synchronous return-shape of `finalize_coord_meeting` and tells the LLM not to re-narrate on `ok:false`.
+
+### Fixed
+- **Repeated personal check-ins** (e.g. "how's Clair Obscur / axons section?" three times in a day) — root cause was that `last_initiated_at` was never being written because the LLM only called `note_about_person` when the person volunteered, never when Maelle initiated. Fixed by subject-level cooldown + mandatory-on-initiate prompt rule.
+- **Race where the LLM narrated success before booking ran** — eliminated by making `finalize_coord_meeting` synchronous; if the booking hit a calendar conflict or duration gate, the tool returns `ok:false` and the LLM can no longer paper over it.
+
+---
+
+## 1.4 — Group-DM / Catch-up / Owner-Override Stabilization
+
+### New
+- **Owner force-book tool (`finalize_coord_meeting`)** — code-level override: when the owner picks a slot during an in-progress coord, the coord is booked immediately regardless of pending participant responses. Backed by `forceBookCoordinationByOwner` in `coord.ts` which marks unresponded key participants as accepted at the chosen slot and invokes the real booking path (no more LLM-narrated fake confirmations). Owner-only (in `ownerOnlyTools`).
+- **Hebrew output rules** — system-prompt block covering name transliteration, proper-noun meeting titles (no nonsense auto-translations like "מחסום דינאמיקה"), no markdown in Hebrew replies, and re-querying availability on date corrections.
+- **`name_he` column on `people_memory`** — cached Hebrew rendering of contact names so Maelle uses the right form in Hebrew conversations. Exposed in `update_person_profile` tool.
+- **Weekday labels on Today/Tomorrow** in the date lookup table (`Today (Tuesday): 2026-04-14`) so the LLM stops back-computing days-of-week.
+- **Outreach reply classifier (Option B)** — Haiku-powered "reply vs new" context match; multi-job disambiguation when a colleague has more than one open outreach.
+- **Daily log rotation** (`winston-daily-rotate-file`) — 7-day retention for `maelle.log`, 30 days for `error.log`. Verbosity kept at current level; only disk management changes.
+
+### Changed
+- **Catch-up reply always threaded under the user's original message** (`background.ts`), regardless of whether the missed message was top-level or in-thread — no more floating replies.
+- **Catch-up reply normalized through `normalizeSlackText`** — `**bold**` → `*bold*`, stripped `##` and leading `- `, matching the live handler.
+- **MPIM message detection** (`app.ts`) — modern Slack delivers group DMs as `channel_type: 'channel'` with C-prefixed IDs; verify `is_mpim` via `conversations.info` rather than rejecting on channel_type alone.
+- **In-group participant message** — dropped "Idan asked me" phrasing, uses thread_ts for ack, removed bot-speak "Just reply with the number".
+- **Slot ordering** — `pickSpreadSlots` now sorts chronologically before returning.
+- **`handleCoordReply` follow-up branch** — when a participant who has already responded sends a follow-up on a `waiting_owner` coord, ack them and forward the content to the owner instead of re-running `resolveCoordination` (which could destructively flip a prior 'yes' to 'no').
+- **"NEVER LIE ABOUT BOOKINGS" rule** added to coordination system prompt — explicit owner-override language so the LLM never narrates a confirmation without a real `create_meeting` / `finalize_coord_meeting` tool call.
+
+### Fixed
+- **Elinor "Yes, that works" dropped** — MPIM `message` handler was rejecting events with `channel_type !== 'mpim'`; now also handles `channel_type === 'channel'` with `is_mpim` verified via API.
+- **Phantom booking narration** — fixed via both prompt rule and code-level `finalize_coord_meeting`; the LLM can no longer claim "huddle link in your calendar invite" without an actual booking call.
+- **Yael's 3rd-message drop** — follow-up on `waiting_owner` jobs no longer routes through the destructive re-resolve path.
+- **Catch-up markdown leak** (`**When?**`, `**Duration?**`) — catch-up path was bypassing `normalizeSlackText`.
+- **Catch-up orphan reply** — catch-up was posting at top-level when the user's message was top-level; now always threads under the user's message.
+- **`slotCountNote` dangling reference** in coordination.ts.
+
+---
+
+## 1.3 — Scheduling System Overhaul
+
+### New
+- **Calendar health skill** — `check_calendar_health` scans for missing lunch, double bookings, OOF conflicts, and uncategorized events; `book_lunch` books a lunch event in the preferred window; `set_event_category` updates Outlook categories on events
+- **Ping-pong negotiation** — when participants pick different slots, Maelle tries converging on existing choices (soonest first) before falling back to open-ended renegotiation
+- **Out-of-thread reply detection** — colleagues can reply to coordination DMs outside the original thread; Haiku-powered context matching determines if the message is scheduling-related and disambiguates multiple active jobs
+- **Location auto-determination per slot** — each proposed slot gets location based on day type: office day (Idan's Office + Teams / Meeting Room + Teams), home day (Huddle / Teams only), with custom location override
+- **Duration flexibility** — owner can request any meeting duration; colleague non-standard durations trigger an owner approval gate before booking
+- **Calendar freshness optimization** — pre-booking calendar check skipped if last check was < 60 seconds ago
+- **Thinking time protection** — days with less than 2h of quality free time (in chunks of >= 30 min) are automatically skipped when searching for slots
+- **Lunch protection** — slots that would eliminate room for lunch in the preferred window are skipped
+- **Urgent scheduling flag** — `is_urgent` flag stored in coordination notes for future relaxed-buffer handling
+- **Phone call location** — `custom_location` set to just the phone number (e.g. `"+972-54-123-4567"`) so it's clickable in the calendar; no Teams link generated for phone meetings
+- **Colleague test mode** — owner can say "test as colleague" in a DM thread to simulate the colleague experience (coordination DMs, slot picking, etc.); "stop testing" to exit
+- **Join-meeting flow (Route 2)** — `check_join_availability` lets colleagues ask the owner to join an existing meeting; checks calendar for conflicts, offers partial join (first/last N minutes), escalates rule violations (lunch/buffer) to the owner; no calendar booking — colleague forwards the invite
+- **Calendar issue tracking** — `get_calendar_issues` and `update_calendar_issue` tools; double bookings and OOF conflicts are auto-tracked in DB with workflow: `new` → owner decides → `approved` (ignore) or `to_resolve` (Maelle acts, then marks `resolved`); resolved/approved issues are never re-flagged
+
+### Changed
+- **Renamed `multi_coord` to `coord`** — DB table `multi_coord_jobs` → `coord_jobs`, all functions and types renamed (`MultiCoordJob` → `CoordJob`, `MultiCoordParticipant` → `CoordParticipant`), file `multiCoordinator.ts` → `coord.ts`; migration drops old table on startup
+- **`findAvailableSlots` overhauled** — accepts `minBufferHours` and `profile` params; enforces per-day work hours (office vs home), 4h minimum buffer from now, 5-min gap around existing events, thinking time check, and lunch protection
+- **`pickSpreadSlots` hardened** — at least 2 unique days required when returning 3 slots (hard constraint); caps at 2 if only 1 day available so the caller expands the search window
+- **`coordinate_meeting` tool rewritten** — any duration accepted (not enum-constrained), date range defaults to now+4h forward expanding weekly up to 12 weeks, returns `SlotWithLocation[]` with per-slot location and online status
+- **Coordination system prompt updated** — includes Route 1 (book meeting) vs Route 2 (join meeting) guidance, location rules, duration flexibility, negotiation flow, slot rules, and out-of-thread support
+- **`check_join_availability` added to colleague tools** — colleagues can now trigger Route 2 directly
+- **Scheduling system prompt updated** — documents min buffer, thinking time threshold, lunch protection rules
+- **User profile schema** — added `thinking_time_min_chunk_minutes`, `min_slot_buffer_hours` to meetings; added `calendar_health` to skills
+- **`coord_jobs` table** — added `negotiating` status and `last_calendar_check` column
+- **Shadow notify on booking** — booking confirmation now sends a shadow message to the owner in addition to the thread notification
+- **Outreach handoff** — now passes `minBufferHours` and `profile` to slot search, builds `SlotWithLocation[]` with proper location per slot
+- **All `findAvailableSlots` callers updated** — scheduling skill, coordination skill, and outreach handoff all pass new slot-rule params
+
+### Fixed
+- Missing shadow notification on final meeting booking in coordination flow
+- `app.ts` casting `proposedSlots` as `string[]` instead of `SlotWithLocation[]`
+- Outreach handoff passing obsolete `isOnline` param to `initiateCoordination`
+- **Late-night date shift** — before 5am, the date lookup table now reflects the user's subjective day (e.g. at 1am Tuesday, "today" = Monday, "tomorrow" = Tuesday); fixes "tomorrow" being off by one after midnight
+- **`analyze_calendar` missing lunch events** — lunch check now recognizes existing "Lunch" calendar events instead of only looking for free gaps; previously reported "no lunch" even when lunch was already booked
+- **Calendar health late-night range** — `check_calendar_health` default date range uses the same before-5am adjustment so it covers the correct week
+
+---
+
+## 1.0 — First production release
+
+### New
+- Channel posting — Maelle can post in any Slack channel with an @mention; auto-joins public channels if not already a member; returns a clear error if the channel is private and she hasn't been invited
+- Company context — `company_brief` field in the YAML profile; a short plain-text paragraph injected into the system prompt so Maelle understands the business she works in; each user writes their own, kept deliberately short to avoid inflating the prompt
+
+### Changed
+- Voice response simplified — no persistent "car mode" state; voice input returns audio when the reply is ≤75 words; text input always returns text; the preference has been removed from the database entirely
+- Company context is inline YAML, not a separate file — keeps the system prompt lean and the configuration self-contained
+
+### Fixed
+- learn_preference crash when value was null — returns a graceful error instead of throwing a SQLite NOT NULL constraint
+- WhatsApp connector had a stale isCarMode reference left over from the car mode removal
+
+---
+
+## 0.9
+
+### New
+- Social engagement — Maelle builds real relationships by asking personal questions, learning from answers, and remembering over time
+- Person model — each contact gets a rich profile: engagement style, communication habits, working hours, role, and who they work with
+- Interaction memory — every meeting booked, message sent, and conversation is logged per person so Maelle never forgets what happened
+- Offline catch-up — on startup, Maelle finds and responds to any messages sent while she was offline (48h window)
+- Two-tier meeting invites — key attendees are coordinated (DM + calendar check), additional attendees added directly to the invite without coordination
+- First contact introduction — first time Maelle DMs a colleague she introduces herself and explains her role
+- Shadow mode — v1 QA safety net; every autonomous action posts a compact receipt in the owner's thread
+- update_meeting tool — Maelle can set or fix Outlook categories on existing events without rescheduling
+- Colleague guardrails — memory, calendar changes, and personal data about others are protected at both prompt and code level; default rule is don't share when in doubt
+
+### Changed
+- Architecture refactor — split the codebase into four clear layers: Core, Skills, Connectors, Background
+- File structure — simplified project layout and split the database layer into focused modules
+- Calendar categories — now fetched from Graph API and available for internal logic
+- senderRole flows into SkillContext so tool handlers enforce owner-vs-colleague permissions in code
+
+### Fixed
+- Duplicate log spam on every tool execution
+- Catch-up double-fire — catchup now checks thread replies before deciding a message was unanswered
+- Catch-up responses show which message they are replying to
+- Calendar categories not fetched — categories field was missing from Graph API select query
+- Meeting category updates silently failing — Graph PATCH did not include categories field
+- Week boundary bug — "next Sunday" showed wrong date for Israeli work week; now derived from profile
+- Timezone/week start now profile-driven (Sunday-first for IL, Monday-first for EU)
+
+---
+
+## 0.8
+
+### New
+- General knowledge skill — conversational Q&A for weather, news, exchange rates, and current events using web search
+- Web search — Tavily as primary provider (free tier, no credit card), DuckDuckGo as fallback
+- Metric units — user profile `units` field; general knowledge skill defaults to °C, km, kg
+- Startup briefing dedup — checks DB before calling `sendMorningBriefing` to prevent double send on restart
+- Multi-tenancy audit — all hardcoded personal data moved to YAML; `company`, `units`, and `room_email` added to profile schema
+
+### Changed
+- Read receipts — `:thread:` emoji on new messages, `:eyes:` on thread replies; never removed
+- Audio response logic — text input always returns text; voice input returns audio if ≤75 words; car mode always returns audio
+- Startup notification — 60-second delay added to prevent spam on rapid restarts
+- Briefing prompt — 350-word limit, explicit perspective rules, completeness rule
+- Model names — owner uses `claude-sonnet-4-6`, colleague/briefing/coordination uses `claude-haiku-4-5-20251001`
+- Assistant name — single-name AI agents now supported (`AssistantNameSchema`); Maelle no longer requires a last name
+- Logger — compact single-line JSON format
+- Skills active log — consolidated from 4 separate lines into one
+- General knowledge — removed weather-specific logic; all topics handled uniformly like ChatGPT
+- Scheduling prompt — location rules and room booking email now derived from profile, not hardcoded
+
+### Fixed
+- Whisper 400 errors — Slack records AAC-ELD codec inside M4A container; fixed by converting to WAV via ffmpeg before upload
+- Double Slack event processing — removed duplicate `file_shared` handler that was firing alongside `file_share`
+- Text input getting audio response — `car_mode` persisting from a previous voice session; fixed by checking `inputWasVoice` first
+- Wrong model names — two rounds of 404 errors from deprecated model IDs
+- "Your message" pronoun bug in briefing — Haiku was saying "checking if he responded to your message"
+- Double briefing log on startup — startup was calling `sendMorningBriefing` which had its own dedup, producing two log lines
+- Reflectiz and Idan hardcoded in system prompt — replaced with profile-derived values throughout
+
+---
+
+## 0.7
+
+### New
+- TTS voice persona — `gpt-4o-mini-tts` with `sage` voice, speed and tone tuned for a young, calm assistant
+- Voice transcription pipeline — fetch download with redirect following, form-data multipart POST to Whisper
+
+### Changed
+- Briefing rewrite — new system prompt, pronoun rules, word limit
+- Persona update — Maelle described as a young woman in her early twenties; last name removed
+- Hourglass and sound emoji removed — replaced in 0.8 with permanent read-receipt emoji
+
+### Fixed
+- Voice file format detection — extension now mapped from MIME type, not assumed
+- Whisper multipart encoding — switched from native `FormData`+`Blob` to `form-data` npm package to fix malformed requests
+- Redirect not followed on Slack file download — switched from `https.get` to `fetch`
+
+---
+
+## 0.6
+
+### New
+- Prompt caching — system prompt split into static (skills, cacheable) and dynamic (date, prefs, sender) parts
+- Skills prompt sections — each skill contributes its own section to the system prompt via `getSystemPromptSection()`
+- COLLEAGUE_ALLOWED_TOOLS — hard-coded allowlist gates which tools are visible to non-owners
+- Night shift detection — system prompt explains how to find the weekly night shift from the calendar
+
+### Changed
+- Orchestrator refactored — model routing (Sonnet for owner, Haiku for colleagues), token limits, tool loop capped at 10 turns
+- System prompt restructured — examples-first communication rules, honesty rules, thread continuity rule, ownership rule
+- Scheduling skill — location rules, interview rules, cancellation rules, `analyze_calendar` tool added
+
+### Fixed
+- Calendar times off by one hour — events returned in user timezone via Graph `Prefer` header; display logic no longer converts
+- Coordination escalation not firing — background timer was checking wrong status field
+- Pending requests accumulating system tasks — `store_request` rules tightened; cleanup logic added
+
+---
+
+## 0.5
+
+### New
+- WhatsApp connector — personal WhatsApp account via whatsapp-web.js with QR scan auth and session persistence
+- Voice input — audio messages in Slack transcribed via Whisper
+- Voice output — TTS response when input was voice and reply is substantive
+- Car mode — say "I'm driving" to switch to audio-only responses, persisted across sessions
+- Multi-person coordination — coordinate meetings with 2–4 attendees; DMs each person separately with 3 slot options
+- Free/busy check — coordinator checks internal colleagues' calendars before proposing slots
+- Security guardrails — rate limit on pending requests per colleague; meeting details scrubbed for non-owners; legitimacy check on incoming requests
+- Recall interactions — search event history by person name across all threads
+
+### Changed
+- Colleague identity injected automatically — real name added to every colleague message so Claude always knows who is writing
+- Briefing dedup — timezone-aware date marker prevents briefing from firing twice in the same day
+- Briefing format — bold section headers, deduplication by actor, replied actors excluded from "still waiting" list
+- Briefing greeting — morning / afternoon / evening based on actual local time
+- Outreach replies forwarded to original thread so follow-up questions have full context
+- Maelle removed from meeting attendees — she books, she does not attend
+- No-response message sent once only, then task cancelled
+
+### Fixed
+- Audio messages in Slack not being received due to mismatched event type
+- Coordination stuck when Slack user lookup failed mid-loop
+- Multiple @mentions in a single message not all being resolved
+- Slack-formatted email links passed raw to Claude instead of being cleaned
+- Self-mention filter incorrectly blocking replies in DMs
+- Briefing showing the same person as both "replied" and "waiting"
+
+---
+
+## 0.4
+
+### New
+- Task system — unified task tracking with flags for user-requested vs system tasks and briefed vs unseen
+- Morning briefing — scheduled daily at configured time; catches up on startup if past scheduled time
+- Events log — all colleague messages, coordination outcomes, outreach replies, and task completions logged
+- On-demand briefing — `get_briefing` tool for an instant catch-up summary at any time
+- Outreach expiry — jobs expire after 3 days with no reply; owner notified once, task closed
+
+### Changed
+- Task list filters out system/background tasks — only user-requested items shown
+- Completed tasks appear in briefing once, then never again
+- Task status uses natural language labels: "waiting for reply", "scheduled for Mon 14 Apr 09:00"
+
+### Fixed
+- Tasks and events tables missing from existing databases on upgrade
+- Coordination timer crashing on startup due to missing table
+- Hebrew text in logs showing as escaped unicode sequences
+
+---
+
+## 0.3
+
+### New
+- Persistent memory — learned preferences stored in SQLite and injected into every conversation
+- `learn_preference` / `forget_preference` / `recall_preferences` tools
+- Coordination skill — single-person meeting coordination: finds slots, DMs colleague, handles replies, escalates after 3 hours
+- `message_colleague` tool — fire-and-forget or await-reply outreach with task tracking
+- Multi-user support — one assistant per YAML profile, all running in the same process
+- Audit log — immutable record of all actions taken
+- Approval queue — destructive actions require owner confirmation before executing
+
+### Changed
+- System prompt rebuilt around examples rather than formatting rules
+- Colleague access enforced in code — calendar details scrubbed from tool results for non-owners
+- Slot finding respects office vs home day hours and YAML work schedule
+
+### Fixed
+- Coordination replies not routing to the right job
+- Calendar times displaying in wrong timezone
+- Maelle being invited to meetings she books
+- Meeting location wrong when owner was counted as an attendee
+
+---
+
+## 0.2
+
+### New
+- Scheduling skill — view calendar, check free/busy, find available slots, create and delete meetings
+- Microsoft Graph integration — calendar read/write via Azure service principal, no user login required
+- Slack user lookup — search workspace members by name, returns ID, timezone, and email
+- YAML profile system — per-user config covering schedule, skills, assistant persona, and VIP contacts
+- SQLite database — conversation threads, coordination jobs, outreach jobs, known contacts
+- Colleague role — separate system prompt and restricted tool set for non-owner senders
+
+### Changed
+- Orchestrator upgraded to multi-turn agent loop with up to 10 iterations
+
+### Fixed
+- Date calculation errors — replaced ad-hoc logic with a 14-day lookup table in the system prompt
+- "Tomorrow" misinterpreted after midnight — explicit rule added for the 00:00–05:00 edge case
+
+---
+
+## 0.1
+
+### New
+- Initial Slack bot — Socket Mode, DM handler, thread-based conversation history
+- Claude orchestrator — single-turn with tool calling via Anthropic SDK
+- Hourglass reaction — shown while processing, removed on reply
+- Assistant identity and persona — Maelle Parker, executive assistant
+- Structured logger — human-readable timestamps with metadata
+- Environment config — Anthropic API key, Slack tokens, Azure credentials
