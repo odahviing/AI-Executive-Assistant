@@ -2,6 +2,39 @@
 
 ---
 
+## 1.7.3 — SummarySkill fixes from first real-world test
+
+First QA of 1.7.2 surfaced two bugs. Owner sent feedback with three distinct asks crammed into one message ("write in first person, paragraph per topic with empty lines, and Yael wasn't there") — Sonnet routed two of them to the wrong tool (`learn_preference` instead of `learn_summary_style`), dropped the third, and produced no text reply. Silence. Plus a parse warning during Stage 1 calendar correlation.
+
+Root causes were three things stacked:
+1. The classifier was single-intent — couldn't represent "style + style + edit" as one feedback.
+2. `learn_preference` was more familiar to Sonnet than the new `learn_summary_style`; the prompt section's "call classify_summary_feedback first" was a suggestion, not a gate.
+3. When tools ran but final text was empty, the orchestrator's recovery pass also returned empty → silence. The owner had no idea their feedback landed.
+
+### Changed
+- **Multi-intent classifier.** `classify_summary_feedback` now returns an array of intents (STYLE_RULE / DRAFT_EDIT / SHARE_INTENT / UNRELATED), each with its own action. Owner saying "write in first person, paragraph per topic with empty lines, and Yael wasn't there" → 2 STYLE_RULE + 1 DRAFT_EDIT, all handled in the same turn. Result includes an `_action_plan` array and a `_must_reply_with` directive specific to the combination of intents found. New `UNRELATED` kind for off-topic messages mid-thread (owner pivots to a separate question) — orchestrator handles those normally.
+- **`_must_reply_with` hints on every Summary tool result.** Replaces the softer `_note` field. Tells Sonnet exactly what confirmation text to write before ending the turn.
+- **`learn_summary_style` description explicitly warns against `learn_preference`** in active summary sessions. Belt-and-suspenders for cases where the deterministic gate isn't active.
+- **Calendar candidate JSON parse hardened.** `tryCalendarMatch` prompt now leads with strict-format instruction; parser falls back to extracting the first `{...}` block when Sonnet ignores the format and returns prose. Previously: `SyntaxError: Unexpected token 'L', "Looking at"...` warning, no calendar match (graceful but uncorrelated). Now: parse succeeds in the prose case, calendar match lands.
+
+### Added — deterministic routing
+- **Forced first tool in active iterating sessions** (`src/connectors/slack/app.ts`). When the orchestrator runs and there's an active summary session for the thread, `forceToolOnFirstTurn: { name: 'classify_summary_feedback' }` is set automatically. Sonnet's first tool call this turn is FORCED to be the classifier — it cannot default to `learn_preference` or another familiar tool. After the classifier returns, Sonnet picks freely from the action plan.
+
+### Added — silence backstop
+- **Recovery pass falls back to a tool-grounded confirmation** when tools ran but final text was empty (`src/core/orchestrator/index.ts`). Builds a human-ish confirmation from the tool summaries ("Done — saved the style preference and updated the summary. Let me know if anything's off.") rather than letting the owner see silence. Only triggers when actual tool work happened in the turn — pure no-tool/no-text turns still silence as before (better than fabricated "Done.").
+
+### Migration
+- No schema changes. No new env vars.
+- Existing summary sessions (if any) continue to work — the classifier change is backward-compatible at the data level.
+
+### Not changed
+- Summary persistence rules (full text wiped on share, meta forever).
+- Owner-only scoping for transcripts in DM and MPIM.
+- Action item follow-up tasks (2pm Brett-local).
+- Image, voice, all other skills untouched.
+
+---
+
 ## 1.7.2 — SummarySkill: meeting transcript → summary → distribute
 
 Owner records meetings and needs summaries he can share. New togglable skill takes a transcript file, drafts a structured English summary, iterates with the owner, then distributes to named recipients with auto-tracked follow-ups for action items that have deadlines.

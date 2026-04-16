@@ -777,13 +777,50 @@ Rules:
     }
 
     if (!finalReply) {
-      // Recovery also produced nothing. Silence — postReply.ts skips the send.
-      // Better than a fabricated "Done."
-      logger.warn('Orchestrator ended without final reply — silencing after recovery attempt', {
-        threadTs,
-        iterations: iteration,
-        lastToolSummaries: toolCallSummaries.slice(-3),
-      });
+      // v1.7.3 — last-resort fallback. If tools actually ran this turn but
+      // both the model AND the recovery pass produced nothing, silence is the
+      // wrong answer — the owner has no idea their request landed. Post a
+      // grounded confirmation derived from the tool summaries so they see SOMETHING.
+      // Only triggers when toolCallSummaries.length > 0 (we don't fabricate
+      // "Done." for nothing-happened turns).
+      if (toolCallSummaries.length > 0) {
+        // Build a compact human-ish summary of what fired
+        const toolNames = toolCallSummaries.map(s => {
+          // Tool summaries look like "[tool_name: short detail]" or "[tool_name]"
+          const m = s.match(/^\[([a-z_]+)/);
+          return m ? m[1] : 'something';
+        });
+        const distinct = [...new Set(toolNames)];
+        // Map tool names to human verbs the owner will understand
+        const verbMap: Record<string, string> = {
+          learn_summary_style: 'saved the style preference',
+          learn_preference: 'saved that as a preference',
+          update_summary_draft: 'updated the summary',
+          share_summary: 'shared the summary',
+          create_task: 'created a task',
+          edit_task: 'updated a task',
+          cancel_task: 'cancelled a task',
+          message_colleague: 'sent the message',
+          coordinate_meeting: 'started the coordination',
+          create_meeting: 'booked the meeting',
+          delete_meeting: 'removed the meeting',
+          note_about_person: 'made a note',
+        };
+        const verbs = distinct.map(n => verbMap[n] ?? `ran ${n}`);
+        finalReply = `Done — ${verbs.join(' and ')}. Let me know if anything's off.`;
+        logger.warn('Orchestrator: tool work happened but no reply text — posted grounded fallback', {
+          threadTs,
+          iterations: iteration,
+          tools: distinct,
+          fallbackReply: finalReply,
+        });
+      } else {
+        // No tools, no text, no recovery. Pure silence — postReply.ts skips.
+        logger.warn('Orchestrator ended without final reply — silencing (no tools ran)', {
+          threadTs,
+          iterations: iteration,
+        });
+      }
     }
   }
 

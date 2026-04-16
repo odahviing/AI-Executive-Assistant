@@ -12,6 +12,7 @@ import {
   getPendingRequestCountForColleague,
   upsertPersonMemory,
   appendPersonNote,
+  getSummarySessionByThread,
 } from '../../db';
 import { detectAndSaveGender } from '../../utils/genderDetect';
 import {
@@ -491,7 +492,24 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         }
       }
 
-      logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0 });
+      // v1.7.3 — when there's an active iterating summary session for this
+      // thread + this is the owner replying, force classify_summary_feedback
+      // as the first tool call. Prevents Sonnet from defaulting to the more
+      // familiar learn_preference (wrong category) and ensures the multi-intent
+      // classifier catches every distinct ask in the message.
+      let forceToolOnFirstTurn: { name: string } | undefined;
+      if (role === 'owner' && !isChannel) {
+        const summarySession = getSummarySessionByThread(threadTs);
+        if (summarySession && summarySession.stage === 'iterating') {
+          forceToolOnFirstTurn = { name: 'classify_summary_feedback' };
+          logger.info('Summary session active — forcing classify_summary_feedback', {
+            threadTs,
+            summarySessionId: summarySession.id,
+          });
+        }
+      }
+
+      logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name });
       const result = await runOrchestrator({
         userMessage,
         conversationHistory: history,
@@ -507,6 +525,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         isOwnerInGroup,
         mpimMemberIds,
         images,
+        forceToolOnFirstTurn,
       });
       logger.info('Orchestrator completed', { senderId, threadTs, hasApproval: result.requiresApproval, actionCount: result.slackActions?.length ?? 0 });
 

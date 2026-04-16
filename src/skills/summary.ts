@@ -424,32 +424,35 @@ export class SummarySkill implements Skill {
     return [
       {
         name: 'classify_summary_feedback',
-        description: `INTERNAL — call this when the owner replies in a thread that has an active summary session, to decide what to do with their reply.
+        description: `INTERNAL — call this FIRST when the owner replies in a thread that has an active summary session. It decomposes the owner's message into a LIST of intents — one message can carry multiple asks (style rule + draft edit + share, all at once).
 
-Returns one of three intents:
-- STYLE_RULE: owner expressed a lasting preference about how summaries should look ("always shorter", "lead with action items", "bold external participants"). Persisted via learn_summary_style.
-- DRAFT_EDIT: owner wants to change THIS specific summary (add/remove a section, fix a name, focus more on X, full rewrite). Apply via update_summary_draft.
-- SHARE_INTENT: owner wants to distribute the summary now ("send it to Brett", "share with the team in #leadership"). Hand off to share_summary.
+Possible intent kinds:
+- STYLE_RULE: lasting preference about how summaries should look ("always shorter", "use first person", "empty line between paragraphs"). Each one becomes a learn_summary_style call.
+- DRAFT_EDIT: change THIS specific summary (remove an attendee, fix a name, refocus a section, full rewrite). Each one becomes an update_summary_draft call.
+- SHARE_INTENT: distribute the summary now ("send it to Brett", "post in #leadership"). Becomes a share_summary call. Apply outstanding draft edits BEFORE sharing.
+- UNRELATED: the message isn't about the summary at all (owner pivoted to a separate question). Stop the summary flow and handle the message normally.
 
-If the reply contains BOTH a draft edit AND a share intent ("shorter, then send to Brett"), return SHARE_INTENT — apply edits inline before sharing.`,
+Always pass the owner's verbatim message in owner_message. Always handle ALL returned intents in this turn — don't drop any.`,
         input_schema: {
           type: 'object',
           properties: {
-            owner_message: { type: 'string', description: 'The owner\'s most recent reply in the summary thread' },
+            owner_message: { type: 'string', description: 'The owner\'s most recent reply in the summary thread, verbatim' },
           },
           required: ['owner_message'],
         },
       },
       {
         name: 'learn_summary_style',
-        description: `Persist a summary STYLE preference for future summaries. Use when the owner says things like "always shorter", "lead with action items", "bold external participants", "use Hebrew names in section headers". Stored under user_preferences with category=summary so every future summary applies the rule.
+        description: `Persist a SUMMARY style preference for all future summaries. Use whenever the owner says how summaries should look — "always shorter", "use first person", "lead with action items", "empty line between paragraphs", "bold external participants".
 
-Do NOT use for per-meeting facts like "Speaker 1 is Brett" — those are draft edits, not style rules.`,
+CRITICAL: when in an active summary session, ALWAYS use this tool — NOT learn_preference. learn_preference saves to a different category that summaries don't read. They look similar but only learn_summary_style affects future summaries.
+
+Do NOT use for per-meeting corrections like "Speaker 1 is Brett" or "remove Yael from attendees" — those are DRAFT_EDIT, use update_summary_draft.`,
         input_schema: {
           type: 'object',
           properties: {
-            key: { type: 'string', description: 'Short snake_case label, e.g. "summary_length", "summary_action_items_first"' },
-            value: { type: 'string', description: 'The rule in plain English, e.g. "Keep summaries to 4 paragraphs max" or "Always lead with action items, then context"' },
+            key: { type: 'string', description: 'Short snake_case label, e.g. "summary_perspective", "summary_paragraph_spacing"' },
+            value: { type: 'string', description: 'The rule in plain English, e.g. "Write in first person — I/me/my, not Idan/he/his." or "One topic per paragraph, empty line between paragraphs."' },
           },
           required: ['key', 'value'],
         },
@@ -524,26 +527,40 @@ Action items WITHOUT deadlines or with external/unmatched assignees → stay as 
         const draft = parseDraft(session);
         const draftBlock = draft ? `\n\nCURRENT DRAFT (subject: "${draft.subject}", paragraphs: ${draft.paragraphs.length}, action items: ${draft.action_items.length}, attendees: ${draft.attendees.map(a => a.name).join(', ')}):\n${draft.paragraphs.slice(0, 2).join(' ').slice(0, 600)}…` : '';
 
-        const prompt = `Classify the owner's reply in an active meeting-summary thread. Three possible intents:
+        const prompt = `Decompose the owner's reply in an active meeting-summary thread into a LIST of intents. One message can carry multiple asks — for example "use first person, paragraph per topic with blank lines, and Yael wasn't there" is THREE intents (two style rules + one draft edit). DON'T pick just one — return ALL of them.
 
-1. STYLE_RULE — they're telling you a LASTING preference for ALL future summaries.
-   Examples: "always make these shorter", "lead with action items", "bold the external names", "write the date at the top".
+Intent kinds:
+1. STYLE_RULE — lasting preference for ALL future summaries
+   Examples: "always shorter", "use first person", "empty line between paragraphs", "bold external names", "lead with action items", "include date at top"
+   Output: { "kind": "STYLE_RULE", "style_key": "snake_case_label", "style_value": "the rule in plain English" }
 
-2. DRAFT_EDIT — they want to change THIS specific summary.
-   Examples: "Speaker 2 is Brett", "remove the part about pricing", "rewrite the privacy section more detailed", "add an action item: Brett to send presentation by Friday", "make it half the length".
+2. DRAFT_EDIT — change THIS specific summary
+   Examples: "Speaker 2 is Brett", "remove Yael from attendees", "rewrite the privacy section more detailed", "add action item: Brett to send presentation by Friday", "make it half the length", a wholesale rewrite pasted inline
+   Output: { "kind": "DRAFT_EDIT", "instruction": "precise instruction for the revision" }
 
-3. SHARE_INTENT — they want to distribute it now.
-   Examples: "send to Brett and Moshe", "share with the team in #leadership", "looks good, ship it", "send it".
+3. SHARE_INTENT — distribute the summary now
+   Examples: "send to Brett and Moshe", "post in #leadership", "looks good, ship it", "send it"
+   Output: { "kind": "SHARE_INTENT", "recipients_hint": "verbatim text describing recipients (e.g. 'Brett and Moshe', '#leadership')" }
 
-If the reply contains both a draft edit AND a share intent (e.g. "shorter then send to Brett"), classify as SHARE_INTENT — the share tool will apply outstanding edits before sending.
+4. UNRELATED — the message isn't about the summary at all (owner pivoted to a separate question)
+   Examples: "by the way, what's my next meeting?", "remind me about the board prep tomorrow"
+   Output: { "kind": "UNRELATED", "reason": "short why" }
 
-If the reply is ambiguous (just "ok" or "thanks"), classify as DRAFT_EDIT (no-op edit).
+Rules:
+- A reply can have 1, 2, or many intents. Decompose carefully — don't merge a style rule with a draft edit just because they're in the same sentence.
+- For STYLE_RULE: style_key is short snake_case (e.g. "summary_perspective", "summary_paragraph_spacing"), style_value is the rule in plain English suitable for injection into a future system prompt ("Write in first person — I/me/my, not the owner's name.").
+- For DRAFT_EDIT: instruction must be clear and specific enough that a separate call with that instruction produces the right revision.
+- If the reply is just "ok" or "thanks" with no actionable content, return [] (empty intents array).
+- If it's UNRELATED, that's the ONLY intent in the array — don't mix UNRELATED with summary intents.
 
-Output STRICT JSON only — no prose, no markdown:
+Output STRICT JSON only — no prose, no markdown, no fences:
 {
-  "kind": "STYLE_RULE" | "DRAFT_EDIT" | "SHARE_INTENT",
-  "style_key":   "snake_case_label or null",      // for STYLE_RULE only
-  "style_value": "the rule in plain English or null"  // for STYLE_RULE only
+  "intents": [
+    { "kind": "STYLE_RULE", "style_key": "...", "style_value": "..." },
+    { "kind": "DRAFT_EDIT", "instruction": "..." },
+    { "kind": "SHARE_INTENT", "recipients_hint": "..." },
+    { "kind": "UNRELATED", "reason": "..." }
+  ]
 }${draftBlock}
 
 OWNER'S REPLY:
@@ -554,31 +571,77 @@ ${ownerMessage}
         try {
           const resp = await anthropic.messages.create({
             model: 'claude-sonnet-4-6',
-            max_tokens: 200,
+            max_tokens: 800,
             messages: [{ role: 'user', content: prompt }],
           });
           const raw = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
           const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
-          const parsed = JSON.parse(cleaned) as { kind: string; style_key?: string | null; style_value?: string | null };
+          const parsed = JSON.parse(cleaned) as { intents?: Array<Record<string, unknown>> };
+          const intents = Array.isArray(parsed.intents) ? parsed.intents : [];
+
+          // Build a directive next-action plan based on the intents found
+          const styleCount = intents.filter(i => i.kind === 'STYLE_RULE').length;
+          const editCount = intents.filter(i => i.kind === 'DRAFT_EDIT').length;
+          const shareCount = intents.filter(i => i.kind === 'SHARE_INTENT').length;
+          const unrelatedCount = intents.filter(i => i.kind === 'UNRELATED').length;
+
           logger.info('summary.stage2 — classified', {
             threadTs,
-            kind: parsed.kind,
+            intentCount: intents.length,
+            styleCount,
+            editCount,
+            shareCount,
+            unrelatedCount,
             preview: ownerMessage.slice(0, 80),
           });
+
+          // Build the action plan as a clear sequence
+          const planSteps: string[] = [];
+          for (const intent of intents) {
+            if (intent.kind === 'STYLE_RULE') {
+              planSteps.push(`- Call learn_summary_style with key="${intent.style_key}" and value="${intent.style_value}"`);
+            } else if (intent.kind === 'DRAFT_EDIT') {
+              planSteps.push(`- Call update_summary_draft with instruction="${intent.instruction}"`);
+            } else if (intent.kind === 'SHARE_INTENT') {
+              planSteps.push(`- Apply any DRAFT_EDIT calls above first, then call share_summary with the recipients matching: "${intent.recipients_hint}"`);
+            } else if (intent.kind === 'UNRELATED') {
+              planSteps.push(`- This message wasn't about the summary (${intent.reason}). Acknowledge briefly and answer it normally — don't touch the summary.`);
+            }
+          }
+
+          let mustReplyWith: string;
+          if (intents.length === 0) {
+            mustReplyWith = 'The owner\'s message had no actionable summary intent. Reply with a brief ack ("Got it.") and stop.';
+          } else if (unrelatedCount > 0) {
+            mustReplyWith = 'Handle the unrelated question normally. Don\'t mention the summary unless asked.';
+          } else if (shareCount > 0) {
+            mustReplyWith = 'After share_summary returns, write ONE confirmation summarizing every action you took (style rules saved + edits applied + recipients sent to). One short paragraph.';
+          } else if (editCount > 0 && styleCount > 0) {
+            mustReplyWith = 'After update_summary_draft returns, post the rendered draft + ONE short paragraph that mentions the style rules saved AND what you changed in the draft. Like: "Saved both as style rules — first person + empty lines between paragraphs. Updated this draft to drop Yael."';
+          } else if (editCount > 0) {
+            mustReplyWith = 'After update_summary_draft returns, post the rendered draft + ONE short note about what changed.';
+          } else {
+            // styleCount > 0 only
+            mustReplyWith = 'After saving the style rule(s), reply with ONE short confirmation listing what you remembered ("Got it — I\'ll write summaries in first person from now on.").';
+          }
+
           return {
             ok: true,
-            kind: parsed.kind,
-            style_key: parsed.style_key ?? null,
-            style_value: parsed.style_value ?? null,
-            _next_action: parsed.kind === 'STYLE_RULE'
-              ? 'Call learn_summary_style with key/value, then briefly acknowledge ("Got it — I\'ll remember that").'
-              : parsed.kind === 'DRAFT_EDIT'
-                ? 'Call update_summary_draft with a clear instruction summarizing what the owner wants changed.'
-                : 'Call share_summary with the recipients the owner named.',
+            intents,
+            _action_plan: planSteps,
+            _must_reply_with: mustReplyWith,
+            _critical: 'You MUST execute every action in _action_plan and write the confirmation in _must_reply_with. Do NOT end this turn without text. Do NOT use learn_preference for any of the STYLE_RULE intents — use learn_summary_style.',
           };
         } catch (err) {
-          logger.warn('summary.stage2 — classification failed, defaulting to DRAFT_EDIT', { err: String(err) });
-          return { ok: true, kind: 'DRAFT_EDIT', style_key: null, style_value: null };
+          logger.warn('summary.stage2 — classification failed, defaulting to single DRAFT_EDIT', { err: String(err) });
+          // Safer default: treat as a draft edit using the verbatim message
+          return {
+            ok: true,
+            intents: [{ kind: 'DRAFT_EDIT', instruction: ownerMessage }],
+            _action_plan: [`- Call update_summary_draft with instruction="${ownerMessage}"`],
+            _must_reply_with: 'After update_summary_draft returns, post the rendered draft + ONE short note about what changed.',
+            _critical: 'You MUST execute the action and write a reply. Do NOT end this turn without text.',
+          };
         }
       }
 
@@ -596,7 +659,13 @@ ${ownerMessage}
           source: 'user_taught',
         });
         logger.info('summary.stage2 — style preference saved', { ownerUserId, key, value });
-        return { ok: true, saved: true, key, value };
+        return {
+          ok: true,
+          saved: true,
+          key,
+          value,
+          _must_reply_with: 'If this is the only intent left in the action plan, write ONE short confirmation listing what you remembered ("Got it — from now on I\'ll [restate the rule].") and stop. If more intents remain, continue executing them; reply once at the end.',
+        };
       }
 
       // ── Apply a draft edit and re-render ──────────────────────────────────
@@ -653,7 +722,7 @@ Output the full updated draft JSON.`;
           return {
             ok: true,
             rendered: renderDraftForOwner(updated),
-            _note: 'Reply to the owner with this rendered draft as the next message. Add ONE short sentence at top describing what changed (e.g. "Tightened the privacy section and added Brett\'s action item.").',
+            _must_reply_with: 'Post a reply containing: (1) ONE short sentence about what changed (e.g. "Updated to drop Yael."), then a blank line, then (2) the rendered draft verbatim from the `rendered` field above. Do NOT end this turn without writing this reply.',
           };
         } catch (err) {
           logger.error('summary.stage2 — draft update failed', { err: String(err) });
@@ -840,7 +909,7 @@ Output the full updated draft JSON.`;
           tasks_skipped: followupSkipped,
           refused,
           send_failures: sendFailures,
-          _note: 'Reply to the owner with a short confirmation: who got it, how many follow-up tasks were created, and any refusals/failures. Be human and brief — one or two sentences.',
+          _must_reply_with: 'Reply to the owner with a short confirmation: who got it (names from sent_to), how many follow-up tasks were created (and to whom), and any refusals/failures. Be human and brief — one or two sentences. Do NOT end this turn without writing this confirmation.',
         };
       }
 
@@ -1079,17 +1148,27 @@ async function tryCalendarMatch(
     const resp = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 50,
-      messages: [{ role: 'user', content: `The owner just uploaded a meeting transcript with this caption: "${caption}".
+      messages: [{ role: 'user', content: `OUTPUT FORMAT: a single line of JSON, nothing else. Do not explain. Do not add prose.
+{"index": <integer>}
 
-Pick the BEST matching calendar event from the list. Consider time mentions ("2pm", "this morning"), participant names, subject keywords. If none clearly matches, output -1.
+The owner uploaded a meeting transcript with this caption: "${caption}".
 
-Output STRICT JSON: {"index": <integer>}.
+Pick the BEST matching calendar event index from the list. Consider time mentions ("2pm", "this morning"), participant names, subject keywords. If none clearly matches, output {"index": -1}.
 
 CANDIDATES:
-${candidateBlock}` }],
+${candidateBlock}
+
+Reply with ONLY {"index": N} — no other text.` }],
     });
     const raw = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
+    // Tolerant parse: strip code fences, then if the response has prose,
+    // pull the first {...} block out before parsing. Sonnet sometimes ignores
+    // the strict-format instruction on this kind of selection prompt.
+    let cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
+    if (!cleaned.startsWith('{')) {
+      const jsonBlock = cleaned.match(/\{[^{}]*"index"[^{}]*\}/);
+      if (jsonBlock) cleaned = jsonBlock[0];
+    }
     const parsed = JSON.parse(cleaned) as { index?: number };
     if (typeof parsed.index === 'number' && parsed.index >= 0 && parsed.index < candidates.length) {
       return candidates[parsed.index];
