@@ -497,14 +497,26 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // as the first tool call. Prevents Sonnet from defaulting to the more
       // familiar learn_preference (wrong category) and ensures the multi-intent
       // classifier catches every distinct ask in the message.
+      // Guard: only force the tool when the SummarySkill is actually enabled
+      // in the profile — otherwise the tool isn't in the registered tools list
+      // and Anthropic returns a 400. Defense-in-depth alongside the Stage 1
+      // toggle gate.
       let forceToolOnFirstTurn: { name: string } | undefined;
       if (role === 'owner' && !isChannel) {
-        const summarySession = getSummarySessionByThread(threadTs);
-        if (summarySession && summarySession.stage === 'iterating') {
-          forceToolOnFirstTurn = { name: 'classify_summary_feedback' };
-          logger.info('Summary session active — forcing classify_summary_feedback', {
+        const summaryActive = ((profile.skills as any)?.meeting_summaries === true);
+        if (summaryActive) {
+          const summarySession = getSummarySessionByThread(threadTs);
+          if (summarySession && summarySession.stage === 'iterating') {
+            forceToolOnFirstTurn = { name: 'classify_summary_feedback' };
+            logger.info('Summary session active — forcing classify_summary_feedback', {
+              threadTs,
+              summarySessionId: summarySession.id,
+            });
+          }
+        } else if (getSummarySessionByThread(threadTs)?.stage === 'iterating') {
+          // Stale session from when skill was on; warn but don't crash
+          logger.warn('Iterating summary session exists but meeting_summaries skill is disabled — skipping force-tool', {
             threadTs,
-            summarySessionId: summarySession.id,
           });
         }
       }
@@ -798,6 +810,29 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         || f.filetype === 'txt'
       );
       if (transcriptFile && senderRole1v1 === 'owner') {
+        // Guard 1: gate Stage 1 on the skill toggle — don't ingest if
+        // SummarySkill isn't enabled, otherwise a session gets created with
+        // no tools available to iterate it (causes 400 from Anthropic on
+        // the next owner turn when force-tool kicks in).
+        const summaryActive = ((profile.skills as any)?.meeting_summaries === true);
+        if (!summaryActive) {
+          logger.info('Transcript ingestion skipped — meeting_summaries skill is disabled', {
+            channel: channelId,
+            user: message.user,
+          });
+          setImmediate(async () => {
+            try {
+              await client.chat.postMessage({
+                token: assistant.slack.bot_token,
+                channel: channelId,
+                thread_ts: threadTs,
+                text: `I noticed you sent me a transcript — to summarize meetings, enable \`meeting_summaries: true\` in your profile (\`config/users/${profile.user.name.split(' ')[0].toLowerCase()}.yaml\`) and restart me.`,
+              });
+            } catch (_) {}
+          });
+          return;
+        }
+
         logger.info('Transcript file received in DM', {
           channel: channelId,
           user: message.user,
