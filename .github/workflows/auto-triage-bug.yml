@@ -49,7 +49,13 @@ jobs:
         # Best-effort — if it fails the agent can still investigate, just no typecheck
 
       - name: Install Claude Agent SDK
-        run: npm install --no-save @anthropic-ai/claude-agent-sdk
+        # --legacy-peer-deps bypasses the zod@^4 peer-dep mismatch (Maelle
+        # uses zod@^3). At runtime the SDK reads zod from node_modules/zod
+        # which is zod 3 — the SDK's usage of zod is compatible between v3
+        # and v4 for the schemas we hit in the triage loop. If this breaks
+        # at runtime we'll move to an isolated /tmp install with its own
+        # node_modules.
+        run: npm install --no-save --legacy-peer-deps @anthropic-ai/claude-agent-sdk
 
       - name: Configure git for bot commits
         run: |
