@@ -56,8 +56,9 @@ function ghLabel(...labels) {
   }
 }
 
-function ghClose() {
-  spawnSync('gh', ['issue', 'close', ISSUE_NUMBER, '--repo', REPO], { encoding: 'utf8' });
+function ghClose(reason = 'completed') {
+  // reason: 'completed' (default — issue resolved) or 'not planned' (won't-fix / not-a-bug)
+  spawnSync('gh', ['issue', 'close', ISSUE_NUMBER, '--repo', REPO, '--reason', reason], { encoding: 'utf8' });
 }
 
 // ── Read the issue ──────────────────────────────────────────────────────────
@@ -86,20 +87,30 @@ YOUR DECISION TREE (apply STRICTLY):
 1. Read the bug. Investigate the codebase using Read / Grep / Glob to find the actual cause.
 
 2. Classify:
-   - SIMPLE: cause is clear, fix touches ONE file, total diff <= 50 lines added+removed,
-     no architectural decisions, no judgment about UX/tone/policy needed.
-   - MEDIUM: cause is clear but the fix is bigger (multiple files, >50 lines, or touches
-     prompts/persona/skill behavior).
-   - COMPLEX: cause is unclear, requires architecture changes, or genuinely needs the
-     owner's judgment (e.g. "should we deprecate X?").
+   - NOT_A_BUG: the issue doesn't describe a real defect. Examples: pipeline/verification
+     tests ("confirm you can read this repo"), usage questions ("how do I enable X?"),
+     feature requests mislabeled as Bug, already-fixed-in-a-previous-commit,
+     invalid/nonsensical reports, duplicate of an existing issue. No code change should
+     be made for these; the issue should be closed.
+   - SIMPLE: real defect. Cause is clear, fix touches ONE file, total diff <= 50 lines
+     added+removed, no architectural decisions, no judgment about UX/tone/policy needed.
+   - MEDIUM: real defect. Cause is clear but the fix is bigger (multiple files, >50 lines,
+     or touches prompts/persona/skill behavior).
+   - COMPLEX: real defect. Cause is unclear, requires architecture changes, or genuinely
+     needs the owner's judgment (e.g. "should we deprecate X?").
 
-3. If SIMPLE:
+3. If NOT_A_BUG:
+   - Do NOT edit any files.
+   - Write a brief "summary" explaining why this isn't a bug (one or two sentences).
+   - The runner will auto-close the issue with a short comment.
+
+4. If SIMPLE:
    - Make the edit using Edit/Write.
    - Run \`npm run typecheck\` via Bash. If it fails, REVERT mentally (the runner script will
      wipe your changes anyway) and write a PLAN instead.
    - Otherwise, your final response MUST be a structured summary so the runner can commit.
 
-4. If MEDIUM or COMPLEX:
+5. If MEDIUM or COMPLEX:
    - Do NOT edit any files. Investigate, then write a PLAN.
    - The plan should describe: root cause, proposed fix, files affected, risks, anything the
      owner needs to decide.
@@ -115,13 +126,14 @@ CRITICAL CONSTRAINTS:
 OUTPUT FORMAT (your final message — strict JSON ONLY, no prose preamble, no fences):
 
 {
-  "classification": "SIMPLE" | "MEDIUM" | "COMPLEX",
-  "summary": "One paragraph: what the bug is, what the cause is, what you did or what should be done.",
-  "files_changed": ["src/path/to/file.ts"],   // empty array if no edits
-  "plan": "Owner-facing plan in markdown. Required for MEDIUM/COMPLEX. Optional for SIMPLE (a brief 'what changed' note)."
+  "classification": "NOT_A_BUG" | "SIMPLE" | "MEDIUM" | "COMPLEX",
+  "summary": "One paragraph: what the bug is, what the cause is, what you did or what should be done. For NOT_A_BUG: why it isn't a real defect.",
+  "files_changed": ["src/path/to/file.ts"],   // empty array if no edits / NOT_A_BUG / MEDIUM / COMPLEX
+  "plan": "Owner-facing plan in markdown. Required for MEDIUM/COMPLEX. Optional for SIMPLE (a brief 'what changed' note). Omit or empty for NOT_A_BUG."
 }
 
-If you're uncertain at any step → classify higher (MEDIUM not SIMPLE; COMPLEX not MEDIUM). Cost of a wrong auto-fix is high; cost of a missed plan is just one extra owner review.`;
+If you're uncertain at any step → classify higher (MEDIUM not SIMPLE; COMPLEX not MEDIUM). Cost of a wrong auto-fix is high; cost of a missed plan is just one extra owner review.
+Do NOT classify as NOT_A_BUG just because the fix seems small — that's SIMPLE. NOT_A_BUG is reserved for "the issue doesn't describe a real defect at all."`;
 
 const userPrompt = `Issue #${issue.number}: "${issue.title}"
 
@@ -224,6 +236,26 @@ ${planText || verdict.plan || '(no plan written)'}
 *Agent classified this as: \`${verdict.classification}\`. Files the agent considered: ${(verdict.files_changed ?? []).map(f => `\`${f}\``).join(', ') || 'none'}*`;
   ghComment(body);
   ghLabel('auto-triaged');
+  process.exit(0);
+}
+
+// NOT_A_BUG — auto-close with "not planned" reason, short comment explaining why.
+// Used for pipeline tests, usage questions, invalid reports, already-fixed, duplicates.
+if (verdict.classification === 'NOT_A_BUG') {
+  // Revert any accidental edits (agent shouldn't have made any, but defense in depth)
+  if (changedFiles.length > 0) {
+    sh('git checkout -- .');
+  }
+  ghComment(`🤖 **Auto-triage: not a bug — closing**
+
+${verdict.summary || 'Agent determined this issue does not describe a real defect.'}
+
+---
+
+*Closed automatically. If this was wrong, reopen the issue and I'll investigate again.*`);
+  ghLabel('auto-triaged');
+  ghClose('not planned');
+  console.log('NOT_A_BUG — closed with not-planned.');
   process.exit(0);
 }
 
