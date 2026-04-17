@@ -438,7 +438,22 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // cheap Haiku classifier; stay silent when the message was addressed
       // to a human (or is genuinely ambiguous). Skip for 1:1 DMs.
       if ((isMpim === true || isChannel === true) && botUserId) {
-        try {
+        // v1.7.5 — same fix as the MPIM relevance gate: when Maelle was the
+        // most recent or second-most-recent speaker in this thread, skip the
+        // addressee gate entirely. The next message is almost always a
+        // continuation. The gate was incorrectly silencing your three
+        // explicit "@Maelle she said yes, but using Elal" messages with
+        // verdict HUMAN despite the @-mention.
+        const maelleRecentlySpoke = history.slice(-3).some(m => m.role === 'assistant');
+        if (maelleRecentlySpoke) {
+          logger.info('Addressee gate skipped — Maelle was just active in this thread', {
+            channelId,
+            threadTs,
+            senderId,
+            historySize: history.length,
+            preview: text.slice(0, 100),
+          });
+        } else try {
           const { classifyAddressee } = await import('../../utils/addresseeGate');
           const botId: string = botUserId;
           const recent = history.slice(-4).map(h => {
@@ -1180,10 +1195,27 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // Pass member names so the classifier can correctly evaluate introductions, etc.
       const history         = getConversationHistory(threadTs);
       const assistantActive = history.some(m => m.role === 'assistant');
-      const shouldRespond   = await isMessageForAssistant(rawText, assistant.name, assistantActive, mpimMemberNames);
-      if (!shouldRespond) {
-        logger.info('MPIM relevance check — staying silent', { senderId: event.user, preview: rawText.slice(0, 80) });
-        return;
+      // v1.7.5 — when Maelle was the most-recent or second-most-recent speaker,
+      // skip the relevance gate entirely. The next message in the thread is
+      // almost certainly a continuation of the exchange she's actively in.
+      // The gate exists to filter unrelated chatter — that's not the failure
+      // mode here, and false negatives (Yael answering Maelle's question →
+      // silenced) burn trust harder than false positives.
+      const recentlyActive = history.slice(-3).some(m => m.role === 'assistant');
+      if (recentlyActive) {
+        logger.info('MPIM relevance check skipped — Maelle was just active in this thread', {
+          senderId: event.user,
+          channelId: event.channel,
+          threadTs,
+          historySize: history.length,
+          preview: rawText.slice(0, 80),
+        });
+      } else {
+        const shouldRespond = await isMessageForAssistant(rawText, assistant.name, assistantActive, mpimMemberNames);
+        if (!shouldRespond) {
+          logger.info('MPIM relevance check — staying silent', { senderId: event.user, preview: rawText.slice(0, 80) });
+          return;
+        }
       }
 
       const resolvedText = await resolveSlackMentions(rawText);

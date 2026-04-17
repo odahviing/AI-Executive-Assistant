@@ -34,6 +34,15 @@ export interface ClaimCheckInput {
   toolSummaries: string[];    // compact [tool_name: arg] strings from this turn
   bookingOccurred: boolean;    // deterministic: create_meeting / finalize_coord_meeting succeeded
   ownerFirstName: string;
+  // v1.7.5 — MPIM context. When the reply was drafted in an MPIM/group thread,
+  // inline `<@USER>` mentions of people who are PARTICIPANTS in that thread
+  // are legitimate addressing (greeting them, directing the message), not
+  // phantom sends. The checker uses this to avoid false-positive flags on
+  // natural group-chat behavior.
+  mpimContext?: {
+    isMpim: boolean;
+    participantSlackIds: string[];   // all non-bot member IDs in the MPIM
+  };
 }
 
 export type ClaimActionType = 'message' | 'book' | 'task' | 'other' | null;
@@ -66,13 +75,23 @@ export async function checkReplyClaims(input: ClaimCheckInput): Promise<ClaimChe
     ? input.toolSummaries.map(s => `  - ${s}`).join('\n')
     : '  (no tools ran this turn)';
 
+  // v1.7.5 — MPIM context block. When the reply was drafted inside an MPIM
+  // group chat, list the participants so the checker can recognize that
+  // inline `<@USER>` mentions of those participants are legitimate addressing
+  // (greeting them in the room) and NOT phantom message sends.
+  const mpimBlock = input.mpimContext?.isMpim
+    ? `\nMPIM CONTEXT (the reply was drafted in a Slack group thread):\n  Participants in this group thread: ${input.mpimContext.participantSlackIds.length > 0
+        ? input.mpimContext.participantSlackIds.map(id => `<@${id}>`).join(', ')
+        : '(none listed)'}\n  Inline mentions of these participants in the reply are LEGITIMATE addressing (greeting/directing them in the shared room). Do NOT treat them as phantom sends.\n`
+    : '';
+
   const prompt = `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
 You audit draft replies from an executive assistant for false action claims before they get sent. The assistant's principal is ${input.ownerFirstName}.
 
 TOOL ACTIVITY THIS TURN:
 ${toolBlock}
-
+${mpimBlock}
 DRAFT REPLY:
 """
 ${input.reply}
@@ -97,7 +116,8 @@ IS a false claim:
 - "I've sent a message to X" when NO message_colleague targeting X is in TOOL ACTIVITY THIS TURN.
 - "Done — booked" / "on the calendar" when no create_meeting / finalize_coord_meeting is in TOOL ACTIVITY THIS TURN.
 - "I've flagged this with him" when no store_request / related tool is in TOOL ACTIVITY THIS TURN.
-- The reply contains a \`<@USERID>\` Slack ping intended to notify someone, but no message_colleague targeting them is in TOOL ACTIVITY THIS TURN. (Inline pings in chat replies are NOT how to message someone — they should call message_colleague.)
+- The reply contains a \`<@USERID>\` Slack ping intended to notify someone OUTSIDE the current room, but no message_colleague targeting them is in TOOL ACTIVITY THIS TURN. (For people NOT in the room, inline pings are not how to message them — message_colleague is.)
+- IMPORTANT MPIM EXCEPTION: if MPIM CONTEXT is present above and the \`<@USERID>\` mention is for a PARTICIPANT in the listed group thread, that's LEGITIMATE in-room addressing — NOT a phantom send. Do not flag it. Only flag pings to people NOT in the participant list.
 
 Schema:
 {
@@ -121,7 +141,17 @@ Reminder: JSON only. Start with { end with }. No prose.`;
     const elapsedMs = Date.now() - start;
 
     // Strip accidental markdown fences — belt-and-braces, the prompt forbids them.
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    let cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    // v1.7.5 — tolerant parse: when Sonnet adds prose preamble despite the
+    // JSON-only instruction (observed in real-world QA — same root as the
+    // calendar candidate selection bug fixed in v1.7.3), extract the first
+    // {...} block by regex before JSON.parse. Without this, the checker
+    // fail-opens and any phantom-action claim ships unedited.
+    if (!cleaned.startsWith('{')) {
+      // Try to find the first JSON object in the prose. Use [\s\S] so . matches newlines.
+      const m = cleaned.match(/\{[\s\S]*?"claimed_action"[\s\S]*?\}/);
+      if (m) cleaned = m[0];
+    }
     let parsed: any;
     try { parsed = JSON.parse(cleaned); }
     catch (err) {

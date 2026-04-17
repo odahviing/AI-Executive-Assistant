@@ -175,6 +175,11 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
       toolSummaries: result.toolSummaries ?? [],
       bookingOccurred: result.bookingOccurred ?? false,
       ownerFirstName: profile.user.name.split(' ')[0],
+      // v1.7.5 — pass MPIM context so the checker recognizes legitimate
+      // in-room @-mentions vs phantom sends to outsiders.
+      mpimContext: ctx.isMpim
+        ? { isMpim: true, participantSlackIds: ctx.mpimMemberIds ?? [] }
+        : undefined,
     });
 
     if (!verdict.claimed_action) return cleanReply;

@@ -2,6 +2,45 @@
 
 ---
 
+## 1.7.5 — Stop silencing in active MPIM threads + MPIM-aware claim-checker
+
+QA pass on v1.7.4 surfaced multiple "stuck" moments — Maelle going silent on legitimate follow-up messages in active group chats. Logs revealed three distinct silencing paths plus one false-positive that was tripping the claim-checker on natural in-room addressing.
+
+### Fixed — claim-checker prose-tolerant JSON parse (Bug B)
+
+Real-world QA caught Sonnet returning prose preamble before the JSON ("The draft contains a Slack-style ping `<@USER>` which implies..." then ```json {...). The parser stripped code fences but couldn't handle the prose, fell open, dishonest reply shipped. Now the parser regex-extracts the first `{...}` block containing `"claimed_action"` if the response doesn't start with `{`. Same pattern as the v1.7.3 calendar candidate parser fix — applied to claim-checker too (was missed last time).
+
+### Fixed — silencing in active MPIM threads (Bug C, two gates)
+
+Two separate gates were silencing legitimate follow-up messages in MPIMs where Maelle was actively engaged:
+
+- **`relevance.ts` `isMessageForAssistant`** (runs first in the MPIM handler). Silenced Yael's reply ("Yes I am, but Elal are already back with their direct flight") to Maelle's question — verdict IGNORE.
+- **`app.ts` addressee gate** (runs in `processMessage`). Silenced three explicit `@Maelle` follow-up messages — verdict HUMAN despite the @-mention.
+
+Both gates now check if Maelle was the most-recent or second-most-recent speaker in the thread (`history.slice(-3).some(m => m.role === 'assistant')`). When she was just active, the gate is **skipped entirely** — the next message is almost certainly a continuation. The gates exist to filter unrelated chatter, not to block continuations of conversations Maelle is in the middle of.
+
+### Fixed — claim-checker treats MPIM @-mentions as fake sends (Bug D)
+
+Maelle replying in an MPIM and including `<@Yael>` to greet/address Yael in the room was being flagged by the claim-checker as a phantom send (no `message_colleague` ran). The corrective retry then forced `tool_choice: message_colleague`, creating an unwanted DM to Yael (separate from the MPIM thread).
+
+The fix:
+- New `mpimContext: { isMpim, participantSlackIds }` field on `ClaimCheckInput`
+- `postReply.ts` passes the MPIM context through (using existing `mpimMemberIds`)
+- Claim-checker prompt updated: when MPIM context is present and the `<@USER>` mention is for a PARTICIPANT in the listed group thread, that's LEGITIMATE in-room addressing — NOT a phantom send. Pings to people NOT in the participant list are still flagged.
+
+### Migration
+
+- No DB schema changes. No new env vars.
+- Existing `mpimMemberIds` in postReply.ts is now propagated to the claim-checker; no code-call-site changes outside the path.
+
+### Not changed
+
+- Claim-checker's behavior for owner-DM replies untouched — still flags any phantom action claim.
+- Addressee gate / relevance gate behavior in COLD threads (where Maelle hasn't spoken in the last 3 messages) untouched — gates still run and can silence as before.
+- All other skills + flows unaffected.
+
+---
+
 ## 1.7.4 — Knowledge base + owner social tracking + duplicate-send fix + cleanup
 
 Wave of QA-driven fixes plus the first cut of the KnowledgeBaseSkill so Maelle has real depth on the company without bloating every prompt.
