@@ -2,6 +2,52 @@
 
 ---
 
+## 1.7.6 — Skill renames (single-word noun form), em-dash avoidance, never-silence-after-eye, README cleanup
+
+QA-driven cleanup pass: skill names now read like the agent's capabilities, prompt stops overusing em-dashes, eye-reaction never appears without a follow-up reply.
+
+### Changed — skill renames
+
+Three togglable skills renamed to single-word noun keys. Each describes WHAT the agent can do:
+
+| Old key | New key |
+|---|---|
+| `meeting_summaries` | `summary` |
+| `knowledge_base` | `knowledge` |
+| `calendar_health` | `calendar` |
+
+Legacy keys still parse and auto-migrate at load time in `skills/registry.ts:getActiveSkills` (same pattern as the existing `scheduling`/`coordination` → `meetings` migration). Existing profiles boot without edits.
+
+Files touched: `src/skills/types.ts` (SkillId union), `src/config/userProfile.ts` (schema), `src/skills/registry.ts` (loader keys + migration), `src/skills/calendarHealth.ts` / `src/skills/summary.ts` / `src/skills/knowledge.ts` (class `id` field), `src/connectors/slack/app.ts` + `src/skills/summary.ts` (toggle reads — accept both old and new for grace period), `config/users/idan.yaml`, `config/users.example/user.example.yaml`, README.
+
+### Changed — em-dash avoidance
+
+Maelle was overusing the em-dash (—) in replies. New PUNCTUATION block in `systemPrompt.ts` instructs her to use commas, periods, parentheses, or two short sentences instead. Applies to every message — owner-facing AND colleague-facing, English AND Hebrew.
+
+### Changed — eye-reaction moved AFTER addressee gate
+
+Previously the `:eyes:` / `:thread:` read-receipt was added BEFORE the addressee gate. Silenced messages still got the emoji, confusing the user ("she read it but said nothing"). Now the reaction fires only when we're going to actually respond — after the gate clears, before the orchestrator call. If the gate silences, no eye.
+
+### Changed — orchestrator never silences post-run
+
+Empty-reply path now has a final fallback: `"Sorry, I didn't quite follow that one. Can you rephrase or give me a bit more context?"`. If the orchestrator ran but produced no text AND no tools fired AND the recovery pass also returned empty, we post the honest-confusion fallback instead of silence. The user's rule: if she put the read-receipt emoji, she should respond — even just to honestly say she didn't follow.
+
+### Changed — README
+
+- Architecture diagram redrawn: input is `channel | DM | group DM` (not "Slack DM / group / @mention"); Connectors shown as a peer layer to Skills (not nested below); arrow flow shows skills calling connectors.
+- "Microsoft Graph" connector heading renamed to "Outlook Calendar" — Graph is the API we use to talk to Outlook, the connector itself is Outlook.
+- Tech-stack row no longer says "no Haiku anywhere" — positive phrasing only ("used for every LLM call across the codebase").
+- Summary + Knowledge skills added to the optional-skills table.
+- New "Multi-modal input" section documenting voice messages, images/screenshots, text transcripts.
+- Roadmap rewritten: WhatsApp owner-sync, Email connector, Inbound workflows, Meeting notes prep — all opened as labeled GitHub issues (#4-7).
+
+### Migration
+
+- No DB schema changes. No new env vars.
+- Profile YAMLs: existing `meeting_summaries`, `knowledge_base`, `calendar_health` keys still work (auto-migrated). Migrate at your leisure to the new single-word forms.
+
+---
+
 ## 1.7.5 — Stop silencing in active MPIM threads + MPIM-aware claim-checker
 
 QA pass on v1.7.4 surfaced multiple "stuck" moments — Maelle going silent on legitimate follow-up messages in active group chats. Logs revealed three distinct silencing paths plus one false-positive that was tripping the claim-checker on natural in-room addressing.

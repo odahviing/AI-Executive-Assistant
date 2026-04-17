@@ -30,32 +30,38 @@ This principle outranks speed, completeness, and elegance in every tradeoff.
 
 ## How It Works
 
+The agent is composed of **Core modules** (always on) and **Skills** (opt-in per profile). Skills use **Connectors** to talk to external services. Connectors also bring messages IN from Slack/etc. — so the connector layer sits at both ends of the request flow.
+
 ```
-User message (Slack DM / group / @mention)
+Inbound message  (Slack channel | DM | group DM)
         │
         ▼
-  Connector layer          ← receives the message, resolves mentions, filters relevance
-  (connectors/slack/)
+   Slack Connector              ← receives, resolves mentions, filters relevance
         │
         ▼
-  Orchestrator             ← builds system prompt, runs Claude tool-use loop
-  (core/orchestrator/)
+   Orchestrator                 ← builds system prompt, runs Claude tool-use loop
         │
-   ┌────┴────┐
-   │  Core   │             ← always active: memory, task queue, routine scheduler
-   │ modules │
-   └────┬────┘
+        │  prompt + tools come from:
         │
-   ┌────┴──────┐
-   │  Skills   │           ← opt-in per user: scheduling, briefing, coordination, etc.
-   └────┬──────┘
-        │
-   ┌────┴──────────┐
-   │  Connectors   │       ← external services: Microsoft Graph, Slack API
-   └───────────────┘
-        │
-        ▼
-  Reply posted back to user
+   ┌────┴────────────────────────────────────┐
+   │                                         │
+   ▼                                         ▼
+ Core modules                              Skills
+ (always on, not configurable)             (opt-in per profile)
+ memory, outreach, tasks, routines         meetings, calendar, summary,
+                                           knowledge, search, research
+                                                │
+                                                │  skills call Connectors
+                                                │  for external work
+                                                ▼
+                                           Connectors
+                                           Microsoft Graph (Outlook),
+                                           Slack API, web search APIs
+                                                │
+                                                ▼
+                                           (results back to the loop)
+
+   Final reply  →  Slack Connector  →  posted back to the user
 ```
 
 ### The orchestrator loop
@@ -82,9 +88,10 @@ Every file belongs to exactly one layer. When in doubt, ask which layer before w
 ```
 src/
 ├── core/                    # LAYER 1 — Core engine (always on per agent)
-│   ├── assistant.ts         # MemorySkill — preferences, people memory, notes, gender, social
+│   ├── assistant.ts         # MemorySkill: preferences, people memory, notes, gender, social
 │   ├── assistantSelf.ts     # Maelle's own self-memory (her name story, etc.)
-│   ├── outreach.ts          # OutreachCoreSkill — message_colleague, find_slack_channel
+│   ├── ownerSelf.ts         # Owner pre-seed in people_memory (for self-tracking)
+│   ├── outreach.ts          # OutreachCoreSkill: message_colleague, find_slack_channel
 │   ├── orchestrator/        # Claude tool-use loop, system prompt builder
 │   │   ├── index.ts
 │   │   └── systemPrompt.ts
@@ -101,11 +108,13 @@ src/
 │   └── briefs.ts
 │
 ├── skills/                  # LAYER 2 — Togglable skills (per-profile YAML)
-│   ├── meetings.ts          # MeetingsSkill — direct ops + multi-party coordination
+│   ├── meetings.ts          # MeetingsSkill: direct ops + multi-party coordination
 │   ├── _meetingsOps.ts      # Internal helper (underscore prefix = not loadable)
-│   ├── calendarHealth.ts    # CalendarHealthSkill — issues, lunch, categories
-│   ├── general.ts           # SearchSkill — web_search, web_extract
-│   ├── research.ts          # ResearchSkill — owner-only multi-step
+│   ├── calendarHealth.ts    # CalendarHealthSkill: issues, lunch, categories
+│   ├── summary.ts           # SummarySkill: transcript → summary → distribute (3-stage)
+│   ├── knowledge.ts         # KnowledgeBaseSkill: file-based markdown KB, on-demand fetch
+│   ├── general.ts           # SearchSkill: web_search, web_extract
+│   ├── research.ts          # ResearchSkill: owner-only multi-step
 │   ├── registry.ts          # Core module + skill loader, tool router, permission gate
 │   └── types.ts
 │
@@ -157,21 +166,23 @@ src/
 
 | Core module | What it does |
 |---|---|
-| **MemorySkill** (`core/assistant.ts`) | Preferences, people memory, notes, interaction log, gender. Tools: `learn_preference`, `recall_preferences`, `note_about_person`, `update_person_profile`, `log_interaction`, `confirm_gender` |
+| **MemorySkill** (`core/assistant.ts`) | Preferences, people memory, notes, interaction log, gender, owner self-tracking. Tools: `learn_preference`, `recall_preferences`, `note_about_person`, `note_about_self`, `update_person_profile`, `log_interaction`, `confirm_gender` |
 | **OutreachCoreSkill** (`core/outreach.ts`) | How Maelle speaks to people on the owner's behalf. Tools: `message_colleague`, `find_slack_channel` |
-| **TasksSkill** (`tasks/skill.ts`) | Tasks, approvals, structured requests, briefings. Tools: `create_task`, `get_my_tasks`, `cancel_task`, `create_approval`, `resolve_approval`, `list_pending_approvals`, `store_request`, `get_pending_requests`, `resolve_request`, `escalate_to_user`, `get_briefing` |
+| **TasksSkill** (`tasks/skill.ts`) | Tasks, approvals, structured requests, briefings. Tools: `create_task`, `get_my_tasks` (with `with_person` filter), `cancel_task`, `create_approval`, `resolve_approval`, `list_pending_approvals`, `store_request`, `get_pending_requests`, `resolve_request`, `escalate_to_user`, `get_briefing` |
 | **RoutinesSkill** (`tasks/crons.ts`) | Recurring automations. Tools: `create_routine`, `get_routines`, `update_routine`, `delete_routine` |
 
 ### Optional (toggled in YAML)
 
 | Skill | Key | What it does |
 |---|---|---|
-| **Meetings** | `meetings: true` | Direct calendar ops + multi-party coordination in one skill. Tools: `get_calendar`, `analyze_calendar`, `get_free_busy`, `find_available_slots`, `create_meeting`, `move_meeting`, `update_meeting`, `delete_meeting`, `find_slack_user`, `coordinate_meeting`, `get_active_coordinations`, `finalize_coord_meeting`, `check_join_availability` |
-| **Calendar health** | `calendar_health: true` | Weekly review, lunch protection, issue tracking. Tools: `check_calendar_health`, `book_lunch`, `set_event_category`, `get_calendar_issues`, `update_calendar_issue` |
+| **Meetings** | `meetings: true` | Direct calendar ops + multi-party coordination. Tools: `get_calendar`, `analyze_calendar`, `get_free_busy`, `find_available_slots`, `create_meeting`, `move_meeting`, `update_meeting`, `delete_meeting`, `find_slack_user`, `coordinate_meeting`, `get_active_coordinations`, `finalize_coord_meeting`, `check_join_availability` |
+| **Calendar** | `calendar: true` | Weekly review, lunch protection, issue tracking. Tools: `check_calendar_health`, `book_lunch`, `set_event_category`, `get_calendar_issues`, `update_calendar_issue` |
+| **Summary** | `summary: true` | Meeting transcript (`.txt`) → structured English summary → distribute. Three-stage state machine per Slack thread. Action items with deadlines auto-create follow-up tasks that DM the assignee at 2pm their local timezone. Tools: `classify_summary_feedback`, `learn_summary_style`, `update_summary_draft`, `share_summary`, `list_speaker_unknowns` |
+| **Knowledge** | `knowledge: true` | Owner-curated markdown KB at `config/users/<name>_kb/` (auto-discovered, no restart, 32KB cap per file). Catalog injected when active; full content lazy via tool. SummarySkill auto-pulls relevant sections during Stage 1. Tools: `list_company_knowledge`, `get_company_knowledge` |
 | **Search** | `search: true` | Web search + URL extraction. Tools: `web_search`, `web_extract` |
 | **Research** | `research: true` | Owner-only multi-step research (reuses `web_search`) |
 
-Legacy YAML keys `scheduling: true` / `coordination: true` auto-migrate to `meetings: true` at load time.
+Legacy YAML keys auto-migrate at load time: `scheduling`/`coordination` → `meetings`, `meeting_summaries` → `summary`, `knowledge_base` → `knowledge`, `calendar_health` → `calendar`. Existing profiles keep working without edits.
 
 ### Routine examples
 
@@ -185,9 +196,9 @@ Routines are user-defined automations written in plain English. Examples:
 
 ## Connectors
 
-### Microsoft Graph (Outlook Calendar)
+### Outlook Calendar
 
-Handles all calendar operations via the Microsoft Graph API using an Azure service principal (client credentials flow — no user login required).
+Handles all calendar operations via the Microsoft Graph API (the underlying tool we use to talk to Outlook), using an Azure service principal (client credentials flow, no user login required).
 
 **Capabilities:**
 - Read calendar events (`calendarView`) with timezone-aware queries
@@ -211,6 +222,18 @@ The assistant runs as a dedicated Slack app (Socket Mode — no open ports). Eac
 ### WhatsApp
 
 Connector is implemented via `whatsapp-web.js` and is ready to enable. Currently disabled pending configuration. Shares the same orchestrator and skill set as Slack.
+
+---
+
+## Multi-modal input (Slack)
+
+Maelle accepts more than text in Slack DMs:
+
+| Input | How it works |
+|---|---|
+| **Voice messages** | Slack audio file_share is downloaded, transcribed by OpenAI Whisper (with ffmpeg WAV conversion), then fed into the orchestrator like a normal message. Voice in → audio reply out (when reply is short enough to listen to), text otherwise. |
+| **Images / screenshots** | Owner pastes a screenshot in DM or MPIM. Sonnet sees the actual image bytes via Anthropic image content blocks (native multimodal, not pre-described summaries). `imageGuard` scans for instruction-like text on every image and shadow-notifies on suspicious finds. Conversation history stores `[Image] caption` placeholders only — bytes never persisted. |
+| **Text transcripts** | Owner uploads a `.txt` meeting transcript. SummarySkill ingests it through the 3-stage state machine (Drafting → Iterating → Sharing). Auto-correlates with calendar events when the caption hints at a time. |
 
 ---
 
@@ -248,7 +271,7 @@ All data is scoped by `owner_user_id` in SQLite. Colleagues can interact with an
 | Component | Library |
 |---|---|
 | Language | TypeScript / Node.js |
-| AI model | Anthropic Claude Sonnet 4.6 (Sonnet everywhere — no Haiku anywhere in src/) |
+| AI model | Anthropic Claude Sonnet 4.6 (used for every LLM call across the codebase) |
 | Slack | `@slack/bolt` (Socket Mode) |
 | Microsoft Graph | `@microsoft/microsoft-graph-client` + `@azure/identity` |
 | WhatsApp | `whatsapp-web.js` |
@@ -308,13 +331,29 @@ npm run build && npm start
 
 ---
 
+## Bug auto-triage (GitHub Action)
+
+When you open an issue with the `Bug` label, a GitHub Action runs immediately and uses the Claude Agent SDK to investigate.
+
+- **Simple, low-risk fix** (≤50 lines, single file, typecheck passes) → committed directly to master with a comment on the issue, issue closed.
+- **Medium or complex** (multi-file, architectural, judgment required) → no code touched. The agent posts a plan as an issue comment for you to review when you're back at the keyboard.
+
+Every triage adds the `auto-triaged` label so the same issue won't be re-processed. Bot commits won't trigger themselves (the workflow only fires on issue events).
+
+**Setup once:** add `ANTHROPIC_API_KEY` as a repository secret in GitHub Settings → Secrets and variables → Actions.
+
+Files: [`.github/workflows/auto-triage-bug.yml`](.github/workflows/auto-triage-bug.yml), [`scripts/auto-triage-bug.mjs`](scripts/auto-triage-bug.mjs).
+
+---
+
 ## Roadmap
 
-- [ ] Email connector (read inbox, draft and send replies)
-- [ ] OneNote / knowledge base integration
-- [ ] Proactive alerts (anomaly detection on calendar and tasks)
-- [ ] WhatsApp connector (enable for production)
-- [ ] Web dashboard for profile management
+- [ ] **WhatsApp connector** — owner-only sync channel. Talk to Maelle in WhatsApp the same way you do in Slack; tasks created in either surface stay in sync. Not for general WhatsApp messaging — only the owner ↔ Maelle channel.
+- [ ] **Email connector** — Maelle reads and writes emails. CC her on a meeting invite to have her book it; ask her to send a follow-up to a thread. Same skill set as Slack, different format.
+- [ ] **Inbound workflows** — Maelle listens for inbound triggers (e.g. a new lead arrives in a channel) and runs a skill end-to-end (research the company, prepare a brief, hand off to the right person). Trigger → skill → result.
+- [ ] **Meeting notes preparation** — for 1:1s and topic-driven meetings. Owner sends a topic ahead of time; Maelle prepares a brief based on company knowledge + history. After the meeting, she summarizes (handing off to the existing SummarySkill).
+
+Each item is tracked as a GitHub issue.
 
 ---
 

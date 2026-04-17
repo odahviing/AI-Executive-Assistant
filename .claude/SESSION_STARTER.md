@@ -94,6 +94,12 @@ Both are valid. The rule is: use CODE where we need determinism, use PROMPTS whe
 - Never bump major (2.0) without explicit instruction
 - Update package.json version at the end of every session where code changed
 
+### Version-bump workflow (what to do at each level)
+- **PATCH** — keep it light. Update `package.json` version + add the `CHANGELOG.md` entry. THAT'S IT. Do NOT commit, do NOT push, do NOT touch memory files or README. The owner runs the patch locally and bundles when ready.
+- **MINOR** — full wrap-up. Update `package.json` + `CHANGELOG.md` + `README.md` (if architecture/public behavior changed) + both memory files + run `npm run typecheck` + commit + push + update/open relevant GitHub issues.
+- **MAJOR** — full wrap-up + explicit user instruction required.
+- If unsure whether the work is patch- or minor-sized: ASK before doing the wrap-up.
+
 ### CHANGELOG.md
 - **Every version** (patches AND minors) gets an entry — Maelle's history is the changelog, don't silently squash patches
 - Add new version block at the top, above the previous one

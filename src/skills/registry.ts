@@ -55,21 +55,21 @@ function buildSkillMap(): Map<SkillId, Skill> {
       },
     },
     {
-      id: 'calendar_health',
+      id: 'calendar',
       loader: () => {
         const { CalendarHealthSkill } = require('./calendarHealth');
         return new CalendarHealthSkill();
       },
     },
     {
-      id: 'meeting_summaries',
+      id: 'summary',
       loader: () => {
         const { SummarySkill } = require('./summary');
         return new SummarySkill();
       },
     },
     {
-      id: 'knowledge_base',
+      id: 'knowledge',
       loader: () => {
         const { KnowledgeBaseSkill } = require('./knowledge');
         return new KnowledgeBaseSkill();
@@ -126,8 +126,13 @@ export function getActiveSkills(profile: UserProfile): Skill[] {
   // v1.6.0 — profile migration: `scheduling` and `coordination` both became
   // `meetings`. If an older YAML still has either, treat as meetings=true so
   // the profile boots without edits. Duplicates (both set) are idempotent.
+  // v1.7.6 — three more renames: meeting_summaries → summary,
+  // knowledge_base → knowledge, calendar_health → calendar.
   const toggles: Record<string, boolean | undefined> = { ...(profile.skills as any) };
   if (toggles.scheduling || toggles.coordination) toggles.meetings = true;
+  if (toggles.meeting_summaries) toggles.summary = true;
+  if (toggles.knowledge_base) toggles.knowledge = true;
+  if (toggles.calendar_health) toggles.calendar = true;
 
   for (const [id, enabled] of Object.entries(toggles)) {
     if (!enabled) continue;

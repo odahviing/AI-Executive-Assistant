@@ -212,19 +212,24 @@ const UserProfileSchema = z.object({
   }).optional(),
 
   skills: z.object({
-    // v1.6.0: scheduling + coordination merged into meetings.
+    // v1.7.6 — single-word skill names. Each identifies a capability the agent
+    // can DO (search, summary, knowledge). Legacy multi-word keys still parse
+    // and auto-migrate at runtime in skills/registry.ts.
     meetings: z.boolean().default(true),
     email_drafting: z.boolean().default(false),
-    meeting_summaries: z.boolean().default(false),
+    summary: z.boolean().default(false),         // was meeting_summaries
+    knowledge: z.boolean().default(false),       // was knowledge_base
+    calendar: z.boolean().default(true),         // was calendar_health
     proactive_alerts: z.boolean().default(false),
     whatsapp: z.boolean().default(false),
     search: z.boolean().default(true),
     research: z.boolean().default(false),
-    calendar_health: z.boolean().default(true),
-    knowledge_base: z.boolean().default(false),   // v1.7.4 — owner-curated markdown KB
     // Legacy aliases — auto-migrated at runtime; kept optional so old YAMLs boot.
-    scheduling: z.boolean().optional(),
-    coordination: z.boolean().optional(),
+    scheduling: z.boolean().optional(),          // → meetings
+    coordination: z.boolean().optional(),        // → meetings
+    meeting_summaries: z.boolean().optional(),   // → summary
+    knowledge_base: z.boolean().optional(),      // → knowledge
+    calendar_health: z.boolean().optional(),     // → calendar
     general_knowledge: z.boolean().optional(),
   }),
 

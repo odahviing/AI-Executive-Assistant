@@ -54,16 +54,19 @@ export type CoreModuleId = 'assistant' | 'outreach' | 'tasks' | 'routines';
 export type SkillId =
   | 'meetings'
   | 'email_drafting'
-  | 'meeting_summaries'
+  | 'summary'             // v1.7.6 (renamed from meeting_summaries)
+  | 'knowledge'           // v1.7.6 (renamed from knowledge_base)
+  | 'calendar'            // v1.7.6 (renamed from calendar_health)
   | 'proactive_alerts'
   | 'whatsapp'
   | 'search'
   | 'research'
-  | 'calendar_health'
-  | 'knowledge_base'      // v1.7.4 — owner-curated markdown KB
-  // legacy aliases
-  | 'scheduling'
-  | 'coordination';
+  // legacy aliases — auto-migrated at load time, kept so old YAMLs still boot
+  | 'scheduling'          // → meetings
+  | 'coordination'        // → meetings
+  | 'meeting_summaries'   // → summary
+  | 'knowledge_base'      // → knowledge
+  | 'calendar_health';    // → calendar
 
 /** Runtime context passed to tool execution */
 export interface SkillContext {

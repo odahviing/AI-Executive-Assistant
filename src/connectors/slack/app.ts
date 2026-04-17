@@ -409,10 +409,14 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       }
     }
 
-    // React to show she's reading — never removed, stays as a read receipt
-    // New top-level message → :thread:  |  Reply in existing thread → :eyes:
+    // v1.7.6 — read-receipt reaction is added LATER (after the addressee gate).
+    // Previously it fired here, before the gate, so silenced messages still got
+    // the :eyes: emoji — confusing the user ("she read it but said nothing").
+    // Now: react only when we're going to actually respond.
     const readEmoji = (threadTs === ts) ? 'thread' : 'eyes';
-    client.reactions.add({ channel: channelId, timestamp: ts, name: readEmoji }).catch(() => {});
+    const addReadReceipt = () => {
+      client.reactions.add({ channel: channelId, timestamp: ts, name: readEmoji }).catch(() => {});
+    };
 
     try {
 
@@ -518,7 +522,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // toggle gate.
       let forceToolOnFirstTurn: { name: string } | undefined;
       if (role === 'owner' && !isChannel) {
-        const summaryActive = ((profile.skills as any)?.meeting_summaries === true);
+        const summaryActive = ((profile.skills as any)?.summary === true || (profile.skills as any)?.meeting_summaries === true);
         if (summaryActive) {
           const summarySession = getSummarySessionByThread(threadTs);
           if (summarySession && summarySession.stage === 'iterating') {
@@ -530,11 +534,15 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           }
         } else if (getSummarySessionByThread(threadTs)?.stage === 'iterating') {
           // Stale session from when skill was on; warn but don't crash
-          logger.warn('Iterating summary session exists but meeting_summaries skill is disabled — skipping force-tool', {
+          logger.warn('Iterating summary session exists but summary skill is disabled — skipping force-tool', {
             threadTs,
           });
         }
       }
+
+      // v1.7.6 — gate cleared, we're going to respond. Add the read receipt NOW
+      // so the user sees the eye emoji exactly when Maelle is committing to a reply.
+      addReadReceipt();
 
       logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name });
       const result = await runOrchestrator({
@@ -829,9 +837,9 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         // SummarySkill isn't enabled, otherwise a session gets created with
         // no tools available to iterate it (causes 400 from Anthropic on
         // the next owner turn when force-tool kicks in).
-        const summaryActive = ((profile.skills as any)?.meeting_summaries === true);
+        const summaryActive = ((profile.skills as any)?.summary === true || (profile.skills as any)?.meeting_summaries === true);
         if (!summaryActive) {
-          logger.info('Transcript ingestion skipped — meeting_summaries skill is disabled', {
+          logger.info('Transcript ingestion skipped — summary skill is disabled', {
             channel: channelId,
             user: message.user,
           });
@@ -841,7 +849,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
                 token: assistant.slack.bot_token,
                 channel: channelId,
                 thread_ts: threadTs,
-                text: `I noticed you sent me a transcript — to summarize meetings, enable \`meeting_summaries: true\` in your profile (\`config/users/${profile.user.name.split(' ')[0].toLowerCase()}.yaml\`) and restart me.`,
+                text: `I noticed you sent me a transcript. To summarize meetings, enable \`summary: true\` in your profile (\`config/users/${profile.user.name.split(' ')[0].toLowerCase()}.yaml\`) and restart me.`,
               });
             } catch (_) {}
           });

@@ -138,14 +138,18 @@ rescheduling:
     description: "Important meetings — never move without explicit approval"
 
 # ── Skills ────────────────────────────────────────────────────
+# Skill names are single-word capabilities. Each describes WHAT the agent
+# can do. Set true to enable, false to disable.
 skills:
-  scheduling: true
-  email_drafting: false
-  meeting_summaries: false
-  proactive_alerts: false
-  whatsapp: false
-  general_knowledge: true
-  calendar_health: true
+  meetings: true        # calendar ops + multi-party coordination
+  calendar: true        # weekly review, lunch protection, issue tracking
+  search: true          # web search + URL extraction
+  research: false       # owner-only multi-step research
+  summary: false        # meeting transcript → summary → distribute
+  knowledge: false      # owner-curated markdown knowledge base
+  email_drafting: false # (planned)
+  proactive_alerts: false # (planned)
+  whatsapp: false       # (planned)
 
 # ── Channels ──────────────────────────────────────────────────
 # Which communication surfaces the assistant is active on

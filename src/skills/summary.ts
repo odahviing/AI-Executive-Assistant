@@ -156,7 +156,7 @@ async function draftSummaryFromTranscript(params: {
   // pre-pass to pull any company/team context that would help ground this
   // summary. Skips silently if KB is empty, skill is off, or nothing matches.
   let kbBlock = '';
-  const kbActive = (params.profile.skills as any)?.knowledge_base === true;
+  const kbActive = (params.profile.skills as any)?.knowledge === true || (params.profile.skills as any)?.knowledge_base === true;
   if (kbActive) {
     const subjectHint = params.calendarEvent?.subject ?? '(unknown subject)';
     kbBlock = await selectRelevantKbForMeeting({
@@ -432,7 +432,7 @@ async function resolveActionItemAssignees(
 // ── Skill ───────────────────────────────────────────────────────────────────
 
 export class SummarySkill implements Skill {
-  id = 'meeting_summaries' as const;   // matches existing SkillId enum
+  id = 'summary' as const;
   name = 'Summary';
   description = 'Drafts meeting summaries from transcripts, iterates with the owner, distributes to recipients, and creates follow-up tasks for action items.';
 

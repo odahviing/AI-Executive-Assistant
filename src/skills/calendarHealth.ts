@@ -35,8 +35,8 @@ interface HealthIssue {
 }
 
 export class CalendarHealthSkill implements Skill {
-  id = 'calendar_health' as const;
-  readonly skillId = 'calendar_health';
+  id = 'calendar' as const;
+  readonly skillId = 'calendar';
   name = 'Calendar Health';
   description = 'Monitors calendar hygiene: lunch protection, double-booking detection, OOF conflicts, and event categories';
 

@@ -10,7 +10,7 @@
  * available section paths (~80 tokens). What's loaded on demand: the actual
  * markdown file content (~500-1500 words per section, fetched only when called).
  *
- * Profile YAML key: `knowledge_base: true`. Default false.
+ * Profile YAML key: `knowledge: true`. Default false. (Legacy alias `knowledge_base` still parses.)
  *
  * Dir layout (per-user, gitignored along with the rest of config/users/):
  *   config/users/<name>_kb/
@@ -200,7 +200,7 @@ Output ONLY the JSON.`;
 // ── Skill ───────────────────────────────────────────────────────────────────
 
 export class KnowledgeBaseSkill implements Skill {
-  id = 'knowledge_base' as const;
+  id = 'knowledge' as const;
   name = 'Knowledge Base';
   description = 'Owner-curated knowledge files (company, product, team, domain) that Maelle pulls on demand for richer context in meetings, summaries, research, and chat.';
 

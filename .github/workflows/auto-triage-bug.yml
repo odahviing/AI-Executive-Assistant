@@ -1,0 +1,65 @@
+name: Auto-triage Bug
+
+# Fires whenever a new issue is opened with the Bug label, OR an existing
+# issue gets the Bug label added. Runs the Claude Agent SDK against the
+# checked-out repo to investigate, classify, and either auto-fix (small)
+# or write a plan as an issue comment (medium/complex).
+#
+# See scripts/auto-triage-bug.mjs for behavior + safety floors.
+
+on:
+  issues:
+    types: [opened, labeled]
+
+# Serialize so two simultaneous bugs don't race on git push
+concurrency:
+  group: auto-triage-bug
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    # Only fire when the Bug label is present. Skip bot-authored issues.
+    if: |
+      github.event.issue.author_association != 'NONE' &&
+      (
+        (github.event.action == 'opened' && contains(github.event.issue.labels.*.name, 'Bug')) ||
+        (github.event.action == 'labeled' && github.event.label.name == 'Bug')
+      ) &&
+      !contains(github.event.issue.labels.*.name, 'auto-triaged')
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write    # for commit + push of fixes
+      issues: write      # for comments + labels
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install repo deps
+        run: npm ci
+        # Best-effort — if it fails the agent can still investigate, just no typecheck
+
+      - name: Install Claude Agent SDK
+        run: npm install --no-save @anthropic-ai/claude-agent-sdk
+
+      - name: Configure git for bot commits
+        run: |
+          git config user.name  "Maelle Auto-Triage"
+          git config user.email "${{ github.actor_id }}+auto-triage@users.noreply.github.com"
+
+      - name: Run auto-triage
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN:          ${{ secrets.GITHUB_TOKEN }}   # for `gh` CLI
+          ISSUE_NUMBER:      ${{ github.event.issue.number }}
+          REPO:              ${{ github.repository }}
+        run: node scripts/auto-triage-bug.mjs

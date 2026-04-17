@@ -857,10 +857,15 @@ Rules:
           fallbackReply: finalReply,
         });
       } else {
-        // No tools, no text, no recovery. Pure silence — postReply.ts skips.
-        logger.warn('Orchestrator ended without final reply — silencing (no tools ran)', {
+        // v1.7.6 — never silence after the orchestrator runs. The user's rule:
+        // if Maelle put the read-receipt emoji, she should respond — even if
+        // just to honestly say she didn't follow. Better to ask for help than
+        // to leave the user hanging. (Pure-silence path is gone.)
+        finalReply = "Sorry, I didn't quite follow that one. Can you rephrase or give me a bit more context?";
+        logger.warn('Orchestrator: no tools, no text, no recovery — posted clarifying-confusion fallback', {
           threadTs,
           iterations: iteration,
+          fallbackReply: finalReply,
         });
       }
     }
