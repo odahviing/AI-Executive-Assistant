@@ -2,6 +2,44 @@
 
 ---
 
+## 1.7.8 — YAML-defined categories + two honesty rules (sycophancy, lunch window)
+
+Real-world QA on bug #10 surfaced two distinct Sonnet behavior issues plus a longer-standing architectural smell. All fixed in one patch.
+
+### Added — YAML-defined Outlook categories
+
+Categories (the colored Outlook event tags) used to be hardcoded in multiple places (`book_lunch` set `['Lunch']`; `set_event_category` tool description listed "Meeting, Internal, External, Interview, Lunch, Logistic, Focus Time"; analyzeCalendar's suggestions referenced the same fixed list). Didn't match the owner's real Outlook setup — his categories turned out to be `Logistic / Meeting / Not Me / Physical / Private / Vacation` (no "Lunch" exists in his Outlook at all).
+
+New design:
+- Profile YAML gets an optional `categories: [{ name, description }]` field. Owner defines their real Outlook categories + a short English description each so Claude can pick the right one per event.
+- `systemPrompt.ts` renders an `EVENT CATEGORIES` block from that profile data when present. When absent, nothing is rendered and tools skip categorization.
+- `book_lunch` no longer hardcodes `categories: ['Lunch']`. It accepts an optional `category` arg that Sonnet passes after reading the profile's categories. Defense-in-depth: if Sonnet proposes a name not in the profile, the tool logs WARN and drops it rather than inventing a category Outlook would auto-create.
+- `set_event_category` tool description updated: no hardcoded list, just instructions to use what's in the EVENT CATEGORIES block.
+- `analyzeCalendar`'s missing-category suggestion now pulls names from profile when defined; falls back to a generic message when not.
+
+Owner's `idan.yaml` populated with his real six categories. `user.example.yaml` gets a generic sample for new installs.
+
+### Added — RULE 9 (verify, don't echo)
+
+When the owner asks about the calendar with a baked-in conclusion ("looking good, right?", "lunch every day?"), Maelle must VERIFY from the tool result before answering. Calendar reviews list per-day facts (meeting count, first/last, lunch status) — never a vague "looks fine". This addresses the bug #10 "Sunday meetings missing" symptom: Sonnet had the data, agreed with the owner's framing, never enumerated the actual Sunday meetings.
+
+### Added — RULE 10 (lunch window respect)
+
+When `book_lunch` returns `error: 'no_room'` OR Maelle is computing a lunch time herself, she must NOT silently propose a slot outside the owner's preferred lunch window. Explicit framing required: *"No slot fits in your usual window (11:30–13:30). Want me to do it at 11:00, earlier than usual?"*. This addresses the bug #10 "Monday lunch offered at 11:00" symptom where Maelle proposed pre-window lunch without flagging it.
+
+### Migration
+
+- Profile YAMLs without a `categories` block keep working (optional field). Tools skip categorization when absent. No forced changes.
+- Existing events tagged `'Lunch'` by pre-1.7.8 `book_lunch` calls are unaffected — those are Outlook data, not code concerns.
+
+### Not changed
+
+- Lunch-event DETECTION (v1.7.7 English-only subject match) unchanged.
+- `showAs: 'free'` stripping unchanged — all free events (all-day AND timed) still stripped before Claude sees them, per owner's explicit confirmation.
+- Auto-triage workflow + script untouched.
+
+---
+
 ## 1.7.7 — Lunch detection: English-only subject match (no Hebrew, no phantom category)
 
 Fixes bug #10 (misinformation about calendar — Monday lunch not detected).

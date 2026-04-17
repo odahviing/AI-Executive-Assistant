@@ -70,13 +70,19 @@ Returns a list of issues with suggestions. Use this proactively when the owner a
         name: 'book_lunch',
         description: `Book a lunch event on a specific day within the owner's preferred lunch window.
 Finds the best available slot in the lunch window (preferred_start to preferred_end) and creates a calendar event.
-Only book lunch when explicitly asked or when check_calendar_health reveals a missing lunch.`,
+Only book lunch when explicitly asked or when check_calendar_health reveals a missing lunch.
+
+CATEGORIES: if the EVENT CATEGORIES block is present in your system prompt, pass the \`category\` arg with the name of the category that fits a lunch event (typically the one whose description mentions lunch / schedule admin / personal time). If no categories are defined, omit the arg and the event will be created uncategorized.`,
         input_schema: {
           type: 'object',
           properties: {
             date: {
               type: 'string',
               description: 'Date YYYY-MM-DD to book lunch on',
+            },
+            category: {
+              type: 'string',
+              description: 'OPTIONAL. Name of the Outlook category to tag this lunch event with. Must match EXACTLY one of the owner\'s defined categories (see EVENT CATEGORIES in system prompt). Omit if no categories are defined or none fits.',
             },
           },
           required: ['date'],
@@ -85,7 +91,8 @@ Only book lunch when explicitly asked or when check_calendar_health reveals a mi
       {
         name: 'set_event_category',
         description: `Add or update the Outlook category on a calendar event. Categories help with calendar organization and analytics.
-Common categories: "Meeting", "Internal", "External", "Interview", "Lunch", "Logistic", "Focus Time".`,
+
+Use the owner's own categories listed in the EVENT CATEGORIES block of your system prompt. Names must match EXACTLY (case-sensitive). Do NOT invent category names — if you think a new category should exist, say so in the reply; don't silently create one.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -261,7 +268,9 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                 date: dayStr,
                 description: `"${e.subject}" has no category`,
                 eventIds: [e.id],
-                suggestion: 'Add a category (Meeting, Internal, External, Interview, Lunch, Logistic, Focus Time)',
+                suggestion: profile.categories && profile.categories.length > 0
+                  ? `Add a category — choose from ${profile.categories.map(c => c.name).join(', ')}`
+                  : 'Add a category to organize this event',
               });
             }
           }
@@ -427,6 +436,26 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
         const lunchStart = DateTime.fromMillis(bestStart).setZone(timezone);
         const lunchEnd = lunchStart.plus({ minutes: lunch.duration_minutes });
 
+        // v1.7.8 — category is no longer hardcoded. Sonnet picks from
+        // profile.categories (the owner's real Outlook categories, injected
+        // into the system prompt) and passes the name here. Skip the field
+        // entirely when no category was supplied.
+        const categoryArg = (args.category as string | undefined)?.trim();
+        const validCategoryNames = (profile.categories ?? []).map(c => c.name);
+        // Defense: if Sonnet picked a name not in the profile, log + drop it
+        // rather than silently inventing a category Outlook will create on-the-fly.
+        let lunchCategories: string[] | undefined = undefined;
+        if (categoryArg) {
+          if (validCategoryNames.length === 0 || validCategoryNames.includes(categoryArg)) {
+            lunchCategories = [categoryArg];
+          } else {
+            logger.warn('book_lunch: agent proposed category not in profile — dropping', {
+              proposed: categoryArg,
+              allowed: validCategoryNames,
+            });
+          }
+        }
+
         try {
           const eventId = await createMeeting({
             subject: 'Lunch',
@@ -435,7 +464,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             attendees: [],
             body: '<p>Lunch break — booked by your executive assistant.</p>',
             isOnline: false,
-            categories: ['Lunch'],
+            categories: lunchCategories,
             sensitivity: 'personal',
             userEmail,
             timezone,

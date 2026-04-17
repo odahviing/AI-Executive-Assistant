@@ -187,6 +187,18 @@ const UserProfileSchema = z.object({
     low: z.array(z.string()),
   }),
 
+  // v1.7.8 — Owner's Outlook categories. Optional. When defined, Maelle reads
+  // these and picks the right one per event (book_lunch, create_meeting,
+  // set_event_category). When absent, tools skip category tagging.
+  //
+  // IMPORTANT: names must match EXACTLY what's defined in the owner's Outlook
+  // (case-sensitive on some Outlook installs). Descriptions guide the LLM —
+  // write them so Claude can tell which category fits a given event.
+  categories: z.array(z.object({
+    name: z.string().min(1),
+    description: z.string().min(1),
+  })).optional(),
+
   vip_contacts: z.array(VipContactSchema).default([]),
 
   behavior: z.object({

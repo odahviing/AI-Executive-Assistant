@@ -151,6 +151,26 @@ skills:
   proactive_alerts: false # (planned)
   whatsapp: false       # (planned)
 
+# ── Outlook categories ──────────────────────────────────────────
+# OPTIONAL. If you use Outlook categories (the colored tags on events),
+# list them here so Maelle can pick the right one when creating or
+# categorizing events. Names must match your Outlook categories EXACTLY
+# (case-sensitive on some installs). Descriptions are free-form — write
+# them so Claude can tell which one fits a given event.
+#
+# Omit this block entirely if you don't use categories.
+categories:
+  - name: "Meeting"
+    description: "Standard work meetings with internal or external participants."
+  - name: "Logistic"
+    description: "Schedule admin: lunch, breaks, commute, personal time, errands. Not a work meeting."
+  - name: "Focus Time"
+    description: "Protected deep work, no meetings allowed."
+  - name: "Interview"
+    description: "Candidate interviews only. Short, discreet titles."
+  - name: "Private"
+    description: "Personal or sensitive events whose details shouldn't be narrated in summaries."
+
 # ── Channels ──────────────────────────────────────────────────
 # Which communication surfaces the assistant is active on
 # Each channel can be toggled independently
