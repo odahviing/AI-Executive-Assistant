@@ -2,6 +2,25 @@
 
 ---
 
+## 1.7.7 — Lunch detection: English-only subject match (no Hebrew, no phantom category)
+
+Fixes bug #10 (misinformation about calendar — Monday lunch not detected).
+
+Both `_meetingsOps.ts:analyzeCalendar` and `calendarHealth.ts:check_calendar_health` were checking for Hebrew "ארוחת" in the event subject alongside English "lunch". The codebase shouldn't detect Hebrew in event subjects — the owner names lunch events in English, and cross-language heuristics in deterministic detection paths are fragile.
+
+### Fixed
+- Removed `subj.includes('ארוחת')` from both lunch detectors. Detection is now English-only: `subject` containing "lunch" (case-insensitive).
+- Inline comment clarifies that there is no `Lunch` category in the owner's Outlook setup; `Logistic` is used for schedule-admin events (not specifically lunch), so category-based detection would false-positive on commutes etc.
+
+### Not changed
+- `book_lunch` in `calendarHealth.ts` still uses the `Logistic` category for the events it CREATES (different code path, existing convention).
+- `$top: 100` cap in `getCalendarEvents` left alone. Bug #10 also reported missing Sunday meetings; the auto-triage agent hypothesized the pagination cap was the cause, but live logs show max 39 events per next-week query — well under the cap. Not the cause. Sunday-missing symptom is filed as a follow-up to investigate (likely presentation/prompt-level, not data-level).
+
+### Migration
+- None. No schema changes, no config changes.
+
+---
+
 ## 1.7.6 — Skill renames (single-word noun form), em-dash avoidance, never-silence-after-eye, README cleanup
 
 QA-driven cleanup pass: skill names now read like the agent's capabilities, prompt stops overusing em-dashes, eye-reaction never appears without a follow-up reply.

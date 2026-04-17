@@ -189,9 +189,14 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
           const lunchEnd = DateTime.fromISO(`${dayStr}T${lunch.preferred_end}`, { zone: timezone });
 
           const hasLunch = dayEvents.some(e => {
+            // v1.7.7 — lunch is detected by subject containing "lunch" (English,
+            // case-insensitive). Categories are separate from subjects in Outlook;
+            // there is no "Lunch" category in the owner's setup (`Logistic` is
+            // used for schedule admin events, not specifically lunch). Hebrew
+            // ארוחת check removed — code should not support Hebrew detection.
             if (e.isAllDay) return false;
             const subj = (e.subject || '').toLowerCase();
-            return subj.includes('lunch') || subj.includes('ארוחת');
+            return subj.includes('lunch');
           });
 
           if (!hasLunch) {

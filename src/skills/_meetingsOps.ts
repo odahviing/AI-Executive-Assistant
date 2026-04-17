@@ -361,9 +361,11 @@ export function analyzeCalendar(
     let lunchGap: string | undefined;
 
     // Check if a "Lunch" event is already booked in the lunch window
+    // v1.7.7 — English-only subject match. The codebase doesn't support Hebrew
+    // event-subject detection; owner names lunch events in English.
     const lunchEvent = timedMeetings.find(e => {
       const subj = (e.subject || '').toLowerCase();
-      if (!subj.includes('lunch') && !subj.includes('ארוחת')) return false;
+      if (!subj.includes('lunch')) return false;
       const [sh, sm] = e._localStartTime.split(':').map(Number);
       const evStart = sh * 60 + sm;
       return evStart >= lunchWindowStart && evStart < lunchWindowEnd;
