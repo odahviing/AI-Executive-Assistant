@@ -221,6 +221,7 @@ const UserProfileSchema = z.object({
     search: z.boolean().default(true),
     research: z.boolean().default(false),
     calendar_health: z.boolean().default(true),
+    knowledge_base: z.boolean().default(false),   // v1.7.4 — owner-curated markdown KB
     // Legacy aliases — auto-migrated at runtime; kept optional so old YAMLs boot.
     scheduling: z.boolean().optional(),
     coordination: z.boolean().optional(),

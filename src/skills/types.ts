@@ -60,6 +60,7 @@ export type SkillId =
   | 'search'
   | 'research'
   | 'calendar_health'
+  | 'knowledge_base'      // v1.7.4 — owner-curated markdown KB
   // legacy aliases
   | 'scheduling'
   | 'coordination';

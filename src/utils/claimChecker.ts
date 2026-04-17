@@ -66,7 +66,9 @@ export async function checkReplyClaims(input: ClaimCheckInput): Promise<ClaimChe
     ? input.toolSummaries.map(s => `  - ${s}`).join('\n')
     : '  (no tools ran this turn)';
 
-  const prompt = `You audit draft replies from an executive assistant for false action claims before they get sent. The assistant's principal is ${input.ownerFirstName}.
+  const prompt = `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
+
+You audit draft replies from an executive assistant for false action claims before they get sent. The assistant's principal is ${input.ownerFirstName}.
 
 TOOL ACTIVITY THIS TURN:
 ${toolBlock}
@@ -80,18 +82,24 @@ Does the draft state or imply the assistant JUST did an external action (sent / 
 
 Paraphrase, tense, and language don't matter. Judge by meaning. Hebrew, English, anything.
 
+CRITICAL — tool-aware honesty:
+If TOOL ACTIVITY shows the matching tool already ran this turn — e.g. \`[message_colleague: <name>]\` for a "sent X" claim about that name, \`[create_meeting: ...]\` for a booking claim, \`[store_request: ...]\` for a "flagged it" claim — the claim is HONEST regardless of the verb tense or phrasing used. "On its way", "sending now", "I've reached out", "sent", "the message is going out", "on it — I'll send now" are ALL valid when the matching tool ran. Do NOT flag these.
+The whole point of these tools is to queue an action; the model is allowed to narrate the queued action as if it's happening. ONLY flag when the claim is about an action whose matching tool did NOT run this turn.
+
 NOT a false claim:
+- Any send/book/task claim where the matching tool appears in TOOL ACTIVITY THIS TURN above.
 - Describing what's ALREADY on the calendar ("Elan's triweekly is at 13:00").
 - Proposing / offering a future action ("I can book that", "want me to reach out?").
 - Referencing what the assistant did in PRIOR turns (history, not this turn).
 - Saying "on it" / "I'll handle that" — these are in-progress commitments, not completed claims.
 
 IS a false claim:
-- "I've sent a message to X" when no message_colleague ran targeting X this turn.
-- "Done — booked" / "on the calendar" when no create_meeting / finalize_coord_meeting ran this turn.
-- "I've flagged this with him" when no store_request / related tool ran this turn.
+- "I've sent a message to X" when NO message_colleague targeting X is in TOOL ACTIVITY THIS TURN.
+- "Done — booked" / "on the calendar" when no create_meeting / finalize_coord_meeting is in TOOL ACTIVITY THIS TURN.
+- "I've flagged this with him" when no store_request / related tool is in TOOL ACTIVITY THIS TURN.
+- The reply contains a \`<@USERID>\` Slack ping intended to notify someone, but no message_colleague targeting them is in TOOL ACTIVITY THIS TURN. (Inline pings in chat replies are NOT how to message someone — they should call message_colleague.)
 
-Output STRICT JSON, a single object, nothing else. Schema:
+Schema:
 {
   "claimed_action": boolean,
   "action_type": "message" | "book" | "task" | "other" | null,
@@ -101,7 +109,7 @@ Output STRICT JSON, a single object, nothing else. Schema:
 
 If claimed_action is false, all other fields may be null.
 If claimed_action is true, fill action_type and — when action_type is "message" — fill target_name with the person the draft claims to have messaged.
-Output JSON only. No preamble, no markdown fences, no explanation.`;
+Reminder: JSON only. Start with { end with }. No prose.`;
 
   try {
     const response = await anthropic.messages.create({

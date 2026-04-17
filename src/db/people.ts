@@ -1,4 +1,5 @@
 import { getDb } from './client';
+import { DateTime } from 'luxon';
 
 // ── People Memory ─────────────────────────────────────────────────────────────
 // Persistent contact directory — auto-populated when people are mentioned or
@@ -444,4 +445,141 @@ export function formatPeopleMemoryForPrompt(
   });
 
   return `WORKSPACE CONTACTS (people you have interacted with — use slack_id directly, no need to call find_slack_user):\n${lines.join('\n')}`;
+}
+
+// ── Social context block (per-sender) ────────────────────────────────────────
+// v1.7.4 — moved here from orchestrator/index.ts. It's a pure formatter for
+// people_memory data, sibling to formatPeopleMemoryForPrompt above. Lives at
+// the data layer so a future togglable persona skill (issue #3) can call it
+// conditionally without the orchestrator having to know.
+
+const SOCIAL_STALE_COUNT_THRESHOLD = 3;
+
+/**
+ * Builds a per-person social context block injected into the system prompt.
+ * Tells Claude whether a social moment is due, what's already known, which
+ * topics have been covered (and which are stale or on cooldown), so she
+ * doesn't repeat herself.
+ *
+ * Returns '' for unknown people (no row in people_memory) — caller can skip.
+ */
+export function buildSocialContextBlock(slackId: string, timezone: string): string {
+  const person = getPersonMemory(slackId);
+  if (!person) return '';
+
+  const now              = DateTime.now().setZone(timezone);
+  const lastInitiatedAt  = person.last_initiated_at ? DateTime.fromISO(person.last_initiated_at) : null;
+  const hoursAgoInit     = lastInitiatedAt ? now.diff(lastInitiatedAt, 'hours').hours : Infinity;
+  const canMaelleInitiate = hoursAgoInit >= 24;
+
+  const notes: PersonNote[]    = JSON.parse(person.notes || '[]');
+  const topics                 = parseSocialTopics(person.social_topics || '[]');
+  const profile: PersonProfile = (() => {
+    try { return JSON.parse(person.profile_json || '{}'); } catch { return {}; }
+  })();
+
+  const lines: string[] = [`SOCIAL CONTEXT — ${person.name}`];
+
+  // Engagement level gate — if they're avoidant, don't push.
+  const engagementLevel = profile.engagement_level ?? 'neutral';
+  if (engagementLevel === 'avoidant') {
+    lines.push(`Engagement level: AVOIDANT — this person consistently avoids personal exchanges. Do NOT initiate social chat. Be professional and warm, but skip personal topics entirely unless they bring it up themselves.`);
+    return lines.join('\n');
+  }
+  if (engagementLevel === 'minimal') {
+    lines.push(`Engagement level: minimal — they rarely engage socially. Keep social moments very light; don't push if they seem uninterested.`);
+  } else if (engagementLevel === 'friendly') {
+    lines.push(`Engagement level: friendly — they respond warmly. Social moments work well with this person.`);
+  } else if (engagementLevel === 'interactive') {
+    lines.push(`Engagement level: interactive — they proactively chat. Be warm and reciprocate their energy.`);
+  }
+
+  // Profile summary — show anything known
+  const profileParts: string[] = [];
+  if (profile.communication_style)  profileParts.push(`style: ${profile.communication_style}`);
+  if (profile.language_preference)  profileParts.push(`language: ${profile.language_preference}`);
+  if (profile.working_hours)        profileParts.push(`hours: ${profile.working_hours}`);
+  if (profile.response_speed)       profileParts.push(`responds: ${profile.response_speed}`);
+  if (profile.role_summary)         profileParts.push(`role: ${profile.role_summary}`);
+  if (profile.reports_to)           profileParts.push(`reports to: ${profile.reports_to}`);
+  if (profile.collaboration_notes)  profileParts.push(`collab: ${profile.collaboration_notes}`);
+  if (profileParts.length > 0) {
+    lines.push(`Profile: ${profileParts.join(' | ')}`);
+  }
+
+  if (canMaelleInitiate) {
+    const ago = lastInitiatedAt
+      ? (hoursAgoInit >= 48 ? `${Math.round(hoursAgoInit / 24)} days ago` : 'yesterday')
+      : 'never';
+    lines.push(`Maelle-initiated check-in: DUE (you last started one ${ago})`);
+  } else {
+    const h = Math.round(24 - hoursAgoInit);
+    lines.push(`Maelle-initiated check-in: NOT due — you already started one recently (${h}h until next). If THEY bring up personal topics, respond freely — just don't YOU start it.`);
+  }
+
+  // Recent activity
+  const interactionLog: PersonInteraction[] = (() => {
+    try { return JSON.parse((person as any).interaction_log || '[]'); } catch { return []; }
+  })();
+  const recentInteractions = interactionLog.slice(-10);
+  if (recentInteractions.length > 0) {
+    lines.push(`Recent activity:\n${recentInteractions.map(i => `  [${i.date.split('T')[0]}] ${i.summary}`).join('\n')}`);
+  }
+
+  // Personal/relationship notes
+  const recentNotes = notes.slice(-8);
+  if (recentNotes.length > 0) {
+    lines.push(`Personal notes:\n${recentNotes.map(n => `  [${n.date}] ${n.note}`).join('\n')}`);
+  } else {
+    lines.push(`Personal notes: none yet — good opportunity to learn something`);
+  }
+
+  // Topic history with cooldown / stale detection / random pick
+  const yesterday = now.minus({ hours: 24 }).toFormat('yyyy-MM-dd');
+  const topicLabel = (t: typeof topics[number]) => t.subject ? `${t.name}:${t.subject}` : t.name;
+  const isStale = (t: typeof topics[number]) =>
+    t.count >= SOCIAL_STALE_COUNT_THRESHOLD && t.quality === 'neutral';
+
+  if (topics.length > 0) {
+    const recentTopics    = topics.filter(t => t.last_used >= yesterday);
+    const notRecent       = topics.filter(t => t.last_used < yesterday);
+    const staleTopics     = notRecent.filter(isStale);
+    const availableTopics = notRecent.filter(t => !isStale(t));
+
+    const goodTopics    = availableTopics.filter(t => t.quality === 'good');
+    const engagedTopics = availableTopics.filter(t => t.quality === 'engaged');
+    const neutralTopics = availableTopics.filter(t => t.quality === 'neutral');
+
+    const topicLines: string[] = [];
+    if (goodTopics.length)    topicLines.push(`  Available — great (go deeper): ${goodTopics.map(topicLabel).join(', ')}`);
+    if (engagedTopics.length) topicLines.push(`  Available — engaged (worth revisiting): ${engagedTopics.map(topicLabel).join(', ')}`);
+    if (neutralTopics.length) topicLines.push(`  Available — flat but not stale (could try once more): ${neutralTopics.map(topicLabel).join(', ')}`);
+    if (recentTopics.length)  topicLines.push(`  INITIATION COOLDOWN (discussed within last 24h — do NOT bring these up yourself; if THEY mention it, respond warmly): ${recentTopics.map(topicLabel).join(', ')}`);
+    if (staleTopics.length)   topicLines.push(`  STALE — DO NOT REVISIT (asked ${SOCIAL_STALE_COUNT_THRESHOLD}+ times, never progressed): ${staleTopics.map(topicLabel).join(', ')}`);
+    lines.push(`Topic history:\n${topicLines.join('\n')}`);
+
+    // v1.7.4 — random pick when 2+ available so Maelle doesn't cycle the same
+    // top-of-list topic every initiation.
+    if (canMaelleInitiate && availableTopics.length >= 2) {
+      const pool = [...availableTopics].sort(() => Math.random() - 0.5);
+      const pick = pool[0];
+      lines.push(`→ RANDOM PICK from available pool this turn: ${topicLabel(pick)} (quality=${pick.quality}). If you initiate, prefer this one — varies which subject you raise so the conversation feels natural over time.`);
+    }
+  }
+
+  const hasFreshTopic =
+    canMaelleInitiate &&
+    topics.some(t => t.last_used < yesterday && !isStale(t));
+
+  if (canMaelleInitiate) {
+    if (hasFreshTopic) {
+      lines.push(`→ Find ONE natural moment after the work is done. Pick a fresh available topic (never one on INITIATION COOLDOWN or marked STALE). 1–2 sentences. MANDATORY: the moment you ask a personal question — even before they answer, even if they never answer — call note_about_person (or note_about_self if this person is the owner) with initiated_by="maelle", the enum topic, and a SPECIFIC free-form subject (e.g. topic="hobby", subject="clair obscur game"; topic="family", subject="daughter's school play"). The subject is what goes on 24h cooldown, not the enum — so be specific. After the conversation, consider calling update_person_profile if you learned something about their engagement, style, or role.`);
+    } else {
+      lines.push(`→ NO FRESH TOPICS available (everything on cooldown, stale, or empty). If a social moment fits naturally, try ONE open discovery question to find new ground. Examples to adapt to context: "what do you like to do after work?", "anything interesting going on outside work?", "anything I should know about you that I don't?". 1 sentence, soft, never pushy. MANDATORY: the moment you ask, call note_about_person (or note_about_self if this person is the owner) with initiated_by="maelle", topic that best fits ("other" if truly open), and a specific subject describing what you asked (e.g. subject="open after-work question"). If they don't bite, that subject just goes on cooldown — no harm. Engagement-level avoidant/minimal → DO NOT initiate even an open question; respect the signal.`);
+    }
+  } else {
+    lines.push(`→ If they bring up something personal, respond warmly and call note_about_person (or note_about_self if this person is the owner) with initiated_by="person" and a specific subject. Do NOT start a social topic yourself. Any subject on INITIATION COOLDOWN above is OFF-LIMITS for you to bring up again — if they don't mention it, neither do you. Anything marked STALE is permanently OFF-LIMITS for initiation.`);
+  }
+
+  return lines.join('\n');
 }

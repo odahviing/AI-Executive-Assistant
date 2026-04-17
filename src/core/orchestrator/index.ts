@@ -4,7 +4,7 @@ import { buildSystemPromptParts } from './systemPrompt';
 import { getSkillTools, executeSkillTool } from '../../skills/registry';
 import type { UserProfile } from '../../config/userProfile';
 import type { SkillContext, ChannelId } from '../../skills/types';
-import { auditLog, getPersonMemory, parseSocialTopics, getSummarySessionByThread, type PersonNote, type PersonProfile, type PersonInteraction } from '../../db';
+import { auditLog, buildSocialContextBlock, getSummarySessionByThread } from '../../db';
 import { getActiveJobsForThread } from '../../tasks';
 import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
@@ -341,6 +341,14 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
   // makes the second call a no-op with an explicit signal; the LLM sees that
   // and can correct its narrative.
   const deletedEventIdsThisTurn = new Set<string>();
+  // v1.7.4 — track message_colleague calls per turn keyed on colleague_slack_id.
+  // The Amazia 6-second-apart bug came from the claim-checker false-positive
+  // forcing a retry with tool_choice: message_colleague — Sonnet, forced to
+  // call again, created a second outreach_jobs row. Even with the upstream
+  // fixes in claim-checker + postReply.ts, this is the deterministic backstop:
+  // any second message_colleague call this turn for the same colleague is a
+  // no-op with an explicit signal.
+  const messagedColleaguesThisTurn = new Set<string>();
   let iteration = 0;
   const MAX_ITERATIONS = 10;
 
@@ -423,6 +431,34 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
         });
         toolCallSummaries.push(`[${toolUse.name}] already-queued — skipped`);
         continue;
+      }
+
+      // ── IDEMPOTENCY: message_colleague once per turn per colleague (v1.7.4) ──
+      // Same-turn duplicate sends are never what the user meant — and the
+      // claim-checker false-positive retry was hitting this exact path.
+      // Short-circuit on (colleague_slack_id) — message text might vary
+      // slightly across calls but the intent is duplicate.
+      if (toolUse.name === 'message_colleague') {
+        const colleagueSlackId = (toolUse.input as any)?.colleague_slack_id;
+        if (typeof colleagueSlackId === 'string' && messagedColleaguesThisTurn.has(colleagueSlackId)) {
+          logger.warn('message_colleague called twice with same colleague this turn — short-circuiting', {
+            senderUserId: input.userId,
+            threadTs,
+            colleagueSlackId,
+          });
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: JSON.stringify({
+              ok: false,
+              reason: 'already_messaged_this_turn',
+              colleague_slack_id: colleagueSlackId,
+              _note: 'You already called message_colleague for this person earlier in THIS turn. Do NOT call again. The first message is queued — your reply should reference what you ALREADY did, not pretend a second send is happening.',
+            }),
+          });
+          toolCallSummaries.push(`[message_colleague] ${colleagueSlackId} — already messaged this turn, skipped`);
+          continue;
+        }
       }
 
       // ── IDEMPOTENCY: delete_meeting once per turn per event_id (v1.6.4) ──
@@ -691,6 +727,12 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
           const eventId = (toolUse.input as any)?.event_id ?? (toolUse.input as any)?.id;
           if (typeof eventId === 'string') deletedEventIdsThisTurn.add(eventId);
         }
+        // v1.7.4 — remember messaged colleagues so the same colleague can't be
+        // messaged twice in one turn. See the short-circuit at the top of the loop.
+        if (toolUse.name === 'message_colleague') {
+          const colleagueSlackId = (toolUse.input as any)?.colleague_slack_id;
+          if (typeof colleagueSlackId === 'string') messagedColleaguesThisTurn.add(colleagueSlackId);
+        }
       }
 
       toolResults.push({
@@ -842,115 +884,3 @@ Rules:
   };
 }
 
-// ── Social engagement context ─────────────────────────────────────────────────
-
-/**
- * Builds a per-person social context block injected into every conversation.
- * Tells Claude whether a social moment is due, what's already known,
- * and which topics have been covered — so it never repeats itself.
- */
-function buildSocialContextBlock(slackId: string, timezone: string): string {
-  const person = getPersonMemory(slackId);
-  if (!person) return '';   // unknown person — no structured social context yet
-
-  const now              = DateTime.now().setZone(timezone);
-
-  // The daily gate is based on last time MAELLE initiated — not last social exchange
-  const lastInitiatedAt  = person.last_initiated_at ? DateTime.fromISO(person.last_initiated_at) : null;
-  const hoursAgoInit     = lastInitiatedAt ? now.diff(lastInitiatedAt, 'hours').hours : Infinity;
-  const canMaelleInitiate = hoursAgoInit >= 24;   // true = Maelle is allowed to start a social moment
-
-  const notes: PersonNote[]  = JSON.parse(person.notes || '[]');
-  const topics               = parseSocialTopics(person.social_topics || '[]');
-  const profile: PersonProfile = (() => {
-    try { return JSON.parse(person.profile_json || '{}'); } catch { return {}; }
-  })();
-
-  const lines: string[] = [`SOCIAL CONTEXT — ${person.name}`];
-
-  // Engagement level gate — if they're avoidant, don't push
-  const engagementLevel = profile.engagement_level ?? 'neutral';
-  if (engagementLevel === 'avoidant') {
-    lines.push(`Engagement level: AVOIDANT — this person consistently avoids personal exchanges. Do NOT initiate social chat. Be professional and warm, but skip personal topics entirely unless they bring it up themselves.`);
-    return lines.join('\n');
-  }
-  if (engagementLevel === 'minimal') {
-    lines.push(`Engagement level: minimal — they rarely engage socially. Keep social moments very light; don't push if they seem uninterested.`);
-  } else if (engagementLevel === 'friendly') {
-    lines.push(`Engagement level: friendly — they respond warmly. Social moments work well with this person.`);
-  } else if (engagementLevel === 'interactive') {
-    lines.push(`Engagement level: interactive — they proactively chat. Be warm and reciprocate their energy.`);
-  }
-
-  // Profile summary — show anything known
-  const profileParts: string[] = [];
-  if (profile.communication_style)  profileParts.push(`style: ${profile.communication_style}`);
-  if (profile.language_preference)  profileParts.push(`language: ${profile.language_preference}`);
-  if (profile.working_hours)        profileParts.push(`hours: ${profile.working_hours}`);
-  if (profile.response_speed)       profileParts.push(`responds: ${profile.response_speed}`);
-  if (profile.role_summary)         profileParts.push(`role: ${profile.role_summary}`);
-  if (profile.reports_to)           profileParts.push(`reports to: ${profile.reports_to}`);
-  if (profile.collaboration_notes)  profileParts.push(`collab: ${profile.collaboration_notes}`);
-  if (profileParts.length > 0) {
-    lines.push(`Profile: ${profileParts.join(' | ')}`);
-  }
-
-  if (canMaelleInitiate) {
-    const ago = lastInitiatedAt
-      ? (hoursAgoInit >= 48 ? `${Math.round(hoursAgoInit / 24)} days ago` : 'yesterday')
-      : 'never';
-    lines.push(`Maelle-initiated check-in: DUE (you last started one ${ago})`);
-  } else {
-    const h = Math.round(24 - hoursAgoInit);
-    lines.push(`Maelle-initiated check-in: NOT due — you already started one recently (${h}h until next). If THEY bring up personal topics, respond freely — just don't YOU start it.`);
-  }
-
-  // Recent activity — what has actually happened with this person lately
-  const interactionLog: PersonInteraction[] = (() => {
-    try { return JSON.parse((person as any).interaction_log || '[]'); } catch { return []; }
-  })();
-  const recentInteractions = interactionLog.slice(-10);
-  if (recentInteractions.length > 0) {
-    lines.push(`Recent activity:\n${recentInteractions.map(i => `  [${i.date.split('T')[0]}] ${i.summary}`).join('\n')}`);
-  }
-
-  // Personal/relationship notes
-  const recentNotes = notes.slice(-8);
-  if (recentNotes.length > 0) {
-    lines.push(`Personal notes:\n${recentNotes.map(n => `  [${n.date}] ${n.note}`).join('\n')}`);
-  } else {
-    lines.push(`Personal notes: none yet — good opportunity to learn something`);
-  }
-
-  // Topic history with quality guidance and 24h initiation cooldown.
-  // Cooldown fires at (topic + subject) level — so "hobby: clair obscur" is on
-  // cooldown while "hobby: woodworking" is still available. Cooldown blocks
-  // MAELLE from starting that subject; if the user brings it up herself, engage freely.
-  const yesterday = now.minus({ hours: 24 }).toFormat('yyyy-MM-dd');
-  const topicLabel = (t: typeof topics[number]) => t.subject ? `${t.name}:${t.subject}` : t.name;
-
-  if (topics.length > 0) {
-    // Topics used within the last 24h are on initiation cooldown
-    const recentTopics    = topics.filter(t => t.last_used >= yesterday);
-    const availableTopics = topics.filter(t => t.last_used < yesterday);
-
-    const goodTopics    = availableTopics.filter(t => t.quality === 'good');
-    const engagedTopics = availableTopics.filter(t => t.quality === 'engaged');
-    const neutralTopics = availableTopics.filter(t => t.quality === 'neutral');
-
-    const topicLines: string[] = [];
-    if (goodTopics.length)    topicLines.push(`  Available — great (go deeper): ${goodTopics.map(topicLabel).join(', ')}`);
-    if (engagedTopics.length) topicLines.push(`  Available — engaged (worth revisiting): ${engagedTopics.map(topicLabel).join(', ')}`);
-    if (neutralTopics.length) topicLines.push(`  Available — flat (try something else): ${neutralTopics.map(topicLabel).join(', ')}`);
-    if (recentTopics.length)  topicLines.push(`  INITIATION COOLDOWN (discussed within last 24h — do NOT bring these up yourself; if THEY mention it, respond warmly): ${recentTopics.map(topicLabel).join(', ')}`);
-    lines.push(`Topic history:\n${topicLines.join('\n')}`);
-  }
-
-  if (canMaelleInitiate) {
-    lines.push(`→ Find ONE natural moment after the work is done. Pick an available topic (never one on INITIATION COOLDOWN). 1–2 sentences. MANDATORY: the moment you ask a personal question — even before they answer, even if they never answer — call note_about_person with initiated_by="maelle", the enum topic, and a SPECIFIC free-form subject (e.g. topic="hobby", subject="clair obscur game"; topic="family", subject="daughter's school play"). The subject is what goes on 24h cooldown, not the enum — so be specific. After the conversation, consider calling update_person_profile if you learned something about their engagement, style, or role.`);
-  } else {
-    lines.push(`→ If they bring up something personal, respond warmly and call note_about_person (initiated_by="person") with a specific subject. Do NOT start a social topic yourself. Specifically: any subject on INITIATION COOLDOWN above is OFF-LIMITS for you to bring up again — if they don't mention it, neither do you.`);
-  }
-
-  return lines.join('\n');
-}

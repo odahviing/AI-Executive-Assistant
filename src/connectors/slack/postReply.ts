@@ -179,6 +179,34 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
 
     if (!verdict.claimed_action) return cleanReply;
 
+    // v1.7.4 — defense in depth. The claim-checker can false-positive (saw
+    // it happen with "the message is on its way" being flagged even when
+    // message_colleague ran). If the matching tool clearly DID run this turn,
+    // refuse the retry — the claim was honest, the checker erred. Without
+    // this guard, the retry forces the SAME tool with a corrective nudge,
+    // which creates a duplicate outreach (Amazia 6-second-apart bug).
+    const toolSummariesText = (result.toolSummaries ?? []).join(' ');
+    const matchingToolAlreadyRan =
+      verdict.action_type === 'message'
+        ? /\[message_colleague/.test(toolSummariesText) &&
+          (!verdict.target_name || toolSummariesText.toLowerCase().includes(verdict.target_name.toLowerCase()))
+        : verdict.action_type === 'book'
+          ? /\[(create_meeting|finalize_coord_meeting)/.test(toolSummariesText)
+          : verdict.action_type === 'task'
+            ? /\[(store_request|create_task|create_approval)/.test(toolSummariesText)
+            : false;
+
+    if (matchingToolAlreadyRan) {
+      logger.warn('Claim-checker flagged but matching tool already ran this turn — skipping retry (false positive)', {
+        senderId: ctx.senderId,
+        threadTs: ctx.threadTs,
+        action_type: verdict.action_type,
+        target_name: verdict.target_name,
+        toolSummaries: result.toolSummaries,
+      });
+      return cleanReply;
+    }
+
     logger.warn('Claim-checker: retrying turn with corrective nudge', {
       senderId: ctx.senderId,
       threadTs: ctx.threadTs,

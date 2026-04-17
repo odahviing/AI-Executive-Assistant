@@ -2,6 +2,69 @@
 
 ---
 
+## 1.7.4 — Knowledge base + owner social tracking + duplicate-send fix + cleanup
+
+Wave of QA-driven fixes plus the first cut of the KnowledgeBaseSkill so Maelle has real depth on the company without bloating every prompt.
+
+### Added — KnowledgeBaseSkill (togglable)
+
+- New `src/skills/knowledge.ts` skill. Profile YAML key `knowledge_base: true` (default false).
+- Owner drops markdown files into `config/users/<name>_kb/` (auto-discovered, no manifest, no restart). Section ID = relative path without `.md`. Created starter dir + README explaining the format.
+- Always-loaded in prompt: a SHORT catalog listing available section IDs (~80 tokens). Tool `list_company_knowledge` and `get_company_knowledge(section_id)` exposed; Sonnet pulls full content on demand.
+- 32 KB cap per section file (anything larger rejected to prevent prompt bloat).
+- Path-traversal protection (rejects `..` / absolute paths / out-of-root resolution).
+
+### Added — KB-relevance pre-pass in SummarySkill
+
+- When both `meeting_summaries` AND `knowledge_base` skills are active, Stage 1 drafting runs a tiny Sonnet pass over the meeting subject + first 1000 chars of transcript to pick 0-3 relevant KB sections, then prefetches them and feeds the content to the drafting prompt as background. Fires automatically — owner doesn't have to ask.
+- Solves the "you don't always know when you need it" dilemma: product/strategy meetings get company context grounded; interview/scheduling meetings skip the cost.
+
+### Added — Owner social tracking
+
+- Owner is now a regular `people_memory` row (pre-seeded at startup via `seedOwnerSelf`). Same machinery that tracks colleague hobbies/topics now tracks the owner's. Visibility-gated: workspace contacts list excludes the owner's own row from the visible list (already enforced); colleagues never see the owner's notes (people memory section not rendered for colleagues).
+- New tool `note_about_self` — owner-only convenience wrapper that writes to the owner's row without requiring Sonnet to know the slack_id. Same shape as `note_about_person`.
+
+### Changed — Social-context dynamics
+
+- **Stale-topic detection.** A topic with `count >= 3` AND quality stuck at `neutral` (never progressed to engaged/good) is killed permanently. Marked STALE in the prompt — Maelle won't re-suggest it for initiation. Antidote to grinding the same dead subject forever.
+- **Random topic pick.** When 2+ topics are available (not on cooldown, not stale), shuffle the pool per-turn and surface a "random pick this turn" hint. Stops Maelle from cycling the same top-of-list topic every time.
+- **Fresh-opener fallback.** When everything is on cooldown, stale, or empty, the prompt now instructs Maelle to try ONE open discovery question ("what do you like to do after work?", "anything interesting going on outside work?") instead of going silent or reusing the dead topic. Engagement-level avoidant/minimal guards still respected.
+
+### Changed — Architecture: `buildSocialContextBlock` relocated
+
+- Moved out of `src/core/orchestrator/index.ts` into `src/db/people.ts` where it belongs (pure formatter for `people_memory` data, sibling to `formatPeopleMemoryForPrompt`).
+- Orchestrator now imports it from `db/`. No behavior change. Sets up the future togglable persona skill (issue #3) to call it conditionally without the orchestrator having to know.
+
+### Fixed — Amazia duplicate task (3-layer)
+
+QA caught two outreach_jobs rows created 6 seconds apart for a single owner ask. Root cause: claim-checker false-positive on "the message is on its way to Amazia" (despite `[message_colleague: Amazia]` being in toolSummaries) → triggered retry with forced `tool_choice: message_colleague` → Sonnet called the tool a second time → duplicate. Three guards now prevent this.
+
+- **Claim-checker prompt tightened (`src/utils/claimChecker.ts`).** Explicit rule: "if TOOL ACTIVITY shows the matching tool already ran this turn, the claim is HONEST regardless of phrasing — 'on its way', 'sending now', 'I've reached out', 'sent' are all valid." Stops the false-positive at the source.
+- **postReply.ts retry guard.** Even when claim-checker errs, if `result.toolSummaries` shows the matching tool already ran for the right target, the retry is SKIPPED. Defense-in-depth.
+- **Orchestrator-level idempotency on `message_colleague`.** Tracks `(colleague_slack_id)` per turn. Second call this turn for the same colleague → short-circuit with explicit `_note: "already messaged this turn"`. Same pattern as `coordinate_meeting` and `delete_meeting` already use.
+
+### Fixed — Language rule
+
+- The base prompt had two conflicting rules: "mirror the latest message" vs "reporting someone else's words: match THEIR language." When owner asked in English about Hebrew-speaking colleagues, the second rule won and Maelle replied in Hebrew. Replaced with a clearer hierarchy: owner's current-turn language ALWAYS wins for the narrative; verbatim quotes can stay in original language; memory of preferred language is for INITIATING outreach to THEM only.
+
+### Added — GitHub repo
+
+- 7 labels created with deliberate color logic — priority warm-spectrum (Low cold blue → Medium amber → High red), type distinct (Bug orange, Feature purple, Improvement green, Task gray). All open issues backfilled.
+
+### Migration
+
+- DB schema: no changes. Owner pre-seed is upsert-idempotent.
+- Profile YAML: `knowledge_base: false` default for new profiles. Existing profiles: enable manually if you want it.
+- KB content: empty by default (just the README). Add markdown files to populate.
+
+### Not changed
+
+- All other skills unchanged.
+- Audio + image paths untouched.
+- Conversation persistence unchanged.
+
+---
+
 ## 1.7.3 — SummarySkill fixes from first real-world test
 
 First QA of 1.7.2 surfaced two bugs. Owner sent feedback with three distinct asks crammed into one message ("write in first person, paragraph per topic with empty lines, and Yael wasn't there") — Sonnet routed two of them to the wrong tool (`learn_preference` instead of `learn_summary_style`), dropped the third, and produced no text reply. Silence. Plus a parse warning during Stage 1 calendar correlation.

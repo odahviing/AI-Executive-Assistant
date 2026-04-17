@@ -68,6 +68,13 @@ function buildSkillMap(): Map<SkillId, Skill> {
         return new SummarySkill();
       },
     },
+    {
+      id: 'knowledge_base',
+      loader: () => {
+        const { KnowledgeBaseSkill } = require('./knowledge');
+        return new KnowledgeBaseSkill();
+      },
+    },
   ];
 
   const map = new Map<SkillId, Skill>();

@@ -176,6 +176,55 @@ Do NOT call this for purely work-related facts (those go in learn_preference). T
         },
       },
       {
+        name: 'note_about_self',
+        description: `Same as note_about_person but for the OWNER (yourself's principal). Convenience wrapper — you don't need to pass slack_id, it's the owner's by definition.
+
+Call this when:
+- The OWNER shares something personal in conversation (a hobby, family thing, sport, weekend plans, mood, what they were working on, etc.)
+- You asked them a social question and they answered
+- They volunteer something about themselves worth remembering for richer future chat
+
+Examples:
+- After "I was building you all day" → topic="hobby", subject="building Maelle", note="Spent the day developing Maelle — clearly enjoying the AI/dev work."
+- After "Just got back from skiing in Italy" → topic="travel", subject="ski trip italy", note="Just back from skiing in Italy — sounded relaxed."
+- After "My daughter started first grade today" → topic="family", subject="daughter first grade", note="Daughter started first grade today."
+
+Owner-only. Do NOT use this for colleagues (use note_about_person for them).`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            note: {
+              type: 'string',
+              description: 'What you learned, in plain English. Be specific — vague notes are useless later.',
+            },
+            topic: {
+              type: 'string',
+              enum: [
+                'family', 'health', 'sport', 'hobby', 'travel', 'work_life', 'mood',
+                'food', 'culture', 'pets', 'goals', 'weekend', 'humor', 'education',
+                'language', 'local', 'news', 'other',
+              ],
+              description: 'Broad enum category. Pair with a specific subject below.',
+            },
+            subject: {
+              type: 'string',
+              description: 'REQUIRED specific subject string. The 24h cooldown fires on (topic + subject), so be SPECIFIC: "building Maelle" (not just "hobby"), "ski trip italy", "daughter first grade", "marathon training". Use 2–5 lowercased words. When the SAME subject comes up again, reuse the exact string so the counter increments.',
+            },
+            topic_quality: {
+              type: 'string',
+              enum: ['neutral', 'engaged', 'good'],
+              description: 'How engaged was the owner on this topic? neutral=brief mention, engaged=opened up a bit, good=really shared openly. Default neutral.',
+            },
+            initiated_by: {
+              type: 'string',
+              enum: ['maelle', 'person'],
+              description: 'Who started the social moment? maelle=you asked them, person=they volunteered.',
+            },
+          },
+          required: ['note', 'topic', 'subject'],
+        },
+      },
+      {
         name: 'update_person_profile',
         description: `Update the structured profile for a person — call this when you've observed enough to reliably assess a dimension.
 
@@ -449,6 +498,46 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
 
         logger.info('Social note saved', { slackId, name, topic, subject, quality, initiatedBy });
         return { saved: true, name, topic, subject, quality };
+      }
+
+      case 'note_about_self': {
+        // Owner-only by semantics — this writes to the OWNER's people_memory row.
+        if (context.senderRole !== 'owner') {
+          logger.warn('Colleague tried to call note_about_self — blocked', { userId: context.userId });
+          return { error: 'not_permitted', reason: 'Only the owner can note things about themselves.' };
+        }
+        const slackId     = context.profile.user.slack_user_id;
+        const name        = context.profile.user.name;
+        const note        = args.note as string;
+        const topic       = args.topic as string;
+        const subject     = (args.subject as string | undefined)?.trim() || undefined;
+        const quality     = (args.topic_quality as SocialTopicQuality | undefined) ?? 'neutral';
+        const initiatedBy = (args.initiated_by as 'maelle' | 'person' | undefined) ?? 'person';
+
+        // Ensure the owner row exists (seedOwnerSelf at startup should have, but
+        // upsert is idempotent and safe).
+        upsertPersonMemory({
+          slackId,
+          name,
+          email:    context.profile.user.email,
+          timezone: context.profile.user.timezone,
+        });
+
+        // Personal notes (who they are)
+        appendPersonNote(slackId, note);
+
+        // Activity timeline (what happened)
+        const timelineTag = subject ? `[${topic}:${subject}]` : `[${topic}]`;
+        appendPersonInteraction(slackId, {
+          type: 'social_chat',
+          summary: `${timelineTag} ${note}`,
+        });
+
+        // Social moment with quality, initiator, and the (topic+subject) cooldown key
+        recordSocialMoment(slackId, topic, quality, initiatedBy, subject);
+
+        logger.info('Owner self-note saved', { slackId, topic, subject, quality, initiatedBy });
+        return { saved: true, scope: 'owner', topic, subject, quality };
       }
 
       case 'log_interaction': {

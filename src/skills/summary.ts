@@ -51,6 +51,7 @@ import {
   findChannelByName,
 } from '../connections/slack/messaging';
 import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calendar';
+import { selectRelevantKbForMeeting } from './knowledge';
 import logger from '../utils/logger';
 
 const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
@@ -151,6 +152,21 @@ async function draftSummaryFromTranscript(params: {
 
   const styleBlock = summaryStylePromptBlock(params.ownerUserId);
 
+  // v1.7.4 — when the KnowledgeBaseSkill is active, run a tiny relevance
+  // pre-pass to pull any company/team context that would help ground this
+  // summary. Skips silently if KB is empty, skill is off, or nothing matches.
+  let kbBlock = '';
+  const kbActive = (params.profile.skills as any)?.knowledge_base === true;
+  if (kbActive) {
+    const subjectHint = params.calendarEvent?.subject ?? '(unknown subject)';
+    kbBlock = await selectRelevantKbForMeeting({
+      profile: params.profile,
+      meetingSubject: subjectHint,
+      transcriptOpening: params.transcript.slice(0, 1000),
+      anthropic,
+    });
+  }
+
   const prompt = `You are ${params.profile.assistant.name}, ${params.ownerName}'s personal executive assistant. The owner just sent you a meeting transcript and wants a summary they can share.
 
 Your output is STRICT JSON ONLY — no prose, no markdown, no code fences. Use this shape:
@@ -188,7 +204,7 @@ CRITICAL RULES:
 - For dates without a year, assume current year. If "tomorrow" / "by Friday", compute relative to ${DateTime.now().setZone(params.profile.user.timezone).toFormat('EEEE, d MMMM yyyy')}.
 - Prefer 4-6 paragraphs. Avoid one-sentence paragraphs.
 - Owner of this meeting: ${params.ownerName} — never list them as an action-item assignee unless they are explicitly tasked.
-${calBlock}${styleBlock}
+${calBlock}${styleBlock}${kbBlock}
 
 TRANSCRIPT:
 """
