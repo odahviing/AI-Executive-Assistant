@@ -1,36 +1,37 @@
 name: Auto-triage Bug
 
-# Fires whenever a new issue is opened with the Bug label, OR an existing
-# issue gets the Bug label added. Runs the Claude Agent SDK against the
-# checked-out repo to investigate, classify, and either auto-fix (small)
-# or write a plan as an issue comment (medium/complex).
+# Fires on:
+#   - issue opened with Bug label
+#   - Bug label added to an existing issue
+#   - Revise label added (owner wants a re-plan based on their comments)
 #
-# See scripts/auto-triage-bug.mjs for behavior + safety floors.
+# v1.8.2 — propose-only flow. No auto-fixes ever. Agent always writes a plan;
+# owner labels `Approved` (→ auto-build.yml) or `Revise` (→ re-runs this).
 
 on:
   issues:
     types: [opened, labeled]
 
-# Serialize so two simultaneous bugs don't race on git push
 concurrency:
-  group: auto-triage-bug
+  group: auto-triage-${{ github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
   triage:
-    # Only fire when the Bug label is present. Skip bot-authored issues.
+    # Trigger when: Bug label added, OR Revise label added, OR issue opened with Bug label
+    # Skip bot-authored issues. Skip if already Proposed AND this isn't a Revise event.
     if: |
       github.event.issue.author_association != 'NONE' &&
       (
         (github.event.action == 'opened' && contains(github.event.issue.labels.*.name, 'Bug')) ||
-        (github.event.action == 'labeled' && github.event.label.name == 'Bug')
+        (github.event.action == 'labeled' && (github.event.label.name == 'Bug' || github.event.label.name == 'Revise'))
       ) &&
-      !contains(github.event.issue.labels.*.name, 'auto-triaged')
+      !(github.event.action == 'labeled' && github.event.label.name == 'Bug' && contains(github.event.issue.labels.*.name, 'Proposed'))
 
     runs-on: ubuntu-latest
     permissions:
-      contents: write    # for commit + push of fixes
-      issues: write      # for comments + labels
+      contents: read
+      issues: write
 
     steps:
       - name: Checkout repo
@@ -46,26 +47,14 @@ jobs:
 
       - name: Install repo deps
         run: npm ci
-        # Best-effort — if it fails the agent can still investigate, just no typecheck
 
-      - name: Install Claude Agent SDK
-        # --legacy-peer-deps bypasses the zod@^4 peer-dep mismatch (Maelle
-        # uses zod@^3). At runtime the SDK reads zod from node_modules/zod
-        # which is zod 3 — the SDK's usage of zod is compatible between v3
-        # and v4 for the schemas we hit in the triage loop. If this breaks
-        # at runtime we'll move to an isolated /tmp install with its own
-        # node_modules.
-        run: npm install --no-save --legacy-peer-deps @anthropic-ai/claude-agent-sdk
-
-      - name: Configure git for bot commits
-        run: |
-          git config user.name  "Maelle Auto-Triage"
-          git config user.email "${{ github.actor_id }}+auto-triage@users.noreply.github.com"
+      - name: Install Claude Agent SDK + Anthropic SDK
+        run: npm install --no-save --legacy-peer-deps @anthropic-ai/claude-agent-sdk @anthropic-ai/sdk
 
       - name: Run auto-triage
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GH_TOKEN:          ${{ secrets.GITHUB_TOKEN }}   # for `gh` CLI
+          GH_TOKEN:          ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER:      ${{ github.event.issue.number }}
           REPO:              ${{ github.repository }}
         run: node scripts/auto-triage-bug.mjs

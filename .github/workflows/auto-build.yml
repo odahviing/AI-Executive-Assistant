@@ -1,0 +1,54 @@
+name: Auto-build Approved Fix
+
+# Fires when the `Approved` label is added to a Bug issue. The owner has
+# reviewed the triage plan and given the go-ahead. The agent implements the
+# plan, typecheck must pass, then commit + push. Laptop's deploy-watcher picks
+# up the push within 5 minutes and restarts Maelle.
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  group: auto-build-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event.label.name == 'Approved'
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write    # for commit + push
+      issues: write      # for comments + labels + edit body
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install repo deps
+        run: npm ci
+
+      - name: Install Claude Agent SDK
+        run: npm install --no-save --legacy-peer-deps @anthropic-ai/claude-agent-sdk
+
+      - name: Configure git for bot commits
+        run: |
+          git config user.name  "Maelle Auto-Triage"
+          git config user.email "${{ github.actor_id }}+auto-triage@users.noreply.github.com"
+
+      - name: Run auto-build
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN:          ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER:      ${{ github.event.issue.number }}
+          REPO:              ${{ github.repository }}
+        run: node scripts/auto-build.mjs

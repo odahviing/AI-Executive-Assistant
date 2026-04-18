@@ -2,6 +2,78 @@
 
 ---
 
+## 1.8.2 — Triage rewrite (propose-only, image-aware) + auto-deploy pipeline + language fixes
+
+Big patch — combines the 1.8.1-scoped language/voice fixes with a substantial rewrite of the auto-triage and deploy infrastructure. Scope nominally exceeds a patch, but owner called it 1.8.2 since it's all stabilization of the 1.8 wave.
+
+### Added — propose-only auto-triage with human approval gate
+
+Auto-triage no longer ships fixes unsupervised. New three-phase flow:
+
+1. **Triage (always plans, never fixes):** on Bug label, the agent investigates and writes a plan as an issue comment. Labels the issue `Proposed`. Script: `scripts/auto-triage-bug.mjs` (rewritten).
+2. **Approval gate:** owner reads the plan. Labels `Approved` to build, or `Revise` with follow-up comments to re-plan (re-fires triage, which re-reads all comments including the owner's guidance).
+3. **Build:** on `Approved` label, new workflow `.github/workflows/auto-build.yml` runs `scripts/auto-build.mjs`, which implements the plan, typechecks, commits + pushes under "Maelle Auto-Triage" author, closes the issue.
+
+Labels: `Proposed` (plan awaiting owner), `Approved` (build now), `Revise` (replan), `Failed` (build aborted), `Triaged` (loop guard).
+
+### Added — image-aware triage (critical for screenshot bugs)
+
+The triage agent now downloads every image embedded in the issue body + comments (GitHub user-attachments URLs, using `GH_TOKEN`) and instructs the agent to Read them before diagnosing. Bugs with screenshots are the majority in practice; diagnosing them without vision was the single biggest source of wrong-cause fixes.
+
+### Added — anti-recency-bias guardrails on triage
+
+Four rules in the new triage prompt, all responses to the v1.8.0 wrong-fix (see the Reverted block below):
+
+1. No pre-injected SESSION_STARTER.md as "repo context" — forces investigation from scratch
+2. Explicit rule against pattern-matching to recent changelog / fresh features
+3. Root cause must name specific file + line + mechanism (grounding)
+4. Single-keyword causes require a second independent signal or classify as lower-confidence
+5. Sanity-check pass: tiny second Sonnet call asks "does the cause actually match the symptoms?" — flags off-topic plans
+
+### Added — laptop deploy watcher (`scripts/deploy-watcher.mjs`)
+
+Runs under PM2 on the laptop. Every 5 min: `git fetch`, compares SHAs, and if the new commits are authored by "Maelle Auto-Triage", pulls + `npm ci` (if lockfile changed) + `npm run build` + `pm2 restart maelle`. Owner's own commits are skipped — he deploys those himself. No inbound network exposure, no SSH setup required.
+
+### Added — PM2 ecosystem file (`ecosystem.config.js`)
+
+Two processes: `maelle` (the main bot, running `dist/index.js`) and `maelle-deploy-watcher` (the polling daemon). Maelle no longer runs via `npm run` — switched to PM2 for auto-restart on crash + surviving reboots via `pm2-windows-startup`.
+
+### Fixed — English text chat sometimes replied in Hebrew (issue #19)
+
+Owner wrote in English after several Hebrew turns in the same thread; Maelle replied Hebrew. The LANGUAGE rule already said "no inertia" but buried the clause mid-sentence and Sonnet slipped under prior-turn pressure. Rewrote the LANGUAGE block in `systemPrompt.ts` so "CURRENT TURN WINS" is the opening line with a concrete override example ("even if the last 10 turns were Hebrew"). Rule now applies to owner AND colleague paths explicitly — any chat, not just owner.
+
+### Fixed — voice transcription prefix wasn't reaching the orchestrator
+
+The voice handler in `src/connectors/slack/app.ts` was calling `appendToConversation` with `[Voice message]: <text>` and then passing bare `text` into `processMessage`. Two effects: (1) history got double-persisted per voice turn, (2) the orchestrator's `userMessage` never started with `[Voice message]:`, so the v1.8.0 VOICE LANGUAGE OVERRIDE rule never fired — Hebrew Whisper transcripts → Hebrew replies despite the override. Fix: drop the redundant pre-append, pass `[Voice message]: <text>` directly to `processMessage` (which already persists via its own `appendToConversation` call). This fix was previously auto-shipped under a wrong-cause commit that claimed it addressed #19 — see the revert below.
+
+### Reverted — commit dec424d (wrong-cause auto-fix for #26)
+
+A second auto-triage misfire, caught before this version shipped. The old auto-fix flow closed #26 with a two-part "fix" in `src/skills/_meetingsOps.ts`:
+
+1. A prompt rule telling Sonnet "after `move_meeting`, if you see the meeting at its new time via `get_calendar`, that's expected, don't act surprised." Wrong layer — this is a determinism problem (we know the move succeeded, we know the new time). The real fix lives in code: either `move_meeting` returns the new state structurally, or post-processing catches "just-moved meeting at new time" and reframes, or the orchestrator blocks redundant `get_calendar` after a successful move in the same turn. Prompt-pleading the model to "not act surprised" rots under model swap.
+2. Preserving Outlook events with `showAs=free` whose subject contains "lunch" — on the hypothesis that a Lunch event marked free was being silently stripped. Diagnosis was wrong: the owner's Lunch event was NOT marked free, and `free`-shown events are correctly skipped by design. The "fix" would have introduced a regression where free-marked events start leaking into calendar analysis.
+
+Both reverted. Issue #26 re-opened for proper triage under the new propose-only flow (which ships with this version — dec424d predated it by minutes).
+
+### Reverted — commit 60546e8 (wrong-cause auto-fix for #19)
+
+Auto-triage v1 closed issue #19 ("English chat → Hebrew reply") with a voice-handler fix. The reported bug was not voice. The old triage pattern-matched to v1.8.0's fresh VOICE LANGUAGE OVERRIDE work, not the actual cause. The infrastructure that enabled this failure mode (auto-fix without owner review + pre-injected changelog context + no image handling) is what this version's triage rewrite fixes. The voice fix has been re-applied cleanly under this version with its real justification, and the real #19 fix (LANGUAGE rule rewrite above) lands alongside it.
+
+### Migration
+
+- Install PM2 globally: `npm i -g pm2 pm2-windows-startup` (owner-side, one-time)
+- Create labels in the repo: `gh label create Proposed --color 0366D6 --description "Triage plan written, awaiting owner decision"` / `Approved` (green) / `Revise` (orange) / `Failed` (red)
+- Build: `npm run build`
+- Start: `pm2 start ecosystem.config.js && pm2 save && pm2-startup install` (Windows)
+- First auto-triage run will test the new flow end-to-end
+
+### Not changed
+
+- `config/users/idan.yaml` persona line — language-mirroring is a Maelle-wide rule, fixed in the prompt
+- Core Maelle behavior — this patch is mostly infra + two prompt fixes
+
+---
+
 ## 1.8.0 — Chapter close: 1.7 wave done, voice English-override + owner quiet-hours
 
 1.7 was a long stabilization run — 8 patches across 2 days that hardened the core. We started with the agent-as-transport-coupling smell, shipped the Connection-shim foundation (issue #1's first wedge), built the Knowledge skill, fixed silencing, fixed dup outreach, fixed the lunch detector, fixed the calendar sycophancy, fixed em-dashes, made categories YAML-defined. Closing the chapter with one feature + two real-world fixes.

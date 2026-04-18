@@ -321,28 +321,47 @@ Edit the file — set your name, email, Slack user ID, Slack app credentials, wo
 
 ### 5. Run
 
-```bash
-# Development (hot reload)
-npm run dev
+Development (hot reload):
 
-# Production
-npm run build && npm start
+```bash
+npm run dev
 ```
+
+Production (under PM2, recommended — survives crashes, auto-restarts, pulls + rebuilds on auto-triage commits):
+
+```bash
+npm i -g pm2 pm2-windows-startup   # one-time
+npm run build
+pm2 start ecosystem.config.js
+pm2 save
+pm2-startup install                 # Windows: auto-start on reboot
+```
+
+This starts two processes — `maelle` (the bot) and `maelle-deploy-watcher` (polls origin every 5 min; auto-pulls + rebuilds + restarts when an auto-triage commit lands).
 
 ---
 
-## Bug auto-triage (GitHub Action)
+## Bug auto-triage + auto-build (GitHub Action)
 
-When you open an issue with the `Bug` label, a GitHub Action runs immediately and uses the Claude Agent SDK to investigate.
+When you open an issue with the `Bug` label, a GitHub Action runs and uses the Claude Agent SDK to investigate and propose a plan. You review; you approve; the build happens.
 
-- **Simple, low-risk fix** (≤50 lines, single file, typecheck passes) → committed directly to master with a comment on the issue, issue closed.
-- **Medium or complex** (multi-file, architectural, judgment required) → no code touched. The agent posts a plan as an issue comment for you to review when you're back at the keyboard.
+**Three-phase flow:**
 
-Every triage adds the `auto-triaged` label so the same issue won't be re-processed. Bot commits won't trigger themselves (the workflow only fires on issue events).
+1. **Triage → Plan.** Agent reads the issue + comments, downloads every attached image, investigates the codebase from scratch (no pre-injected context — avoids recency bias), and writes a plan as an issue comment. Labels the issue `Proposed`. Never edits files.
+2. **Your decision.** Read the plan. Label `Approved` to build, or label `Revise` and add comments explaining what to reconsider.
+3. **Auto-build.** On `Approved`, a second Action runs: implements the plan, typechecks, commits + pushes under "Maelle Auto-Triage" author, closes the issue.
 
-**Setup once:** add `ANTHROPIC_API_KEY` as a repository secret in GitHub Settings → Secrets and variables → Actions.
+After push, the `maelle-deploy-watcher` PM2 process on your machine picks up the commit within 5 minutes and restarts Maelle on the new code. Only auto-triage commits trigger the auto-deploy — your own pushes you deploy yourself.
 
-Files: [`.github/workflows/auto-triage-bug.yml`](.github/workflows/auto-triage-bug.yml), [`scripts/auto-triage-bug.mjs`](scripts/auto-triage-bug.mjs).
+**Safety floors on auto-build:** typecheck must pass, diff ≤200 lines, path allowlist (cannot edit `.claude/`, memory files, `CHANGELOG.md`, `README.md`, `package.json`, `config/users/`, `.github/`, or the auto-triage scripts themselves). Any violation → revert + comment + `Failed` label, issue stays open.
+
+**Image-aware triage.** The triage agent downloads every GitHub user-attachments image referenced in the issue body or comments and reads them as visual evidence before diagnosing. This is critical — most bug reports include screenshots.
+
+**Labels:** `Proposed` / `Approved` / `Revise` / `Failed` / `Triaged`.
+
+**Setup once:** add `ANTHROPIC_API_KEY` as a repository secret (Settings → Secrets and variables → Actions). Create the labels: `gh label create Proposed Approved Revise Failed` (any colors).
+
+Files: [`.github/workflows/auto-triage-bug.yml`](.github/workflows/auto-triage-bug.yml), [`.github/workflows/auto-build.yml`](.github/workflows/auto-build.yml), [`scripts/auto-triage-bug.mjs`](scripts/auto-triage-bug.mjs), [`scripts/auto-build.mjs`](scripts/auto-build.mjs), [`scripts/deploy-watcher.mjs`](scripts/deploy-watcher.mjs), [`ecosystem.config.js`](ecosystem.config.js).
 
 ---
 

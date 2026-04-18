@@ -984,9 +984,9 @@ export function createSlackAppForProfile(profile: UserProfile): App {
             const txt = typeof msgOrText === 'string' ? msgOrText : msgOrText.text;
             await client.chat.postMessage({ token: assistant.slack.bot_token, channel: channelId, thread_ts: threadTs, text: txt });
           };
-          // Prefix the transcription with "[Voice message]:" so the orchestrator's
-          // VOICE LANGUAGE OVERRIDE rule fires and forces an English reply.
-          // processMessage persists it to conversation history — no pre-append needed.
+          // Prefix with [Voice message]: so the orchestrator's VOICE LANGUAGE
+          // OVERRIDE rule fires. processMessage persists the text via
+          // appendToConversation, so no pre-append needed.
           await processMessage({ senderId: message.user!, text: `[Voice message]: ${text}`, channelId, ts, threadTs, say: sayFn, client, isChannel: false, isMpim: false, voiceInput: true });
         } catch (err) {
           logger.error('Voice message handling error', { err: String(err) });

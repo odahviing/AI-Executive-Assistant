@@ -2,33 +2,40 @@
 /**
  * Auto-triage a Bug issue using the Claude Agent SDK.
  *
- * Invoked by .github/workflows/auto-triage-bug.yml when a Bug-labeled issue
- * opens. The agent investigates the codebase, classifies the bug, and either
- * (a) fixes it directly when the change is small + safe, or
- * (b) writes a plan as an issue comment when the change is too big or
- *     requires owner judgment.
+ * v1.8.2 — PROPOSE-ONLY flow. The agent never edits files directly; it always
+ * writes a plan as an issue comment and labels the issue `Proposed`. The owner
+ * reviews, then labels `Approved` (triggers auto-build.mjs) or `Revise` (re-runs
+ * this script against the full comment history).
  *
- * SAFETY FLOORS (enforced by THIS SCRIPT, not the agent):
- *   - Auto-commit only when ALL of: agent classified SIMPLE, edits are
- *     <= 50 lines added+removed, edits touch a single file, npm typecheck
- *     passes after the edits.
- *   - Any failure → revert all working-tree changes, comment the agent's
- *     plan on the issue, label `auto-triaged`, leave issue OPEN for owner.
- *   - Bot's own commits don't re-trigger (workflow runs on ISSUES, not pushes).
- *   - Same issue won't re-trigger (`auto-triaged` label is the dedupe gate
- *     in the workflow's `if`).
+ * Invoked by .github/workflows/auto-triage-bug.yml on:
+ *   - issue opened with `Bug` label
+ *   - `Bug` label added to an existing issue
+ *   - `Revise` label added to an issue (re-plan with owner's feedback)
  *
- * The agent's allowed tools are deliberately narrow: Read/Grep/Glob/Edit/Write
- * for codebase work + Bash for `npm run typecheck`. No git access from inside
- * the agent — commits + pushes are this script's job, after the agent finishes.
+ * What this script does:
+ *   1. Reads issue title + body + all prior comments
+ *   2. Downloads every image embedded in the body/comments to /tmp/triage-images/
+ *   3. Invokes the agent with no pre-injected codebase context — forces it to
+ *      investigate from scratch (anti-recency-bias)
+ *   4. Agent outputs strict-JSON classification + plan; never edits files
+ *   5. Posts plan as a comment, labels `Proposed` (or auto-closes NOT_A_BUG)
+ *   6. Removes `Revise` label if present
+ *
+ * Critical change from v1: there is no SIMPLE auto-fix path. Every real bug
+ * gets a plan the owner must approve. Cost: 1 extra click per bug. Benefit:
+ * no more wrong auto-fixes shipping unsupervised.
  */
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import Anthropic from '@anthropic-ai/sdk';
 import { execSync, spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const ISSUE_NUMBER = process.env.ISSUE_NUMBER;
 const REPO         = process.env.REPO;
+const GH_TOKEN     = process.env.GH_TOKEN;
 
 if (!ISSUE_NUMBER || !REPO || !process.env.ANTHROPIC_API_KEY) {
   console.error('Missing required env: ISSUE_NUMBER, REPO, ANTHROPIC_API_KEY');
@@ -42,7 +49,6 @@ function sh(cmd, opts = {}) {
 }
 
 function ghComment(body) {
-  // gh expects body via --body-file when content has special chars; use stdin.
   const r = spawnSync('gh', ['issue', 'comment', ISSUE_NUMBER, '--repo', REPO, '--body-file', '-'], {
     input: body,
     encoding: 'utf8',
@@ -56,84 +62,113 @@ function ghLabel(...labels) {
   }
 }
 
+function ghRemoveLabel(label) {
+  spawnSync('gh', ['issue', 'edit', ISSUE_NUMBER, '--repo', REPO, '--remove-label', label], { encoding: 'utf8' });
+}
+
 function ghClose(reason = 'completed') {
-  // reason: 'completed' (default — issue resolved) or 'not planned' (won't-fix / not-a-bug)
   spawnSync('gh', ['issue', 'close', ISSUE_NUMBER, '--repo', REPO, '--reason', reason], { encoding: 'utf8' });
 }
 
-// ── Read the issue ──────────────────────────────────────────────────────────
+// ── Read the issue + comments ────────────────────────────────────────────────
 
 const issue = JSON.parse(sh(
-  `gh issue view ${ISSUE_NUMBER} --repo ${REPO} --json title,body,labels,author,number,url`,
+  `gh issue view ${ISSUE_NUMBER} --repo ${REPO} --json title,body,labels,author,number,url,comments`,
 ));
 
-console.log(`Auto-triaging issue #${issue.number}: "${issue.title}"`);
+console.log(`Triaging issue #${issue.number}: "${issue.title}"`);
+const isRevise = issue.labels.some(l => l.name === 'Revise');
+if (isRevise) console.log('REVISE mode — re-planning with full comment history');
 
-// ── Build agent prompt ──────────────────────────────────────────────────────
+// ── Download images referenced in the issue + comments ───────────────────────
 
-let sessionStarter = '';
-try {
-  sessionStarter = readFileSync('.claude/SESSION_STARTER.md', 'utf8');
-} catch { /* OK if missing */ }
+const IMG_DIR = join(tmpdir(), `triage-${ISSUE_NUMBER}`);
+mkdirSync(IMG_DIR, { recursive: true });
 
-const systemPrompt = `You are an automated bug-triage agent for the Maelle codebase. You run in GitHub Actions whenever a Bug-labeled issue is filed. Your job is to investigate, classify, and either fix-or-plan.
+// Catches both GitHub user-attachments URLs and the older user-images CDN
+const IMG_URL_RE = /https:\/\/(?:github\.com\/user-attachments\/assets|user-images\.githubusercontent\.com)\/[^\s)"'\]<>]+/g;
 
-REPOSITORY CONTEXT (from .claude/SESSION_STARTER.md):
+const allText = [
+  issue.body || '',
+  ...(issue.comments || []).map(c => c.body || ''),
+].join('\n\n');
 
-${sessionStarter || '(SESSION_STARTER.md not found — investigate the repo structure yourself before fixing anything)'}
+const imageUrls = Array.from(new Set(allText.match(IMG_URL_RE) || []));
+const downloadedImages = []; // { url, path }
 
-YOUR DECISION TREE (apply STRICTLY):
-
-1. Read the bug. Investigate the codebase using Read / Grep / Glob to find the actual cause.
-
-2. Classify:
-   - NOT_A_BUG: the issue doesn't describe a real defect. Examples: pipeline/verification
-     tests ("confirm you can read this repo"), usage questions ("how do I enable X?"),
-     feature requests mislabeled as Bug, already-fixed-in-a-previous-commit,
-     invalid/nonsensical reports, duplicate of an existing issue. No code change should
-     be made for these; the issue should be closed.
-   - SIMPLE: real defect. Cause is clear, fix touches ONE file, total diff <= 50 lines
-     added+removed, no architectural decisions, no judgment about UX/tone/policy needed.
-   - MEDIUM: real defect. Cause is clear but the fix is bigger (multiple files, >50 lines,
-     or touches prompts/persona/skill behavior).
-   - COMPLEX: real defect. Cause is unclear, requires architecture changes, or genuinely
-     needs the owner's judgment (e.g. "should we deprecate X?").
-
-3. If NOT_A_BUG:
-   - Do NOT edit any files.
-   - Write a brief "summary" explaining why this isn't a bug (one or two sentences).
-   - The runner will auto-close the issue with a short comment.
-
-4. If SIMPLE:
-   - Make the edit using Edit/Write.
-   - Run \`npm run typecheck\` via Bash. If it fails, REVERT mentally (the runner script will
-     wipe your changes anyway) and write a PLAN instead.
-   - Otherwise, your final response MUST be a structured summary so the runner can commit.
-
-5. If MEDIUM or COMPLEX:
-   - Do NOT edit any files. Investigate, then write a PLAN.
-   - The plan should describe: root cause, proposed fix, files affected, risks, anything the
-     owner needs to decide.
-
-CRITICAL CONSTRAINTS:
-- NEVER edit: .claude/, memory files (anywhere), CHANGELOG.md, README.md, package.json,
-  config/users/ (real owner data — gitignored anyway). These are owner-curated.
-- NEVER edit: .github/ (your own workflow), scripts/auto-triage-*.mjs (your own script).
-- NEVER attempt git operations directly. The runner handles all git.
-- Honesty rule (from Maelle's standing principles): if you're not sure, classify as MEDIUM
-  or COMPLEX. Don't guess.
-
-OUTPUT FORMAT (your final message — strict JSON ONLY, no prose preamble, no fences):
-
-{
-  "classification": "NOT_A_BUG" | "SIMPLE" | "MEDIUM" | "COMPLEX",
-  "summary": "One paragraph: what the bug is, what the cause is, what you did or what should be done. For NOT_A_BUG: why it isn't a real defect.",
-  "files_changed": ["src/path/to/file.ts"],   // empty array if no edits / NOT_A_BUG / MEDIUM / COMPLEX
-  "plan": "Owner-facing plan in markdown. Required for MEDIUM/COMPLEX. Optional for SIMPLE (a brief 'what changed' note). Omit or empty for NOT_A_BUG."
+async function downloadImage(url, idx) {
+  const res = await fetch(url, {
+    headers: GH_TOKEN ? { Authorization: `Bearer ${GH_TOKEN}` } : {},
+    redirect: 'follow',
+  });
+  if (!res.ok) {
+    console.warn(`  Failed to fetch ${url}: ${res.status}`);
+    return null;
+  }
+  // Best-effort extension from Content-Type
+  const ct = res.headers.get('content-type') || '';
+  let ext = 'png';
+  if (ct.includes('jpeg') || ct.includes('jpg')) ext = 'jpg';
+  else if (ct.includes('gif')) ext = 'gif';
+  else if (ct.includes('webp')) ext = 'webp';
+  const buf = Buffer.from(await res.arrayBuffer());
+  const path = join(IMG_DIR, `img-${idx}.${ext}`);
+  writeFileSync(path, buf);
+  console.log(`  Downloaded ${url} → ${path} (${buf.length} bytes)`);
+  return { url, path };
 }
 
-If you're uncertain at any step → classify higher (MEDIUM not SIMPLE; COMPLEX not MEDIUM). Cost of a wrong auto-fix is high; cost of a missed plan is just one extra owner review.
-Do NOT classify as NOT_A_BUG just because the fix seems small — that's SIMPLE. NOT_A_BUG is reserved for "the issue doesn't describe a real defect at all."`;
+if (imageUrls.length > 0) {
+  console.log(`Found ${imageUrls.length} image(s) in issue + comments. Downloading...`);
+  for (let i = 0; i < imageUrls.length; i++) {
+    const r = await downloadImage(imageUrls[i], i);
+    if (r) downloadedImages.push(r);
+  }
+} else {
+  console.log('No images in issue.');
+}
+
+// ── Build agent prompt ───────────────────────────────────────────────────────
+
+const systemPrompt = `You are an automated bug-triage agent for the Maelle codebase. A Bug-labeled issue was filed. Your job: investigate, then PROPOSE A PLAN. You never edit files.
+
+RULES:
+
+1. NEVER edit any file. You have Read/Grep/Glob only for code. No Edit, no Write, no Bash git.
+2. Always propose a plan as your output. The owner reviews the plan and labels "Approved" to trigger the build phase. You do NOT build.
+3. Investigate the codebase BEFORE forming a hypothesis. Do NOT pattern-match on recent changelog entries or the latest version's headline feature — that's a known failure mode (the auto-triage shipped a bad fix in v1.8.0 because it associated a language bug with the fresh VOICE LANGUAGE OVERRIDE feature; the bug was actually about text chat). Anchor your diagnosis in code you've actually read, not memory of recent work.
+4. If the issue has images (screenshots), READ THEM via the Read tool on the paths listed under "ATTACHED IMAGES" below. Screenshots are usually the single most important evidence — a text-chat bug looks very different from a voice-chat bug in a screenshot. Do not classify without inspecting images present.
+5. Your root cause must name specific code: a file path and an approximate line or function. "A fix in the prompt" is not grounded. "The LANGUAGE rule at systemPrompt.ts:292-296 doesn't hold under prior-turn pressure" is grounded.
+6. If the cause relies on a single keyword match (e.g., "Hebrew" → voice), confirm with a second independent signal (the screenshot, a specific code path, a reproducer). Missing confirmation → lower your confidence and flag the uncertainty in the plan.
+7. Classification:
+   - NOT_A_BUG: pipeline tests ("confirm you can read this repo"), usage questions, feature requests mislabeled, already-fixed, invalid/nonsensical reports, duplicates. No plan needed.
+   - BUG: a real defect. You write a plan, classify internal complexity (simple/medium/complex) as metadata, and the owner decides.
+8. If uncertain about the cause, classify BUG + complex + say so in the plan. Do not guess. The owner can ask you to dig more via the Revise label.
+
+OUTPUT FORMAT (your final message — strict JSON only, no prose preamble, no code fences):
+
+{
+  "classification": "NOT_A_BUG" | "BUG",
+  "complexity": "simple" | "medium" | "complex",
+  "confidence": "high" | "medium" | "low",
+  "summary": "One paragraph: what the bug is, what the cause is, grounded in code you read. For NOT_A_BUG: why it isn't a real defect.",
+  "root_cause": "File path + line/function + mechanism. E.g. 'src/core/orchestrator/systemPrompt.ts:292-296 — LANGUAGE rule buries the no-inertia clause mid-sentence; Sonnet drifts under conversational pressure'. Empty string for NOT_A_BUG.",
+  "files_likely_affected": ["src/path/to/file.ts"],
+  "plan": "Owner-facing plan in markdown. Required for BUG. Structure: what, why, how, risks. Omit or empty for NOT_A_BUG.",
+  "uncertainty": "If confidence is medium or low, name exactly what you're unsure about. Empty string if high confidence."
+}`;
+
+const attachedImages = downloadedImages.length > 0
+  ? `\nATTACHED IMAGES (use the Read tool on each path to view — these are almost always critical evidence):\n${downloadedImages.map((img, i) => `  ${i + 1}. ${img.path}  (original URL: ${img.url})`).join('\n')}\n`
+  : '\nNo images attached to this issue.\n';
+
+const commentHistory = (issue.comments && issue.comments.length > 0)
+  ? `\nPRIOR COMMENTS ON THIS ISSUE (chronological, oldest first):\n\n${issue.comments.map(c => `— ${c.author?.login || 'unknown'} @ ${c.createdAt || '?'}:\n${c.body}\n`).join('\n')}\n`
+  : '\n(No prior comments.)\n';
+
+const reviseNote = isRevise
+  ? '\nTHIS IS A REVISE REQUEST: You already proposed a plan earlier (see PRIOR COMMENTS above). The owner wants you to reconsider based on their feedback in those comments. Read the feedback carefully and write a NEW plan that addresses their concerns. Do not simply restate the old plan.\n'
+  : '';
 
 const userPrompt = `Issue #${issue.number}: "${issue.title}"
 
@@ -144,10 +179,11 @@ Labels: ${issue.labels.map(l => l.name).join(', ')}
 BUG REPORT BODY:
 
 ${issue.body || '(empty body)'}
+${attachedImages}${commentHistory}${reviseNote}
 
-Investigate the codebase, classify, and produce your structured JSON output as specified.`;
+Investigate the codebase (use Grep/Glob/Read — start by figuring out what subsystem this touches, then read the actual code). Inspect every attached image with the Read tool before diagnosing. Produce your structured JSON output as specified. Remember: you cannot edit files; you can only propose a plan.`;
 
-// ── Run the agent ──────────────────────────────────────────────────────────
+// ── Run the agent ────────────────────────────────────────────────────────────
 
 console.log('Invoking Claude Agent SDK...');
 
@@ -159,11 +195,8 @@ try {
     options: {
       systemPrompt,
       model: 'claude-sonnet-4-6',
-      permissionMode: 'acceptEdits',   // auto-accept Edit/Write; Bash still prompts unless allowed
-      allowedTools: ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'],
-      // Bash is allowed because the agent needs `npm run typecheck`.
-      // The script's safety floors (typecheck pass + size cap) are the real guard,
-      // not tool permissions.
+      permissionMode: 'default',    // no edits allowed; we don't grant Edit/Write
+      allowedTools: ['Read', 'Grep', 'Glob'],
     },
   })) {
     if (event.type === 'result') {
@@ -173,13 +206,13 @@ try {
 } catch (err) {
   console.error('Agent run failed:', err);
   ghComment(`🤖 Auto-triage hit an internal error and could not investigate this bug. Owner: please review manually.\n\n\`\`\`\n${String(err).slice(0, 1000)}\n\`\`\``);
-  ghLabel('auto-triaged');
+  ghLabel('Triaged');
   process.exit(0);
 }
 
 console.log('Agent finished. Final result length:', lastTextResult.length);
 
-// ── Parse the agent's structured output ────────────────────────────────────
+// ── Parse the agent's output ─────────────────────────────────────────────────
 
 function extractJson(raw) {
   let cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
@@ -196,56 +229,67 @@ try {
 } catch (err) {
   console.error('Could not parse agent output as JSON:', err);
   ghComment(`🤖 Auto-triage finished but its output was not parseable. Raw output below for owner review:\n\n${lastTextResult.slice(0, 4000)}`);
-  ghLabel('auto-triaged');
+  ghLabel('Triaged');
   process.exit(0);
 }
 
-console.log('Verdict:', verdict.classification);
+console.log(`Verdict: ${verdict.classification} | complexity=${verdict.complexity} | confidence=${verdict.confidence}`);
 
-// ── Inspect what the agent actually changed ────────────────────────────────
+// ── Sanity-check pass (anti-recency-bias guardrail) ──────────────────────────
+// A tiny Sonnet call asks: "does your plan's cause actually match the reported
+// symptoms?" This catches off-topic fixes like 60546e8 (voice fix proposed for
+// a text-chat bug). Fails open on API error.
 
-const changedFiles = sh('git diff --name-only').split('\n').filter(Boolean);
-const stat = sh('git diff --shortstat || echo ""');
+let sanityWarning = null;
+if (verdict.classification === 'BUG' && verdict.summary && verdict.root_cause) {
+  try {
+    const anthropic = new Anthropic();
+    const res = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 400,
+      system: 'You are a sanity-checker for bug triage. Given a reported bug and a proposed root cause, judge whether the cause plausibly explains the symptoms. Be strict — catch off-topic fixes. Strict JSON only, no preamble.',
+      messages: [{
+        role: 'user',
+        content: `REPORTED BUG:
+Title: ${issue.title}
+Body: ${(issue.body || '').slice(0, 2000)}
+${downloadedImages.length > 0 ? `[${downloadedImages.length} image(s) attached — the triage agent inspected them; you cannot]` : ''}
 
-// Parse "X files changed, Y insertions(+), Z deletions(-)"
-const insMatch = stat.match(/(\d+)\s+insertion/);
-const delMatch = stat.match(/(\d+)\s+deletion/);
-const totalLines = (parseInt(insMatch?.[1] ?? '0', 10)) + (parseInt(delMatch?.[1] ?? '0', 10));
+PROPOSED ROOT CAUSE:
+${verdict.root_cause}
 
-console.log(`Changed files: ${changedFiles.length} | total lines changed: ${totalLines}`);
+PROPOSED SUMMARY:
+${verdict.summary}
 
-// ── Apply safety floors + decide outcome ────────────────────────────────────
+Does this cause plausibly match the symptoms? Watch for:
+- Off-topic: the cause is about a different feature than the bug describes
+- Keyword match: the cause pattern-matched a word in the bug instead of the actual problem
+- Overreach: the cause is real but doesn't explain the specific symptom reported
 
-function postPlanAndExit(reason, planText) {
-  // Wipe any working-tree changes the agent left behind
-  if (changedFiles.length > 0) {
-    sh('git checkout -- .');
+Output strict JSON only:
+{
+  "match": "yes" | "no" | "uncertain",
+  "reason": "one sentence"
+}`,
+      }],
+    });
+    const text = res.content.find(b => b.type === 'text')?.text || '';
+    const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
+    const parsed = JSON.parse(cleaned.match(/\{[\s\S]*\}/)?.[0] || cleaned);
+    if (parsed.match !== 'yes') {
+      sanityWarning = `⚠️ **Sanity-check warning:** ${parsed.reason || '(no reason given)'} (verdict: ${parsed.match})`;
+      console.log('Sanity check flagged:', parsed);
+    } else {
+      console.log('Sanity check passed.');
+    }
+  } catch (err) {
+    console.warn('Sanity check failed (fails open):', String(err).slice(0, 200));
   }
-  const body = `🤖 **Auto-triage: needs owner review**
-
-**Reason:** ${reason}
-
-**Summary:** ${verdict.summary || '(none)'}
-
-**Plan:**
-
-${planText || verdict.plan || '(no plan written)'}
-
----
-
-*Agent classified this as: \`${verdict.classification}\`. Files the agent considered: ${(verdict.files_changed ?? []).map(f => `\`${f}\``).join(', ') || 'none'}*`;
-  ghComment(body);
-  ghLabel('auto-triaged');
-  process.exit(0);
 }
 
-// NOT_A_BUG — auto-close with "not planned" reason, short comment explaining why.
-// Used for pipeline tests, usage questions, invalid reports, already-fixed, duplicates.
+// ── NOT_A_BUG — auto-close ───────────────────────────────────────────────────
+
 if (verdict.classification === 'NOT_A_BUG') {
-  // Revert any accidental edits (agent shouldn't have made any, but defense in depth)
-  if (changedFiles.length > 0) {
-    sh('git checkout -- .');
-  }
   ghComment(`🤖 **Auto-triage: not a bug — closing**
 
 ${verdict.summary || 'Agent determined this issue does not describe a real defect.'}
@@ -253,84 +297,50 @@ ${verdict.summary || 'Agent determined this issue does not describe a real defec
 ---
 
 *Closed automatically. If this was wrong, reopen the issue and I'll investigate again.*`);
-  ghLabel('auto-triaged');
+  ghLabel('Triaged');
   ghClose('not planned');
   console.log('NOT_A_BUG — closed with not-planned.');
   process.exit(0);
 }
 
-if (verdict.classification !== 'SIMPLE') {
-  postPlanAndExit(
-    verdict.classification === 'COMPLEX'
-      ? 'Agent classified this as COMPLEX (architecture / judgment required).'
-      : 'Agent classified this as MEDIUM (multi-file or significant change).',
-    verdict.plan,
-  );
-}
+// ── BUG — post plan comment, label Proposed ──────────────────────────────────
 
-// SIMPLE path — verify size + typecheck before committing
-if (changedFiles.length === 0) {
-  postPlanAndExit('Agent classified as SIMPLE but made no file edits. Posting analysis only.', verdict.plan || verdict.summary);
-}
+const confidenceBadge = verdict.confidence === 'high' ? '✅ high confidence'
+                     : verdict.confidence === 'medium' ? '🟡 medium confidence'
+                     : '🔴 low confidence';
 
-if (changedFiles.length > 1) {
-  postPlanAndExit(`Agent's edit touched ${changedFiles.length} files (cap: 1). Reverting and posting plan.`, verdict.plan);
-}
+const uncertaintyBlock = verdict.uncertainty
+  ? `\n**Uncertain about:** ${verdict.uncertainty}\n`
+  : '';
 
-if (totalLines > 50) {
-  postPlanAndExit(`Agent's edit changed ${totalLines} lines (cap: 50). Reverting and posting plan.`, verdict.plan);
-}
+const sanityBlock = sanityWarning ? `\n${sanityWarning}\n` : '';
 
-// Forbidden paths check (defense-in-depth — system prompt also forbids these)
-const FORBIDDEN_PREFIXES = ['.claude/', '.github/', 'memory/', 'CHANGELOG.md', 'README.md', 'package.json', 'config/users/', 'scripts/auto-triage'];
-const forbiddenHit = changedFiles.find(f => FORBIDDEN_PREFIXES.some(p => f.startsWith(p) || f === p));
-if (forbiddenHit) {
-  postPlanAndExit(`Agent edited a forbidden path (\`${forbiddenHit}\`). Reverting.`, verdict.plan);
-}
+const imagesBlock = downloadedImages.length > 0
+  ? `\n*Inspected ${downloadedImages.length} attached image(s).*`
+  : '';
 
-// Typecheck
-console.log('Running typecheck...');
-const tc = spawnSync('npm', ['run', 'typecheck'], { encoding: 'utf8' });
-if (tc.status !== 0) {
-  postPlanAndExit('Typecheck failed after the agent\'s edit. Reverting.', `Typecheck output:\n\`\`\`\n${(tc.stdout + tc.stderr).slice(-2000)}\n\`\`\`\n\n${verdict.plan ?? ''}`);
-}
+const commentBody = `🤖 **Auto-triage: plan proposed**
 
-console.log('Typecheck passed. Committing + pushing.');
+**Classification:** BUG (${verdict.complexity}) · ${confidenceBadge}${imagesBlock}
+${sanityBlock}${uncertaintyBlock}
+**Summary:** ${verdict.summary || '(none)'}
 
-// ── Commit + push ──────────────────────────────────────────────────────────
+**Root cause:** ${verdict.root_cause || '(not identified — see plan)'}
 
-const filesList = changedFiles.join(', ');
-const commitMessage = `auto-fix: ${issue.title}
-
-Fixes #${issue.number}
-
-${verdict.summary || ''}
-
-Files: ${filesList}
-Lines changed: ${totalLines}
-
-🤖 Generated by auto-triage GitHub Action.
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`;
-
-sh('git add -A');
-sh(`git commit -m ${JSON.stringify(commitMessage)}`);
-sh('git push');
-const sha = sh('git rev-parse HEAD');
-
-console.log(`Committed ${sha}`);
-
-ghComment(`🤖 **Auto-fixed in commit ${sha.slice(0, 7)}**
-
-${verdict.summary || ''}
-
-**File:** \`${filesList}\` (${totalLines} lines changed)
-
-${verdict.plan ? `**What changed:**\n${verdict.plan}` : ''}
+**Files likely affected:** ${(verdict.files_likely_affected || []).map(f => `\`${f}\``).join(', ') || '(tbd)'}
 
 ---
 
-*Review at home. Revert with \`git revert ${sha.slice(0, 7)}\` if anything's off.*`);
-ghLabel('auto-triaged');
-ghClose();
+## Plan
 
-console.log('Done.');
+${verdict.plan || '(no plan written)'}
+
+---
+
+**Next step:** label this issue \`Approved\` to build, or \`Revise\` with a comment to re-plan.`;
+
+ghComment(commentBody);
+ghLabel('Proposed');
+if (isRevise) ghRemoveLabel('Revise');
+
+console.log('Posted plan comment. Labeled Proposed. Waiting for owner decision.');
