@@ -980,12 +980,14 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           const text = await transcribeSlackAudio(audioFile.url_private, assistant.slack.bot_token, undefined, audioFile.mimetype);
           if (!text || text.length < 2) return;
           logger.info('Voice message transcribed', { preview: text.slice(0, 80) });
-          appendToConversation(threadTs, channelId, { role: 'user', content: `[Voice message]: ${text}`, ts });
           const sayFn = async (msgOrText: any) => {
             const txt = typeof msgOrText === 'string' ? msgOrText : msgOrText.text;
             await client.chat.postMessage({ token: assistant.slack.bot_token, channel: channelId, thread_ts: threadTs, text: txt });
           };
-          await processMessage({ senderId: message.user!, text, channelId, ts, threadTs, say: sayFn, client, isChannel: false, isMpim: false, voiceInput: true });
+          // Prefix the transcription with "[Voice message]:" so the orchestrator's
+          // VOICE LANGUAGE OVERRIDE rule fires and forces an English reply.
+          // processMessage persists it to conversation history — no pre-append needed.
+          await processMessage({ senderId: message.user!, text: `[Voice message]: ${text}`, channelId, ts, threadTs, say: sayFn, client, isChannel: false, isMpim: false, voiceInput: true });
         } catch (err) {
           logger.error('Voice message handling error', { err: String(err) });
         }
