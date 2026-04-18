@@ -112,10 +112,16 @@ export function processCalendarEvents(
   const result: ProcessedEvent[] = [];
 
   for (const ev of events) {
-    // showAs=free → strip entirely before Claude sees it
+    // showAs=free → strip unless it's a named lunch block.
+    // A "Lunch" event marked free is valid signal for analyzeCalendar's lunch
+    // detection; all other free events are noise (reminders, placeholders, etc.).
     if (ev.showAs === 'free') {
-      logger.debug('Skipping free event', { subject: ev.subject });
-      continue;
+      const isLunchBlock = (ev.subject || '').toLowerCase().includes('lunch');
+      if (!isLunchBlock) {
+        logger.debug('Skipping free event', { subject: ev.subject });
+        continue;
+      }
+      logger.debug('Keeping free lunch event for analysis', { subject: ev.subject });
     }
 
     const startDt = parseGraphDateTime(ev.start.dateTime, ev.start.timeZone, timezone);
@@ -292,12 +298,17 @@ export function analyzeCalendar(
       });
     }
 
-    // Time-block analysis (only non-all-day meetings within work hours)
-    const timedMeetings = nonAllDayMeetings.filter(e => {
+    // Time-block analysis (only non-all-day meetings within work hours).
+    // allTimedEvents includes free-showAs blocks (e.g. a "Lunch" block marked free)
+    // so the lunch-event detector below can find them.
+    // timedMeetings excludes free-showAs events so they don't distort gap /
+    // buffer / meeting-count calculations.
+    const allTimedEvents = nonAllDayMeetings.filter(e => {
       const [h, m] = e._localStartTime.split(':').map(Number);
       const startMin = h * 60 + m;
       return startMin >= workStartMin && startMin < workEndMin;
     });
+    const timedMeetings = allTimedEvents.filter(e => e.showAs !== 'free');
 
     // Compute gaps (free blocks) between meetings
     let totalMeetingMin = 0;
@@ -360,10 +371,12 @@ export function analyzeCalendar(
     let hasLunch = false;
     let lunchGap: string | undefined;
 
-    // Check if a "Lunch" event is already booked in the lunch window
+    // Check if a "Lunch" event is already booked in the lunch window.
+    // Uses allTimedEvents (not timedMeetings) so that a free-showAs "Lunch" block
+    // preserved in processCalendarEvents is still detectable here.
     // v1.7.7 — English-only subject match. The codebase doesn't support Hebrew
     // event-subject detection; owner names lunch events in English.
-    const lunchEvent = timedMeetings.find(e => {
+    const lunchEvent = allTimedEvents.find(e => {
       const subj = (e.subject || '').toLowerCase();
       if (!subj.includes('lunch')) return false;
       const [sh, sm] = e._localStartTime.split(':').map(Number);
@@ -1192,6 +1205,7 @@ Never narrate the full list of meetings unless asked. The summary is about issue
 
 CANCELLATION & RESCHEDULE RULES
 - To move a meeting: ALWAYS use move_meeting (PATCH) — NEVER delete + recreate. Preserves attendees, Teams link, and history.
+- After move_meeting returns success, the result already carries new_start / new_end — use those directly to confirm the move. If you then call get_calendar in the same turn and see the meeting at the new time, that is the expected outcome of the move you just ran. Do NOT treat it as a discovery ("I see the meeting was moved") or ask the owner about it — you moved it.
 - To cancel: ask the user once naturally ("Want me to cancel [X]?"). The moment they say yes — call delete_meeting. Done. No more asking.
 - NEVER use escalate_to_user for a simple delete confirmation — that creates a separate formal approval flow that conflicts with what you already asked. Just ask inline, then act.
 - Never report a meeting as moved, deleted, or created until the tool returns success.
