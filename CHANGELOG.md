@@ -2,6 +2,27 @@
 
 ---
 
+## 1.8.3 — Mutation tools return past-tense `action_summary` (issue #26 bug 1)
+
+Small patch addressing the "move-and-forget" class of bug caught in issue #26, where Maelle moved a meeting successfully and then narrated the post-move state as a fresh discovery ("already at 12:30, nothing to change") instead of acknowledging her own action.
+
+### Fixed — mutation tool returns now include action_summary
+
+`move_meeting`, `create_meeting`, `update_meeting`, `delete_meeting` all return an additional `action_summary` field with a past-tense sentence Sonnet can quote verbatim:
+
+- Move: `"Moved 'Lunch' to 12:30–13:10."`
+- Create: `"Booked 'Quarterly review' for 14:00–15:00."`
+- Update: `"Updated 'Planning sync': renamed to 'Q2 planning'."`
+- Delete: `"Cancelled 'Standup'."`
+
+Code-level fix — the tool result itself carries the past-tense framing, so there's less room for Sonnet to misread the outcome as a fresh calendar state. No new post-processing gate (intentionally — we already have claim-checker + date-verifier + security-gate). Consumers were checked: no external callers read these returns, so additive fields are safe.
+
+### Not fixed — Bug 2 from #26 (Lunch not detected)
+
+Root cause still unclear. The event subject IS "Lunch" (English) per owner confirmation, so the existing case-insensitive `subject.includes('lunch')` detector should pass. Needs live-log investigation at the next reproduction — #26 stays open at Medium priority.
+
+---
+
 ## 1.8.2 — Triage rewrite (propose-only, image-aware) + auto-deploy pipeline + language fixes
 
 Big patch — combines the 1.8.1-scoped language/voice fixes with a substantial rewrite of the auto-triage and deploy infrastructure. Scope nominally exceeds a patch, but owner called it 1.8.2 since it's all stabilization of the 1.8 wave.

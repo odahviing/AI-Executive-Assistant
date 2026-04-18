@@ -19,6 +19,13 @@
 import logger from '../utils/logger';
 import { DateTime } from 'luxon';
 import type { SkillContext } from './types';
+
+// v1.8.3 — extract "HH:MM" from an ISO datetime string for action_summary formatting.
+// Falls back to the raw string if the shape is unexpected.
+function formatIsoTime(iso: string): string {
+  const m = /T(\d{2}:\d{2})/.exec(iso);
+  return m ? m[1] : iso;
+}
 import type { UserProfile } from '../config/userProfile';
 import {
   getCalendarEvents,
@@ -898,7 +905,14 @@ Never claim you deleted something until the tool returns success.`,
           location:   args.location  as string | undefined,
           categories:  args.category ? [args.category as string] : ['Meeting'],  // default fallback
           sensitivity: args.category === 'Private' ? 'private' : undefined,
-        }).then(meetingId => ({ success: true, meetingId }));
+        }).then(meetingId => ({
+          success: true,
+          meetingId,
+          // v1.8.3 — past-tense summary the reply can quote verbatim. Prevents
+          // Sonnet from narrating the post-action calendar state as a fresh
+          // discovery instead of the result of her own action (issue #26 bug 1).
+          action_summary: `Booked '${args.subject}' for ${formatIsoTime(args.start as string)}–${formatIsoTime(args.end as string)}.`,
+        }));
       }
 
       case 'update_meeting': {
@@ -917,7 +931,17 @@ Never claim you deleted something until the tool returns success.`,
           details: { subject: args.meeting_subject, category: args.category, new_subject: args.new_subject },
           outcome: 'success',
         });
-        return { success: true, updated: args.meeting_subject, category: args.category ?? null, new_subject: args.new_subject ?? null };
+        const updateChanges: string[] = [];
+        if (args.new_subject) updateChanges.push(`renamed to '${args.new_subject}'`);
+        if (args.category) updateChanges.push(`category set to ${args.category}`);
+        return {
+          success: true,
+          updated: args.meeting_subject,
+          category: args.category ?? null,
+          new_subject: args.new_subject ?? null,
+          // v1.8.3 — past-tense summary for owner-visible reply. Issue #26 bug 1.
+          action_summary: `Updated '${args.meeting_subject}'${updateChanges.length > 0 ? ': ' + updateChanges.join(', ') : ''}.`,
+        };
       }
 
       case 'move_meeting': {
@@ -936,7 +960,17 @@ Never claim you deleted something until the tool returns success.`,
           details: { subject: args.meeting_subject, new_start: args.new_start, new_end: args.new_end },
           outcome: 'success',
         });
-        return { success: true, moved: args.meeting_subject, new_start: args.new_start, new_end: args.new_end };
+        return {
+          success: true,
+          moved: args.meeting_subject,
+          new_start: args.new_start,
+          new_end: args.new_end,
+          // v1.8.3 — past-tense summary the reply quotes verbatim. Issue #26 bug 1:
+          // without this, Sonnet could re-read the calendar post-move and narrate
+          // the new time as a fresh discovery ("already at 12:30, nothing to change")
+          // instead of acknowledging her own action.
+          action_summary: `Moved '${args.meeting_subject}' to ${formatIsoTime(args.new_start as string)}–${formatIsoTime(args.new_end as string)}.`,
+        };
       }
 
       case 'delete_meeting': {
@@ -949,7 +983,12 @@ Never claim you deleted something until the tool returns success.`,
           details: { subject: args.meeting_subject },
           outcome: 'success',
         });
-        return { success: true, deleted: args.meeting_subject };
+        return {
+          success: true,
+          deleted: args.meeting_subject,
+          // v1.8.3 — past-tense summary for owner-visible reply. Issue #26 bug 1.
+          action_summary: `Cancelled '${args.meeting_subject}'.`,
+        };
       }
 
       case 'escalate_to_user': {
