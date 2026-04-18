@@ -2,6 +2,60 @@
 
 ---
 
+## 1.8.0 — Chapter close: 1.7 wave done, voice English-override + owner quiet-hours
+
+1.7 was a long stabilization run — 8 patches across 2 days that hardened the core. We started with the agent-as-transport-coupling smell, shipped the Connection-shim foundation (issue #1's first wedge), built the Knowledge skill, fixed silencing, fixed dup outreach, fixed the lunch detector, fixed the calendar sycophancy, fixed em-dashes, made categories YAML-defined. Closing the chapter with one feature + two real-world fixes.
+
+### What's solid now (the 1.7 wave summary)
+
+- **Skill structure:** five togglable skills (`meetings`, `calendar`, `summary`, `knowledge`, `search`, `research`) with single-word noun keys; legacy keys auto-migrate at load time. New togglable skills cleanly slot in via `src/skills/registry.ts`.
+- **Multi-modal input:** voice (Whisper transcribe → orchestrator), image (Anthropic native multimodal + injection guard), text transcript (SummarySkill 3-stage state machine).
+- **Categories are YAML-defined:** owner declares `categories: [{name, description}]` in profile; tools (`book_lunch`, `set_event_category`, `create_meeting`) read them; Sonnet picks the right one via the EVENT CATEGORIES prompt block. Zero hardcoded category names.
+- **Honesty layers stable:** claim-checker (MPIM-aware), date-verifier, security gate, coord guard, image guard, recovery pass, no-silence-after-tools fallback. Plus RULE 9 (verify-don't-echo) + RULE 10 (lunch window respect) added in 1.7.8.
+- **MPIM thread continuity:** addressee gate + relevance gate skip when Maelle was just active in the thread (no more silent ignore on legitimate follow-ups).
+- **Auto-triage GitHub Action:** Bug-labeled issues run the Claude Agent SDK, classify SIMPLE/MEDIUM/COMPLEX/NOT_A_BUG, auto-fix tiny safe changes, plan-comment everything else.
+- **Owner social tracking:** owner is a regular `people_memory` row with `note_about_self` convenience tool. Stale-topic detection + random pick + fresh-opener fallback for richer social moments.
+
+### Added — VOICE LANGUAGE OVERRIDE (issue #11)
+
+Hebrew Whisper transcription quality + Hebrew TTS quality is meaningfully weaker than English today. New prompt rule in the VOICE block of `systemPrompt.ts`: when the user message starts with the literal token `"[Voice message]:"`, Sonnet's reply must be in ENGLISH regardless of the transcript's language. This OVERRIDES the LANGUAGE-mirror rule for voice scenarios only. Transcript itself stays in source language (no translation loss for context); only the reply is forced English. When the Hebrew gap closes (issue #12), the override flips off.
+
+Implementation: prompt-rule, NOT a Whisper endpoint swap. Sonnet sees the original Hebrew transcript fully (preserves names, places, cultural context that translation flattens), just constrains the output language.
+
+### Fixed — outreach_expiry respects owner work hours (Amazia 3am bug)
+
+QA caught two duplicate "Amazia hasn't replied" DMs at 3am Saturday Israel time. Two distinct issues:
+
+1. **Two duplicate outreach rows** from the v1.7.4 claim-checker bug were still in the DB. Cancelled the older one (`out_1776318265288_ewq9`) via one-time SQL update. The other (`out_1776318271902_zcd0`) remains in `no_response` as the canonical record.
+
+2. **`outreachExpiry.ts` posted owner DMs at 3am** because the deadline timing uses the colleague's timezone. The dispatcher fired immediately at deadline regardless of when "now" is for the OWNER. Fixed: second-stage owner notification now checks `isWithinOwnerWorkHours(profile, now)` based on `schedule.office_days` + `schedule.home_days`. If outside work hours, the task re-queues itself for the next owner workday morning (status stays `sent` so a colleague reply between now and morning still cancels naturally). If inside work hours, original behavior (mark `no_response`, post DM).
+
+Helpers `isWithinOwnerWorkHours`, `nextOwnerWorkdayStart` live inline in `outreachExpiry.ts` — small enough not to warrant a shared module, but the pattern can be extracted later if other dispatchers need the same gate.
+
+### New issue opened
+
+- **#12** — Better Hebrew voice support (Whisper + TTS). Tracks the gap that the v1.8.0 English-override is a workaround for. Resolution path: profile `voice_language: 'auto' | 'en' | 'he'`, better Hebrew ASR/TTS providers, naturalness in spoken Hebrew replies.
+
+### What 1.8 starts with
+
+- **#1 Connection-interface migration** (High) — the messaging shim landed in 1.7.2 (SummarySkill uses it). Next: define the formal `Connection` interface, port `outreach.ts` and `coord.ts` to it, then the email connector (#5) and meeting-summary email distribution (#2) unblock cleanly.
+- **#3 Persona/social-context as togglable skill** (Low) — refactor MemorySkill into core (basic identity) + togglable SocialContextSkill (hobbies, topics, engagement gate).
+- **#4 WhatsApp owner-sync channel**, **#6 Inbound workflows**, **#7 Meeting notes prep** — feature backlog.
+
+### Migration
+
+- DB schema: no changes. The Amazia row cancellation was a one-time data fix.
+- Profile YAML: no schema changes from 1.7.8 → 1.8.0.
+- Voice behavior changes: existing voice flows now reply in English even for Hebrew input. If you want this OFF temporarily (testing Hebrew TTS path), comment out the VOICE LANGUAGE OVERRIDE paragraph in `systemPrompt.ts`.
+
+### Not changed
+
+- All other skills + flows untouched.
+- `showAs: 'free'` stripping unchanged (all free events still dropped before Sonnet sees them).
+- Audio output (TTS) still fires for voice input when reply is short enough.
+
+---
+
 ## 1.7.8 — YAML-defined categories + two honesty rules (sycophancy, lunch window)
 
 Real-world QA on bug #10 surfaced two distinct Sonnet behavior issues plus a longer-standing architectural smell. All fixed in one patch.

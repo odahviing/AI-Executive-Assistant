@@ -26,7 +26,12 @@ function getOpenAI(): OpenAI {
 
 /**
  * Download a Slack audio file and transcribe it with Whisper.
- * Returns the transcribed text.
+ * Returns the transcribed text in the SOURCE language (Hebrew audio → Hebrew
+ * text). Sonnet receives the transcript in its original language so context
+ * is preserved; the prompt rule (see VOICE block in systemPrompt.ts) enforces
+ * English in the REPLY for voice scenarios. This way Sonnet understands the
+ * Hebrew prompt fully (no translation loss for context) but speaks back in
+ * English where the TTS quality is stronger. See issue #11.
  */
 export async function transcribeSlackAudio(
   fileUrl: string,

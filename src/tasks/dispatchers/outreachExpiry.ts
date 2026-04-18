@@ -2,8 +2,67 @@ import { DateTime } from 'luxon';
 import { completeTask, createTask, updateTask } from '../index';
 import { getDb, updateOutreachJob } from '../../db';
 import { calcResponseDeadline } from '../../connectors/slack/coordinator';
+import type { UserProfile } from '../../config/userProfile';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
+
+/**
+ * v1.8.0 — owner-quiet-hours respect for system→owner notifications.
+ *
+ * Returns true if `now` falls within ANY of the owner's defined work windows
+ * (office_days OR home_days, each with their own hours). If false, the
+ * notification should be deferred to the next workday morning.
+ */
+function isWithinOwnerWorkHours(profile: UserProfile, now: DateTime): boolean {
+  const day = now.toFormat('EEEE'); // "Monday"
+  const officeDays = profile.schedule.office_days.days as string[];
+  const homeDays = profile.schedule.home_days.days as string[];
+
+  if (officeDays.includes(day)) {
+    return isInWindow(now, profile.schedule.office_days.hours_start, profile.schedule.office_days.hours_end);
+  }
+  if (homeDays.includes(day)) {
+    return isInWindow(now, profile.schedule.home_days.hours_start, profile.schedule.home_days.hours_end);
+  }
+  return false; // not a work day
+}
+
+function isInWindow(dt: DateTime, startHHMM: string, endHHMM: string): boolean {
+  const [sh, sm] = startHHMM.split(':').map(Number);
+  const [eh, em] = endHHMM.split(':').map(Number);
+  const minutes = dt.hour * 60 + dt.minute;
+  return minutes >= (sh * 60 + sm) && minutes <= (eh * 60 + em);
+}
+
+/**
+ * Returns ISO of the next moment the owner is in work hours.
+ * Walks forward day-by-day; for each candidate day, picks the relevant
+ * hours_start. Caps at 14 days lookahead (defensive — should never hit).
+ */
+function nextOwnerWorkdayStart(profile: UserProfile): string {
+  let cursor = DateTime.now().setZone(profile.user.timezone);
+  const officeDays = profile.schedule.office_days.days as string[];
+  const homeDays = profile.schedule.home_days.days as string[];
+
+  for (let i = 0; i < 14; i++) {
+    const candidate = cursor.plus({ days: i });
+    const day = candidate.toFormat('EEEE');
+    if (officeDays.includes(day)) {
+      const [h, m] = profile.schedule.office_days.hours_start.split(':').map(Number);
+      const dt = candidate.set({ hour: h, minute: m, second: 0, millisecond: 0 });
+      if (i === 0 && dt < cursor) continue; // already past today's start; try tomorrow
+      return dt.toUTC().toISO()!;
+    }
+    if (homeDays.includes(day)) {
+      const [h, m] = profile.schedule.home_days.hours_start.split(':').map(Number);
+      const dt = candidate.set({ hour: h, minute: m, second: 0, millisecond: 0 });
+      if (i === 0 && dt < cursor) continue;
+      return dt.toUTC().toISO()!;
+    }
+  }
+  // Fallback — schedule looks empty; fire in 8 hours
+  return cursor.plus({ hours: 8 }).toUTC().toISO()!;
+}
 
 /**
  * Reply deadline reached. On first expiry: send one follow-up, re-queue
@@ -75,7 +134,42 @@ export const dispatchOutreachExpiry: TaskDispatcher = async (app, task, profile)
     }
   }
 
-  // Second expiry or no-reply-awaited — mark no_response and notify owner.
+  // v1.8.0 — quiet-hours respect. If now is outside the OWNER's defined
+  // work hours (per profile.schedule.office_days/home_days), defer the
+  // owner-facing notification to the next workday morning. The expiry
+  // deadline is set in COLLEAGUE timezone so it can fire at any hour for
+  // the owner; we don't want to DM the owner at 3am about a colleague who
+  // didn't reply — wait until the owner is actually working.
+  // Critically: do NOT mark the job as no_response yet, so a colleague
+  // reply between now and morning still cancels this expiry naturally.
+  const ownerNow = DateTime.now().setZone(profile.user.timezone);
+  if (!isWithinOwnerWorkHours(profile, ownerNow)) {
+    const deferredAt = nextOwnerWorkdayStart(profile);
+    createTask({
+      owner_user_id: job.owner_user_id,
+      owner_channel: job.owner_channel,
+      owner_thread_ts: job.owner_thread_ts,
+      type: 'outreach_expiry',
+      status: 'new',
+      title: `Final check on ${job.colleague_name}'s reply (deferred to your work hours)`,
+      due_at: deferredAt,
+      skill_ref: job.id,
+      context: JSON.stringify({ outreach_id: job.id, attempt: 2, deferred_from: ownerNow.toISO() }),
+      who_requested: 'system',
+      skill_origin: 'outreach',
+    });
+    completeTask(task.id);
+    logger.info('outreach_expiry — deferred owner notification (outside work hours)', {
+      taskId: task.id,
+      outreachId: job.id,
+      colleague: job.colleague_name,
+      ownerLocalNow: ownerNow.toFormat("EEE HH:mm"),
+      deferredUntil: deferredAt,
+    });
+    return;
+  }
+
+  // In owner work hours — mark no_response and notify now.
   updateOutreachJob(job.id, { status: 'no_response' });
   getDb().prepare(
     `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
