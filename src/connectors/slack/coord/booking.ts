@@ -355,12 +355,22 @@ export async function bookCoordination(
   for (const p of privateDmConfirm) {
     if (!p.slack_id) continue;
     try {
-      const dmResult = await app.client.conversations.open({ token: botToken, users: p.slack_id });
-      const dmChannel = (dmResult.channel as any)?.id;
+      // v1.8.6 — post the booking confirmation back in the ORIGINAL coord DM
+      // thread when we have it recorded (dm_channel + dm_thread_ts set in
+      // sendCoordDM). Falls back to opening a fresh DM for older coord rows
+      // that predate thread-tracking — those still get a top-level message.
+      let channel = p.dm_channel;
+      let threadTs = p.dm_thread_ts;
+      if (!channel) {
+        const dmResult = await app.client.conversations.open({ token: botToken, users: p.slack_id });
+        channel = (dmResult.channel as any)?.id;
+        threadTs = undefined;
+      }
       const pDt = DateTime.fromISO(slot).setZone(p.tz);
       await app.client.chat.postMessage({
         token: botToken,
-        channel: dmChannel,
+        channel: channel!,
+        thread_ts: threadTs,
         text: `All confirmed! "${job.subject}" is booked for ${pDt.toFormat("EEEE, d MMMM 'at' HH:mm")}${locationLine}. See you there.`,
       });
     } catch (_) {}

@@ -98,13 +98,28 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       app,
     });
 
-    const isSilent = !result.reply || result.reply.trim().toUpperCase() === 'NO_ISSUES';
+    const rawReply = result.reply ?? '';
+    const isSilent = !rawReply || rawReply.trim().toUpperCase() === 'NO_ISSUES';
 
     if (!isSilent) {
       await app.client.chat.postMessage({
         token: bot_token,
         channel: routine.owner_channel,
         text: `*${routine.title}*\n${normalizeSlackText(result.reply)}`,
+      });
+    } else {
+      // v1.8.6 — silent-completion visibility. Routines that return empty
+      // or "NO_ISSUES" used to complete silently with no trace the owner
+      // could see in Slack. Log prominently so pm2 logs shows when/why a
+      // routine ran without producing output. Owner can also ask Maelle
+      // "when did <routine> last run" — the last_result field captures it.
+      logger.info('Routine completed silently (no message sent to owner)', {
+        taskId: task.id,
+        routineId: routine.id,
+        routineTitle: routine.title,
+        scheduledAt,
+        replyPreview: rawReply ? rawReply.slice(0, 120) : '(empty)',
+        reason: rawReply.trim().toUpperCase() === 'NO_ISSUES' ? 'NO_ISSUES_sentinel' : 'empty_reply',
       });
     }
 

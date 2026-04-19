@@ -229,6 +229,12 @@ export interface CoordParticipant {
   contacted_via?: 'dm' | 'group';  // 'group' = options posted in the MPIM thread, 'dm' = private DM
   group_channel?: string;           // channel ID of the MPIM when contacted_via='group'
   group_thread_ts?: string;         // thread ts in the MPIM when contacted_via='group'
+  // v1.8.6 — for contacted_via='dm', the DM channel ID and the ts of Maelle's
+  // initial coord DM (which becomes the thread root for the participant's
+  // replies). Used to post follow-ups — including the final booking
+  // confirmation — back into the same thread instead of as a new top-level DM.
+  dm_channel?: string;
+  dm_thread_ts?: string;
 }
 
 export interface CoordJob {

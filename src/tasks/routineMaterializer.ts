@@ -129,7 +129,12 @@ export async function materializeRoutineTasks(
             is_system: routine.is_system === 1,
             never_stale: (routine as any).never_stale === 1,
           }),
-          who_requested: 'system',
+          // v1.8.6 — routine tasks are owner-authored, not system-created.
+          // The owner set the routine up; its materialized firings are "on
+          // his plate" (visible to get_my_tasks). Only skill-internal tasks
+          // (outreach dispatch, coord nudge, calendar fix, etc.) should
+          // remain 'system' and stay hidden from the owner's queue.
+          who_requested: routine.owner_user_id,
           routine_id: routine.id,
         });
         logger.info('Routine materialized', {

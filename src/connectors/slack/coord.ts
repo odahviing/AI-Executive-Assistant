@@ -410,18 +410,22 @@ async function sendCoordDM(
   // introLine already includes the greeting in both branches, so just concatenate.
   const message = `${introLine}${body}`;
 
-  await app.client.chat.postMessage({
+  const postResult = await app.client.chat.postMessage({
     token: params.botToken,
     channel: dmChannel,
     text: message,
   });
+  const dmTs = (postResult as any)?.ts as string | undefined;
 
   const job = getCoordJob(params.jobId);
   if (job) {
     const participants = JSON.parse(job.participants) as CoordParticipant[];
     const updated = participants.map(p =>
       p.slack_id === params.participant.slack_id
-        ? { ...p, dm_sent_at: new Date().toISOString() }
+        // v1.8.6 — also record dm_channel + dm_thread_ts so follow-ups
+        // (especially the booking confirmation in booking.ts) can post back
+        // into the same thread instead of starting a new top-level DM.
+        ? { ...p, dm_sent_at: new Date().toISOString(), dm_channel: dmChannel, dm_thread_ts: dmTs }
         : p
     );
     updateCoordJob(params.jobId, { participants: JSON.stringify(updated) });

@@ -2,6 +2,43 @@
 
 ---
 
+## 1.8.6 — Routines appear in get_my_tasks + silent-routine logging + coord thread continuity
+
+Three fixes, all from a single Sunday-morning bug report trace.
+
+### Fixed — `get_my_tasks` now surfaces routine-materialized tasks
+
+`get_my_tasks` filters `who_requested != 'system'`, which was correct for hiding internal bookkeeping (outreach dispatch, coord nudges, calendar fix tasks) but wrongly excluded routines — which the owner explicitly set up and should see on his plate. Root cause was semantic, not query-level: `routineMaterializer.ts` was tagging routine firings with `who_requested: 'system'` when the correct value is the owner's user_id (the owner IS the one who asked for the routine to run; only skill-internal side-effects are truly 'system').
+
+Changed `routineMaterializer.ts:132` to record `who_requested: routine.owner_user_id`. No query changes, no migration. Other 'system' callers (outreach dispatch, coord nudge, calendar fix, summary follow-up, briefing cron, calendar health monitor) stay 'system' — correct.
+
+Surfaces: when the owner asks "do you have a task today to check my LinkedIn?", the materialized routine firing shows up in the same list as reminders, outreach, and coord tasks.
+
+### Changed — silent routine completions now log prominently
+
+When a routine runs through the orchestrator and the reply is empty or `NO_ISSUES`, the dispatcher completes the task silently with no Slack output. That behavior is correct (you don't want routine noise in DMs), but it used to leave no trace the owner could find. Added an `INFO`-level log line (`Routine completed silently (no message sent to owner)`) with the routine id, title, scheduled-at, and reply preview. `pm2 logs maelle | grep routine` now shows the trail.
+
+No behavior change to actual dispatch. Owner can also ask "when did my LinkedIn routine last run?" — `routines.last_result` still captures "No issues found" for silent runs.
+
+This is an instrumentation fix for the "my 9am routine never fired" reports — most likely cause is that it DID fire and returned silent output, not that it skipped. Next time we'll have the logs to confirm.
+
+### Fixed — coord booking confirmation posts in thread instead of new DM
+
+When a coord booked, the final `"All confirmed! '<subject>' is booked for ..."` message to private-DM participants was posted as a new top-level DM instead of a reply in the existing coord thread. Thread continuity broken; colleague sees a floating confirmation disconnected from the slot-options conversation.
+
+Root cause: `CoordParticipant` only tracked `group_channel` + `group_thread_ts` for MPIM participants. For private-DM participants there was no equivalent, so `booking.ts` was opening a fresh DM (`conversations.open`) and posting without `thread_ts`.
+
+Added `dm_channel` + `dm_thread_ts` fields to `CoordParticipant`. `sendCoordDM` now captures the initial message's ts and stores both. `booking.ts` uses them when present; falls back to the old open-new-DM path for legacy coord rows that predate this change.
+
+No DB migration — participants live as JSON in `coord_jobs.participants`, additive fields.
+
+### Not changed / known follow-ups
+
+- Outreach-path DM thread continuity: `outreach_jobs` doesn't track where Maelle's initial outreach landed in Slack, so the v1.8.4 meeting-reschedule handler's confirmation DMs to the colleague may also post out-of-thread. Not hit in practice yet; file a bug if seen.
+- Root cause of Bug B (LinkedIn routine at 9am): still unknown. Logging above is the research trace, not a fix. Next time it happens, check `pm2 logs maelle --lines 2000 | grep -iE "routine|linkedin"` for the trail.
+
+---
+
 ## 1.8.5 — Phrasing + tool-choice clarity + LLM-based weekday context verifier
 
 Quality patch. Three narrow fixes, all learned from the "is Idan free at 3pm to join a meeting with me" trace pattern.
