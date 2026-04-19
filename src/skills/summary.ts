@@ -19,8 +19,10 @@
  * Externals are never auto-resolved to Slack IDs (they're not in the workspace).
  * If a name is unclear, the skill asks the owner — never guesses.
  *
- * Slack messaging goes through src/connections/slack/messaging.ts — NOT through
- * coordinator.ts. This is the foundation for the issue #1 Connection split.
+ * Messaging goes through the Connection interface (v1.8.10) — the skill
+ * resolves `getConnection(ownerUserId, 'slack')` at call time. No direct
+ * imports from connectors/slack or connections/slack. When email / WhatsApp
+ * Connections land, external recipients route through them automatically.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -43,13 +45,12 @@ import {
   type SummaryActionItem,
 } from '../db';
 import { createTask } from '../tasks';
-import {
-  sendDM,
-  sendMpim,
-  postToChannel,
-  findUserByName,
-  findChannelByName,
-} from '../connections/slack/messaging';
+// v1.8.10 — SummarySkill is the reference consumer for the Connection
+// interface. Instead of importing messaging.ts primitives directly, we
+// resolve the registered Slack Connection at call time. Future recipients
+// on other transports will route through the same interface without code
+// changes here.
+import { getConnection } from '../connections/registry';
 import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calendar';
 import { selectRelevantKbForMeeting } from './knowledge';
 import logger from '../utils/logger';
@@ -549,6 +550,10 @@ async function resolveActionItemAssignees(
 ): Promise<SummaryDraft> {
   if (!app) return draft;
   const updatedItems: SummaryActionItem[] = [];
+  // v1.8.10 — resolve via the registered Slack Connection. Falls back to
+  // direct messaging.ts if the registry doesn't have Slack yet (shouldn't
+  // happen once sub-phase A is deployed — fails open).
+  const slackConn = getConnection(profile.user.slack_user_id, 'slack');
 
   for (const item of draft.action_items) {
     if (item.assignee_slack_id) {
@@ -570,15 +575,17 @@ async function resolveActionItemAssignees(
       continue;
     }
 
-    // 2) Try Slack workspace lookup
+    // 2) Try Slack workspace lookup via Connection
     try {
-      const candidates = await findUserByName(app, botToken, item.assignee_text);
+      const candidates = slackConn
+        ? await slackConn.findUserByName(item.assignee_text)
+        : [];
       const internalCandidate = candidates.find(c => isInternalEmail(c.email, profile));
       if (internalCandidate) {
         updatedItems.push({
           ...item,
           assignee_slack_id: internalCandidate.id,
-          assignee_name: internalCandidate.real_name,
+          assignee_name: internalCandidate.name,
           assignee_internal: true,
         });
         continue;
@@ -963,6 +970,12 @@ Output the full updated draft JSON.`;
           return { ok: false, reason: 'no_recipients' };
         }
 
+        // v1.8.10 — resolve via Connection interface (registered Slack
+        // connection). Share targets are currently all Slack-native
+        // (user/channel/mpim); when email lands as a recipient type, this
+        // loop will route externals through the EmailConnection instead.
+        const slackConn = getConnection(ownerUserId, 'slack');
+
         // Resolve recipients to concrete IDs
         const resolved: Array<{ type: 'user' | 'channel' | 'mpim'; id: string; name: string; ids?: string[] }> = [];
         const refused: Array<{ original: string; reason: string }> = [];
@@ -973,10 +986,12 @@ Output the full updated draft JSON.`;
               resolved.push({ type: 'user', id: r.id_or_name, name: r.display_name ?? r.id_or_name });
               continue;
             }
-            const matches = await findUserByName(app, botToken, r.id_or_name);
+            const matches = slackConn
+              ? await slackConn.findUserByName(r.id_or_name)
+              : [];
             const first = matches.find(m => isInternalEmail(m.email, profile)) ?? matches[0];
             if (first) {
-              resolved.push({ type: 'user', id: first.id, name: first.real_name });
+              resolved.push({ type: 'user', id: first.id, name: first.name });
             } else {
               refused.push({ original: r.id_or_name, reason: 'user not found in workspace' });
             }
@@ -985,7 +1000,9 @@ Output the full updated draft JSON.`;
               resolved.push({ type: 'channel', id: r.id_or_name, name: r.display_name ?? r.id_or_name });
               continue;
             }
-            const matches = await findChannelByName(app, botToken, r.id_or_name);
+            const matches = slackConn
+              ? await slackConn.findChannelByName(r.id_or_name)
+              : [];
             if (matches.length > 0) {
               resolved.push({ type: 'channel', id: matches[0].id, name: `#${matches[0].name}` });
             } else {
@@ -1013,14 +1030,18 @@ Output the full updated draft JSON.`;
         // Render share text once
         const shareText = renderDraftForShare(draft, profile);
 
-        // Send to each
+        // Send to each (v1.8.10 — via Connection interface)
         const sentTo: Array<{ type: 'user' | 'channel' | 'mpim'; id: string; name: string }> = [];
         const sendFailures: Array<{ name: string; reason: string }> = [];
         for (const r of resolved) {
+          if (!slackConn) {
+            sendFailures.push({ name: r.name, reason: 'slack_connection_unregistered' });
+            continue;
+          }
           let outcome;
-          if (r.type === 'user') outcome = await sendDM(app, botToken, r.id, shareText);
-          else if (r.type === 'channel') outcome = await postToChannel(app, botToken, r.id, shareText);
-          else outcome = await sendMpim(app, botToken, r.ids ?? [], shareText);
+          if (r.type === 'user') outcome = await slackConn.sendDirect(r.id, shareText);
+          else if (r.type === 'channel') outcome = await slackConn.postToChannel(r.id, shareText);
+          else outcome = await slackConn.sendGroupConversation(r.ids ?? [], shareText);
 
           if (outcome.ok) {
             sentTo.push({ type: r.type, id: r.id, name: r.name });

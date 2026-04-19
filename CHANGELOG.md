@@ -2,6 +2,32 @@
 
 ---
 
+## 1.8.10 — SummarySkill ported to Connection interface (#1 sub-phase B)
+
+Reference consumer port. SummarySkill no longer imports directly from `connections/slack/messaging.ts`; it resolves the registered Slack Connection via the registry and calls through the generic `Connection` interface.
+
+### Changed — SummarySkill uses Connection interface
+
+- `resolveActionItemAssignees`: `findUserByName(app, token, query)` → `slackConn.findUserByName(query)` (via `getConnection(ownerUserId, 'slack')`).
+- `share_summary` recipient resolution + send loop: same pattern. `findChannelByName`, `sendDM`, `sendMpim`, `postToChannel` all go through `slackConn.*` instead of direct imports.
+- Fails gracefully if the Slack Connection isn't registered (logs + refuses that recipient) — shouldn't happen in practice since 1.8.9 registers on startup.
+
+### Invariants verified
+
+- Same recipient resolution logic (internal email preference, Slack ID fast-path)
+- Same send semantics (DM per user, channel post per channel, MPIM for mpim)
+- Same failure-handling (refused list, sendFailures list)
+- No change to the summary draft format, action-item extraction, task follow-up creation
+- `action_summary` style learner (v1.8.8) unchanged
+
+This is the smallest possible behavior-preserving port — pure interface swap. The actual payoff (external recipients routed to email automatically) comes when EmailConnection lands.
+
+### Next sub-phase (1.8.11): port outreach.ts
+
+Bigger scope — `message_colleague`, `find_slack_channel`, outreach-reply handling, intent-routed reschedule flow. Medium risk because outreach_jobs DB + task dispatchers have tight integration.
+
+---
+
 ## 1.8.9 — Connection layer foundation (issue #1 sub-phase A)
 
 First sub-phase of the Connection-interface rollout. Pure additions — zero behavior change. Lays the groundwork for porting SummarySkill (next sub-phase), outreach, coord, and reply classifier. Multiple sub-phases will ship as 1.8.x patches; v1.9.0 is reserved for the completion milestone once every port is stable.
