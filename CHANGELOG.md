@@ -2,6 +2,185 @@
 
 ---
 
+## 2.0.0 — Connection interface milestone (issue #1 closed)
+
+First major version. The entire messaging architecture is now abstracted behind a single `Connection` interface. Skills no longer know or care which transport they're speaking through. Slack is the fully wired implementation today; email and WhatsApp slot in through the same interface without touching skill code.
+
+This closes [#1](https://github.com/odahviing/AI-Executive-Assistant/issues/1) — the Connection-interface rollout that spanned versions 1.8.9 → 1.8.14 across six sub-phases (foundation + SummarySkill port + OutreachCoreSkill port + coord port + post-polish + duplicate-reply / create_meeting idempotency / date-verifier hardening).
+
+### The architectural shift
+
+Before: skills imported `@slack/bolt`, called `app.client.chat.postMessage` directly, and the coord state machine lived under `src/connectors/slack/coord*`. Layer boundaries existed on paper but leaked in code.
+
+After:
+- Skills import only `src/connections/types` + `src/connections/registry`. They resolve `getConnection(ownerUserId, 'slack')` and call `conn.sendDirect` / `conn.postToChannel` / `conn.sendGroupConversation`. Zero `@slack/bolt` imports anywhere under `src/skills/`.
+- The coord state machine moved from `src/connectors/slack/coord/` and `src/connectors/slack/coord.ts` (~1244 lines) to `src/skills/meetings/coord/{utils,approval,booking,state,reply}.ts`. All transport-agnostic.
+- `shadowNotify`, `coord_nudge`, `coord_abandon`, outreach dispatchers, and every task dispatcher that sends messages resolve their transport via the Connection registry.
+- `SendOptions.threadTs` flows through to Slack's `chat.postMessage` — threading is no longer a special case.
+- Core → skill dependency inverted via a registry pattern: `core/approvals/coordBookingHandler.ts` exposes register/get, MeetingsSkill registers its booking handler on load, `core/approvals/resolver.ts` calls through the registry. Core never imports from skills.
+
+### What this unlocks
+
+- **Email and WhatsApp transports** can be added by implementing the `Connection` interface once. No skill changes. No orchestrator changes. Just a new `src/connections/<name>/` folder and a registration in the corresponding inbound handler.
+- **Per-profile transport preferences** work without skill-level branching. The router (`src/connections/router.ts`, in place but not yet hot-path) will apply the 4-layer policy (inbound-context / person preference / per-skill / profile default) uniformly.
+- **Test isolation.** Skills can be exercised against a mock `Connection` — no Slack app required.
+
+### Fixes shipped in the 2.0 wave (1.8.12 → 1.8.14)
+
+- Thread-ts support across the Connection interface — preserves v1.8.6 "booking confirm in original coord DM thread" behavior without special-casing.
+- coord_nudge + coord_abandon respect owner work hours via new `src/utils/workHours.ts` (extracted from outreachExpiry — mirrors the v1.8.0 fix).
+- `_meetingsOps.ts` → `src/skills/meetings/ops.ts`. Matches coord structure.
+- Tool-grounded fallback verbMap expanded from 11 to ~45 entries + safe generic default — raw tool names can never leak to users again.
+- `create_meeting` idempotent across turns — pre-check Graph for existing event at same subject+start (±2 min) and return that id instead of duplicating. Fixes the 3-events-from-one-booking bug when date-verifier retry loops fired on the same intent.
+- Date verifier: post-retry re-verification with **deterministic inline correction** of wrong weekday tokens. "Thursday 24 Apr" → "Friday 24 Apr" when Sonnet's retry also fails. Previously the wrong pair could ship after retry.
+- Prompt RULE 2b: your prior replies are commitments. Stops Sonnet re-asking for emails/IDs/names it already wrote in an earlier turn.
+- Shared `processedDedup` module for Slack message dedup. Live handlers + catch-up share the same process-global Set so a message the catch-up replied to can't be re-processed by the live handler after reconnect. Closes the "Maelle replied twice to the same message after restart" bug.
+
+### Invariants preserved
+
+- Every coord_jobs column and participant-JSON extension field unchanged.
+- Coord state-machine semantics identical (collecting / resolving / negotiating / waiting_owner / booked / cancelled / abandoned).
+- Approvals layer (v1.5) intact — freshness re-check, idempotency via external_event_id, amend support, owner-decision parse from PENDING APPROVALS block.
+- All honesty guards (claim-checker, date-verifier, security gate, coord guard, recovery pass) still run on the owner + colleague paths they did before.
+- Multi-tenancy semantics unchanged — per-profile isolation via `owner_user_id` + per-profile Connection registry.
+
+### Migration
+
+No schema changes. No config changes. Existing profiles keep working.
+
+### Not changed
+
+- Microsoft Graph is a calendar backend, not a messaging surface — stays under `src/connectors/graph/` and skills call it directly (domain dependency, not a transport).
+- `audit_log`, `people_memory`, `user_preferences`, `outreach_jobs`, `routines`, `events`, `summary_sessions`, `calendar_dismissed_issues` — untouched.
+- `coordinator.ts` still hosts the outreach reply classifier — its port is the next natural step (was originally sub-phase E), but not in 2.0's scope.
+
+### Next
+
+v2.1+ targets: WhatsApp connector (first non-Slack `Connection` implementation), email connector, coordinator.ts outreach-reply port, inbound workflows, meeting notes preparation. See README roadmap.
+
+---
+
+## 1.8.14 — Post-D polish: skills fully transport-agnostic, work-hours for coord, structural cleanup
+
+Follow-up to sub-phase D closing the remaining architectural debt the port surfaced. Three fixes:
+
+### Changed — `shadowNotify` ported to Connection (architectural completeness)
+
+- `src/utils/shadowNotify.ts` no longer takes `app: App`. Resolves the Slack Connection via `getConnection(ownerUserId, 'slack')` and calls `conn.sendDirect` / `conn.postToChannel` like every other outbound messaging site.
+- The owner's DM channel id is cached per-profile (`Map<profileId, channelId>`) — first `sendDirect` populates it from `SendResult.ref`, subsequent calls detect "same channel" to preserve thread context.
+- Slack-specific context-block rendering dropped — shadow messages are now plain italic text with the 🔍 prefix. Visually slightly less distinct, but fits any transport.
+- **Skill files are now 100% transport-agnostic.** `@slack/bolt` import removed from `skills/meetings/coord/state.ts`, `reply.ts`, `booking.ts`. The `app: App` parameter removed from every public function there (`initiateCoordination`, `handleCoordReply`, `bookCoordination`, `forceBookCoordinationByOwner`). Callers (app.ts, coordinator.ts, resolver.ts, skills/meetings.ts) updated to drop the arg.
+- `CoordBookingHandler` type dropped `app` from its payload too — resolver no longer needs to plumb Slack into skill land.
+- This completes what sub-phase D set out to do: skills import only `connections/types` + `connections/registry`, never a transport.
+
+### Changed — coord_nudge + coord_abandon respect owner work hours
+
+- `src/utils/workHours.ts` — extracted `isWithinOwnerWorkHours` + `nextOwnerWorkdayStart` from `outreachExpiry.ts` so multiple dispatchers can share them.
+- `src/tasks/dispatchers/coordNudge.ts` + `coordAbandon.ts`: on dispatch, if current time is outside the owner's `schedule.office_days` / `home_days` windows, re-queue the task at `nextOwnerWorkdayStart(profile)` instead of firing. Fixes "coord initiated Friday 5pm → nudge/abandon owner DM at Saturday 3am" bug — mirrors the v1.8.0 outreach_expiry fix.
+- The nudge message itself goes to colleagues (who don't have owner work hours), but the follow-on `coord_abandon` step DMs the owner, and keeping the whole cycle aligned with work hours is cleaner than a split policy.
+
+### Changed — `_meetingsOps.ts` relocated into `skills/meetings/`
+
+- `src/skills/_meetingsOps.ts` → `src/skills/meetings/ops.ts`. Removes the underscore-flat file sitting next to a `meetings/` folder; matches the coord structure.
+- Class is still `SchedulingSkill` (private name, only used via `MeetingsSkill`'s delegation).
+- Callers updated: `skills/meetings.ts`, `tasks/dispatchers/calendarFix.ts`.
+
+### DB cleanup — stale operational data
+
+Per owner request (no live activity to preserve): `coord_jobs`, `tasks`, `approvals`, `pending_requests` wiped. Knowledge tables (`people_memory`, `user_preferences`, `conversation_threads`, `outreach_jobs`, `routines`, `events`, `summary_sessions`, `calendar_dismissed_issues`, `audit_log`) untouched.
+
+### Fallback leak fix (1.8.13) folded in
+
+The fallback-verbMap expansion from 1.8.13 stays as shipped.
+
+### Invariants preserved
+
+- Shadow mode security rule (owner-DM-only) preserved: non-owner-channel contexts still redirect to the owner's DM with no thread.
+- outreachExpiry.ts behavior unchanged — just swapped its inline helpers for the shared `workHours.ts` module.
+- coord state machine, approvals layer, booking path all function identically — only the `app` parameter plumbing changed.
+
+### Not changed
+
+- `shadowNotify` blocks-based rendering is gone; if the visual distinction turns out to matter, it can come back as a Slack-specific extension to Connection. For now: readable plain text.
+- Load-order / registration warning for profiles with `meetings: false` — deferred (was issue #5 in the review, owner said "not now").
+
+---
+
+## 1.8.13 — Fix raw tool names leaking in silence-prevention fallback
+
+Bug observed: "What is my calendar for tomorrow" → Maelle replied `"Done — ran get_calendar and ran note_about_self. Let me know if anything's off."` The v1.7.3 tool-grounded confirmation fallback fired (Sonnet silenced, recovery pass also silent, so the fallback built text from tool names) — but its `verbMap` only covered ~11 tools. Any tool not in the map fell through to `ran ${toolName}`, exposing raw tool names to the user. AI-ish tell; violates the human-EA filter.
+
+### Changed — `core/orchestrator/index.ts` fallback verbMap
+
+- Expanded verbMap from 11 entries to ~45 — every currently-registered tool across MemorySkill, TasksSkill, CronsSkill, MeetingsSkill, CalendarHealthSkill, SummarySkill, KnowledgeBaseSkill, SearchSkill, OutreachCoreSkill now has a human verb.
+- **Safe default:** if any tool in the turn isn't mapped, the whole reply falls back to `"Done — handled a few things. Let me know if anything's off."` instead of leaking `ran ${toolName}`. This future-proofs the fallback — new tools added later will never leak even if someone forgets to update the map.
+- Root cause of the silence itself (why Sonnet didn't narrate the calendar after `get_calendar`) is a separate investigation; this fixes the surfacing bug where the fallback text itself was broken.
+
+### Not changed
+
+- The fallback still only triggers when `toolCallSummaries.length > 0` (no fabricated "Done" for nothing-happened turns).
+- Fallback is last-resort only — primary reply + recovery pass still try first.
+
+---
+
+## 1.8.12 — coord.ts ported to Connection interface (#1 sub-phase D, D1-D8)
+
+Biggest single port in issue #1. The ~1244-line `connectors/slack/coord.ts` state machine moves to `src/skills/meetings/coord/`, Slack transport calls go through the Connection interface, and `core/approvals/resolver.ts` no longer imports from `connectors/slack/` — it calls a registered booking handler.
+
+### Changed — coord lives under MeetingsSkill now
+
+- **Files moved and rewritten:**
+  - `src/connectors/slack/coord/utils.ts` → `src/skills/meetings/coord/utils.ts` (pure — zero transport; content unchanged)
+  - `src/connectors/slack/coord/approval.ts` → `src/skills/meetings/coord/approval.ts` (drops `app + botToken` params; resolves Slack via `getConnection(ownerUserId, 'slack')` and calls `conn.postToChannel(owner_channel, text, {threadTs})`)
+  - `src/connectors/slack/coord/booking.ts` → `src/skills/meetings/coord/booking.ts` (every `app.client.chat.postMessage` / `conversations.open` → Connection; calendar reads via Graph unchanged; v1.8.6 dm_thread_ts threading preserved via `postToChannel(dm_channel, text, {threadTs: dm_thread_ts})`)
+  - `src/connectors/slack/coord.ts` (state machine) → `src/skills/meetings/coord/state.ts` (initiateCoordination + sendCoordDM + resolveCoordination + startPingPong + tryNextPingPongSlot + startRenegotiation + triggerRoundTwo) and `src/skills/meetings/coord/reply.ts` (handleCoordReply + handlePreferenceReply + parseTimePreference)
+- **Deleted:** `src/connectors/slack/coord.ts` and the `src/connectors/slack/coord/` subdirectory.
+- `src/skills/meetings.ts` imports from `./meetings/coord/utils` + `./meetings/coord/booking` (no more skill → connector violation).
+- `src/connectors/slack/app.ts` imports directly from `src/skills/meetings/coord/state|reply|booking` (the old re-export barrel is gone).
+- `src/connectors/slack/coordinator.ts` imports `initiateCoordination` + `determineSlotLocation` from the new location.
+
+### Changed — resolver dependency inverted
+
+- New `src/core/approvals/coordBookingHandler.ts` — a tiny registry (`registerCoordBookingHandler` / `getCoordBookingHandler`).
+- `src/core/approvals/resolver.ts` no longer imports `forceBookCoordinationByOwner` from connectors. Calls the registered handler instead; returns `ok:false, reason:'no coord booking handler registered'` if MeetingsSkill is disabled in the profile.
+- `src/skills/meetings/coord/booking.ts` registers its handler at module load (runs when MeetingsSkill is required).
+- This is approach (b) from the sub-phase D plan: skills subscribe, core publishes. Cleanest way to keep core from reaching into a skill.
+
+### Changed — threading wired through the Connection interface (D1)
+
+- `src/connections/slack/messaging.ts` — `sendDM` / `sendMpim` / `postToChannel` now accept an optional `{ threadTs }` opts parameter and forward `thread_ts` to `chat.postMessage`.
+- `src/connections/slack/index.ts` — `SlackConnection.sendDirect` / `sendBroadcast` / `sendGroupConversation` / `postToChannel` stop voiding `opts` and pass `threadTs` through. The interface's `SendOptions.threadTs` now actually does something for Slack.
+- Needed before any coord port could move — coord threads replies in ~20 call sites, the v1.8.6 booking-confirm-in-original-thread fix depends on it.
+
+### Changed — coord dispatchers use Connection (D7)
+
+- `src/tasks/dispatchers/coordNudge.ts` and `coordAbandon.ts` drop direct `app.client.chat.postMessage` + `conversations.open`. Resolve Slack via `getConnection(profile.user.slack_user_id, 'slack')` and call `sendDirect` / `postToChannel`.
+
+### Invariants preserved
+
+- **coord_jobs schema byte-for-byte:** every field (participants, proposed_slots, notes, winning_slot, external_event_id, requesters, last_participant_activity_at, etc.) and every participant extension field (dm_channel, dm_thread_ts, _preference, _awaiting_preference, _pingPongTarget, _re_voter, _owner_force_booked, contacted_via, group_channel, group_thread_ts) unchanged.
+- **State machine statuses:** collecting | resolving | negotiating | waiting_owner | confirmed | booked | cancelled | abandoned.
+- **Owner auto-include for colleague-initiated coord** (layer-2 defense-in-depth) preserved in `initiateCoordination`.
+- **MPIM coord flow** (contacted_via='group', voting in the group thread) preserved.
+- **v1.8.6 fix:** booking confirmation DMs post back into the original coord DM thread when `dm_channel + dm_thread_ts` are recorded. `sendCoordDM` now records them from the Connection's `SendResult.ref + ts`.
+- **Idempotency via `coord_jobs.external_event_id`** preserved in bookCoordination.
+- **Pre-booking calendar freshness re-check** (60s skip window) preserved.
+- **Duration approval gate** (non-standard duration requested by colleague) preserved.
+- **Reschedule-intent routing (v1.8.4)** unchanged — `meetingReschedule.ts` still owns that path; coord is only invoked for new meetings.
+
+### Not changed
+
+- `_meetingsOps.ts` stays flat at `src/skills/_meetingsOps.ts`. Not in scope.
+- `coordinator.ts` outreach reply classifier — sub-phase E.
+- `utils/shadowNotify.ts` still takes `app` directly (audit utility; port is a separate concern).
+- `sendCoordDM`'s user-existence preflight (was `app.client.users.info`) now surfaces through `sendDirect`'s error path — same outward behavior ("guest user / wrong ID" message) for user_not_found.
+
+### Migration
+
+None. Additive + in-place relocation. Existing coord_jobs rows, approvals rows, and queued coord_nudge / coord_abandon tasks all continue to work.
+
+---
+
 ## 1.8.11 — Outreach ported to Connection interface (#1 sub-phase C)
 
 Second skill port. `core/outreach.ts` moved to `skills/outreach.ts` and rewritten to send through the Connection layer. Drops the `_requires_slack_client` async-dispatch indirection — the tool handler sends synchronously now.

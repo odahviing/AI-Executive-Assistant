@@ -429,6 +429,7 @@ async function runDateVerifierAndMaybeRetry(ctx: DateVerifyContext): Promise<str
     });
 
     const nudge = buildDateCorrectionNudge(verdict.mismatches);
+    let retriedReply: string | null = null;
     try {
       const retry = await runOrchestrator({
         userMessage,
@@ -447,14 +448,41 @@ async function runDateVerifierAndMaybeRetry(ctx: DateVerifyContext): Promise<str
         extraInstruction: nudge,
       });
       if (retry.reply && retry.reply.trim().length > 0) {
-        cleanReply = normalizeSlackText(retry.reply);
-        appendToConversation(ctx.threadTs, ctx.channelId, { role: 'assistant', content: cleanReply });
+        retriedReply = normalizeSlackText(retry.reply);
       }
     } catch (retryErr) {
-      logger.warn('Date verifier retry errored — keeping original draft', { err: String(retryErr) });
+      logger.warn('Date verifier retry errored — falling through to deterministic correction', { err: String(retryErr) });
+    }
+
+    // v1.8.14 — re-verify retry output. If it STILL has the same mismatches,
+    // deterministically rewrite the wrong weekday tokens inline. Prevents the
+    // "Thursday 24 Apr" bug where a retry loop produces the same wrong pair
+    // twice and the draft ships anyway. String replacement is bounded by the
+    // lookup we already computed — safe and always correct.
+    const candidate = retriedReply ?? cleanReply;
+    const reverdict = await verifyDates(candidate, profile.user.timezone, userMessage);
+    if (!reverdict.ok && reverdict.mismatches.length > 0) {
+      logger.warn('Date verifier: retry still has mismatches — applying deterministic correction', {
+        mismatches: reverdict.mismatches,
+      });
+      cleanReply = candidate;
+      for (const mm of reverdict.mismatches) {
+        // Example: written="Thursday" (or "Thu") + writtenDate="24 Apr" → correct="Friday".
+        // Find the exact wrong pair in the draft and swap the weekday token only.
+        const wdPattern = new RegExp(`\\b${escapeRegex(mm.writtenWeekday)}\\b(?=[,\\s]+(?:the\\s+)?\\d{1,2}(?:st|nd|rd|th)?\\s+${escapeRegex(mm.writtenDate.split(' ')[1] ?? '')})`, 'gi');
+        cleanReply = cleanReply.replace(wdPattern, mm.correctWeekday);
+      }
+      appendToConversation(ctx.threadTs, ctx.channelId, { role: 'assistant', content: cleanReply });
+    } else if (retriedReply) {
+      cleanReply = retriedReply;
+      appendToConversation(ctx.threadTs, ctx.channelId, { role: 'assistant', content: cleanReply });
     }
   } catch (err) {
     logger.warn('Date verifier threw — sending original reply', { err: String(err) });
   }
   return cleanReply;
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

@@ -1,36 +1,26 @@
-import type { App } from '@slack/bolt';
 import type { UserProfile } from '../config/userProfile';
+import { getConnection } from '../connections/registry';
 import logger from './logger';
 
 /**
  * Shadow mode — v1 safety net.
  *
  * When enabled in the user profile (behavior.v1_shadow_mode: true), Maelle
- * posts a compact, unobtrusive receipt in the owner's thread every time she
+ * posts a compact, unobtrusive receipt in the owner's DM every time she
  * takes an autonomous action — even one that doesn't require approval.
  *
  * SECURITY: Shadow messages are ONLY sent to the owner's DM channel.
  * If the originating channel is not the owner's DM, we redirect to the
  * owner's DM instead. Colleagues must NEVER see shadow/debug messages.
+ *
+ * Ported to the Connection interface in v1.8.14 — no longer takes `app`.
+ * Skills that call shadowNotify are now fully transport-agnostic.
  */
 
-/** Cache the owner's DM channel ID so we don't re-open it every call */
-let ownerDmChannelCache: string | null = null;
-
-async function getOwnerDmChannel(app: App, profile: UserProfile): Promise<string> {
-  if (ownerDmChannelCache) return ownerDmChannelCache;
-
-  const result = await app.client.conversations.open({
-    token: profile.assistant.slack.bot_token,
-    users: profile.user.slack_user_id,
-  });
-  ownerDmChannelCache = (result.channel as any)?.id ?? null;
-  if (!ownerDmChannelCache) throw new Error('Could not open DM with owner');
-  return ownerDmChannelCache;
-}
+/** Per-profile cache of the owner's DM channel id. */
+const ownerDmChannelCache: Map<string, string> = new Map();
 
 export async function shadowNotify(
-  app: App,
   profile: UserProfile,
   params: {
     channel: string;
@@ -41,34 +31,38 @@ export async function shadowNotify(
 ): Promise<void> {
   if (!profile.behavior.v1_shadow_mode) return;
 
-  try {
-    // SECURITY: Only send shadow messages to the owner's DM.
-    // If the channel is already the owner's DM, use it (with thread context).
-    // Otherwise, redirect to the owner's DM with no thread (standalone).
-    const ownerDm = await getOwnerDmChannel(app, profile);
-    const isOwnerChannel = params.channel === ownerDm;
+  const ownerId = profile.user.slack_user_id;
+  const conn = getConnection(ownerId, 'slack');
+  if (!conn) {
+    logger.warn('shadowNotify — no Slack connection registered', { ownerId, action: params.action });
+    return;
+  }
 
-    await app.client.chat.postMessage({
-      token: profile.assistant.slack.bot_token,
-      channel: ownerDm,
-      // Only preserve thread context if we're already in the owner's DM
-      thread_ts: isOwnerChannel ? params.threadTs : undefined,
-      text: `_[shadow] ${params.action}: ${params.detail}_`,
-      // Using context block so it renders smaller/dimmer than a regular message
-      blocks: [
-        {
-          type: 'context',
-          elements: [
-            {
-              type: 'mrkdwn',
-              text: `🔍 *${params.action}:* ${params.detail}`,
-            },
-          ],
-        },
-      ],
-    });
+  try {
+    const text = `🔍 _*${params.action}:* ${params.detail}_`;
+    const cached = ownerDmChannelCache.get(ownerId);
+
+    // If we already know the owner's DM channel AND the originating channel
+    // matches it, thread into the same conversation. Otherwise send a
+    // standalone DM to the owner (and learn the channel id from the result).
+    if (cached && cached === params.channel) {
+      const res = await conn.postToChannel(cached, text, { threadTs: params.threadTs });
+      if (!res.ok) {
+        logger.warn('shadowNotify failed (cached channel)', { reason: res.reason, detail: res.detail, action: params.action });
+      }
+      return;
+    }
+
+    const res = await conn.sendDirect(ownerId, text);
+    if (!res.ok) {
+      logger.warn('shadowNotify failed (sendDirect)', { reason: res.reason, detail: res.detail, action: params.action });
+      return;
+    }
+    // Cache the owner's DM channel id from the first successful send so
+    // subsequent calls can detect "same channel" and preserve thread context.
+    if (res.ref) ownerDmChannelCache.set(ownerId, res.ref);
   } catch (err) {
-    // Shadow notifications are fire-and-forget — never let them break the main flow
-    logger.warn('shadowNotify failed', { err: String(err), action: params.action });
+    // Shadow notifications are fire-and-forget — never let them break the main flow.
+    logger.warn('shadowNotify threw', { err: String(err), action: params.action });
   }
 }

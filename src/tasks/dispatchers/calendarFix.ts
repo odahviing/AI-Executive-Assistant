@@ -6,7 +6,7 @@ import {
   buildIssueKey,
   updateCalendarIssueStatus,
 } from '../../db/calendarIssues';
-import { analyzeCalendar, processCalendarEvents } from '../../skills/_meetingsOps';
+import { analyzeCalendar, processCalendarEvents } from '../../skills/meetings/ops';
 import { getCalendarEvents } from '../../connectors/graph/calendar';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';

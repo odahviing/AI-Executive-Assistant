@@ -31,7 +31,8 @@ import {
   type OutreachJob,
 } from '../../db';
 import { findAvailableSlots, pickSpreadSlots } from '../graph/calendar';
-import { initiateCoordination, determineSlotLocation, type SlotWithLocation } from './coord';
+import { initiateCoordination } from '../../skills/meetings/coord/state';
+import { determineSlotLocation, type SlotWithLocation } from '../../skills/meetings/coord/utils';
 import { searchPeopleMemory } from '../../db/people';
 import logger from '../../utils/logger';
 
@@ -447,7 +448,7 @@ export async function handleOutreachReply(
         };
       });
 
-      await initiateCoordination(app, {
+      await initiateCoordination({
         ownerUserId: params.profile.user.slack_user_id,
         ownerChannel: job.owner_channel,
         ownerThreadTs: job.owner_thread_ts,
@@ -459,7 +460,6 @@ export async function handleOutreachReply(
         durationMin,
         participants: [participant],
         proposedSlots,
-        botToken: params.bot_token,
         profile: params.profile,
       });
 

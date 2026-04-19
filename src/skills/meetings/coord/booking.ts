@@ -1,5 +1,5 @@
 /**
- * Coord booking (v1.6.2 split from coord.ts).
+ * Coord booking.
  *
  * Two entry points:
  *   - bookCoordination (internal): called by the resolver path once the state
@@ -12,15 +12,11 @@
  *     behind the prompt rule "owner's pick wins" — finalize_coord_meeting
  *     calls this, so the LLM can't narrate a fake confirmation.
  *
- * Why its own file: booking was ~400 lines of end-of-state-machine logic that
- * was inflating coord.ts. The agent-vs-Slack seam (planned next) will split
- * this further — the `createMeeting` / `getCalendarEvents` calls are pure
- * meetings-domain work, while the participant/owner DM sends are Slack-
- * specific transport. For now we keep them together so the booking flow is
- * readable in one place.
+ * Ported from connectors/slack/coord/booking.ts (issue #1 sub-phase D4).
+ * Slack-specific `app.client.*` calls now go through the Slack Connection
+ * resolved via the registry — skills stay transport-agnostic.
  */
 
-import type { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../../config/userProfile';
 import {
@@ -32,8 +28,10 @@ import {
   type CoordParticipant,
 } from '../../../db';
 import { getOpenTasksForOwner } from '../../../tasks';
-import { createMeeting, getCalendarEvents } from '../../graph/calendar';
+import { createMeeting, getCalendarEvents } from '../../../connectors/graph/calendar';
 import { shadowNotify } from '../../../utils/shadowNotify';
+import { getConnection } from '../../../connections/registry';
+import { registerCoordBookingHandler } from '../../../core/approvals/coordBookingHandler';
 import { determineSlotLocation } from './utils';
 import { emitWaitingOwnerApproval } from './approval';
 import logger from '../../../utils/logger';
@@ -45,13 +43,14 @@ import logger from '../../../utils/logger';
  * when the owner has explicitly picked a slot. Marks all unresponded key
  * participants as accepted at that slot, sets winning_slot, and invokes the
  * real booking path so the calendar invite actually gets created.
+ *
+ * `app` is kept in the signature for shadowNotify (still Slack-specific) but
+ * all coord-owned messaging now goes through the Connection registry.
  */
 export async function forceBookCoordinationByOwner(
-  app: App,
   jobId: string,
   chosenSlotIso: string,
   profile: UserProfile,
-  botToken: string,
   options: { synchronous?: boolean } = {},
 ): Promise<{ ok: boolean; reason?: string; status?: string; subject?: string; slot?: string }> {
   const { synchronous = false } = options;
@@ -104,24 +103,15 @@ export async function forceBookCoordinationByOwner(
   // confirmation message inside bookCoordination so the LLM's reply is the
   // sole narrator (prevents double-post). The async queue path keeps the
   // legacy behavior where bookCoordination narrates itself.
-  await bookCoordination(app, jobId, finalSlot, profile, botToken, {
+  await bookCoordination(jobId, finalSlot, profile, {
     suppressOwnerConfirm: synchronous,
   });
 
-  // Re-read job to see what actually happened. bookCoordination may have
-  // left us in 'booked' (success) or 'waiting_owner' (conflict, duration
-  // approval needed, or calendar error — each posts its own explanatory
-  // message that the LLM should NOT second-guess).
   const after = getCoordJob(jobId);
   if (!after) return { ok: false, reason: 'coord job disappeared after booking', subject: job.subject, slot: finalSlot };
   if (after.status === 'booked') {
-    // Approval sync lives inside updateCoordJob (v1.6.2) — no per-call-site
-    // mirroring needed.
     return { ok: true, status: 'booked', subject: after.subject, slot: finalSlot };
   }
-  // Not booked — bookCoordination already told the owner why. Surface the
-  // status so the LLM can stay quiet or echo a short acknowledgment without
-  // inventing an outcome.
   return {
     ok: false,
     status: after.status,
@@ -136,16 +126,23 @@ export async function forceBookCoordinationByOwner(
 // ── Actual booking ───────────────────────────────────────────────────────────
 
 export async function bookCoordination(
-  app: App,
   jobId: string,
   slot: string,
   profile: UserProfile,
-  botToken: string,
   options: { suppressOwnerConfirm?: boolean } = {},
 ): Promise<void> {
   const { suppressOwnerConfirm = false } = options;
   const job = getCoordJob(jobId);
   if (!job) return;
+
+  const slackConn = getConnection(profile.user.slack_user_id, 'slack');
+  if (!slackConn) {
+    logger.error('bookCoordination — no Slack connection registered; aborting', {
+      jobId,
+      ownerUserId: profile.user.slack_user_id,
+    });
+    return;
+  }
 
   logger.info('Booking coordination meeting', { jobId, slot, subject: job.subject });
 
@@ -160,7 +157,6 @@ export async function bookCoordination(
   const isInternal = participants.every(p => !p.email || p.email.endsWith(`@${ownerDomain}`));
   const totalPeople = participants.length + 1;
 
-  // Check if there's a location override from notes (participant requested a change)
   let notesObj: Record<string, unknown> = {};
   try { notesObj = JSON.parse(job.notes ?? '{}'); } catch (_) {}
 
@@ -171,27 +167,23 @@ export async function bookCoordination(
     location = notesObj.locationOverride as string;
     isOnline = true; // custom location always gets Teams
   } else {
-    // Check slot-specific metadata first
     const slotsMetadata = (notesObj.slotsMetadata as Array<{ start: string; location: string; isOnline: boolean }>) ?? [];
     const slotMeta = slotsMetadata.find(sm => sm.start === slot);
     if (slotMeta) {
       location = slotMeta.location;
       isOnline = slotMeta.isOnline;
     } else {
-      // Fallback: auto-determine from day
       const locInfo = determineSlotLocation(slot, profile, totalPeople, isInternal);
       location = locInfo.location;
       isOnline = locInfo.isOnline;
     }
   }
 
-  // Override from participant preference if set
   if (notesObj.isOnline !== undefined) {
     isOnline = notesObj.isOnline as boolean;
   }
 
   // ── Pre-booking validation: check the owner's calendar is still free ──
-  // Skip if we checked less than 60 seconds ago (calendar freshness)
   const lastCheck = job.last_calendar_check ? new Date(job.last_calendar_check).getTime() : 0;
   const secondsSinceCheck = (Date.now() - lastCheck) / 1000;
   if (secondsSinceCheck < 60) {
@@ -216,7 +208,7 @@ export async function bookCoordination(
     if (hasConflict) {
       logger.warn('Slot has a calendar conflict — escalating to owner', { jobId, slot });
       const participantsParsed = JSON.parse(job.participants) as CoordParticipant[];
-      await emitWaitingOwnerApproval(app, {
+      await emitWaitingOwnerApproval({
         job,
         kind: 'calendar_conflict',
         payload: {
@@ -229,7 +221,6 @@ export async function bookCoordination(
           conflict_reason: 'owner now has a calendar conflict at the agreed slot',
         },
         askText: `Everyone agreed on ${slotDt.toFormat("EEEE, d MMMM 'at' HH:mm")} for "${job.subject}", but you now have a conflict at that time. Want me to book anyway or find a new slot?`,
-        botToken,
         winningSlot: slot,
       });
       return;
@@ -239,9 +230,8 @@ export async function bookCoordination(
   }
 
   // ── Duration approval gate ─────────────────────────────────────────────────
-  // If a colleague requested a non-standard duration, ask the owner before booking
   if (notesObj.needsDurationApproval) {
-    await emitWaitingOwnerApproval(app, {
+    await emitWaitingOwnerApproval({
       job,
       kind: 'duration_override',
       payload: {
@@ -252,7 +242,6 @@ export async function bookCoordination(
         reason: 'non-standard duration requested by colleague',
       },
       askText: `Everyone agreed on ${slotDt.toFormat("EEEE, d MMMM 'at' HH:mm")} for "${job.subject}" (${job.duration_min} min). The ${job.duration_min}-minute duration was requested by a colleague and isn't one of your standard durations. Shall I book it as-is, or adjust to a standard length?`,
-      botToken,
       winningSlot: slot,
     });
     return;
@@ -284,7 +273,7 @@ export async function bookCoordination(
   } catch (err) {
     logger.error('Calendar booking failed for coordination', { err: String(err), jobId });
     try {
-      await emitWaitingOwnerApproval(app, {
+      await emitWaitingOwnerApproval({
         job,
         kind: 'freeform',
         payload: {
@@ -295,7 +284,6 @@ export async function bookCoordination(
           failure_reason: err instanceof Error ? err.message : String(err),
         },
         askText: `Everyone agreed on ${slotDt.toFormat("EEEE, d MMMM 'at' HH:mm")} for "${job.subject}", but I couldn't create the calendar event. Want me to try again?`,
-        botToken,
         winningSlot: slot,
       });
     } catch (inner) {
@@ -313,17 +301,13 @@ export async function bookCoordination(
     const participantSlackIds = new Set(participants.map(p => p.slack_id).filter(Boolean));
     for (const r of requesters) {
       if (!r.slack_id || participantSlackIds.has(r.slack_id)) continue;
-      try {
-        const dm = await app.client.conversations.open({ token: botToken, users: r.slack_id });
-        const ch = (dm.channel as any)?.id;
-        const rDt = DateTime.fromISO(slot);
-        await app.client.chat.postMessage({
-          token: botToken,
-          channel: ch,
-          text: `Following up — I set up "${job.subject}" for ${rDt.toFormat("EEEE, d MMMM 'at' HH:mm")}. All set.`,
-        });
-      } catch (err) {
-        logger.warn('Could not notify requester of booking', { err: String(err), slackId: r.slack_id });
+      const rDt = DateTime.fromISO(slot);
+      const res = await slackConn.sendDirect(
+        r.slack_id,
+        `Following up — I set up "${job.subject}" for ${rDt.toFormat("EEEE, d MMMM 'at' HH:mm")}. All set.`,
+      );
+      if (!res.ok) {
+        logger.warn('Could not notify requester of booking', { reason: res.reason, slackId: r.slack_id });
       }
     }
   } catch (err) {
@@ -340,39 +324,30 @@ export async function bookCoordination(
     const channel = inGroupConfirm[0].group_channel!;
     const threadTs = inGroupConfirm[0].group_thread_ts!;
     const pDt = DateTime.fromISO(slot).setZone(inGroupConfirm[0].tz);
-    try {
-      await app.client.chat.postMessage({
-        token: botToken,
-        channel,
-        thread_ts: threadTs,
-        text: `All confirmed! "${job.subject}" is booked for ${pDt.toFormat("EEEE, d MMMM 'at' HH:mm")}${locationLine}. Calendar invites are on their way.`,
-      });
-    } catch (err) {
-      logger.warn('Could not post booking confirmation in group thread', { err: String(err) });
+    const res = await slackConn.postToChannel(
+      channel,
+      `All confirmed! "${job.subject}" is booked for ${pDt.toFormat("EEEE, d MMMM 'at' HH:mm")}${locationLine}. Calendar invites are on their way.`,
+      { threadTs },
+    );
+    if (!res.ok) {
+      logger.warn('Could not post booking confirmation in group thread', { reason: res.reason, detail: res.detail });
     }
   }
 
   for (const p of privateDmConfirm) {
     if (!p.slack_id) continue;
+    // v1.8.6 — post the booking confirmation back in the ORIGINAL coord DM
+    // thread when we have it recorded (dm_channel + dm_thread_ts set in
+    // sendCoordDM). Falls back to a fresh DM for older coord rows that
+    // predate thread-tracking.
+    const pDt = DateTime.fromISO(slot).setZone(p.tz);
+    const msgText = `All confirmed! "${job.subject}" is booked for ${pDt.toFormat("EEEE, d MMMM 'at' HH:mm")}${locationLine}. See you there.`;
     try {
-      // v1.8.6 — post the booking confirmation back in the ORIGINAL coord DM
-      // thread when we have it recorded (dm_channel + dm_thread_ts set in
-      // sendCoordDM). Falls back to opening a fresh DM for older coord rows
-      // that predate thread-tracking — those still get a top-level message.
-      let channel = p.dm_channel;
-      let threadTs = p.dm_thread_ts;
-      if (!channel) {
-        const dmResult = await app.client.conversations.open({ token: botToken, users: p.slack_id });
-        channel = (dmResult.channel as any)?.id;
-        threadTs = undefined;
+      if (p.dm_channel) {
+        await slackConn.postToChannel(p.dm_channel, msgText, { threadTs: p.dm_thread_ts });
+      } else {
+        await slackConn.sendDirect(p.slack_id, msgText);
       }
-      const pDt = DateTime.fromISO(slot).setZone(p.tz);
-      await app.client.chat.postMessage({
-        token: botToken,
-        channel: channel!,
-        thread_ts: threadTs,
-        text: `All confirmed! "${job.subject}" is booked for ${pDt.toFormat("EEEE, d MMMM 'at' HH:mm")}${locationLine}. See you there.`,
-      });
     } catch (_) {}
   }
 
@@ -388,15 +363,14 @@ export async function bookCoordination(
     : '';
 
   if (!suppressOwnerConfirm) {
-    await app.client.chat.postMessage({
-      token: botToken,
-      channel: job.owner_channel,
-      thread_ts: job.owner_thread_ts ?? undefined,
-      text: `Done — "${job.subject}" booked with ${keyNames}${extraSuffix} on ${slotDt.toFormat("EEEE, d MMMM 'at' HH:mm")}${locationLine}.${closing}`,
-    });
+    await slackConn.postToChannel(
+      job.owner_channel,
+      `Done — "${job.subject}" booked with ${keyNames}${extraSuffix} on ${slotDt.toFormat("EEEE, d MMMM 'at' HH:mm")}${locationLine}.${closing}`,
+      { threadTs: job.owner_thread_ts ?? undefined },
+    );
   }
 
-  await shadowNotify(app, profile, {
+  await shadowNotify(profile, {
     channel: job.owner_channel,
     threadTs: job.owner_thread_ts ?? undefined,
     action: 'Meeting booked',
@@ -410,3 +384,13 @@ export async function bookCoordination(
     detail: slotDt.toFormat("EEEE, d MMMM 'at' HH:mm") + locationLine,
   });
 }
+
+// ── Register with the core approval resolver ─────────────────────────────────
+// The resolver (core/approvals/resolver.ts) calls this handler when the owner
+// approves a slot_pick approval. Registered at module-load time so it's
+// available as soon as MeetingsSkill is required.
+registerCoordBookingHandler(args =>
+  forceBookCoordinationByOwner(args.jobId, args.chosenSlotIso, args.profile, {
+    synchronous: args.synchronous,
+  }),
+);

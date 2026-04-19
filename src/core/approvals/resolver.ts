@@ -28,7 +28,7 @@ import {
   type CoordParticipant,
 } from '../../db/jobs';
 import { getDb } from '../../db/client';
-import { forceBookCoordinationByOwner } from '../../connectors/slack/coord';
+import { getCoordBookingHandler } from './coordBookingHandler';
 import { getFreeBusy } from '../../connectors/graph/calendar';
 import logger from '../../utils/logger';
 
@@ -339,16 +339,22 @@ async function resolveSlotPick(
     };
   }
 
-  const botToken = ctx.profile.assistant.slack.bot_token;
+  const handler = getCoordBookingHandler();
+  if (!handler) {
+    return {
+      ok: false,
+      approval_id: approval.id,
+      status: 'pending',
+      reason: 'no coord booking handler registered — MeetingsSkill may be disabled',
+    };
+  }
   try {
-    const result = await forceBookCoordinationByOwner(
-      ctx.app,
-      approval.skill_ref,
-      chosenIso,
-      ctx.profile,
-      botToken,
-      { synchronous: true },
-    );
+    const result = await handler({
+      jobId: approval.skill_ref,
+      chosenSlotIso: chosenIso,
+      profile: ctx.profile,
+      synchronous: true,
+    });
     if (result.ok) {
       setApprovalDecision({
         id: approval.id,

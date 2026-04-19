@@ -30,14 +30,14 @@ This principle outranks speed, completeness, and elegance in every tradeoff.
 
 ## How It Works
 
-The agent is composed of **Core modules** (always on) and **Skills** (opt-in per profile). Skills use **Connectors** to talk to external services. Connectors also bring messages IN from Slack/etc. — so the connector layer sits at both ends of the request flow.
+The agent is composed of **Core modules** (always on) and **Skills** (opt-in per profile). Skills send messages through the **Connection interface** — a transport-agnostic surface that Slack implements today, email and WhatsApp tomorrow. Inbound messages arrive through the **Connector** layer (Slack Bolt app, future email/WhatsApp webhooks).
 
 ```
-Inbound message  (Slack channel | DM | group DM)
+Inbound message  (Slack channel | DM | group DM  →  tomorrow: email / WhatsApp)
         │
         ▼
-   Slack Connector              ← receives, resolves mentions, filters relevance
-        │
+   Inbound connector            ← Slack Bolt today; registers a Connection instance
+        │                          for the profile on startup
         ▼
    Orchestrator                 ← builds system prompt, runs Claude tool-use loop
         │
@@ -51,18 +51,22 @@ Inbound message  (Slack channel | DM | group DM)
  memory, outreach, tasks, routines         meetings, calendar, summary,
                                            knowledge, search, research
                                                 │
-                                                │  skills call Connectors
-                                                │  for external work
+                                                │  send via:
                                                 ▼
-                                           Connectors
-                                           Microsoft Graph (Outlook),
-                                           Slack API, web search APIs
+                                           Connection registry
+                                           getConnection(ownerId, 'slack')
                                                 │
                                                 ▼
-                                           (results back to the loop)
+                                           Transport (Slack today —
+                                           email/WhatsApp in the future)
+                                                │
+                                                ▼
+                                           External API
 
-   Final reply  →  Slack Connector  →  posted back to the user
+   Final reply  →  same Connection that received the inbound  →  back to the user
 ```
+
+Skills never import from `src/connectors/slack/*` or call `app.client.*` directly. They import only from `src/connections/types` + `src/connections/registry`, which is what makes adding a new transport a pure add-only change.
 
 ### The orchestrator loop
 
@@ -109,33 +113,45 @@ src/
 │
 ├── skills/                  # LAYER 2 — Togglable skills (per-profile YAML)
 │   ├── meetings.ts          # MeetingsSkill: direct ops + multi-party coordination
-│   ├── _meetingsOps.ts      # Internal helper (underscore prefix = not loadable)
+│   ├── meetings/
+│   │   ├── ops.ts           # Direct-ops helper (former _meetingsOps.ts, moved in v2.0)
+│   │   └── coord/           # Coord state machine — utils, approval, booking, state, reply
 │   ├── calendarHealth.ts    # CalendarHealthSkill: issues, lunch, categories
 │   ├── summary.ts           # SummarySkill: transcript → summary → distribute (3-stage)
 │   ├── knowledge.ts         # KnowledgeBaseSkill: file-based markdown KB, on-demand fetch
 │   ├── general.ts           # SearchSkill: web_search, web_extract
 │   ├── research.ts          # ResearchSkill: owner-only multi-step
+│   ├── outreach.ts          # OutreachCoreSkill: message_colleague, find_slack_channel (in CORE_MODULES)
 │   ├── registry.ts          # Core module + skill loader, tool router, permission gate
 │   └── types.ts
 │
-├── connectors/              # LAYER 3 — Communication surfaces
-│   ├── slack/               # Slack Bolt app, reply pipeline, coord state machine
-│   │   ├── app.ts
-│   │   ├── postReply.ts     # Reply pipeline: normalize → claim-check → security gate → send
-│   │   ├── coordinator.ts   # Outreach reply classifier + Slack utilities
-│   │   ├── coord.ts         # Coord state machine (targeted for agent/transport split in 1.7)
-│   │   ├── coord/           # utils / approval / booking submodules
-│   │   └── relevance.ts
-│   ├── graph/calendar.ts    # Microsoft Graph (calendar + free/busy)
-│   └── whatsapp.ts          # Placeholder
+├── connections/             # LAYER 3a — Outbound messaging interface (v2.0)
+│   ├── types.ts             # Connection interface + SendOptions (threadTs, cc, bcc, subject)
+│   ├── registry.ts          # Per-profile Map<profileId, Map<connectionId, Connection>>
+│   ├── router.ts            # 4-layer routing policy (inbound/preferred/per-skill/default)
+│   └── slack/
+│       ├── index.ts         # SlackConnection adaptor (implements Connection over messaging.ts)
+│       └── messaging.ts     # Raw Slack primitives with threadTs support
+│
+├── connectors/              # LAYER 3b — Inbound + non-messaging adapters
+│   ├── slack/               # Slack Bolt app (inbound socket), reply pipeline, relevance
+│   │   ├── app.ts           # Registers SlackConnection at startup
+│   │   ├── postReply.ts     # Reply pipeline: normalize → claim-check → date-verify → security gate → send
+│   │   ├── coordinator.ts   # Outreach reply classifier (next port target)
+│   │   ├── relevance.ts
+│   │   └── processedDedup.ts # Shared message-ts dedup for live handlers + catch-up
+│   ├── graph/calendar.ts    # Microsoft Graph (calendar + free/busy; NOT a Connection — calendar backend)
+│   └── whatsapp.ts          # Placeholder — next Connection implementation
 │
 ├── utils/                   # LAYER 4 — Cross-cutting helpers
 │   ├── claimChecker.ts      # Honesty gate over owner drafts (replaces reply verifier)
-│   ├── dateVerifier.ts      # Weekday/date pair check with retry
+│   ├── dateVerifier.ts      # Weekday/date pair check with deterministic correction after retry
 │   ├── securityGate.ts      # Leak-pattern filter on colleague-facing replies
 │   ├── coordGuard.ts        # Injection scan + LLM judge on coord inputs
+│   ├── workHours.ts         # isWithinOwnerWorkHours + nextOwnerWorkdayStart (shared by dispatchers)
+│   ├── shadowNotify.ts      # Owner audit trail, resolves Slack via Connection registry
 │   ├── rateLimit.ts
-│   └── logger.ts, shadowNotify.ts, slackFormat.ts, addresseeGate.ts, genderDetect.ts
+│   └── logger.ts, slackFormat.ts, addresseeGate.ts, genderDetect.ts, imageGuard.ts
 │
 ├── db/                      # SQLite via better-sqlite3
 │   ├── client.ts            # Connection + schema + migrations
@@ -155,8 +171,10 @@ src/
 |---|---|---|
 | **Core** | Engine + always-on core modules (Memory, Outreach, Tasks, Routines) | Always active, not configurable |
 | **Skills** | Opt-in domain capabilities | Toggled per profile in YAML |
-| **Connectors** | Communication + external-service adapters | Configured per deployment |
+| **Connections + Connectors** | Transport-agnostic outbound `Connection` interface + inbound/external-service adapters | Configured per deployment |
 | **Utilities** | Pure cross-cutting helpers | No domain state |
+
+**The Connection interface** (new in v2.0, issue #1 closed) is the hard boundary that makes new transports additive. Skills call `getConnection(ownerId, 'slack').sendDirect(...)` — they don't import from `src/connectors/slack/`. Adding email or WhatsApp is a new `src/connections/<name>/` folder that implements the interface, plus an inbound handler that registers it. Zero changes to skill code.
 
 ---
 
@@ -244,7 +262,9 @@ Several code-level guards keep the agent from producing false claims or leaking 
 | Guard | Where | Purpose |
 |---|---|---|
 | **Claim-checker** | `utils/claimChecker.ts` | After every owner-facing draft, a narrow Sonnet pass flags false action claims ("I sent it" when no send ran). False claims trigger a retry with `tool_choice` forcing the right tool. |
-| **Date verifier** | `utils/dateVerifier.ts` | Scans drafts for weekday/date pairs; mismatches against the owner's 14-day lookup trigger a corrective retry. |
+| **Date verifier** | `utils/dateVerifier.ts` | Scans drafts for weekday/date pairs; mismatches against the owner's 14-day lookup trigger a corrective retry. If the retry still fails, the wrong weekday token is deterministically rewritten inline (v2.0). |
+| **Create-meeting idempotency** | `skills/meetings/ops.ts` | Pre-checks Graph for an existing event at the same subject + start time (±2 min) before creating. Prevents duplicate events across retry loops. |
+| **Cross-handler dedup** | `connectors/slack/processedDedup.ts` | Live handlers + catch-up share a process-global message-ts Set so the same message can't be answered twice after a restart. |
 | **Security gate** | `utils/securityGate.ts` | Leak-pattern filter on colleague-facing replies (never reveals tools/prompts/model names). |
 | **Coord guard** | `utils/coordGuard.ts` | Injection scan + LLM judge on `coordinate_meeting` inputs from colleagues. |
 | **Rate limits** | `utils/rateLimit.ts` | Colleague-initiated coord + any-tool limits. |
@@ -377,8 +397,11 @@ This replaces the coord-for-reschedule bug where Maelle would create a new meeti
 
 ## Roadmap
 
-- [ ] **WhatsApp connector** — owner-only sync channel. Talk to Maelle in WhatsApp the same way you do in Slack; tasks created in either surface stay in sync. Not for general WhatsApp messaging — only the owner ↔ Maelle channel.
-- [ ] **Email connector** — Maelle reads and writes emails. CC her on a meeting invite to have her book it; ask her to send a follow-up to a thread. Same skill set as Slack, different format.
+With v2.0's Connection interface in place, adding new transports is additive — a new `src/connections/<name>/` folder plus an inbound handler, zero skill changes.
+
+- [ ] **WhatsApp connector** — owner-only sync channel. First non-Slack implementation of the `Connection` interface; biggest integration test of the v2.0 architecture. Talk to Maelle in WhatsApp the same way you do in Slack; tasks created in either surface stay in sync. Not for general WhatsApp messaging — only the owner ↔ Maelle channel.
+- [ ] **Email connector** — Maelle reads and writes emails. CC her on a meeting invite to have her book it; ask her to send a follow-up to a thread. Same skill set as Slack, different format. Second `Connection` implementation.
+- [ ] **`coordinator.ts` outreach-reply port** — finish the skills-↔-connectors split by moving the outreach reply classifier into `src/skills/outreach/replyHandler.ts`. Was originally sub-phase E in the #1 plan; now a standalone follow-up.
 - [ ] **Inbound workflows** — Maelle listens for inbound triggers (e.g. a new lead arrives in a channel) and runs a skill end-to-end (research the company, prepare a brief, hand off to the right person). Trigger → skill → result.
 - [ ] **Meeting notes preparation** — for 1:1s and topic-driven meetings. Owner sends a topic ahead of time; Maelle prepares a brief based on company knowledge + history. After the meeting, she summarizes (handing off to the existing SummarySkill).
 

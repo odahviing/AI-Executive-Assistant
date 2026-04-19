@@ -9,54 +9,31 @@ Read these two memory files before doing anything:
 
 ---
 
-## Active work — issue #1 (Connection interface rollout)
+## Where we are — v2.0.0 just shipped
 
-We are mid-way through [issue #1](https://github.com/odahviing/AI-Executive-Assistant/issues/1). Each sub-phase ships as its own patch version so the owner can test incrementally; v1.9.0 is reserved for the milestone when every port is stable.
+Issue #1 (Connection interface rollout) is closed. The whole messaging layer is now abstracted: skills import only `connections/types` + `connections/registry`, and all three transports (Slack / email / WhatsApp — Slack is the only one wired up today, the other two are on the roadmap) will plug in through the same `Connection` interface. The coord state machine moved from `connectors/slack/coord*` to `src/skills/meetings/coord/`. `shadowNotify`, coord dispatchers, and every skill file are transport-agnostic — zero `@slack/bolt` imports outside `src/connectors/slack/` and `src/connections/slack/`.
 
-### Progress so far
+## Focus for v2.x
 
-- **Sub-phase A — v1.8.9** ✅ Shipped. Connection interface + PersonRef + RoutingPolicy + per-profile registry + Router with 4-layer policy + SlackConnection factory + `SkillContext.inboundConnectionId` plumbed through. Pure additions, zero behavior change.
-- **Sub-phase B — v1.8.10** ✅ Shipped. SummarySkill ported to Connection interface (reference consumer). `findUserByName` / `findChannelByName` / `sendDM` / `sendMpim` / `postToChannel` all go through `slackConn.*` now.
-- **Sub-phase C — v1.8.11** ✅ Shipped. OutreachCoreSkill moved from `src/core/outreach.ts` to `src/skills/outreach.ts`. `message_colleague` sends synchronously via Connection now (no more `_requires_slack_client` indirection). `outreach_send` dispatcher ported too. `send_outreach_dm` + `post_to_channel` SlackAction handlers removed from app.ts.
+Two priorities now that the framework is clean:
 
-### NEXT — sub-phase D (coord.ts port) — HIGH RISK
+1. **Make sure the framework scales when needed.** The four-layer split is honest for the first time. Every new capability we add has to respect the boundary:
+   - Skills speak through `Connection` primitives — never `app.client.*` anywhere under `src/skills/`.
+   - New core modules go through `src/core/` + `CORE_MODULES` registry.
+   - Transport additions (email, WhatsApp) implement the `Connection` interface in `src/connections/<name>/` and register themselves at startup in `connectors/<name>/app.ts` (or equivalent).
+   - Task dispatchers that send messages MUST resolve their transport via `getConnection(ownerId, 'slack')` — don't reach for `app.client.*` directly.
+   - If you're tempted to cross a boundary "just for this one thing," that's the signal to either extend the `Connection` interface or add a new layer-4 utility.
 
-**Start fresh.** Before writing any code for sub-phase D, do a full analysis pass:
+2. **Build new features now that v1 items are finally past us.** The roadmap is in the README:
+   - WhatsApp owner-sync connector (second `Connection` implementation — biggest integration test of the port)
+   - Email connector (third transport)
+   - Inbound workflows (triggers that run skills end-to-end)
+   - Meeting notes preparation (1:1 briefs + post-meeting summaries)
+   - Plus anything else that comes up in day-to-day use.
 
-1. Read `src/connectors/slack/coord.ts` top-to-bottom (1244 lines) and map every exported function + every internal helper
-2. Categorize each piece:
-   - **Pure domain logic** (state transitions, slot resolution, ping-pong decision) → moves to `src/skills/meetings/coord/`
-   - **Slack transport logic** (DM sending, channel posts, thread management) → stays in `connectors/slack/` but refactored to implement a narrow transport interface
-   - **Already in coord/utils.ts** (v1.6.3 split) → stays, but imports may shift
-3. Catalogue the DB touchpoints (`coord_jobs` schema: proposed_slots JSON, participants JSON, requesters, external_event_id, winning_slot, etc.) — every one must be preserved byte-for-byte
-4. Catalogue the integration points: background cron (coord_nudge + coord_abandon tasks), approvals layer (`emitWaitingOwnerApproval`), MPIM coord (contacted_via='group'), owner auto-include for colleague-initiated coord, intent-routed reschedule (v1.8.4 — hands off to meetingReschedule.ts already)
-5. Propose the sub-sub-phase structure **before writing any code**. Getting this wrong causes regressions in the meeting coord flow — the most user-visible part of Maelle.
+## Bugs are expected
 
-**Do not try to port coord.ts in one commit.** Break it into smaller verifiable steps. Ship each step as its own patch (1.8.12, 1.8.13, etc.) if it simplifies rollback.
-
-**Key invariants to preserve:**
-- Multi-party coord flow (propose slots → DM participants → collect → negotiate → book)
-- MPIM coord flow (in-group variant, contacted_via='group')
-- Reschedule intent flow (v1.8.4 — colleague replies yes → move existing meeting, not create new)
-- `emitWaitingOwnerApproval` → approvals layer integration
-- Booking confirmation posts in the original coord DM thread, not a new top-level DM (v1.8.6 fix)
-- Owner auto-inclusion for colleague-initiated coord
-- Coord state machine statuses: collecting / resolving / negotiating / waiting_owner / confirmed / booked / cancelled / abandoned
-
-### Remaining sub-phases after D
-
-- **E (v1.8.13):** port `coordinator.ts` outreach reply classifier → `skills/outreach/replyHandler.ts`
-- **F (v1.9.0):** doc sweep — SESSION_STARTER.md four-layer model, memory files, README. Close #1.
-
-### Core architectural principles for this work
-
-Every sub-phase must respect:
-- **Skills ↔ Connections orthogonality.** Skills import only `connections/types` (Connection interface) and `connections/registry` (getConnection). They MUST NOT import from `connectors/slack/*` or `connections/slack/*`. If a Slack-specific helper is needed, either expose it on the Connection interface or keep the usage inside `connectors/slack/` code.
-- **Internal is always Slack by default.** Having email/WhatsApp capability does not mean internal messages migrate. Internal work stays on Slack. Email engages only when: (a) external recipient involved, (b) inbound message came from email. Sometimes overrides.
-- **Context-driven replies.** If a message came in on transport X, the reply goes back on X. The router's Layer 1 handles this via `SkillContext.inboundConnectionId`.
-- **Settings-driven routing.** Profiles carry `connections.default_routing` + optional `per_skill_routing` in YAML. Other owners may route differently; don't hardcode policy.
-
----
+External QA starts now — more people testing, new usage patterns, new classes of bugs. When one lands, follow the usual flow (propose, don't fix; verify in code before trusting memory; code for determinism, prompts for judgment).
 
 ---
 
@@ -80,35 +57,45 @@ Maelle is built on four conceptually distinct layers. Every new file belongs to 
 
 ### 1. Core (always on — required to run any agent)
 Engine-level capabilities every profile needs. Cannot be toggled off.
-- `src/core/assistant.ts` — **MemorySkill**: preferences, people memory, interactions, gender, notes. *(future: person memory might become a skill)*
-- `src/core/outreach.ts` — **OutreachCoreSkill**: `message_colleague`, `find_slack_channel`. How Maelle speaks to people on the owner's behalf.
+- `src/core/assistant.ts` — **MemorySkill**: preferences, people memory, interactions, gender, notes.
+- `src/core/outreach.ts` — historical location; **OutreachCoreSkill** now lives at `src/skills/outreach.ts` after the v1.8.11 port, but it stays in CORE_MODULES and cannot be toggled off. `message_colleague`, `find_slack_channel`. How Maelle speaks to people on the owner's behalf.
 - `src/tasks/skill.ts` — **TasksSkill**: tasks CRUD, approvals, structured requests, briefings.
 - `src/tasks/crons.ts` — **RoutinesSkill** (CronsSkill): create/list/update/delete recurring routines.
-- Plus pure engine infra that isn't a Skill: `src/tasks/runner.ts`, `routineMaterializer.ts`, `lateness.ts`, `src/core/orchestrator/`, `src/core/background.ts`, `src/core/approvals/`.
+- Plus pure engine infra: `src/tasks/runner.ts`, `routineMaterializer.ts`, `lateness.ts`, `src/core/orchestrator/`, `src/core/background.ts`, `src/core/approvals/` (now includes `coordBookingHandler.ts` — the registry MeetingsSkill registers its booking handler on so core/ doesn't import from skills/).
 - **Persona** is core too, but lives as data in the YAML profile + `orchestrator/systemPrompt.ts` — no dedicated module.
 
 ### 2. Skills (togglable — profile YAML `skills: { ... }`)
 Opt-in capabilities. Some agents will do meetings, some will do research, some both. Toggled per profile.
 - `src/skills/meetings.ts` — MeetingsSkill (direct calendar ops + multi-party coordination)
+- `src/skills/meetings/coord/` — coord state machine internals (v2.0, moved from connectors/slack/coord). Files: `utils.ts`, `approval.ts`, `booking.ts`, `state.ts`, `reply.ts`. All transport-agnostic.
+- `src/skills/meetings/ops.ts` — direct-op helper (former `_meetingsOps.ts`, relocated in v1.8.14). Still class `SchedulingSkill`, used only via MeetingsSkill's delegation.
 - `src/skills/calendarHealth.ts` — CalendarHealthSkill (issues, lunch, categories)
+- `src/skills/summary.ts` — SummarySkill (transcript → summary → share)
+- `src/skills/knowledge.ts` — KnowledgeBaseSkill (markdown KB)
 - `src/skills/general.ts` — SearchSkill (web_search, web_extract)
 - `src/skills/research.ts` — ResearchSkill (owner-only, multi-step)
-- `src/skills/_meetingsOps.ts` — **internal** helper for MeetingsSkill (the underscore prefix = "not a loadable skill, don't register it")
+- `src/skills/outreach.ts` — OutreachCoreSkill (lives under `skills/` for code layout; stays always-on via `CORE_MODULES`)
 - `src/skills/registry.ts` + `src/skills/types.ts` — the skills-system machinery itself
 
-Legacy profile YAML keys `scheduling: true` / `coordination: true` auto-map to `meetings: true` at load time.
+Legacy profile YAML keys `scheduling: true` / `coordination: true` auto-map to `meetings: true` at load time; `meeting_summaries` → `summary`; `knowledge_base` → `knowledge`; `calendar_health` → `calendar`.
 
-### 3. Connections (framework for a comm surface)
-How Maelle gets onto a given surface (Slack, email, WhatsApp, Graph). Currently hand-wired per surface; a formal `Connection` interface + registry is planned but not yet built.
-- `src/connectors/slack/` — Slack Bolt app, reply routing, outreach reply classifier, coord state machine
-- `src/connectors/graph/` — Microsoft Graph (calendar reads/writes, free/busy)
-- `src/connectors/whatsapp.ts` — WhatsApp (placeholder)
+### 3. Connections (comm-surface framework — v2.0 first-class layer)
+How Maelle gets onto a given surface (Slack, email, WhatsApp, Graph). **Connection interface is fully implemented for Slack.** Email + WhatsApp pending.
+- `src/connections/types.ts` — `Connection` interface (sendDirect, sendBroadcast, sendGroupConversation, postToChannel, findUserByName, findChannelByName). `SendOptions.threadTs` flows through to `chat.postMessage`.
+- `src/connections/registry.ts` — per-profile `Map<profileId, Map<connectionId, Connection>>`. Skills resolve via `getConnection(ownerUserId, 'slack')`.
+- `src/connections/router.ts` — 4-layer routing policy (inbound-context / person preference / per-skill / profile default). Not yet hot-path for skills, but in place.
+- `src/connections/slack/messaging.ts` — raw Slack primitives with threadTs support.
+- `src/connections/slack/index.ts` — `SlackConnection` that implements the interface over messaging.ts.
+- `src/connectors/slack/` — Slack Bolt app, reply pipeline, outreach reply classifier. The SOCKET-side (inbound) of Slack lives here. App.ts registers a `SlackConnection` in the registry at startup.
+- `src/connectors/graph/` — Microsoft Graph (calendar reads/writes, free/busy) — not a Connection (it's a calendar backend, not a messaging surface).
+- `src/connectors/whatsapp.ts` — placeholder. Next concrete target.
 
-**Known muddling (1.7 target, not yet done):** `connectors/slack/coord.ts` still contains meetings-domain state-machine logic that happens to DM via Slack. It ought to live under `skills/meetings/` and call abstract `Connection` primitives like `connection.sendDM(user, text)`. Today it's hard-coupled to Slack's API. Same story for `coordinator.ts`'s outreach reply handler. 1.6.3's size-only split extracted utils / approval-emit / booking into `coord/*.ts` files — the architectural split comes next.
+**Rule:** skills import only from `src/connections/`. They NEVER import from `src/connectors/slack/*` or use `app.client.*`. This was the v1.8.12–14 port; protect it.
 
 ### 4. Tools & Utilities
 Pure cross-cutting helpers. No domain state, no registered tools.
-- `src/utils/` — logger, gender detection, security gate, reply verifier, coord guard, rate limit, shadow notify, slack formatting, addressee gate
+- `src/utils/` — logger, gender detection, security gate, claim checker, reply verifier, date verifier (with deterministic correction fallback), coord guard, rate limit, shadow notify (uses Connection registry now), Slack formatting, addressee gate, **workHours** (isWithinOwnerWorkHours + nextOwnerWorkdayStart — shared by outreach_expiry / coord_nudge / coord_abandon).
+- `src/connectors/slack/processedDedup.ts` — process-global message ts dedup Set, shared between live handlers + catch-up (fixes the v1.8.14 duplicate-reply bug).
 - `src/db/` — storage helpers per table
 - `src/config/` — profile loader + env
 
@@ -132,17 +119,17 @@ Pure cross-cutting helpers. No domain state, no registered tools.
 
 ### Prompts vs code — use the layer that gives the right kind of correctness
 Both are valid. The rule is: use CODE where we need determinism, use PROMPTS where we need judgment.
-- **Truth-critical guards → CODE.** Anything where an LLM mistake would damage data or trust: idempotency on destructive tools (delete_meeting, create_meeting), schedule-rule enforcement in `findAvailableSlots`, date-weekday verification, action-claim verification (claim-checker runs AFTER the draft), approval-state sync on coord terminal transitions. These must behave identically across models and prompts.
+- **Truth-critical guards → CODE.** Anything where an LLM mistake would damage data or trust: idempotency on destructive tools (delete_meeting, create_meeting), schedule-rule enforcement in `findAvailableSlots`, date-weekday verification (with deterministic correction after one retry), action-claim verification (claim-checker runs AFTER the draft), approval-state sync on coord terminal transitions. These must behave identically across models and prompts.
 - **Tone, interpretation, phrasing → PROMPT.** How Maelle describes a conflict to the owner, how she asks a clarifying question, how she formats a slot proposal, how she disambiguates a two-clause request. Code can't judge "what sounds human."
 - **When a bug shows up:** first ask which kind it is. "She proposed 17:05 instead of 17:15" is a DETERMINISM bug — quarter-hour alignment belongs in code and in the tool contract. "She sounded robotic when the slot was blocked" is a JUDGMENT bug — fix in prompt.
 - **Do not cram determinism into prompts.** A prompt rule saying "always align to :00/:15/:30/:45" rots under model swap. The tool that returns the slot should only return aligned slots.
 - **Do not cram judgment into code.** A regex trying to detect "is this message a relay commitment" will miss 10% of cases and add false positives. An LLM pass over the draft can classify by meaning.
-- **Short prompt rules beat long ones.** One sentence the model actually reads is worth ten it skims. When in doubt: delete a rule, don't add one. Measure prompt size regularly (see 1.6.13-14 for how we cut ~40%).
+- **Short prompt rules beat long ones.** One sentence the model actually reads is worth ten it skims. When in doubt: delete a rule, don't add one.
 
 ### Version
 - Bump patch (1.x.y → 1.x.y+1) when: bug fixes, small improvements, prompt tweaks, file rename/split without behavior change
-- Bump minor (1.x → 1.x+1) when: a meaningful new capability, a new skill, a significant behavior change, a schema migration that needs explaining
-- Never bump major (2.0) without explicit instruction
+- Bump minor (x.y → x.y+1) when: a meaningful new capability, a new skill, a significant behavior change, a schema migration that needs explaining
+- Never bump major (x.0) without explicit instruction
 - Update package.json version at the end of every session where code changed
 
 ### Version-bump workflow (what to do at each level)
@@ -169,7 +156,7 @@ Both are valid. The rule is: use CODE where we need determinism, use PROMPTS whe
 ### Code conventions
 - TypeScript strict, no `any` unless unavoidable
 - Skill pattern: new togglable capability = new file in `src/skills/` implementing the `Skill` interface, registered in `registry.ts` under a YAML toggle
-- Internal helpers in `skills/`: prefix filename with underscore (e.g. `_meetingsOps.ts`)
+- Internal helpers in `skills/`: nest under the skill's folder (e.g. `src/skills/meetings/ops.ts`, `src/skills/meetings/coord/*.ts`). Underscore-prefix flat files are retired post-v1.8.14.
 - Core module pattern: new core capability = new file in `src/core/` + added to `CORE_MODULES` in `registry.ts` + added to `CoreModuleId` union
 - DB changes: idempotent migrations via `try { ALTER TABLE } catch {}` or `CREATE TABLE IF NOT EXISTS` in `db/client.ts` initSchema()
 - All times: UTC in storage, Luxon for display in user timezone
@@ -177,6 +164,7 @@ Both are valid. The rule is: use CODE where we need determinism, use PROMPTS whe
 - Lazy skill loading: use `require()` inside `loader()` so one broken skill doesn't crash startup
 - Every task creation, dispatch, and lifecycle transition: `logger.info` with `skill_origin`, `skill_ref`, `due_at`, preview fields
 - Task system owns every async job — creating a background sweep that walks its own table is an anti-pattern; schedule a typed task instead
+- **Skills speak through Connections.** Never import from `src/connectors/slack/*` or use `app.client.*` inside `src/skills/`. Resolve via `getConnection(ownerId, 'slack')` and call `conn.sendDirect` / `conn.postToChannel`. Task dispatchers follow the same rule.
 
 ### Before finishing any session
 1. `npm run typecheck` — must pass

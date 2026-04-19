@@ -20,8 +20,9 @@ import {
   getCalendarEvents,
   GraphPermissionError,
 } from '../connectors/graph/calendar';
-import { SchedulingSkill as _LegacyOpsSkill } from './_meetingsOps';
-import { determineSlotLocation, forceBookCoordinationByOwner, type SlotWithLocation } from '../connectors/slack/coord';
+import { SchedulingSkill as _LegacyOpsSkill } from './meetings/ops';
+import { determineSlotLocation, type SlotWithLocation } from './meetings/coord/utils';
+import { forceBookCoordinationByOwner } from './meetings/coord/booking';
 import logger from '../utils/logger';
 import { DateTime } from 'luxon';
 
@@ -887,14 +888,11 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
         }
 
         if (context.app) {
-          const botToken = profile.assistant.slack.bot_token;
           try {
             const result = await forceBookCoordinationByOwner(
-              context.app,
               jobId,
               slotIso,
               profile,
-              botToken,
               { synchronous: true },
             );
             logger.info('finalize_coord_meeting synchronous result', {

@@ -1,16 +1,22 @@
 import { DateTime } from 'luxon';
 import { completeTask, createTask, updateTask } from '../index';
 import { getCoordJob, updateCoordJob, type CoordParticipant } from '../../db';
+import { getConnection } from '../../connections/registry';
+import { isWithinOwnerWorkHours, nextOwnerWorkdayStart } from '../../utils/workHours';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
 
 /**
  * 24-work-hour nudge: DM non-responders once, then schedule coord_abandon
  * at +4h from now.
+ *
+ * Respects owner work hours — if the due_at falls outside the owner's
+ * schedule (weekend, evening), re-queues the task for the next workday
+ * morning. The nudge DM goes to *colleagues*, but firing it at 3am Saturday
+ * still produces a Saturday-morning coord_abandon and owner notification,
+ * which the owner shouldn't be woken for.
  */
-export const dispatchCoordNudge: TaskDispatcher = async (app, task, profile) => {
-  const bot_token = profile.assistant.slack.bot_token;
-
+export const dispatchCoordNudge: TaskDispatcher = async (_app, task, profile) => {
   if (!task.skill_ref) { updateTask(task.id, { status: 'failed' }); return; }
   const job = getCoordJob(task.skill_ref);
   if (!job) {
@@ -28,6 +34,20 @@ export const dispatchCoordNudge: TaskDispatcher = async (app, task, profile) => 
     return;
   }
 
+  // Defer to next work window if current time is outside owner work hours.
+  const ownerNow = DateTime.now().setZone(profile.user.timezone);
+  if (!isWithinOwnerWorkHours(profile, ownerNow)) {
+    const deferredAt = nextOwnerWorkdayStart(profile);
+    logger.info('coord_nudge — outside owner work hours; deferring', {
+      taskId: task.id,
+      coordId: job.id,
+      now: ownerNow.toISO(),
+      deferredAt,
+    });
+    updateTask(task.id, { due_at: deferredAt });
+    return; // task stays 'new' at new due_at — runner will pick it up then
+  }
+
   const participants = JSON.parse(job.participants) as CoordParticipant[];
   const nonResponders = participants.filter(p =>
     !p.just_invite &&
@@ -40,20 +60,20 @@ export const dispatchCoordNudge: TaskDispatcher = async (app, task, profile) => 
     return;
   }
 
+  const slackConn = getConnection(profile.user.slack_user_id, 'slack');
+  if (!slackConn) {
+    logger.error('coord_nudge — no Slack connection registered', { taskId: task.id });
+    updateTask(task.id, { status: 'failed' });
+    return;
+  }
   for (const p of nonResponders) {
     if (!p.slack_id) continue;
-    try {
-      const dmResult = await app.client.conversations.open({ token: bot_token, users: p.slack_id });
-      const dmChannel = (dmResult.channel as any)?.id;
-      if (dmChannel) {
-        await app.client.chat.postMessage({
-          token: bot_token,
-          channel: dmChannel,
-          text: `Hi ${p.name}, gentle nudge about "${job.subject}" — let me know when you get a chance.`,
-        });
-      }
-    } catch (err) {
-      logger.warn('coord_nudge — DM failed for participant', { err: String(err), participant: p.name });
+    const res = await slackConn.sendDirect(
+      p.slack_id,
+      `Hi ${p.name}, gentle nudge about "${job.subject}" — let me know when you get a chance.`,
+    );
+    if (!res.ok) {
+      logger.warn('coord_nudge — DM failed for participant', { reason: res.reason, detail: res.detail, participant: p.name });
     }
   }
   updateCoordJob(job.id, { follow_up_sent_at: new Date().toISOString() });

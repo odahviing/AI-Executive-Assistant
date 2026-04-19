@@ -34,11 +34,9 @@ export function createSlackConnection(app: App, botToken: string): Connection {
     id: 'slack',
 
     async sendDirect(recipientRef, text, opts) {
-      // opts.threadTs: Slack supports thread replies. Requires the thread's
-      // parent channel — today the helper opens a fresh DM; threading support
-      // can extend later if a skill needs it. For v1 this is fire-and-forget.
-      void opts;
-      const outcome = await sendDM(app, botToken, recipientRef, text);
+      // threadTs is passed through when set — Slack thread replies on DMs are
+      // supported (Slack treats DMs as channels internally).
+      const outcome = await sendDM(app, botToken, recipientRef, text, { threadTs: opts?.threadTs });
       return toSendResult(outcome);
     },
 
@@ -46,12 +44,11 @@ export function createSlackConnection(app: App, botToken: string): Connection {
       // Slack idiom: individual DMs per recipient. (Email's semantics of
       // "one message to many" don't apply here — MPIM would be a persistent
       // group chat, not a broadcast.)
-      void opts;
       if (recipientRefs.length === 0) return { ok: false, reason: 'no_recipients' };
       let lastErr: SendResult | null = null;
       let anyOk = false;
       for (const ref of recipientRefs) {
-        const outcome = await sendDM(app, botToken, ref, text);
+        const outcome = await sendDM(app, botToken, ref, text, { threadTs: opts?.threadTs });
         const result = toSendResult(outcome);
         if (result.ok) anyOk = true;
         else lastErr = result;
@@ -61,14 +58,12 @@ export function createSlackConnection(app: App, botToken: string): Connection {
 
     async sendGroupConversation(recipientRefs, text, opts) {
       // Slack idiom: MPIM — opens a persistent group chat with all recipients.
-      void opts;
-      const outcome = await sendMpim(app, botToken, recipientRefs, text);
+      const outcome = await sendMpim(app, botToken, recipientRefs, text, { threadTs: opts?.threadTs });
       return toSendResult(outcome);
     },
 
     async postToChannel(channelRef, text, opts) {
-      void opts;
-      const outcome = await slackPostToChannel(app, botToken, channelRef, text);
+      const outcome = await slackPostToChannel(app, botToken, channelRef, text, { threadTs: opts?.threadTs });
       return toSendResult(outcome);
     },
 

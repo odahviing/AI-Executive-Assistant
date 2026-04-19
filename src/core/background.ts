@@ -178,6 +178,18 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
     hoursAgo,
   });
 
+  // v1.8.14 — mark this message ts as processed BEFORE replying, so that if
+  // Slack re-delivers the same event to the live socket handler after we
+  // reconnect, the live handler will see it as already handled and skip.
+  // Prevents the duplicate-reply bug where catch-up and live handler both
+  // answer the same missed message.
+  try {
+    const { markProcessed } = require('../connectors/slack/processedDedup') as typeof import('../connectors/slack/processedDedup');
+    markProcessed(msgTs);
+  } catch (err) {
+    logger.warn('catch-up: could not mark ts as processed', { err: String(err) });
+  }
+
   const senderId  = latestUserMsg.user as string;
   const rawText   = (latestUserMsg.text as string) ?? '';
   const threadTs  = (latestUserMsg.thread_ts as string | undefined) ?? (latestUserMsg.ts as string);

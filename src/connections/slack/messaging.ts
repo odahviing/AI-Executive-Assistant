@@ -53,6 +53,7 @@ export async function sendDM(
   botToken: string,
   userId: string,
   text: string,
+  opts: { threadTs?: string } = {},
 ): Promise<SendOutcome> {
   try {
     const open = await app.client.conversations.open({ token: botToken, users: userId });
@@ -63,6 +64,7 @@ export async function sendDM(
       token: botToken,
       channel: channelId,
       text,
+      ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}),
     });
     return { ok: true, channel_id: channelId, ts: res.ts };
   } catch (err: any) {
@@ -81,6 +83,7 @@ export async function sendMpim(
   botToken: string,
   userIds: string[],
   text: string,
+  opts: { threadTs?: string } = {},
 ): Promise<SendOutcome> {
   if (userIds.length === 0) return { ok: false, reason: 'user_not_found', detail: 'no users supplied' };
   try {
@@ -92,6 +95,7 @@ export async function sendMpim(
       token: botToken,
       channel: channelId,
       text,
+      ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}),
     });
     return { ok: true, channel_id: channelId, ts: res.ts };
   } catch (err: any) {
@@ -110,11 +114,13 @@ export async function postToChannel(
   botToken: string,
   channelId: string,
   text: string,
+  opts: { threadTs?: string } = {},
 ): Promise<SendOutcome> {
   const tryPost = async () => app.client.chat.postMessage({
     token: botToken,
     channel: channelId,
     text,
+    ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}),
   });
 
   try {

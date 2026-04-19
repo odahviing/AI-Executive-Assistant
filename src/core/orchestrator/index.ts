@@ -521,7 +521,7 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
             try {
               if (input.app) {
                 const { shadowNotify } = await import('../../utils/shadowNotify');
-                await shadowNotify(input.app, profile, {
+                await shadowNotify(profile, {
                   channel: input.channelId,
                   threadTs,
                   action: '⚠ Coord rate limit hit',
@@ -553,7 +553,7 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
           try {
             if (input.app) {
               const { shadowNotify } = await import('../../utils/shadowNotify');
-              await shadowNotify(input.app, profile, {
+              await shadowNotify(profile, {
                 channel: input.channelId,
                 threadTs,
                 action: '⚠ Colleague tool-call flood',
@@ -602,7 +602,7 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
             try {
               if (input.app) {
                 const { shadowNotify } = await import('../../utils/shadowNotify');
-                await shadowNotify(input.app, profile, {
+                await shadowNotify(profile, {
                   channel: input.channelId,
                   threadTs,
                   action: '⚠ Security: coord blocked (injection pattern)',
@@ -653,7 +653,7 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
             try {
               if (input.app) {
                 const { shadowNotify } = await import('../../utils/shadowNotify');
-                await shadowNotify(input.app, profile, {
+                await shadowNotify(profile, {
                   channel: input.channelId,
                   threadTs,
                   action: '⚠ Security: coord blocked (judge SUSPICIOUS)',
@@ -844,23 +844,81 @@ Rules:
           return m ? m[1] : 'something';
         });
         const distinct = [...new Set(toolNames)];
-        // Map tool names to human verbs the owner will understand
+        // Map tool names to human verbs the owner will understand.
+        // Any tool not listed falls through to the generic phrase below —
+        // NEVER leak raw tool names to the user (that's an AI-ish tell, plus
+        // new tools added later would silently start leaking).
         const verbMap: Record<string, string> = {
+          // Summary
           learn_summary_style: 'saved the style preference',
-          learn_preference: 'saved that as a preference',
           update_summary_draft: 'updated the summary',
           share_summary: 'shared the summary',
+          classify_summary_feedback: 'noted your feedback',
+          // Memory
+          learn_preference: 'saved that as a preference',
+          forget_preference: 'cleared that preference',
+          recall_preferences: 'looked up your preferences',
+          recall_interactions: 'checked past interactions',
+          note_about_person: 'made a note',
+          note_about_self: 'made a note about myself',
+          update_person_profile: 'updated contact info',
+          log_interaction: 'logged the interaction',
+          confirm_gender: 'confirmed the pronouns',
+          // Tasks / approvals
           create_task: 'created a task',
           edit_task: 'updated a task',
           cancel_task: 'cancelled a task',
-          message_colleague: 'sent the message',
-          coordinate_meeting: 'started the coordination',
+          get_my_tasks: 'checked your open tasks',
+          resolve_approval: 'recorded your decision',
+          list_pending_approvals: 'checked pending approvals',
+          store_request: 'saved the request',
+          // Calendar
+          get_calendar: 'looked at your calendar',
+          get_free_busy: 'checked availability',
+          find_available_slots: 'searched for open times',
+          analyze_calendar: 'reviewed your calendar',
+          check_join_availability: 'checked if you can join',
           create_meeting: 'booked the meeting',
+          move_meeting: 'moved the meeting',
+          update_meeting: 'updated the meeting',
           delete_meeting: 'removed the meeting',
-          note_about_person: 'made a note',
+          // Coord
+          coordinate_meeting: 'started the coordination',
+          finalize_coord_meeting: 'finalized the booking',
+          cancel_coordination: 'cancelled the coordination',
+          get_active_coordinations: 'checked active coordinations',
+          // Calendar health
+          check_calendar_health: 'reviewed calendar health',
+          book_lunch: 'blocked lunch',
+          set_event_category: 'categorized the event',
+          get_calendar_issues: 'checked calendar issues',
+          update_calendar_issue: 'updated the calendar issue',
+          dismiss_calendar_issue: 'dismissed the calendar issue',
+          // Outreach
+          message_colleague: 'sent the message',
+          find_slack_channel: 'found the channel',
+          find_slack_user: 'found the person',
+          // Search / knowledge
+          web_search: 'searched the web',
+          web_extract: 'pulled the page',
+          list_company_knowledge: 'checked the knowledge base',
+          get_company_knowledge: 'read from the knowledge base',
+          // Routines
+          create_routine: 'set up the routine',
+          get_routines: 'checked your routines',
+          update_routine: 'updated the routine',
+          delete_routine: 'removed the routine',
+          // Briefings
+          get_briefing: 'pulled your briefing',
+          send_briefing_now: 'sent the briefing',
         };
-        const verbs = distinct.map(n => verbMap[n] ?? `ran ${n}`);
-        finalReply = `Done — ${verbs.join(' and ')}. Let me know if anything's off.`;
+        const mapped = distinct.map(n => verbMap[n]).filter((v): v is string => !!v);
+        // If every tool maps cleanly, list what happened. Otherwise use a
+        // generic human phrase so raw tool names never reach the user.
+        const verbsText = mapped.length === distinct.length && mapped.length > 0
+          ? mapped.join(' and ')
+          : 'handled a few things';
+        finalReply = `Done — ${verbsText}. Let me know if anything's off.`;
         logger.warn('Orchestrator: tool work happened but no reply text — posted grounded fallback', {
           threadTs,
           iterations: iteration,

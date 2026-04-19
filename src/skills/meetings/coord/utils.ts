@@ -1,5 +1,5 @@
 /**
- * Coord utility helpers (v1.6.2 split from coord.ts).
+ * Coord utility helpers.
  *
  * Three stateless helpers that don't touch coord DB state or send Slack
  * messages on their own:
@@ -12,8 +12,8 @@
  *     out-of-thread message continues an existing coord thread, or is a new
  *     request. Used for out-of-thread reply support.
  *
- * Pulled into its own file because these functions are reusable, have zero
- * side effects on coord state, and were diluting coord.ts.
+ * Pure — zero DB, zero transport. Moved from connectors/slack/coord/utils.ts
+ * as part of the Connection-interface port (issue #1 sub-phase D).
  */
 
 import Anthropic from '@anthropic-ai/sdk';

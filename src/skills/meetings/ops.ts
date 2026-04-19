@@ -16,9 +16,9 @@
  * NOT registered in `skills/registry.ts`. The leading underscore in the
  * filename signals "internal helper, not a togglable skill."
  */
-import logger from '../utils/logger';
+import logger from '../../utils/logger';
 import { DateTime } from 'luxon';
-import type { SkillContext } from './types';
+import type { SkillContext } from '../types';
 
 // v1.8.3 — extract "HH:MM" from an ISO datetime string for action_summary formatting.
 // Falls back to the raw string if the shape is unexpected.
@@ -26,7 +26,7 @@ function formatIsoTime(iso: string): string {
   const m = /T(\d{2}:\d{2})/.exec(iso);
   return m ? m[1] : iso;
 }
-import type { UserProfile } from '../config/userProfile';
+import type { UserProfile } from '../../config/userProfile';
 import {
   getCalendarEvents,
   type CalendarEvent,
@@ -36,7 +36,7 @@ import {
   deleteMeeting,
   updateMeeting,
   GraphPermissionError,
-} from '../connectors/graph/calendar';
+} from '../../connectors/graph/calendar';
 import {
   enqueueApproval,
   createPendingRequest,
@@ -46,7 +46,7 @@ import {
   getDismissedIssueKeys,
   dismissCalendarIssue,
   buildIssueKey,
-} from '../db';
+} from '../../db';
 
 // ── Calendar event processing ─────────────────────────────────────────────────
 
@@ -834,7 +834,7 @@ Never claim you deleted something until the tool returns success.`,
               searchFrom: args.search_from as string,
               searchTo: args.search_to as string,
               preferMorning: args.prefer_morning as boolean | undefined,
-              meetingMode: mode as import('../connectors/graph/calendar').MeetingMode,
+              meetingMode: mode as import('../../connectors/graph/calendar').MeetingMode,
               travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
               minBufferHours: (context.senderRole === 'owner' || context.isOwnerInGroup === true)
                 ? 1
@@ -893,6 +893,43 @@ Never claim you deleted something until the tool returns success.`,
           // User confirmed — proceed with booking
         }
 
+        // v1.8.14 — cross-turn idempotency. If a meeting with the SAME subject
+        // at the SAME start time already exists on the owner's calendar (±2 min
+        // tolerance), return that event id instead of creating a duplicate.
+        // Root cause: date-verifier retries and claim-checker retries can each
+        // re-run the whole orchestrator loop on a new turn. Per-turn dedup
+        // (like delete_meeting has) doesn't help across turns. Graph is the
+        // source of truth — query it.
+        try {
+          const requestedSubject = (args.subject as string).trim();
+          const probeDate = startDt.toFormat('yyyy-MM-dd');
+          const startMs = startDt.toMillis();
+          const existingEvents = await getCalendarEvents(userEmail, probeDate, probeDate, timezone);
+          const duplicate = existingEvents.find(ev => {
+            if (ev.isCancelled) return false;
+            const evSubject = (ev.subject ?? '').trim();
+            if (evSubject.toLowerCase() !== requestedSubject.toLowerCase()) return false;
+            const evStartMs = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone }).toMillis();
+            return Math.abs(evStartMs - startMs) <= 2 * 60 * 1000;
+          });
+          if (duplicate) {
+            logger.warn('create_meeting idempotent short-circuit — same subject+start already on calendar', {
+              subject: requestedSubject,
+              start: args.start,
+              existingEventId: duplicate.id,
+            });
+            return {
+              success: true,
+              meetingId: duplicate.id,
+              idempotent: true,
+              action_summary: `'${requestedSubject}' is already on the calendar for ${formatIsoTime(args.start as string)}–${formatIsoTime(args.end as string)}. Did not create a duplicate.`,
+              _note: 'A meeting with this exact subject and start time was already on the calendar. Returning the existing event id instead of creating a duplicate. Do NOT call create_meeting again for this slot.',
+            };
+          }
+        } catch (err) {
+          logger.warn('create_meeting idempotency pre-check failed — proceeding with create', { err: String(err) });
+        }
+
         return createMeeting({
           userEmail,
           timezone,
@@ -923,7 +960,7 @@ Never claim you deleted something until the tool returns success.`,
         // exceptions (already-customized single firings) are allowed — Graph
         // creates/modifies an exception for that instance on PATCH.
         try {
-          const { getEventType } = await import('../connectors/graph/calendar');
+          const { getEventType } = await import('../../connectors/graph/calendar');
           const probe = await getEventType(userEmail, args.meeting_id as string);
           if (probe?.type === 'seriesMaster') {
             logger.info('update_meeting refused on recurring seriesMaster', {
@@ -974,7 +1011,7 @@ Never claim you deleted something until the tool returns success.`,
         // occurrence moves (type='occurrence' or 'exception') are allowed;
         // Graph creates an exception pinning just that date.
         try {
-          const { getEventType } = await import('../connectors/graph/calendar');
+          const { getEventType } = await import('../../connectors/graph/calendar');
           const probe = await getEventType(userEmail, args.meeting_id as string);
           if (probe?.type === 'seriesMaster') {
             logger.info('move_meeting refused on recurring seriesMaster', {

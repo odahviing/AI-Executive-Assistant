@@ -21,7 +21,10 @@ import {
   findSlackChannel,
 } from './coordinator';
 import { isMessageForAssistant } from './relevance';
-import { initiateCoordination, handleCoordReply, forceBookCoordinationByOwner, type SlotWithLocation } from './coord';
+import { initiateCoordination } from '../../skills/meetings/coord/state';
+import { handleCoordReply } from '../../skills/meetings/coord/reply';
+import { forceBookCoordinationByOwner } from '../../skills/meetings/coord/booking';
+import { type SlotWithLocation } from '../../skills/meetings/coord/utils';
 import {
   transcribeSlackAudio,
   textToSpeech,
@@ -107,9 +110,11 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     return senderId === user.slack_user_id ? 'owner' : 'colleague';
   }
 
-  // Deduplication — Slack retries events if the handler takes too long (>3s)
-  // This prevents double-processing when Claude is slow.
-  const processedTs = new Set<string>();
+  // Deduplication — Slack retries events if the handler takes too long (>3s),
+  // and catch-up can race with live delivery of the same event after restart.
+  // v1.8.14: shared process-global Set (processedDedup.ts) so catchUpMissedMessages
+  // can mark messages it replied to — preventing live handler from replying again.
+  const { markProcessed, hasProcessed } = require('./processedDedup') as typeof import('./processedDedup');
 
   // Bot user ID — fetched once at startup, used to detect self-mentions
   let botUserId: string | null = null;
@@ -289,9 +294,8 @@ export function createSlackAppForProfile(profile: UserProfile): App {
 
       // Step 2: Check if this is a reply to an active coordination or outreach job
       try {
-        const multiHandled = await handleCoordReply(app, {
+        const multiHandled = await handleCoordReply({
           senderId, text, channelId, threadTs, profile,
-          botToken: assistant.slack.bot_token,
         });
         if (multiHandled) {
           logger.info('Message handled as coordination reply', { senderId, channelId });
@@ -632,7 +636,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           (async () => {
             try {
               if (action.action === 'coordinate_meeting') {
-                await initiateCoordination(app, {
+                await initiateCoordination({
                   ownerUserId: action.ownerUserId as string,
                   ownerChannel: channelId,
                   ownerThreadTs: threadTs,
@@ -644,7 +648,6 @@ export function createSlackAppForProfile(profile: UserProfile): App {
                   durationMin: action.durationMin as number,
                   participants: action.participants as any[],
                   proposedSlots: action.proposedSlots as SlotWithLocation[],
-                  botToken: assistant.slack.bot_token,
                   profile,
                   mpimMemberIds: mpimMemberIds,
                   needsDurationApproval: action.needsDurationApproval as boolean | undefined,
@@ -654,11 +657,9 @@ export function createSlackAppForProfile(profile: UserProfile): App {
                 });
               } else if (action.action === 'finalize_coord_meeting') {
                 const result = await forceBookCoordinationByOwner(
-                  app,
                   action.job_id as string,
                   action.slot_iso as string,
                   profile,
-                  assistant.slack.bot_token,
                 );
                 if (!result.ok) {
                   await app.client.chat.postMessage({
@@ -751,7 +752,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           extractedTextPreview: scan.extractedText?.slice(0, 200),
         });
         try {
-          await shadowNotify(app, profile, {
+          await shadowNotify(profile, {
             channel: channelId,
             threadTs,
             action: '⚠ Image guard: suspicious content',
@@ -1077,9 +1078,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     const threadTs = ('thread_ts' in message && message.thread_ts) ? message.thread_ts : ts;
 
     // Dedup — Slack retries if we're slow; skip if already processing this message
-    if (processedTs.has(ts)) { logger.debug('DM dedup — skipping retry', { ts }); return; }
-    processedTs.add(ts);
-    setTimeout(() => processedTs.delete(ts), 60_000);
+    if (!markProcessed(ts)) { logger.debug('DM dedup — skipping retry', { ts }); return; }
 
     // Process async — return to Bolt immediately to avoid 3s timeout
     const rawText = message.text!.trim();
@@ -1200,9 +1199,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     const threadTs = ('thread_ts' in event && event.thread_ts) ? event.thread_ts as string : ts;
 
     // Dedup — same ts = Slack retry, skip it
-    if (processedTs.has(ts)) { logger.debug('MPIM dedup — skipping retry', { ts }); return; }
-    processedTs.add(ts);
-    setTimeout(() => processedTs.delete(ts), 60_000);
+    if (!markProcessed(ts)) { logger.debug('MPIM dedup — skipping retry', { ts }); return; }
 
     setImmediate(async () => {
       const rawText = (event.text as string).trim();
@@ -1336,9 +1333,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     const threadTs = event.thread_ts || event.ts;
 
     // Dedup — Slack retries app_mention too if we're slow
-    if (processedTs.has(event.ts)) { logger.debug('mention dedup — skipping retry', { ts: event.ts }); return; }
-    processedTs.add(event.ts);
-    setTimeout(() => processedTs.delete(event.ts), 60_000);
+    if (!markProcessed(event.ts)) { logger.debug('mention dedup — skipping retry', { ts: event.ts }); return; }
 
     setImmediate(async () => {
       // ── Detect "channel" that is actually a group DM (MPIM) ──

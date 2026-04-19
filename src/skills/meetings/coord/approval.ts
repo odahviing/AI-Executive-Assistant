@@ -1,41 +1,48 @@
 /**
- * Waiting-owner → approval helper (v1.6.2 split from coord.ts).
+ * Waiting-owner → approval helper.
  *
- * Every place that parks a coord in `waiting_owner` and DMs the owner goes
- * through this function. Instead of a raw postMessage + a prose question, it:
+ * Every place that parks a coord in `waiting_owner` and asks the owner to
+ * decide goes through this function. Instead of a raw postMessage + a prose
+ * question, it:
  *
  *   1. Finds the linked task row (skill_ref = job.id).
  *   2. Creates a structured approval row (idempotent by (task, kind, payload)).
- *   3. Posts the DM (no internal token appended — v1.6.2 removed that).
+ *   3. Posts the DM via the Slack Connection (no internal token appended).
  *   4. Records the message ts on the approval for thread continuity.
  *
- * Lives in its own file because both the state-machine (coord.ts) and the
- * booking path (coord/booking.ts) call it — extracting it breaks a circular
- * dependency that would otherwise appear once booking was pulled out.
- *
  * If no linked task exists (legacy coord rows, tests), we skip the approval
- * and fall back to a plain postMessage — behavior is never worse than a raw DM.
+ * and fall back to a plain send — behavior is never worse than a raw DM.
+ *
+ * Moved from connectors/slack/coord/approval.ts as part of the Connection-
+ * interface port (issue #1 sub-phase D3). Now resolves the Slack Connection
+ * via registry instead of taking raw `app` + `botToken`.
  */
 
-import type { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import { updateCoordJob, getDb, type CoordJob } from '../../../db';
 import { createApproval, type ApprovalKind } from '../../../db/approvals';
+import { getConnection } from '../../../connections/registry';
 import logger from '../../../utils/logger';
 
 export async function emitWaitingOwnerApproval(
-  app: App,
   opts: {
     job: CoordJob;
     kind: ApprovalKind;                         // usually 'slot_pick' or 'calendar_conflict'
     payload: Record<string, unknown>;
     askText: string;                            // the DM text to post
-    botToken: string;
     expiresInHours?: number;                    // default 24
     winningSlot?: string;                       // set on coord_job too
   },
 ): Promise<{ approvalId?: string; ts?: string }> {
-  const { job, kind, payload, askText, botToken, expiresInHours = 24, winningSlot } = opts;
+  const { job, kind, payload, askText, expiresInHours = 24, winningSlot } = opts;
+
+  const slackConn = getConnection(job.owner_user_id, 'slack');
+  if (!slackConn) {
+    logger.error('emitWaitingOwnerApproval — no Slack connection registered', {
+      ownerUserId: job.owner_user_id,
+      jobId: job.id,
+    });
+  }
 
   // Find parent task
   let taskId: string | null = null;
@@ -55,15 +62,17 @@ export async function emitWaitingOwnerApproval(
 
   if (!taskId) {
     logger.warn('emitWaitingOwnerApproval — no parent task; falling back to plain DM', { jobId: job.id });
-    try {
-      await app.client.chat.postMessage({
-        token: botToken,
-        channel: job.owner_channel,
-        thread_ts: job.owner_thread_ts ?? undefined,
-        text: askText,
+    if (slackConn) {
+      const res = await slackConn.postToChannel(job.owner_channel, askText, {
+        threadTs: job.owner_thread_ts ?? undefined,
       });
-    } catch (err) {
-      logger.error('emitWaitingOwnerApproval fallback DM failed', { err: String(err), jobId: job.id });
+      if (!res.ok) {
+        logger.error('emitWaitingOwnerApproval fallback DM failed', {
+          reason: res.reason,
+          detail: res.detail,
+          jobId: job.id,
+        });
+      }
     }
     return {};
   }
@@ -86,24 +95,27 @@ export async function emitWaitingOwnerApproval(
     logger.error('emitWaitingOwnerApproval — createApproval threw', { err: String(err), jobId: job.id });
   }
 
-  // v1.6.2 — no visible "_ref: #appr_..._" token appended. Orchestrator binds
-  // via PENDING APPROVALS block (subject + timing + thread).
+  // No visible "_ref: #appr_..._" token appended. Orchestrator binds via
+  // PENDING APPROVALS block (subject + timing + thread).
   let ts: string | undefined;
-  try {
-    const res = await app.client.chat.postMessage({
-      token: botToken,
-      channel: job.owner_channel,
-      thread_ts: job.owner_thread_ts ?? undefined,
-      text: askText,
+  if (slackConn) {
+    const res = await slackConn.postToChannel(job.owner_channel, askText, {
+      threadTs: job.owner_thread_ts ?? undefined,
     });
-    ts = res.ts ?? undefined;
-    if (ts && approvalId) {
-      getDb().prepare(
-        `UPDATE approvals SET slack_msg_ts = ?, updated_at = datetime('now') WHERE id = ?`
-      ).run(ts, approvalId);
+    if (res.ok) {
+      ts = res.ts;
+      if (ts && approvalId) {
+        getDb().prepare(
+          `UPDATE approvals SET slack_msg_ts = ?, updated_at = datetime('now') WHERE id = ?`
+        ).run(ts, approvalId);
+      }
+    } else {
+      logger.error('emitWaitingOwnerApproval — DM failed', {
+        reason: res.reason,
+        detail: res.detail,
+        jobId: job.id,
+      });
     }
-  } catch (err) {
-    logger.error('emitWaitingOwnerApproval — DM failed', { err: String(err), jobId: job.id });
   }
 
   return { approvalId, ts };
