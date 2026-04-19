@@ -2,6 +2,65 @@
 
 ---
 
+## 1.8.9 — Connection layer foundation (issue #1 sub-phase A)
+
+First sub-phase of the Connection-interface rollout. Pure additions — zero behavior change. Lays the groundwork for porting SummarySkill (next sub-phase), outreach, coord, and reply classifier. Multiple sub-phases will ship as 1.8.x patches; v1.9.0 is reserved for the completion milestone once every port is stable.
+
+### Added — Connection interface + per-profile registry
+
+- `src/connections/types.ts` — `Connection` interface (narrow common denominator: `sendDirect`, `sendBroadcast`, `sendGroupConversation`, `postToChannel`, `findUserByName`, `findChannelByName`). Plus `PersonRef` (per-recipient routing info with owner-pinnable `preferred_external`) and `RoutingPolicy` (profile-level routing rules).
+- `src/connections/registry.ts` — per-profile `Map<profileId, Map<connectionId, Connection>>`. Each profile registers its own connections on startup.
+- `src/connections/slack/index.ts` — concrete `SlackConnection` factory that wraps the existing `messaging.ts` primitives behind the interface. Zero behavior change vs. calling `messaging.ts` directly.
+
+### Added — routing policy layer
+
+`src/connections/router.ts` resolves outgoing Connection + recipient ref with 4 decision layers:
+
+1. Context wins — `SkillContext.inboundConnectionId` (Yael DMs on Slack → reply on Slack)
+2. Internal rule — internal recipients always go to Slack unless per-skill override says otherwise
+3. External routing — per-recipient `preferred_external` → per-skill → profile `default_routing` → hardcoded `email` fallback
+4. Graceful fallback — if preferred transport unreachable, walk email → whatsapp → slack for any address we have
+
+Never throws. Returns null + logs when no reachable transport exists for a recipient.
+
+### Added — profile schema carries routing policy
+
+`UserProfile.connections` block (optional, defaults to `{internal: slack, external: email}`):
+
+```yaml
+connections:
+  default_routing:
+    internal: slack
+    external: email
+  per_skill_routing:       # optional per-skill overrides
+    research: { internal: slack, external: slack }
+```
+
+`idan.yaml` updated with the default block. Existing profiles without the block get sensible defaults via Zod.
+
+### Added — `SkillContext.inboundConnectionId`
+
+Piped through `OrchestratorInput` → `SkillContext`. Defaults to `'slack'` in the Slack transport (only transport today). Skills don't consume this yet — they will in sub-phase B.
+
+### Added — SlackConnection registered on startup
+
+`createSlackAppForProfile` in `connectors/slack/app.ts` registers a SlackConnection under `user.slack_user_id` as the profile key. Startup log: `Connection registered: slack for profile <name>`.
+
+### Invariants preserved
+
+- No existing tool changes behavior
+- No existing prompt changes
+- SummarySkill continues using `messaging.ts` directly — port happens in sub-phase B
+- `outreach`, `coord`, `coordinator` untouched — later sub-phases
+
+Typecheck passes. Smoke test: bot starts, logs show connection registration, all prior Slack behavior unchanged.
+
+### Next sub-phase (1.8.10): port SummarySkill to use router
+
+Replace SummarySkill's direct `messaging.ts` imports with router-mediated access. Reference consumer — proves the interface works end-to-end before staking outreach or coord on it.
+
+---
+
 ## 1.8.8 — Passive style learner + recurring-series guard + addressee gate fix + quality batch
 
 Bundled patch from a day of MPIM + summary iteration + routine diagnostics.

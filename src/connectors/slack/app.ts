@@ -61,6 +61,20 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     logLevel: config.NODE_ENV === 'development' ? LogLevel.WARN : LogLevel.ERROR,
   });
 
+  // v1.9.0 — register SlackConnection for this profile so skills (via the
+  // router) can resolve it for outgoing messages. Nothing consumes this yet
+  // in v1.9.0 sub-phase A; SummarySkill will be the first consumer in B,
+  // then outreach + coord in C/D.
+  //
+  // Profile id comes from user.slack_user_id (stable per-owner identifier).
+  {
+    // Lazy import to avoid circular deps with connections/slack/index.ts
+    // which imports from this module via messaging.ts.
+    const { createSlackConnection } = require('../../connections/slack') as typeof import('../../connections/slack');
+    const { registerConnection } = require('../../connections/registry') as typeof import('../../connections/registry');
+    registerConnection(user.slack_user_id, createSlackConnection(app, assistant.slack.bot_token));
+  }
+
   // ── Channel type helpers ──────────────────────────────────────────────────
   // Slack channel ID prefixes:
   //   D = 1:1 direct message

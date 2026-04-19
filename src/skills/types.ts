@@ -80,6 +80,13 @@ export interface SkillContext {
   isMpim?: boolean;                   // true if this is a group DM (MPIM)
   isOwnerInGroup?: boolean;           // true when the owner sent this message in an MPIM
   mpimMemberIds?: string[];           // all non-bot member IDs when in MPIM
+  /**
+   * v1.9.0 — which Connection this message arrived on. Used by the router so
+   * replies follow the inbound transport (Yael DMs on Slack → Maelle replies
+   * on Slack). For now always 'slack' since that's the only Connection; will
+   * carry 'email' / 'whatsapp' when those transports are added.
+   */
+  inboundConnectionId?: import('../connections/types').ConnectionId;
 }
 
 /** All supported communication channels */

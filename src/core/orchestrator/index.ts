@@ -136,6 +136,13 @@ export interface OrchestratorInput {
    * a `[Image] ...` placeholder by the caller; the bytes are not stored.
    */
   images?: Anthropic.ImageBlockParam[];
+  /**
+   * v1.9.0 — which Connection the inbound message arrived on. Used by the
+   * router layer so replies follow the inbound transport. Defaults to 'slack'
+   * (the only transport today); email and WhatsApp callers will pass their
+   * own id when those connectors land.
+   */
+  inboundConnectionId?: import('../../connections/types').ConnectionId;
 }
 
 export interface SlackAction {
@@ -406,6 +413,10 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
       isMpim: input.isMpim,
       isOwnerInGroup: input.isOwnerInGroup,
       mpimMemberIds: input.mpimMemberIds,
+      // v1.8.9 — carry the inbound transport through. Today every caller is
+      // the Slack transport so this defaults to 'slack'. When email/WhatsApp
+      // inbound lands, those callers will set their own id.
+      inboundConnectionId: input.inboundConnectionId ?? 'slack',
     };
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
