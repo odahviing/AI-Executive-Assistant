@@ -9,6 +9,57 @@ Read these two memory files before doing anything:
 
 ---
 
+## Active work — issue #1 (Connection interface rollout)
+
+We are mid-way through [issue #1](https://github.com/odahviing/AI-Executive-Assistant/issues/1). Each sub-phase ships as its own patch version so the owner can test incrementally; v1.9.0 is reserved for the milestone when every port is stable.
+
+### Progress so far
+
+- **Sub-phase A — v1.8.9** ✅ Shipped. Connection interface + PersonRef + RoutingPolicy + per-profile registry + Router with 4-layer policy + SlackConnection factory + `SkillContext.inboundConnectionId` plumbed through. Pure additions, zero behavior change.
+- **Sub-phase B — v1.8.10** ✅ Shipped. SummarySkill ported to Connection interface (reference consumer). `findUserByName` / `findChannelByName` / `sendDM` / `sendMpim` / `postToChannel` all go through `slackConn.*` now.
+- **Sub-phase C — v1.8.11** ✅ Shipped. OutreachCoreSkill moved from `src/core/outreach.ts` to `src/skills/outreach.ts`. `message_colleague` sends synchronously via Connection now (no more `_requires_slack_client` indirection). `outreach_send` dispatcher ported too. `send_outreach_dm` + `post_to_channel` SlackAction handlers removed from app.ts.
+
+### NEXT — sub-phase D (coord.ts port) — HIGH RISK
+
+**Start fresh.** Before writing any code for sub-phase D, do a full analysis pass:
+
+1. Read `src/connectors/slack/coord.ts` top-to-bottom (1244 lines) and map every exported function + every internal helper
+2. Categorize each piece:
+   - **Pure domain logic** (state transitions, slot resolution, ping-pong decision) → moves to `src/skills/meetings/coord/`
+   - **Slack transport logic** (DM sending, channel posts, thread management) → stays in `connectors/slack/` but refactored to implement a narrow transport interface
+   - **Already in coord/utils.ts** (v1.6.3 split) → stays, but imports may shift
+3. Catalogue the DB touchpoints (`coord_jobs` schema: proposed_slots JSON, participants JSON, requesters, external_event_id, winning_slot, etc.) — every one must be preserved byte-for-byte
+4. Catalogue the integration points: background cron (coord_nudge + coord_abandon tasks), approvals layer (`emitWaitingOwnerApproval`), MPIM coord (contacted_via='group'), owner auto-include for colleague-initiated coord, intent-routed reschedule (v1.8.4 — hands off to meetingReschedule.ts already)
+5. Propose the sub-sub-phase structure **before writing any code**. Getting this wrong causes regressions in the meeting coord flow — the most user-visible part of Maelle.
+
+**Do not try to port coord.ts in one commit.** Break it into smaller verifiable steps. Ship each step as its own patch (1.8.12, 1.8.13, etc.) if it simplifies rollback.
+
+**Key invariants to preserve:**
+- Multi-party coord flow (propose slots → DM participants → collect → negotiate → book)
+- MPIM coord flow (in-group variant, contacted_via='group')
+- Reschedule intent flow (v1.8.4 — colleague replies yes → move existing meeting, not create new)
+- `emitWaitingOwnerApproval` → approvals layer integration
+- Booking confirmation posts in the original coord DM thread, not a new top-level DM (v1.8.6 fix)
+- Owner auto-inclusion for colleague-initiated coord
+- Coord state machine statuses: collecting / resolving / negotiating / waiting_owner / confirmed / booked / cancelled / abandoned
+
+### Remaining sub-phases after D
+
+- **E (v1.8.13):** port `coordinator.ts` outreach reply classifier → `skills/outreach/replyHandler.ts`
+- **F (v1.9.0):** doc sweep — SESSION_STARTER.md four-layer model, memory files, README. Close #1.
+
+### Core architectural principles for this work
+
+Every sub-phase must respect:
+- **Skills ↔ Connections orthogonality.** Skills import only `connections/types` (Connection interface) and `connections/registry` (getConnection). They MUST NOT import from `connectors/slack/*` or `connections/slack/*`. If a Slack-specific helper is needed, either expose it on the Connection interface or keep the usage inside `connectors/slack/` code.
+- **Internal is always Slack by default.** Having email/WhatsApp capability does not mean internal messages migrate. Internal work stays on Slack. Email engages only when: (a) external recipient involved, (b) inbound message came from email. Sometimes overrides.
+- **Context-driven replies.** If a message came in on transport X, the reply goes back on X. The router's Layer 1 handles this via `SkillContext.inboundConnectionId`.
+- **Settings-driven routing.** Profiles carry `connections.default_routing` + optional `per_skill_routing` in YAML. Other owners may route differently; don't hardcode policy.
+
+---
+
+---
+
 ## Mission — what we're actually building
 
 Maelle is an AI executive assistant that works **as a human EA**. The entire product premise is that colleagues and the owner experience her as a person — not a bot, not an "AI assistant," not a chat interface. A real member of the team who happens to run on code.
