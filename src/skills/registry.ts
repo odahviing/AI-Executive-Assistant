@@ -3,7 +3,7 @@ import type { Skill, SkillId, SkillContext } from './types';
 import type { UserProfile } from '../config/userProfile';
 import logger from '../utils/logger';
 import { AssistantSkill } from '../core/assistant';
-import { OutreachCoreSkill } from '../core/outreach';
+import { OutreachCoreSkill } from './outreach';
 import { TasksSkill } from '../tasks/skill';
 import { CronsSkill } from '../tasks/crons';
 

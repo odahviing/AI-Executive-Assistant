@@ -16,11 +16,9 @@ import {
 } from '../../db';
 import { detectAndSaveGender } from '../../utils/genderDetect';
 import {
-  sendOutreachDM,
   handleOutreachReply,
   findSlackUser,
   findSlackChannel,
-  postToChannel,
 } from './coordinator';
 import { isMessageForAssistant } from './relevance';
 import { initiateCoordination, handleCoordReply, forceBookCoordinationByOwner, type SlotWithLocation } from './coord';
@@ -654,24 +652,6 @@ export function createSlackAppForProfile(profile: UserProfile): App {
                   senderRole: action._senderRole as 'owner' | 'colleague' | undefined,
                   senderUserId: action._senderUserId as string | undefined,
                 });
-              } else if (action.action === 'post_to_channel') {
-                const postResult = await postToChannel(app, {
-                  bot_token: assistant.slack.bot_token,
-                  channel_id: action.channel_id as string,
-                  colleague_slack_id: action.colleague_slack_id as string,
-                  message: action.message as string,
-                });
-                if (!postResult.ok) {
-                  const errMsg = postResult.reason === 'not_in_channel_private'
-                    ? `I couldn't post to that channel — it's private and I haven't been invited. Ask a channel admin to add me, then try again.`
-                    : `I couldn't post to that channel: ${postResult.detail}`;
-                  await app.client.chat.postMessage({
-                    token: assistant.slack.bot_token,
-                    channel: channelId,
-                    thread_ts: threadTs,
-                    text: errMsg,
-                  });
-                }
               } else if (action.action === 'finalize_coord_meeting') {
                 const result = await forceBookCoordinationByOwner(
                   app,
@@ -688,16 +668,10 @@ export function createSlackAppForProfile(profile: UserProfile): App {
                     text: `Couldn't finalize that booking — ${result.reason ?? 'unknown error'}.`,
                   });
                 }
-              } else if (action.action === 'send_outreach_dm') {
-                await sendOutreachDM(app, {
-                  jobId: action.jobId as string,
-                  colleague_slack_id: action.colleague_slack_id as string,
-                  colleague_name: action.colleague_name as string,
-                  message: action.message as string,
-                  await_reply: action.await_reply as boolean,
-                  bot_token: assistant.slack.bot_token,
-                });
               }
+              // v1.8.11 — `send_outreach_dm` and `post_to_channel` actions
+              // removed: message_colleague now sends synchronously inside
+              // its tool handler via Connection.
             } catch (err) {
               logger.error('Slack action failed', { err, action: action.action });
             }

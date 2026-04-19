@@ -1,31 +1,37 @@
 /**
- * Outreach core module (v1.6.1).
+ * Outreach skill (v1.8.11 — moved from src/core to src/skills).
  *
  * Owns the "how Maelle speaks to people on behalf of the owner" primitives:
  *   - message_colleague — send a DM or a channel post
  *   - find_slack_channel — resolve channel name → channel id
  *
- * This is a CORE module (always active), not a togglable skill. Every
- * Slack-based profile needs outreach for routine interactions: "tell Yael
- * the meeting's confirmed", "post this to #marketing and tag Mike", etc.
- * If/when we add more comm surfaces (email, WhatsApp), outreach will gain
- * connection abstraction — today it's Slack-specific via `context.app`.
+ * Still registered as a core module in the registry (always active when a
+ * Connection is available) but the implementation is now fully transport-
+ * agnostic. Sends go through the Connection interface resolved via registry.
+ * When email / WhatsApp Connections land, externals route through them
+ * automatically via the router (sub-phase F+).
  *
- * Extracted from `src/core/assistant.ts` in 1.6.1 to separate "memory about
- * people" (assistant.ts) from "messages to people" (this file).
+ * Changed in sub-phase C (v1.8.11):
+ *   - File moved from core/outreach.ts → skills/outreach.ts
+ *   - _requires_slack_client return pattern removed — sends happen
+ *     synchronously inside the tool handler via Connection
+ *   - find_slack_channel uses Connection.findChannelByName
+ *   - Channel-post branch prepends `<@slack_id>` mention before calling
+ *     Connection.postToChannel (@mention was previously done by coordinator.ts)
  */
 
 import type Anthropic from '@anthropic-ai/sdk';
-import type { Skill, SkillContext } from '../skills/types';
+import type { Skill, SkillContext } from './types';
 import type { UserProfile } from '../config/userProfile';
 import { DateTime } from 'luxon';
 import {
   createOutreachJob,
+  updateOutreachJob,
   upsertPersonMemory,
-  appendPersonInteraction,
 } from '../db';
 import { createTask } from '../tasks';
 import { calcResponseDeadline } from '../connectors/slack/coordinator';
+import { getConnection } from '../connections/registry';
 import logger from '../utils/logger';
 
 export class OutreachCoreSkill implements Skill {
@@ -263,38 +269,71 @@ Only send messages the user explicitly asks for — never reach out to people on
           });
         }
 
-        // Channel post — bypass DM flow (app.ts sees _requires_slack_client)
+        // v1.8.11 — resolve the Connection and send synchronously here, no
+        // more _requires_slack_client dispatch to app.ts. Uses the owner's
+        // Slack Connection for now; router-based resolution will kick in
+        // per-recipient when EmailConnection / WhatsAppConnection land.
+        const connection = getConnection(userId, 'slack');
+        if (!connection) {
+          logger.error('message_colleague — Slack Connection not registered for profile', { userId });
+          updateOutreachJob(jobId, { status: 'cancelled', reply_text: 'Connection not registered' });
+          return { ok: false, error: 'connection_not_registered' };
+        }
+
+        // Channel post branch: prepend @mention so the colleague is pinged
         if (args.channel_id) {
+          const mention = `<@${args.colleague_slack_id as string}>`;
+          const fullText = `${mention} ${args.message as string}`;
+          const outcome = await connection.postToChannel(args.channel_id as string, fullText);
+          if (!outcome.ok) {
+            updateOutreachJob(jobId, { status: 'cancelled', reply_text: `Channel post failed: ${outcome.reason}` });
+            const hint = outcome.reason === 'not_in_channel_private'
+              ? `That channel is private and I haven't been invited. Ask an admin to add me, then try again.`
+              : `Channel post failed: ${outcome.detail ?? outcome.reason}`;
+            return { ok: false, error: outcome.reason, detail: hint };
+          }
+          logger.info('message_colleague — channel post sent', {
+            jobId,
+            channel: args.channel_name ?? args.channel_id,
+            colleague: args.colleague_name,
+          });
           return {
-            _requires_slack_client: true,
-            _status: 'queued_not_sent',
-            _note: `Message has NOT been posted yet. Say "On it — I'll post that to #${args.channel_name ?? 'the channel'} now" and nothing more.`,
-            action: 'post_to_channel',
-            channel_id: args.channel_id,
-            channel_name: args.channel_name,
-            colleague_slack_id: args.colleague_slack_id,
-            colleague_name: args.colleague_name,
-            message: args.message,
+            ok: true,
+            posted_to_channel: args.channel_name ?? args.channel_id,
+            colleague_mentioned: args.colleague_name,
+            jobId,
+            _must_reply_with: `One short sentence acknowledging the post, e.g. "Posted to #${args.channel_name ?? 'the channel'} with ${args.colleague_name} tagged."`,
           };
         }
 
-        return {
-          _requires_slack_client: true,
-          _status: 'queued_not_sent',
-          _note: 'Message has NOT been sent yet — it is queued. Do NOT say Done/Sent/Confirmed. Say "On it — I\'ll send that now and let you know when [name] replies." and STOP. Do NOT generate any follow-up text about their reply — you will be notified asynchronously when they actually respond.',
-          action: 'send_outreach_dm',
+        // DM branch: send directly to the colleague
+        const outcome = await connection.sendDirect(args.colleague_slack_id as string, args.message as string);
+        if (!outcome.ok) {
+          updateOutreachJob(jobId, { status: 'cancelled', reply_text: `Send failed: ${outcome.reason}` });
+          return { ok: false, error: outcome.reason, detail: outcome.detail };
+        }
+        logger.info('message_colleague — DM sent', {
           jobId,
-          colleague_slack_id: args.colleague_slack_id,
+          colleague: args.colleague_name,
+          await_reply: !!args.await_reply,
+          preview: (args.message as string).slice(0, 80),
+        });
+        return {
+          ok: true,
+          sent: true,
+          jobId,
           colleague_name: args.colleague_name,
-          message: args.message,
-          await_reply: args.await_reply,
+          await_reply: !!args.await_reply,
+          _must_reply_with: args.await_reply
+            ? `One short sentence confirming the send and that you will report back, e.g. "Sent — I\'ll let you know when ${args.colleague_name} replies."`
+            : `One short sentence confirming the send, e.g. "Sent to ${args.colleague_name}."`,
         };
       }
 
       case 'find_slack_channel': {
-        if (!context.app) return { error: 'Slack client not available' };
-        const { findSlackChannel } = await import('../connectors/slack/coordinator');
-        const channels = await findSlackChannel(context.app, context.profile.assistant.slack.bot_token, args.name as string);
+        const connection = getConnection(userId, 'slack');
+        if (!connection) return { error: 'slack_connection_not_registered' };
+        const channels = await connection.findChannelByName(args.name as string);
         return { channels, count: channels.length };
       }
 

@@ -2,6 +2,61 @@
 
 ---
 
+## 1.8.11 — Outreach ported to Connection interface (#1 sub-phase C)
+
+Second skill port. `core/outreach.ts` moved to `skills/outreach.ts` and rewritten to send through the Connection layer. Drops the `_requires_slack_client` async-dispatch indirection — the tool handler sends synchronously now.
+
+### Changed — outreach.ts location + implementation
+
+- **File moved:** `src/core/outreach.ts` → `src/skills/outreach.ts`. Class still `OutreachCoreSkill` (kept name; registry imports updated).
+- **`message_colleague` tool handler now sends synchronously.**
+  - Resolves `getConnection(ownerUserId, 'slack')` inside the handler
+  - DM branch: `connection.sendDirect(colleague_slack_id, message)`
+  - Channel-post branch: prepends `<@slack_id>` mention to the text, then `connection.postToChannel(channel_id, text)`
+  - Returns `{ ok: true, sent: true, jobId, _must_reply_with: ... }` for immediate sends. No more `_requires_slack_client: true` indirection.
+  - On send failure: updates `outreach_jobs.status = 'cancelled'` with the reason, returns `{ ok: false, error, detail }`.
+- **`find_slack_channel` uses `connection.findChannelByName`** instead of the coordinator helper.
+- **Scheduled-send path (`send_at` future) unchanged.** Still creates the `outreach_send` task; the task dispatcher now also uses the Connection interface (see below).
+
+### Changed — `outreach_send` task dispatcher uses Connection
+
+`src/tasks/dispatchers/outreachSend.ts` no longer imports `sendOutreachDM` from `coordinator.ts`. Resolves the Connection at dispatch time and calls `slackConn.sendDirect(...)` directly. Post-send bookkeeping (owner notification, reply deadline, outreach_expiry task creation) unchanged.
+
+### Removed — `send_outreach_dm` + `post_to_channel` SlackActions
+
+`src/connectors/slack/app.ts` no longer handles `send_outreach_dm` or `post_to_channel` actions — they were the other side of the `_requires_slack_client` indirection that outreach no longer uses. Imports (`sendOutreachDM`, `postToChannel`) dropped from app.ts. `coordinator.ts` still exports `sendOutreachDM` for any other caller but outreach no longer uses it.
+
+### Invariants preserved
+
+- `outreach_jobs` rows created identically (intent + context_json from v1.8.4 still work)
+- `outreach_send` / `outreach_expiry` task flow unchanged
+- Owner quiet-hours respect (v1.8.0) unchanged — lives in outreachExpiry.ts dispatcher, untouched
+- Intent-routed meeting reschedule (v1.8.4) unchanged
+- `message_colleague` tool schema unchanged (Sonnet's view identical)
+- `find_slack_channel` tool name unchanged (Sonnet's view identical)
+- Claim-checker still sees `[message_colleague: <name>]` in toolSummaries
+
+### What's different from Sonnet's perspective
+
+- **message_colleague used to return** `{_requires_slack_client: true, _note: "NOT sent yet — say 'On it'"}`. Sonnet would say "On it."
+- **Now returns** `{ok: true, sent: true, _must_reply_with: "One short sentence confirming the send..."}`. Sonnet says "Sent — I'll let you know when [name] replies."
+
+The new phrasing is more honest — the send DID happen by the time Sonnet sees the result. Claim-checker still validates correctly.
+
+### Not changed
+
+- Coord state machine (`connectors/slack/coord.ts`) — sub-phase D
+- Outreach reply classifier (`coordinator.ts` `handleOutreachReply`) — sub-phase E
+- CORE_MODULES list still includes OutreachCoreSkill; auto-load-based-on-Connection logic will come in a later sub-phase if any profile disables Slack
+
+Typecheck clean. Owner-facing semantics identical; internal plumbing fully ported.
+
+### Next sub-phase (1.8.12): coord.ts state machine port — HIGH RISK
+
+1244 lines of state machine. Dedicated session. Multiple sub-sub-phases probably. Own risk budget.
+
+---
+
 ## 1.8.10 — SummarySkill ported to Connection interface (#1 sub-phase B)
 
 Reference consumer port. SummarySkill no longer imports directly from `connections/slack/messaging.ts`; it resolves the registered Slack Connection via the registry and calls through the generic `Connection` interface.

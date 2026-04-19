@@ -1,6 +1,7 @@
 import { completeTask, createTask, updateTask } from '../index';
 import { getDb, updateOutreachJob } from '../../db';
-import { sendOutreachDM, calcResponseDeadline } from '../../connectors/slack/coordinator';
+import { calcResponseDeadline } from '../../connectors/slack/coordinator';
+import { getConnection } from '../../connections/registry';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
 
@@ -37,13 +38,23 @@ export const dispatchOutreachSend: TaskDispatcher = async (app, task, profile) =
   }
 
   try {
-    await sendOutreachDM(app, {
+    // v1.8.11 — use the registered Slack Connection instead of the direct
+    // coordinator.sendOutreachDM helper. Keeps the dispatcher transport-
+    // agnostic; when email / WhatsApp Connections come online and an
+    // outreach was scheduled for a non-Slack recipient, the router will
+    // resolve to the right connection here.
+    const slackConn = getConnection(job.owner_user_id, 'slack');
+    if (!slackConn) {
+      throw new Error('slack_connection_not_registered');
+    }
+    const outcome = await slackConn.sendDirect(job.colleague_slack_id, job.message);
+    if (!outcome.ok) {
+      throw new Error(`send failed: ${outcome.reason}${outcome.detail ? ` (${outcome.detail})` : ''}`);
+    }
+    logger.info('Scheduled outreach DM sent', {
       jobId: job.id,
-      colleague_slack_id: job.colleague_slack_id,
-      colleague_name: job.colleague_name,
-      message: job.message,
-      await_reply: job.await_reply === 1,
-      bot_token,
+      colleague: job.colleague_name,
+      preview: job.message.slice(0, 80),
     });
     updateOutreachJob(job.id, { status: 'sent', sent_at: new Date().toISOString() });
     await app.client.chat.postMessage({
