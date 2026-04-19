@@ -995,6 +995,82 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       return;
     }
 
+    // v1.8.4 — forwarded huddle recap detection. If the owner shares a Slack
+    // AI huddle recap via "Share message" (or pastes a huddle transcript
+    // into DM), detect it and route to SummarySkill directly instead of the
+    // orchestrator. Only triggers on strong signal: substantial text length
+    // + at least two huddle-recap keyword markers.
+    if (senderRole1v1 === 'owner' && !subtype) {
+      const attachmentText = ((message as any).attachments?.[0]?.text as string | undefined) ?? '';
+      const bodyText = (message.text ?? '').toString();
+      const candidate = attachmentText.length > bodyText.length ? attachmentText : bodyText;
+
+      const HUDDLE_KEYWORDS = ['summary', 'action items', 'huddle', 'transcript', 'key points', 'highlights', 'takeaways', 'next steps', 'discussion'];
+      const candidateLower = candidate.toLowerCase();
+      const hitCount = HUDDLE_KEYWORDS.filter(kw => candidateLower.includes(kw)).length;
+      const looksLikeRecap = candidate.length >= 300 && hitCount >= 2;
+
+      if (looksLikeRecap) {
+        const summaryActive = ((profile.skills as any)?.summary === true || (profile.skills as any)?.meeting_summaries === true);
+        if (!summaryActive) {
+          logger.info('Forwarded huddle recap detected but summary skill disabled', { channel: channelId });
+        } else {
+          const ts = message.ts;
+          const threadTs = ('thread_ts' in message && (message as any).thread_ts)
+            ? (message as any).thread_ts as string
+            : ts;
+          logger.info('Forwarded huddle recap detected — ingesting', {
+            channel: channelId,
+            length: candidate.length,
+            keywordHits: hitCount,
+            source: attachmentText.length > bodyText.length ? 'attachment' : 'body',
+          });
+          setImmediate(async () => {
+            try {
+              // Caption: if message body is short, use it as the hint; otherwise no caption
+              const caption = attachmentText.length > bodyText.length ? bodyText.trim() : '';
+              const { ingestTranscriptUpload } = await import('../../skills/summary');
+              const result = await ingestTranscriptUpload({
+                text: candidate,
+                caption,
+                ownerUserId: profile.user.slack_user_id,
+                threadTs,
+                channelId,
+                profile,
+              });
+              const preface = result.kind === 'created'
+                ? `Got the huddle recap. Here's a draft summary — let me know what to change.`
+                : result.kind === 'overridden_new_meeting'
+                  ? `New huddle recap noted. Here's the draft for this one.`
+                  : `Got your edits — here's the updated version.`;
+              await client.chat.postMessage({
+                token: assistant.slack.bot_token,
+                channel: channelId,
+                thread_ts: threadTs,
+                text: `${preface}\n\n${result.rendered}`,
+              });
+              appendToConversation(threadTs, channelId, {
+                role: 'assistant',
+                content: `[Summary draft posted]\n${result.rendered}`,
+                ts: undefined,
+              });
+            } catch (err) {
+              logger.error('Huddle recap ingestion failed', { err: String(err) });
+              try {
+                await client.chat.postMessage({
+                  token: assistant.slack.bot_token,
+                  channel: channelId,
+                  thread_ts: threadTs,
+                  text: `I hit an issue summarizing that recap — give me a moment and try again?`,
+                });
+              } catch (_) {}
+            }
+          });
+          return;
+        }
+      }
+    }
+
     if (!message.text) return;
 
     // Skip self-mentions only in channels — in DMs, respond regardless

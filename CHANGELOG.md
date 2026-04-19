@@ -2,6 +2,63 @@
 
 ---
 
+## 1.8.4 — Intent-routed outreach + forwarded huddle recaps + triage principles restored
+
+Patch. Adds intent-routed outreach replies (colleague's approval automatically moves the calendar event), forwarded Slack huddle recap auto-ingest, coordinate_meeting preflight, colleague-path mutation-contradiction check, bare-weekday date verification, and triage context restoration. Several defensive code fixes learned from the issue #26 aftermath.
+
+### Added — intent-routed outreach with meeting-reschedule handler
+
+`message_colleague` now accepts optional `intent` and `context` parameters. When `intent='meeting_reschedule'` is set with `context={meeting_id, meeting_subject, proposed_start, proposed_end}`, the outreach reply dispatcher routes the colleague's reply to a dedicated handler in `src/skills/meetingReschedule.ts` instead of the generic classifier:
+
+- **approved** ("yes, works") → the handler calls `updateMeeting` to MOVE the existing calendar event, DMs the colleague a confirmation, reports to the owner
+- **declined** ("no, can't") → reports to the owner, keeps the original time
+- **counter** ("yes but 09:30 would be better") → DMs the owner the counter-offer for them to accept or reject in natural conversation
+
+Closes the workflow gap surfaced by issue #26 where Maelle sent a reschedule DM, got "yes" back, and then created a NEW meeting next week instead of moving today's. The outreach now remembers what meeting it's about.
+
+`outreach_jobs` gets two new columns: `intent TEXT`, `context_json TEXT`. Migration is additive (old rows keep null and fall through to the original done/continue/schedule classifier).
+
+### Added — coordinate_meeting preflight against existing meetings
+
+Before starting a new coord, `coordinate_meeting` now scans the next 14 days of the owner's calendar for an event whose subject substring-matches the requested subject AND whose attendees overlap with the requested participants. If a match is found, the tool refuses with a message steering Sonnet to use `message_colleague` with `intent='meeting_reschedule'` instead. Fails open on Graph errors (legitimate coords still work if Graph is briefly down).
+
+This is the code-level gate that makes the issue #26 "coord_meeting when you meant reschedule" mistake very hard to repeat.
+
+### Added — colleague-path mutation-contradiction check
+
+New step in `postReply.ts` for colleague-facing drafts. When a calendar-mutating tool (`move_meeting` / `create_meeting` / `update_meeting` / `delete_meeting` / `finalize_coord_meeting`) succeeded this turn AND the draft contains owner-deferral phrasing (`"flagged for <owner>"`, `"let <owner> know"`, `"check with <owner>"`, `"he'll likely / probably / decide"`), retry once with a nudge: action already happened — acknowledge it directly to the colleague. Code-only check (no Sonnet call). Addresses the Bug C pattern from issue #26 aftermath where the audit log said "booked" while the colleague was told "flagged for Idan".
+
+### Added — forwarded Slack huddle recaps auto-ingest
+
+Owner uses Slack's "Share message" action on a Slack AI huddle recap and sends it to Maelle's DM. Maelle detects the recap (attachment text / long body with 2+ huddle-recap keywords: `summary`, `action items`, `huddle`, `transcript`, etc.) and routes it to `SummarySkill.ingestTranscriptUpload` directly, skipping the orchestrator. Summary + follow-up flow lands without leaving Slack and without uploading a .txt file. Requires Slack AI huddle summaries enabled in the workspace.
+
+Future live-huddle participation (Maelle joins as audio participant) tracked separately in [#27](https://github.com/odahviing/issues/27) as a Roadmap item — forwarded-recap is the narrower path available today.
+
+### Fixed — dateVerifier now catches bare weekday misreferences
+
+When the user's current-turn message contains `today` / `tomorrow` / `היום` / `מחר` and the draft contains a bare weekday reference (`"Monday's calendar"`, `"on Monday's schedule"`) that doesn't match today's or tomorrow's actual weekday, the verifier flags it and triggers a corrective orchestrator retry. Narrow pattern (possessive + schedule-noun, or preposition + weekday + schedule-noun) to avoid false-positives on legitimate future references like `"I'll ping you Monday"`. Addresses the "Monday's calendar" bug in the issue #26 screenshot where Maelle misread Sunday as Monday.
+
+### Changed — triage + auto-build agents have repository context again
+
+Restored the two memory files (`.claude/memory/project_overview.md`, `.claude/memory/project_architecture.md`) as pre-injected reference material in both `scripts/auto-triage-bug.mjs` and `scripts/auto-build.mjs`. The v1.8.2 removal was an over-correction — we threw out architectural knowledge to solve a different problem (pattern-matching to recent changelog entries). The five anti-recency-bias guardrails stay in place at the instruction level; they're what actually prevented the bad fix, not the context removal.
+
+Added a "Maelle-is-a-human-EA" rule to the triage system prompt so proposed fixes that make Maelle sound more robotic get flagged as concerns.
+
+Memory files are now tracked in the repo at `.claude/memory/` so GitHub Actions can read them. Owner (local auto-memory) is the source of truth — these repo copies need to stay in sync when memory is updated. Consider adding a sync step to future workflow.
+
+### Migration
+
+- DB migration is automatic on startup (additive ALTER TABLE on outreach_jobs)
+- No new labels needed
+- Owner's first push after this version triggers memory-file-in-repo sync if not already done
+
+### Not changed
+
+- Reschedule coordination via coord.ts (the multi-party state machine) — that path stays for genuinely new meetings. Reschedule flow is strictly via `message_colleague` + intent='meeting_reschedule'.
+- Issue #26 bug 2 (Lunch not detected despite subject being "Lunch") — root cause still not identified. Ticket stays open at Medium priority; needs live-log reproduction.
+
+---
+
 ## 1.8.3 — Mutation tools return past-tense `action_summary` (issue #26 bug 1)
 
 Small patch addressing the "move-and-forget" class of bug caught in issue #26, where Maelle moved a meeting successfully and then narrated the post-move state as a fresh discovery ("already at 12:30, nothing to change") instead of acknowledging her own action.

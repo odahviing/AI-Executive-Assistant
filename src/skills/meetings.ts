@@ -547,6 +547,87 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
         }
         args.participants = validatedParticipants;
 
+        // ── Preflight (v1.8.4) — existing-meeting detection ─────────────────────
+        // If an event with a matching subject AND at least one overlapping
+        // participant already exists on the calendar in the search window, the
+        // owner almost certainly meant to MOVE that existing meeting — not
+        // create a new one. coordinate_meeting creates new meetings; for
+        // rescheduling an existing meeting, message_colleague with a reschedule
+        // intent is the right flow. This check catches the specific "Sonnet
+        // picked coord_meeting when she should have picked message_colleague"
+        // bug (issue #26 aftermath, v1.8.4).
+        try {
+          const requestedSubject = String(args.subject ?? '').trim();
+          const participantNames = (args.participants as any[])
+            .map((p: any) => (p.name ? String(p.name).toLowerCase() : null))
+            .filter((n: string | null): n is string => n !== null && n.length > 0);
+          const participantEmailsAll = (args.participants as any[])
+            .map((p: any) => (p.email ? String(p.email).toLowerCase() : null))
+            .filter((e: string | null): e is string => e !== null && e.length > 0);
+
+          if (requestedSubject.length >= 3 && participantNames.length > 0) {
+            const { getCalendarEvents } = await import('../connectors/graph/calendar');
+            const searchStart = DateTime.now().setZone(timezone).startOf('day').toFormat('yyyy-MM-dd');
+            const searchEnd = DateTime.now().setZone(timezone).plus({ days: 14 }).toFormat('yyyy-MM-dd');
+            const rawEvents = await getCalendarEvents(userEmail, searchStart, searchEnd, timezone);
+
+            const normalize = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+            const requestedNorm = normalize(requestedSubject);
+
+            for (const ev of rawEvents) {
+              if (ev.isCancelled) continue;
+              const evSubjectNorm = normalize(ev.subject ?? '');
+              if (!evSubjectNorm) continue;
+
+              // Subject match: exact, or either is a substring of the other (handles
+              // "BiWeekly Idan & Yael" vs "BiWeekly Idan Yael" both ways)
+              const subjectMatches =
+                evSubjectNorm === requestedNorm ||
+                evSubjectNorm.includes(requestedNorm) ||
+                requestedNorm.includes(evSubjectNorm);
+              if (!subjectMatches) continue;
+
+              // Participant match: check existing event's attendees for any overlap
+              // with the coord's requested participants (by email or name).
+              const evAttendees = (ev.attendees ?? []).map((a: any) => ({
+                name: (a.emailAddress?.name ?? '').toLowerCase(),
+                email: (a.emailAddress?.address ?? '').toLowerCase(),
+              }));
+              const participantMatches = evAttendees.some((a: any) => {
+                if (a.email && participantEmailsAll.includes(a.email)) return true;
+                if (!a.name) return false;
+                return participantNames.some(pn => a.name.includes(pn) || pn.includes(a.name));
+              });
+              if (!participantMatches) continue;
+
+              // Match found — refuse the coord and steer toward message_colleague
+              const evDateTime = ev.start?.dateTime
+                ? DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone || timezone })
+                : null;
+              const whenStr = evDateTime && evDateTime.isValid
+                ? evDateTime.toFormat('EEE d MMM HH:mm')
+                : 'soon';
+
+              logger.info('coordinate_meeting preflight blocked — existing meeting matched', {
+                requestedSubject,
+                existingSubject: ev.subject,
+                existingStart: ev.start?.dateTime,
+                participantNames,
+              });
+              return {
+                error: 'existing_meeting_on_calendar',
+                existing_subject: ev.subject,
+                existing_start: ev.start?.dateTime,
+                existing_when_local: whenStr,
+                message: `There's already a "${ev.subject}" on the calendar for ${whenStr} with overlapping participants. coordinate_meeting creates NEW meetings — if the owner wants to MOVE or RESCHEDULE the existing one, use message_colleague instead: send a DM asking the participant if the new time works, and when they reply yes, call move_meeting on the existing event. Only call coordinate_meeting again if this is definitely a separate new meeting (not a reschedule).`,
+              };
+            }
+          }
+        } catch (err) {
+          // Fail open — preflight errors should not break legitimate coord calls
+          logger.warn('coordinate_meeting preflight failed — skipping check', { err: String(err) });
+        }
+
         // ── Date range: default to now, search forward until 3 options found ────
         const now = DateTime.now().setZone(timezone);
         // Owner can request urgent same-day meetings — reduce buffer to 1h

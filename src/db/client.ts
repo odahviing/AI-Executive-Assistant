@@ -176,6 +176,11 @@ function initSchema(db: Database.Database): void {
     `ALTER TABLE tasks ADD COLUMN user_requested INTEGER NOT NULL DEFAULT 1`,
     `ALTER TABLE tasks ADD COLUMN briefed INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE outreach_jobs ADD COLUMN briefed_at TEXT`,
+    // v1.8.4 — intent routing on outreach replies. Skills tag an outreach
+    // with an intent (e.g. 'meeting_reschedule') and a context_json payload;
+    // the reply dispatcher routes incoming replies to the right skill handler.
+    `ALTER TABLE outreach_jobs ADD COLUMN intent TEXT`,
+    `ALTER TABLE outreach_jobs ADD COLUMN context_json TEXT`,
     // Defensive: older coord_jobs may be missing subject (was hit by injection-driven writes)
     `ALTER TABLE coord_jobs ADD COLUMN subject TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE coord_jobs ADD COLUMN topic TEXT`,

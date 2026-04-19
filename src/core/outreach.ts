@@ -86,6 +86,23 @@ Only send messages the user explicitly asks for — never reach out to people on
               type: 'string',
               description: 'ISO 8601 datetime to send the message. Use when the user asks to reach out at a future time. Leave empty to send now.',
             },
+            intent: {
+              type: 'string',
+              enum: ['meeting_reschedule'],
+              description: 'Optional. Tag the outreach with a specific intent so the colleague\'s reply is handled correctly. Use "meeting_reschedule" when the owner is asking a colleague to MOVE an existing meeting (not to set up a new one). When set, you must also supply the context field with the meeting details. If omitted, the reply is classified generically (done/continue/schedule).',
+            },
+            context: {
+              type: 'object',
+              description: 'Optional. Intent-specific payload. For intent="meeting_reschedule", supply { meeting_id, meeting_subject, proposed_start, proposed_end } where proposed_start/end are ISO datetimes in the owner\'s timezone. meeting_id must come from get_calendar so the actual calendar event can be updated when the colleague approves.',
+              properties: {
+                meeting_id: { type: 'string', description: 'Calendar event ID from get_calendar (the existing meeting being rescheduled).' },
+                meeting_subject: { type: 'string', description: 'The existing meeting\'s subject as it appears on the calendar.' },
+                proposed_start: { type: 'string', description: 'Proposed new start time as ISO datetime (e.g. "2026-04-19T09:00:00").' },
+                proposed_end: { type: 'string', description: 'Proposed new end time as ISO datetime.' },
+                original_start: { type: 'string', description: 'Optional — the meeting\'s current start time (ISO). Helps narration.' },
+                original_end: { type: 'string', description: 'Optional — the meeting\'s current end time (ISO).' },
+              },
+            },
           },
           required: ['colleague_slack_id', 'colleague_name', 'message', 'await_reply'],
         },
@@ -124,6 +141,12 @@ Only send messages the user explicitly asks for — never reach out to people on
           ? calcResponseDeadline(colleagueTzForDeadline)
           : undefined;
 
+        // v1.8.4 — intent + context for intent-routed reply dispatch
+        const intent = typeof args.intent === 'string' ? args.intent : undefined;
+        const contextPayload = args.context && typeof args.context === 'object'
+          ? JSON.stringify(args.context)
+          : undefined;
+
         const jobId = createOutreachJob({
           owner_user_id: userId,
           owner_channel: context.channelId,
@@ -137,6 +160,8 @@ Only send messages the user explicitly asks for — never reach out to people on
           sent_at: isFuture ? undefined : new Date().toISOString(),
           reply_deadline: deadline,
           scheduled_at: sendAt,
+          intent,
+          context_json: contextPayload,
         });
 
         logger.info('message_colleague — outreach row created', {
@@ -283,6 +308,23 @@ Only send messages the user explicitly asks for — never reach out to people on
 
 When the owner asks you to send someone a message, use message_colleague. Default is a DM; pass a channel_id for a channel post (use find_slack_channel first). Pass send_at for scheduled future sends — those are driven by the task runner, not sent immediately.
 
-Never reach out to people on your own. Only on explicit owner request. If the colleague might reply, set await_reply=true so we'll track the response.`;
+Never reach out to people on your own. Only on explicit owner request. If the colleague might reply, set await_reply=true so we'll track the response.
+
+## RESCHEDULE EXISTING MEETINGS
+
+When the owner asks you to ask a colleague to MOVE an existing meeting (e.g. "ask Yael if we can start our weekly 15 minutes earlier"), do NOT use coordinate_meeting — that tool creates NEW meetings. Instead:
+
+1. Call get_calendar to find the existing meeting — note the meeting_id and current start/end.
+2. Call message_colleague with:
+   - colleague_slack_id, colleague_name, colleague_tz
+   - message: natural phrasing asking them to move to the new time
+   - await_reply: true
+   - intent: "meeting_reschedule"
+   - context: { meeting_id, meeting_subject, proposed_start (ISO), proposed_end (ISO), original_start (ISO), original_end (ISO) }
+
+When the colleague replies "yes" → the system automatically moves the meeting on the calendar and reports back to the owner.
+When they decline or propose a different time → the system tells the owner; the owner decides next.
+
+If you forget intent + context, the reply falls through to the generic classifier and the move will NOT be applied automatically — the owner would have to ask again.`;
   }
 }

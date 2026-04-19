@@ -36,6 +36,14 @@ export interface OutreachJob {
   sent_at?: string;
   reply_deadline?: string;
   conversation_json?: string;  // JSON array of {role:'maelle'|'colleague', text:string}
+  // v1.8.4 — intent routing. When set, the outreach reply dispatcher routes
+  // the colleague's reply to the registered handler for this intent (instead
+  // of just surfacing the reply to the owner). context_json carries
+  // intent-specific payload (e.g. { meeting_id, proposed_start, proposed_end }
+  // for 'meeting_reschedule'). Optional — legacy rows have both NULL and
+  // fall through to the default "report reply to owner" behavior.
+  intent?: string;
+  context_json?: string;
 }
 
 export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' | 'updated_at'>): string {
@@ -45,11 +53,11 @@ export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' 
     INSERT INTO outreach_jobs (
       id, owner_user_id, owner_channel, owner_thread_ts,
       colleague_slack_id, colleague_name, colleague_tz, message, await_reply, status,
-      sent_at, reply_deadline, scheduled_at
+      sent_at, reply_deadline, scheduled_at, intent, context_json
     ) VALUES (
       @id, @owner_user_id, @owner_channel, @owner_thread_ts,
       @colleague_slack_id, @colleague_name, @colleague_tz, @message, @await_reply, @status,
-      @sent_at, @reply_deadline, @scheduled_at
+      @sent_at, @reply_deadline, @scheduled_at, @intent, @context_json
     )
   `).run({
     id,
@@ -65,6 +73,8 @@ export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' 
     sent_at: params.sent_at ?? null,
     reply_deadline: params.reply_deadline ?? null,
     scheduled_at: params.scheduled_at ?? null,
+    intent: params.intent ?? null,
+    context_json: params.context_json ?? null,
   });
   return id;
 }

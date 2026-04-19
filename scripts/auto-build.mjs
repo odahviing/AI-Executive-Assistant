@@ -23,6 +23,7 @@
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { execSync, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 const ISSUE_NUMBER = process.env.ISSUE_NUMBER;
 const REPO         = process.env.REPO;
@@ -143,9 +144,32 @@ const newBody = (issue.body || '') + approvedPlanBlock;
 ghEditBody(newBody);
 console.log('Plan written into issue body.');
 
+// ── Load repository architecture reference ───────────────────────────────────
+// Same files the owner reads. Gives the build agent the architectural shape
+// of the project when implementing the approved plan.
+function loadMemoryFile(path) {
+  try { return readFileSync(path, 'utf8'); } catch { return `(could not read ${path})`; }
+}
+const memoryOverview     = loadMemoryFile('.claude/memory/project_overview.md');
+const memoryArchitecture = loadMemoryFile('.claude/memory/project_architecture.md');
+
 // ── Build the agent prompt ───────────────────────────────────────────────────
 
 const systemPrompt = `You are an automated bug-fix agent for the Maelle codebase. The owner has reviewed and APPROVED a plan for a bug fix. Your job: implement it.
+
+REPOSITORY ARCHITECTURE (reference material — use it to know where files live, conventions to follow, and how the layers interact):
+
+--- project_overview.md ---
+
+${memoryOverview}
+
+--- project_architecture.md ---
+
+${memoryArchitecture}
+
+--- end reference ---
+
+
 
 RULES:
 

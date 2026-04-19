@@ -281,7 +281,28 @@ export async function handleOutreachReply(
     jobId: job.id,
     from: job.colleague_name,
     preview: params.text.slice(0, 80),
+    intent: job.intent ?? null,
   });
+
+  // v1.8.4 — intent-routed outreach replies. If the outreach was tagged with
+  // a recognized intent (meeting_reschedule for now), dispatch to the skill's
+  // dedicated handler instead of the generic done/continue/schedule classifier.
+  // Handler returns true if it handled the reply; false if we should fall
+  // through (e.g. context_json missing or unparseable).
+  if (job.intent === 'meeting_reschedule') {
+    try {
+      const { handleRescheduleReply } = await import('../../skills/meetingReschedule');
+      const handled = await handleRescheduleReply(app, {
+        job,
+        replyText: params.text,
+        profile: params.profile,
+        bot_token: params.bot_token,
+      });
+      if (handled) return true;
+    } catch (err) {
+      logger.error('meeting_reschedule intent handler threw — falling through', { err: String(err), jobId: job.id });
+    }
+  }
 
   const conversation: Array<{ role: 'maelle' | 'colleague'; text: string }> =
     job.conversation_json ? JSON.parse(job.conversation_json) : [];
@@ -641,7 +662,7 @@ export async function postToChannel(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-async function openDM(app: App, bot_token: string, userId: string): Promise<string> {
+export async function openDM(app: App, bot_token: string, userId: string): Promise<string> {
   const result = await app.client.conversations.open({ token: bot_token, users: userId });
   return (result.channel as any)?.id;
 }

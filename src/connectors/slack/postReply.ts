@@ -107,6 +107,58 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     role, colleagueName, isMpim, isOwnerInGroup, mpimMemberIds,
   });
 
+  // Step 3c (v1.8.4) — colleague-path mutation-contradiction check. When a
+  // calendar-mutating tool succeeded this turn AND the draft tells the
+  // colleague something like "I'll flag it for <owner>" or "he'll decide,"
+  // Maelle is contradicting her own action — she did mutate the calendar,
+  // she shouldn't defer it back to the owner. Retry once with a nudge so
+  // the reply acknowledges the action. Code-only check, no Sonnet call.
+  // Addresses the Bug C pattern from issue #26 aftermath (owner saw audit
+  // log "Meeting booked" while the colleague was told "flagged for Idan").
+  if (role === 'colleague' && !isOwnerInGroup) {
+    const toolSummariesText = (result.toolSummaries ?? []).join(' ');
+    const mutationRan = /\[(move_meeting|create_meeting|update_meeting|delete_meeting|finalize_coord_meeting)/i.test(toolSummariesText);
+    const ownerFirstName = profile.user.name.split(' ')[0];
+    const ownerFnRe = new RegExp(`\\b${ownerFirstName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\b`, 'i');
+    const draftDefersToOwner =
+      /\bflag(?:ged|ging)?\s+(?:it|this|that)?\s*for\b/i.test(cleanReply) ||
+      (/\blet\s+\S+\s+know\b/i.test(cleanReply) && ownerFnRe.test(cleanReply)) ||
+      (/\bcheck\s+with\s+\S+/i.test(cleanReply) && ownerFnRe.test(cleanReply)) ||
+      /\bhe'?ll\s+(?:likely|probably|need|decide|confirm|jump)/i.test(cleanReply);
+    if (mutationRan && draftDefersToOwner) {
+      logger.warn('Colleague draft defers to owner after mutation ran — retrying', {
+        senderId, threadTs,
+        toolSummaries: result.toolSummaries,
+        draftPreview: cleanReply.slice(0, 160),
+      });
+      const nudge = `Your previous reply to this colleague said you'd flag / check with ${ownerFirstName}, but a calendar action (move / create / update / delete / book) already SUCCEEDED this turn. Do not defer to ${ownerFirstName} — acknowledge the action to the colleague directly. If the tool returned an action_summary, use it verbatim or paraphrase. Write one short honest sentence that matches what actually happened.`;
+      try {
+        const retry = await runOrchestrator({
+          userMessage,
+          conversationHistory: history,
+          threadTs,
+          channelId,
+          userId: senderId,
+          senderRole: role as 'owner' | 'colleague',
+          senderName: colleagueName,
+          channel: 'slack' as ChannelId,
+          app,
+          profile,
+          extraInstruction: nudge,
+          isMpim,
+          isOwnerInGroup,
+          mpimMemberIds,
+        });
+        if (retry?.reply) {
+          cleanReply = normalizeSlackText(retry.reply);
+          logger.info('Colleague mutation-contradiction retry produced new draft', { previewAfter: cleanReply.slice(0, 160) });
+        }
+      } catch (err) {
+        logger.warn('Colleague mutation-contradiction retry failed — leaving original draft', { err: String(err) });
+      }
+    }
+  }
+
   // Step 4 — colleague-facing security gate (leak filter).
   if (role === 'colleague' && !isOwnerInGroup) {
     cleanReply = await runSecurityGate({
@@ -367,7 +419,7 @@ async function runDateVerifierAndMaybeRetry(ctx: DateVerifyContext): Promise<str
 
   try {
     const { verifyDates, buildDateCorrectionNudge } = await import('../../utils/dateVerifier');
-    const verdict = verifyDates(cleanReply, profile.user.timezone);
+    const verdict = verifyDates(cleanReply, profile.user.timezone, userMessage);
     if (verdict.ok || verdict.mismatches.length === 0) return cleanReply;
 
     logger.warn('Date verifier: draft has wrong weekday/date pairs — retrying', {

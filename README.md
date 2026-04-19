@@ -363,6 +363,16 @@ After push, the `maelle-deploy-watcher` PM2 process on your machine picks up the
 
 Files: [`.github/workflows/auto-triage-bug.yml`](.github/workflows/auto-triage-bug.yml), [`.github/workflows/auto-build.yml`](.github/workflows/auto-build.yml), [`scripts/auto-triage-bug.mjs`](scripts/auto-triage-bug.mjs), [`scripts/auto-build.mjs`](scripts/auto-build.mjs), [`scripts/deploy-watcher.mjs`](scripts/deploy-watcher.mjs), [`ecosystem.config.js`](ecosystem.config.js).
 
+**Architecture context for the agents** (v1.8.4): both the triage and auto-build scripts read `.claude/memory/project_overview.md` + `.claude/memory/project_architecture.md` as reference material so they understand where files live and how the four-layer model works. Keep those files in sync with the owner's local auto-memory when architecture changes land.
+
+---
+
+## Outreach with intent routing (v1.8.4)
+
+When the owner asks Maelle to ask a colleague to MOVE an existing meeting (not set up a new one), Maelle uses `message_colleague` with `intent='meeting_reschedule'` and the existing meeting's context. If the colleague approves, the calendar event is moved automatically — no second owner turn needed. Decline or counter-offer gets surfaced to the owner.
+
+This replaces the coord-for-reschedule bug where Maelle would create a new meeting next week instead of moving today's.
+
 ---
 
 ## Roadmap

@@ -111,7 +111,7 @@ function weekdayName(weekday: number, style: 'en' | 'he'): string {
   return lut[weekday] ?? '';
 }
 
-export function verifyDates(draft: string, timezone: string): DateVerifyResult {
+export function verifyDates(draft: string, timezone: string, userMessage?: string): DateVerifyResult {
   const mismatches: DateMismatch[] = [];
   if (!draft || draft.length < 6) return { ok: true, mismatches };
 
@@ -121,6 +121,50 @@ export function verifyDates(draft: string, timezone: string): DateVerifyResult {
   } catch (err) {
     logger.warn('dateVerifier: could not build lookup — failing open', { err: String(err) });
     return { ok: true, mismatches };
+  }
+
+  // v1.8.4 — bare-weekday check. When the user's current-turn message
+  // contains "today" / "tomorrow" / "היום" / "מחר" and the draft references
+  // a bare weekday in a calendar/schedule/meeting context, verify the
+  // weekday matches today's (or tomorrow's) actual weekday. Narrow patterns
+  // only — "Monday's calendar" / "on Monday's schedule" — to avoid
+  // false-positives on legitimate future references like "I'll ping you
+  // Monday".
+  if (userMessage && userMessage.length > 0) {
+    const userLower = userMessage.toLowerCase();
+    const userSaidToday    = /\b(today)\b/.test(userLower) || /היום/.test(userMessage);
+    const userSaidTomorrow = /\b(tomorrow)\b/.test(userLower) || /מחר/.test(userMessage);
+    if (userSaidToday || userSaidTomorrow) {
+      try {
+        const nowLocal = DateTime.now().setZone(timezone);
+        const todayWd    = nowLocal.weekday;
+        const tomorrowWd = nowLocal.plus({ days: 1 }).weekday;
+        const bareRe = /\b(Mon(?:day)?|Tue(?:s(?:day)?)?|Wed(?:nesday)?|Thu(?:r(?:s(?:day)?)?)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)(?:'s|\s+on|)\s+(calendar|schedule|meeting|meetings|event|events|agenda|morning|afternoon|evening|day)\b/gi;
+        let bm: RegExpExecArray | null;
+        while ((bm = bareRe.exec(draft)) !== null) {
+          const wdText = bm[1];
+          const writtenWd = WEEKDAYS_EN[wdText.toLowerCase()];
+          if (!writtenWd) continue;
+          if (userSaidToday && writtenWd !== todayWd) {
+            mismatches.push({
+              writtenWeekday: wdText,
+              writtenDate: '(user said "today")',
+              correctWeekday: weekdayName(todayWd, 'en'),
+              date: nowLocal.toFormat('yyyy-MM-dd'),
+            });
+          } else if (userSaidTomorrow && writtenWd !== tomorrowWd) {
+            mismatches.push({
+              writtenWeekday: wdText,
+              writtenDate: '(user said "tomorrow")',
+              correctWeekday: weekdayName(tomorrowWd, 'en'),
+              date: nowLocal.plus({ days: 1 }).toFormat('yyyy-MM-dd'),
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn('dateVerifier: bare-weekday check failed — skipping this pass', { err: String(err) });
+      }
+    }
   }
 
   // Pattern A (English): "Weekday[,] N Mon [Year]?" — handles "Sunday 20 Apr",

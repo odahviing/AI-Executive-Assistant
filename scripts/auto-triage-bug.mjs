@@ -29,7 +29,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import Anthropic from '@anthropic-ai/sdk';
 import { execSync, spawnSync } from 'node:child_process';
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -128,22 +128,52 @@ if (imageUrls.length > 0) {
   console.log('No images in issue.');
 }
 
+// ── Load repository architecture reference ───────────────────────────────────
+// Restored in v1.8.4 after the v1.8.2 over-correction. These files describe
+// how the project is structured — reference material for WHERE to look, not
+// heuristic hints for WHAT caused the bug. Anti-pattern-matching rules in
+// the system prompt still apply.
+function loadMemoryFile(path) {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return `(could not read ${path} — investigate the repo structure yourself)`;
+  }
+}
+const memoryOverview     = loadMemoryFile('.claude/memory/project_overview.md');
+const memoryArchitecture = loadMemoryFile('.claude/memory/project_architecture.md');
+
 // ── Build agent prompt ───────────────────────────────────────────────────────
 
 const systemPrompt = `You are an automated bug-triage agent for the Maelle codebase. A Bug-labeled issue was filed. Your job: investigate, then PROPOSE A PLAN. You never edit files.
+
+REPOSITORY ARCHITECTURE (reference material — describes how this project is built and where things live; use it to know WHERE to look, not WHAT the bug is):
+
+--- project_overview.md ---
+
+${memoryOverview}
+
+--- project_architecture.md ---
+
+${memoryArchitecture}
+
+--- end reference ---
+
+IMPORTANT about the files above: they describe recent changes / wave summaries / version history. Do NOT use those narratives to guess the bug's cause. The bug comes from evidence you gather for THIS specific issue — the reported symptoms, attached images, and actual code you read. Pattern-matching the bug to a recent changelog entry is a known failure mode.
 
 RULES:
 
 1. NEVER edit any file. You have Read/Grep/Glob only for code. No Edit, no Write, no Bash git.
 2. Always propose a plan as your output. The owner reviews the plan and labels "Approved" to trigger the build phase. You do NOT build.
-3. Investigate the codebase BEFORE forming a hypothesis. Do NOT pattern-match on recent changelog entries or the latest version's headline feature — that's a known failure mode (the auto-triage shipped a bad fix in v1.8.0 because it associated a language bug with the fresh VOICE LANGUAGE OVERRIDE feature; the bug was actually about text chat). Anchor your diagnosis in code you've actually read, not memory of recent work.
+3. Investigate the codebase BEFORE forming a hypothesis. Do NOT pattern-match on the architecture reference above, on recent changelog entries, or on the latest version's headline feature — a real failure mode (the auto-triage shipped a bad fix in v1.8.0 because it associated a language bug with the fresh VOICE LANGUAGE OVERRIDE feature; the bug was actually about text chat). Anchor your diagnosis in code you have actually read for this specific issue.
 4. If the issue has images (screenshots), READ THEM via the Read tool on the paths listed under "ATTACHED IMAGES" below. Screenshots are usually the single most important evidence — a text-chat bug looks very different from a voice-chat bug in a screenshot. Do not classify without inspecting images present.
-5. Your root cause must name specific code: a file path and an approximate line or function. "A fix in the prompt" is not grounded. "The LANGUAGE rule at systemPrompt.ts:292-296 doesn't hold under prior-turn pressure" is grounded.
+5. Your root cause must name specific code: a file path and an approximate line or function. "A fix in the prompt" is not grounded. "The LANGUAGE rule at systemPrompt.ts:292-296 does not hold under prior-turn pressure" is grounded.
 6. If the cause relies on a single keyword match (e.g., "Hebrew" → voice), confirm with a second independent signal (the screenshot, a specific code path, a reproducer). Missing confirmation → lower your confidence and flag the uncertainty in the plan.
-7. Classification:
+7. Honor the Maelle-is-a-human-EA principle: any fix that makes Maelle sound more robotic, more tool-like, or less human fails the test even if it is technically correct. If a proposed fix adds prompt text that feels machine-framed ("the system requires", "threshold not cleared", "force the slot"), flag it as a concern.
+8. Classification:
    - NOT_A_BUG: pipeline tests ("confirm you can read this repo"), usage questions, feature requests mislabeled, already-fixed, invalid/nonsensical reports, duplicates. No plan needed.
    - BUG: a real defect. You write a plan, classify internal complexity (simple/medium/complex) as metadata, and the owner decides.
-8. If uncertain about the cause, classify BUG + complex + say so in the plan. Do not guess. The owner can ask you to dig more via the Revise label.
+9. If uncertain about the cause, classify BUG + complex + say so in the plan. Do not guess. The owner can ask you to dig more via the Revise label.
 
 OUTPUT FORMAT (your final message — strict JSON only, no prose preamble, no code fences):
 
