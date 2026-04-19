@@ -45,6 +45,12 @@ export interface CalendarEvent {
   isOnlineMeeting: boolean;
   onlineMeetingUrl?: string;
   bodyPreview?: string;
+  // v1.8.8 — recurring-event metadata. type='seriesMaster' = the series root
+  // (mutations affect every occurrence — don't touch). 'occurrence' = one
+  // instance of a recurring series. 'exception' = an already-customized
+  // occurrence. 'singleInstance' = ordinary non-recurring event.
+  type?: 'singleInstance' | 'occurrence' | 'exception' | 'seriesMaster';
+  seriesMasterId?: string;
 }
 
 export interface FreeBusySlot {
@@ -192,7 +198,7 @@ export async function getCalendarEvents(
       .query({
         startDateTime: cleanStart,
         endDateTime: cleanEnd,
-        $select: 'id,subject,start,end,isAllDay,importance,showAs,sensitivity,categories,organizer,attendees,isCancelled,isOnlineMeeting,onlineMeetingUrl,bodyPreview',
+        $select: 'id,subject,start,end,isAllDay,importance,showAs,sensitivity,categories,organizer,attendees,isCancelled,isOnlineMeeting,onlineMeetingUrl,bodyPreview,type,seriesMasterId',
         $orderby: 'start/dateTime',
         $top: 100,
       })
@@ -608,6 +614,29 @@ export interface UpdateMeetingParams {
   end?: string;
   body?: string;
   categories?: string[];
+}
+
+/**
+ * v1.8.8 — cheap probe to check whether an event is part of a recurring
+ * series. Returns { type, subject, seriesMasterId? } from a lightweight
+ * GET. Used by update_meeting and move_meeting to block changes to the
+ * series root while allowing single-occurrence edits.
+ */
+export async function getEventType(userEmail: string, meetingId: string): Promise<{
+  type?: 'singleInstance' | 'occurrence' | 'exception' | 'seriesMaster';
+  subject?: string;
+  seriesMasterId?: string;
+}> {
+  const client = getClient();
+  const event = await client
+    .api(`/users/${userEmail}/events/${meetingId}`)
+    .select('id,type,subject,seriesMasterId')
+    .get();
+  return {
+    type: event?.type,
+    subject: event?.subject,
+    seriesMasterId: event?.seriesMasterId,
+  };
 }
 
 export async function updateMeeting(params: UpdateMeetingParams): Promise<void> {

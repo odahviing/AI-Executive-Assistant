@@ -2,6 +2,65 @@
 
 ---
 
+## 1.8.8 — Passive style learner + recurring-series guard + addressee gate fix + quality batch
+
+Bundled patch from a day of MPIM + summary iteration + routine diagnostics.
+
+### Added — passive style-rule learner (issue #18)
+
+SummarySkill now learns from owner's feedback automatically. After each successful `update_summary_draft`, a Sonnet classifier judges whether the feedback was a *generalizable style rule* worth saving (vs. a one-off topic correction). If yes, it saves silently via `savePreference` — no DM, no confirmation.
+
+Examples that save:
+- *"more paragraphs per topic than one-liner bullets"* → global rule
+- *"don't call me Idan in the summary, I was in the meeting"* → global (first-person convention)
+- *"on interview summary focus on entry/positive/negative/follow-up"* → type-specific (interview)
+
+Examples that skip:
+- *"Q3 goals was wrong, should be Q2"* → topic correction, not style
+- *"add Amazia as attendee"* → content fix
+
+**Type-specific support:** rules scoped to `interview`, `one_on_one`, `standup`, `retro`, `weekly`, `quarterly`, or `global`. Summary type inferred from draft subject via keyword match. `summaryStylePromptBlock` loads global first, then type-specific on top — type wins on conflict (last-rendered).
+
+Storage: `user_preferences` with category `summary` (global, back-compat) or `summary_type_<type>`. `source='inferred'` distinguishes passive saves from the explicit `learn_summary_style` tool calls.
+
+Every classifier decision logs under `style-learner:` prefix for auditing.
+
+### Added — recurring-series protection on update_meeting and move_meeting
+
+Before PATCHing an event, a lightweight probe (`getEventType` in `connectors/graph/calendar.ts`) checks the Graph `type` field. If `type='seriesMaster'`, the operation is refused with a message explaining that series-wide changes aren't safe to automate; owner should edit the series in the calendar, or specify a single occurrence (by meeting_id from get_calendar for that specific date) — Graph creates an exception automatically on occurrence PATCH. Occurrences + singleInstance + exception events all work as before.
+
+Also: `get_calendar` now returns `type` + `seriesMasterId` fields so Sonnet can see whether an event is recurring.
+
+### Added — `web_search` takes `time_range_days` parameter
+
+Tavily search now accepts a `days` filter plus `topic: 'news'` mode when the caller passes `time_range_days`. Tool description pushes Sonnet to set it for news/recent queries ("last 7 / 14 / 30 days"). Prevents stale-but-popular articles from dominating fresh queries — the pattern we hit trying to generate "recent" LinkedIn content and getting 2025 CRN articles back repeatedly.
+
+### Fixed — MPIM addressee gate silently dropped direct @Maelle mentions
+
+In an MPIM, when the owner wrote `<@Maelle>, can you say hi to <@Swan>?`, the gate returned HUMAN and the message was silently dropped. Root cause: (a) `resolveSlackMentions` rewrites `<@ID>` to `"Name (slack_id: ID)"` before the gate runs, breaking fast-path 1 which looks for the raw form; (b) the group-DM preamble prepended by app.ts pushes "Maelle" past the 40-char fast-path window.
+
+Two fixes:
+- Addressee gate fast-path now also matches the resolved form `(slack_id: <botUserId>)`
+- App.ts strips the `<<GROUP DM — ...>>` preamble before passing to `classifyAddressee` — the gate judges the owner's actual message, not Maelle's own framing
+
+Either fix alone would have caught this case. Together = robust.
+
+### Fixed — MPIM owner's request refused for non-standard meeting duration
+
+`_meetingsOps.ts` scheduling-rules block said *"Allowed durations: 10/25/40/55 minutes only"* — the word *only* contradicted the `coordinate_meeting` tool description that explicitly allows owner to request any duration. Softened: standard durations listed, owner-override is approved (per v1.8.7 MPIM authority rule), with a single soft suggestion ("did you mean 55 to keep to standards?") allowed if unusual. Never refuse a duration owner specified.
+
+### Fixed — get_my_tasks now prompts Sonnet to also check routines
+
+When owner asks *"did you do my LinkedIn post this morning?"* or similar recurring-activity questions, `get_my_tasks` alone misses routines that haven't materialized yet or completed silently. Tool description now tells Sonnet to also call `get_routines` for recurring-activity questions and cross-reference: `last_run_at=today + last_result="No issues found"` DID run (silently); `last_run_at` still blank today = didn't fire yet.
+
+### Not changed
+
+- Feature label deleted repo-wide — tier labels (Next/Roadmap/Idea) fully imply a feature, so the separate type label was redundant
+- Issue #26 closed (Bug 1 fixed in 1.8.3; Bug 2 dormant — instrumentation added in 1.8.6, no recurrence)
+- Issue #18 closed by this patch
+
+---
+
 ## 1.8.7 — MPIM-with-owner: owner's request IS his approval
 
 Reframes the MPIM-with-owner prompt. Previously the rule conflated privacy ("what to reveal") with action deferral ("where to act") — Maelle would correctly filter what she said but wrongly refuse to do things the owner was asking her to do right there in the group chat, offering to "take it to our private chat" instead. That's backwards: the owner's direct request in the MPIM IS his approval.

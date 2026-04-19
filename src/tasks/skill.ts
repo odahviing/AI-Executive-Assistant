@@ -119,7 +119,9 @@ Use when asked to:
         name: 'get_my_tasks',
         description: `Get all open tasks Maelle is currently working on or waiting on. Call this when the user asks "what tasks do you have?" or "what's pending?" or "what are you working on?"
 
-Optional with_person filter: pass a Slack user ID to scope results to 1:1 tasks involving that person (outreach + summary action follow-ups). Use when the user asks "what's open with Brett?" or "show me everything with @Yael". Coord tasks (multi-party meetings) are excluded from the filter since they don't have a single counterpart.`,
+Optional with_person filter: pass a Slack user ID to scope results to 1:1 tasks involving that person (outreach + summary action follow-ups). Use when the user asks "what's open with Brett?" or "show me everything with @Yael". Coord tasks (multi-party meetings) are excluded from the filter since they don't have a single counterpart.
+
+ALSO CHECK ROUTINES when the owner asks about recurring activities ("did you do my LinkedIn post?", "did the briefing run?", "weekly review this morning?"). Routines only appear in get_my_tasks once a firing has materialized — if the owner asks before the scheduled time, or if a firing completed silently, the task may not be visible here. Always also call get_routines for questions about recurring activities and cross-reference: a routine with last_run_at=today + last_result="No issues found" DID run (silently); last_run_at still empty for today = didn't fire yet.`,
         input_schema: {
           type: 'object',
           properties: {

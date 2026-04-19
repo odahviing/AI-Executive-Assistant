@@ -480,8 +480,16 @@ export function createSlackAppForProfile(profile: UserProfile): App {
               )).filter(Boolean);
             } catch { /* best-effort */ }
           }
+          // v1.8.8 — strip the "<<GROUP DM — participants: ... >>" preamble
+          // that app.ts prepends for MPIM context. The preamble bloats the
+          // fast-path window (pushes "Maelle" past text.slice(0, 40)) and
+          // confuses the Sonnet classifier (it reads "participants: Swan,
+          // Dina" and votes HUMAN even when the actual message starts with
+          // "Maelle, ..."). The gate should judge the owner/colleague
+          // message itself, not Maelle's own framing.
+          const textForGate = text.replace(/^<<[\s\S]*?>>\n+/, '');
           const verdict = await classifyAddressee({
-            text,
+            text: textForGate,
             botUserId: botId,
             assistantName: assistant.name,
             ownerFirstName: profile.user.name.split(' ')[0],

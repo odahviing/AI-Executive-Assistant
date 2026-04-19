@@ -29,13 +29,24 @@ Use this for:
 - Any fact that may have changed recently
 
 For questions you can answer from your own knowledge (history, general concepts), answer directly — no search needed.
-Keep queries specific and targeted.`,
+Keep queries specific and targeted.
+
+FRESHNESS: when the question is about recent news / latest updates / "what happened this week" / "something from the last N days", ALWAYS set time_range_days. Without it, search engines rank by relevance and often return popular-but-old articles. Rules of thumb:
+- "This week" / "last few days" → time_range_days: 7
+- "Recent" / "latest" / "last couple weeks" → time_range_days: 14
+- "This month" / "recently" → time_range_days: 30
+- "News" / "what's going on with X" → time_range_days: 14 default unless obviously older
+Only omit time_range_days for evergreen questions (company background, general concepts, historical facts).`,
         input_schema: {
           type: 'object' as const,
           properties: {
             query: {
               type: 'string',
-              description: 'The search query. Be specific. e.g. "weather Tel Aviv today", "USD ILS exchange rate", "Sighting AI company LinkedIn"',
+              description: 'The search query. Be specific. e.g. "weather Tel Aviv today", "USD ILS exchange rate", "Reflectiz cybersecurity news"',
+            },
+            time_range_days: {
+              type: 'number',
+              description: 'Optional. Only return results from the last N days. Use for news / recent queries to avoid stale popular articles. Omit for evergreen topics.',
             },
           },
           required: ['query'],
@@ -87,11 +98,12 @@ Note: Some pages may block extraction (login-required, bot-protected). If extrac
     if (toolName !== 'web_search') return null;
 
     const query = args.query as string;
-    logger.info('Web search', { query });
+    const timeRangeDays = typeof args.time_range_days === 'number' ? args.time_range_days : undefined;
+    logger.info('Web search', { query, timeRangeDays });
 
     try {
       if (config.TAVILY_API_KEY) {
-        const result = await tavilySearch(query);
+        const result = await tavilySearch(query, 'advanced', timeRangeDays);
         const hasContent = (result as any).answer || ((result as any).results?.length ?? 0) > 0;
         if (hasContent) return result;
         logger.info('Tavily returned empty — falling back to DuckDuckGo', { query });
@@ -128,17 +140,29 @@ Never use bullet points or headers for simple factual answers.
 
 // ── Search implementations ────────────────────────────────────────────────────
 
-export async function tavilySearch(query: string, depth: 'basic' | 'advanced' = 'advanced'): Promise<object> {
+export async function tavilySearch(
+  query: string,
+  depth: 'basic' | 'advanced' = 'advanced',
+  timeRangeDays?: number,
+): Promise<object> {
+  // v1.8.8 — when caller passes timeRangeDays, use Tavily's news topic + days
+  // filter so recency is enforced. Otherwise general-topic search (no date
+  // constraint) for evergreen lookups.
+  const body: Record<string, unknown> = {
+    api_key: config.TAVILY_API_KEY,
+    query,
+    search_depth: depth,
+    max_results: 8,
+    include_answer: true,
+  };
+  if (typeof timeRangeDays === 'number' && timeRangeDays > 0) {
+    body.topic = 'news';
+    body.days = Math.min(Math.max(Math.round(timeRangeDays), 1), 365);
+  }
   const res = await fetch('https://api.tavily.com/search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      api_key: config.TAVILY_API_KEY,
-      query,
-      search_depth: depth,
-      max_results: 8,
-      include_answer: true,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {

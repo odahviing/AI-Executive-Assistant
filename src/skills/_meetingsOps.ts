@@ -916,6 +916,30 @@ Never claim you deleted something until the tool returns success.`,
       }
 
       case 'update_meeting': {
+        // v1.8.8 — block series-level mutations on recurring meetings. If the
+        // event is a seriesMaster, updating it would change every occurrence,
+        // which is almost never what the owner wants. Refuse and hand back
+        // control. Occurrences (single firings of a recurring series) and
+        // exceptions (already-customized single firings) are allowed — Graph
+        // creates/modifies an exception for that instance on PATCH.
+        try {
+          const { getEventType } = await import('../connectors/graph/calendar');
+          const probe = await getEventType(userEmail, args.meeting_id as string);
+          if (probe?.type === 'seriesMaster') {
+            logger.info('update_meeting refused on recurring seriesMaster', {
+              meetingId: args.meeting_id,
+              subject: probe.subject,
+            });
+            return {
+              error: 'recurring_series_master',
+              meeting_subject: probe.subject,
+              message: `"${probe.subject}" is a recurring series. Updating the series here would change every occurrence — that's not safe to do automatically. The owner should update the series directly in the calendar. For a SINGLE occurrence, call update_meeting with that occurrence's meeting_id (get it from get_calendar for that specific date) — the system will create an exception for that one date only.`,
+            };
+          }
+        } catch (err) {
+          logger.warn('update_meeting recurring-preflight failed — proceeding', { err: String(err) });
+        }
+
         await updateMeeting({
           userEmail,
           timezone,
@@ -945,6 +969,28 @@ Never claim you deleted something until the tool returns success.`,
       }
 
       case 'move_meeting': {
+        // v1.8.8 — same series-master block as update_meeting. Moving a
+        // seriesMaster would shift every occurrence in the series. Single
+        // occurrence moves (type='occurrence' or 'exception') are allowed;
+        // Graph creates an exception pinning just that date.
+        try {
+          const { getEventType } = await import('../connectors/graph/calendar');
+          const probe = await getEventType(userEmail, args.meeting_id as string);
+          if (probe?.type === 'seriesMaster') {
+            logger.info('move_meeting refused on recurring seriesMaster', {
+              meetingId: args.meeting_id,
+              subject: probe.subject,
+            });
+            return {
+              error: 'recurring_series_master',
+              meeting_subject: probe.subject,
+              message: `"${probe.subject}" is a recurring series. Moving the series here would shift every occurrence — the owner should do series-level moves directly in the calendar. For a SINGLE occurrence, call move_meeting with that occurrence's meeting_id from get_calendar for that specific date; Graph will create an exception for that one.`,
+            };
+          }
+        } catch (err) {
+          logger.warn('move_meeting recurring-preflight failed — proceeding', { err: String(err) });
+        }
+
         await updateMeeting({
           userEmail,
           timezone,
@@ -1121,8 +1167,8 @@ Home/remote days (${schedule.home_days.days.join(', ')}): ${schedule.home_days.h
   → ${schedule.home_days.notes || 'Prefer for lighter and internal meetings'}
 
 SCHEDULING RULES
-Allowed durations: ${meetings.allowed_durations.join(', ')} minutes only
-Buffer between meetings: ~${meetings.buffer_minutes} min — already baked into the allowed durations (10/25/40/55 min always end 5 min before the next quarter-hour).
+Standard durations: ${meetings.allowed_durations.join(', ')} min. When ${profile.user.name.split(' ')[0]} asks for a non-standard duration (e.g. 50 min), the owner's ask IS his approval — proceed with the requested duration. You MAY soft-suggest the nearest standard once ("50 min — did you mean 55 to keep to standards?"), but if he confirms or you already know, just use his number. Never refuse a duration ${profile.user.name.split(' ')[0]} specified.
+Buffer between meetings: ~${meetings.buffer_minutes} min — already baked into the standard durations (10/25/40/55 min always end 5 min before the next quarter-hour).
 Slot start times: ALWAYS :00 / :15 / :30 / :45. Never propose :05, :10, :20, :35, :40, :50 etc. — not even to "recover" a few minutes of buffer.
 Buffer is a preference you can suggest, NOT a reason to refuse or rewrite an exact time the owner gave.
 Adjacency vs overlap: a meeting ending at 13:00 and another starting at 13:00 is ADJACENT (0 gap), NOT overlapping. Never call that an "overlap."

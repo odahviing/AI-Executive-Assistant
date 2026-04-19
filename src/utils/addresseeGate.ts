@@ -36,8 +36,12 @@ export async function classifyAddressee(params: {
 }): Promise<Addressee> {
   const { text, botUserId, assistantName, ownerFirstName, recentContext = [], humanNames = [] } = params;
 
-  // Fast-path 1: explicit @mention of the bot
+  // Fast-path 1a: raw @mention of the bot (before resolveSlackMentions rewrites it)
   if (text.includes(`<@${botUserId}>`)) return 'MAELLE';
+  // Fast-path 1b (v1.8.8): resolved @mention — app.ts rewrites <@ID> into
+  // "Name (slack_id: ID)" before the gate runs, so the raw-form check fails.
+  // Detect the resolved form too so explicit bot mentions still short-circuit.
+  if (text.includes(`(slack_id: ${botUserId})`)) return 'MAELLE';
 
   // Fast-path 2: explicit name mention at start of message ("Maelle, ...", "Hey Maelle")
   const nameRx = new RegExp(`(^|\\s)(?:hey\\s+|hi\\s+|@)?${assistantName}\\b`, 'i');

@@ -70,11 +70,40 @@ function isInternalEmail(email: string | undefined, profile: UserProfile): boole
   return email.toLowerCase().endsWith(`@${domain}`);
 }
 
-function summaryStylePromptBlock(ownerUserId: string): string {
-  const prefs = getPreferences(ownerUserId).filter(p => p.category === 'summary');
-  if (prefs.length === 0) return '';
-  const lines = prefs.map(p => `- ${p.value}`).join('\n');
-  return `\n\nOWNER'S SUMMARY STYLE PREFERENCES (apply these unless the owner overrides for this specific summary):\n${lines}`;
+// v1.8.8 — infer summary type from the draft subject so type-specific style
+// preferences can be loaded on top of the global ones. Keyword-based; returns
+// null for ambiguous/general meetings (use global rules only).
+export function inferSummaryType(subject: string | undefined | null): string | null {
+  if (!subject) return null;
+  const s = subject.toLowerCase();
+  if (/\binterview\b/.test(s)) return 'interview';
+  if (/\b(1:1|one.?on.?one)\b/.test(s)) return 'one_on_one';
+  if (/\b(standup|stand.?up|daily)\b/.test(s)) return 'standup';
+  if (/\bretro(spective)?\b/.test(s)) return 'retro';
+  if (/\b(biweekly|bi.?weekly|weekly)\b/.test(s)) return 'weekly';
+  if (/\b(quarterly|q[1-4])\b/.test(s)) return 'quarterly';
+  return null;
+}
+
+function summaryStylePromptBlock(ownerUserId: string, summaryType?: string | null): string {
+  // v1.8.8 — layered preferences: global ('summary' category, backward-compat)
+  // + optional type-specific ('summary_type_<type>' category). Type rules are
+  // rendered AFTER global so Sonnet sees them last — last-wins in attention.
+  const allPrefs = getPreferences(ownerUserId);
+  const globalPrefs = allPrefs.filter(p => p.category === 'summary');
+  const typePrefs = summaryType
+    ? allPrefs.filter(p => p.category === `summary_type_${summaryType}`)
+    : [];
+  if (globalPrefs.length === 0 && typePrefs.length === 0) return '';
+
+  const sections: string[] = [];
+  if (globalPrefs.length > 0) {
+    sections.push(`GLOBAL (apply to every summary):\n${globalPrefs.map(p => `- ${p.value}`).join('\n')}`);
+  }
+  if (typePrefs.length > 0) {
+    sections.push(`SPECIFIC TO ${summaryType!.toUpperCase().replace(/_/g, ' ')} SUMMARIES (these win over global on conflict):\n${typePrefs.map(p => `- ${p.value}`).join('\n')}`);
+  }
+  return `\n\nOWNER'S SUMMARY STYLE PREFERENCES (apply unless the owner overrides for this specific summary):\n\n${sections.join('\n\n')}`;
 }
 
 /**
@@ -150,7 +179,8 @@ async function draftSummaryFromTranscript(params: {
     ? `\n\nCALENDAR EVENT MATCH:\n- Subject: ${params.calendarEvent.subject}\n- Start: ${params.calendarEvent.start?.dateTime}\n- Attendees: ${(params.calendarEvent.attendees ?? []).map(a => `${a.emailAddress.name} <${a.emailAddress.address}>`).join(', ')}${params.agendaText ? `\n- Agenda/body: ${params.agendaText.slice(0, 2000)}` : ''}`
     : '';
 
-  const styleBlock = summaryStylePromptBlock(params.ownerUserId);
+  const inferredType = inferSummaryType(params.calendarEvent?.subject);
+  const styleBlock = summaryStylePromptBlock(params.ownerUserId, inferredType);
 
   // v1.7.4 — when the KnowledgeBaseSkill is active, run a tiny relevance
   // pre-pass to pull any company/team context that would help ground this
@@ -362,6 +392,144 @@ function renderDraftForShare(draft: SummaryDraft, profile: UserProfile): string 
   }
 
   return lines.join('\n');
+}
+
+// ── v1.8.8 — passive style-rule learner ─────────────────────────────────────
+// After each successful update_summary_draft, this classifier judges whether
+// the owner's feedback was a GENERALIZABLE style rule worth saving. If so, it
+// saves the rule to user_preferences automatically — no confirmation, no DM,
+// no explicit tool call from Sonnet. Silent learning.
+//
+// Scope:
+// - Saves only when Sonnet judges the rule would help FUTURE drafts (not a
+//   one-off topic correction).
+// - Saves under category='summary' for global rules, 'summary_type_<type>'
+//   for type-specific rules (interview/one_on_one/standup/retro/weekly/
+//   quarterly). Type inferred from the current draft's subject.
+//
+// Never blocks the iteration flow: runs asynchronously, fails open on any
+// error (network, parse). Logs every decision at INFO level under
+// "style-learner:" so pm2 logs show the trail.
+async function classifyAndSaveStylePreference(params: {
+  feedback: string;
+  draftSubjectBefore: string;
+  draftBefore: SummaryDraft;
+  draftAfter: SummaryDraft;
+  ownerUserId: string;
+  anthropic: Anthropic;
+}): Promise<void> {
+  const { feedback, draftBefore, draftAfter, ownerUserId, anthropic } = params;
+  const currentType = inferSummaryType(draftAfter.subject ?? params.draftSubjectBefore);
+
+  const prompt = `You watch owner feedback on a meeting-summary draft and decide whether that feedback is a STYLE RULE worth saving for future summaries — or just a one-off topic/content correction.
+
+OWNER'S FEEDBACK MESSAGE:
+${feedback}
+
+DRAFT BEFORE (abridged):
+Subject: ${params.draftSubjectBefore}
+Paragraphs: ${draftBefore.paragraphs.length}
+Action items: ${draftBefore.action_items.length}
+
+DRAFT AFTER EDIT (abridged):
+Paragraphs: ${draftAfter.paragraphs.length}
+Action items: ${draftAfter.action_items.length}
+
+${currentType ? `INFERRED TYPE: ${currentType}` : 'INFERRED TYPE: (general / not categorized)'}
+
+DECISION RULES:
+- is_style_rule: true if the feedback is about HOW the summary is written (length, structure, voice, tone, format, sections, naming conventions). False if it's a topic/content correction ("that fact is wrong", "add this attendee", "remove the decision about X").
+- generalizes: true if applying this rule would help FUTURE summaries of similar type. False if it only makes sense for THIS specific meeting.
+- scope: 'global' if the rule should apply to every summary regardless of type. 'type-specific' if it's specific to interview / one-on-one / weekly / etc.
+- type_name: required if scope='type-specific'. Choose from: interview, one_on_one, standup, retro, weekly, quarterly. If the rule is for a type not listed, use the closest match or set scope='global'.
+- rule_key: a short snake_case identifier (2-4 words) for the rule, e.g. "paragraph_style", "owner_self_reference", "interview_sections".
+- rule_value: a single sentence describing the rule in action form. E.g. "Write paragraphs per topic rather than one-line bullets." or "In summaries written from the owner's POV, use first person — never name the owner in third person."
+
+EXAMPLES of save:
+- Feedback "more paragraphs per topic than one-liner bullets" → is_style_rule=true, generalizes=true, scope=global
+- Feedback "don't call me Idan in the summary, I was in the meeting" → is_style_rule=true, generalizes=true, scope=global (applies to all first-person summaries)
+- Feedback "on interview summary focus on entry/positive/negative/follow-up" → is_style_rule=true, generalizes=true, scope=type-specific, type_name=interview
+
+EXAMPLES of SKIP:
+- Feedback "Q3 goals was wrong, should be Q2" → is_style_rule=false (topic correction)
+- Feedback "add Amazia as attendee" → is_style_rule=false (content fix)
+- Feedback "cut the part about budget" → is_style_rule=false (one-off content removal)
+
+Output strict JSON only (no prose, no fences):
+{
+  "is_style_rule": true | false,
+  "generalizes": true | false,
+  "scope": "global" | "type-specific",
+  "type_name": "interview" | "one_on_one" | "standup" | "retro" | "weekly" | "quarterly" | null,
+  "rule_key": "snake_case_identifier",
+  "rule_value": "one-sentence rule",
+  "reason": "one short sentence explaining the decision"
+}`;
+
+  try {
+    const resp = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 400,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const raw = ((resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      logger.info('style-learner: parse failure — skip', { rawPreview: raw.slice(0, 200) });
+      return;
+    }
+    const verdict = JSON.parse(jsonMatch[0]) as {
+      is_style_rule: boolean;
+      generalizes: boolean;
+      scope: 'global' | 'type-specific';
+      type_name: string | null;
+      rule_key: string;
+      rule_value: string;
+      reason: string;
+    };
+
+    if (!verdict.is_style_rule || !verdict.generalizes) {
+      logger.info('style-learner: skipped (not generalizable style rule)', {
+        ownerUserId,
+        feedbackPreview: feedback.slice(0, 80),
+        reason: verdict.reason,
+        is_style_rule: verdict.is_style_rule,
+        generalizes: verdict.generalizes,
+      });
+      return;
+    }
+    if (!verdict.rule_key || !verdict.rule_value) {
+      logger.warn('style-learner: verdict missing key/value — skip', { verdict });
+      return;
+    }
+
+    const category = verdict.scope === 'type-specific' && verdict.type_name
+      ? `summary_type_${verdict.type_name}`
+      : 'summary';
+    const normalizedKey = verdict.rule_key.replace(/[^a-z0-9_]/gi, '_').toLowerCase();
+
+    savePreference({
+      userId: ownerUserId,
+      category,
+      key: normalizedKey,
+      value: verdict.rule_value,
+      source: 'inferred',
+    });
+
+    logger.info('style-learner: rule saved', {
+      ownerUserId,
+      category,
+      key: normalizedKey,
+      value: verdict.rule_value,
+      scope: verdict.scope,
+      type_name: verdict.type_name,
+      reason: verdict.reason,
+      feedbackPreview: feedback.slice(0, 120),
+    });
+  } catch (err) {
+    logger.warn('style-learner: classifier call failed — skip', { err: String(err) });
+  }
 }
 
 // ── Action-item resolution ──────────────────────────────────────────────────
@@ -694,7 +862,8 @@ ${ownerMessage}
         const instruction = String(args.instruction ?? '').trim();
         if (!instruction) return { ok: false, reason: 'missing_instruction' };
 
-        const styleBlock = summaryStylePromptBlock(ownerUserId);
+        const currentType = inferSummaryType(draft.subject);
+        const styleBlock = summaryStylePromptBlock(ownerUserId, currentType);
         const prompt = `You are revising an in-progress meeting summary based on the owner's instruction. Output the COMPLETE updated summary as STRICT JSON in the same shape — no prose, no markdown, no fences.
 
 INSTRUCTION: ${instruction}
@@ -735,6 +904,19 @@ Output the full updated draft JSON.`;
             paragraphCount: updated.paragraphs.length,
             actionItemCount: updated.action_items.length,
           });
+
+          // v1.8.8 — passive style-rule learner. Runs asynchronously so it
+          // doesn't block the reply back to owner. Judges whether this
+          // feedback was a generalizable style rule worth saving.
+          classifyAndSaveStylePreference({
+            feedback: instruction,
+            draftSubjectBefore: draft.subject,
+            draftBefore: draft,
+            draftAfter: updated,
+            ownerUserId,
+            anthropic,
+          }).catch(err => logger.warn('style-learner: async run failed', { err: String(err) }));
+
           return {
             ok: true,
             rendered: renderDraftForOwner(updated),
