@@ -2,6 +2,37 @@
 
 ---
 
+## 1.8.7 — MPIM-with-owner: owner's request IS his approval
+
+Reframes the MPIM-with-owner prompt. Previously the rule conflated privacy ("what to reveal") with action deferral ("where to act") — Maelle would correctly filter what she said but wrongly refuse to do things the owner was asking her to do right there in the group chat, offering to "take it to our private chat" instead. That's backwards: the owner's direct request in the MPIM IS his approval.
+
+### Fixed — MPIM-with-owner authority + speaking rules
+
+Rewrote the authLine block in `systemPrompt.ts`. Clear separation:
+
+- **Authority:** owner's request = approval. Execute calendar actions (book / move / cancel / update / message) directly in-thread. Only redirect to DM when the action genuinely requires revealing owner-private info (tasks, preferences, people memory, notes).
+- **Privacy filter:** still colleague-level. What she REVEALS stays filtered — no topics, no preferences, no other colleagues' personal details. "Moved it to 11:45" = fine. "Moved it; the 12:30 was about Q2 KPIs" = leak.
+- **Speak to the group:** owner is reading too. Address the group, not the owner in third person. One message to the group, not "answer to owner + separate heads-up to colleague" (they're both in the chat).
+
+Fixes five related failure modes from a single Sunday MPIM trace:
+1. Maelle talking ABOUT the owner in 3rd person ("Idan's calendar is packed") instead of TO him.
+2. Offering "let's take this to our private chat" for shared scheduling work.
+3. Composing dual-feedback messages (answer to owner, `@`-mention heads-up to colleague, same reply).
+4. Saying "I don't have the ability to move calendar events in this chat" when tools were available — previously the prompt told her to defer regardless.
+5. Producing a plan as TEXT but not calling the mutation tools — same defer logic.
+
+The privacy rules are unchanged in behavior (what's revealed), only the action-deferral logic is removed for owner-initiated requests.
+
+### Fixed — Idan's lunch duration 45 → 25 minutes
+
+Stale YAML config. Real lunch block is 25 minutes (owner's convention: actual duration − 5-minute buffer). Maelle was correctly reading the config but the config was wrong. `config/users/idan.yaml:51` updated.
+
+### Not changed / possible follow-up
+
+- No false-negative claim-checker added. Shipping the prompt rewrite alone first — if Sonnet still drifts to "I can't" phrasing under the new rules, we'll add a code-level false-negative check in 1.8.8. Monitor MPIM owner interactions for this pattern.
+
+---
+
 ## 1.8.6 — Routines appear in get_my_tasks + silent-routine logging + coord thread continuity
 
 Three fixes, all from a single Sunday-morning bug report trace.
