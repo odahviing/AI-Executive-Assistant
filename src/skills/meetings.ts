@@ -65,7 +65,14 @@ export class MeetingsSkill implements Skill {
       },
       {
         name: 'coordinate_meeting',
-        description: `Book a meeting with one or more people. One unified flow:
+        description: `Set up a NEW meeting from scratch. Finds slots, DMs participants, books once they agree.
+
+Use ONLY when there is no existing meeting yet and people need to find a time together. Do NOT use to:
+- Move an existing meeting → message_colleague with intent='meeting_reschedule'
+- Check if the owner can join a colleague's meeting → check_join_availability
+- Just check free/busy without booking → get_free_busy
+
+Flow:
 1. Find 3 available slots on the owner's calendar (respecting buffers, thinking time, lunch)
 2. DM each key participant with the 3 options (including location per slot)
 3. Collect responses — negotiate if needed (ping-pong then open-ended, up to 2 rounds)
@@ -180,16 +187,21 @@ Do NOT use this for ordinary negotiation. Only when the owner has made an explic
       },
       {
         name: 'check_join_availability',
-        description: `Check if the owner can join an EXISTING meeting at a specific time.
-Use this when a colleague says "can ${_profile.user.name.split(' ')[0]} join our meeting" or "we'd love to have ${_profile.user.name.split(' ')[0]} in our call".
+        description: `Check if the owner can join an EXISTING meeting the colleague is organising. Use when a colleague asks "is ${_profile.user.name.split(' ')[0]} free at X", "can ${_profile.user.name.split(' ')[0]} join our meeting", "we'd love ${_profile.user.name.split(' ')[0]} in our call".
 
-This is Route 2 — the meeting is already booked (or will be booked by someone else). We just check if the owner is free.
+Route 2 — the COLLEAGUE owns the meeting and its invite. Maelle does NOT book or add anyone. She only confirms availability so the colleague can send the invite themselves.
+
+Reply phrasing when available:
+- RIGHT: "Yes, he's free at 3pm — send him the invite."
+- RIGHT: "He's free, you can add him."
+- WRONG: "Want me to add him to the invite?" (Maelle doesn't own the meeting, can't add)
+- WRONG: "I'll add him." (same — not hers to do)
 
 Results:
-- Free → tell the colleague to forward the calendar invite (we do NOT book anything)
-- Partially free → offer to join for part of the meeting (first or last N minutes)
-- Blocked by a scheduling rule (lunch, buffer) → escalate to the owner with context
-- Busy with another meeting → tell the colleague there's a conflict
+- Free → confirm availability, tell the colleague to send the invite themselves
+- Partially free → offer partial join (first or last N minutes), same ownership rule
+- Blocked by scheduling rule (lunch, buffer) → escalate to owner with context
+- Busy with another meeting → decline with the conflict info
 
 If the meeting is NOT yet booked and they need to find a time together, use coordinate_meeting instead.`,
         input_schema: {
@@ -248,7 +260,16 @@ If the meeting is NOT yet booked and they need to find a time together, use coor
       },
       {
         name: 'get_free_busy',
-        description: `Check free/busy data for a calendar — use ONLY for checking ${_profile.user.name}'s own calendar, or when a colleague explicitly asks "when is ${_profile.user.name.split(' ')[0]} free?". NEVER use this to check a colleague's availability before scheduling a meeting. Use coordinate_meeting instead.`,
+        description: `Check free/busy data for ${_profile.user.name.split(' ')[0]}'s own calendar over a date range — e.g. "when is ${_profile.user.name.split(' ')[0]} free this week?".
+
+Use ONLY for:
+- ${_profile.user.name.split(' ')[0]}'s own calendar
+- Open-ended "when is he free" ranges
+
+Do NOT use for:
+- "Is he free at 3pm today to join my meeting" → use check_join_availability (specific time, existing meeting context)
+- Checking colleague availability before scheduling → use coordinate_meeting
+- Needing actual bookable slots (with buffers, rules) → use find_available_slots`,
         input_schema: {
           type: 'object',
           properties: {

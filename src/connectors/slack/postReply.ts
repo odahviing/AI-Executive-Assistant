@@ -419,7 +419,7 @@ async function runDateVerifierAndMaybeRetry(ctx: DateVerifyContext): Promise<str
 
   try {
     const { verifyDates, buildDateCorrectionNudge } = await import('../../utils/dateVerifier');
-    const verdict = verifyDates(cleanReply, profile.user.timezone, userMessage);
+    const verdict = await verifyDates(cleanReply, profile.user.timezone, userMessage);
     if (verdict.ok || verdict.mismatches.length === 0) return cleanReply;
 
     logger.warn('Date verifier: draft has wrong weekday/date pairs — retrying', {

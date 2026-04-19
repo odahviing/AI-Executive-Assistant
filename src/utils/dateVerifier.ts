@@ -25,7 +25,9 @@
  */
 
 import { DateTime } from 'luxon';
+import Anthropic from '@anthropic-ai/sdk';
 import logger from './logger';
+import { config } from '../config';
 
 const MONTHS_EN: Record<string, number> = {
   jan: 1, january: 1,
@@ -111,7 +113,7 @@ function weekdayName(weekday: number, style: 'en' | 'he'): string {
   return lut[weekday] ?? '';
 }
 
-export function verifyDates(draft: string, timezone: string, userMessage?: string): DateVerifyResult {
+export async function verifyDates(draft: string, timezone: string, userMessage?: string): Promise<DateVerifyResult> {
   const mismatches: DateMismatch[] = [];
   if (!draft || draft.length < 6) return { ok: true, mismatches };
 
@@ -121,50 +123,6 @@ export function verifyDates(draft: string, timezone: string, userMessage?: strin
   } catch (err) {
     logger.warn('dateVerifier: could not build lookup — failing open', { err: String(err) });
     return { ok: true, mismatches };
-  }
-
-  // v1.8.4 — bare-weekday check. When the user's current-turn message
-  // contains "today" / "tomorrow" / "היום" / "מחר" and the draft references
-  // a bare weekday in a calendar/schedule/meeting context, verify the
-  // weekday matches today's (or tomorrow's) actual weekday. Narrow patterns
-  // only — "Monday's calendar" / "on Monday's schedule" — to avoid
-  // false-positives on legitimate future references like "I'll ping you
-  // Monday".
-  if (userMessage && userMessage.length > 0) {
-    const userLower = userMessage.toLowerCase();
-    const userSaidToday    = /\b(today)\b/.test(userLower) || /היום/.test(userMessage);
-    const userSaidTomorrow = /\b(tomorrow)\b/.test(userLower) || /מחר/.test(userMessage);
-    if (userSaidToday || userSaidTomorrow) {
-      try {
-        const nowLocal = DateTime.now().setZone(timezone);
-        const todayWd    = nowLocal.weekday;
-        const tomorrowWd = nowLocal.plus({ days: 1 }).weekday;
-        const bareRe = /\b(Mon(?:day)?|Tue(?:s(?:day)?)?|Wed(?:nesday)?|Thu(?:r(?:s(?:day)?)?)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)(?:'s|\s+on|)\s+(calendar|schedule|meeting|meetings|event|events|agenda|morning|afternoon|evening|day)\b/gi;
-        let bm: RegExpExecArray | null;
-        while ((bm = bareRe.exec(draft)) !== null) {
-          const wdText = bm[1];
-          const writtenWd = WEEKDAYS_EN[wdText.toLowerCase()];
-          if (!writtenWd) continue;
-          if (userSaidToday && writtenWd !== todayWd) {
-            mismatches.push({
-              writtenWeekday: wdText,
-              writtenDate: '(user said "today")',
-              correctWeekday: weekdayName(todayWd, 'en'),
-              date: nowLocal.toFormat('yyyy-MM-dd'),
-            });
-          } else if (userSaidTomorrow && writtenWd !== tomorrowWd) {
-            mismatches.push({
-              writtenWeekday: wdText,
-              writtenDate: '(user said "tomorrow")',
-              correctWeekday: weekdayName(tomorrowWd, 'en'),
-              date: nowLocal.plus({ days: 1 }).toFormat('yyyy-MM-dd'),
-            });
-          }
-        }
-      } catch (err) {
-        logger.warn('dateVerifier: bare-weekday check failed — skipping this pass', { err: String(err) });
-      }
-    }
   }
 
   // Pattern A (English): "Weekday[,] N Mon [Year]?" — handles "Sunday 20 Apr",
@@ -214,10 +172,114 @@ export function verifyDates(draft: string, timezone: string, userMessage?: strin
     }
   }
 
+  // v1.8.5 — LLM-based context verifier. Catches bare-weekday misreferences
+  // that slip past the weekday+date regex patterns above. Fires only if:
+  //   - the draft contains a bare weekday (cheap regex pre-gate, no LLM if not)
+  //   - no weekday+date mismatch already found (if the regex caught it, LLM
+  //     doesn't need to redo the work)
+  //   - userMessage is present (gives the classifier context to judge against)
+  //
+  // Runs on Sonnet (per owner's call — not Haiku). Cost is one small call per
+  // reply that happens to contain a weekday, which is a small fraction of
+  // replies. Fails open on any error.
+  const bareWeekdayRe = /\b(Mon(?:day)?|Tue(?:s(?:day)?)?|Wed(?:nesday)?|Thu(?:r(?:s(?:day)?)?)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)\b/i;
+  const draftHasBareWeekday = bareWeekdayRe.test(draft);
+  if (draftHasBareWeekday && mismatches.length === 0 && userMessage && userMessage.length > 0) {
+    try {
+      const contextMismatches = await verifyBareWeekdayContext({
+        draft,
+        userMessage,
+        timezone,
+      });
+      for (const cm of contextMismatches) mismatches.push(cm);
+    } catch (err) {
+      logger.warn('dateVerifier: LLM context pass failed — skipping', { err: String(err) });
+    }
+  }
+
   if (mismatches.length > 0) {
     logger.warn('dateVerifier: weekday/date mismatches in draft', { mismatches });
   }
   return { ok: mismatches.length === 0, mismatches };
+}
+
+// ── v1.8.5 LLM context verifier ─────────────────────────────────────────────
+// Sonnet classifier: given the user's message, Maelle's draft, and a 14-day
+// lookup anchored on today, identify any bare weekday in the draft that's
+// contextually wrong. Judgment on phrasing; determinism stays in the regex
+// checks above. Strict JSON output, fails open on parse errors.
+async function verifyBareWeekdayContext(params: {
+  draft: string;
+  userMessage: string;
+  timezone: string;
+}): Promise<DateMismatch[]> {
+  const now = DateTime.now().setZone(params.timezone);
+  const lookupLines = Array.from({ length: 14 }, (_, i) => {
+    const d = now.plus({ days: i });
+    const label = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toFormat('EEE d MMM');
+    return `${label} (${d.toFormat('EEEE')}): ${d.toFormat('yyyy-MM-dd')}`;
+  }).join('\n');
+
+  const prompt = `You are a weekday-consistency checker for a calendar assistant's reply draft. Output strict JSON only, no prose, no fences.
+
+USER'S MESSAGE:
+${params.userMessage}
+
+ASSISTANT'S DRAFT REPLY:
+${params.draft}
+
+DATE LOOKUP (today and next 13 days in the user's timezone):
+${lookupLines}
+
+Task: find any bare weekday reference in the draft (e.g. "Monday's calendar", "on Monday", "this Monday", "Monday morning") that is CONTEXTUALLY WRONG given the user's message + the date lookup.
+
+Rules for judging:
+- If the user's message refers to a day relative to now (today / tomorrow / this afternoon / at 3pm / tonight / in an hour / later / EOD / now), the reply's weekday must match the ACTUAL weekday for that day.
+- If the user explicitly named a weekday (e.g. "on Friday") and the reply uses the same weekday, that's fine.
+- A future-facing weekday far from now ("I'll ping you Monday" when today is Sunday) is NOT wrong — it refers to the next Monday, not a mismatched today.
+- Only flag mismatches where the weekday clearly refers to the day the user is asking about.
+
+Output:
+{
+  "mismatches": [
+    {
+      "written_weekday": "Monday",
+      "draft_excerpt": "Monday's calendar",
+      "correct_weekday": "Sunday",
+      "target_date": "2026-04-19"
+    }
+  ]
+}
+
+Empty array if everything is consistent. Keep output minimal.`;
+
+  const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+  const resp = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 400,
+    messages: [{ role: 'user', content: prompt }],
+  });
+  const text = (resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '';
+  const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return [];
+  const parsed = JSON.parse(jsonMatch[0]) as {
+    mismatches?: Array<{
+      written_weekday: string;
+      draft_excerpt?: string;
+      correct_weekday: string;
+      target_date: string;
+    }>;
+  };
+  if (!parsed.mismatches || parsed.mismatches.length === 0) return [];
+  return parsed.mismatches
+    .filter(mm => mm.written_weekday && mm.correct_weekday && mm.written_weekday !== mm.correct_weekday)
+    .map(mm => ({
+      writtenWeekday: mm.written_weekday,
+      writtenDate: mm.draft_excerpt ? `(${mm.draft_excerpt})` : '(bare weekday)',
+      correctWeekday: mm.correct_weekday,
+      date: mm.target_date || '',
+    }));
 }
 
 /** Build a short corrective nudge for the retry path. */

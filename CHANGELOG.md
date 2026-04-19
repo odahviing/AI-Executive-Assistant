@@ -2,6 +2,37 @@
 
 ---
 
+## 1.8.5 — Phrasing + tool-choice clarity + LLM-based weekday context verifier
+
+Quality patch. Three narrow fixes, all learned from the "is Idan free at 3pm to join a meeting with me" trace pattern.
+
+### Fixed — `check_join_availability` reply ownership
+
+Maelle could reply *"want me to add him to the invite?"* when a colleague asked if the owner could join THEIR meeting. Wrong — the colleague owns the meeting; Maelle doesn't add anyone. The tool description now lists right / wrong phrasing explicitly: *"RIGHT: 'Yes, he's free at 3pm — send him the invite.' WRONG: 'Want me to add him' (Maelle doesn't own the meeting, can't add)."* Prompt-level fix; determinism isn't the right layer for phrasing.
+
+### Changed — MeetingsSkill tool descriptions carry clearer decision tree
+
+Audited `coordinate_meeting`, `check_join_availability`, `get_free_busy` descriptions. Each now opens with "use ONLY for X" + "do NOT use for Y → use Z instead" lines, so the boundary between tools is hard to blur. Small additions (~5-8 lines per tool), no bloat. Addresses the "Sonnet picks the wrong tool for an availability check" drift risk.
+
+### Changed — dateVerifier bare-weekday check now uses Sonnet instead of keyword triggers
+
+The v1.8.4 bare-weekday check fired only when the user's message contained the literal word `today` / `tomorrow` / `היום` / `מחר`. Real messages use a wide range of temporal phrasings (`"this afternoon"`, `"at 3pm"`, `"tonight"`, `"EOD"`, `"in an hour"`, `"now"`) — all of which slipped through.
+
+Replaced with an LLM-based context verifier: when the draft contains any bare weekday AND the existing regex checks didn't already catch a mismatch, a Sonnet call judges against the user's message + the 14-day DATE LOOKUP. Strict JSON output; fails open on any error. Owner's call was to use Sonnet (not Haiku) — classifier quality matters more than cost for this check, which only fires on replies that mention a weekday at all.
+
+Determinism stays in the weekday+date regex (exact Mon-DD-Month mismatches). Judgment (does this weekday contextually fit the user's question?) moves to the LLM.
+
+### Migration
+
+None. Behavioral changes only.
+
+### Not changed
+
+- Weekday+date regex pair verifier (Pattern A / B) stays as-is — deterministic and fast.
+- Deferred Fix 3B (tool-choice sanity-check code gate) — only ship if the prompt-level tightening (3A) isn't enough in practice.
+
+---
+
 ## 1.8.4 — Intent-routed outreach + forwarded huddle recaps + triage principles restored
 
 Patch. Adds intent-routed outreach replies (colleague's approval automatically moves the calendar event), forwarded Slack huddle recap auto-ingest, coordinate_meeting preflight, colleague-path mutation-contradiction check, bare-weekday date verification, and triage context restoration. Several defensive code fixes learned from the issue #26 aftermath.
