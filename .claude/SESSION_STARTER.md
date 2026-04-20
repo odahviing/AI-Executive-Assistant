@@ -7,6 +7,8 @@ Read these two memory files before doing anything:
 - C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/project_overview.md
 - C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/project_architecture.md
 
+When the owner says "wrap up" / "close the patch" / "cut a version" / "day close" → follow `.claude/WRAP_UP.md` step-by-step. That's the end-of-session housekeeping process (auto-triage commits + owner's session work → single version bump + CHANGELOG + commit + push).
+
 ---
 
 ## Where we are — v2.0.0 just shipped
