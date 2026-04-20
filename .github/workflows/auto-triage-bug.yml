@@ -14,7 +14,14 @@ on:
 
 concurrency:
   group: auto-triage-${{ github.event.issue.number }}
-  cancel-in-progress: false
+  # cancel-in-progress: true — GitHub fires BOTH `opened` and `labeled` events
+  # when an issue is created with a label, and both match the trigger. With
+  # cancel-in-progress:false (the old default) they both ran, producing two
+  # duplicate plan comments (see issue #28). With true, the second dispatch
+  # cancels the first before it can post. A Revise event during an in-flight
+  # triage also correctly supersedes it — Revise is the owner's explicit
+  # re-plan signal and should win.
+  cancel-in-progress: true
 
 jobs:
   triage:
