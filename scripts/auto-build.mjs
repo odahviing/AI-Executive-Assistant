@@ -109,12 +109,24 @@ if (triageComments.length === 0) {
 const latestPlanComment = triageComments[triageComments.length - 1];
 const latestPlanIdx = (issue.comments || []).findIndex(c => c === latestPlanComment);
 
-// Extract just the plan section from that comment
-const planStart = latestPlanComment.body.indexOf(planMarker);
-const planEnd = latestPlanComment.body.indexOf('---', planStart + planMarker.length);
-const extractedPlan = planStart >= 0
-  ? latestPlanComment.body.slice(planStart, planEnd > 0 ? planEnd : undefined).trim()
-  : latestPlanComment.body;
+// Extract just the plan section from that comment. Prefer the HTML-comment
+// sentinels emitted by auto-triage-bug.mjs — the plan's own markdown legitimately
+// contains '---' section separators, so using the first '---' after '## Plan'
+// truncates multi-section plans (see issue #28 build abort).
+const sentinelStart = latestPlanComment.body.indexOf('<!-- PLAN START -->');
+const sentinelEnd = latestPlanComment.body.indexOf('<!-- PLAN END -->');
+let extractedPlan;
+if (sentinelStart >= 0 && sentinelEnd > sentinelStart) {
+  extractedPlan = latestPlanComment.body
+    .slice(sentinelStart + '<!-- PLAN START -->'.length, sentinelEnd)
+    .trim();
+} else {
+  const planStart = latestPlanComment.body.indexOf(planMarker);
+  const planEnd = latestPlanComment.body.indexOf('---', planStart + planMarker.length);
+  extractedPlan = planStart >= 0
+    ? latestPlanComment.body.slice(planStart, planEnd > 0 ? planEnd : undefined).trim()
+    : latestPlanComment.body;
+}
 
 // Follow-up comments posted AFTER the latest plan (excluding bot comments and label-event comments)
 const followUps = (issue.comments || []).slice(latestPlanIdx + 1).filter(c => {

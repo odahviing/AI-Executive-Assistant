@@ -175,7 +175,7 @@ export function getExpiredOutreachJobs(): OutreachJob[] {
     SELECT * FROM outreach_jobs
     WHERE status = 'sent' AND await_reply = 1
     AND (
-      (reply_deadline IS NOT NULL AND reply_deadline <= datetime('now'))
+      (reply_deadline IS NOT NULL AND datetime(reply_deadline) <= datetime('now'))
       OR sent_at <= datetime('now', '-3 days')
     )
   `).all() as OutreachJob[];
@@ -209,7 +209,7 @@ export function getScheduledOutreachJobs(): OutreachJob[] {
     SELECT * FROM outreach_jobs
     WHERE status = 'pending_scheduled'
     AND scheduled_at IS NOT NULL
-    AND scheduled_at <= datetime('now')
+    AND datetime(scheduled_at) <= datetime('now')
     ORDER BY scheduled_at ASC
   `).all() as OutreachJob[];
 }

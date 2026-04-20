@@ -190,7 +190,7 @@ export function getTasksDueNow(): Task[] {
     SELECT * FROM tasks
     WHERE status IN ('new', 'pending_colleague')
     AND due_at IS NOT NULL
-    AND due_at <= datetime('now')
+    AND datetime(due_at) <= datetime('now')
   `).all() as Task[];
 }
 

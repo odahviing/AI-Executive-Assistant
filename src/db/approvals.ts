@@ -281,7 +281,7 @@ export function sweepExpiredApprovals(): Approval[] {
     SELECT * FROM approvals
     WHERE status = 'pending'
     AND expires_at IS NOT NULL
-    AND expires_at <= datetime('now')
+    AND datetime(expires_at) <= datetime('now')
   `).all() as Approval[];
 
   for (const a of expired) {

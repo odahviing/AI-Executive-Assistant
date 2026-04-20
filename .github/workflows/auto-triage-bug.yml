@@ -4,13 +4,14 @@ name: Auto-triage Bug
 #   - issue opened with Bug label
 #   - Bug label added to an existing issue
 #   - Revise label added (owner wants a re-plan based on their comments)
+#   - issue reopened with Bug label (owner says a prior fix didn't resolve it)
 #
 # v1.8.2 — propose-only flow. No auto-fixes ever. Agent always writes a plan;
 # owner labels `Approved` (→ auto-build.yml) or `Revise` (→ re-runs this).
 
 on:
   issues:
-    types: [opened, labeled]
+    types: [opened, labeled, reopened]
 
 concurrency:
   group: auto-triage-${{ github.event.issue.number }}
@@ -31,6 +32,7 @@ jobs:
       github.event.issue.author_association != 'NONE' &&
       (
         (github.event.action == 'opened' && contains(github.event.issue.labels.*.name, 'Bug')) ||
+        (github.event.action == 'reopened' && contains(github.event.issue.labels.*.name, 'Bug')) ||
         (github.event.action == 'labeled' && (github.event.label.name == 'Bug' || github.event.label.name == 'Revise'))
       ) &&
       !(github.event.action == 'labeled' && github.event.label.name == 'Bug' && contains(github.event.issue.labels.*.name, 'Proposed'))

@@ -14,5 +14,6 @@ export function normalizeSlackText(text: string): string {
   return text
     .replace(/\*\*/g, '*')
     .replace(/##+ /g, '')
-    .replace(/^- /gm, '');
+    .replace(/^- /gm, '')
+    .replace(/ - /g, ', ');
 }

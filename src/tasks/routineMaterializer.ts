@@ -28,7 +28,7 @@ function getDueRoutines(): Routine[] {
     SELECT * FROM routines
     WHERE status = 'active'
       AND next_run_at IS NOT NULL
-      AND next_run_at <= datetime('now')
+      AND datetime(next_run_at) <= datetime('now')
   `).all() as Routine[];
 }
 

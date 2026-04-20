@@ -363,7 +363,9 @@ ${sanityBlock}${uncertaintyBlock}
 
 ## Plan
 
+<!-- PLAN START -->
 ${verdict.plan || '(no plan written)'}
+<!-- PLAN END -->
 
 ---
 

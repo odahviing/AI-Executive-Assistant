@@ -2,6 +2,26 @@
 
 ---
 
+## 2.0.1 — routine timing fix + triage-process hardening
+
+Routines and tasks fire on their scheduled UTC day again. A SQL TEXT-comparison bug was silently skipping any routine/task/approval whose due time fell on the current UTC calendar day, so they fired at UTC midnight instead (03:00 local for UTC+3) — the symptom owner caught on the weekly LinkedIn routine. Separately, two triage-process failures from today: a plan extractor that stopped at the first markdown `---` inside the plan, and a workflow that didn't re-fire when a reopened issue was marked Bug.
+
+### Fixed
+
+- [#28: routines fire at wrong time](https://github.com/odahviing/AI-Executive-Assistant/issues/28) — SQLite `<=` on raw TEXT compared Luxon's T-separator ISO (`...T09:00:00.000Z`) against `datetime('now')`'s space-separator format. Byte-wise, `T`(0x54) > ` `(0x20), so same-UTC-day due times always looked still-in-the-future. Wrapped each column in `datetime()` in the five affected queries: `getDueRoutines`, `getTasksDueNow`, `getExpiredOutreachJobs` (reply_deadline), `getScheduledOutreachJobs`, `sweepExpiredApprovals`. No schema change.
+- [#20: Maelle still overusing hyphens](https://github.com/odahviing/AI-Executive-Assistant/issues/20) — the prompt rule added in 678fac7 wasn't enough; Sonnet kept emitting `word - word` separators mid-sentence. Extended `normalizeSlackText` to replace ` - ` → `, ` deterministically on outbound Slack text. Belt-and-braces: prompt rule stays, post-processor guarantees it.
+
+### Changed
+
+- Auto-triage plan extractor — plans legitimately contain `---` section separators, but `auto-build.mjs` was slicing at the first `---` after `## Plan`, truncating multi-section plans. Emit `<!-- PLAN START -->` / `<!-- PLAN END -->` sentinels in the triage comment and slice between them. Falls back to old behavior if sentinels are missing (older comments). This is what broke the #28 build.
+- Auto-triage workflow — added `reopened` to `on.issues.types` and allow-listed reopen-with-Bug in the `if:` guard. Previously reopening an issue with Bug already on it fired nothing (the #20 symptom). Now a reopen re-triggers triage.
+
+### Config
+
+- `config/users/idan.yaml` — re-enabled `summary: true` (was flipped off at some point during the recent refactor wave).
+
+---
+
 ## 2.0.0 — Connection interface milestone (issue #1 closed)
 
 First major version. The entire messaging architecture is now abstracted behind a single `Connection` interface. Skills no longer know or care which transport they're speaking through. Slack is the fully wired implementation today; email and WhatsApp slot in through the same interface without touching skill code.
