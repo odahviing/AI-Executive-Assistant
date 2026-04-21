@@ -9,9 +9,7 @@ import logger from '../../utils/logger';
  * Scheduled outreach DM send. skill_ref → outreach_jobs.id.
  * On success, auto-queues an outreach_expiry task if await_reply is set.
  */
-export const dispatchOutreachSend: TaskDispatcher = async (app, task, profile) => {
-  const bot_token = profile.assistant.slack.bot_token;
-
+export const dispatchOutreachSend: TaskDispatcher = async (_app, task, profile) => {
   if (!task.skill_ref) {
     logger.warn('outreach_send task missing skill_ref', { taskId: task.id });
     updateTask(task.id, { status: 'failed' });
@@ -57,12 +55,11 @@ export const dispatchOutreachSend: TaskDispatcher = async (app, task, profile) =
       preview: job.message.slice(0, 80),
     });
     updateOutreachJob(job.id, { status: 'sent', sent_at: new Date().toISOString() });
-    await app.client.chat.postMessage({
-      token: bot_token,
-      channel: job.owner_channel,
-      thread_ts: job.owner_thread_ts ?? undefined,
-      text: `Just sent your message to ${job.colleague_name} as scheduled. I'll let you know what they say.`,
-    });
+    await slackConn.postToChannel(
+      job.owner_channel,
+      `Just sent your message to ${job.colleague_name} as scheduled. I'll let you know what they say.`,
+      { threadTs: job.owner_thread_ts ?? undefined },
+    );
 
     if (job.await_reply === 1) {
       const deadline = calcResponseDeadline(job.colleague_tz ?? profile.user.timezone);

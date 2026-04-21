@@ -1,14 +1,15 @@
 import { completeTask, updateTask } from '../index';
 import { getDb, getCoordJob, updateCoordJob } from '../../db';
 import { getApproval, setApprovalDecision } from '../../db/approvals';
+import { getConnection } from '../../connections/registry';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
 
 /**
  * Approval past its expires_at — expire it and cascade.
  */
-export const dispatchApprovalExpiry: TaskDispatcher = async (app, task, profile) => {
-  const bot_token = profile.assistant.slack.bot_token;
+export const dispatchApprovalExpiry: TaskDispatcher = async (_app, task, profile) => {
+  const conn = getConnection(profile.user.slack_user_id, 'slack');
 
   if (!task.skill_ref) { updateTask(task.id, { status: 'failed' }); return; }
   const approval = getApproval(task.skill_ref);
@@ -42,14 +43,13 @@ export const dispatchApprovalExpiry: TaskDispatcher = async (app, task, profile)
       });
     }
   }
-  if (approval.slack_channel) {
+  if (approval.slack_channel && conn) {
     try {
-      await app.client.chat.postMessage({
-        token: bot_token,
-        channel: approval.slack_channel,
-        thread_ts: approval.slack_thread_ts ?? undefined,
-        text: `I never heard back on the approval I asked about. I've closed it — let me know if you want to try again.`,
-      });
+      await conn.postToChannel(
+        approval.slack_channel,
+        `I never heard back on the approval I asked about. I've closed it, let me know if you want to try again.`,
+        { threadTs: approval.slack_thread_ts ?? undefined },
+      );
     } catch (err) {
       logger.warn('approval_expiry — owner DM failed', { err: String(err), approvalId: approval.id });
     }

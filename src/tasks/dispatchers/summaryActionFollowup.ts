@@ -25,7 +25,7 @@ import {
   getPersonMemory,
 } from '../../db';
 import { calcResponseDeadline } from '../../connectors/slack/coordinator';
-import { sendDM } from '../../connections/slack/messaging';
+import { getConnection } from '../../connections/registry';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
 
@@ -89,8 +89,13 @@ Output ONLY the DM text — no quotes, no preamble, no explanation.`;
   }
 }
 
-export const dispatchSummaryActionFollowup: TaskDispatcher = async (app, task, profile) => {
-  const botToken = profile.assistant.slack.bot_token;
+export const dispatchSummaryActionFollowup: TaskDispatcher = async (_app, task, profile) => {
+  const conn = getConnection(profile.user.slack_user_id, 'slack');
+  if (!conn) {
+    logger.warn('dispatchSummaryActionFollowup — no Slack connection registered', { profileId: profile.user.slack_user_id });
+    updateTask(task.id, { status: 'failed' });
+    return;
+  }
   const ctx = (() => {
     try { return JSON.parse(task.context || '{}') as FollowupContext; }
     catch { return null; }
@@ -122,8 +127,8 @@ export const dispatchSummaryActionFollowup: TaskDispatcher = async (app, task, p
     targetLanguage,
   });
 
-  // Send via the messaging shim (no outreach_jobs side effect from the shim itself)
-  const sendResult = await sendDM(app, botToken, ctx.target_slack_id, message);
+  // Send via the Connection (no outreach_jobs side effect from the send itself)
+  const sendResult = await conn.sendDirect(ctx.target_slack_id, message);
   if (!sendResult.ok) {
     logger.error('summary_action_followup: send failed', {
       taskId: task.id,
@@ -133,12 +138,11 @@ export const dispatchSummaryActionFollowup: TaskDispatcher = async (app, task, p
     });
     // Tell owner it failed so they can chase manually
     try {
-      await app.client.chat.postMessage({
-        token: botToken,
-        channel: task.owner_channel,
-        thread_ts: task.owner_thread_ts ?? undefined,
-        text: `I tried to check in with ${ctx.target_name} about "${ctx.action_description}" but the DM didn't go through (${sendResult.reason}). Want to follow up directly?`,
-      });
+      await conn.postToChannel(
+        task.owner_channel,
+        `I tried to check in with ${ctx.target_name} about "${ctx.action_description}" but the DM didn't go through (${sendResult.reason}). Want to follow up directly?`,
+        { threadTs: task.owner_thread_ts ?? undefined },
+      );
     } catch (_) {}
     updateTask(task.id, { status: 'failed' });
     return;

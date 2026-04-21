@@ -26,7 +26,7 @@ import type { UserProfile } from '../../config/userProfile';
 import type { ChannelId } from '../../skills/types';
 import { appendToConversation } from '../../db';
 import { runOrchestrator, type OrchestratorOutput } from '../../core/orchestrator';
-import { normalizeSlackText } from '../../utils/slackFormat';
+import { formatForSlack } from '../../connections/slack/formatting';
 import { config } from '../../config';
 import { textToSpeech, sendAudioMessage, shouldRespondWithAudio } from '../../voice';
 import logger from '../../utils/logger';
@@ -81,7 +81,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   appendToConversation(threadTs, channelId, { role: 'assistant', content: savedContent });
 
   // Step 2 — normalize markdown → Slack mrkdwn.
-  let cleanReply = normalizeSlackText(result.reply);
+  let cleanReply = formatForSlack(result.reply);
 
   // Step 3 — owner-facing claim check (+ corrective retry).
   if (role === 'owner' || isOwnerInGroup) {
@@ -150,7 +150,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
           mpimMemberIds,
         });
         if (retry?.reply) {
-          cleanReply = normalizeSlackText(retry.reply);
+          cleanReply = formatForSlack(retry.reply);
           logger.info('Colleague mutation-contradiction retry produced new draft', { previewAfter: cleanReply.slice(0, 160) });
         }
       } catch (err) {
@@ -297,7 +297,7 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
         forceToolOnFirstTurn:
           verdict.action_type === 'message' ? { name: 'message_colleague' } : undefined,
       });
-      cleanReply = normalizeSlackText(retry.reply);
+      cleanReply = formatForSlack(retry.reply);
       // Overwrite the conversation-history entry with the corrected draft so
       // Claude's NEXT turn doesn't see the dishonest version.
       appendToConversation(ctx.threadTs, ctx.channelId, { role: 'assistant', content: cleanReply });
@@ -448,7 +448,7 @@ async function runDateVerifierAndMaybeRetry(ctx: DateVerifyContext): Promise<str
         extraInstruction: nudge,
       });
       if (retry.reply && retry.reply.trim().length > 0) {
-        retriedReply = normalizeSlackText(retry.reply);
+        retriedReply = formatForSlack(retry.reply);
       }
     } catch (retryErr) {
       logger.warn('Date verifier retry errored — falling through to deterministic correction', { err: String(retryErr) });

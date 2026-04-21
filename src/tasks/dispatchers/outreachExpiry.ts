@@ -3,6 +3,7 @@ import { completeTask, createTask, updateTask } from '../index';
 import { getDb, updateOutreachJob } from '../../db';
 import { calcResponseDeadline } from '../../connectors/slack/coordinator';
 import { isWithinOwnerWorkHours, nextOwnerWorkdayStart } from '../../utils/workHours';
+import { getConnection } from '../../connections/registry';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
 
@@ -10,8 +11,13 @@ import logger from '../../utils/logger';
  * Reply deadline reached. On first expiry: send one follow-up, re-queue
  * +3 work-hours. On second expiry: mark no_response, notify owner.
  */
-export const dispatchOutreachExpiry: TaskDispatcher = async (app, task, profile) => {
-  const bot_token = profile.assistant.slack.bot_token;
+export const dispatchOutreachExpiry: TaskDispatcher = async (_app, task, profile) => {
+  const conn = getConnection(profile.user.slack_user_id, 'slack');
+  if (!conn) {
+    logger.warn('dispatchOutreachExpiry — no Slack connection registered', { profileId: profile.user.slack_user_id });
+    updateTask(task.id, { status: 'failed' });
+    return;
+  }
 
   if (!task.skill_ref) {
     updateTask(task.id, { status: 'failed' });
@@ -39,15 +45,10 @@ export const dispatchOutreachExpiry: TaskDispatcher = async (app, task, profile)
   if (job.await_reply === 1 && attempts < 1) {
     // First expiry — send one follow-up, re-schedule the expiry +3h
     try {
-      const dmResult = await app.client.conversations.open({ token: bot_token, users: job.colleague_slack_id });
-      const dmChannel = (dmResult.channel as any)?.id;
-      if (dmChannel) {
-        await app.client.chat.postMessage({
-          token: bot_token,
-          channel: dmChannel,
-          text: `Hi ${job.colleague_name}, just following up on my earlier message. Whenever you get a chance — no rush!`,
-        });
-      }
+      await conn.sendDirect(
+        job.colleague_slack_id,
+        `Hi ${job.colleague_name}, just following up on my earlier message. Whenever you get a chance, no rush!`,
+      );
       const newDeadline = calcResponseDeadline(job.colleague_tz ?? profile.user.timezone);
       updateOutreachJob(job.id, { reply_deadline: newDeadline, attempts: 1 } as any);
       createTask({
@@ -125,12 +126,11 @@ export const dispatchOutreachExpiry: TaskDispatcher = async (app, task, profile)
     : hour < 9
     ? `it's early morning for them (${colleagueDt.toFormat('HH:mm')})`
     : `their time is ${colleagueDt.toFormat('HH:mm')}`;
-  await app.client.chat.postMessage({
-    token: bot_token,
-    channel: job.owner_channel,
-    thread_ts: job.owner_thread_ts ?? undefined,
-    text: `${job.colleague_name} hasn't replied — I followed up once (${timeCtx}). Want me to try again or leave it?`,
-  });
+  await conn.postToChannel(
+    job.owner_channel,
+    `${job.colleague_name} hasn't replied, I followed up once (${timeCtx}). Want me to try again or leave it?`,
+    { threadTs: job.owner_thread_ts ?? undefined },
+  );
   completeTask(task.id);
   logger.info('outreach_expiry — marked no_response', {
     taskId: task.id,

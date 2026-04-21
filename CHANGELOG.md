@@ -2,6 +2,62 @@
 
 ---
 
+## 2.0.2 — KB ingestion + summary context fixes + engagement classifier
+
+A dense patch. Maelle can now learn from PDFs, text files, and web pages — not just markdown files in a folder. Summary drafter finally sees the framing the owner types alongside a transcript. Social-topic quality upgrades moved from prompt judgment (fragile) to a deterministic post-turn classifier. Plus the day's cleanup: retired `work_life` from the social enum (mis-used for work activities, not emotions), purged orphan bare-subject rows, hardened the KB classifier against JSON parse failures, switched Tavily to advanced-depth extraction for SPA pages.
+
+### Added
+
+- Knowledge ingestion pipeline. `ingestKnowledgeDoc` in `src/skills/knowledge.ts` classifies content (transcript / knowledge_doc / other) via Sonnet tool_use with a schema (guaranteed JSON) and writes a condensed markdown section under `config/users/<owner>_kb/`. Merge-vs-sibling-vs-create decided per upload based on the existing catalog. Low-confidence cases return `ambiguous` and ask the owner instead of misfiling. `writeSection` + `nextSiblingId` + `sectionExists` helpers enforce safe-path semantics.
+- File upload routing in `app.ts`. PDF (via `pdf-parse` v2 `PDFParse` class), `.txt`, `.md` all pass through the unified classifier. PDFs always route to KB; txt/md are transcript-or-knowledge depending on content. `knowledge: false` in profile triggers a polite refusal. `:thread:` reaction fires on every transcript/doc upload (was silently missing — file_share branch never reached the read-receipt code).
+- `ingest_knowledge_from_url` tool on KnowledgeBaseSkill. Uses `tavilyExtract` under the hood. Distinct from `web_extract` which remains one-off research — this tool is for durable storage when the owner says "save this".
+- Post-turn engagement classifier in `src/core/socialEngagement.ts`. When `note_about_self` / `note_about_person` fires with a subject, stashes a `PendingCheck` keyed on thread. On the next user message in that thread, a tiny tool_use classifier judges engagement (neutral / engaged / good) and upgrades quality via `recordSocialMoment` (monotonic upgrade already handled). Deterministic trigger, LLM for judgment — the right layering. 30-min TTL on pending checks.
+- `scripts/recover-kb-reflectiz.mjs` — one-off recovery for the 13 Reflectiz URLs `web_extract`ed before the KB write path existed. Safe to re-run.
+- `scripts/ingest-local-pdfs.mjs` — same shape for local PDF paths.
+- `scripts/clean-social-topics.mjs` — one-shot DB cleanup, drops bare-subject rows and retroactively removes `work_life` entries. Ran once during wrap.
+
+### Fixed
+
+- Summary drafter now sees the owner's caption. `ingestTranscriptUpload` threads `caption` through to `draftSummaryFromTranscript` as `ownerCaption`, injected as "OWNER'S FRAMING FOR THIS SUMMARY" with an explicit rule that framing overrides default paragraph shape. Fixes: unresolved Speaker 1/2 when owner named them, topical framing ignored, action-item shape mismatch, attendee fabrication from calendar invitees.
+- Calendar invitees no longer fabricated as attendees. `calBlock` now explicitly says "invited per Outlook — NOT a confirmation of who actually attended"; rule added that attendees must have actually participated per transcript or owner framing.
+- Jointly-agreed next steps ("let's meet again") now default to the owner as assignee, not the other party.
+- KB classifier swapped from free-form JSON in prompt to Anthropic tool_use with a strict schema. Previously failed with `SyntaxError: Expected ',' or '}'` on outputs with unescaped quotes in the `condensed_markdown` field.
+- Tavily extraction switched to `extract_depth: advanced` in `tavilyExtract`. Basic mode was returning empty content for SPA-heavy pages (www.reflectiz.com/*); advanced mode handles client-side rendered content.
+- Internal-leakage scrubber at the central output layer. Strips sentinel tokens (any `ALL_CAPS_SNAKE_CASE` — real prose never uses this shape) and all known tool names. Previous behavior let leaks like `"NO_ISSUES"` or `"the analyzer"` reach the owner's Slack when routine prompts instructed Sonnet to emit sentinels. Paired with a new base-prompt rule that forbids naming or paraphrasing tools / internal processes. Code handles verbatim leaks, prompt handles paraphrased ones.
+- Two-stage KB ingest. Stage 1 classifies + proposes metadata via tool_use (short payload, no parse risk). Stage 2, only if the verdict is `knowledge_doc`, does a plain-text call for the condensed markdown. Previous one-stage version had the SDK throw `SyntaxError: Expected ',' or '}'` when Sonnet emitted malformed JSON inside the `condensed_markdown` arg string — the Anthropic SDK parses streamed tool_use args and chokes on unescaped chars. Splitting content generation out of JSON eliminates the parse surface.
+
+### Refactor (layer hygiene — advances [#22](https://github.com/odahviing/AI-Executive-Assistant/issues/22))
+
+- Split `src/utils/slackFormat.ts` into cross-cutting vs transport-specific:
+  - `src/utils/textScrubber.ts` — `scrubInternalLeakage(text)`. Sentinel strip, tool name strip, hyphen → comma, whitespace cleanup. Transport-agnostic; email and WhatsApp will reuse it.
+  - `src/connections/slack/formatting.ts` — `formatForSlack(text)`. Slack's `**`→`*`, `##` strip, `-` list prefix strip. Composes textScrubber + Slack dialect.
+  - Old `utils/slackFormat.ts` deleted.
+- **SlackConnection now auto-applies `formatForSlack` internally** on `sendDirect` / `sendBroadcast` / `sendGroupConversation` / `postToChannel`. Callers pass raw text; the Connection runs the full outbound pipeline (scrub → Slack dialect) before hitting `chat.postMessage`. Idempotent, so pre-formatting callers stay safe.
+- **All skill / dispatcher / task / core outbound paths migrated from raw `app.client.chat.postMessage` to the Connection registry.** Every outbound call site now resolves `getConnection(profile.user.slack_user_id, 'slack')` and calls `conn.postToChannel` or `conn.sendDirect`. Migrated files: `skills/meetingReschedule.ts`, `tasks/briefs.ts`, `tasks/runner.ts`, `tasks/skill.ts` (approvals), all 9 dispatchers (`reminder`, `followUp`, `research`, `routine`, `outreachSend`, `outreachExpiry`, `approvalExpiry`, `calendarFix`, `summaryActionFollowup`), `core/approvals/orphanBackfill.ts`. Dispatchers that no longer needed `app` take `(_app, ...)` — signature preserved for the runner.
+- **Only remaining core-layer raw `postMessage`** is the catch-up handler in `core/background.ts`, which renders Slack-specific `context` + `section` blocks for the "↩ Catching up on your message from <time>" caption. The Connection interface doesn't carry a blocks payload yet; the call is documented in place and flagged as follow-up under [#22](https://github.com/odahviing/AI-Executive-Assistant/issues/22). Everything else respects the four-layer rule: skills, dispatchers, and task code never import `@slack/bolt` or use `app.client.*`.
+
+### Removed
+
+- `work_life` from both `note_about_person` and `note_about_self` topic enums. Was consistently mis-used for work-activity logs (interviews, projects) instead of emotional work content. Work activity doesn't belong in social tracking; the owner's assistant has direct access to his calendar and email for logistics.
+
+### Config
+
+- `config/users/idan.yaml` — all togglable skills flipped to `true` (email_drafting, knowledge, proactive_alerts, whatsapp, search, research, calendar). Knowledge is a hard prerequisite for ingest; without it, upload is refused.
+- `pdf-parse` v2 added.
+
+### Invariants preserved
+
+- KB write path enforces safe-path semantics (no `..`, no absolute paths, never escapes `config/users/<owner>_kb/`). `writeSection` mirrors the read-side guards.
+- Skill boundary holds — knowledge.ts imports no `@slack/bolt`; ingest flow uses existing Slack client via file_share handler.
+- Social-quality upgrade remains monotonic (neutral → engaged → good, never downgrade).
+
+### Not changed
+
+- URL ingestion is Sonnet-initiated, not pattern-matched. Keeps judgment in the prompt layer.
+- Proactive social-nudge cron deferred. Maelle stays passive between threads; more topic variety requires more `note_about_self` calls on owner shares, not louder initiation logic.
+
+---
+
 ## 2.0.1 — routine timing fix + triage-process hardening
 
 Routines and tasks fire on their scheduled UTC day again. A SQL TEXT-comparison bug was silently skipping any routine/task/approval whose due time fell on the current UTC calendar day, so they fired at UTC midnight instead (03:00 local for UTC+3) — the symptom owner caught on the weekly LinkedIn routine. Separately, two triage-process failures from today: a plan extractor that stopped at the first markdown `---` inside the plan, and a workflow that didn't re-fire when a reopened issue was marked Bug.

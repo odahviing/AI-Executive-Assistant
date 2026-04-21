@@ -8,6 +8,7 @@ import {
 } from '../../db/calendarIssues';
 import { analyzeCalendar, processCalendarEvents } from '../../skills/meetings/ops';
 import { getCalendarEvents } from '../../connectors/graph/calendar';
+import { getConnection } from '../../connections/registry';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
 
@@ -15,9 +16,7 @@ import logger from '../../utils/logger';
  * Re-check whether a calendar issue marked 'to_resolve' still exists.
  * If yes → re-ping owner; if no → mark resolved silently.
  */
-export const dispatchCalendarFix: TaskDispatcher = async (app, task, profile) => {
-  const bot_token = profile.assistant.slack.bot_token;
-
+export const dispatchCalendarFix: TaskDispatcher = async (_app, task, profile) => {
   if (!task.skill_ref) { updateTask(task.id, { status: 'failed' }); return; }
   const issue = getCalendarIssueById(task.skill_ref);
   if (!issue) {
@@ -64,12 +63,16 @@ export const dispatchCalendarFix: TaskDispatcher = async (app, task, profile) =>
     return;
   }
 
-  await app.client.chat.postMessage({
-    token: bot_token,
-    channel: task.owner_channel,
-    thread_ts: task.owner_thread_ts ?? undefined,
-    text: `Checking back on a calendar issue I flagged — it's still there: ${issue.detail}. Want me to help fix it, or should I let it sit?`,
-  });
+  const conn = getConnection(profile.user.slack_user_id, 'slack');
+  if (conn) {
+    await conn.postToChannel(
+      task.owner_channel,
+      `Checking back on a calendar issue I flagged, it's still there: ${issue.detail}. Want me to help fix it, or should I let it sit?`,
+      { threadTs: task.owner_thread_ts ?? undefined },
+    );
+  } else {
+    logger.warn('calendar_fix — no Slack connection registered, skipping re-ping DM', { profileId: profile.user.slack_user_id });
+  }
   // Re-queue: check again in 1 day
   const nextDue = DateTime.now().plus({ days: 1 }).toUTC().toISO()!;
   createTask({

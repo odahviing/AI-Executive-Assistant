@@ -28,6 +28,7 @@ import { getDb } from '../db';
 import { updateMeeting } from '../connectors/graph/calendar';
 import { appendToConversation } from '../db';
 import { config } from '../config';
+import { getConnection } from '../connections/registry';
 import logger from '../utils/logger';
 
 export interface RescheduleContext {
@@ -112,7 +113,7 @@ If ambiguous, prefer "declined" over guessing.`;
  * (e.g. intent missing or context unparseable).
  */
 export async function handleRescheduleReply(
-  app: App,
+  _app: App,
   params: {
     job: OutreachJob;
     replyText: string;
@@ -122,6 +123,12 @@ export async function handleRescheduleReply(
 ): Promise<boolean> {
   const { job, replyText, profile } = params;
   if (job.intent !== 'meeting_reschedule' || !job.context_json) return false;
+
+  const conn = getConnection(profile.user.slack_user_id, 'slack');
+  if (!conn) {
+    logger.warn('handleRescheduleReply — no Slack connection registered', { profileId: profile.user.slack_user_id });
+    return false;
+  }
 
   let ctx: RescheduleContext;
   try {
@@ -166,8 +173,6 @@ export async function handleRescheduleReply(
     job.conversation_json ? JSON.parse(job.conversation_json) : [];
   conversation.push({ role: 'colleague', text: replyText });
 
-  const { openDM } = await import('../connectors/slack/coordinator');
-
   // ── Branch: approved → move the meeting ──────────────────────────────────
   if (decision.status === 'approved') {
     try {
@@ -180,12 +185,11 @@ export async function handleRescheduleReply(
       });
     } catch (err) {
       logger.error('updateMeeting failed on reschedule approval', { err: String(err), jobId: job.id });
-      await app.client.chat.postMessage({
-        token: params.bot_token,
-        channel: job.owner_channel,
-        thread_ts: job.owner_thread_ts ?? undefined,
-        text: `${job.colleague_name} said yes to moving "${ctx.meeting_subject}" to ${proposedStartLocal}, but I hit an error updating the calendar. You'll need to move it manually.`,
-      });
+      await conn.postToChannel(
+        job.owner_channel,
+        `${job.colleague_name} said yes to moving "${ctx.meeting_subject}" to ${proposedStartLocal}, but I hit an error updating the calendar. You'll need to move it manually.`,
+        { threadTs: job.owner_thread_ts ?? undefined },
+      );
       updateOutreachJob(job.id, {
         status: 'replied',
         reply_text: replyText,
@@ -195,26 +199,18 @@ export async function handleRescheduleReply(
     }
 
     // Confirm to colleague
-    const colleagueMsg = `Great — moved to ${proposedStartLocal}. See you then.`;
+    const colleagueMsg = `Great, moved to ${proposedStartLocal}. See you then.`;
     try {
-      const dmCh = await openDM(app, params.bot_token, job.colleague_slack_id);
-      await app.client.chat.postMessage({
-        token: params.bot_token,
-        channel: dmCh,
-        text: colleagueMsg,
-      });
+      await conn.sendDirect(job.colleague_slack_id, colleagueMsg);
     } catch (err) {
       logger.warn('Failed to DM colleague the confirmation', { err: String(err) });
     }
     conversation.push({ role: 'maelle', text: colleagueMsg });
 
     // Report to owner
-    const ownerMsg = `${job.colleague_name} confirmed — moved "${ctx.meeting_subject}" to ${proposedStartLocal}–${proposedEndLocal}.`;
-    await app.client.chat.postMessage({
-      token: params.bot_token,
-      channel: job.owner_channel,
-      thread_ts: job.owner_thread_ts ?? undefined,
-      text: ownerMsg,
+    const ownerMsg = `${job.colleague_name} confirmed, moved "${ctx.meeting_subject}" to ${proposedStartLocal}–${proposedEndLocal}.`;
+    await conn.postToChannel(job.owner_channel, ownerMsg, {
+      threadTs: job.owner_thread_ts ?? undefined,
     });
     if (job.owner_thread_ts) {
       appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: ownerMsg });
@@ -236,11 +232,8 @@ export async function handleRescheduleReply(
   // ── Branch: declined → report to owner, keep original time ───────────────
   if (decision.status === 'declined') {
     const ownerMsg = `${job.colleague_name} declined moving "${ctx.meeting_subject}". Keeping the original time. Reply preview: "${replyText.slice(0, 120)}"`;
-    await app.client.chat.postMessage({
-      token: params.bot_token,
-      channel: job.owner_channel,
-      thread_ts: job.owner_thread_ts ?? undefined,
-      text: ownerMsg,
+    await conn.postToChannel(job.owner_channel, ownerMsg, {
+      threadTs: job.owner_thread_ts ?? undefined,
     });
     if (job.owner_thread_ts) {
       appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: ownerMsg });
@@ -266,11 +259,8 @@ export async function handleRescheduleReply(
       : '(time not cleanly extracted — check their reply)';
     const ownerMsg = `${job.colleague_name} can't do ${proposedStartLocal}, but offers ${counterDesc} for "${ctx.meeting_subject}". Want me to take it?`;
 
-    await app.client.chat.postMessage({
-      token: params.bot_token,
-      channel: job.owner_channel,
-      thread_ts: job.owner_thread_ts ?? undefined,
-      text: ownerMsg,
+    await conn.postToChannel(job.owner_channel, ownerMsg, {
+      threadTs: job.owner_thread_ts ?? undefined,
     });
     if (job.owner_thread_ts) {
       appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: ownerMsg });

@@ -22,6 +22,7 @@ import { App } from '@slack/bolt';
 import type { UserProfile } from '../config/userProfile';
 import { getTasksDueNow, updateTask, type Task } from './index';
 import { DISPATCHERS } from './dispatchers';
+import { getConnection } from '../connections/registry';
 import logger from '../utils/logger';
 
 export async function runDueTasks(
@@ -42,12 +43,14 @@ export async function runDueTasks(
     } catch (err) {
       logger.error('Task execution failed', { err, taskId: task.id, type: task.type });
       updateTask(task.id, { status: 'failed' });
-      await app.client.chat.postMessage({
-        token: profile.assistant.slack.bot_token,
-        channel: task.owner_channel,
-        thread_ts: task.owner_thread_ts ?? undefined,
-        text: `I couldn't complete "${task.title}" — something went wrong. Want me to try again?`,
-      });
+      const conn = getConnection(profile.user.slack_user_id, 'slack');
+      if (conn) {
+        await conn.postToChannel(
+          task.owner_channel,
+          `I couldn't complete "${task.title}", something went wrong. Want me to try again?`,
+          { threadTs: task.owner_thread_ts ?? undefined },
+        );
+      }
     }
   }
 }

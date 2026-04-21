@@ -3,7 +3,8 @@ import { getDb } from '../../db';
 import { runOrchestrator } from '../../core/orchestrator';
 import { assessLateness } from '../lateness';
 import { sendMorningBriefing } from '../briefs';
-import { normalizeSlackText } from '../../utils/slackFormat';
+import { scrubInternalLeakage } from '../../utils/textScrubber';
+import { getConnection } from '../../connections/registry';
 import type { Routine } from '../crons';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
@@ -14,8 +15,6 @@ import logger from '../../utils/logger';
  * "I was offline at X, run now or skip?" DMs.
  */
 export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) => {
-  const bot_token = profile.assistant.slack.bot_token;
-
   if (!task.routine_id) {
     logger.warn('Routine task has no routine_id — failing', { taskId: task.id });
     updateTask(task.id, { status: 'failed' });
@@ -99,31 +98,32 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     });
 
     const rawReply = result.reply ?? '';
-    const isSilent = !rawReply || rawReply.trim().toUpperCase() === 'NO_ISSUES';
+    // v2.0.2 — scrub first, then decide silence. SlackConnection auto-applies
+    // Slack-specific formatting + scrubbing; we scrub here too so the silence
+    // check sees the post-scrub text (a reply that was "only internal leakage"
+    // becomes empty and shouldn't post a lonely "*Routine title*" header).
+    const cleaned = rawReply ? scrubInternalLeakage(rawReply) : '';
+    const isSilent = cleaned.trim().length === 0;
 
+    const conn = getConnection(profile.user.slack_user_id, 'slack');
     if (!isSilent) {
-      await app.client.chat.postMessage({
-        token: bot_token,
-        channel: routine.owner_channel,
-        text: `*${routine.title}*\n${normalizeSlackText(result.reply)}`,
-      });
+      if (conn) {
+        await conn.postToChannel(routine.owner_channel, `*${routine.title}*\n${cleaned}`);
+      } else {
+        logger.warn('dispatchRoutine — no Slack connection registered, routine output dropped', { routineId: routine.id });
+      }
     } else {
-      // v1.8.6 — silent-completion visibility. Routines that return empty
-      // or "NO_ISSUES" used to complete silently with no trace the owner
-      // could see in Slack. Log prominently so pm2 logs shows when/why a
-      // routine ran without producing output. Owner can also ask Maelle
-      // "when did <routine> last run" — the last_result field captures it.
       logger.info('Routine completed silently (no message sent to owner)', {
         taskId: task.id,
         routineId: routine.id,
         routineTitle: routine.title,
         scheduledAt,
         replyPreview: rawReply ? rawReply.slice(0, 120) : '(empty)',
-        reason: rawReply.trim().toUpperCase() === 'NO_ISSUES' ? 'NO_ISSUES_sentinel' : 'empty_reply',
+        scrubbedEmpty: !!rawReply && cleaned.length === 0,
       });
     }
 
-    const summary = isSilent ? 'No issues found' : result.reply.slice(0, 300);
+    const summary = isSilent ? 'No issues found' : cleaned.slice(0, 300);
     getDb().prepare(
       `UPDATE routines SET last_run_at = datetime('now'), run_count = run_count + 1, last_result = ?, updated_at = datetime('now') WHERE id = ?`
     ).run(summary, routine.id);

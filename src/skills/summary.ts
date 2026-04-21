@@ -172,12 +172,17 @@ async function draftSummaryFromTranscript(params: {
   transcript: string;
   ownerUserId: string;
   ownerName: string;
+  ownerCaption?: string;
   calendarEvent?: CalendarEvent;
   agendaText?: string;
   profile: UserProfile;
 }): Promise<SummaryDraft> {
   const calBlock = params.calendarEvent
-    ? `\n\nCALENDAR EVENT MATCH:\n- Subject: ${params.calendarEvent.subject}\n- Start: ${params.calendarEvent.start?.dateTime}\n- Attendees: ${(params.calendarEvent.attendees ?? []).map(a => `${a.emailAddress.name} <${a.emailAddress.address}>`).join(', ')}${params.agendaText ? `\n- Agenda/body: ${params.agendaText.slice(0, 2000)}` : ''}`
+    ? `\n\nCALENDAR EVENT (invited per Outlook — NOT a confirmation of who actually attended):\n- Subject: ${params.calendarEvent.subject}\n- Start: ${params.calendarEvent.start?.dateTime}\n- Invited: ${(params.calendarEvent.attendees ?? []).map(a => `${a.emailAddress.name} <${a.emailAddress.address}>`).join(', ')}${params.agendaText ? `\n- Agenda/body: ${params.agendaText.slice(0, 2000)}` : ''}`
+    : '';
+
+  const captionBlock = params.ownerCaption && params.ownerCaption.trim()
+    ? `\n\nOWNER'S FRAMING FOR THIS SUMMARY (the owner typed this alongside the transcript upload — these instructions override defaults):\n"""\n${params.ownerCaption.trim()}\n"""`
     : '';
 
   const inferredType = inferSummaryType(params.calendarEvent?.subject);
@@ -229,13 +234,15 @@ Your output is STRICT JSON ONLY — no prose, no markdown, no code fences. Use t
 CRITICAL RULES:
 - Summary language is ALWAYS English. Even if the transcript is Hebrew.
 - Do NOT invent attendees, action items, or quotes. If something isn't in the transcript, it doesn't go in the summary.
-- Do NOT auto-resolve "Speaker 1" / "Speaker 2" to names unless the transcript itself names them. List them in speakers_unresolved instead.
-- Action items: only flag items that were CLEARLY committed to (assignee + action), not vague "we should look into this".
+- ATTENDEES: include only people who actually participated per the transcript or the owner's framing. Calendar invitees who never spoke and aren't referenced as present MUST be excluded — invited ≠ attended.
+- Do NOT auto-resolve "Speaker 1" / "Speaker 2" to names unless the transcript itself names them OR the owner's framing names them (e.g. "speaker 1 is me"). List unresolved ones in speakers_unresolved.
+- Action items: only flag items that were CLEARLY committed to (assignee + action), not vague "we should look into this". When a next step is jointly agreed ("let's meet again", "we'll reconnect"), the assignee is the owner unless the transcript clearly tasks the other party.
 - Deadlines: only fill deadline_iso when the transcript was explicit ("by tomorrow", "Friday morning", "by EOD"). If there was no deadline, omit both deadline fields.
 - For dates without a year, assume current year. If "tomorrow" / "by Friday", compute relative to ${DateTime.now().setZone(params.profile.user.timezone).toFormat('EEEE, d MMMM yyyy')}.
 - Prefer 4-6 paragraphs. Avoid one-sentence paragraphs.
-- Owner of this meeting: ${params.ownerName} — never list them as an action-item assignee unless they are explicitly tasked.
-${calBlock}${styleBlock}${kbBlock}
+- Owner of this meeting: ${params.ownerName} — never list them as an action-item assignee unless they are explicitly tasked OR the action is a jointly-agreed next step (see above).
+- If the owner's framing (above) specifies what to cover or what to de-emphasize, FOLLOW IT. Their framing overrides the default paragraph shape.
+${captionBlock}${calBlock}${styleBlock}${kbBlock}
 
 TRANSCRIPT:
 """
@@ -1249,6 +1256,7 @@ export async function ingestTranscriptUpload(params: {
       transcript: params.text,
       ownerUserId: params.ownerUserId,
       ownerName: params.profile.user.name,
+      ownerCaption: params.caption,
       calendarEvent: calendarMatch ?? undefined,
       agendaText: calendarMatch?.bodyPreview,
       profile: params.profile,

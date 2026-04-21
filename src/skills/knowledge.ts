@@ -197,6 +197,233 @@ Output ONLY the JSON.`;
   }
 }
 
+// ── Write side — ingest pipeline (v2.0.2) ───────────────────────────────────
+
+/** Safe-path write, mkdir -p as needed. Rejects traversal / absolute paths. */
+async function writeSection(profile: UserProfile, sectionId: string, content: string): Promise<void> {
+  if (sectionId.includes('..') || sectionId.startsWith('/') || sectionId.includes('\\')) {
+    throw new Error('invalid_section_id');
+  }
+  const root = kbRootForProfile(profile);
+  const full = path.resolve(root, `${sectionId}.md`);
+  if (!full.startsWith(root)) throw new Error('path_outside_kb');
+  await fs.mkdir(path.dirname(full), { recursive: true });
+  await fs.writeFile(full, content, 'utf-8');
+}
+
+async function sectionExists(profile: UserProfile, sectionId: string): Promise<boolean> {
+  const root = kbRootForProfile(profile);
+  const full = path.resolve(root, `${sectionId}.md`);
+  if (!full.startsWith(root)) return false;
+  try { await fs.stat(full); return true; } catch { return false; }
+}
+
+/** Pick a non-colliding sibling id: investors/fulcrum → investors/fulcrum_2. */
+async function nextSiblingId(profile: UserProfile, baseId: string): Promise<string> {
+  for (let n = 2; n < 50; n++) {
+    const candidate = `${baseId}_${n}`;
+    if (!(await sectionExists(profile, candidate))) return candidate;
+  }
+  return `${baseId}_${Date.now()}`;
+}
+
+export interface IngestResult {
+  kind: 'created' | 'merged' | 'sibling' | 'ambiguous' | 'rejected';
+  sectionId?: string;
+  title?: string;
+  summary?: string;
+  mergedInto?: string;    // when kind=merged
+  question?: string;      // when kind=ambiguous
+  reason?: string;        // when kind=rejected
+}
+
+/**
+ * Ingest a knowledge document into the owner's KB.
+ *
+ * Single Sonnet pass: classify (transcript/doc/other), propose section_id,
+ * title, one-line summary, condensed markdown, and — if an existing section
+ * looks like a match — whether to merge or file as sibling. Writes the file
+ * and returns the result for the caller to narrate to the owner.
+ *
+ * Fails closed on low confidence (kind='ambiguous'): asks the owner rather
+ * than misfiling.
+ */
+export async function ingestKnowledgeDoc(params: {
+  profile: UserProfile;
+  text: string;           // extracted text (raw)
+  sourceHint: string;     // filename, URL, or "pasted text"
+  ownerCaption?: string;  // text the owner typed alongside the upload, if any
+  anthropic: import('@anthropic-ai/sdk').default;
+}): Promise<IngestResult> {
+  const trimmed = params.text.trim();
+  if (trimmed.length < 50) {
+    return { kind: 'rejected', reason: 'too_short' };
+  }
+
+  const existingSections = await listSections(params.profile);
+  const catalog = existingSections.length > 0
+    ? existingSections.map(s => `- ${s.id}`).join('\n')
+    : '(KB is currently empty)';
+
+  const sample = trimmed.length > 24000 ? trimmed.slice(0, 24000) + '\n\n[Truncated for classification — full text preserved for storage]' : trimmed;
+
+  const prompt = `You are the knowledge librarian for ${params.profile.user.name}. A document arrived. Decide what to do with it.
+
+EXISTING KB SECTIONS:
+${catalog}
+
+SOURCE: ${params.sourceHint}
+${params.ownerCaption ? `OWNER SAID: "${params.ownerCaption.trim()}"` : ''}
+
+CONTENT:
+"""
+${sample}
+"""
+
+Call the \`classify_document\` tool with your verdict. DO NOT include the condensed content here — only metadata. A separate call handles content.
+
+GUIDANCE:
+- kind=transcript: dialogue / multi-speaker / meeting recording. Caller routes to the summary flow.
+- kind=other: receipts, random screenshots, personal stuff — not durable knowledge.
+- kind=knowledge_doc: investor memos, product docs, customer research, team profiles, strategy docs, market research, contracts, company pages.
+- action=merge when the content UPDATES or EXPANDS an existing section on the same topic.
+- action=sibling when it's related-but-distinct (existing "investors/fulcrum" + a DIFFERENT investor → sibling named differently).
+- action=create when no existing section is close enough.
+- confidence=low when content is ambiguous — caller asks the owner rather than misfile.`;
+
+  // Stage 1: classify + propose metadata. Small tool_use payload — no big
+  // markdown strings, so no risk of the SDK hitting malformed JSON in the
+  // streamed arg output (which was the v2.0.2 crash cause).
+  let verdict: any;
+  try {
+    const resp = await params.anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1000,
+      tools: [{
+        name: 'classify_document',
+        description: 'Classify the document and propose where to file it. Metadata only — no content.',
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            kind: { type: 'string', enum: ['knowledge_doc', 'transcript', 'other'] },
+            confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+            section_id: { type: 'string', description: 'snake_case/slug/path, nested with / allowed (e.g. "investors/fulcrum"). Only for knowledge_doc.' },
+            title: { type: 'string', description: 'Short human title. Only for knowledge_doc.' },
+            summary: { type: 'string', description: 'One line describing what the section covers.' },
+            action: { type: 'string', enum: ['create', 'merge', 'sibling'] },
+            existing_match: { type: 'string', description: 'section_id from catalog when action=merge|sibling, empty string otherwise' },
+            reason: { type: 'string', description: 'For transcript/other/low-confidence: explain.' },
+          },
+          required: ['kind', 'confidence'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'classify_document' },
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
+    if (!toolUse || !toolUse.input) {
+      logger.warn('KB ingest — no tool_use block in classify response');
+      return { kind: 'rejected', reason: 'classifier_error' };
+    }
+    verdict = toolUse.input;
+  } catch (err) {
+    logger.warn('KB ingest — classify call failed', { err: String(err).slice(0, 300) });
+    return { kind: 'rejected', reason: 'classifier_error' };
+  }
+
+  if (verdict.kind === 'transcript') {
+    logger.info('KB ingest — routed to transcript', { source: params.sourceHint, reason: verdict.reason });
+    return { kind: 'rejected', reason: 'transcript' };
+  }
+  if (verdict.kind === 'other') {
+    logger.info('KB ingest — classified other', { source: params.sourceHint, reason: verdict.reason });
+    return { kind: 'rejected', reason: verdict.reason || 'not_knowledge' };
+  }
+  if (verdict.confidence === 'low') {
+    return { kind: 'ambiguous', question: verdict.reason || 'Not sure where this fits — want to tell me?' };
+  }
+
+  const proposedId = String(verdict.section_id || '').trim().replace(/^\/+|\/+$/g, '');
+  if (!proposedId || proposedId.includes('..')) {
+    return { kind: 'rejected', reason: 'bad_section_id' };
+  }
+
+  const title = String(verdict.title || proposedId);
+  const summary = String(verdict.summary || '');
+  const action = verdict.action === 'merge' || verdict.action === 'sibling' ? verdict.action : 'create';
+  const existingMatch = typeof verdict.existing_match === 'string' ? verdict.existing_match : null;
+
+  // Stage 2: generate the condensed markdown as plain text (no JSON wrapping).
+  // This avoids the SDK's SyntaxError on malformed tool_use arg JSON that the
+  // one-call version hit whenever Sonnet emitted unescaped chars in a long
+  // markdown string. Plain text output has no parse risk.
+  const contentPrompt = `Write a condensed knowledge-base entry for the following document. Output RAW MARKDOWN ONLY — no JSON, no fences, no preamble.
+
+FILE TITLE: ${title}
+TOPIC SUMMARY: ${summary}
+SOURCE: ${params.sourceHint}
+
+SOURCE CONTENT:
+"""
+${sample}
+"""
+
+Write:
+- A # heading with the title
+- 2-6 paragraphs synthesizing the content (NOT a verbatim dump)
+- Sub-sections where helpful
+- A "## Source excerpts" section with verbatim snippets ONLY for numeric / contractual / quotable facts
+- 500-2500 words typical
+
+No JSON. No code fences around the output. Just markdown.`;
+
+  let condensed: string;
+  try {
+    const resp = await params.anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 8000,
+      messages: [{ role: 'user', content: contentPrompt }],
+    });
+    const firstBlock = resp.content[0];
+    const raw = (firstBlock && firstBlock.type === 'text' ? firstBlock.text : '').trim();
+    // Strip accidental ```markdown fences if Sonnet ignored the instruction
+    condensed = raw.replace(/^```(?:markdown|md)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  } catch (err) {
+    logger.warn('KB ingest — content generation failed', { err: String(err).slice(0, 300) });
+    return { kind: 'rejected', reason: 'content_generation_error' };
+  }
+  if (condensed.length < 50) {
+    return { kind: 'rejected', reason: 'empty_condensed' };
+  }
+
+  if (action === 'merge' && existingMatch && await sectionExists(params.profile, existingMatch)) {
+    const prior = await readSection(params.profile, existingMatch);
+    if ('content' in prior) {
+      const stamp = new Date().toISOString().slice(0, 10);
+      const appended = `${prior.content.trimEnd()}\n\n---\n\n## Update (${stamp}) — ${title}\n\n${condensed}\n`;
+      await writeSection(params.profile, existingMatch, appended);
+      logger.info('KB ingest — merged into existing', { section: existingMatch, source: params.sourceHint });
+      return { kind: 'merged', sectionId: existingMatch, title, summary, mergedInto: existingMatch };
+    }
+  }
+
+  if (action === 'sibling' && existingMatch) {
+    const siblingId = await nextSiblingId(params.profile, proposedId);
+    const body = `# ${title}\n\n${summary ? `_${summary}_\n\n` : ''}${condensed}\n`;
+    await writeSection(params.profile, siblingId, body);
+    logger.info('KB ingest — sibling created', { section: siblingId, near: existingMatch, source: params.sourceHint });
+    return { kind: 'sibling', sectionId: siblingId, title, summary };
+  }
+
+  const finalId = (await sectionExists(params.profile, proposedId))
+    ? await nextSiblingId(params.profile, proposedId)
+    : proposedId;
+  const body = `# ${title}\n\n${summary ? `_${summary}_\n\n` : ''}${condensed}\n`;
+  await writeSection(params.profile, finalId, body);
+  logger.info('KB ingest — created', { section: finalId, source: params.sourceHint });
+  return { kind: 'created', sectionId: finalId, title, summary };
+}
+
 // ── Skill ───────────────────────────────────────────────────────────────────
 
 export class KnowledgeBaseSkill implements Skill {
@@ -229,6 +456,18 @@ Don't pull every section by default — just the ones relevant to the current ta
             },
           },
           required: ['section_id'],
+        },
+      },
+      {
+        name: 'ingest_knowledge_from_url',
+        description: `Save a webpage into the owner's KB. Use when the owner asks you to remember / learn / file / save the contents of a URL — "save this page", "learn about this company", "file this under investors", etc. DO NOT use for one-off research (use web_extract for that). Only use when the owner clearly wants durable storage. Fetches the URL, condenses, files under an appropriate section, handles merge/sibling with existing sections automatically. Returns the filed section id + title so you can tell the owner where it landed.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'The URL to fetch and store' },
+            owner_hint: { type: 'string', description: 'Optional — what the owner said alongside the URL ("save under investors", "this is our new competitor", etc.). Helps file it in the right place.' },
+          },
+          required: ['url'],
         },
       },
     ];
@@ -267,6 +506,46 @@ Don't pull every section by default — just the ones relevant to the current ta
           content: r.content,
           bytes: r.bytes,
         };
+      }
+
+      case 'ingest_knowledge_from_url': {
+        const url = String(args.url ?? '').trim();
+        const hint = String(args.owner_hint ?? '').trim();
+        if (!url) return { ok: false, error: 'missing_url' };
+        try {
+          const { tavilyExtract } = await import('./general');
+          const extracted = await tavilyExtract(url) as { content?: string; url?: string; error?: string };
+          if (!extracted.content || extracted.content.trim().length < 50) {
+            return { ok: false, error: 'page_unreadable', url, detail: extracted.error || 'no content returned' };
+          }
+          const Anthropic = (await import('@anthropic-ai/sdk')).default;
+          const anthropic = new Anthropic();
+          const result = await ingestKnowledgeDoc({
+            profile: context.profile,
+            text: extracted.content,
+            sourceHint: extracted.url || url,
+            ownerCaption: hint || undefined,
+            anthropic,
+          });
+          if (result.kind === 'rejected') {
+            return { ok: false, error: 'rejected', reason: result.reason, url };
+          }
+          if (result.kind === 'ambiguous') {
+            return { ok: true, kind: 'ambiguous', question: result.question, url };
+          }
+          return {
+            ok: true,
+            kind: result.kind,
+            section_id: result.sectionId,
+            title: result.title,
+            summary: result.summary,
+            merged_into: result.mergedInto,
+            url: extracted.url || url,
+          };
+        } catch (err) {
+          logger.warn('KB ingest_from_url failed', { err: String(err).slice(0, 300), url });
+          return { ok: false, error: 'ingest_failed', detail: String(err).slice(0, 200), url };
+        }
       }
 
       default:

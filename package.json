@@ -1,6 +1,6 @@
 {
   "name": "maelle",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Executive Assistant Platform",
   "main": "dist/index.js",
   "scripts": {
@@ -26,6 +26,7 @@
     "js-yaml": "^4.1.1",
     "luxon": "^3.7.2",
     "openai": "^6.34.0",
+    "pdf-parse": "^2.4.5",
     "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.34.6",
     "winston": "^3.13.0",

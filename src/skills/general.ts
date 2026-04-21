@@ -234,12 +234,16 @@ export async function tavilyExtract(url: string): Promise<object> {
     throw new Error('TAVILY_API_KEY required for web_extract');
   }
 
+  // extract_depth: advanced handles JS-heavy SPAs and content behind client-side
+  // rendering (common on marketing sites like www.reflectiz.com). basic mode
+  // returned empty content for those pages during KB recovery (2026-04-20).
   const res = await fetch('https://api.tavily.com/extract', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       api_key: config.TAVILY_API_KEY,
       urls: [url],
+      extract_depth: 'advanced',
     }),
   });
 

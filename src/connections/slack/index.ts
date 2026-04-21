@@ -19,6 +19,7 @@ import {
   findChannelByName as slackFindChannelByName,
   type SendOutcome,
 } from './messaging';
+import { formatForSlack } from './formatting';
 
 function toSendResult(outcome: SendOutcome): SendResult {
   if (outcome.ok) return { ok: true, ref: outcome.channel_id, ts: outcome.ts };
@@ -33,22 +34,24 @@ export function createSlackConnection(app: App, botToken: string): Connection {
   return {
     id: 'slack',
 
+    // v2.0.2 — all four outbound methods run text through formatForSlack
+    // before hitting the primitives. This scrubs internal leakage (sentinels,
+    // tool names) and applies Slack's markdown dialect. formatForSlack is
+    // idempotent, so callers that pre-format stay safe. Any remaining direct
+    // `app.client.chat.postMessage` call sites will migrate through here.
+
     async sendDirect(recipientRef, text, opts) {
-      // threadTs is passed through when set — Slack thread replies on DMs are
-      // supported (Slack treats DMs as channels internally).
-      const outcome = await sendDM(app, botToken, recipientRef, text, { threadTs: opts?.threadTs });
+      const outcome = await sendDM(app, botToken, recipientRef, formatForSlack(text), { threadTs: opts?.threadTs });
       return toSendResult(outcome);
     },
 
     async sendBroadcast(recipientRefs, text, opts) {
-      // Slack idiom: individual DMs per recipient. (Email's semantics of
-      // "one message to many" don't apply here — MPIM would be a persistent
-      // group chat, not a broadcast.)
       if (recipientRefs.length === 0) return { ok: false, reason: 'no_recipients' };
+      const formatted = formatForSlack(text);
       let lastErr: SendResult | null = null;
       let anyOk = false;
       for (const ref of recipientRefs) {
-        const outcome = await sendDM(app, botToken, ref, text, { threadTs: opts?.threadTs });
+        const outcome = await sendDM(app, botToken, ref, formatted, { threadTs: opts?.threadTs });
         const result = toSendResult(outcome);
         if (result.ok) anyOk = true;
         else lastErr = result;
@@ -57,13 +60,12 @@ export function createSlackConnection(app: App, botToken: string): Connection {
     },
 
     async sendGroupConversation(recipientRefs, text, opts) {
-      // Slack idiom: MPIM — opens a persistent group chat with all recipients.
-      const outcome = await sendMpim(app, botToken, recipientRefs, text, { threadTs: opts?.threadTs });
+      const outcome = await sendMpim(app, botToken, recipientRefs, formatForSlack(text), { threadTs: opts?.threadTs });
       return toSendResult(outcome);
     },
 
     async postToChannel(channelRef, text, opts) {
-      const outcome = await slackPostToChannel(app, botToken, channelRef, text, { threadTs: opts?.threadTs });
+      const outcome = await slackPostToChannel(app, botToken, channelRef, formatForSlack(text), { threadTs: opts?.threadTs });
       return toSendResult(outcome);
     },
 

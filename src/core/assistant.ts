@@ -2,6 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
 import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonNote, appendPersonInteraction, recordSocialMoment, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, type SocialTopicQuality, type PersonProfile, type PersonInteraction } from '../db';
+import { markPendingEngagement } from './socialEngagement';
 import { DateTime } from 'luxon';
 import logger from '../utils/logger';
 
@@ -142,7 +143,6 @@ Do NOT call this for purely work-related facts (those go in learn_preference). T
                 'sport',        // team sports, running, gym, watching sports
                 'hobby',        // music, art, gaming, cooking, reading, photography
                 'travel',       // trips, places visited, upcoming travel
-                'work_life',    // how they feel about work, stress, reorg, career
                 'mood',         // emotional state, vibe, energy level
                 'food',         // dietary preferences, favourite restaurants, cuisine
                 'culture',      // movies, shows, books, music they like
@@ -200,7 +200,7 @@ Owner-only. Do NOT use this for colleagues (use note_about_person for them).`,
             topic: {
               type: 'string',
               enum: [
-                'family', 'health', 'sport', 'hobby', 'travel', 'work_life', 'mood',
+                'family', 'health', 'sport', 'hobby', 'travel', 'mood',
                 'food', 'culture', 'pets', 'goals', 'weekend', 'humor', 'education',
                 'language', 'local', 'news', 'other',
               ],
@@ -496,6 +496,12 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
         // specific subject (the subject is what drives the 24h cooldown).
         recordSocialMoment(slackId, topic, quality, initiatedBy, subject);
 
+        // If Maelle initiated with a subject, arm the post-turn engagement
+        // classifier for the next user message in this thread (v2.0.2).
+        if (initiatedBy === 'maelle' && subject) {
+          markPendingEngagement({ threadTs: context.threadTs, slackId, topic, subject });
+        }
+
         logger.info('Social note saved', { slackId, name, topic, subject, quality, initiatedBy });
         return { saved: true, name, topic, subject, quality };
       }
@@ -535,6 +541,13 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
 
         // Social moment with quality, initiator, and the (topic+subject) cooldown key
         recordSocialMoment(slackId, topic, quality, initiatedBy, subject);
+
+        // Arm the post-turn engagement classifier for the next owner reply
+        // in this thread (v2.0.2). Only when Maelle asked (owner's own
+        // volunteered shares have real quality already).
+        if (initiatedBy === 'maelle' && subject) {
+          markPendingEngagement({ threadTs: context.threadTs, slackId, topic, subject });
+        }
 
         logger.info('Owner self-note saved', { slackId, topic, subject, quality, initiatedBy });
         return { saved: true, scope: 'owner', topic, subject, quality };

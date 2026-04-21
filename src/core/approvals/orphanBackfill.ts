@@ -116,18 +116,23 @@ export async function backfillOrphanApprovals(
       });
 
       // DM the owner with the recovered ask so it doesn't silently sit there.
-      // v1.6.2 — no visible ref token appended (see tasks/skill.ts rationale).
       try {
-        const res = await app.client.chat.postMessage({
-          token: profile.assistant.slack.bot_token,
-          channel: taskRow.owner_channel,
-          thread_ts: taskRow.owner_thread_ts ?? undefined,
-          text: askText,
-        });
-        if (res.ts) {
-          db.prepare(
-            `UPDATE approvals SET slack_msg_ts = ?, updated_at = datetime('now') WHERE id = ?`
-          ).run(res.ts, approval.id);
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getConnection } = require('../../connections/registry') as typeof import('../../connections/registry');
+        const conn = getConnection(profile.user.slack_user_id, 'slack');
+        if (conn) {
+          const res = await conn.postToChannel(
+            taskRow.owner_channel,
+            askText,
+            { threadTs: taskRow.owner_thread_ts ?? undefined },
+          );
+          if (res.ok && res.ts) {
+            db.prepare(
+              `UPDATE approvals SET slack_msg_ts = ?, updated_at = datetime('now') WHERE id = ?`
+            ).run(res.ts, approval.id);
+          }
+        } else {
+          logger.warn('orphanBackfill — no Slack connection registered', { jobId: job.id });
         }
       } catch (err) {
         logger.warn('orphanBackfill — failed to DM recovered approval', { err: String(err), jobId: job.id });

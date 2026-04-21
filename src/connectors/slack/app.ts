@@ -568,6 +568,18 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // so the user sees the eye emoji exactly when Maelle is committing to a reply.
       addReadReceipt();
 
+      // v2.0.2 — if a social question was asked in this thread's previous turn,
+      // classify whether the user's reply was engaged and upgrade topic quality.
+      // Fires before orchestrator so the upgrade lands in people_memory before
+      // the next social-context block is built for this turn.
+      try {
+        const { checkAndUpgradeEngagement } = await import('../../core/socialEngagement');
+        const Anthropic = (await import('@anthropic-ai/sdk')).default;
+        await checkAndUpgradeEngagement({ threadTs, userReply: text, anthropic: new Anthropic() });
+      } catch (err) {
+        logger.warn('socialEngagement — pre-orchestrator check failed', { err: String(err).slice(0, 200) });
+      }
+
       logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name });
       const result = await runOrchestrator({
         userMessage,
@@ -795,6 +807,30 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     });
   }
 
+  // Helper: narrate a KB ingest result to the owner in-thread.
+  async function postIngestResult(
+    result: Awaited<ReturnType<typeof import('../../skills/knowledge').ingestKnowledgeDoc>>,
+    say: (text: string) => Promise<void>,
+  ): Promise<void> {
+    if (result.kind === 'created' && result.sectionId) {
+      await say(`Filed under \`${result.sectionId}.md\`, ${result.summary || result.title || 'saved'}. Want it renamed or moved? Just tell me.`);
+    } else if (result.kind === 'merged' && result.sectionId) {
+      await say(`Added to your existing \`${result.sectionId}.md\`, ${result.summary || 'merged under a new update section'}.`);
+    } else if (result.kind === 'sibling' && result.sectionId) {
+      await say(`Filed as \`${result.sectionId}.md\` (sibling of a related section), ${result.summary || result.title || 'saved'}.`);
+    } else if (result.kind === 'ambiguous') {
+      await say(result.question || `Not sure where to file this. Want to give me a hint?`);
+    } else if (result.kind === 'rejected') {
+      if (result.reason === 'too_short' || result.reason === 'empty_condensed') {
+        await say(`That file's too thin to keep as a standalone reference, was it clipped?`);
+      } else if (result.reason === 'classifier_error') {
+        await say(`I hit an issue classifying that, give me a moment and try again?`);
+      } else {
+        await say(`I don't think this is worth keeping in the knowledge base (${result.reason || 'not a clear knowledge doc'}). Let me know if I got that wrong.`);
+      }
+    }
+  }
+
   // ── Handler 1: Direct messages (1:1 DM) ──────────────────────────────────
   // Fires for every message in a 1:1 DM with Maelle — no mention needed
   app.message(async ({ message, say, client }) => {
@@ -820,119 +856,151 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         ? (message as any).thread_ts as string
         : ts;
 
-      // Transcript branch (v1.7.2) — owner-only by convention (1:1 DM with the bot).
-      // Any .txt upload in DM is treated as a meeting transcript candidate. The
-      // SummarySkill helper classifies (transcript vs corrected summary) and
-      // creates / overrides / replaces the per-thread summary session.
-      const transcriptFile = files?.find((f: any) =>
-        f.mimetype === 'text/plain'
-        || f.filetype === 'text'
-        || f.filetype === 'txt'
-      );
-      if (transcriptFile && senderRole1v1 === 'owner') {
-        // Guard 1: gate Stage 1 on the skill toggle — don't ingest if
-        // SummarySkill isn't enabled, otherwise a session gets created with
-        // no tools available to iterate it (causes 400 from Anthropic on
-        // the next owner turn when force-tool kicks in).
+      // Document branch (v2.0.2) — owner-only. Any .txt/.md/.pdf upload in DM
+      // routes through a unified classifier. The classifier inside
+      // ingestKnowledgeDoc decides transcript vs knowledge_doc vs other:
+      //   - transcript → existing SummarySkill flow (requires summary: true)
+      //   - knowledge_doc → file under KB (requires knowledge: true)
+      //   - other → polite refusal
+      const docFile = files?.find((f: any) => {
+        const mt = String(f.mimetype || '');
+        const ft = String(f.filetype || '');
+        return mt === 'text/plain' || mt === 'text/markdown' || mt === 'application/pdf'
+          || ft === 'text' || ft === 'txt' || ft === 'markdown' || ft === 'md' || ft === 'pdf';
+      });
+      if (docFile && senderRole1v1 === 'owner') {
         const summaryActive = ((profile.skills as any)?.summary === true || (profile.skills as any)?.meeting_summaries === true);
-        if (!summaryActive) {
-          logger.info('Transcript ingestion skipped — summary skill is disabled', {
-            channel: channelId,
-            user: message.user,
-          });
-          setImmediate(async () => {
+        const knowledgeActive = ((profile.skills as any)?.knowledge === true || (profile.skills as any)?.knowledge_base === true);
+        const isPdf = String(docFile.mimetype || '') === 'application/pdf' || String(docFile.filetype || '') === 'pdf';
+
+        logger.info('Document file received in DM', {
+          channel: channelId,
+          user: message.user,
+          filetype: docFile.filetype,
+          mimetype: docFile.mimetype,
+          size: docFile.size,
+          isPdf,
+        });
+        client.reactions.add({ channel: channelId, timestamp: message.ts, name: 'thread' }).catch(() => {});
+        setImmediate(async () => {
+          const saySafe = async (text: string) => {
             try {
               await client.chat.postMessage({
                 token: assistant.slack.bot_token,
                 channel: channelId,
                 thread_ts: threadTs,
-                text: `I noticed you sent me a transcript. To summarize meetings, enable \`summary: true\` in your profile (\`config/users/${profile.user.name.split(' ')[0].toLowerCase()}.yaml\`) and restart me.`,
+                text,
               });
             } catch (_) {}
-          });
-          return;
-        }
-
-        logger.info('Transcript file received in DM', {
-          channel: channelId,
-          user: message.user,
-          filetype: transcriptFile.filetype,
-          mimetype: transcriptFile.mimetype,
-          size: transcriptFile.size,
-        });
-        setImmediate(async () => {
+          };
           try {
-            // Download the file via Slack's authenticated URL
-            const dl = await fetch(transcriptFile.url_private, {
+            const dl = await fetch(docFile.url_private, {
               headers: { Authorization: `Bearer ${assistant.slack.bot_token}` },
             });
             if (!dl.ok) {
-              logger.warn('Transcript download failed', { status: dl.status });
-              await client.chat.postMessage({
-                token: assistant.slack.bot_token,
-                channel: channelId,
-                thread_ts: threadTs,
-                text: `I couldn't open that file — try sending it again?`,
-              });
-              return;
-            }
-            const text = await dl.text();
-            if (text.trim().length < 50) {
-              await client.chat.postMessage({
-                token: assistant.slack.bot_token,
-                channel: channelId,
-                thread_ts: threadTs,
-                text: `That file looks empty — was the export complete?`,
-              });
+              logger.warn('Doc download failed', { status: dl.status });
+              await saySafe(`I couldn't open that file — try sending it again?`);
               return;
             }
 
-            // Caption (if any) is the message text alongside the file
+            // Extract text per format
+            let text: string;
+            if (isPdf) {
+              try {
+                const buf = Buffer.from(await dl.arrayBuffer());
+                const { PDFParse } = await import('pdf-parse');
+                const parser = new PDFParse({ data: buf });
+                const parsed = await parser.getText();
+                text = parsed.text || '';
+              } catch (err) {
+                logger.warn('PDF parse failed', { err: String(err).slice(0, 200) });
+                await saySafe(`I couldn't read that PDF — it may be scanned images or encrypted. Send a text version?`);
+                return;
+              }
+            } else {
+              text = await dl.text();
+            }
+
+            if (text.trim().length < 50) {
+              await saySafe(`That file looks empty — was the export complete?`);
+              return;
+            }
+
             const caption = ((message as any).text as string | undefined)?.trim() ?? '';
 
-            // Hand off to the Summary skill ingestion helper
-            const { ingestTranscriptUpload } = await import('../../skills/summary');
-            const result = await ingestTranscriptUpload({
-              text,
-              caption,
-              ownerUserId: profile.user.slack_user_id,
-              threadTs,
-              channelId,
-              profile,
-            });
-
-            // Post the rendered draft into the thread + a one-line preface
-            // depending on which path the helper took
-            const preface = result.kind === 'created'
-              ? `Here's a draft — let me know what to change before we send it out.`
-              : result.kind === 'overridden_new_meeting'
-                ? `New transcript noted — replacing the previous one with this draft.`
-                : `Got your edits — here's the updated version.`;
-
-            await client.chat.postMessage({
-              token: assistant.slack.bot_token,
-              channel: channelId,
-              thread_ts: threadTs,
-              text: `${preface}\n\n${result.rendered}`,
-            });
-
-            // Persist the rendered draft into conversation history so future
-            // orchestrator turns in this thread see it as Maelle's prior turn.
-            appendToConversation(threadTs, channelId, {
-              role: 'assistant',
-              content: `[Summary draft posted]\n${result.rendered}`,
-              ts: undefined,
-            });
-          } catch (err) {
-            logger.error('Transcript ingestion failed', { err: String(err) });
-            try {
-              await client.chat.postMessage({
-                token: assistant.slack.bot_token,
-                channel: channelId,
-                thread_ts: threadTs,
-                text: `I hit an issue summarizing that — give me a moment and try again?`,
+            // For PDFs, skip the transcript check — PDFs are rarely transcripts.
+            // For txt/md, run classifier via ingestKnowledgeDoc which returns
+            // kind='rejected', reason='transcript' when it detects a transcript.
+            if (!isPdf) {
+              // Hand off directly to summary flow if classifier below says transcript
+              const Anthropic = (await import('@anthropic-ai/sdk')).default;
+              const anthropic = new Anthropic();
+              const { ingestKnowledgeDoc } = await import('../../skills/knowledge');
+              const ingestResult = await ingestKnowledgeDoc({
+                profile,
+                text,
+                sourceHint: docFile.name || docFile.title || 'uploaded text',
+                ownerCaption: caption || undefined,
+                anthropic,
               });
-            } catch (_) {}
+
+              if (ingestResult.kind === 'rejected' && ingestResult.reason === 'transcript') {
+                // Route to summary flow
+                if (!summaryActive) {
+                  await saySafe(`This looks like a meeting transcript. To summarize meetings, enable \`summary: true\` in your profile and restart me.`);
+                  return;
+                }
+                const { ingestTranscriptUpload } = await import('../../skills/summary');
+                const result = await ingestTranscriptUpload({
+                  text,
+                  caption,
+                  ownerUserId: profile.user.slack_user_id,
+                  threadTs,
+                  channelId,
+                  profile,
+                });
+                const preface = result.kind === 'created'
+                  ? `Here's a draft, let me know what to change before we send it out.`
+                  : result.kind === 'overridden_new_meeting'
+                    ? `New transcript noted, replacing the previous one with this draft.`
+                    : `Got your edits, here's the updated version.`;
+                await saySafe(`${preface}\n\n${result.rendered}`);
+                appendToConversation(threadTs, channelId, {
+                  role: 'assistant',
+                  content: `[Summary draft posted]\n${result.rendered}`,
+                  ts: undefined,
+                });
+                return;
+              }
+
+              // Knowledge doc path for txt/md
+              if (!knowledgeActive) {
+                await saySafe(`I'd file this under your knowledge base, but \`knowledge\` is off in your profile. Flip \`knowledge: true\` and restart me.`);
+                return;
+              }
+              await postIngestResult(ingestResult, saySafe);
+              return;
+            }
+
+            // PDF path — direct knowledge ingest
+            if (!knowledgeActive) {
+              await saySafe(`I can't file PDFs yet because \`knowledge\` is off in your profile. Flip \`knowledge: true\` and restart me.`);
+              return;
+            }
+            const Anthropic = (await import('@anthropic-ai/sdk')).default;
+            const anthropic = new Anthropic();
+            const { ingestKnowledgeDoc } = await import('../../skills/knowledge');
+            const result = await ingestKnowledgeDoc({
+              profile,
+              text,
+              sourceHint: docFile.name || docFile.title || 'uploaded pdf',
+              ownerCaption: caption || undefined,
+              anthropic,
+            });
+            await postIngestResult(result, saySafe);
+          } catch (err) {
+            logger.error('Doc ingestion failed', { err: String(err).slice(0, 400) });
+            await saySafe(`I hit an issue filing that, give me a moment and try again?`);
           }
         });
         return;

@@ -655,20 +655,27 @@ Binding — how to pick the right approval_id:
         // timing + thread — enough context). The #appr_<id> token still exists
         // as an optional explicit reference Sonnet MAY use internally, but it
         // is never rendered to the user.
-        if (created && context.app) {
+        if (created) {
           try {
-            const res = await context.app.client.chat.postMessage({
-              token: profile.assistant.slack.bot_token,
-              channel: parentTask.owner_channel,
-              thread_ts: parentTask.owner_thread_ts ?? undefined,
-              text: askText,
-            });
-            if (res.ts) {
-              // Record message ts on the approval for future in-place edits / threading
-              const { getDb } = require('../db/client') as typeof import('../db/client');
-              getDb().prepare(
-                `UPDATE approvals SET slack_msg_ts = ?, updated_at = datetime('now') WHERE id = ?`
-              ).run(res.ts, approval.id);
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
+            const conn = getConnection(profile.user.slack_user_id, 'slack');
+            if (conn) {
+              const res = await conn.postToChannel(
+                parentTask.owner_channel,
+                askText,
+                { threadTs: parentTask.owner_thread_ts ?? undefined },
+              );
+              if (res.ok && res.ts) {
+                // Record message ts on the approval for future in-place edits / threading
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { getDb } = require('../db/client') as typeof import('../db/client');
+                getDb().prepare(
+                  `UPDATE approvals SET slack_msg_ts = ?, updated_at = datetime('now') WHERE id = ?`
+                ).run(res.ts, approval.id);
+              }
+            } else {
+              logger.warn('create_approval — no Slack connection registered', { approvalId: approval.id });
             }
           } catch (err) {
             logger.error('create_approval — DM to owner failed', { err: String(err), approvalId: approval.id });

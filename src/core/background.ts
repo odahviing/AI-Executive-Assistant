@@ -228,18 +228,21 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
   const contextLine = `_↩ Catching up on your message from ${timeLabel}_`;
   const msgPreviewShort = rawText.slice(0, 60) + (rawText.length > 60 ? '…' : '');
 
-  // Normalize markdown the LLM may have emitted (** → *, ## headings, leading "- ")
-  // so Slack renders bold/lists correctly. Same helper the live handler uses.
-  const { normalizeSlackText } = await import('../utils/slackFormat');
-  const cleanReply = normalizeSlackText(output.reply);
+  // Run through the Slack outbound formatter (scrubs internal leakage + applies
+  // Slack's markdown dialect). Same helper the live handler uses.
+  const { formatForSlack } = await import('../connections/slack/formatting');
+  const cleanReply = formatForSlack(output.reply);
 
+  // NOTE (v2.0.2): this is the single remaining core-path raw Slack call.
+  // It uses Slack-specific rich-layout blocks (`context` + `section`) to render
+  // the "↩ Catching up on your message from <time>" caption above the reply,
+  // and the Connection interface doesn't (yet) carry a blocks payload. Kept
+  // as a direct app.client call until the Connection interface grows a
+  // transport-specific rich-payload option — tracked under issue #22.
   try {
     await app.client.chat.postMessage({
       token: profile.assistant.slack.bot_token,
       channel: channelId,
-      // Always thread the catch-up reply under the user's original message so
-      // it visually belongs to what they wrote, even when that message was a
-      // top-level DM/channel post.
       thread_ts: latestUserMsg.ts as string,
       text: cleanReply,
       blocks: [

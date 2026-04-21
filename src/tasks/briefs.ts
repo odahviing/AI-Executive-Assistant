@@ -340,17 +340,17 @@ export async function sendMorningBriefing(
   const db2 = getDb();
   db2.prepare(`UPDATE events SET actioned = 1 WHERE owner_user_id = ? AND actioned = 0`).run(ownerUserId);
 
-  // Generate natural language briefing via Sonnet
+  // Generate natural language briefing via Sonnet. SlackConnection internally
+  // applies formatForSlack so no explicit formatting needed at the call site.
   const rawText = await generateBriefingText(items, profile);
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { normalizeSlackText } = require('../utils/slackFormat') as typeof import('../utils/slackFormat');
-  const text = normalizeSlackText(rawText);
-
-  await app.client.chat.postMessage({
-    token: profile.assistant.slack.bot_token,
-    channel: ownerChannel,
-    text,
-  });
+  const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
+  const conn = getConnection(ownerUserId, 'slack');
+  if (conn) {
+    await conn.postToChannel(ownerChannel, rawText);
+  } else {
+    logger.warn('briefs — no Slack connection registered, briefing not sent', { ownerUserId });
+  }
 
   // Mark completed tasks as informed (briefing does NOT set informed — only direct notifications do)
   // But we still need to track that the briefing mentioned them to avoid re-mentioning
