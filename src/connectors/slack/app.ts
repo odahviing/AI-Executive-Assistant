@@ -694,7 +694,10 @@ export function createSlackAppForProfile(profile: UserProfile): App {
 
     } catch (err) {
       logger.error('Failed to process message', { err, assistant: assistant.name, channelId });
-      await say({ text: `I ran into an issue on my end. Give me a moment and try again.`, thread_ts: threadTs });
+      const text = isOverloadError(err)
+        ? `Quick coffee break, ping me again in a couple of minutes?`
+        : `Something's off on my end, give me a minute and try again?`;
+      await say({ text, thread_ts: threadTs });
     }
   }
 
@@ -807,6 +810,16 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     });
   }
 
+  // Helper: detect Anthropic API "overloaded" errors (529) so we can surface
+  // a human "coffee break" message instead of generic "something broke".
+  function isOverloadError(err: unknown): boolean {
+    const s = String((err as any)?.error?.error?.type ?? '');
+    const msg = String(err ?? '');
+    if (s === 'overloaded_error') return true;
+    if ((err as any)?.status === 529) return true;
+    return /overloaded|rate[_ ]?limit/i.test(msg);
+  }
+
   // Helper: narrate a KB ingest result to the owner in-thread.
   async function postIngestResult(
     result: Awaited<ReturnType<typeof import('../../skills/knowledge').ingestKnowledgeDoc>>,
@@ -856,30 +869,30 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         ? (message as any).thread_ts as string
         : ts;
 
-      // Document branch (v2.0.2) — owner-only. Any .txt/.md/.pdf upload in DM
-      // routes through a unified classifier. The classifier inside
-      // ingestKnowledgeDoc decides transcript vs knowledge_doc vs other:
+      // Document branch (v2.0.2, multi-file in v2.0.7) — owner-only. Every
+      // .txt/.md/.pdf in the upload gets processed sequentially (not in
+      // parallel — Anthropic rate limits + we want deterministic thread
+      // order). Each file posts its own confirmation in the thread. The
+      // classifier inside ingestKnowledgeDoc decides transcript vs
+      // knowledge_doc vs other per file:
       //   - transcript → existing SummarySkill flow (requires summary: true)
       //   - knowledge_doc → file under KB (requires knowledge: true)
       //   - other → polite refusal
-      const docFile = files?.find((f: any) => {
+      const docFiles = (files ?? []).filter((f: any) => {
         const mt = String(f.mimetype || '');
         const ft = String(f.filetype || '');
         return mt === 'text/plain' || mt === 'text/markdown' || mt === 'application/pdf'
           || ft === 'text' || ft === 'txt' || ft === 'markdown' || ft === 'md' || ft === 'pdf';
       });
-      if (docFile && senderRole1v1 === 'owner') {
+      if (docFiles.length > 0 && senderRole1v1 === 'owner') {
         const summaryActive = ((profile.skills as any)?.summary === true || (profile.skills as any)?.meeting_summaries === true);
         const knowledgeActive = ((profile.skills as any)?.knowledge === true || (profile.skills as any)?.knowledge_base === true);
-        const isPdf = String(docFile.mimetype || '') === 'application/pdf' || String(docFile.filetype || '') === 'pdf';
 
-        logger.info('Document file received in DM', {
+        logger.info('Document files received in DM', {
           channel: channelId,
           user: message.user,
-          filetype: docFile.filetype,
-          mimetype: docFile.mimetype,
-          size: docFile.size,
-          isPdf,
+          count: docFiles.length,
+          files: docFiles.map((f: any) => ({ filetype: f.filetype, mimetype: f.mimetype, size: f.size })),
         });
         client.reactions.add({ channel: channelId, timestamp: message.ts, name: 'thread' }).catch(() => {});
         setImmediate(async () => {
@@ -893,114 +906,122 @@ export function createSlackAppForProfile(profile: UserProfile): App {
               });
             } catch (_) {}
           };
-          try {
-            const dl = await fetch(docFile.url_private, {
-              headers: { Authorization: `Bearer ${assistant.slack.bot_token}` },
-            });
-            if (!dl.ok) {
-              logger.warn('Doc download failed', { status: dl.status });
-              await saySafe(`I couldn't open that file — try sending it again?`);
-              return;
-            }
 
-            // Extract text per format
-            let text: string;
-            if (isPdf) {
-              try {
-                const buf = Buffer.from(await dl.arrayBuffer());
-                const { PDFParse } = await import('pdf-parse');
-                const parser = new PDFParse({ data: buf });
-                const parsed = await parser.getText();
-                text = parsed.text || '';
-              } catch (err) {
-                logger.warn('PDF parse failed', { err: String(err).slice(0, 200) });
-                await saySafe(`I couldn't read that PDF — it may be scanned images or encrypted. Send a text version?`);
+          const caption = ((message as any).text as string | undefined)?.trim() ?? '';
+
+          const processOneDoc = async (docFile: any, index: number, total: number): Promise<void> => {
+            const isPdf = String(docFile.mimetype || '') === 'application/pdf' || String(docFile.filetype || '') === 'pdf';
+            const fileLabel = docFile.name || docFile.title || `file ${index + 1}`;
+            const prefix = total > 1 ? `[${index + 1}/${total}] ${fileLabel}: ` : '';
+            try {
+              const dl = await fetch(docFile.url_private, {
+                headers: { Authorization: `Bearer ${assistant.slack.bot_token}` },
+              });
+              if (!dl.ok) {
+                logger.warn('Doc download failed', { status: dl.status, file: fileLabel });
+                await saySafe(`${prefix}Couldn't open that one, try sending it again?`);
                 return;
               }
-            } else {
-              text = await dl.text();
-            }
 
-            if (text.trim().length < 50) {
-              await saySafe(`That file looks empty — was the export complete?`);
-              return;
-            }
+              let text: string;
+              if (isPdf) {
+                try {
+                  const buf = Buffer.from(await dl.arrayBuffer());
+                  const { PDFParse } = await import('pdf-parse');
+                  const parser = new PDFParse({ data: buf });
+                  const parsed = await parser.getText();
+                  text = parsed.text || '';
+                } catch (err) {
+                  logger.warn('PDF parse failed', { err: String(err).slice(0, 200), file: fileLabel });
+                  await saySafe(`${prefix}Couldn't read that PDF (maybe scanned images or encrypted). Send a text version?`);
+                  return;
+                }
+              } else {
+                text = await dl.text();
+              }
 
-            const caption = ((message as any).text as string | undefined)?.trim() ?? '';
+              if (text.trim().length < 50) {
+                await saySafe(`${prefix}Looks empty, was the export complete?`);
+                return;
+              }
 
-            // For PDFs, skip the transcript check — PDFs are rarely transcripts.
-            // For txt/md, run classifier via ingestKnowledgeDoc which returns
-            // kind='rejected', reason='transcript' when it detects a transcript.
-            if (!isPdf) {
-              // Hand off directly to summary flow if classifier below says transcript
+              const sourceHint = fileLabel;
+              if (!isPdf) {
+                const Anthropic = (await import('@anthropic-ai/sdk')).default;
+                const anthropic = new Anthropic();
+                const { ingestKnowledgeDoc } = await import('../../skills/knowledge');
+                const ingestResult = await ingestKnowledgeDoc({
+                  profile,
+                  text,
+                  sourceHint,
+                  ownerCaption: caption || undefined,
+                  anthropic,
+                });
+
+                if (ingestResult.kind === 'rejected' && ingestResult.reason === 'transcript') {
+                  if (!summaryActive) {
+                    await saySafe(`${prefix}Looks like a meeting transcript. To summarize meetings, enable \`summary: true\` in your profile and restart me.`);
+                    return;
+                  }
+                  const { ingestTranscriptUpload } = await import('../../skills/summary');
+                  const result = await ingestTranscriptUpload({
+                    text,
+                    caption,
+                    ownerUserId: profile.user.slack_user_id,
+                    threadTs,
+                    channelId,
+                    profile,
+                  });
+                  const preface = result.kind === 'created'
+                    ? `Here's a draft, let me know what to change before we send it out.`
+                    : result.kind === 'overridden_new_meeting'
+                      ? `New transcript noted, replacing the previous one with this draft.`
+                      : `Got your edits, here's the updated version.`;
+                  await saySafe(`${prefix}${preface}\n\n${result.rendered}`);
+                  appendToConversation(threadTs, channelId, {
+                    role: 'assistant',
+                    content: `[Summary draft posted]\n${result.rendered}`,
+                    ts: undefined,
+                  });
+                  return;
+                }
+
+                if (!knowledgeActive) {
+                  await saySafe(`${prefix}I'd file this under your knowledge base, but \`knowledge\` is off in your profile. Flip it on and restart me.`);
+                  return;
+                }
+                await postIngestResult(ingestResult, async (t) => saySafe(`${prefix}${t}`));
+                return;
+              }
+
+              // PDF path — direct knowledge ingest
+              if (!knowledgeActive) {
+                await saySafe(`${prefix}I can't file PDFs yet because \`knowledge\` is off in your profile. Flip it on and restart me.`);
+                return;
+              }
               const Anthropic = (await import('@anthropic-ai/sdk')).default;
               const anthropic = new Anthropic();
               const { ingestKnowledgeDoc } = await import('../../skills/knowledge');
-              const ingestResult = await ingestKnowledgeDoc({
+              const result = await ingestKnowledgeDoc({
                 profile,
                 text,
-                sourceHint: docFile.name || docFile.title || 'uploaded text',
+                sourceHint,
                 ownerCaption: caption || undefined,
                 anthropic,
               });
-
-              if (ingestResult.kind === 'rejected' && ingestResult.reason === 'transcript') {
-                // Route to summary flow
-                if (!summaryActive) {
-                  await saySafe(`This looks like a meeting transcript. To summarize meetings, enable \`summary: true\` in your profile and restart me.`);
-                  return;
-                }
-                const { ingestTranscriptUpload } = await import('../../skills/summary');
-                const result = await ingestTranscriptUpload({
-                  text,
-                  caption,
-                  ownerUserId: profile.user.slack_user_id,
-                  threadTs,
-                  channelId,
-                  profile,
-                });
-                const preface = result.kind === 'created'
-                  ? `Here's a draft, let me know what to change before we send it out.`
-                  : result.kind === 'overridden_new_meeting'
-                    ? `New transcript noted, replacing the previous one with this draft.`
-                    : `Got your edits, here's the updated version.`;
-                await saySafe(`${preface}\n\n${result.rendered}`);
-                appendToConversation(threadTs, channelId, {
-                  role: 'assistant',
-                  content: `[Summary draft posted]\n${result.rendered}`,
-                  ts: undefined,
-                });
-                return;
-              }
-
-              // Knowledge doc path for txt/md
-              if (!knowledgeActive) {
-                await saySafe(`I'd file this under your knowledge base, but \`knowledge\` is off in your profile. Flip \`knowledge: true\` and restart me.`);
-                return;
-              }
-              await postIngestResult(ingestResult, saySafe);
-              return;
+              await postIngestResult(result, async (t) => saySafe(`${prefix}${t}`));
+            } catch (err) {
+              logger.error('Doc ingestion failed', { err: String(err).slice(0, 400), file: fileLabel });
+              const msg = isOverloadError(err)
+                ? `${prefix}Quick coffee break, ping me again in a couple of minutes?`
+                : `${prefix}Something jammed on my end, try that one again in a minute?`;
+              await saySafe(msg);
             }
+          };
 
-            // PDF path — direct knowledge ingest
-            if (!knowledgeActive) {
-              await saySafe(`I can't file PDFs yet because \`knowledge\` is off in your profile. Flip \`knowledge: true\` and restart me.`);
-              return;
-            }
-            const Anthropic = (await import('@anthropic-ai/sdk')).default;
-            const anthropic = new Anthropic();
-            const { ingestKnowledgeDoc } = await import('../../skills/knowledge');
-            const result = await ingestKnowledgeDoc({
-              profile,
-              text,
-              sourceHint: docFile.name || docFile.title || 'uploaded pdf',
-              ownerCaption: caption || undefined,
-              anthropic,
-            });
-            await postIngestResult(result, saySafe);
-          } catch (err) {
-            logger.error('Doc ingestion failed', { err: String(err).slice(0, 400) });
-            await saySafe(`I hit an issue filing that, give me a moment and try again?`);
+          // Sequential loop — each file gets its own confirmation.
+          for (let i = 0; i < docFiles.length; i++) {
+            await processOneDoc(docFiles[i], i, docFiles.length);
           }
         });
         return;
@@ -1027,34 +1048,39 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         return;
       }
 
-      // Audio branch
-      logger.info('Audio message received', { channel: channelId, user: message.user });
-      const audioFile = files?.find((f: any) =>
+      // Audio branch (multi-file in v2.0.7). Every audio file in the upload
+      // gets transcribed sequentially; each transcription turns into its own
+      // processMessage call so the orchestrator answers each one in order.
+      const audioFiles = (files ?? []).filter((f: any) =>
         f.mimetype?.startsWith('audio/') || f.filetype === 'mp4' || f.filetype === 'webm'
       );
-      if (!audioFile) {
-        logger.warn('file_share but no audio/image file found', { files: files?.map((f:any) => f.filetype) });
+      if (audioFiles.length === 0) {
+        logger.warn('file_share but no audio/image/doc file found', { files: files?.map((f:any) => f.filetype) });
         return;
       }
       if (!config.OPENAI_API_KEY) {
         logger.warn('OPENAI_API_KEY not set — cannot transcribe');
         return;
       }
+      logger.info('Audio messages received', { channel: channelId, user: message.user, count: audioFiles.length });
       setImmediate(async () => {
-        try {
-          const text = await transcribeSlackAudio(audioFile.url_private, assistant.slack.bot_token, undefined, audioFile.mimetype);
-          if (!text || text.length < 2) return;
-          logger.info('Voice message transcribed', { preview: text.slice(0, 80) });
-          const sayFn = async (msgOrText: any) => {
-            const txt = typeof msgOrText === 'string' ? msgOrText : msgOrText.text;
-            await client.chat.postMessage({ token: assistant.slack.bot_token, channel: channelId, thread_ts: threadTs, text: txt });
-          };
-          // Prefix with [Voice message]: so the orchestrator's VOICE LANGUAGE
-          // OVERRIDE rule fires. processMessage persists the text via
-          // appendToConversation, so no pre-append needed.
-          await processMessage({ senderId: message.user!, text: `[Voice message]: ${text}`, channelId, ts, threadTs, say: sayFn, client, isChannel: false, isMpim: false, voiceInput: true });
-        } catch (err) {
-          logger.error('Voice message handling error', { err: String(err) });
+        const sayFn = async (msgOrText: any) => {
+          const txt = typeof msgOrText === 'string' ? msgOrText : msgOrText.text;
+          await client.chat.postMessage({ token: assistant.slack.bot_token, channel: channelId, thread_ts: threadTs, text: txt });
+        };
+        for (let i = 0; i < audioFiles.length; i++) {
+          const audioFile = audioFiles[i];
+          try {
+            const text = await transcribeSlackAudio(audioFile.url_private, assistant.slack.bot_token, undefined, audioFile.mimetype);
+            if (!text || text.length < 2) continue;
+            logger.info('Voice message transcribed', { preview: text.slice(0, 80), index: i });
+            // Prefix with [Voice message]: so the orchestrator's VOICE LANGUAGE
+            // OVERRIDE rule fires. processMessage persists the text via
+            // appendToConversation, so no pre-append needed.
+            await processMessage({ senderId: message.user!, text: `[Voice message]: ${text}`, channelId, ts, threadTs, say: sayFn, client, isChannel: false, isMpim: false, voiceInput: true });
+          } catch (err) {
+            logger.error('Voice message handling error', { err: String(err), index: i });
+          }
         }
       });
       return;
@@ -1126,7 +1152,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
                   token: assistant.slack.bot_token,
                   channel: channelId,
                   thread_ts: threadTs,
-                  text: `I hit an issue summarizing that recap — give me a moment and try again?`,
+                  text: `Couldn't summarize that recap cleanly, try again in a minute?`,
                 });
               } catch (_) {}
             }

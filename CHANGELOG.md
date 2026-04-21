@@ -2,6 +2,18 @@
 
 ---
 
+## 2.0.7 — multi-file uploads + coffee-break error copy
+
+### Added
+
+- Multi-file upload support in the Slack DM handler. Previously only the FIRST matching file of each type was processed; other files in the same upload were silently dropped. Now every PDF / `.txt` / `.md` / audio file in an upload gets processed sequentially (not parallel — Anthropic rate limits + we want deterministic thread order). Each file posts its own confirmation in the thread, prefixed `[N/M] filename:` when multiple files. Applies to the KB ingest pipeline, the transcript routing, and audio transcription — any skill that consumes a file gets the batch. Images already supported this pattern (up to 4); now parity across types.
+
+### Changed
+
+- Error copy on transient Anthropic overload (529 `overloaded_error`) is now the human "quick coffee break" line. New `isOverloadError` helper detects 529 / overloaded_error and routes to: *"Quick coffee break, ping me again in a couple of minutes?"*. Non-overload errors (classifier parse failures, download failures, etc.) keep their task-specific friendlier copy. Applies to the main `processMessage` catch and to the per-file doc-ingest loop.
+
+---
+
 ## 2.0.6 — deterministic invite emails + thread-aware shadow notifications
 
 ### Fixed
