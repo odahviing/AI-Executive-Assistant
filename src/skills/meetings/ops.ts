@@ -178,7 +178,7 @@ export function processCalendarEvents(
 // ── Calendar analysis (detect issues) ────────────────────────────────────────
 
 interface CalendarIssue {
-  type: 'oof_with_meetings' | 'no_buffer' | 'no_lunch' | 'back_to_back' | 'work_on_day_off';
+  type: 'oof_with_meetings' | 'no_buffer' | 'no_lunch' | 'back_to_back' | 'overlap' | 'work_on_day_off';
   severity: 'high' | 'medium' | 'low';
   detail: string;
   suggestedFix?: string;
@@ -327,7 +327,33 @@ export function analyzeCalendar(
         freeMin += Math.max(0, gapSize - bufferMin);
       }
 
-      // Back-to-back check
+      // v2.0.8 — true overlap detection. A new meeting starting BEFORE the
+      // previous one ends is a real time conflict and must be flagged as high
+      // severity. Previously the analyzer only fired a back_to_back issue
+      // when evStart >= prevEndMin (adjacent, not overlapping). Overlaps
+      // slipped through silently — the Apr 29 FC & Capri 14:45–15:30 +
+      // Fulcrum Product Sync 15:00 case is the observed example.
+      if (prevEndMin > workStartMin && evStart < prevEndMin) {
+        // Find the previous meeting (the one ending at prevEndMin) for a
+        // clearer error message. Walk back through timedMeetings.
+        const prev = timedMeetings
+          .slice(0, timedMeetings.indexOf(ev))
+          .reverse()
+          .find(p => {
+            const [peh, pem] = p._localEndTime.split(':').map(Number);
+            return Math.min(peh * 60 + pem, workEndMin) === prevEndMin;
+          });
+        const prevLabel = prev
+          ? `${prev.subject} (${prev._localStartTime}–${prev._localEndTime})`
+          : `the previous meeting (ends ${String(Math.floor(prevEndMin/60)).padStart(2,'0')}:${String(prevEndMin%60).padStart(2,'0')})`;
+        issues.push({
+          type: 'overlap',
+          severity: 'high',
+          detail: `${ev.subject} (${ev._localStartTime}–${ev._localEndTime}) overlaps ${prevLabel} by ${prevEndMin - evStart} min`,
+          suggestedFix: 'Move one of the meetings or drop out of one.',
+        });
+      }
+      // Back-to-back check (adjacent, <bufferMin gap)
       if (prevEndMin > workStartMin && evStart < prevEndMin + bufferMin && evStart >= prevEndMin) {
         issues.push({
           type: 'back_to_back',
@@ -357,7 +383,13 @@ export function analyzeCalendar(
       });
     }
 
-    // Lunch check — first look for an existing lunch event, then for a free gap
+    // v2.0.8 — strict lunch semantics. hasLunch is ONLY true when an actual
+    // "Lunch" event is booked in the lunch window. A free gap is not
+    // sufficient — the owner wants a blocked calendar event, otherwise the
+    // gap gets eaten by something else mid-day. If no lunch event exists,
+    // we still compute the largest free gap inside the lunch window so the
+    // no_lunch issue can suggest a specific time ("Want me to block 30 min
+    // starting at 12:30?"), but hasLunch stays false.
     const [lsH, lsM] = lunch.preferred_start.split(':').map(Number);
     const [leH, leM] = lunch.preferred_end.split(':').map(Number);
     const lunchWindowStart = lsH * 60 + lsM;
@@ -368,8 +400,6 @@ export function analyzeCalendar(
     let lunchGap: string | undefined;
 
     // Check if a "Lunch" event is already booked in the lunch window
-    // v1.7.7 — English-only subject match. The codebase doesn't support Hebrew
-    // event-subject detection; owner names lunch events in English.
     const lunchEvent = timedMeetings.find(e => {
       const subj = (e.subject || '').toLowerCase();
       if (!subj.includes('lunch')) return false;
@@ -382,28 +412,35 @@ export function analyzeCalendar(
       lunchGap = `${lunchEvent._localStartTime}–${lunchEvent._localEndTime}`;
     }
 
-    // If no lunch event, check for a free gap in the lunch window
+    // Find the best free gap inside the lunch window — used ONLY for the
+    // suggestedFix when no lunch event exists. Does NOT flip hasLunch.
+    let bestGapStart: number | undefined;
+    let bestGapSize = 0;
     if (!hasLunch) {
       for (const gap of gaps) {
         const overlapStart = Math.max(gap.start, lunchWindowStart);
         const overlapEnd   = Math.min(gap.end, lunchWindowEnd);
-        if (overlapEnd - overlapStart >= minLunchMin) {
-          hasLunch = true;
-          const fmt = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
-          lunchGap = `${fmt(overlapStart)}–${fmt(overlapEnd)}`;
-          break;
+        const overlapSize = overlapEnd - overlapStart;
+        if (overlapSize >= minLunchMin && overlapSize > bestGapSize) {
+          bestGapStart = overlapStart;
+          bestGapSize = overlapSize;
         }
       }
     }
 
     if (!hasLunch && !lunch.can_skip) {
-      const [lsH2, lsM2] = lunch.preferred_start.split(':').map(Number);
-      const suggestedStart = `${String(lsH2).padStart(2,'0')}:${String(lsM2).padStart(2,'0')}`;
+      const fmt = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+      const suggestedStart = bestGapStart !== undefined
+        ? fmt(bestGapStart)
+        : lunch.preferred_start;
+      const suggestedFix = bestGapStart !== undefined
+        ? `Want me to block ${minLunchMin} min at ${suggestedStart}?`
+        : `No free gap in your lunch window — want me to bump something and block ${minLunchMin} min at ${suggestedStart}?`;
       issues.push({
         type: 'no_lunch',
         severity: 'medium',
-        detail: `No lunch gap of ≥${minLunchMin} min between ${lunch.preferred_start}–${lunch.preferred_end}`,
-        suggestedFix: `Want me to block ${minLunchMin} min starting around ${suggestedStart}?`,
+        detail: `No lunch event booked`,
+        suggestedFix,
       });
     }
 

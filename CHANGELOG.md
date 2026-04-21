@@ -2,6 +2,15 @@
 
 ---
 
+## 2.0.8 — overlap detection + strict lunch semantics
+
+### Fixed
+
+- **[Calendar] `analyzeCalendar` now detects true meeting overlaps.** The analyzer had a back-to-back check but no overlap check — when a new meeting started BEFORE the previous one ended, the condition `evStart >= prevEndMin` filtered it out silently. Every real calendar conflict (e.g. Apr 29 FC & Capri 14:45–15:30 overlapping Fulcrum Product Sync 15:00–…) went unflagged. The `overlap` type was already in the analyzer's filter enum at the tool boundary for Sonnet to use, but the analyzer itself never emitted one. Now it emits `{type: 'overlap', severity: 'high'}` with both meeting subjects, times, and the overlap duration in minutes.
+- **[Calendar] Strict lunch semantics.** `hasLunch` used to be true whenever there was a free gap ≥30 min inside the lunch window — so Sonnet narrated "lunch is covered" even when no lunch event was booked. Now `hasLunch` is true ONLY when a lunch event exists in the window. When none exists, the `no_lunch` issue fires AND uses the largest free gap in the window to suggest a specific time: *"Want me to block 30 min at 12:30?"*. If no free gap exists either, it says so and offers to bump something.
+
+---
+
 ## 2.0.7 — multi-file uploads + coffee-break error copy
 
 ### Added
