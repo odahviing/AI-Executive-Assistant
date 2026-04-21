@@ -2,42 +2,38 @@
 
 ---
 
-## 2.0.9 — slot diversity across days
+## 2.0.6 — scheduling + coord + briefing cleanup (post-2.0.5 bundle)
 
-### Fixed
+Rollup of the bug wave that followed the 2.0.5 restart — scheduling tool correctness, coord follow-up handling, invite plumbing, briefing delivery, and input-handling polish. Grouped as one patch to avoid version noise from per-bug bumps.
 
-- **[Scheduling] `findAvailableSlots` was clipping results to a single day.** The 15-min cursor walked chronologically through the search window, and the final `.slice(0, 10)` took the first 10 candidates it found. A single open morning (e.g. Sunday home-day 09:00–15:30) produced 10+ candidates before the cursor even reached Monday, so the rest of the week was silently dropped. Observed symptom: owner asked "options next week for a 55-min meeting?" and got "all on Sunday" even though Mon/Tue/Thu had wide-open middays.
-- Fix: cap per-day at 4 candidates (skip to next day's start once the cap hits); raise the overall cap from 10 to 30. Candidate pool now spans all available days; `pickSpreadSlots` narrows to the final 3 from a balanced list. Verified against the owner's live calendar — 55-min search across Apr 26–May 2 now returns 20 candidates across 5 days where previously it returned 10 all on Sunday.
+### Fixed — scheduling
 
----
+- **`findAvailableSlots` now returns slots across multiple days.** The 15-min cursor walked chronologically and `.slice(0, 10)` kept the first 10 candidates. A single open morning produced 10+ hits before the cursor reached the next day → rest of the week silently dropped. Owner saw "all options on Sunday" when Mon/Tue/Thu were wide open. Walker now collects all valid slots per day into day-buckets; per-day post-processing picks up to 4 with **30-min preferred spacing** (owner's preference — "10, 10:30, 11:30, 14:00" > "10, 10:15, 10:30, 10:45"), falling back to 15-min only when strict 30-min gives fewer picks. Overall cap raised 10 → 30.
+- **`analyzeCalendar` detects true meeting overlaps.** The analyzer had a back-to-back check but no overlap check — when a new meeting started BEFORE the previous one ended, the condition `evStart >= prevEndMin` filtered it out silently. Every real calendar conflict (e.g. FC & Capri 14:45–15:30 overlapping Fulcrum Product Sync 15:00) went unflagged. Now emits `{type: 'overlap', severity: 'high'}` with both subjects, times, and overlap duration.
+- **Strict lunch semantics.** `hasLunch` used to be true whenever there was a free gap ≥30 min inside the lunch window. Sonnet narrated "lunch is covered" even when no lunch was booked. Now `hasLunch` is true ONLY when a lunch event exists. The `no_lunch` issue always fires when none exists and suggests a specific time based on the largest free gap in the lunch window: *"Want me to block 30 min at 12:30?"*.
 
-## 2.0.8 — overlap detection + strict lunch semantics
+### Fixed — coord & invites
 
-### Fixed
+- **Waiting-owner follow-ups no longer discarded.** `handleCoordReply` previously ack'd + shadow-logged any reply arriving after a coord entered `waiting_owner`, dropping the content. Now runs a tool_use Sonnet classifier with four outcomes: `counter` (new time — merges `counter_offer` onto the pending approval's payload AND DMs the owner directly), `cancel` (pending approval flipped to `cancelled`, coord cancelled, owner notified), `confirm` / `other` (prior ack + log). Observed trigger: Amazia replying "Monday 27 at 14:45" as a counter-offer was being silently thrown away.
+- **Deterministic invite emails.** `coordinate_meeting` was receiving participant args with `name + slack_id` but no `email` (schema marks email optional). Graph's `createMeeting` sent invites with empty email strings → Outlook showed a red "unresolved recipient" circle AND silently dropped `just_invite` folk. Now fills missing emails from `people_memory` by `slack_id` (primary) or name (fuzzy) BEFORE proceeding. Refuses the tool call with a clear error if still missing. Deterministic — not a Sonnet judgment.
+- **Thread-aware shadow notifications.** `shadowNotify` was routing the FIRST call per process to a standalone DM (cache empty on startup) and only threading subsequent calls that matched the cached channel. Now: if caller passes `channel + threadTs` and the channel is a Slack DM (id starts with 'D'), post there directly — no cache dance. Non-DM channels fall through to the owner's DM (security floor: colleagues never see shadow content). Yaml toggle `behavior.v1_shadow_mode` unchanged.
+- `mergeApprovalPayload(id, patch)` helper in `db/approvals.ts` for shallow-merging fields into a pending approval's payload. Used by the counter-offer branch above.
 
-- **[Calendar] `analyzeCalendar` now detects true meeting overlaps.** The analyzer had a back-to-back check but no overlap check — when a new meeting started BEFORE the previous one ended, the condition `evStart >= prevEndMin` filtered it out silently. Every real calendar conflict (e.g. Apr 29 FC & Capri 14:45–15:30 overlapping Fulcrum Product Sync 15:00–…) went unflagged. The `overlap` type was already in the analyzer's filter enum at the tool boundary for Sonnet to use, but the analyzer itself never emitted one. Now it emits `{type: 'overlap', severity: 'high'}` with both meeting subjects, times, and the overlap duration in minutes.
-- **[Calendar] Strict lunch semantics.** `hasLunch` used to be true whenever there was a free gap ≥30 min inside the lunch window — so Sonnet narrated "lunch is covered" even when no lunch event was booked. Now `hasLunch` is true ONLY when a lunch event exists in the window. When none exists, the `no_lunch` issue fires AND uses the largest free gap in the window to suggest a specific time: *"Want me to block 30 min at 12:30?"*. If no free gap exists either, it says so and offers to bump something.
+### Added — input handling
 
----
+- **Multi-file uploads.** Previously only the FIRST matching file of each type in a Slack upload was processed; the rest were silently dropped. Now every PDF / `.txt` / `.md` / audio file gets processed sequentially (not parallel — rate limits + deterministic thread order). Each file posts its own confirmation, prefixed `[N/M] filename:` when batched. Parity with the existing image handling (up to 4).
 
-## 2.0.7 — multi-file uploads + coffee-break error copy
+### Changed — error copy
 
-### Added
+- Error copy on transient Anthropic overload (529 `overloaded_error`) is now the human "quick coffee break" line: *"Quick coffee break, ping me again in a couple of minutes?"*. New `isOverloadError` helper detects 529 / overloaded_error and routes accordingly. Non-overload errors (classifier parse failures, download failures) keep their task-specific friendlier copy.
 
-- Multi-file upload support in the Slack DM handler. Previously only the FIRST matching file of each type was processed; other files in the same upload were silently dropped. Now every PDF / `.txt` / `.md` / audio file in an upload gets processed sequentially (not parallel — Anthropic rate limits + we want deterministic thread order). Each file posts its own confirmation in the thread, prefixed `[N/M] filename:` when multiple files. Applies to the KB ingest pipeline, the transcript routing, and audio transcription — any skill that consumes a file gets the batch. Images already supported this pattern (up to 4); now parity across types.
+### Verified
 
-### Changed
+- Stress-tests for the timezone fix and slot-diversity pass against the owner's live calendar for multiple meeting times. Scripts: `scripts/stress-test-timezone-fix.mjs`, `scripts/test-55min-slots.mjs`.
 
-- Error copy on transient Anthropic overload (529 `overloaded_error`) is now the human "quick coffee break" line. New `isOverloadError` helper detects 529 / overloaded_error and routes to: *"Quick coffee break, ping me again in a couple of minutes?"*. Non-overload errors (classifier parse failures, download failures, etc.) keep their task-specific friendlier copy. Applies to the main `processMessage` catch and to the per-file doc-ingest loop.
+### Note on version policy
 
----
-
-## 2.0.6 — deterministic invite emails + thread-aware shadow notifications
-
-### Fixed
-
-- **[Scheduling] `coordinate_meeting` now fills missing participant emails from `people_memory` deterministically.** Sonnet was calling the tool with `participants` / `just_invite` entries that had `name` + `slack_id` but no `email`, because the tool schema marks `email` optional. Downstream, Graph's `createMeeting` ran `attendees.map(p => ({ name, email: p.email || '' }))` and sent invites with empty email strings — Outlook showed a red "unresolved recipient" circle on the key participant AND silently dropped the `just_invite` folk. Symptom: booked the Kickoff meeting with Amazia showing a broken invite and Onn/Oran missing entirely. Fix lives in the tool handler, not the schema: for every participant with a missing email, look up by `slack_id` (primary) or name (fuzzy) in `people_memory`. If the email is still missing after the lookup, refuse the tool call with a clear `missing_participant_emails` error so Sonnet has to resolve the people properly (e.g. via `find_slack_user`) before re-calling. Deterministic, not a judgment call.
-- **[Shadow] Shadow notifications now post in-thread when the owner started the work in a thread.** `shadowNotify` was previously routing the FIRST call per process to a standalone DM (cache empty on startup) and only threading subsequent calls that happened to match the cached channel. After a restart, every new coord's first shadow ping became a top-level DM, unlinked from the thread the owner was reading. Now: if caller passes `channel + threadTs` and the channel is a Slack DM (id starts with 'D'), post there directly — no cache dance. Non-DM channels (colleague DM, MPIM) still fall through to the owner's DM (security floor: colleagues never see shadow content). Yaml toggle `behavior.v1_shadow_mode` still gates the whole feature — flip to `false` to silence all shadow DMs once stable.
+This is one patch for the whole session's bug wave — prior habit of bumping per individual fix (2.0.6→2.0.7→2.0.8→2.0.9 on a single session) inflates the version history. Going forward: bundle a session's fixes into one version.
 
 ---
 
