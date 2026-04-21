@@ -787,7 +787,11 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
     // silence and log.
     const firstName = profile.user.name.split(' ')[0];
     const recoverySystem = `You just handled a turn for ${firstName} but did not write a reply.
-Look at the conversation above (${firstName}'s last message + your tool calls + their results). Write ONE short, plain-text sentence in the SAME LANGUAGE ${firstName} wrote in. Three branches — pick the one that fits:
+Look at the conversation above (${firstName}'s last message + your tool calls + their results). Write ONE short, plain-text sentence.
+
+LANGUAGE — mirror the language of ${firstName}'s MOST RECENT message ONLY. If his latest message is English, reply English. If his latest message is Hebrew, reply Hebrew. Ignore the language of earlier turns, names, or meeting subjects. No inertia, no "natural default", no carry-over.
+
+Three branches — pick the one that fits:
 
 A) YOU DID SOMETHING → describe it grounded in the tool results. One sentence. Example: "Deleted 'Sales Sync' from Wed 22 Apr 16:15."
 

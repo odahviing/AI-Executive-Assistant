@@ -2,6 +2,14 @@
 
 ---
 
+## 2.0.5 — recovery-pass language mirror
+
+### Fixed
+
+- **[Language] Recovery pass ignored the "current turn wins" rule.** The empty-reply recovery pass in `core/orchestrator/index.ts` used its own system prompt that said *"SAME LANGUAGE firstName wrote in"* — ambiguous. With a Hebrew contact in the turn and an Israeli owner, Sonnet defaulted to Hebrew even when the owner's latest messages were English. Tightened the recovery prompt to mirror the base prompt's explicit rule: match the language of the owner's MOST RECENT message only, no inertia from names or subjects. Symptom: booking confirmation came back as *"יצרתי את הפגישה..."* after owner said "in person" in English.
+
+---
+
 ## 2.0.4 — coord follow-up handler + timezone-fix stress test
 
 Addresses the "Amazia keeps proposing times and Maelle keeps acting confused" episode. The coord follow-up handler was silently discarding any participant message that arrived after a coord entered `waiting_owner` — acking + logging to shadow only. So when Amazia replied with "Monday 27 at 14:45" as a counter-offer, nothing happened: the coord's `winning_slot` stayed on the conflicting Sun 11:00, the pending approval stayed stale, and the owner saw Maelle keep referencing the old pick.
