@@ -19,6 +19,9 @@ import { config } from '../../../config';
 import {
   updateCoordJob,
   getCoordJobsByParticipant,
+  getPendingApprovalsBySkillRef,
+  mergeApprovalPayload,
+  setApprovalDecision,
   type CoordParticipant,
   type CoordJob,
 } from '../../../db';
@@ -111,8 +114,82 @@ export async function handleCoordReply(
   logger.info('Coord reply received', { jobId: job.id, from: participant.name });
 
   // ── Follow-up on a waiting_owner job ────────────────────────────────────
+  // v2.0.4 — classify the follow-up and act on it. Previously this branch just
+  // acked + shadow-logged, throwing away counter-offers / cancellations. Now:
+  //   - counter (new time): update the pending approval's payload with the
+  //     amended offer + DM the owner directly so they see the new option
+  //   - confirm (just acknowledging): ack + log (prior behavior)
+  //   - cancel (participant pulling out): resolve approval cancelled + notify owner
+  //   - other (question / vague): ack + log (prior behavior)
   if (job.status === 'waiting_owner' && participant.response !== null) {
     const ackInThread = participant.contacted_via === 'group' && job.owner_channel === params.channelId;
+    const followupIntent = await classifyWaitingOwnerFollowup({
+      text: params.text.trim(),
+      subject: job.subject,
+      participantName: participant.name,
+      originalSlot: job.winning_slot ?? undefined,
+      timezone: params.profile.user.timezone,
+    });
+
+    logger.info('Coord waiting_owner follow-up classified', {
+      jobId: job.id,
+      participant: participant.name,
+      intent: followupIntent.intent,
+      hasProposed: !!followupIntent.proposed_iso,
+      reason: followupIntent.reason,
+    });
+
+    // Counter-offer: new time proposed by the participant. Attach to the
+    // pending approval so owner's system prompt shows the amendment; also
+    // DM owner directly so they're not chasing shadow logs.
+    if (followupIntent.intent === 'counter') {
+      const pendings = getPendingApprovalsBySkillRef(job.id);
+      const proposedLocalLabel = followupIntent.proposed_iso
+        ? DateTime.fromISO(followupIntent.proposed_iso).setZone(params.profile.user.timezone).toFormat('EEEE d MMM \'at\' HH:mm')
+        : null;
+      for (const ap of pendings) {
+        mergeApprovalPayload(ap.id, {
+          counter_offer: {
+            iso: followupIntent.proposed_iso ?? null,
+            label: proposedLocalLabel,
+            raw_text: params.text.trim(),
+            from_participant: participant.name,
+            received_at: new Date().toISOString(),
+          },
+        });
+      }
+      // DM owner so they SEE this (not just log it)
+      const ownerMsg = proposedLocalLabel
+        ? `${participant.name} came back on "${job.subject}" — now proposing ${proposedLocalLabel} instead. Want me to take that, or suggest something else?`
+        : `${participant.name} came back on "${job.subject}" with a different time: "${params.text.trim().slice(0, 200)}". Want me to work that out?`;
+      await slackConn.postToChannel(job.owner_channel, ownerMsg, {
+        threadTs: job.owner_thread_ts ?? undefined,
+      });
+      await slackConn.postToChannel(params.channelId, `Got it, I'll run that past Idan.`, {
+        threadTs: ackInThread ? (job.owner_thread_ts ?? undefined) : undefined,
+      });
+      return true;
+    }
+
+    // Cancellation: participant pulling out. Resolve pending approval as
+    // cancelled (cascading task/coord cleanup is handled by setApprovalDecision).
+    if (followupIntent.intent === 'cancel') {
+      const pendings = getPendingApprovalsBySkillRef(job.id);
+      for (const ap of pendings) {
+        setApprovalDecision({ id: ap.id, status: 'cancelled', decision: { reason: `${participant.name} pulled out: ${params.text.trim().slice(0, 160)}` } });
+      }
+      updateCoordJob(job.id, { status: 'cancelled', notes: `${participant.name} pulled out` });
+      await slackConn.postToChannel(job.owner_channel,
+        `${participant.name} pulled out of "${job.subject}": "${params.text.trim().slice(0, 200)}". I've closed it.`,
+        { threadTs: job.owner_thread_ts ?? undefined },
+      );
+      await slackConn.postToChannel(params.channelId, `No worries, I'll let Idan know.`, {
+        threadTs: ackInThread ? (job.owner_thread_ts ?? undefined) : undefined,
+      });
+      return true;
+    }
+
+    // Confirm or other: prior behavior — ack + shadow log.
     await slackConn.postToChannel(params.channelId, `Thanks! I'll pass that along.`, {
       threadTs: ackInThread ? (job.owner_thread_ts ?? undefined) : undefined,
     });
@@ -120,7 +197,7 @@ export async function handleCoordReply(
       channel: job.owner_channel,
       threadTs: job.owner_thread_ts ?? undefined,
       action: 'Follow-up received',
-      detail: `${participant.name} followed up on "${job.subject}": "${params.text.trim()}"`,
+      detail: `${participant.name} followed up on "${job.subject}": "${params.text.trim().slice(0, 200)}"`,
     });
     return true;
   }
@@ -259,6 +336,73 @@ export async function handleCoordReply(
 /**
  * Use Sonnet to parse a free-text time preference into a concrete search window.
  */
+/**
+ * Classify a reply that arrived on a coord already in waiting_owner state.
+ * The participant has already given their slot pick; this later message is a
+ * follow-up. It could be a counter-offer, confirmation, cancellation, or noise.
+ * Uses a tool_use Sonnet call so the structured output is guaranteed.
+ */
+async function classifyWaitingOwnerFollowup(params: {
+  text: string;
+  subject: string;
+  participantName: string;
+  originalSlot?: string;  // ISO of the slot currently pending approval
+  timezone: string;
+}): Promise<{
+  intent: 'counter' | 'confirm' | 'cancel' | 'other';
+  proposed_iso?: string;
+  reason: string;
+}> {
+  const originalLocal = params.originalSlot
+    ? DateTime.fromISO(params.originalSlot).setZone(params.timezone).toFormat('EEEE d MMM \'at\' HH:mm')
+    : '(unknown)';
+  const today = DateTime.now().setZone(params.timezone).toFormat('yyyy-MM-dd');
+
+  const prompt = `${params.participantName} was asked to confirm a meeting time for "${params.subject}" — they earlier picked ${originalLocal}. That slot is currently pending the owner's approval because of a calendar conflict. Now they've sent this follow-up message:
+
+"${params.text.slice(0, 500)}"
+
+Classify the follow-up. Today is ${today} (${params.timezone}). Output ONE of:
+- intent="counter" — they're proposing a NEW time (different day/hour). Extract the proposed time as ISO if clear.
+- intent="confirm" — they're just reconfirming / nudging about the original slot.
+- intent="cancel" — they're pulling out, declining, or saying "never mind".
+- intent="other" — a question, small talk, or ambiguous.
+
+Only set intent=counter if you can tell they want a DIFFERENT time from the original. "Still works for me" = confirm, NOT counter. Convert relative dates ("next Monday", "tomorrow") to ISO relative to today.`;
+
+  const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+  try {
+    const resp = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 300,
+      tools: [{
+        name: 'classify_followup',
+        description: 'Classify a coord follow-up message from a participant after they already picked a slot.',
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            intent: { type: 'string', enum: ['counter', 'confirm', 'cancel', 'other'] },
+            proposed_iso: { type: 'string', description: 'ISO datetime of the new time, in the participant timezone. Only when intent=counter AND the time is clear. Empty string otherwise.' },
+            reason: { type: 'string', description: 'One sentence explaining the call.' },
+          },
+          required: ['intent', 'reason'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'classify_followup' },
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
+    if (!toolUse?.input) return { intent: 'other', reason: 'classifier returned no verdict' };
+    const v = toolUse.input as { intent: string; proposed_iso?: string; reason?: string };
+    const intent = (v.intent === 'counter' || v.intent === 'confirm' || v.intent === 'cancel') ? v.intent : 'other';
+    const proposed = v.proposed_iso && v.proposed_iso.trim().length > 0 ? v.proposed_iso.trim() : undefined;
+    return { intent, proposed_iso: proposed, reason: v.reason ?? '' };
+  } catch (err) {
+    logger.warn('classifyWaitingOwnerFollowup failed', { err: String(err).slice(0, 200) });
+    return { intent: 'other', reason: 'classifier error' };
+  }
+}
+
 async function parseTimePreference(
   text: string,
   timezone: string,

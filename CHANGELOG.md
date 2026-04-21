@@ -2,6 +2,24 @@
 
 ---
 
+## 2.0.4 — coord follow-up handler + timezone-fix stress test
+
+Addresses the "Amazia keeps proposing times and Maelle keeps acting confused" episode. The coord follow-up handler was silently discarding any participant message that arrived after a coord entered `waiting_owner` — acking + logging to shadow only. So when Amazia replied with "Monday 27 at 14:45" as a counter-offer, nothing happened: the coord's `winning_slot` stayed on the conflicting Sun 11:00, the pending approval stayed stale, and the owner saw Maelle keep referencing the old pick.
+
+### Fixed
+
+- **[Coord] Waiting-owner follow-ups are no longer discarded.** `handleCoordReply` now runs a tool_use Sonnet classifier on any follow-up message, with four outcomes:
+  - `counter` — participant proposes a NEW time. The pending approval's payload is merged with a `counter_offer: { iso, label, from_participant, received_at }` field (so it surfaces in the owner's system prompt via `getPendingApprovalsForOwner`), and the owner is DM'd directly with a human message: *"Amazia came back on Kickoff — now proposing Monday 27 Apr at 14:45 instead. Want me to take that, or suggest something else?"*. No more silent shadow-only logs for actionable counter-offers.
+  - `cancel` — participant is pulling out. Pending approval flipped to `cancelled`, coord flipped to `cancelled`, owner DM'd.
+  - `confirm` / `other` — prior behavior (ack + shadow log). No regression.
+- New `mergeApprovalPayload(id, patch)` helper in `db/approvals.ts` for shallow-merging fields into a pending approval's payload. Used by the counter-offer branch above.
+
+### Added
+
+- `scripts/stress-test-timezone-fix.mjs` — reproduces the 2.0.3 timezone fix against the owner's live calendar for multiple meeting times (morning 11:00 vs afternoon 15:30). Both scenarios pass: real meetings correctly block, free time correctly available. Retained so the fix can be verified on demand.
+
+---
+
 ## 2.0.3 — scheduling root-cause fix + briefing cleanup + hallucination rules
 
 Addresses a wave of scheduling / briefing bugs. The big one: `findAvailableSlots` has been silently off by the owner's timezone offset since the coord feature existed — Graph's `getSchedule` returns busy slots in UTC (zoneless ISO), but the code parsed them as the owner's local timezone, so an 11:00 Israel meeting (08:00 UTC busy) looked free at 11:00. Verified against the actual production calendar. Plus a dense set of briefing cleanups, honesty-rule additions, and a new same-thread task continuity classifier.

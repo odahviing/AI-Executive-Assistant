@@ -297,6 +297,32 @@ export function sweepExpiredApprovals(): Approval[] {
  * Cancel all pending approvals for a task — used when the parent task is
  * cancelled or superseded so owner isn't left with orphan asks.
  */
+/**
+ * Merge additional fields into a pending approval's payload_json. Used when a
+ * counter-offer or amendment arrives on a waiting_owner coord and we want the
+ * extra context (amended_offer, counter_offer_at, etc.) visible in the owner's
+ * system prompt via getPendingApprovalsForOwner. Shallow merge at the top level.
+ * No-op if the approval is not pending.
+ */
+export function mergeApprovalPayload(id: string, patch: Record<string, unknown>): void {
+  const db = getDb();
+  const row = db.prepare(`SELECT status, payload_json FROM approvals WHERE id = ?`).get(id) as
+    | { status: ApprovalStatus; payload_json: string }
+    | undefined;
+  if (!row) return;
+  if (row.status !== 'pending') return;
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+  } catch {
+    payload = {};
+  }
+  const merged = { ...payload, ...patch };
+  db.prepare(
+    `UPDATE approvals SET payload_json = ?, updated_at = datetime('now') WHERE id = ?`,
+  ).run(JSON.stringify(merged), id);
+}
+
 export function cancelApprovalsForTask(taskId: string, reason?: string): void {
   const db = getDb();
   const info = db.prepare(`
