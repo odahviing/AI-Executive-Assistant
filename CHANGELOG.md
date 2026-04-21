@@ -2,6 +2,15 @@
 
 ---
 
+## 2.0.6 — deterministic invite emails + thread-aware shadow notifications
+
+### Fixed
+
+- **[Scheduling] `coordinate_meeting` now fills missing participant emails from `people_memory` deterministically.** Sonnet was calling the tool with `participants` / `just_invite` entries that had `name` + `slack_id` but no `email`, because the tool schema marks `email` optional. Downstream, Graph's `createMeeting` ran `attendees.map(p => ({ name, email: p.email || '' }))` and sent invites with empty email strings — Outlook showed a red "unresolved recipient" circle on the key participant AND silently dropped the `just_invite` folk. Symptom: booked the Kickoff meeting with Amazia showing a broken invite and Onn/Oran missing entirely. Fix lives in the tool handler, not the schema: for every participant with a missing email, look up by `slack_id` (primary) or name (fuzzy) in `people_memory`. If the email is still missing after the lookup, refuse the tool call with a clear `missing_participant_emails` error so Sonnet has to resolve the people properly (e.g. via `find_slack_user`) before re-calling. Deterministic, not a judgment call.
+- **[Shadow] Shadow notifications now post in-thread when the owner started the work in a thread.** `shadowNotify` was previously routing the FIRST call per process to a standalone DM (cache empty on startup) and only threading subsequent calls that happened to match the cached channel. After a restart, every new coord's first shadow ping became a top-level DM, unlinked from the thread the owner was reading. Now: if caller passes `channel + threadTs` and the channel is a Slack DM (id starts with 'D'), post there directly — no cache dance. Non-DM channels (colleague DM, MPIM) still fall through to the owner's DM (security floor: colleagues never see shadow content). Yaml toggle `behavior.v1_shadow_mode` still gates the whole feature — flip to `false` to silence all shadow DMs once stable.
+
+---
+
 ## 2.0.5 — recovery-pass language mirror
 
 ### Fixed

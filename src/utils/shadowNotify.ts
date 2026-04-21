@@ -40,26 +40,35 @@ export async function shadowNotify(
 
   try {
     const text = `🔍 _*${params.action}:* ${params.detail}_`;
-    const cached = ownerDmChannelCache.get(ownerId);
 
-    // If we already know the owner's DM channel AND the originating channel
-    // matches it, thread into the same conversation. Otherwise send a
-    // standalone DM to the owner (and learn the channel id from the result).
-    if (cached && cached === params.channel) {
-      const res = await conn.postToChannel(cached, text, { threadTs: params.threadTs });
-      if (!res.ok) {
-        logger.warn('shadowNotify failed (cached channel)', { reason: res.reason, detail: res.detail, action: params.action });
+    // v2.0.6 — if the caller passed a channel + threadTs AND the channel is a
+    // Slack DM (id starts with 'D'), post in-thread there. Any coord/outreach
+    // that the owner started in a thread flows this way so the shadow messages
+    // stay inside the conversation the owner is already reading. Non-DM
+    // channels (colleague DMs, MPIMs, public channels) fall through to
+    // sendDirect to the owner — that's the security floor: colleagues never
+    // see shadow/debug content. No cache needed; postToChannel either succeeds
+    // or we fall back cleanly.
+    if (params.channel && params.threadTs && params.channel.startsWith('D')) {
+      const res = await conn.postToChannel(params.channel, text, { threadTs: params.threadTs });
+      if (res.ok) {
+        ownerDmChannelCache.set(ownerId, params.channel);
+        return;
       }
-      return;
+      logger.info('shadowNotify in-thread post failed, falling back to DM', {
+        reason: res.reason, detail: res.detail, action: params.action,
+      });
+      // fall through
     }
 
+    // Default: standalone DM to the owner. Used when the originating context
+    // wasn't the owner's DM (e.g. coord initiated by a colleague, or top-level
+    // ask with no thread_ts).
     const res = await conn.sendDirect(ownerId, text);
     if (!res.ok) {
       logger.warn('shadowNotify failed (sendDirect)', { reason: res.reason, detail: res.detail, action: params.action });
       return;
     }
-    // Cache the owner's DM channel id from the first successful send so
-    // subsequent calls can detect "same channel" and preserve thread context.
     if (res.ref) ownerDmChannelCache.set(ownerId, res.ref);
   } catch (err) {
     // Shadow notifications are fire-and-forget — never let them break the main flow.

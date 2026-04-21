@@ -8,6 +8,7 @@ import {
   auditLog,
   upsertPersonMemory,
   searchPeopleMemory,
+  getPersonMemory,
   getDismissedIssueKeys,
   buildIssueKey,
   dismissCalendarIssue,
@@ -494,6 +495,66 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
 
       case 'coordinate_meeting': {
         const { email: userEmail, timezone, slack_user_id: ownerUserId, name: ownerName } = profile.user;
+
+        // v2.0.6 — deterministic email fill-in for participants and just_invite.
+        // Sonnet was previously dropping the email field from these arrays even
+        // though we had the email in people_memory, resulting in Graph invites
+        // sent with empty email strings: Outlook showed a red "unresolved
+        // recipient" circle and just_invite folk weren't actually invited.
+        // Fill from DB before any downstream use. If email is still missing
+        // after lookup AND the participant has neither slack_id nor a resolvable
+        // name, refuse the call so Sonnet has to fix the args.
+        const participantsIn = (args.participants as any[] | undefined) ?? [];
+        const justInviteIn = (args.just_invite as any[] | undefined) ?? [];
+        const missingEmails: string[] = [];
+
+        for (const p of participantsIn) {
+          if (p.email && typeof p.email === 'string' && p.email.includes('@')) continue;
+          // Try slack_id lookup in people_memory
+          if (p.slack_id) {
+            const mem = getPersonMemory(p.slack_id);
+            if (mem?.email) { p.email = mem.email; continue; }
+          }
+          // Try fuzzy name lookup
+          if (p.name) {
+            const matches = searchPeopleMemory(p.name);
+            const hit = matches.find(m => m.email && m.email.includes('@'));
+            if (hit) { p.email = hit.email; continue; }
+          }
+          missingEmails.push(p.name ?? p.slack_id ?? '(unknown)');
+        }
+
+        for (const p of justInviteIn) {
+          if (p.email && typeof p.email === 'string' && p.email.includes('@')) continue;
+          if (p.slack_id) {
+            const mem = getPersonMemory(p.slack_id);
+            if (mem?.email) { p.email = mem.email; continue; }
+          }
+          if (p.name) {
+            const matches = searchPeopleMemory(p.name);
+            const hit = matches.find(m => m.email && m.email.includes('@'));
+            if (hit) { p.email = hit.email; continue; }
+          }
+          missingEmails.push(p.name ?? '(unknown)');
+        }
+
+        if (missingEmails.length > 0) {
+          logger.warn('coordinate_meeting refused — missing emails after DB fill-in', {
+            missingEmails,
+            subject: args.subject,
+          });
+          return {
+            error: 'missing_participant_emails',
+            missing: missingEmails,
+            message: `I can't coordinate this yet — I don't have email addresses for: ${missingEmails.join(', ')}. Call find_slack_user for them first (which returns email), or tell the owner you need the email address to send an invite.`,
+          };
+        }
+
+        logger.info('coordinate_meeting — emails filled', {
+          participantCount: participantsIn.length,
+          justInviteCount: justInviteIn.length,
+          subject: args.subject,
+        });
 
         const keyParticipantCount = (args.participants as any[]).length;
         if (keyParticipantCount > 4) {
