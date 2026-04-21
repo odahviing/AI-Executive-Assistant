@@ -527,10 +527,23 @@ export async function findAvailableSlots(params: {
       return freeMin;
     };
 
+    // v2.0.9 — walker collects ALL valid 15-min-stepped candidates per day
+    // into dayBuckets. After the walker, per-day post-processing picks up to
+    // MAX_PER_DAY with 30-min preferred spacing and 15-min fallback. Prior
+    // chronological-slice(10) truncated the rest of the week whenever Sunday
+    // had 10+ hits; hard-capping the walker at 4/day would also over-cluster
+    // in 15-min increments. Two-stage approach gives both day-diversity AND
+    // nice intra-day spacing ("10, 10:30, 11:30, 14:00" not "10, 10:15,
+    // 10:30, 10:45").
+    const MAX_PER_DAY = 4;
+    const PREFERRED_GAP_MS = 30 * 60 * 1000;
+    const dayBuckets: Map<string, Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other' }>> = new Map();
+
     let cursor = DateTime.fromISO(params.searchFrom, { zone: params.timezone }).toJSDate();
     while (cursor.getTime() + durationMs <= searchEnd.getTime()) {
       const cursorDt = DateTime.fromJSDate(cursor).setZone(params.timezone);
       const dayName = cursorDt.toFormat('EEEE');
+      const dayKey = cursorDt.toFormat('yyyy-MM-dd');
 
       if (!workDays.includes(dayName)) {
         cursor = new Date(cursor.getTime() + step);
@@ -587,12 +600,40 @@ export async function findAvailableSlots(params: {
         }
       }
 
-      candidates.push({
+      if (!dayBuckets.has(dayKey)) dayBuckets.set(dayKey, []);
+      dayBuckets.get(dayKey)!.push({
         start: cursor.toISOString(),
         end: slotEnd.toISOString(),
         day_type: classifyDay(dayName),
       });
       cursor = new Date(cursor.getTime() + step);
+    }
+
+    // v2.0.9 — per-day selection. For each day, pick up to MAX_PER_DAY with
+    // PREFERRED_GAP (30 min) between picks; if that yields fewer than
+    // MAX_PER_DAY, fill remaining from the unused list at 15-min spacing.
+    // Owner preference: "10, 10:30, 11:30, 14:00" > "10, 10:15, 10:30, 10:45".
+    for (const [, daySlots] of dayBuckets) {
+      if (daySlots.length === 0) continue;
+      const picked: typeof daySlots = [daySlots[0]];
+      let lastTime = new Date(daySlots[0].start).getTime();
+      for (let i = 1; i < daySlots.length && picked.length < MAX_PER_DAY; i++) {
+        const t = new Date(daySlots[i].start).getTime();
+        if (t - lastTime >= PREFERRED_GAP_MS) {
+          picked.push(daySlots[i]);
+          lastTime = t;
+        }
+      }
+      // Fallback: if we still have room, fill with anything we skipped (15-min
+      // spacing allowed). Re-sort chronologically after to keep output tidy.
+      if (picked.length < MAX_PER_DAY) {
+        const pickedSet = new Set(picked.map(p => p.start));
+        for (let i = 0; i < daySlots.length && picked.length < MAX_PER_DAY; i++) {
+          if (!pickedSet.has(daySlots[i].start)) picked.push(daySlots[i]);
+        }
+        picked.sort((a, b) => a.start.localeCompare(b.start));
+      }
+      candidates.push(...picked);
     }
 
     // v1.6.4 — enough? If yes, stop. Otherwise extend the window (but not
@@ -608,7 +649,13 @@ export async function findAvailableSlots(params: {
     currentTo = nextTo;
   }
 
-  return candidates.slice(0, 10);
+  // v2.0.9 — cap raised from 10 to 30. With MAX_PER_DAY=4 and up to 5 work
+  // days in a typical week (Sun-Thu in Israel / Mon-Fri elsewhere), 4 × 5 =
+  // 20 is the normal maximum; 30 gives headroom if a multi-week search
+  // window somehow slips through. pickSpreadSlots still narrows to the final
+  // 3. The old cap of 10 combined with chronological candidate accumulation
+  // meant a single open morning could dominate the output.
+  return candidates.slice(0, 30);
 }
 
 export interface UpdateMeetingParams {

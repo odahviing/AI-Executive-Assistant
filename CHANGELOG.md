@@ -2,6 +2,15 @@
 
 ---
 
+## 2.0.9 — slot diversity across days
+
+### Fixed
+
+- **[Scheduling] `findAvailableSlots` was clipping results to a single day.** The 15-min cursor walked chronologically through the search window, and the final `.slice(0, 10)` took the first 10 candidates it found. A single open morning (e.g. Sunday home-day 09:00–15:30) produced 10+ candidates before the cursor even reached Monday, so the rest of the week was silently dropped. Observed symptom: owner asked "options next week for a 55-min meeting?" and got "all on Sunday" even though Mon/Tue/Thu had wide-open middays.
+- Fix: cap per-day at 4 candidates (skip to next day's start once the cap hits); raise the overall cap from 10 to 30. Candidate pool now spans all available days; `pickSpreadSlots` narrows to the final 3 from a balanced list. Verified against the owner's live calendar — 55-min search across Apr 26–May 2 now returns 20 candidates across 5 days where previously it returned 10 all on Sunday.
+
+---
+
 ## 2.0.8 — overlap detection + strict lunch semantics
 
 ### Fixed
