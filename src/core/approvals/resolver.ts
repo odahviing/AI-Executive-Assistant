@@ -259,8 +259,10 @@ async function resolveSlotPick(
     for (const [email, slots] of Object.entries(busy)) {
       const conflict = slots.find(s => {
         if (s.status !== 'busy' && s.status !== 'tentative' && s.status !== 'oof') return false;
-        const sStart = DateTime.fromISO(s.start).toMillis();
-        const sEnd = DateTime.fromISO(s.end).toMillis();
+        // v2.0.3 — Graph getSchedule returns times in UTC (zoneless ISO). Parse
+        // as UTC explicitly so comparison against chosenDt (already UTC) is correct.
+        const sStart = DateTime.fromISO(s.start, { zone: 'utc' }).toMillis();
+        const sEnd = DateTime.fromISO(s.end, { zone: 'utc' }).toMillis();
         const cStart = chosenDt.toMillis();
         const cEnd = endDt.toMillis();
         return sStart < cEnd && sEnd > cStart;

@@ -423,13 +423,19 @@ export async function findAvailableSlots(params: {
 
     const busyMap = await getFreeBusy(params.userEmail, allEmails, windowFrom, windowTo, params.timezone);
 
+    // v2.0.3 — Graph's getSchedule returns scheduleItems in UTC (the ISO
+    // strings have no timezone suffix and are NOT in the request timezone).
+    // The previous code parsed them as Israel local time, shifting every
+    // busy block by the owner's timezone offset. That let a recurring
+    // meeting at 11:00 local (08:00 UTC) appear free at 11:00 local because
+    // the busy block was interpreted as 08:00 local. Parse as UTC explicitly.
     const allBusy: Array<{ start: Date; end: Date }> = [];
     for (const slots of Object.values(busyMap)) {
       for (const slot of slots) {
         if (slot.status !== 'free') {
           allBusy.push({
-            start: DateTime.fromISO(slot.start, { zone: params.timezone }).toJSDate(),
-            end:   DateTime.fromISO(slot.end,   { zone: params.timezone }).toJSDate(),
+            start: DateTime.fromISO(slot.start, { zone: 'utc' }).toJSDate(),
+            end:   DateTime.fromISO(slot.end,   { zone: 'utc' }).toJSDate(),
           });
         }
       }

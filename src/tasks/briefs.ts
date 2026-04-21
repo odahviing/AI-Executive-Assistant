@@ -33,6 +33,17 @@ interface BriefingData {
   items: RichItem[];
   outreachIds: string[];
   coordIds: string[];
+  completedTaskIds: string[];
+  // v2.0.3 — name → pronoun map so Sonnet can pick the right pronouns
+  // instead of guessing from first names (which is unreliable for non-Western
+  // names like "Amazia").
+  peopleGender: Record<string, 'he' | 'she' | 'they'>;
+}
+
+function pronounFor(gender: string | null | undefined): 'he' | 'she' | 'they' {
+  if (gender === 'male') return 'he';
+  if (gender === 'female') return 'she';
+  return 'they';
 }
 
 function collectBriefingData(ownerUserId: string, timezone: string): BriefingData {
@@ -185,6 +196,12 @@ function collectBriefingData(ownerUserId: string, timezone: string): BriefingDat
   }
 
   // ── Recently completed tasks (uninformed) ──────────────────────────────────
+  // v2.0.3 — surface completed tasks ONCE. The model is: completed → informed.
+  // Query below pulls status='completed' only (not 'informed'); after the
+  // briefing sends, the outer function flips each included task via
+  // markTaskInformed so it never re-appears. Previously the briefing didn't
+  // flip completed → informed, so tasks re-surfaced every day for 7 days.
+  const completedTaskIds: string[] = [];
   const completedTasks = db.prepare(`
     SELECT * FROM tasks
     WHERE owner_user_id = ?
@@ -196,6 +213,7 @@ function collectBriefingData(ownerUserId: string, timezone: string): BriefingDat
   `).all(ownerUserId, sevenDaysAgo) as any[];
 
   for (const task of completedTasks) {
+    completedTaskIds.push(task.id);
     items.push({
       kind: 'completed_task',
       title: task.title,
@@ -203,7 +221,24 @@ function collectBriefingData(ownerUserId: string, timezone: string): BriefingDat
     });
   }
 
-  return { items, outreachIds, coordIds };
+  // v2.0.3 — collect gender for every person referenced by name anywhere in
+  // the briefing items. Keyed on name (first-name collisions are rare inside
+  // one owner's circle; Sonnet resolves from context).
+  const peopleGender: Record<string, 'he' | 'she' | 'they'> = {};
+  const peopleRows = db.prepare(
+    `SELECT name, gender FROM people_memory WHERE gender IS NOT NULL`
+  ).all() as Array<{ name: string; gender: string }>;
+  for (const row of peopleRows) {
+    if (!row.name) continue;
+    const firstName = row.name.split(' ')[0];
+    peopleGender[row.name] = pronounFor(row.gender);
+    // Also key by first name for easier Sonnet lookup
+    if (firstName && !peopleGender[firstName]) {
+      peopleGender[firstName] = pronounFor(row.gender);
+    }
+  }
+
+  return { items, outreachIds, coordIds, completedTaskIds, peopleGender };
 }
 
 // ── Generate briefing with Sonnet ────────────────────────────────────────────
@@ -211,6 +246,7 @@ function collectBriefingData(ownerUserId: string, timezone: string): BriefingDat
 async function generateBriefingText(
   items: RichItem[],
   profile: UserProfile,
+  peopleGender: Record<string, 'he' | 'she' | 'they'> = {},
 ): Promise<string> {
   if (items.length === 0) {
     const h = DateTime.now().setZone(profile.user.timezone).hour;
@@ -258,7 +294,14 @@ TASK OWNERSHIP — critical distinction:
 - outreach items where theyReplied=true and their reply is a question for Idan → these belong in action items.
 - outreach items where Maelle is still waiting for a reply → say "I'm waiting to hear back" — not Idan's problem.
 
-COMPLETENESS: Include every item in the data — do not skip or group items silently. If there are many, be brief on each but mention all of them.`;
+COMPLETENESS: Include every item in the data — do not skip or group items silently. If there are many, be brief on each but mention all of them.
+
+PRONOUNS — use the provided gender data, NEVER guess from a name. The PEOPLE_GENDER map below gives the correct pronoun (he / she / they) for every person referenced. If a person isn't in the map, use "they". Names like Amazia, Yael, Oran, Onn can be male or female — check the map. Don't guess.
+
+PEOPLE_GENDER:
+${Object.keys(peopleGender).length > 0
+  ? Object.entries(peopleGender).map(([name, p]) => `  ${name}: ${p}`).join('\n')
+  : '  (no gender data available — use "they" for all)'}`;
 
   try {
     const response = await anthropic.messages.create({
@@ -325,7 +368,7 @@ export async function sendMorningBriefing(
   }
 
   // Collect everything that's happened / in-flight
-  const { items, outreachIds, coordIds } = collectBriefingData(ownerUserId, profile.user.timezone);
+  const { items, outreachIds, coordIds, completedTaskIds, peopleGender } = collectBriefingData(ownerUserId, profile.user.timezone);
 
   // Mark sent TODAY before generating (prevents duplicate on restart mid-generation)
   const { logEvent } = require('../db');
@@ -342,7 +385,7 @@ export async function sendMorningBriefing(
 
   // Generate natural language briefing via Sonnet. SlackConnection internally
   // applies formatForSlack so no explicit formatting needed at the call site.
-  const rawText = await generateBriefingText(items, profile);
+  const rawText = await generateBriefingText(items, profile, peopleGender);
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
   const conn = getConnection(ownerUserId, 'slack');
@@ -383,6 +426,13 @@ export async function sendMorningBriefing(
   // v1.6 — coord_jobs no longer uses a briefed_at column; the briefing is a
   // read-only view of the current state. Unread-delta suppression happens via
   // the events table instead.
+
+  // v2.0.3 — flip completed → informed for tasks included above. Next briefing
+  // queries status='completed' only, so they drop off. Two-step
+  // completed→informed pattern documented in tasks/index.ts.
+  for (const id of completedTaskIds ?? []) {
+    markTaskInformed(id);
+  }
 
   logger.info('Morning briefing sent (AI-generated)', {
     userId: ownerUserId,

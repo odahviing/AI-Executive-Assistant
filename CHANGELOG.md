@@ -2,6 +2,27 @@
 
 ---
 
+## 2.0.3 — scheduling root-cause fix + briefing cleanup + hallucination rules
+
+Addresses a wave of scheduling / briefing bugs. The big one: `findAvailableSlots` has been silently off by the owner's timezone offset since the coord feature existed — Graph's `getSchedule` returns busy slots in UTC (zoneless ISO), but the code parsed them as the owner's local timezone, so an 11:00 Israel meeting (08:00 UTC busy) looked free at 11:00. Verified against the actual production calendar. Plus a dense set of briefing cleanups, honesty-rule additions, and a new same-thread task continuity classifier.
+
+### Fixed
+
+- **[Scheduling] Timezone parse bug in `findAvailableSlots`.** Graph's `getSchedule` returns scheduleItems in UTC; the code at `connectors/graph/calendar.ts:431` and the approval freshness re-check at `core/approvals/resolver.ts:262` were parsing them with `{ zone: params.timezone }`, shifting every busy block by the offset. Now both parse as `{ zone: 'utc' }`. Reproduced and verified against the owner's live calendar for Sun 26 Apr — the 11:00 recurring meeting that was being ignored is now correctly excluded from returned slots.
+- **[Briefing] Completed tasks re-surfacing for 7 days.** The briefing's "Recently completed tasks" block pulled every completed task in the last 7 days, every day. The `completed → informed` two-step existed in `tasks/index.ts` (via `markTaskInformed`) but the briefing never called it. Now it does — completed tasks surface ONCE in the next briefing, then flip to `informed` and drop.
+- **[Briefing] Pronoun guessing from first names.** The briefing prompt gave Sonnet raw item JSON with no gender data; she guessed pronouns from names, often wrong on non-Western names (Amazia → "her"). Now `collectBriefingData` pulls `people_memory.gender` for every person and injects a `PEOPLE_GENDER` map into the system prompt with a rule: "use the map, never guess." Keyed by both full and first name.
+
+### Added — honesty rules (base prompt, global across all skills)
+
+- **RULE 2c — Never invent a recovery narrative.** When a booking returned a conflict, an approval parked, a tool errored, or a reply came back you didn't expect, describe what ACTUALLY happened per the tool output. No corrective fiction ("I hadn't actually sent anything yet" when you did, "she agreed" when state is waiting_owner). If you don't know the current state, ask. Triggered by the Kickoff coord episode where Sonnet invented a narrative instead of describing a detected calendar conflict.
+- **RULE 2d — Close the loop when the owner handles it himself.** When the owner says "I posted it", "I sent the email", "I already decided", call `cancel_task` / `resolve_request` on the matching open task instead of just acknowledging. Stops stale tasks from re-appearing in the next morning's briefing.
+
+### Added — task continuity classifier
+
+- `src/core/taskContinuity.ts` — narrow Sonnet tool_use classifier hooked into the `create_task` handler in `tasks/skill.ts`. When the owner asks for a new task in a thread that already has open tasks, classifier decides `new` vs `follow_up_of` with confidence. On confident follow-up, `create_task` returns `{ created: false, would_duplicate: true, existing_task_id }` so Sonnet narrates continuation instead of creating a duplicate. Only fires for owner-path, same-thread requests. Cross-thread is always treated as new. Designed for the "couple of orders in one thread" pattern where replies / refinements were previously becoming separate tasks.
+
+---
+
 ## 2.0.2 — KB ingestion + summary context fixes + engagement classifier
 
 A dense patch. Maelle can now learn from PDFs, text files, and web pages — not just markdown files in a folder. Summary drafter finally sees the framing the owner types alongside a transcript. Social-topic quality upgrades moved from prompt judgment (fragile) to a deterministic post-turn classifier. Plus the day's cleanup: retired `work_life` from the social enum (mis-used for work activities, not emotions), purged orphan bare-subject rows, hardened the KB classifier against JSON parse failures, switched Tavily to advanced-depth extraction for SPA pages.

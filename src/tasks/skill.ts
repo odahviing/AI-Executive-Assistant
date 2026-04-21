@@ -7,6 +7,7 @@ import {
   getTask,
   getOpenTasksForOwner,
   getOpenTasksWithPerson,
+  getActiveJobsForThread,
   getCompletedUninformedTasks,
   markTaskInformed,
   cancelTask,
@@ -14,6 +15,7 @@ import {
   formatTasksForUser,
   type TaskType,
 } from './index';
+import { classifyTaskContinuity } from '../core/taskContinuity';
 import {
   getUnseenEvents,
   markEventsSeen,
@@ -338,6 +340,52 @@ Binding — how to pick the right approval_id:
         if (args.target_slack_id) taskContext.target_slack_id = args.target_slack_id;
         if (args.target_name) taskContext.target_name = args.target_name;
         if (args.message) taskContext.message = args.message;
+
+        // v2.0.3 — same-thread continuity check. If there are open tasks in
+        // the same thread, classify whether this new request is a follow-up
+        // on an existing one vs genuinely new. Prevents the "couple orders
+        // in one thread" case from creating duplicate tasks. Cross-thread
+        // requests skip the check (different thread = always new).
+        if (threadTs && context.senderRole === 'owner') {
+          const thread = getActiveJobsForThread(ownerUserId, threadTs);
+          if (thread.tasks.length > 0) {
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const Anthropic = (require('@anthropic-ai/sdk') as typeof import('@anthropic-ai/sdk')).default;
+              const anthropic = new Anthropic();
+              const verdict = await classifyTaskContinuity({
+                newTaskTitle: String(args.title ?? ''),
+                newTaskDescription: args.description as string | undefined,
+                newTaskType: String(args.type ?? ''),
+                existingTasks: thread.tasks.map(t => ({
+                  id: t.id,
+                  type: t.type,
+                  status: t.status,
+                  title: t.title,
+                  description: t.description ?? undefined,
+                  created_at: t.created_at,
+                })),
+                anthropic,
+              });
+              if (verdict.kind === 'follow_up_of' && verdict.confidence !== 'low' && verdict.existing_task_id) {
+                logger.info('Task creation skipped — continuation of existing', {
+                  existingId: verdict.existing_task_id,
+                  confidence: verdict.confidence,
+                  reason: verdict.reason,
+                });
+                return {
+                  created: false,
+                  would_duplicate: true,
+                  existing_task_id: verdict.existing_task_id,
+                  reason: verdict.reason,
+                  _note: `This looks like a follow-up on task ${verdict.existing_task_id} (${verdict.reason}). Use edit_task to update it, or tell the owner you're continuing that task. Only call create_task again if this is genuinely a separate piece of work.`,
+                };
+              }
+            } catch (err) {
+              logger.warn('create_task — continuity check failed, proceeding with create', { err: String(err).slice(0, 200) });
+            }
+          }
+        }
 
         // Determine created_context from current conversation context
         let createdContext = 'dm';
