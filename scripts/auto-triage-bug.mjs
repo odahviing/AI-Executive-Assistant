@@ -175,18 +175,41 @@ RULES:
    - BUG: a real defect. You write a plan, classify internal complexity (simple/medium/complex) as metadata, and the owner decides.
 9. If uncertain about the cause, classify BUG + complex + say so in the plan. Do not guess. The owner can ask you to dig more via the Revise label.
 
-OUTPUT FORMAT (your final message — strict JSON only, no prose preamble, no code fences):
+OUTPUT FORMAT — emit TWO blocks in your final message, in this exact order:
 
+BLOCK 1 — a fenced JSON code block with ONLY the structured fields (NO plan inside):
+
+\`\`\`json
 {
   "classification": "NOT_A_BUG" | "BUG",
   "complexity": "simple" | "medium" | "complex",
   "confidence": "high" | "medium" | "low",
   "summary": "One paragraph: what the bug is, what the cause is, grounded in code you read. For NOT_A_BUG: why it isn't a real defect.",
-  "root_cause": "File path + line/function + mechanism. E.g. 'src/core/orchestrator/systemPrompt.ts:292-296 — LANGUAGE rule buries the no-inertia clause mid-sentence; Sonnet drifts under conversational pressure'. Empty string for NOT_A_BUG.",
+  "root_cause": "File path + line/function + mechanism. E.g. 'src/core/orchestrator/systemPrompt.ts:292-296 — LANGUAGE rule buries the no-inertia clause mid-sentence'. Empty string for NOT_A_BUG.",
   "files_likely_affected": ["src/path/to/file.ts"],
-  "plan": "Owner-facing plan in markdown. Required for BUG. Structure: what, why, how, risks. Omit or empty for NOT_A_BUG.",
   "uncertainty": "If confidence is medium or low, name exactly what you're unsure about. Empty string if high confidence."
-}`;
+}
+\`\`\`
+
+BLOCK 2 — for BUG only, the long-form plan as markdown between these exact fences (no quoting, no JSON escaping — just markdown):
+
+<!-- PLAN START -->
+## What
+Short description of the bug grounded in what you found.
+
+## Why
+Why it happens — cite file:line and the specific code mechanism.
+
+## How
+The proposed fix. Be specific: which file, what to change, what the before/after looks like. Include code snippets when useful.
+
+## Risks
+What could go wrong / false positives / edge cases.
+<!-- PLAN END -->
+
+For NOT_A_BUG, emit only Block 1 — no plan fences.
+
+CRITICAL: The plan must be OUTSIDE the JSON, between the PLAN fences. Putting long markdown inside the JSON string will truncate under token pressure (past failure mode — do not repeat). Keep the JSON short and structured; put every long narrative in the PLAN block.`;
 
 const attachedImages = downloadedImages.length > 0
   ? `\nATTACHED IMAGES (use the Read tool on each path to view — these are almost always critical evidence):\n${downloadedImages.map((img, i) => `  ${i + 1}. ${img.path}  (original URL: ${img.url})`).join('\n')}\n`
@@ -236,30 +259,66 @@ try {
 } catch (err) {
   console.error('Agent run failed:', err);
   ghComment(`🤖 Auto-triage hit an internal error and could not investigate this bug. Owner: please review manually.\n\n\`\`\`\n${String(err).slice(0, 1000)}\n\`\`\``);
-  ghLabel('Triaged');
+  ghLabel('Triaged', 'Failed');
+  if (isRevise) ghRemoveLabel('Revise');
   process.exit(0);
 }
 
 console.log('Agent finished. Final result length:', lastTextResult.length);
 
 // ── Parse the agent's output ─────────────────────────────────────────────────
+//
+// v2.1.0+ — the agent emits TWO blocks:
+//   1) a JSON object with the structured fields (classification, confidence,
+//      root_cause, summary, files) — short, safely parseable.
+//   2) an OPTIONAL markdown plan between <!-- PLAN START --> / <!-- PLAN END -->
+//      fences — long-form. NOT inside the JSON, so it can't truncate the JSON
+//      by being big. Parser reads it independently.
+//
+// This replaces the old one-big-JSON-with-plan-as-string layout that hit
+// max_tokens truncation mid-string on dense bugs (issue #29 Revise run).
 
 function extractJson(raw) {
   let cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
   if (!cleaned.startsWith('{')) {
-    const m = cleaned.match(/\{[\s\S]*"classification"[\s\S]*\}/);
-    if (m) cleaned = m[0];
+    // Prefer a fenced ```json block if one exists
+    const fenced = cleaned.match(/```json\s*(\{[\s\S]*?\})\s*```/i);
+    if (fenced) {
+      cleaned = fenced[1];
+    } else {
+      // Fallback: first JSON-like block containing "classification"
+      const m = cleaned.match(/\{[\s\S]*"classification"[\s\S]*\}/);
+      if (m) cleaned = m[0];
+    }
   }
   return JSON.parse(cleaned);
 }
 
+function extractLongFormPlan(raw) {
+  // Accepts either <!-- PLAN START --> ... <!-- PLAN END --> fences or a
+  // bare ## heading block after the JSON. Preference: the fenced form.
+  const fenced = raw.match(/<!--\s*PLAN\s+START\s*-->([\s\S]*?)<!--\s*PLAN\s+END\s*-->/i);
+  if (fenced && fenced[1].trim().length > 0) return fenced[1].trim();
+  return null;
+}
+
+function extractVerdictAndPlan(raw) {
+  const verdict = extractJson(raw);
+  const longFormPlan = extractLongFormPlan(raw);
+  // Back-compat: if the agent still stuffed a plan INSIDE the JSON, use that
+  // as fallback — same as before. The new extraction is additive, not breaking.
+  return { verdict, longFormPlan: longFormPlan ?? (typeof verdict.plan === 'string' ? verdict.plan : null) };
+}
+
 let verdict;
+let longFormPlan = null;
 try {
-  verdict = extractJson(lastTextResult);
+  ({ verdict, longFormPlan } = extractVerdictAndPlan(lastTextResult));
 } catch (err) {
   console.error('Could not parse agent output as JSON:', err);
   ghComment(`🤖 Auto-triage finished but its output was not parseable. Raw output below for owner review:\n\n${lastTextResult.slice(0, 4000)}`);
-  ghLabel('Triaged');
+  ghLabel('Triaged', 'Failed');
+  if (isRevise) ghRemoveLabel('Revise');
   process.exit(0);
 }
 
@@ -328,6 +387,7 @@ ${verdict.summary || 'Agent determined this issue does not describe a real defec
 
 *Closed automatically. If this was wrong, reopen the issue and I'll investigate again.*`);
   ghLabel('Triaged');
+  if (isRevise) ghRemoveLabel('Revise');
   ghClose('not planned');
   console.log('NOT_A_BUG — closed with not-planned.');
   process.exit(0);
@@ -364,7 +424,7 @@ ${sanityBlock}${uncertaintyBlock}
 ## Plan
 
 <!-- PLAN START -->
-${verdict.plan || '(no plan written)'}
+${longFormPlan || verdict.plan || '(no plan written)'}
 <!-- PLAN END -->
 
 ---
