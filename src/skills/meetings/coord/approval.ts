@@ -19,9 +19,11 @@
  */
 
 import { DateTime } from 'luxon';
+import type { UserProfile } from '../../../config/userProfile';
 import { updateCoordJob, getDb, type CoordJob } from '../../../db';
 import { createApproval, type ApprovalKind } from '../../../db/approvals';
 import { getConnection } from '../../../connections/registry';
+import { workTimeBaseFromNow } from '../../../utils/workHours';
 import logger from '../../../utils/logger';
 
 export async function emitWaitingOwnerApproval(
@@ -32,9 +34,10 @@ export async function emitWaitingOwnerApproval(
     askText: string;                            // the DM text to post
     expiresInHours?: number;                    // default 24
     winningSlot?: string;                       // set on coord_job too
+    profile?: UserProfile;                      // v2.1.3 — used to rebase expiry off owner work time
   },
 ): Promise<{ approvalId?: string; ts?: string }> {
-  const { job, kind, payload, askText, expiresInHours = 24, winningSlot } = opts;
+  const { job, kind, payload, askText, expiresInHours = 24, winningSlot, profile } = opts;
 
   const slackConn = getConnection(job.owner_user_id, 'slack');
   if (!slackConn) {
@@ -77,7 +80,12 @@ export async function emitWaitingOwnerApproval(
     return {};
   }
 
-  const expiresAt = DateTime.now().plus({ hours: expiresInHours }).toUTC().toISO()!;
+  // v2.1.3 — rebase expiry off owner's work time. If the approval is
+  // raised at 20:00 (colleague replied late), we shouldn't burn the first
+  // N hours of the window while the owner's off-duty. When profile isn't
+  // passed, fall back to the legacy "from now" behavior so nothing breaks.
+  const base = profile ? workTimeBaseFromNow(profile) : new Date().toISOString();
+  const expiresAt = DateTime.fromISO(base).plus({ hours: expiresInHours }).toUTC().toISO()!;
   let approvalId: string | undefined;
   try {
     const { approval } = createApproval({

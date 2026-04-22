@@ -160,6 +160,10 @@ export function createApproval(input: CreateApprovalInput): { approval: Approval
   // v1.6.0 — schedule the expiry check as a first-class task instead of
   // relying on a background sweep. When the task fires, the runner's
   // 'approval_expiry' dispatcher will expire the approval and cascade.
+  // v2.1.3 — also schedule an approval_reminder at the halfway point of
+  // the expiry window. If the approval is still pending when it fires,
+  // Maelle DMs the owner a "still waiting" nag so an ignored approval
+  // doesn't die silently on brief scroll-past (scenario 11).
   if (input.expiresAt) {
     try {
       // Look up owner channel/thread from the parent task so the expiry DM
@@ -187,6 +191,34 @@ export function createApproval(input: CreateApprovalInput): { approval: Approval
           skill_ref: id,
           context: JSON.stringify({ approval_id: id, kind: input.kind }),
         });
+
+        // Halfway reminder. Skips if the resulting ISO is in the past
+        // (very short expiry windows — <60 s — don't get a reminder).
+        const createdMs = Date.now();
+        const expiresMs = Date.parse(input.expiresAt);
+        if (Number.isFinite(expiresMs) && expiresMs > createdMs + 60_000) {
+          const midMs = createdMs + Math.floor((expiresMs - createdMs) / 2);
+          const midIso = new Date(midMs).toISOString();
+          const reminderTaskId = `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          db.prepare(`
+            INSERT INTO tasks (
+              id, owner_user_id, owner_channel, owner_thread_ts,
+              type, status, title, due_at, skill_ref, context, who_requested, skill_origin
+            ) VALUES (
+              @id, @owner_user_id, @owner_channel, @owner_thread_ts,
+              'approval_reminder', 'new', @title, @due_at, @skill_ref, @context, 'system', 'tasks'
+            )
+          `).run({
+            id: reminderTaskId,
+            owner_user_id: input.ownerUserId,
+            owner_channel: parentTask.owner_channel,
+            owner_thread_ts: parentTask.owner_thread_ts ?? null,
+            title: `Approval reminder (${input.kind})`,
+            due_at: midIso,
+            skill_ref: id,
+            context: JSON.stringify({ approval_id: id, kind: input.kind, fires: 'midpoint' }),
+          });
+        }
       }
     } catch (err) {
       logger.warn('Failed to schedule approval_expiry task — approval still live but sweep-free expiry may not fire', {
@@ -256,6 +288,17 @@ export function setApprovalDecision(opts: {
     decision_json: opts.decision !== undefined ? JSON.stringify(opts.decision) : null,
     notes: opts.notes ?? null,
   });
+  // v2.1.3 — cancel the sibling reminder + expiry tasks so they don't fire
+  // after the approval is already resolved. Mirrors the coord-terminal
+  // cascade in updateCoordJob. Applies to every setApprovalDecision caller
+  // (coord + non-coord), not just the coord-linked ones.
+  db.prepare(`
+    UPDATE tasks
+    SET status = 'cancelled', updated_at = datetime('now')
+    WHERE type IN ('approval_expiry', 'approval_reminder')
+      AND skill_ref = @approval_id
+      AND status IN ('new','scheduled','in_progress','pending_owner')
+  `).run({ approval_id: opts.id });
   logger.info('setApprovalDecision', { id: opts.id, status: opts.status });
 }
 

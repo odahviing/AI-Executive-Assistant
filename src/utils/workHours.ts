@@ -79,6 +79,23 @@ export function addWorkdays(fromIso: string, n: number, profile: UserProfile): s
 }
 
 /**
+ * v2.1.3 — base timestamp for owner-workday expiry calculations.
+ * Returns NOW when the owner is currently within their work hours, else
+ * the ISO of the next work-time start.
+ *
+ * Why: when an approval is created at 20:00 (colleague asked late), the
+ * "2 workdays from now" expiry shouldn't count the 13 off-hours between
+ * creation and the next work morning. The counter should start when the
+ * owner is actually at work. Otherwise a 20:00 approval gets an expiry
+ * ~13 hours earlier in the workday than a 09:00 approval — silent bias.
+ */
+export function workTimeBaseFromNow(profile: UserProfile): string {
+  const now = DateTime.now().setZone(profile.user.timezone);
+  if (isWithinOwnerWorkHours(profile, now)) return now.toUTC().toISO()!;
+  return nextOwnerWorkdayStart(profile);
+}
+
+/**
  * Returns ISO of the next moment the owner is in work hours.
  * Walks forward day-by-day; for each candidate day, picks the relevant
  * hours_start. Caps at 14 days lookahead (defensive — should never hit).

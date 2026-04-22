@@ -2,6 +2,56 @@
 
 ---
 
+## 2.1.3 — approval reminder + work-time expiry base + scenario polish
+
+Bundle of scenario-driven fixes uncovered during the walkthrough round. Three real behavior changes + two small prompt tightenings.
+
+### Added — approval reminder at the halfway point
+
+New task type `approval_reminder` + dispatcher at `src/tasks/dispatchers/approvalReminder.ts`. When `createApproval` schedules the existing `approval_expiry` task at the window's end, it now ALSO schedules a reminder task at the midpoint. If the approval is still `pending` when the midpoint fires, Maelle DMs the owner a single short nag — *"Still waiting on your call on [subject]. Want to approve, decline, or should I close it? I'll auto-close if I don't hear back."* No-ops if already resolved.
+
+Why it exists: the morning brief surfaces pending approvals, but a passive list entry is easy to scroll past. A dedicated short DM at the midpoint is impossible to miss. Owner called this out in scenario 11 — *"brief is general update but if I'm ignoring an approval process, I should get reminded about it."*
+
+Cascade-cancel: both `setApprovalDecision` (every resolve path) and `updateCoordJob` terminal transitions now cancel BOTH `approval_expiry` and `approval_reminder` tasks so they don't fire on an already-answered approval.
+
+### Fixed — approval expiry now rebases off owner work time
+
+Previously `expiresAt = addWorkdays(now, 2)` counted from the creation timestamp. A colleague replying at 20:00 → approval created at 20:00 → expiry 2 workdays from 20:00 → owner loses ~13 off-hours of the window before he's even at work.
+
+New helper `workTimeBaseFromNow(profile)` in `src/utils/workHours.ts`: returns NOW if within work hours, else `nextOwnerWorkdayStart()`. Both the `create_approval` tool path (`tasks/skill.ts`) and the coord-path `emitWaitingOwnerApproval` now compute expiry from this base.
+
+Result: 20:00 approval → base = next morning work start → 2 workdays from that moment. The reminder's midpoint calculation sits on the same base (it's halfway between creation time and the rebased `expiresAt`). `emitWaitingOwnerApproval` signature grew an optional `profile` parameter — all 11 call sites in `coord/state.ts` + `coord/booking.ts` updated to pass it.
+
+### Fixed — explicit @-mentions override thread sweep
+
+`src/skills/meetings.ts` system prompt gains a **THREAD CONTEXT** rule covering meeting requests made from inside a Slack thread. Two shapes:
+- *"Let's meet about this"* with no names → invite thread participants (mentioned + replied).
+- *"With @Amazia and @Brett"* → invite literally those two, ignore everyone else on the thread.
+
+Explicit names override the thread-sweep. Addresses scenario 2.
+
+### Fixed — research refusal offers web-search fallback
+
+`src/core/orchestrator/systemPrompt.ts` colleague-path section gains a **RESEARCH REQUESTS** rule. When a non-owner asks for research, refuse the deep research skill (owner-gated) AND offer the light alternative in the same reply: *"The deeper research work is something [owner] drives — but if a quick web look is enough, I can do that. Want me to?"* Runs `web_search` / `web_extract` on consent. Addresses scenario 3.
+
+### Updated — [#30](https://github.com/odahviing/coding/pull) reframed
+
+Ticket body corrected per owner's clarification: proposed slots are NOT reservations, slots are open until explicitly chosen. The actual reservation window opens when a requester picks a specific slot AND needs to verify/confirm with their side. Reframed three-state model (offer → verification window → booked/released) with explicit design questions about triggers, TTL, and lock granularity.
+
+### Verified
+
+- `npm run typecheck` clean.
+- Scenario walkthroughs 9-11 work end-to-end with existing machinery + the new reminder.
+- 11 call sites of `emitWaitingOwnerApproval` updated consistently; the profile parameter is optional so back-compat is preserved for any unseen caller (none in the tree today).
+
+### Migration
+
+- No schema changes.
+- No profile changes required.
+- Existing pending approvals (created pre-2.1.3) keep their original expiry; only approvals created AFTER the restart use the work-time-rebased expiry + new halfway reminder.
+
+---
+
 ## 2.1.2 — social-layer fix (Maelle asks real social questions, not just the same one)
 
 Owner observation: *"still no social question, even once for the last 5 days with Maelle and we're talking all the time."* DB walk showed the literal count was non-zero — Maelle had initiated six times over 10 days — but four of those six were re-asks of the same "clair obscur axons progress" topic, with a note in her own interaction log reading *"fourth time asking, still don't have his answer."* Two failure modes compounded: the stale-topic threshold was too lax, and the "no fresh topics" fallback was too soft to actually trigger in a task-heavy conversation.

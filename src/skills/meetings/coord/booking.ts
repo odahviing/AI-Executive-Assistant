@@ -210,6 +210,7 @@ export async function bookCoordination(
       const participantsParsed = JSON.parse(job.participants) as CoordParticipant[];
       await emitWaitingOwnerApproval({
         job,
+        profile,
         kind: 'calendar_conflict',
         payload: {
           coord_job_id: job.id,
@@ -233,6 +234,7 @@ export async function bookCoordination(
   if (notesObj.needsDurationApproval) {
     await emitWaitingOwnerApproval({
       job,
+      profile,
       kind: 'duration_override',
       payload: {
         coord_job_id: job.id,
@@ -294,6 +296,7 @@ export async function bookCoordination(
     try {
       await emitWaitingOwnerApproval({
         job,
+        profile,
         kind: 'freeform',
         payload: {
           coord_job_id: job.id,

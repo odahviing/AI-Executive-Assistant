@@ -28,6 +28,7 @@ export type TaskType =
   | 'coord_nudge'        // 24-work-hour nudge to non-responders
   | 'coord_abandon'      // +4h after nudge, close coord if still stuck
   | 'approval_expiry'    // approval expires_at
+  | 'approval_reminder'  // v2.1.3 — halfway-point nag for an unresolved approval
   | 'calendar_fix'       // re-check a calendar issue marked to_resolve
   // v1.7.2 — Summary skill action-item follow-ups. At due_at the dispatcher
   // DMs the assignee asking for a status update; the reply flows back to the

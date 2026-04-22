@@ -341,12 +341,13 @@ export function updateCoordJob(id: string, updates: Partial<Omit<CoordJob, 'id' 
           external_event_id: (updates as any).external_event_id ?? null,
         }),
       });
-      // Also cancel the approval_expiry follow-up task so it doesn't re-fire
-      // and DM the owner "you never got back to me" after the thing is done.
+      // Also cancel the approval_expiry + approval_reminder follow-up tasks
+      // so they don't re-fire after the thing is done (v2.1.3 adds the
+      // halfway-point reminder — same cascade-cancel logic applies).
       db.prepare(`
         UPDATE tasks
         SET status = 'cancelled', updated_at = datetime('now')
-        WHERE type = 'approval_expiry'
+        WHERE type IN ('approval_expiry', 'approval_reminder')
           AND skill_ref = @approval_id
           AND status IN ('new','scheduled','in_progress','pending_owner')
       `).run({ approval_id: a.id });

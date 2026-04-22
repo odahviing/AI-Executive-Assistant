@@ -513,6 +513,7 @@ export async function resolveCoordination(
         : `I couldn't find a time for "${job.subject}" that works for everyone. Want me to try different options?`;
     await emitWaitingOwnerApproval({
       job,
+      profile,
       kind: 'freeform',
       payload: { subject: job.subject, question: 'retry_with_new_slots', no_responders: finalNoResponders.map(p => p.name) },
       askText,
@@ -526,6 +527,7 @@ export async function resolveCoordination(
     const participantsParsed = JSON.parse(job.participants) as CoordParticipant[];
     await emitWaitingOwnerApproval({
       job,
+      profile,
       kind: 'slot_pick',
       payload: {
         coord_job_id: job.id,
@@ -592,6 +594,7 @@ async function tryNextPingPongSlot(
     } else {
       await emitWaitingOwnerApproval({
         job,
+        profile,
         kind: 'freeform',
         payload: { coord_job_id: job.id, subject: job.subject, question: 'no_slot_found_try_new_options' },
         askText: `I couldn't find a time that works for everyone on "${job.subject}". Want me to try different options?`,
@@ -747,6 +750,7 @@ export async function triggerRoundTwo(
     const names = preferenceGivers.map(p => p.name).join(' and ');
     await emitWaitingOwnerApproval({
       job,
+      profile,
       kind: 'freeform',
       payload: { coord_job_id: job.id, subject: job.subject, question: 'conflicting_preferences', names },
       askText: `I couldn't find overlapping availability for "${job.subject}" — ${names} have conflicting time preferences. Want to handle this differently?`,
@@ -781,6 +785,7 @@ export async function triggerRoundTwo(
   if (newSlots.length === 0) {
     await emitWaitingOwnerApproval({
       job,
+      profile,
       kind: 'freeform',
       payload: { coord_job_id: job.id, subject: job.subject, question: 'no_slots_within_preferences' },
       askText: `No available slots found for "${job.subject}" within the preferences given. Want me to try different times?`,

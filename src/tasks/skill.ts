@@ -626,12 +626,19 @@ Binding — how to pick the right approval_id:
         // escape hatch for sub-workday precision.
         let expiresAt: string;
         if (typeof args.expires_in_hours === 'number') {
+          // Explicit hour window — use as-is. Owner said "must decide in N
+          // calendar hours", we respect the urgency.
           expiresAt = DateTime.now().plus({ hours: args.expires_in_hours }).toUTC().toISO()!;
         } else {
+          // v2.1.3 — workday-based expiry counts from owner WORK TIME, not
+          // from the creation timestamp. A 20:00 approval (colleague asked
+          // late) shouldn't silently lose 13 hours of window because the
+          // owner is off-duty; the 2-workday clock starts tomorrow morning.
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { addWorkdays } = require('../utils/workHours') as typeof import('../utils/workHours');
+          const { addWorkdays, workTimeBaseFromNow } = require('../utils/workHours') as typeof import('../utils/workHours');
           const n = typeof args.expires_in_workdays === 'number' ? args.expires_in_workdays : 2;
-          expiresAt = addWorkdays(DateTime.now().toUTC().toISO()!, n, profile);
+          const base = workTimeBaseFromNow(profile);
+          expiresAt = addWorkdays(base, n, profile);
         }
 
         // v2.0.7 — task_id now optional. If omitted, auto-create a follow_up
