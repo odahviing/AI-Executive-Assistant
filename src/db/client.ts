@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { config } from '../config';
 import logger from '../utils/logger';
+import { runV207ConsolidateRequests } from './migrations/v2_0_7_consolidate_requests';
 
 let db: Database.Database;
 
@@ -15,6 +16,14 @@ export function getDb(): Database.Database {
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     initSchema(db);
+    // v2.0.7 — one-shot migration: back up + drop pending_requests + approval_queue.
+    // Runs AFTER initSchema so new installs (that never had the tables) don't
+    // create-then-drop; existing installs back up first, then drop. Idempotent.
+    try {
+      runV207ConsolidateRequests(db, config.DB_PATH);
+    } catch (err) {
+      logger.error('v2.0.7 consolidate-requests migration threw — continuing', { err: String(err) });
+    }
     logger.info('Database initialized', { path: config.DB_PATH });
   }
   return db;
@@ -22,36 +31,10 @@ export function getDb(): Database.Database {
 
 function initSchema(db: Database.Database): void {
   db.exec(`
-    -- Pending scheduling requests being negotiated
-    CREATE TABLE IF NOT EXISTS pending_requests (
-      id          TEXT PRIMARY KEY,
-      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-      status      TEXT NOT NULL DEFAULT 'open',   -- open | approved | rejected | completed | expired
-      source      TEXT NOT NULL,                  -- slack | email
-      thread_ts   TEXT,                           -- Slack thread timestamp
-      channel_id  TEXT,                           -- Slack channel
-      requester   TEXT NOT NULL,                  -- name or email of who requested
-      subject     TEXT NOT NULL,                  -- meeting title / topic
-      participants TEXT NOT NULL,                 -- JSON array of emails
-      priority    TEXT NOT NULL DEFAULT 'medium', -- highest | high | medium | low
-      duration_min INTEGER NOT NULL DEFAULT 40,
-      preferred_slots TEXT,                       -- JSON array of ISO datetime strings
-      proposed_slot TEXT,                         -- ISO datetime Maelle proposed
-      notes       TEXT                            -- any extra context
-    );
-
-    -- Actions requiring the user's approval before execution
-    CREATE TABLE IF NOT EXISTS approval_queue (
-      id          TEXT PRIMARY KEY,
-      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-      resolved_at TEXT,
-      status      TEXT NOT NULL DEFAULT 'pending', -- pending | approved | rejected
-      action_type TEXT NOT NULL,                   -- create_meeting | reschedule | cancel | send_email
-      payload     TEXT NOT NULL,                   -- JSON blob of action details
-      reason      TEXT NOT NULL,                   -- why approval is needed
-      slack_msg_ts TEXT                            -- message TS so we can update it
-    );
+    -- v2.0.7: pending_requests + approval_queue retired. Their roles were
+    -- consolidated into the approvals table (create_approval tool). The
+    -- migration step right after initSchema drops the legacy tables if they
+    -- still exist on an upgraded install; we do NOT re-create them here.
 
     -- Conversation context per Slack thread
     CREATE TABLE IF NOT EXISTS conversation_threads (

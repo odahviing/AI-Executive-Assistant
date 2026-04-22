@@ -2,7 +2,7 @@ import { DateTime } from 'luxon';
 import { completeTask, createTask, updateTask } from '../index';
 import { getDb, updateOutreachJob } from '../../db';
 import { calcResponseDeadline } from '../../connectors/slack/coordinator';
-import { isWithinOwnerWorkHours, nextOwnerWorkdayStart } from '../../utils/workHours';
+import { isWithinOwnerWorkHours, nextOwnerWorkdayStart, addWorkdays } from '../../utils/workHours';
 import { getConnection } from '../../connections/registry';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
@@ -131,6 +131,37 @@ export const dispatchOutreachExpiry: TaskDispatcher = async (_app, task, profile
     `${job.colleague_name} hasn't replied, I followed up once (${timeCtx}). Want me to try again or leave it?`,
     { threadTs: job.owner_thread_ts ?? undefined },
   );
+
+  // v2.0.7 — schedule the owner-silence tombstone. If the owner doesn't
+  // reply to the "try again or leave it?" DM within 2 owner-workdays, the
+  // outreach_decision dispatcher will auto-close the job (done) with a
+  // shadow DM so it stops re-surfacing in the morning brief. Workday math
+  // skips Friday/Saturday — asking on Thursday 12:00 fires Monday 12:00,
+  // asking on Saturday 12:00 fires Tuesday 12:00.
+  try {
+    const decisionDueAt = addWorkdays(DateTime.now().toUTC().toISO()!, 2, profile);
+    createTask({
+      owner_user_id: job.owner_user_id,
+      owner_channel: job.owner_channel,
+      owner_thread_ts: job.owner_thread_ts,
+      type: 'outreach_decision',
+      status: 'new',
+      title: `Auto-close ${job.colleague_name}'s stuck outreach if still silent`,
+      due_at: decisionDueAt,
+      skill_ref: job.id,
+      context: JSON.stringify({ outreach_id: job.id, reason: 'no_response_timeout_2_workdays' }),
+      who_requested: 'system',
+      skill_origin: 'outreach',
+    });
+    logger.info('outreach_expiry — scheduled outreach_decision tombstone', {
+      outreachId: job.id, colleague: job.colleague_name, decisionDueAt,
+    });
+  } catch (err) {
+    logger.warn('outreach_expiry — failed to schedule outreach_decision, non-fatal', {
+      err: String(err), outreachId: job.id,
+    });
+  }
+
   completeTask(task.id);
   logger.info('outreach_expiry — marked no_response', {
     taskId: task.id,

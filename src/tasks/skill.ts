@@ -28,11 +28,6 @@ import {
   type ApprovalKind,
 } from '../db/approvals';
 import { resolveApproval, type ResolveDecision } from '../core/approvals/resolver';
-import {
-  createPendingRequest,
-  resolvePendingRequest,
-  enqueueApproval,
-} from '../db/requests';
 import { getDb as _getDb } from '../db/client';
 import { sendMorningBriefing } from './briefs';
 import { DateTime } from 'luxon';
@@ -187,27 +182,32 @@ This sends the full AI-generated briefing as a fresh top-level DM, bypassing the
       // question for a decision; create_approval so the ask is tracked.
       {
         name: 'create_approval',
-        description: `Ask the owner for a structured decision. ALWAYS use this when you need the owner to decide something instead of just DMing them a question. Every approval is attached to a parent task.
+        description: `Ask the owner for a decision. ALWAYS use this when you need the owner to decide something instead of just DMing them a question. The owner is the only one who can bypass scheduling rules — colleagues asking for something that breaks the rules MUST go through this tool. Maelle never overrides on her own.
+
+AUTHORITY MODEL:
+- If the owner tells Maelle directly to do something (even when it breaks a rule), that IS the approval — just do it, no approval needed. "Book Yael at 15:00 tomorrow even though it's during my focus block" = owner explicitly overriding, proceed.
+- If a colleague asks for something that breaks a rule or needs an owner-only judgment, create_approval — the owner must decide. The colleague cannot bypass rules on their own.
 
 Kinds:
 - slot_pick: pick one of N offered meeting slots. Payload: { coord_job_id, subject, slots: [{iso, label}], participants_emails, duration_min }. Resolving calls through to the booking flow automatically.
 - duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
-- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch). Payload: { rule, context }.
+- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting). Payload: { rule, context }.
 - lunch_bump: move the owner's lunch block. Payload: { from, to, reason }.
 - unknown_person: book with someone we don't have full contact info for. Payload: { name, known_fields, missing_fields }.
 - calendar_conflict: the chosen slot went stale — offer fresh options. Payload: { coord_job_id, original_slot, conflict_reason, slots: [...] }.
-- freeform: catch-all yes/no/amend question. Payload: { question, context }.
+- freeform: catch-all yes/no/amend question. Payload: { question, context }. Use for colleague asks that don't fit the structured kinds (e.g. "Yael wants you to free up the 15:00 slot").
 
 Behavior:
-- Creating the same (task_id, kind, payload) twice returns the existing pending approval — safe to retry.
-- The approval lands on the owner with an expiry (default 24 working hours). When it expires, the parent task cancels.
-- The owner's free-text reply is interpreted by you. Call resolve_approval with the right verdict.`,
+- DMs the owner immediately with ask_text. Idempotent on (task_id, kind, payload) — safe to retry.
+- Default expiry is 2 owner-workdays (Fri/Sat skipped for this profile). Owner-silent past expiry → parent task cancels + owner gets a tombstone DM.
+- When approval has a colleague-originated context, include requester_slack_id in the payload so the resolver can DM the requester back with the owner's decision. No requester_slack_id = nothing to close back to (owner-internal approval).
+- The owner's free-text reply is interpreted by you on the owner's next turn. Call resolve_approval with the right verdict.`,
         input_schema: {
           type: 'object',
           properties: {
             task_id: {
               type: 'string',
-              description: 'Parent task ID. REQUIRED. If no task exists yet, create one first with create_task (type reminder or follow_up) and pass its id here.',
+              description: 'Optional. Parent task ID if you already created one. If omitted, a follow_up task is auto-created with a title derived from the payload — saves you a create_task call.',
             },
             kind: {
               type: 'string',
@@ -215,7 +215,7 @@ Behavior:
             },
             payload: {
               type: 'object',
-              description: 'Kind-specific payload (see tool description). Free-form JSON; the resolver validates per kind.',
+              description: 'Kind-specific payload (see tool description). Free-form JSON; the resolver validates per kind. For colleague-initiated asks include requester_slack_id + requester_name so the resolver can DM them the outcome.',
             },
             skill_ref: {
               type: 'string',
@@ -223,14 +223,18 @@ Behavior:
             },
             ask_text: {
               type: 'string',
-              description: 'The exact text to DM the owner as the approval ask. Make it warm, specific, include the decision to make. The owner sees this; include an approval token like "#appr_xyz" so you can bind their reply — the system will append one automatically if you omit it.',
+              description: 'The exact text to DM the owner as the approval ask. Make it warm, specific, include the decision to make. The owner sees this verbatim.',
+            },
+            expires_in_workdays: {
+              type: 'number',
+              description: 'Owner-workdays until this approval expires. Default 2. Counter only advances on the owner\'s office/home days — Fri/Sat do not count (so an ask on Thursday expires Monday, an ask on Saturday expires Tuesday). Use 1 for same-day urgency, 3+ for low-urgency.',
             },
             expires_in_hours: {
               type: 'number',
-              description: 'Hours from now until this approval expires. Default 24. Use 2 for urgent (same-day booking), 48 for low-urgency.',
+              description: 'Optional escape hatch for sub-workday precision ("this has to be decided in the next 2 hours"). If set, overrides expires_in_workdays.',
             },
           },
-          required: ['task_id', 'kind', 'payload', 'ask_text'],
+          required: ['kind', 'payload', 'ask_text'],
         },
       },
       {
@@ -272,56 +276,15 @@ Binding — how to pick the right approval_id:
         description: 'List approvals currently waiting on the owner. Use when the owner asks "what are you waiting on me for" or when you need to disambiguate which approval a reply is answering.',
         input_schema: { type: 'object', properties: {}, required: [] },
       },
-      // ── Structured requests (v1.6.0 — moved here from SchedulingSkill) ───
-      // Captures "a colleague asked for something, flag it for the owner"
-      // shape. Not a full approval (no decision binding), just a record of
-      // a request that needs the owner's attention.
-      {
-        name: 'store_request',
-        description: `Save a request to follow up on later. Call this whenever you tell a colleague "I'll flag this for ${_profile.user.name.split(' ')[0]}" or "I'll pass that along" — only say you've flagged something if this tool was actually called. For scheduling asks, this captures the context; for non-scheduling asks, this is the handoff to the owner's review queue.`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            requester: { type: 'string' },
-            subject: { type: 'string' },
-            participants: { type: 'array', items: { type: 'string' } },
-            priority: { type: 'string', enum: ['highest', 'high', 'medium', 'low'] },
-            duration_min: { type: 'number', enum: [10, 25, 40, 55] },
-            notes: { type: 'string' },
-          },
-          required: ['requester', 'subject', 'participants', 'priority', 'duration_min'],
-        },
-      },
-      {
-        name: 'get_pending_requests',
-        description: 'Retrieve all open structured requests that were flagged for the owner via store_request.',
-        input_schema: { type: 'object', properties: {}, required: [] },
-      },
-      {
-        name: 'resolve_request',
-        description: 'Mark a pending request as resolved or cancelled. Call this BEFORE telling the user you cleared/removed/resolved something — never claim it happened without calling this first.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            request_id: { type: 'string' },
-            resolution: { type: 'string', enum: ['resolved', 'cancelled'] },
-          },
-          required: ['request_id', 'resolution'],
-        },
-      },
-      {
-        name: 'escalate_to_user',
-        description: "Flag an action for the owner's approval via the approval_queue. Use when rules would be broken, protected meetings are affected, or judgment is required — for structured slot_pick / duration_override decisions prefer create_approval instead.",
-        input_schema: {
-          type: 'object',
-          properties: {
-            action_type: { type: 'string', enum: ['reschedule', 'cancel', 'rule_exception', 'unclear_priority', 'other'] },
-            summary: { type: 'string' },
-            payload: { type: 'object', additionalProperties: true },
-          },
-          required: ['action_type', 'summary', 'payload'],
-        },
-      },
+      // v2.0.7 — store_request / get_pending_requests / resolve_request /
+      // escalate_to_user retired. All three paths ("colleague asked something
+      // that needs owner input", "I'd like to break a rule, is that ok?",
+      // "flag this for later") now go through create_approval. The old
+      // store_request was a silent write-only bucket — the owner only found
+      // out via the next morning brief, which is why Yael's "free the 15:00
+      // slot" ask sat invisible for a day. create_approval always DMs the
+      // owner immediately (via sendDirect), has a real expiry, and the
+      // owner's reply binds deterministically through the resolver.
     ];
   }
 
@@ -560,31 +523,14 @@ Binding — how to pick the right approval_id:
           };
         });
 
-        // Open colleague requests (store_request)
-        // Also suppressed when filtering by person (request rows don't carry a slack_id reliably)
-        const colleagueRequests = withPerson ? [] : (() => {
-          try {
-            const rows = db.prepare(
-              `SELECT id, requester, subject, priority, created_at, notes
-               FROM pending_requests WHERE status = 'open' ORDER BY created_at DESC`
-            ).all() as any[];
-            return rows.map(r => ({
-              request_id: r.id,
-              requester: r.requester,
-              subject: r.subject,
-              priority: r.priority,
-              created_at: r.created_at,
-              notes: r.notes ?? null,
-            }));
-          } catch (_) {
-            return [];
-          }
-        })();
-
+        // v2.0.7 — pending_requests retired; its contents now flow through
+        // the approvals table (see store_request removal in this file). No
+        // separate colleague_requests bucket — every colleague-initiated ask
+        // needing owner input is a `create_approval` row.
         const formatted = formatTasksForUser(tasks);
         const totalOpen =
           pendingOwner.length + waitingOnOthers.length + active.length + recentlyDone.length +
-          pendingApprovals.length + colleagueRequests.length;
+          pendingApprovals.length;
 
         return {
           summary: {
@@ -593,11 +539,9 @@ Binding — how to pick the right approval_id:
             waiting_on_others_count: waitingOnOthers.length,
             active_count: active.length,
             recently_done_count: recentlyDone.length,
-            colleague_requests_count: colleagueRequests.length,
           },
           pending_your_input: pendingOwner,
           pending_approvals: pendingApprovals,
-          colleague_requests: colleagueRequests,
           waiting_on_others: waitingOnOthers,
           active_tasks: active,
           recently_done: recentlyDone,
@@ -663,64 +607,120 @@ Binding — how to pick the right approval_id:
         }
       }
 
-      // ── Approvals (v1.5) ───────────────────────────────────────────────────
+      // ── Approvals (v1.5, rewritten in v2.0.7) ──────────────────────────────
       case 'create_approval': {
-        // Owner-only by semantics (approvals are things the OWNER decides).
-        // A colleague calling this is nearly always an injection attempt or LLM
-        // misuse — hard-block them.
-        if (context.senderRole !== 'owner') {
-          logger.warn('Colleague attempted create_approval — blocked', { userId: context.userId });
-          return { error: 'not_permitted', reason: 'Only the owner can create approvals.' };
-        }
-        const taskId = args.task_id as string;
+        // v2.0.7 — owner-only guard removed. Approvals are Maelle's decision
+        // (not the caller's); the DM always lands in the owner's DM channel
+        // via sendDirect regardless of where the tool was invoked from. That
+        // means colleague-path Sonnet can legitimately create an approval
+        // when a colleague asks for something needing owner input (Yael's
+        // slot-bump ask). resolve_approval still guards owner-only.
         const kind = args.kind as ApprovalKind;
         const payload = (args.payload as Record<string, unknown>) ?? {};
         const askText = args.ask_text as string;
-        const expiresInHours = typeof args.expires_in_hours === 'number' ? args.expires_in_hours : 24;
 
-        const parentTask = getTask(taskId);
-        if (!parentTask) {
-          return { error: 'task_not_found', reason: `Task ${taskId} not found. Create a parent task first (create_task).` };
+        // v2.0.7 — expiry in owner-workdays by default. Fri/Sat don't count
+        // so an approval asked Thursday 16:00 expires Monday 16:00, not
+        // Saturday; one asked Saturday 10:00 expires Tuesday 10:00 (counter
+        // starts Sunday). Legacy `expires_in_hours` still honored as an
+        // escape hatch for sub-workday precision.
+        let expiresAt: string;
+        if (typeof args.expires_in_hours === 'number') {
+          expiresAt = DateTime.now().plus({ hours: args.expires_in_hours }).toUTC().toISO()!;
+        } else {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { addWorkdays } = require('../utils/workHours') as typeof import('../utils/workHours');
+          const n = typeof args.expires_in_workdays === 'number' ? args.expires_in_workdays : 2;
+          expiresAt = addWorkdays(DateTime.now().toUTC().toISO()!, n, profile);
         }
 
-        const expiresAt = DateTime.now().plus({ hours: expiresInHours }).toUTC().toISO()!;
+        // v2.0.7 — task_id now optional. If omitted, auto-create a follow_up
+        // task with a title derived from the payload. This cuts Sonnet's
+        // two-call pattern (create_task + create_approval) to one, which was
+        // the friction that made her fall back to the retired store_request
+        // bucket whenever a colleague asked for something.
+        let taskId = (args.task_id as string | undefined) ?? '';
+        let parentTask = taskId ? getTask(taskId) : null;
+        if (!parentTask) {
+          const derivedTitle =
+            (typeof payload.subject === 'string' && payload.subject) ||
+            (typeof payload.question === 'string' && payload.question.slice(0, 80)) ||
+            `${kind.replace(/_/g, ' ')} needs your input`;
+          const requesterName =
+            (typeof payload.requester_name === 'string' && payload.requester_name) || null;
+          const autoTitle = requesterName
+            ? `${requesterName} asked: ${derivedTitle} — needs your input`
+            : `${derivedTitle} — needs your input`;
+          taskId = createTask({
+            owner_user_id: ownerUserId,
+            owner_channel: channelId,
+            owner_thread_ts: threadTs,
+            type: 'follow_up',
+            status: 'new',
+            title: autoTitle,
+            description: askText,
+            due_at: expiresAt,
+            context: JSON.stringify({
+              auto_created_by: 'create_approval',
+              kind,
+              requester_slack_id: payload.requester_slack_id ?? null,
+              requester_name: requesterName,
+            }),
+            who_requested: context.userId,
+            skill_origin: 'tasks',
+          });
+          parentTask = getTask(taskId);
+          if (!parentTask) {
+            return { error: 'task_autocreate_failed', reason: `Auto-created task ${taskId} could not be read back.` };
+          }
+          logger.info('create_approval — auto-created parent task', {
+            taskId, kind, requesterName,
+          });
+        }
+
+        // v2.0.7 — approvals always DM the owner. When triggered from a
+        // colleague DM, parentTask.owner_channel points at the colleague's
+        // channel — wrong destination. Resolve via sendDirect(ownerId) instead,
+        // which the SlackConnection maps to the owner's actual DM channel.
+        // We still persist owner_channel on the approval row AFTER the DM
+        // completes so approval-in-system-prompt binding works from any
+        // subsequent owner turn.
         const { approval, created } = createApproval({
           taskId,
           ownerUserId,
           kind,
           payload,
           skillRef: (args.skill_ref as string | undefined) ?? undefined,
-          slackChannel: parentTask.owner_channel,
-          slackThreadTs: parentTask.owner_thread_ts ?? undefined,
+          // Deliberately NOT passing slackChannel here — we'll stamp it after
+          // the DM lands so the recorded channel is the owner's real DM, not
+          // whatever channel the parent task was created in.
           expiresAt,
         });
 
-        // Send the DM ask to the owner. v1.6.2 — no visible "_ref: #appr_..._"
-        // token appended; colleagues-and-owner were seeing internal plumbing in
-        // every approval DM, which broke the human-EA illusion. The orchestrator
-        // binds the owner's free-text reply to the right approval via the
-        // PENDING APPROVALS block injected into the system prompt (subject +
-        // timing + thread — enough context). The #appr_<id> token still exists
-        // as an optional explicit reference Sonnet MAY use internally, but it
-        // is never rendered to the user.
         if (created) {
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
             const conn = getConnection(profile.user.slack_user_id, 'slack');
             if (conn) {
-              const res = await conn.postToChannel(
-                parentTask.owner_channel,
-                askText,
-                { threadTs: parentTask.owner_thread_ts ?? undefined },
-              );
-              if (res.ok && res.ts) {
-                // Record message ts on the approval for future in-place edits / threading
+              const res = await conn.sendDirect(profile.user.slack_user_id, askText);
+              if (res.ok) {
+                // Record the owner's DM channel + message ts on the approval
+                // row so the resolver + system-prompt binding see the correct
+                // conversation surface.
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const { getDb } = require('../db/client') as typeof import('../db/client');
                 getDb().prepare(
-                  `UPDATE approvals SET slack_msg_ts = ?, updated_at = datetime('now') WHERE id = ?`
-                ).run(res.ts, approval.id);
+                  `UPDATE approvals
+                      SET slack_channel = COALESCE(?, slack_channel),
+                          slack_msg_ts  = COALESCE(?, slack_msg_ts),
+                          updated_at    = datetime('now')
+                    WHERE id = ?`
+                ).run(res.ref ?? null, res.ts ?? null, approval.id);
+              } else {
+                logger.error('create_approval — sendDirect to owner failed', {
+                  approvalId: approval.id, reason: res.reason, detail: res.detail,
+                });
               }
             } else {
               logger.warn('create_approval — no Slack connection registered', { approvalId: approval.id });
@@ -795,61 +795,8 @@ Binding — how to pick the right approval_id:
         };
       }
 
-      // ── Structured requests (v1.6.0) ────────────────────────────────────
-      case 'store_request': {
-        const requestId = createPendingRequest({
-          source: context.channel,
-          thread_ts: context.threadTs,
-          channel_id: context.channelId,
-          requester: args.requester as string,
-          subject: args.subject as string,
-          participants: args.participants as string[],
-          priority: args.priority as string,
-          duration_min: args.duration_min as number,
-          notes: args.notes as string | undefined,
-          status: 'open',
-        });
-        logger.info('store_request saved', {
-          requestId,
-          requester: args.requester,
-          subject: args.subject,
-          priority: args.priority,
-          skill_origin: 'tasks',
-        });
-        return { saved: true, requestId };
-      }
-
-      case 'get_pending_requests': {
-        return _getDb().prepare(
-          `SELECT * FROM pending_requests WHERE status = 'open' ORDER BY created_at DESC`
-        ).all();
-      }
-
-      case 'resolve_request': {
-        const ok = resolvePendingRequest(args.request_id as string, args.resolution as 'resolved' | 'cancelled');
-        logger.info('resolve_request called', {
-          requestId: args.request_id,
-          resolution: args.resolution,
-          ok,
-        });
-        return ok
-          ? { success: true, request_id: args.request_id, status: args.resolution }
-          : { success: false, error: 'Request not found or already closed' };
-      }
-
-      case 'escalate_to_user': {
-        const id = enqueueApproval({
-          action_type: args.action_type as string,
-          payload: args.payload as Record<string, unknown>,
-          reason: args.summary as string,
-          slack_msg_ts: context.threadTs,
-        });
-        logger.info('escalate_to_user queued', {
-          approvalId: id,
-          action_type: args.action_type,
-        });
-        return { queued: true, approvalId: id, requiresApproval: true };
-      }
+      // v2.0.7 — store_request / get_pending_requests / resolve_request /
+      // escalate_to_user retired; see tool-declaration comment above.
 
       default:
         return null;

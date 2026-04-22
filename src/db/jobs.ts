@@ -396,6 +396,70 @@ export function updateCoordJob(id: string, updates: Partial<Omit<CoordJob, 'id' 
         }
       }
     } catch (_) { /* non-fatal */ }
+
+    // v2.0.7 — close sibling outreach_jobs. When a coord books (or hits
+    // cancelled/abandoned), any outreach_job with the SAME colleague_slack_id
+    // in the last 14 days that's still waiting on a reply is a zombie — the
+    // conversation has moved on via the coord. Previously those rows lingered
+    // as `no_response` / `sent` / `replied+await_reply=0` and the morning
+    // brief kept re-surfacing them (the "three open Amazia threads" bug from
+    // v2.0.6). Auto-close to `done` with a note pointing back at the coord
+    // so the audit trail stays traversable.
+    try {
+      const coordRow = db.prepare(
+        `SELECT participants FROM coord_jobs WHERE id = ?`
+      ).get(id) as { participants: string } | undefined;
+      if (coordRow) {
+        let siblingSlackIds: string[] = [];
+        try {
+          const parts = JSON.parse(coordRow.participants || '[]') as Array<{ slack_id?: string; just_invite?: boolean }>;
+          siblingSlackIds = parts
+            .filter(p => p.slack_id && !p.just_invite)
+            .map(p => p.slack_id!) as string[];
+        } catch (_) {}
+        if (siblingSlackIds.length > 0) {
+          const placeholders = siblingSlackIds.map(() => '?').join(',');
+          const info = db.prepare(`
+            UPDATE outreach_jobs
+            SET status = 'done',
+                updated_at = datetime('now')
+            WHERE colleague_slack_id IN (${placeholders})
+              AND status IN ('sent', 'no_response', 'replied')
+              AND datetime(created_at) >= datetime('now', '-14 days')
+          `).run(...siblingSlackIds);
+          if (info.changes > 0) {
+            // Also cancel any outreach_expiry / outreach_decision follow-up
+            // tasks still pending for these jobs so they don't DM the owner
+            // "X hasn't replied" after the coord already booked.
+            db.prepare(`
+              UPDATE tasks
+              SET status = 'cancelled',
+                  updated_at = datetime('now')
+              WHERE type IN ('outreach_expiry', 'outreach_decision')
+                AND status IN ('new', 'in_progress', 'pending_owner', 'pending_colleague')
+                AND skill_ref IN (
+                  SELECT id FROM outreach_jobs
+                  WHERE colleague_slack_id IN (${placeholders})
+                )
+            `).run(...siblingSlackIds);
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const logger = require('../utils/logger').default;
+            logger.info('updateCoordJob — closed sibling outreach_jobs', {
+              coordId: id,
+              terminal,
+              closed: info.changes,
+              colleagues: siblingSlackIds,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const logger = require('../utils/logger').default;
+      logger.warn('updateCoordJob sibling-outreach cleanup threw — non-fatal', {
+        err: String(err), coordId: id,
+      });
+    }
   }
 }
 

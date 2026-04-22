@@ -2,6 +2,59 @@
 
 ---
 
+## 2.0.7 — silence-gap close + one approval path + orphan kill at source + dead-code sweep
+
+Addresses the bug wave around the April 22 brief: Yael asked for a slot-bump, Maelle silently stored it to `pending_requests`, owner never heard. Michal DM'd about a bank visit, Maelle replied, owner never heard. Amazia "three open threads" turned out to be two zombie outreach rows + one correct booking. Three root causes this release: inbound colleague path never shadow-notified, three overlapping tools (store_request / escalate_to_user / create_approval) with the owner-facing one blocked in the colleague path, and coord-booked outreach never cleaned up its siblings.
+
+### Fixed — the silence gap
+
+- Every inbound colleague DM Maelle replies to now fires one shadow-DM line into the owner's DM: who messaged, what she said, which tools fired. Gated on the existing `v1_shadow_mode` yaml toggle — no new flag. Skipped when the turn raised an approval (the approval DM already reaches the owner). Closes the "I didn't hear about Michal talking to you" gap.
+- `create_approval` no longer blocked when Sonnet is on the colleague path. The old guard `senderRole !== 'owner'` forced Sonnet into the dead-end `store_request` bucket whenever a colleague asked for something that needed owner input. Guard removed; approvals always `sendDirect(ownerId)` so the DM never lands in the colleague's channel regardless of where the tool was called from. `resolve_approval` stays owner-only.
+
+### Changed — one path for "needs the owner's input"
+
+- `store_request`, `get_pending_requests`, `resolve_request`, `escalate_to_user` retired. Three tools + a dead table (`approval_queue`) all overlapped with the v1.5 `create_approval` / `approvals` flow. Collapsed into the single approval path — fewer tools for Sonnet to choose wrongly between, one place to maintain. Removed from both `tasks/skill.ts` and `skills/meetings/ops.ts`.
+- Legacy tables dropped with backup. One-shot migration (`src/db/migrations/v2_0_7_consolidate_requests.ts`) dumps `pending_requests` + `approval_queue` rows to `data/migrations/v2_0_7_legacy_requests_<ts>.json` on next startup, then DROPs both. Idempotent. `db/requests.ts` deleted entirely.
+- Legacy "approve appr_xxx" / "reject appr_xxx" command parser in `connectors/slack/app.ts` retired — it wrote to the dropped `approval_queue`. Today's approvals resolve via `resolve_approval` + Sonnet's free-text binding.
+- `create_approval` rewritten to be Sonnet-friendly (it's effectively a new tool):
+  - `task_id` is now optional. If omitted, a `follow_up` task is auto-created with a title derived from the payload (requester name + subject). Cuts Sonnet's two-call pattern to one; the friction that made her reach for `store_request` is gone.
+  - Expiry defaults to `expires_in_workdays: 2` using the new `addWorkdays` helper. Counter only advances on the owner's office/home days — Fri/Sat skipped for this profile, so an ask on Thursday expires Monday, an ask on Saturday expires Tuesday (counter starts Sunday). `expires_in_hours` still accepted as a sub-workday escape hatch.
+  - Tool description now explicitly spells out the authority model: owner direct override IS the approval (no create_approval needed when the owner tells Maelle to just do it); colleagues asking for a rule break MUST go through create_approval — they can't bypass rules on their own.
+- `resolver.ts` now closes the requester loop. When an approval carries `requester_slack_id` + `requester_name` in its payload (colleague-initiated ask), the resolver DMs the requester on `approve` / `reject` / `amend` with a templated owner-voiced note. Slot_pick / calendar_conflict skip this — they already use `coord_jobs.requesters` for the same job. Prevents the "owner decided but Yael never heard back" failure.
+- System-prompt + tool-description callouts updated: `systemPrompt.ts` RULE 2d + RULE 3, the colleague-path OUT-OF-SCOPE rule, `meetings/ops.ts` OWNER-DECISION ASKS section, claim-checker examples, coord-guard pattern, orchestrator verbMap, `postReply.ts` claim-matcher regex. Every reference to the retired tools replaced with `create_task` / `create_approval`. `COLLEAGUE_ALLOWED_TOOLS` in `skills/registry.ts` updated: `store_request` out, `create_task` + `create_approval` in.
+- `meetings.ts` `finalize_coord_meeting` now has a DISAMBIGUATION section in its description: if there's a pending approval for the coord, use `resolve_approval`; if not (owner force-booking), use `finalize_coord_meeting`. Prevents Sonnet picking the wrong path.
+
+### Fixed — orphans at the source (no brief-side workarounds)
+
+- `updateCoordJob` terminal transition (booked / cancelled / abandoned) auto-closes sibling `outreach_jobs` for the same colleague in the last 14 days and cancels any pending `outreach_expiry` / `outreach_decision` tasks on them. Kills the "Amazia Kickoff booked but two stale no_response outreaches keep showing in the brief" pattern at the root.
+- New `outreach_decision` task type + dispatcher. When `outreachExpiry` marks a job `no_response` + DMs the owner "try again or drop?", it schedules an `outreach_decision` 2 owner-workdays out. Owner silence past that → auto-close to `done` + one-line tombstone shadow DM. No more zombies surfacing for 6+ days (the Amazia Privacy GTM pattern).
+- New `utils/workHours.addWorkdays(iso, n, profile)`. Skips days outside the owner's office_days/home_days. Shared with both the approval expiry default and the outreach decision window.
+
+### Changed — morning brief prompt
+
+- Rewritten for per-colleague grouping (one paragraph per person, not per item), content-over-activity, human time phrasing (`~1.5 hours open`, `plenty of room midday`, `a short pocket before lunch` — never `110 min` or `pretty full` when there's open space). Dropped the 350-word cap per owner feedback: surface everything that's open, not just today's urgent items. Ban on markdown asterisks, robot phrasings, "your message" / "you messaged" stays.
+
+### Removed — dead code
+
+- `src/skills/meetings/ops.ts` — deleted the DEAD CODE `getTools` method (11 duplicated tool schemas) and `getSystemPromptSection` method (~200 lines). Both documented as dead since v1.7 and verified unused (zero callers anywhere — MeetingsSkill owns both; ops is only invoked via `executeToolCall`). ~420 lines gone.
+- `src/db/requests.ts` deleted (createPendingRequest, resolvePendingRequest, enqueueApproval, resolveApproval-legacy, getPendingApprovals, updatePendingRequest — all for the dropped tables).
+- `handleApprovalResponse` in `connectors/slack/app.ts` — removed with the legacy `approval_queue` write path.
+
+### Migration
+
+- On next startup: `pending_requests` + `approval_queue` get backed up to `data/migrations/` then DROPped. No action required.
+- Profile yaml is unchanged — `v1_shadow_mode: true` remains the single toggle for all shadow notifications (no per-category flags, per owner decision).
+
+### Verified
+
+- `npm run typecheck` clean.
+
+### Not changed
+
+- Approval authority model. Owner can always override rules by telling Maelle directly — that counts as the approval. Colleagues can't bypass rules; they must go through `create_approval` and wait for the owner's decision. Already the design; now documented in the `create_approval` tool description.
+
+---
+
 ## 2.0.6 — scheduling + coord + briefing cleanup (post-2.0.5 bundle)
 
 Rollup of the bug wave that followed the 2.0.5 restart — scheduling tool correctness, coord follow-up handling, invite plumbing, briefing delivery, and input-handling polish. Grouped as one patch to avoid version noise from per-bug bumps.

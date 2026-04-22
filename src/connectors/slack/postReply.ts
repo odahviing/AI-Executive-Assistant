@@ -250,7 +250,7 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
         : verdict.action_type === 'book'
           ? /\[(create_meeting|finalize_coord_meeting)/.test(toolSummariesText)
           : verdict.action_type === 'task'
-            ? /\[(store_request|create_task|create_approval)/.test(toolSummariesText)
+            ? /\[(create_task|create_approval)/.test(toolSummariesText)
             : false;
 
     if (matchingToolAlreadyRan) {

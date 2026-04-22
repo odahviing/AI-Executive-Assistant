@@ -38,6 +38,47 @@ function isInWindow(dt: DateTime, startHHMM: string, endHHMM: string): boolean {
 }
 
 /**
+ * Add N owner work-days to an ISO timestamp and return the resulting ISO.
+ *
+ * "Work-day" = any day listed in the owner's office_days or home_days. Weekend
+ * days (Friday/Saturday for the default profile) do not advance the counter.
+ * The time-of-day portion of `fromIso` is preserved; we only skip the date
+ * forward across non-work days. Used by `outreach_decision` to give up on a
+ * colleague after N working days regardless of weekends in between. v2.0.7.
+ *
+ * Examples for a profile with workDays = Sun/Mon/Tue/Wed/Thu:
+ *   - fromIso=Sun 12:00, addWorkdays(2) → Tue 12:00
+ *   - fromIso=Thu 12:00, addWorkdays(2) → Mon 12:00  (Fri+Sat skipped)
+ *   - fromIso=Sat 12:00, addWorkdays(2) → Tue 12:00  (count starts from Sun)
+ */
+export function addWorkdays(fromIso: string, n: number, profile: UserProfile): string {
+  const officeDays = profile.schedule.office_days.days as string[];
+  const homeDays = profile.schedule.home_days.days as string[];
+  const workDays = new Set([...officeDays, ...homeDays]);
+
+  let cursor = DateTime.fromISO(fromIso).setZone(profile.user.timezone);
+  let remaining = n;
+
+  // If fromIso falls on a non-work day, advance to next work day without
+  // consuming any of the N — "counter starts from Sunday" when asked Saturday.
+  while (!workDays.has(cursor.toFormat('EEEE'))) {
+    cursor = cursor.plus({ days: 1 });
+  }
+
+  // Now consume N work-days. Each iteration moves +1 calendar day then skips
+  // over any non-work days before the next count.
+  while (remaining > 0) {
+    cursor = cursor.plus({ days: 1 });
+    while (!workDays.has(cursor.toFormat('EEEE'))) {
+      cursor = cursor.plus({ days: 1 });
+    }
+    remaining -= 1;
+  }
+
+  return cursor.toUTC().toISO()!;
+}
+
+/**
  * Returns ISO of the next moment the owner is in work hours.
  * Walks forward day-by-day; for each candidate day, picks the relevant
  * hours_start. Caps at 14 days lookahead (defensive — should never hit).

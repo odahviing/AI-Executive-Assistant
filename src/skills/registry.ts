@@ -109,7 +109,11 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   'get_calendar',
   'get_free_busy',
   'find_available_slots',
-  'store_request',
+  // v2.0.7 — store_request retired. Colleague-initiated asks that need owner
+  // input now go through create_task + create_approval, both of which ARE in
+  // this allowlist so a colleague-path Sonnet can flag things up to the owner.
+  'create_task',
+  'create_approval',
   'coordinate_meeting',
   'check_join_availability',
   'web_search',

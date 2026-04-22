@@ -177,7 +177,11 @@ Override with custom_location if a specific external venue is needed.`,
 
 Use this when the owner picks a slot from an active coord (one of the options you proposed, or a specific time they called out). This force-books: marks missing responses as yes, sets winning_slot, runs the real calendar booking, and posts the confirmation to everyone involved.
 
-Do NOT use this for ordinary negotiation. Only when the owner has made an explicit decision that overrides waiting for other participants.`,
+Do NOT use this for ordinary negotiation. Only when the owner has made an explicit decision that overrides waiting for other participants.
+
+DISAMBIGUATION vs resolve_approval:
+- If the coord is in status \`waiting_owner\` (you can see a PENDING APPROVAL for this coord in the system prompt) → use \`resolve_approval\` with verdict=approve + data.slot_iso. The resolver runs freshness re-check + books + closes the requester loop. That's the canonical path.
+- If the coord is NOT waiting on an approval (status is collecting/resolving/negotiating) and the owner says "just book Tuesday 2pm" → \`finalize_coord_meeting\`. There's no approval to resolve; owner's word IS the decision.`,
         input_schema: {
           type: 'object',
           properties: {

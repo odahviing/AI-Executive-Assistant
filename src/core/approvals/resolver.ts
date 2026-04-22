@@ -106,6 +106,12 @@ export async function resolveApproval(
                        updated_at = datetime('now')
       WHERE id = ?
     `).run(approval.task_id);
+    // v2.0.7 — loop-close DM to the colleague who originated the ask (if any).
+    // Only fires for non-coord approvals; slot_pick / calendar_conflict use
+    // coord_jobs.requesters which already has its own loop-close path.
+    if (approval.kind !== 'slot_pick' && approval.kind !== 'calendar_conflict') {
+      await notifyRequesterOfDecision(approval, 'amend', decision.counter, decision.reason, ctx);
+    }
     return {
       ok: true,
       approval_id: approvalId,
@@ -131,6 +137,10 @@ export async function resolveApproval(
         `UPDATE tasks SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?`
       ).run(approval.task_id);
     }
+    // v2.0.7 — loop-close DM for non-coord approvals (see amend branch).
+    if (approval.kind !== 'slot_pick' && approval.kind !== 'calendar_conflict') {
+      await notifyRequesterOfDecision(approval, 'reject', null, decision.reason, ctx);
+    }
     return {
       ok: true,
       approval_id: approvalId,
@@ -150,7 +160,7 @@ export async function resolveApproval(
     case 'lunch_bump':
     case 'unknown_person':
     case 'freeform':
-      return resolveGenericApprove(approval, decision);
+      return resolveGenericApprove(approval, decision, ctx);
   }
 }
 
@@ -406,6 +416,7 @@ async function resolveSlotPick(
 async function resolveGenericApprove(
   approval: Approval,
   decision: ResolveDecision,
+  ctx: ResolveContext,
 ): Promise<ResolveResult> {
   // amend is handled generically above before dispatching to kind — reaching
   // here with verdict !== 'approve' is a caller bug.
@@ -415,6 +426,12 @@ async function resolveGenericApprove(
     status: 'approved',
     decision: { approved: true, data },
   });
+  // v2.0.7 — loop-close DM to the colleague who originated the ask (if any).
+  // Matches the amend/reject branches above. The owner's subsequent action
+  // (actually booking / executing the override) is still the orchestrator's
+  // job on the next turn; this DM just closes the "is it approved?" loop so
+  // the colleague isn't left hanging.
+  await notifyRequesterOfDecision(approval, 'approve', data, undefined, ctx);
   // The downstream action for generic kinds is the orchestrator's job (the
   // owner saying "yes, override the lunch rule" still needs the orchestrator
   // to call create_meeting with the override flag set). We just record the
@@ -425,4 +442,87 @@ async function resolveGenericApprove(
     status: 'approved',
     effect: `approved ${approval.kind} — orchestrator should now proceed with the underlying action`,
   };
+}
+
+// ── Requester loop-close (v2.0.7) ────────────────────────────────────────────
+//
+// When a colleague (Yael, Michal, etc.) initiated an approval by asking Maelle
+// for something that needed owner input, payload carries requester_slack_id +
+// requester_name. On resolve (approve / reject / amend), DM that person a
+// short human-sounding update so they aren't left wondering. Templated, not
+// LLM-generated — this is a safety net so the loop always closes even if the
+// owner never returns to a context where Sonnet could narrate the decision.
+//
+// Skipped for slot_pick / calendar_conflict: those use coord_jobs.requesters
+// which has its own loop-close path.
+
+async function notifyRequesterOfDecision(
+  approval: Approval,
+  verdict: 'approve' | 'reject' | 'amend',
+  data: Record<string, unknown> | null,
+  reason: string | undefined,
+  ctx: ResolveContext,
+): Promise<void> {
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(approval.payload_json) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  const requesterSlackId = typeof payload.requester_slack_id === 'string' ? payload.requester_slack_id : undefined;
+  if (!requesterSlackId) return;  // owner-internal approval — nothing to close back to
+  const requesterName = typeof payload.requester_name === 'string' ? payload.requester_name : undefined;
+  const subject =
+    (typeof payload.subject === 'string' && payload.subject) ||
+    (typeof payload.question === 'string' && payload.question) ||
+    'that ask';
+
+  const { getConnection } = await import('../../connections/registry');
+  const conn = getConnection(approval.owner_user_id, 'slack');
+  if (!conn) {
+    logger.warn('requester loop-close: no Slack connection registered', {
+      approvalId: approval.id, requesterSlackId,
+    });
+    return;
+  }
+
+  const ownerFirst = ctx.profile.user.name.split(' ')[0];
+  const hi = requesterName ? `Hey ${requesterName.split(' ')[0]}` : 'Hey';
+  let body: string;
+  if (verdict === 'approve') {
+    body = `${hi} — ${ownerFirst} said yes on ${subject}. I'll take it from here, will let you know once it's sorted.`;
+  } else if (verdict === 'reject') {
+    const reasonTail = reason && reason.trim() ? ` (${reason.trim()})` : '';
+    body = `${hi} — ${ownerFirst} can't make that work right now${reasonTail}. Sorry about that — happy to find another path if you want.`;
+  } else {
+    // amend — counter carries the alternative shape; surface whatever text
+    // the owner's counter included, falling back to a generic line.
+    const counterSummary = summarizeCounter(data);
+    body = `${hi} — ${ownerFirst} suggested a different approach${counterSummary ? ': ' + counterSummary : ''}. Does that work for you?`;
+  }
+
+  try {
+    const res = await conn.sendDirect(requesterSlackId, body);
+    if (!res.ok) {
+      logger.warn('requester loop-close DM failed', {
+        approvalId: approval.id, requesterSlackId, reason: res.reason, detail: res.detail,
+      });
+    } else {
+      logger.info('requester loop-close DM sent', {
+        approvalId: approval.id, requesterSlackId, verdict,
+      });
+    }
+  } catch (err) {
+    logger.warn('requester loop-close DM threw — non-fatal', {
+      approvalId: approval.id, err: String(err),
+    });
+  }
+}
+
+function summarizeCounter(data: Record<string, unknown> | null): string {
+  if (!data) return '';
+  if (typeof data.text === 'string' && data.text.trim()) return data.text.trim();
+  if (typeof data.slot_iso === 'string') return `a different time (${data.slot_iso})`;
+  if (typeof data.to === 'string') return `move it to ${data.to}`;
+  return '';
 }

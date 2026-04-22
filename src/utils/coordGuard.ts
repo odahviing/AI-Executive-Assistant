@@ -26,7 +26,7 @@ const INJECTION_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
   // Tool-call-syntax payloads
   { name: 'tool_call_payload', pattern: /\{\s*["']?name["']?\s*:\s*["']\w+["']\s*,\s*["']?(subject|participants|attendees|arguments)["']?/i },
   { name: 'function_call_kw', pattern: /\b(?:function_call|tool_use|call_function|invoke_tool|execute_tool)\b/i },
-  { name: 'explicit_tool_ref', pattern: /\buse\s+(?:the\s+)?(?:store_request|create_meeting|coordinate_meeting|find_available_slots)\s+tool\b/i },
+  { name: 'explicit_tool_ref', pattern: /\buse\s+(?:the\s+)?(?:create_meeting|coordinate_meeting|find_available_slots|create_approval)\s+tool\b/i },
   { name: 'tool_arg_block', pattern: /\barguments\s*:\s*\{/i },
 
   // Prompt extraction attempts

@@ -186,7 +186,7 @@ src/
 |---|---|
 | **MemorySkill** (`core/assistant.ts`) | Preferences, people memory, notes, interaction log, gender, owner self-tracking. Tools: `learn_preference`, `recall_preferences`, `note_about_person`, `note_about_self`, `update_person_profile`, `log_interaction`, `confirm_gender` |
 | **OutreachCoreSkill** (`core/outreach.ts`) | How Maelle speaks to people on the owner's behalf. Tools: `message_colleague`, `find_slack_channel` |
-| **TasksSkill** (`tasks/skill.ts`) | Tasks, approvals, structured requests, briefings. Tools: `create_task`, `get_my_tasks` (with `with_person` filter), `cancel_task`, `create_approval`, `resolve_approval`, `list_pending_approvals`, `store_request`, `get_pending_requests`, `resolve_request`, `escalate_to_user`, `get_briefing` |
+| **TasksSkill** (`tasks/skill.ts`) | Tasks, approvals, briefings. Tools: `create_task`, `edit_task`, `get_my_tasks` (with `with_person` filter), `cancel_task`, `create_approval`, `resolve_approval`, `list_pending_approvals`, `get_briefing`, `send_briefing_now`. Every "colleague asked for owner input" ask — scheduling escalations, rule overrides, free-form questions — flows through `create_approval`; the legacy `store_request` / `escalate_to_user` / `pending_requests` paths were retired in v2.0.7. |
 | **RoutinesSkill** (`tasks/crons.ts`) | Recurring automations. Tools: `create_routine`, `get_routines`, `update_routine`, `delete_routine` |
 
 ### Optional (toggled in YAML)

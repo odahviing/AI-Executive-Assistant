@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run build:*)",
+      "Bash(pm2 status:*)",
+      "Bash(node scripts/db-query.cjs:*)"
+    ]
+  }
+}

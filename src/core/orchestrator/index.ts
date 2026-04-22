@@ -875,7 +875,7 @@ Rules:
           get_my_tasks: 'checked your open tasks',
           resolve_approval: 'recorded your decision',
           list_pending_approvals: 'checked pending approvals',
-          store_request: 'saved the request',
+          create_approval: 'raised it with you',
           // Calendar
           get_calendar: 'looked at your calendar',
           get_free_busy: 'checked availability',
@@ -951,6 +951,42 @@ Rules:
     details: { threadTs, iterations: iteration, requiresApproval, skills: tools.map(t => t.name) },
     outcome: requiresApproval ? 'pending_approval' : 'success',
   });
+
+  // v2.0.7 — shadow-DM the owner whenever Maelle replies to a colleague.
+  // Previously shadow notify fired only on outbound coord and security events,
+  // which meant inbound flows (Michal asking about a bank visit, Yael asking
+  // for a slot bump) happened completely invisibly until the next morning
+  // brief. This closes the silence gap: one line per inbound so the owner can
+  // follow along in ~real time. Gated on v1_shadow_mode like every other
+  // shadow path. Skipped when requiresApproval=true because the approval
+  // helper already DMs the owner with the full ask.
+  if (
+    input.senderRole === 'colleague' &&
+    !input.isOwnerInGroup &&
+    !requiresApproval &&
+    finalReply &&
+    finalReply.trim().length > 0
+  ) {
+    try {
+      const { shadowNotify } = await import('../../utils/shadowNotify');
+      const who = input.senderName ?? input.userId;
+      const replyPreview = finalReply.slice(0, 200).replace(/\s+/g, ' ').trim();
+      const toolHint = toolCallSummaries.length > 0
+        ? ` (${[...new Set(toolCallSummaries.map(s => {
+            const m = s.match(/^\[([a-z_]+)/);
+            return m ? m[1] : '';
+          }).filter(Boolean))].join(', ')})`
+        : '';
+      await shadowNotify(profile, {
+        channel: input.channelId,
+        threadTs,
+        action: `${who} → me`,
+        detail: `I said: "${replyPreview}"${toolHint}`,
+      });
+    } catch (err) {
+      logger.warn('Inbound-colleague shadow notify threw — continuing', { err: String(err) });
+    }
+  }
 
   return {
     reply: finalReply,

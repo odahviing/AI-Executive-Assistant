@@ -15,6 +15,7 @@ import { dispatchResearch } from './research';
 import { dispatchRoutine } from './routine';
 import { dispatchOutreachSend } from './outreachSend';
 import { dispatchOutreachExpiry } from './outreachExpiry';
+import { dispatchOutreachDecision } from './outreachDecision';
 import { dispatchCoordNudge } from './coordNudge';
 import { dispatchCoordAbandon } from './coordAbandon';
 import { dispatchApprovalExpiry } from './approvalExpiry';
@@ -28,6 +29,7 @@ export const DISPATCHERS: Partial<Record<Task['type'], TaskDispatcher>> = {
   routine:                  dispatchRoutine,
   outreach_send:            dispatchOutreachSend,
   outreach_expiry:          dispatchOutreachExpiry,
+  outreach_decision:        dispatchOutreachDecision,
   coord_nudge:              dispatchCoordNudge,
   coord_abandon:            dispatchCoordAbandon,
   approval_expiry:          dispatchApprovalExpiry,

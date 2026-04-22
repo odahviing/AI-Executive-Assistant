@@ -24,6 +24,7 @@ export type TaskType =
   // fires and then self-complete. Replace the old parallel sweeps.
   | 'outreach_send'      // scheduled outreach post time
   | 'outreach_expiry'    // outreach reply deadline
+  | 'outreach_decision'  // v2.0.7 — 48 workhours after no_response, auto-close
   | 'coord_nudge'        // 24-work-hour nudge to non-responders
   | 'coord_abandon'      // +4h after nudge, close coord if still stuck
   | 'approval_expiry'    // approval expires_at

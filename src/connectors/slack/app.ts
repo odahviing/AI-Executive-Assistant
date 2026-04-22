@@ -7,7 +7,6 @@ import {
   getConversationHistory,
   appendToConversation,
   auditLog,
-  resolveApproval,
   logEvent,
   getPendingRequestCountForColleague,
   upsertPersonMemory,
@@ -352,21 +351,11 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       }
     }
 
-    // Approval responses — owner only, DMs only
-    if (role === 'owner' && !isChannel) {
-      const approvalMatch = text.match(/^(approve|reject)\s+(appr_\S+)/i);
-      if (approvalMatch) {
-        await handleApprovalResponse(
-          approvalMatch[1].toLowerCase() as 'approve' | 'reject',
-          approvalMatch[2],
-          say,
-          isChannel,
-          threadTs,
-          profile,
-        );
-        return;
-      }
-    }
+    // v2.0.7 — legacy "approve appr_xxx" / "reject appr_xxx" command path
+    // retired. That route wrote to the (now-dropped) approval_queue table.
+    // Approvals today use the first-class `approvals` table + free-text
+    // replies bound by Sonnet via `resolve_approval`, so no command parsing
+    // is needed here.
 
 
     const dbHistory = getConversationHistory(threadTs);
@@ -1552,60 +1541,9 @@ export function createSlackAppForProfile(profile: UserProfile): App {
   return app;
 }
 
-// ── Approval handler ──────────────────────────────────────────────────────────
-
-async function handleApprovalResponse(
-  decision: 'approve' | 'reject',
-  approvalId: string,
-  say: Function,
-  isChannel: boolean,
-  threadTs: string,
-  profile: UserProfile,
-): Promise<void> {
-  const status = decision === 'approve' ? 'approved' : 'rejected';
-  const item   = resolveApproval(approvalId, status);
-
-  if (!item) {
-    const msg = `I couldn't find approval request \`${approvalId}\`. It may have already been resolved.`;
-    isChannel ? await say({ text: msg, thread_ts: threadTs }) : await say(msg);
-    return;
-  }
-
-  auditLog({
-    action: `approval_${status}`,
-    source: 'slack',
-    actor: profile.user.slack_user_id,
-    target: approvalId,
-    details: { action_type: item.action_type, assistant: profile.assistant.name },
-    outcome: 'success',
-  });
-
-  const reply = decision === 'approve'
-    ? `Got it — I'll go ahead with that now.`
-    : `Understood, I'll leave that as is. Let me know if you'd like to explore alternatives.`;
-
-  isChannel ? await say({ text: reply, thread_ts: threadTs }) : await say(reply);
-
-  if (decision === 'approve') {
-    // Execute the approved action
-    try {
-      if (item.action_type === 'cancel' || item.action_type === 'reschedule') {
-        const payload = item.payload as Record<string, unknown>;
-        if (payload.meeting_id) {
-          const { deleteMeeting } = await import('../graph/calendar');
-          await deleteMeeting(profile.user.email, payload.meeting_id as string);
-          const doneMsg = `Done — "${payload.meeting_subject || 'meeting'}" has been removed from your calendar.`;
-          isChannel ? await say({ text: doneMsg, thread_ts: threadTs }) : await say(doneMsg);
-        }
-      }
-      logger.info('Approval executed', { approvalId, actionType: item.action_type });
-    } catch (err) {
-      logger.error('Approval execution failed', { err, approvalId });
-      const errMsg = `I approved the action but hit an error executing it. Please check manually.`;
-      isChannel ? await say({ text: errMsg, thread_ts: threadTs }) : await say(errMsg);
-    }
-  }
-}
+// v2.0.7 — handleApprovalResponse retired with the legacy approval_queue
+// table. Approvals today are resolved via the `approvals` table + Sonnet's
+// free-text interpretation (resolve_approval tool); no command grammar needed.
 
 // ── Proactive messaging ───────────────────────────────────────────────────────
 // Phase 3 — push messages to user without them initiating
