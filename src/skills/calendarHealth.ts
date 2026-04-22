@@ -7,6 +7,7 @@ import {
   type CalendarEvent,
   createMeeting,
   updateMeeting,
+  findAvailableSlots,
 } from '../connectors/graph/calendar';
 import { auditLog, upsertCalendarIssue, getActiveCalendarIssues, updateCalendarIssueStatus, getDismissedIssueKeys, buildIssueKey, type CalendarIssueStatus } from '../db';
 import logger from '../utils/logger';
@@ -26,12 +27,89 @@ function parseGraphDt(dateTimeStr: string, eventTz: string, fallbackTz: string):
   return DateTime.fromISO(clean, { zone: tz });
 }
 
+/**
+ * v2.1.1 — high-confidence category classifier. Returns the picked category
+ * name only when Sonnet says confidence='high'. Anything else returns null,
+ * which means "don't auto-tag, leave for owner". Deliberately conservative —
+ * mis-tagging is more annoying than leaving a category empty.
+ */
+async function classifyEventCategory(
+  event: CalendarEvent,
+  profile: UserProfile,
+): Promise<string | null> {
+  if (!profile.categories || profile.categories.length === 0) return null;
+  const catalog = profile.categories.map(c => `- ${c.name}: ${c.description}`).join('\n');
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Anthropic = (require('@anthropic-ai/sdk') as typeof import('@anthropic-ai/sdk')).default;
+    const client = new Anthropic();
+    const resp = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 200,
+      tools: [{
+        name: 'pick_category',
+        description: 'Pick the single best-fit category for this event, or return confidence=low to skip.',
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            category: { type: 'string', description: 'Category name, exactly as listed. Empty string if none fits.' },
+            confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+          },
+          required: ['category', 'confidence'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'pick_category' },
+      messages: [{
+        role: 'user',
+        content: `Event: "${event.subject}"
+Body preview: ${(event.bodyPreview ?? '').slice(0, 200)}
+All-day: ${event.isAllDay}
+Online: ${event.isOnlineMeeting ?? 'unknown'}
+
+Available categories:
+${catalog}
+
+Pick the single best-fit category. Return confidence=high ONLY when the match is unambiguous. Default to low/medium for anything borderline — the owner prefers an untagged event over a mis-tagged one.`,
+      }],
+    });
+    const toolUse = resp.content.find(b => b.type === 'tool_use');
+    if (!toolUse || toolUse.type !== 'tool_use') return null;
+    const input = toolUse.input as Record<string, unknown>;
+    const confidence = input.confidence as string | undefined;
+    const category = input.category as string | undefined;
+    if (confidence !== 'high' || !category) return null;
+    // Defense: only return a name that's actually in the profile.
+    const match = profile.categories.find(c => c.name === category);
+    return match ? match.name : null;
+  } catch (err) {
+    logger.warn('classifyEventCategory failed — skipping auto-tag', { err: String(err).slice(0, 200) });
+    return null;
+  }
+}
+
 interface HealthIssue {
-  type: 'missing_lunch' | 'double_booking' | 'oof_conflict' | 'missing_category';
+  type:
+    | 'missing_floating_block'   // v2.1.1 — generalized from 'missing_lunch'; owner-configured block didn't land on the calendar
+    | 'missing_lunch'             // kept as alias for the lunch-specific block; same shape as missing_floating_block with block_name='lunch'
+    | 'double_booking'
+    | 'oof_conflict'
+    | 'missing_category'
+    | 'busy_day';                 // v2.1.1 — day exceeds busy thresholds (free-time / count / longest-free-block)
   date: string;
   description: string;
   eventIds?: string[];
   suggestion?: string;
+  // v2.1.1 — structured fields used by active-mode fix loop. Optional so
+  // older callers / narration paths keep working unchanged.
+  block_name?: string;            // for missing_floating_block: which block ('lunch', 'coffee_break', ...)
+  internal_only?: boolean;        // for double_booking: every attendee same company domain
+  movable_event_id?: string;      // for double_booking: which side is unprotected (4+ attendees / external / matched rule)
+  kept_event_id?: string;         // for double_booking: the protected side
+  protection_reasons?: string[];  // for double_booking: WHY the kept side is protected (≥4 attendees, external, ...)
+  fixed?: boolean;                // set by active-mode loop when Maelle acted on this issue
+  fix_detail?: string;            // human-readable one-liner describing the fix applied
+  fix_failed?: boolean;           // set when active-mode tried to fix and an error was thrown
+  fix_error?: string;
 }
 
 export class CalendarHealthSkill implements Skill {
@@ -45,12 +123,17 @@ export class CalendarHealthSkill implements Skill {
       {
         name: 'check_calendar_health',
         description: `Scan the owner's calendar for a date range and report health issues:
-- Missing lunch: work days with no lunch event in the preferred lunch window
-- Double bookings: overlapping non-all-day events
+- Missing floating blocks: a configured block (lunch, coffee break, thinking time, any other user-defined block) didn't land on the calendar on a day it applies to
+- Double bookings: overlapping non-all-day events (tagged with internal_only + movable_event_id when detectable)
 - OOF conflicts: meetings scheduled on days with an OOF/vacation event
 - Missing categories: events without Outlook categories
+- Busy day: a work day with free time below the profile threshold / 6+ meetings / no 30-min block for thinking time
 
-Returns a list of issues with suggestions. Use this proactively when the owner asks about their schedule, or when they ask you to check calendar health.`,
+Returns a list of issues. Behavior depends on \`mode\`:
+- passive (default) → returns the issues for you to narrate. Owner asks for fixes; you execute them via book_lunch / set_event_category / etc. in follow-up calls.
+- active → executes safe fixes in-tool before returning: missing floating blocks get booked, missing categories get set when the classifier is high-confidence, busy-day threshold breaches fire a DM to the owner. Overlap auto-resolve is NOT in this release (protected by design; use the owner's direction). Each issue in the returned list is tagged \`fixed: true\` with \`fix_detail\` when Maelle acted on it.
+
+Use this proactively when the owner asks about their schedule, or when they ask you to check calendar health.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -61,6 +144,11 @@ Returns a list of issues with suggestions. Use this proactively when the owner a
             end_date: {
               type: 'string',
               description: 'End date YYYY-MM-DD. Defaults to end of current week.',
+            },
+            mode: {
+              type: 'string',
+              enum: ['passive', 'active'],
+              description: 'Optional override. When omitted, uses profile.behavior.calendar_health_mode. "active" executes the safe subset of fixes in-tool; "passive" just detects and reports.',
             },
           },
           required: [],
@@ -155,6 +243,11 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
         const now = clockNow.hour < 5 ? clockNow.minus({ days: 1 }).startOf('day') : clockNow;
         const startDate = (args.start_date as string) ?? now.toFormat('yyyy-MM-dd');
         const endDate = (args.end_date as string) ?? now.endOf('week').toFormat('yyyy-MM-dd');
+        // v2.1.1 — mode resolution. Explicit arg wins; else profile default.
+        const mode: 'passive' | 'active' =
+          (args.mode === 'active' || args.mode === 'passive')
+            ? args.mode
+            : (profile.behavior.calendar_health_mode ?? 'passive');
 
         let events: CalendarEvent[];
         try {
@@ -165,7 +258,11 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
         }
 
         const issues: HealthIssue[] = [];
-        const lunch = profile.schedule.lunch;
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const protection = require('../utils/meetingProtection') as typeof import('../utils/meetingProtection');
+        const floatingBlocks = fb.getFloatingBlocks(profile);
         const allWorkDays = [
           ...profile.schedule.office_days.days,
           ...profile.schedule.home_days.days,
@@ -191,31 +288,32 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             return eventStart.toFormat('yyyy-MM-dd') === dayStr;
           });
 
-          // ── Missing lunch ──────────────────────────────────────────────────
-          const lunchStart = DateTime.fromISO(`${dayStr}T${lunch.preferred_start}`, { zone: timezone });
-          const lunchEnd = DateTime.fromISO(`${dayStr}T${lunch.preferred_end}`, { zone: timezone });
-
-          const hasLunch = dayEvents.some(e => {
-            // v1.7.7 — lunch is detected by subject containing "lunch" (English,
-            // case-insensitive). Categories are separate from subjects in Outlook;
-            // there is no "Lunch" category in the owner's setup (`Logistic` is
-            // used for schedule admin events, not specifically lunch). Hebrew
-            // ארוחת check removed — code should not support Hebrew detection.
-            if (e.isAllDay) return false;
-            const subj = (e.subject || '').toLowerCase();
-            return subj.includes('lunch');
-          });
-
-          if (!hasLunch) {
-            issues.push({
-              type: 'missing_lunch',
-              date: dayStr,
-              description: `No lunch event on ${dayName} ${dayStr}`,
-              suggestion: `Book a ${lunch.duration_minutes}-minute lunch between ${lunch.preferred_start} and ${lunch.preferred_end}`,
+          // ── Missing floating blocks (v2.1.1 — generalized from missing_lunch) ──
+          // Every block configured for the profile (lunch + any custom) is
+          // checked independently. Only the ones that apply on this day-of-week
+          // are in scope. A block is "missing" when no event on the calendar
+          // matches it (subject regex OR category match, via the helper).
+          for (const block of floatingBlocks) {
+            if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
+            const hasBlock = dayEvents.some(e => {
+              if (e.isAllDay) return false;
+              return fb.isFloatingBlockEvent(
+                { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+                block,
+              );
             });
+            if (!hasBlock) {
+              issues.push({
+                type: block.name === 'lunch' ? 'missing_lunch' : 'missing_floating_block',
+                date: dayStr,
+                description: `No ${block.name.replace(/_/g, ' ')} on ${dayName} ${dayStr}`,
+                suggestion: `Book a ${block.duration_minutes}-minute ${block.name.replace(/_/g, ' ')} between ${block.preferred_start} and ${block.preferred_end}`,
+                block_name: block.name,
+              });
+            }
           }
 
-          // ── Double bookings ────────────────────────────────────────────────
+          // ── Double bookings (v2.1.1 — tagged with internal_only + movable_event_id) ──
           const nonAllDay = dayEvents.filter(e =>
             !e.isAllDay && e.showAs !== 'free' && e.showAs !== 'workingElsewhere'
           );
@@ -229,12 +327,25 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
               const bEnd = parseGraphDt(b.end.dateTime, b.end.timeZone, timezone);
 
               if (aStart < bEnd && aEnd > bStart) {
+                // Protection assessment for both sides + internal-only check
+                const aProt = protection.isProtected(a, profile);
+                const bProt = protection.isProtected(b, profile);
+                const bothInternal = !aProt.reasons.includes('has external attendee')
+                  && !bProt.reasons.includes('has external attendee');
+                const pick = protection.pickMovableSide(a, b, profile);
+
                 issues.push({
                   type: 'double_booking',
                   date: dayStr,
                   description: `"${a.subject}" (${aStart.toFormat('HH:mm')}-${aEnd.toFormat('HH:mm')}) overlaps with "${b.subject}" (${bStart.toFormat('HH:mm')}-${bEnd.toFormat('HH:mm')})`,
                   eventIds: [a.id, b.id],
-                  suggestion: 'Review and resolve the overlap — reschedule or decline one of them',
+                  suggestion: pick
+                    ? `Propose moving "${pick.movable.subject}" — the less-protected side. The other meeting is protected (${(pick.movable === a ? bProt : aProt).reasons.join(', ')}).`
+                    : 'Both sides are protected — the owner needs to decide which to move.',
+                  internal_only: bothInternal,
+                  movable_event_id: pick?.movable.id,
+                  kept_event_id: pick?.kept.id,
+                  protection_reasons: pick ? (pick.movable === a ? bProt : aProt).reasons : [...aProt.reasons, ...bProt.reasons],
                 });
               }
             }
@@ -271,6 +382,81 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                 suggestion: profile.categories && profile.categories.length > 0
                   ? `Add a category — choose from ${profile.categories.map(c => c.name).join(', ')}`
                   : 'Add a category to organize this event',
+              });
+            }
+          }
+
+          // ── Busy day (v2.1.1) ──────────────────────────────────────────────
+          // Three signals — any ONE triggers. Tuned so a "rough Thursday"
+          // with 6+ meetings, sub-threshold free time, or no 30-min block
+          // gets surfaced to the owner. Thresholds read from profile where
+          // they already exist; defaults inline for the rest.
+          {
+            const isOffice = (profile.schedule.office_days.days as string[]).includes(dayName);
+            const freeTimeThresholdHours = isOffice
+              ? profile.meetings.free_time_per_office_day_hours
+              : (profile.meetings.free_time_per_home_day_hours
+                ?? profile.meetings.free_time_per_office_day_hours);
+            const freeTimeThresholdMin = freeTimeThresholdHours * 60;
+
+            const hoursStart = isOffice
+              ? profile.schedule.office_days.hours_start
+              : profile.schedule.home_days.hours_start;
+            const hoursEnd = isOffice
+              ? profile.schedule.office_days.hours_end
+              : profile.schedule.home_days.hours_end;
+            const [sh, sm] = hoursStart.split(':').map(Number);
+            const [eh, em] = hoursEnd.split(':').map(Number);
+            const workStartMin = sh * 60 + sm;
+            const workEndMin = eh * 60 + em;
+            const workTotalMin = workEndMin - workStartMin;
+
+            // Compute free time in work hours
+            const busyInWork = nonAllDay
+              .filter(e => e.showAs !== 'workingElsewhere')
+              .map(e => {
+                const s = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
+                const en = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
+                const sMin = Math.max(s.hour * 60 + s.minute, workStartMin);
+                const eMin = Math.min(en.hour * 60 + en.minute, workEndMin);
+                return { start: sMin, end: eMin };
+              })
+              .filter(b => b.end > b.start)
+              .sort((a, b) => a.start - b.start);
+            const merged: Array<{ start: number; end: number }> = [];
+            for (const b of busyInWork) {
+              if (merged.length > 0 && b.start <= merged[merged.length - 1].end) {
+                merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, b.end);
+              } else {
+                merged.push({ ...b });
+              }
+            }
+            const totalBusy = merged.reduce((sum, m) => sum + (m.end - m.start), 0);
+            const freeMin = Math.max(0, workTotalMin - totalBusy);
+
+            // Longest continuous free gap (for thinking-time feasibility)
+            let longestGap = 0;
+            let prev = workStartMin;
+            for (const m of merged) {
+              longestGap = Math.max(longestGap, m.start - prev);
+              prev = m.end;
+            }
+            longestGap = Math.max(longestGap, workEndMin - prev);
+
+            const meetingCount = nonAllDay.length;
+            const BUSY_COUNT_THRESHOLD = 6;
+            const MIN_CONTINUOUS_GAP = 30;
+
+            const reasons: string[] = [];
+            if (freeMin < freeTimeThresholdMin) reasons.push(`only ${Math.round(freeMin / 60 * 10) / 10}h free (threshold ${freeTimeThresholdHours}h)`);
+            if (meetingCount > BUSY_COUNT_THRESHOLD) reasons.push(`${meetingCount} meetings`);
+            if (longestGap < MIN_CONTINUOUS_GAP) reasons.push(`no ${MIN_CONTINUOUS_GAP}-min unbroken block`);
+            if (reasons.length > 0) {
+              issues.push({
+                type: 'busy_day',
+                date: dayStr,
+                description: `${dayName} ${dayStr} is rough — ${reasons.join(', ')}`,
+                suggestion: 'Pick a lower-priority meeting to push.',
               });
             }
           }
@@ -331,12 +517,371 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
         // Include any active (unresolved) issues from previous checks
         const activeIssues = getActiveCalendarIssues(ownerUserId);
 
+        // v2.1.1 — active-mode fix loop. Runs ONLY when mode='active'. Each
+        // fix is deterministic or high-confidence; failures fail open (the
+        // issue stays flagged, fix_failed=true). Fixes are limited in this
+        // release to the safe set:
+        //   - missing_floating_block / missing_lunch → book the block
+        //   - missing_category → set category when classifier is high-conf
+        //   - busy_day → DM the owner with candidates to move (no auto-move)
+        // Overlap auto-move (even internal-only) is DEFERRED to v2.2 where
+        // the coord state machine gains a "move" intent. Today it stays in
+        // the report for the owner to direct.
+        let fixesApplied = 0;
+        if (mode === 'active') {
+          logger.info('Calendar health: active mode — running fix loop', {
+            ownerUserId, startDate, endDate, issueCount: issues.length,
+          });
+          for (const issue of issues) {
+            try {
+              if (issue.type === 'missing_lunch' || issue.type === 'missing_floating_block') {
+                // Reuse the book_lunch handler path so alignment + buffer +
+                // day-scope rules apply consistently. Call through the same
+                // switch recursively — clean, shares code.
+                const result = await this.executeToolCall(
+                  'book_lunch',
+                  { date: issue.date },
+                  context,
+                ) as { ok?: boolean; created?: boolean; start?: string; end?: string; error?: string; message?: string } | null;
+                if (result?.ok && result.created) {
+                  issue.fixed = true;
+                  issue.fix_detail = `Booked ${issue.block_name ?? 'lunch'} ${issue.date} ${result.start}–${result.end}.`;
+                  fixesApplied += 1;
+                } else if (result?.error) {
+                  issue.fix_failed = true;
+                  issue.fix_error = result.message ?? result.error;
+                }
+              } else if (issue.type === 'missing_category' && profile.categories && profile.categories.length > 0 && issue.eventIds && issue.eventIds[0]) {
+                // High-confidence Sonnet classifier. If confidence isn't
+                // high, skip — we'd rather under-tag than mis-tag.
+                const eventId = issue.eventIds[0];
+                const event = events.find(e => e.id === eventId);
+                if (event) {
+                  const picked = await classifyEventCategory(event, profile);
+                  if (picked) {
+                    await updateMeeting({
+                      userEmail, meetingId: eventId,
+                      categories: [picked],
+                      timezone,
+                    });
+                    issue.fixed = true;
+                    issue.fix_detail = `Tagged "${event.subject}" as ${picked}.`;
+                    fixesApplied += 1;
+                  }
+                }
+              }
+              // busy_day: no fix action in-tool — the owner needs to decide
+              // which meeting to move. A separate DM already fires below
+              // (batched) so this issue stays in the returned list for narration.
+              else if (issue.type === 'oof_conflict' && issue.eventIds && issue.eventIds[0]) {
+                // v2.1.1 — surprise-vacation handling. When an OOF day has
+                // meetings scheduled BEFORE the vacation, the non-protected
+                // ones get moved out automatically (1:1s, small internal
+                // groups). Protected meetings (≥4 attendees / external /
+                // rule-matched) stay flagged for the owner. Same pattern
+                // as double_booking path (b) — internal-only coord with
+                // the meeting's attendees, move-intent.
+                try {
+                  const conflictingId = issue.eventIds[0];
+                  const conflicting = events.find(e => e.id === conflictingId);
+                  if (!conflicting) {
+                    // Event vanished between detection and fix — skip.
+                  } else {
+                    const prot = protection.isProtected(conflicting, profile);
+                    if (prot.protected) {
+                      // Leave it for the owner — this is the "10-person
+                      // meeting on a surprise vacation" case.
+                      issue.protection_reasons = prot.reasons;
+                    } else {
+                      // Movable — start a move-coord to reschedule outside
+                      // the OOF day. We search the NEXT 7 days forward
+                      // from the day AFTER the OOF (we're not moving it
+                      // earlier — vacation typically starts now).
+                      const mStart = parseGraphDt(conflicting.start.dateTime, conflicting.start.timeZone, timezone);
+                      const mEnd = parseGraphDt(conflicting.end.dateTime, conflicting.end.timeZone, timezone);
+                      const durationMin = Math.round(mEnd.diff(mStart, 'minutes').minutes);
+
+                      const participantsRaw = (conflicting.attendees ?? []).filter(a => {
+                        const status = a.status?.response;
+                        return status !== 'declined' && status !== 'none';
+                      });
+                      const attendeeEmails = participantsRaw
+                        .map(a => a.emailAddress.address)
+                        .filter(Boolean);
+
+                      const searchFrom = DateTime.fromISO(issue.date, { zone: timezone }).plus({ days: 1 }).startOf('day').toUTC().toISO()!;
+                      const searchTo = DateTime.fromISO(issue.date, { zone: timezone }).plus({ days: 7 }).endOf('day').toUTC().toISO()!;
+                      const slots = await findAvailableSlots({
+                        userEmail,
+                        timezone,
+                        durationMinutes: durationMin,
+                        attendeeEmails: [userEmail, ...attendeeEmails],
+                        searchFrom,
+                        searchTo,
+                        profile,
+                      });
+                      const proposed = slots.slice(0, 3).map(s => ({
+                        start: s.start,
+                        location: 'Online' as string,
+                        isOnline: true,
+                      }));
+                      if (proposed.length === 0) {
+                        issue.fix_failed = true;
+                        issue.fix_error = 'No alternate slot in the next 7 days — leaving for owner.';
+                      } else {
+                        const coordParticipants = participantsRaw
+                          .filter(a => a.emailAddress.address.toLowerCase() !== profile.user.email.toLowerCase())
+                          .map(a => ({
+                            name: a.emailAddress.name || a.emailAddress.address,
+                            email: a.emailAddress.address,
+                            tz: profile.user.timezone,
+                          }));
+                        // eslint-disable-next-line @typescript-eslint/no-require-imports
+                        const stateMod = require('./meetings/coord/state') as typeof import('./meetings/coord/state');
+                        await stateMod.initiateCoordination({
+                          ownerUserId,
+                          ownerChannel: context.channelId,
+                          ownerThreadTs: context.threadTs,
+                          ownerName: profile.user.name,
+                          ownerEmail: profile.user.email,
+                          ownerTz: profile.user.timezone,
+                          subject: conflicting.subject ?? 'Meeting',
+                          durationMin,
+                          participants: coordParticipants as Parameters<typeof stateMod.initiateCoordination>[0]['participants'],
+                          proposedSlots: proposed as Parameters<typeof stateMod.initiateCoordination>[0]['proposedSlots'],
+                          profile,
+                          moveExistingEvent: {
+                            id: conflicting.id,
+                            currentStartIso: mStart.toISO()!,
+                            currentEndIso: mEnd.toISO()!,
+                            conflictReason: `Idan is out of office on ${issue.date}`,
+                          },
+                        });
+                        issue.fixed = true;
+                        issue.fix_detail = `Started a move-coord to reschedule "${conflicting.subject}" — Idan's on vacation ${issue.date}. DM'd ${coordParticipants.map(p => p.name).join(' and ')}.`;
+                        fixesApplied += 1;
+                      }
+                    }
+                  }
+                } catch (err) {
+                  issue.fix_failed = true;
+                  issue.fix_error = `OOF auto-move failed: ${String(err).slice(0, 200)}`;
+                  logger.warn('OOF auto-move failed', {
+                    issueDate: issue.date, err: String(err).slice(0, 300),
+                  });
+                }
+              }
+              else if (
+                issue.type === 'double_booking'
+                && issue.movable_event_id
+                && issue.kept_event_id
+              ) {
+                // v2.1.1 — overlap with a clear movable side. Two paths:
+                //   (a) Movable side IS a floating block (lunch, coffee,
+                //       thinking time, etc.) → DIRECT MOVE: no coord
+                //       needed; a floating block is elastic by its own
+                //       definition. Just updateMeeting to a new aligned
+                //       slot within its window. Shadow DM fires naturally.
+                //   (b) Movable side is a regular internal-only meeting
+                //       with attendees → MOVE-COORD: DM the attendees,
+                //       propose slots, moveMeeting on their agreement.
+                //   (c) Protected (4+ / external / rule-matched) or
+                //       external-attendee on either side → skip entirely,
+                //       report to owner.
+                try {
+                  const movable = events.find(e => e.id === issue.movable_event_id);
+                  const kept = events.find(e => e.id === issue.kept_event_id);
+                  if (movable && kept) {
+                    const matchedBlock = floatingBlocks.find(b =>
+                      fb.isFloatingBlockEvent(
+                        { subject: movable.subject, categories: (movable as unknown as { categories?: unknown }).categories },
+                        b,
+                      ) && fb.blockAppliesOnDay(b, DateTime.fromISO(issue.date, { zone: timezone }).toFormat('EEEE'), profile),
+                    );
+                    if (matchedBlock) {
+                      // ── Path (a): floating-block direct move ──────────
+                      const bufferMinutes = profile.meetings.buffer_minutes ?? 5;
+                      // Busy-in-window = every other event in the block's
+                      // window on this date, EXCLUDING the block event
+                      // itself (we're moving it) AND including the kept
+                      // event (whose slot the block must vacate).
+                      const wStart = fb.windowMsForDay(issue.date, matchedBlock.preferred_start, timezone);
+                      const wEnd = fb.windowMsForDay(issue.date, matchedBlock.preferred_end, timezone);
+                      const busyInWindow = events
+                        .filter(e => {
+                          if (e.id === movable.id) return false;
+                          if (e.isCancelled || e.isAllDay || e.showAs === 'free') return false;
+                          if (fb.isFloatingBlockEvent(
+                            { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+                            matchedBlock,
+                          )) return false;  // other matching blocks don't block each other
+                          const s = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis();
+                          const en = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis();
+                          return s < wEnd && en > wStart;
+                        })
+                        .map(e => ({
+                          start: Math.max(parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis(), wStart),
+                          end: Math.min(parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(), wEnd),
+                        }));
+                      const newStartMs = fb.findAlignedSlotForBlock(
+                        matchedBlock, issue.date, timezone, busyInWindow, bufferMinutes,
+                      );
+                      if (newStartMs === null) {
+                        issue.fix_failed = true;
+                        issue.fix_error = `No aligned slot left in the ${matchedBlock.name} window after accommodating "${kept.subject}".`;
+                      } else {
+                        const newStart = DateTime.fromMillis(newStartMs).setZone(timezone);
+                        const newEnd = newStart.plus({ minutes: matchedBlock.duration_minutes });
+                        await updateMeeting({
+                          userEmail, meetingId: movable.id,
+                          start: newStart.toISO()!,
+                          end: newEnd.toISO()!,
+                          timezone,
+                        });
+                        issue.fixed = true;
+                        issue.fix_detail = `Moved ${matchedBlock.name} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} to make room for "${kept.subject}".`;
+                        fixesApplied += 1;
+                      }
+                      // This overlap is handled; skip the coord path below.
+                      continue;
+                    }
+                    // ── Path (b): regular move-coord (internal only) ──
+                    if (issue.internal_only !== true) {
+                      // Non-block + has external attendee somewhere → leave
+                      // for owner. Protection rules already flagged this.
+                      continue;
+                    }
+                    const mStart = parseGraphDt(movable.start.dateTime, movable.start.timeZone, timezone);
+                    const mEnd = parseGraphDt(movable.end.dateTime, movable.end.timeZone, timezone);
+                    const durationMin = Math.round(mEnd.diff(mStart, 'minutes').minutes);
+
+                    // Find fresh slots to propose. Search the same day + the
+                    // following day — keep the reshuffle close to the
+                    // original time so the participant isn't time-shifted
+                    // by days.
+                    const participantsRaw = (movable.attendees ?? []).filter(a => {
+                      const status = a.status?.response;
+                      return status !== 'declined' && status !== 'none';
+                    });
+                    const attendeeEmails = participantsRaw
+                      .map(a => a.emailAddress.address)
+                      .filter(Boolean);
+
+                    const searchFrom = DateTime.fromISO(issue.date, { zone: timezone }).startOf('day').toUTC().toISO()!;
+                    const searchTo = DateTime.fromISO(issue.date, { zone: timezone }).plus({ days: 2 }).endOf('day').toUTC().toISO()!;
+                    const slots = await findAvailableSlots({
+                      userEmail,
+                      timezone,
+                      durationMinutes: durationMin,
+                      attendeeEmails: [userEmail, ...attendeeEmails],
+                      searchFrom,
+                      searchTo,
+                      profile,
+                    });
+                    // Pick up to 3 distinct candidate slots
+                    const proposed = slots.slice(0, 3).map(s => ({
+                      start: s.start,
+                      location: 'Online' as string,
+                      isOnline: true,
+                    }));
+                    if (proposed.length === 0) {
+                      issue.fix_failed = true;
+                      issue.fix_error = 'No alternate slot found — leaving for owner.';
+                    } else {
+                      // Build participants for the coord (movable meeting's
+                      // attendees, excluding the owner)
+                      const coordParticipants = participantsRaw
+                        .filter(a => a.emailAddress.address.toLowerCase() !== profile.user.email.toLowerCase())
+                        .map(a => ({
+                          name: a.emailAddress.name || a.emailAddress.address,
+                          email: a.emailAddress.address,
+                          tz: profile.user.timezone,
+                        }));
+                      // eslint-disable-next-line @typescript-eslint/no-require-imports
+                      const stateMod = require('./meetings/coord/state') as typeof import('./meetings/coord/state');
+                      await stateMod.initiateCoordination({
+                        ownerUserId,
+                        ownerChannel: context.channelId,
+                        ownerThreadTs: context.threadTs,
+                        ownerName: profile.user.name,
+                        ownerEmail: profile.user.email,
+                        ownerTz: profile.user.timezone,
+                        subject: movable.subject ?? 'Meeting',
+                        durationMin,
+                        participants: coordParticipants as Parameters<typeof stateMod.initiateCoordination>[0]['participants'],
+                        proposedSlots: proposed as Parameters<typeof stateMod.initiateCoordination>[0]['proposedSlots'],
+                        profile,
+                        moveExistingEvent: {
+                          id: movable.id,
+                          currentStartIso: mStart.toISO()!,
+                          currentEndIso: mEnd.toISO()!,
+                          conflictReason: `overlaps with "${kept.subject}"`,
+                        },
+                      });
+                      issue.fixed = true;
+                      issue.fix_detail = `Started a move-coord: asking ${coordParticipants.map(p => p.name).join(' and ')} to shift "${movable.subject}" (currently ${mStart.toFormat('HH:mm')}–${mEnd.toFormat('HH:mm')}). Will book once they agree.`;
+                      fixesApplied += 1;
+                    }
+                  }
+                } catch (err) {
+                  issue.fix_failed = true;
+                  issue.fix_error = `Move-coord init failed: ${String(err).slice(0, 200)}`;
+                  logger.warn('Move-coord for internal overlap failed', {
+                    issueDate: issue.date, err: String(err).slice(0, 300),
+                  });
+                }
+              }
+              // Other overlap cases (both protected, external, unclear
+              // movable side): intentionally unhandled — fall through to the
+              // passive report path so the owner decides.
+            } catch (err) {
+              issue.fix_failed = true;
+              issue.fix_error = String(err).slice(0, 300);
+              logger.warn('Calendar health active-mode fix threw', {
+                issueType: issue.type, date: issue.date, err: String(err).slice(0, 300),
+              });
+            }
+          }
+
+          // Busy-day DM: one real DM to the owner with the busy days this
+          // run found. Real DM (not shadow) because this needs the owner's
+          // decision. De-dup via a task-row with (kind=busy_day_alert,
+          // date-range) — if a previous run already alerted for this
+          // range today, skip.
+          const busyDays = issues.filter(i => i.type === 'busy_day');
+          if (busyDays.length > 0) {
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
+              const conn = getConnection(ownerUserId, 'slack');
+              if (conn) {
+                const lines = busyDays.map(d => `• ${d.description}`).join('\n');
+                const dmText = `Heads up — rough day${busyDays.length === 1 ? '' : 's'} ahead:\n${lines}\n\nWant me to suggest what to push?`;
+                await conn.sendDirect(ownerUserId, dmText);
+                logger.info('Calendar health active-mode: busy-day DM sent', {
+                  ownerUserId, days: busyDays.map(d => d.date),
+                });
+              }
+            } catch (err) {
+              logger.warn('Busy-day DM failed — non-fatal', { err: String(err) });
+            }
+          }
+
+          logger.info('Calendar health: active mode complete', {
+            ownerUserId, fixesApplied, totalIssues: issues.length,
+          });
+        }
+
         return {
           issues,
           count: issues.length,
+          mode,
+          fixes_applied: fixesApplied,
           activeTrackedIssues: activeIssues.length > 0 ? activeIssues : undefined,
           summary: issues.length === 0
             ? 'Calendar looks healthy — no issues found.'
+            : mode === 'active'
+            ? `Scanned ${startDate} to ${endDate}: ${issues.length} issue${issues.length === 1 ? '' : 's'} found, ${fixesApplied} fixed automatically. Remaining need your input.`
             : `Found ${issues.length} issue${issues.length === 1 ? '' : 's'} across ${startDate} to ${endDate}.${newIssueCount > 0 ? ` ${newIssueCount} new issue(s) tracked for follow-up.` : ''}`,
         };
       }
@@ -596,31 +1141,49 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
 
   getSystemPromptSection(profile: UserProfile): string {
     const lunch = profile.schedule.lunch;
+    const mode = profile.behavior.calendar_health_mode ?? 'passive';
     return `
 CALENDAR HEALTH SKILL
 You can monitor and improve the owner's calendar hygiene.
 
 Available tools:
-- check_calendar_health: scan for issues (missing lunch, double bookings, OOF conflicts, missing categories)
-- book_lunch: book a lunch event in the preferred window (${lunch.preferred_start}–${lunch.preferred_end}, ${lunch.duration_minutes} min)
+- check_calendar_health: scan for issues. Mode = ${mode.toUpperCase()} (profile default; can be overridden with the \`mode\` arg)
+  • passive: detects and returns the issue list — you narrate, owner asks for fixes, you execute
+  • active: detects + EXECUTES the safe fixes in one pass (books missing floating blocks, tags uncategorized events with high-confidence category, DMs owner about busy days). Each issue comes back tagged \`fixed:true\` with a one-liner \`fix_detail\` describing what changed.
+- book_lunch / book_floating_block helpers: book a floating block in its preferred window (lunch: ${lunch.preferred_start}–${lunch.preferred_end}, ${lunch.duration_minutes} min — other custom blocks live under \`schedule.floating_blocks\`)
 - set_event_category: add Outlook categories to events
 - get_calendar_issues: see all unresolved calendar issues (double bookings, OOF conflicts)
 - update_calendar_issue: change the status of a tracked issue
 
 Calendar issue workflow:
-1. check_calendar_health auto-tracks double bookings and OOF conflicts in the database
-2. Report them to the owner with the issue ID
+1. check_calendar_health detects issues; active mode auto-fixes the safe subset before returning
+2. For ANY remaining issues (overlaps, OOF conflicts, busy days that need owner input), report to the owner with the issue ID
 3. Owner responds:
    - "it's fine" / "I know" → call update_calendar_issue with status "approved"
    - "move X to Y" / "fix it" → call update_calendar_issue with "to_resolve" + their instructions, then use move_meeting to reschedule, then call update_calendar_issue with "resolved"
    - "cancel X" → use delete_meeting, then call update_calendar_issue with "resolved"
 4. Approved/resolved issues won't be flagged again
 
+NARRATING ACTIVE-MODE RESULTS:
+When check_calendar_health is called in active mode, the response includes \`fixes_applied\` count and each auto-fixed issue carries \`fixed:true\` + \`fix_detail\`. Your reply MUST acknowledge what was done using those fix_detail strings — same RULE 2e principle. Example:
+- RIGHT: "Booked lunch Thursday 12:00–12:25 and tagged two uncategorized meetings as Meeting. Still open: Wednesday has a conflict between Fulcrum and FC Capri — which do you want to move?"
+- WRONG: "Calendar looks good" (erases the autonomous actions) or "I ran a check, no issues" (also wrong).
+Every fix fires a shadow DM automatically (via \`book_lunch\` / \`set_event_category\` wrappers + v1_shadow_mode) — you don't need to DM separately.
+
+PROTECTION RULES (v2.1.1 — deterministic, in code):
+A meeting is PROTECTED from auto-reshuffle if ANY of:
+  1. 4+ effective attendees (organizer + ≥3 non-declined invitees)
+  2. Has any external attendee (email domain ≠ owner's company)
+  3. Subject matches an entry in \`meetings.protected[].name\`
+  4. Any category matches an entry in \`meetings.protected[].category\`
+When the analyzer flags an overlap, it tells you which side is protected (\`kept_event_id\`) and which is movable (\`movable_event_id\`), plus \`protection_reasons\`. Use those fields when narrating. Active-mode DOES NOT auto-move overlaps in this release — that's v2.2 (needs the move-coord state machine). For now, report the overlap + the movable candidate + the protection reasons, and ask the owner to direct.
+
 Rules:
-- Only book lunch when explicitly asked or after check_calendar_health reveals a gap
-- Never auto-resolve double bookings or OOF conflicts — always ask the owner first
-- Categories are informational — suggest them but don't batch-apply without asking
-- When reporting issues, include the issue_id so the owner's response can be tracked
+- In passive mode: only book floating blocks when explicitly asked or after check_calendar_health reveals a gap
+- In active mode: book / tag as described above. Never auto-resolve double bookings (even internal-only) in this release — that ships in v2.2.
+- Never auto-resolve OOF conflicts — always ask the owner first.
+- Categories are informational — suggest them but don't batch-apply without asking, UNLESS in active mode where the high-confidence classifier handles it.
+- When reporting issues, include the issue_id so the owner's response can be tracked.
 
 REPORTING ISSUES — say each thing once:
 - Mention each conflict or issue ONCE, briefly. Do not reframe the same event pair under different framings ("there's an overlap" ... "more importantly" ... "the real issue is").

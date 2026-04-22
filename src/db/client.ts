@@ -384,6 +384,14 @@ function initSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN request_signature TEXT`); } catch (_) {}
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_coord_jobs_req_sig ON coord_jobs(request_signature, status)`); } catch (_) {}
 
+  // v2.1.1 — coord_jobs gains a second intent: MOVE. intent='schedule' books
+  // a new meeting (today's path); intent='move' reshuffles an existing one
+  // via moveMeeting on the existing_event_id. DM phrasing + terminal action
+  // branch on intent. Default 'schedule' so every existing row keeps its
+  // current behavior.
+  try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN intent TEXT NOT NULL DEFAULT 'schedule'`); } catch (_) {}
+  try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN existing_event_id TEXT`); } catch (_) {}
+
   // ── v1.7.2 — Summary skill ────────────────────────────────────────────────
   // One row per per-thread summary session. `current_draft` holds the
   // ephemeral in-progress JSON during stages 1–2; nulled at share or after

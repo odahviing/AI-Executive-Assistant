@@ -139,10 +139,104 @@ export async function handleCoordReply(
       reason: followupIntent.reason,
     });
 
-    // Counter-offer: new time proposed by the participant. Attach to the
-    // pending approval so owner's system prompt shows the amendment; also
-    // DM owner directly so they're not chasing shadow logs.
+    // Counter-offer: new time proposed by the participant.
+    //
+    // v2.1.1 — MOVE-intent auto-accept path. When the coord is moving an
+    // existing meeting (not booking a new one) AND the counter is
+    // (a) same ISO week as the original AND (b) within Idan's rules
+    // (no buffer break, no floating-block window violation, within work
+    // hours — all enforced by `findAvailableSlots`), we accept the counter
+    // autonomously: book the move, shadow-DM the owner, done. If any check
+    // fails, fall through to the existing approval flow so the owner can
+    // decide. The auto-accept never fires for schedule-intent coords.
     if (followupIntent.intent === 'counter') {
+      if (
+        params.profile.behavior.calendar_health_mode === 'active'
+        && job.intent === 'move'
+        && job.existing_event_id
+        && followupIntent.proposed_iso
+      ) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const cal = require('../../../connectors/graph/calendar') as typeof import('../../../connectors/graph/calendar');
+          // Parse the original-meeting start from the move context we
+          // stashed in notes at initiateCoordination time.
+          let moveCtx: { currentStart?: string } | null = null;
+          try { moveCtx = job.notes ? (JSON.parse(job.notes).moveContext ?? null) : null; } catch (_) {}
+          const originalStart = moveCtx?.currentStart;
+          const counterDt = DateTime.fromISO(followupIntent.proposed_iso).setZone(params.profile.user.timezone);
+          const originalDt = originalStart
+            ? DateTime.fromISO(originalStart).setZone(params.profile.user.timezone)
+            : null;
+
+          // Rule 1 — same ISO week.
+          const sameWeek = originalDt
+            ? (counterDt.weekYear === originalDt.weekYear && counterDt.weekNumber === originalDt.weekNumber)
+            : false;
+
+          if (sameWeek) {
+            // Rule 2 — rule compliance. Narrow-window findAvailableSlots:
+            // search exactly the counter slot (± 1 min) for the meeting's
+            // duration. If the slot comes back, it passes every scheduled
+            // rule (buffer, work hours, floating blocks, protected list).
+            const duration = job.duration_min;
+            const startMs = counterDt.toMillis();
+            const fromIso = DateTime.fromMillis(startMs - 60_000).toUTC().toISO()!;
+            const toIso = DateTime.fromMillis(startMs + duration * 60_000 + 60_000).toUTC().toISO()!;
+            let validSlots: Array<{ start: string }> = [];
+            try {
+              validSlots = await cal.findAvailableSlots({
+                userEmail: params.profile.user.email,
+                timezone: params.profile.user.timezone,
+                durationMinutes: duration,
+                attendeeEmails: [params.profile.user.email],
+                searchFrom: fromIso,
+                searchTo: toIso,
+                profile: params.profile,
+              });
+            } catch (err) {
+              logger.warn('Counter auto-accept: findAvailableSlots threw, falling back to approval', {
+                err: String(err).slice(0, 200), jobId: job.id,
+              });
+            }
+
+            const matches = validSlots.some(s => {
+              const s1 = DateTime.fromISO(s.start).toMillis();
+              return Math.abs(s1 - startMs) <= 60_000;
+            });
+
+            if (matches) {
+              logger.info('Counter auto-accept (move coord, rule-compliant, same week) — booking', {
+                jobId: job.id, counterIso: followupIntent.proposed_iso,
+              });
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const booking = require('./booking') as typeof import('./booking');
+              await booking.bookCoordination(job.id, followupIntent.proposed_iso, params.profile);
+              // Shadow DM so owner sees what happened
+              await shadowNotify(params.profile, {
+                channel: job.owner_channel,
+                threadTs: job.owner_thread_ts ?? undefined,
+                action: 'Auto-accepted counter',
+                detail: `${participant.name} countered "${job.subject}" to ${counterDt.toFormat('EEEE d MMM HH:mm')} — same week, within your rules, so I moved it. Let me know if you'd rather I hadn't.`,
+              });
+              // Ack the participant
+              await slackConn.postToChannel(params.channelId, `Works — I've moved "${job.subject}" to ${counterDt.toFormat('EEEE d MMM, HH:mm')}. See you then.`, {
+                threadTs: ackInThread ? (job.owner_thread_ts ?? undefined) : undefined,
+              });
+              return true;
+            }
+          }
+        } catch (err) {
+          logger.warn('Counter auto-accept pre-check threw — falling back to approval', {
+            err: String(err).slice(0, 200), jobId: job.id,
+          });
+        }
+        // Fall through to the approval path below on any failure.
+      }
+
+      // Existing path: attach counter to pending approval + DM owner for
+      // sign-off. Used for schedule-intent coords, passive mode, counters
+      // outside same week, or counters that break a rule.
       const pendings = getPendingApprovalsBySkillRef(job.id);
       const proposedLocalLabel = followupIntent.proposed_iso
         ? DateTime.fromISO(followupIntent.proposed_iso).setZone(params.profile.user.timezone).toFormat('EEEE d MMM \'at\' HH:mm')

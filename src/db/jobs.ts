@@ -261,6 +261,11 @@ export interface CoordJob {
   requesters?: string;                     // JSON array of { slack_id, name? } — colleagues who asked for this coord
   external_event_id?: string;              // Graph event id once booked — idempotency guard
   request_signature?: string;              // hash(subject, participants, day) — dedupe across duplicate asks
+  // v2.1.1 — MOVE intent. When intent='move', the terminal booking step
+  // calls moveMeeting on existing_event_id instead of createMeeting.
+  // DM phrasing to participants also branches on intent.
+  intent?: 'schedule' | 'move';
+  existing_event_id?: string;              // set only when intent='move'
 }
 
 export function createCoordJob(params: Omit<CoordJob, 'id' | 'created_at' | 'updated_at'>): string {
@@ -269,10 +274,12 @@ export function createCoordJob(params: Omit<CoordJob, 'id' | 'created_at' | 'upd
   db.prepare(`
     INSERT INTO coord_jobs (
       id, owner_user_id, owner_channel, owner_thread_ts,
-      subject, topic, duration_min, status, proposed_slots, participants, notes, last_calendar_check
+      subject, topic, duration_min, status, proposed_slots, participants, notes, last_calendar_check,
+      intent, existing_event_id
     ) VALUES (
       @id, @owner_user_id, @owner_channel, @owner_thread_ts,
-      @subject, @topic, @duration_min, @status, @proposed_slots, @participants, @notes, @last_calendar_check
+      @subject, @topic, @duration_min, @status, @proposed_slots, @participants, @notes, @last_calendar_check,
+      @intent, @existing_event_id
     )
   `).run({
     id,
@@ -287,6 +294,8 @@ export function createCoordJob(params: Omit<CoordJob, 'id' | 'created_at' | 'upd
     participants: params.participants,
     notes: params.notes ?? null,
     last_calendar_check: params.last_calendar_check ?? new Date().toISOString(),
+    intent: params.intent ?? 'schedule',
+    existing_event_id: params.existing_event_id ?? null,
   });
   return id;
 }

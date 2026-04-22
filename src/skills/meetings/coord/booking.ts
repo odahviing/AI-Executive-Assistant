@@ -28,7 +28,7 @@ import {
   type CoordParticipant,
 } from '../../../db';
 import { getOpenTasksForOwner } from '../../../tasks';
-import { createMeeting, getCalendarEvents } from '../../../connectors/graph/calendar';
+import { createMeeting, getCalendarEvents, updateMeeting } from '../../../connectors/graph/calendar';
 import { shadowNotify } from '../../../utils/shadowNotify';
 import { getConnection } from '../../../connections/registry';
 import { registerCoordBookingHandler } from '../../../core/approvals/coordBookingHandler';
@@ -256,20 +256,39 @@ export async function bookCoordination(
     return;
   }
 
-  // ── Actually create the event in Graph ─────────────────────────────────────
+  // ── Actually create / move the event in Graph ────────────────────────────
+  // v2.1.1 — MOVE branch. When intent='move', we reshuffle the existing
+  // event rather than creating a fresh one. Graph preserves attendees +
+  // Teams link + history on PATCH (same as move_meeting). When intent is
+  // 'schedule' (default, historical path), we createMeeting as before.
   let newEventId: string;
   try {
-    newEventId = await createMeeting({
-      userEmail: profile.user.email,
-      timezone: profile.user.timezone,
-      subject: job.subject,
-      start: slot,
-      end: endDt.toISO()!,
-      attendees: participants.map(p => ({ name: p.name, email: p.email || '' })),
-      body: job.topic ? `Topic: ${job.topic}` : undefined,
-      isOnline,
-      location: location || undefined,
-    });
+    const isMove = job.intent === 'move' && !!job.existing_event_id;
+    if (isMove) {
+      await updateMeeting({
+        userEmail: profile.user.email,
+        meetingId: job.existing_event_id!,
+        start: slot,
+        end: endDt.toISO()!,
+        timezone: profile.user.timezone,
+      });
+      newEventId = job.existing_event_id!;
+      logger.info('bookCoordination — moved existing event', {
+        jobId, eventId: newEventId, slot,
+      });
+    } else {
+      newEventId = await createMeeting({
+        userEmail: profile.user.email,
+        timezone: profile.user.timezone,
+        subject: job.subject,
+        start: slot,
+        end: endDt.toISO()!,
+        attendees: participants.map(p => ({ name: p.name, email: p.email || '' })),
+        body: job.topic ? `Topic: ${job.topic}` : undefined,
+        isOnline,
+        location: location || undefined,
+      });
+    }
   } catch (err) {
     logger.error('Calendar booking failed for coordination', { err: String(err), jobId });
     try {

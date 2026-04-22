@@ -2,6 +2,71 @@
 
 ---
 
+## 2.1.1 — active calendar-health mode (autonomy layer)
+
+Takes the floating-blocks work from v2.1.0 and adds the autonomy layer on top. One flag in the profile (`behavior.calendar_health_mode`) toggles `check_calendar_health` between "passive — detect and report" (today's behavior, still the default) and "active — detect and execute the safe fixes in the same call." Owner stays in the loop on everything via shadow DMs + daily brief, but Maelle does the reshuffle work herself.
+
+### Added — the autonomy surface
+
+- **`behavior.calendar_health_mode: 'passive' | 'active'`** in the profile schema. Default `passive`. Set to `active` to turn on the autonomous calendar maintenance. Same yaml section as `v1_shadow_mode` — both are "how aggressively does Maelle act on her own" knobs.
+- **`meetings.protected[]` entries now accept `category`** alongside `name`. Forward-compatible: when the owner creates an Outlook category like "Protected", one yaml line `{category: "Protected", rule: "never_move"}` auto-protects every event tagged with it. Existing entries with only `name` keep working.
+- **`src/utils/meetingProtection.ts`** (new) — `isProtected(event, profile)` + `pickMovableSide(a, b, profile)`. Deterministic rules: ≥4 effective attendees / any external attendee / matches a `protected` entry by name or category → protected. All other meetings are movable under active mode.
+- **`src/utils/attendeeScope.ts`** (new) — `getOwnerDomain`, `isInternalOnly`, `countEffectiveAttendees`. Company domain derived from `profile.user.email`.
+- **`coord_jobs.intent: 'schedule' | 'move'`** + **`coord_jobs.existing_event_id`** (new columns, idempotent migration). The coord state machine now handles TWO intents — scheduling a new meeting (existing flow) or moving an existing one (new). Participant DMs branch to "can we shift our sync" phrasing for move intent; the booking terminal calls `updateMeeting` on the `existing_event_id` instead of `createMeeting`. Preserves attendees + Teams link + history, creates a single-date exception for recurring meetings.
+
+### Added — active-mode fix loop in `check_calendar_health`
+
+When `mode: 'active'`, on a single call the tool:
+
+- **Books every missing floating block** for days it applies to (lunch + any other `floating_blocks` the profile defines). Quarter-aligned, buffer-aware, day-scoped via `blockAppliesOnDay`.
+- **Tags uncategorized events** with a Sonnet classifier that returns confidence. Only acts on `high` confidence — ambiguous stays untagged so the owner chooses. No mis-tagging.
+- **Reshuffles floating-block overlaps directly** (fast-path). If a new meeting overlaps a floating-block event (lunch vs a new 1pm meeting), Maelle moves the block to the next aligned slot inside its window via `updateMeeting`. No coord needed — a floating block is elastic by definition.
+- **Starts a move-coord for internal-only overlaps** where a clear movable side exists. DMs the attendees of the movable meeting with "small conflict on Idan's side — can we shift our sync from 14:00 to 13:30 or 14:45?", waits for replies via the existing reply classifier, and when they agree calls `updateMeeting` on the occurrence id. Protection rules (4+ attendees / external / rule-matched) ensure the kept side is never touched.
+- **Auto-resolves OOF conflicts on a surprise vacation day.** When a meeting is scheduled on a day that becomes OOF (vacation, holiday, PTO), non-protected meetings get a move-coord pushing them 1–7 days out; protected ones (≥4 attendees / external) are left for the owner in the next-day report.
+- **DMs the owner about busy days.** Three thresholds (free time below profile target, >6 meetings, no 30-min unbroken block) — any one trips a real DM (not shadow) with the reasons and "want me to suggest what to push?". No auto-move.
+- **Returns a per-issue report** with `fixed: true` + `fix_detail` + optional `fix_failed` + `fix_error` so Sonnet narrates accurately — same RULE 2e principle ("narrate YOUR actions, not just resulting state").
+
+### Added — `check_join_availability` active-mode in-turn block move
+
+When a colleague asks "can Idan join our 1pm meeting?" and the only reason it's not immediately free is that a floating block (e.g. lunch) currently sits there:
+
+- **Passive mode (today's default):** Maelle replies "yes, free — forward the invite" (because the block could theoretically move). The block stays where it is on the calendar until the next health-check run.
+- **Active mode (v2.1.1):** same "yes" answer, but Maelle actually calls `updateMeeting` on the block event in the same turn, shifting it to a new aligned slot in its window. By the time the invite lands, the calendar already matches the answer.
+
+### Added — counter-offer auto-accept for move-coords
+
+When a move-coord participant counters with a different slot:
+
+- **If the coord is `intent='move'` AND profile is active mode AND the counter is same ISO week AND the slot passes every rule** (`findAvailableSlots` is used as the rule engine — buffer, work hours, floating-block windows, protected list all enforced), Maelle accepts the counter autonomously. Move books, participant gets "works — see you then", owner gets a shadow DM: *"Isaac countered Weekly with Isaac to Wed 19:00 — same week, within your rules, so I moved it."*
+- **Otherwise** (schedule-intent coord, passive mode, different week, rule break): falls through to the existing approval-to-owner path. Owner decides.
+
+### Changed — prompt nudges
+
+- **Meetings system prompt** now describes the passive/active mode explicitly, the protection rules inline, and uses the tools' `fix_detail` strings to narrate active-mode results.
+- **New LARGE-GROUP PARTITIONING rule.** When the owner asks for a meeting with 5+ people, Sonnet must ask once "who are the 1–4 people whose schedule truly matters?", then put the rest in `just_invite`. The coord state machine already warns ≥5 key participants; the prompt makes Sonnet narrow before calling the tool.
+- **New RETRY-ON-DECLINE rule.** When a coord approval was declined and the owner's reply extends the range or narrows the participant list, Sonnet must re-call `coordinate_meeting` with the new parameters before reporting "couldn't find time" a second time.
+- **FLOATING BLOCKS elasticity rule** (carried over from v2.1.0) tightened: explicit callout that Maelle may move a block to another quarter-hour inside its window without asking; moving out of the window requires `create_approval(kind=lunch_bump)`.
+
+### Follow-ups filed as improvement tickets (not in 2.1.1)
+
+Surfaced while walking through test scenarios, scoped out of this patch:
+
+- **[#30](https://github.com/odahviing/AI-Executive-Assistant/issues/30) — Tentative reservation awareness** (Medium). Active coord_jobs hold proposed slots that Graph doesn't know about. When a second colleague asks about the same slot, Maelle should treat it as tentatively reserved, not blindly free.
+- **[#31](https://github.com/odahviing/AI-Executive-Assistant/issues/31) — Auto-book travel buffer blocks** (Low). `custom` meeting mode pads slot search but doesn't insert actual "Travel" blocks on the calendar. Offsite visits leave adjacent slots looking free when the owner's in transit.
+- **[#32](https://github.com/odahviing/AI-Executive-Assistant/issues/32) — Retry-on-refusal with earlier-bias** (High). When a move-coord participant refuses ("this meeting must not move — it's important"), Maelle should try earlier-biased slots once before escalating to owner approval — rather than collapsing straight to cancel/approval.
+
+### Verified
+
+- `npm run typecheck` clean.
+- Five scenario walkthroughs covering: colleague-initiated coord + out-of-thread reply; tentative reservation; refusal-retry; large-group partitioning + decline-extend; surprise-vacation auto-cleanup.
+
+### Migration
+
+- No data migration required on startup beyond the `ALTER TABLE coord_jobs ADD COLUMN intent / existing_event_id` (idempotent, runs on first `getDb()` call).
+- Existing profiles unchanged (`calendar_health_mode` defaults to `passive` — today's behavior). Flip to `active` in `behavior:` to turn on autonomy.
+
+---
+
 ## 2.1.0 — floating blocks (lunch + generalized), elastic within window + day-scoped
 
 Lunch used to be a hardcoded, immutable calendar event: if a meeting wanted the slot lunch sat on, the meeting got rejected. The owner said: "lunch is just one example — there could be coffee breaks Thursday only, thinking-time blocks, etc. These should all be elastic within their window and config-driven, not hardcoded." This release ships the generalization + fixes the original lunch-immutability bug.

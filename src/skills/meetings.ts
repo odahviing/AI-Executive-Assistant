@@ -20,6 +20,7 @@ import {
   pickSpreadSlots,
   getCalendarEvents,
   GraphPermissionError,
+  updateMeeting,
 } from '../connectors/graph/calendar';
 import { SchedulingSkill as _LegacyOpsSkill } from './meetings/ops';
 import { determineSlotLocation, type SlotWithLocation } from './meetings/coord/utils';
@@ -1057,6 +1058,22 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
         const blockBufferMin = profile.meetings.buffer_minutes ?? 5;
         let lunchViolation = false;
         const violatedBlocks: string[] = [];
+        // v2.1.1 — collect which floating-block EVENTS need to be moved in
+        // the same turn if we return "yes free" in active mode. A block
+        // event needs a move when (a) it exists on the calendar and
+        // (b) its CURRENT slot overlaps the proposed meeting. The helper
+        // has already told us the new aligned slot.
+        const pendingBlockMoves: Array<{
+          eventId: string;
+          blockName: string;
+          currentSubject: string;
+          currentStartHHMM: string;
+          currentEndHHMM: string;
+          newStartIso: string;
+          newEndIso: string;
+          newStartHHMM: string;
+          newEndHHMM: string;
+        }> = [];
         for (const block of floatingBlocks) {
           if (!fb.blockAppliesOnDay(block, joinDayName, profile)) continue;
           const wStart = DateTime.fromISO(`${dayStr}T${block.preferred_start}`, { zone: timezone }).toMillis();
@@ -1090,17 +1107,81 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
           if (aligned === null && !block.can_skip) {
             lunchViolation = true;
             violatedBlocks.push(block.name);
+          } else if (aligned !== null) {
+            // Block fits — does its CURRENT event overlap the proposed
+            // meeting? If so, record a pending move.
+            const existingBlockEvent = events.find(e => {
+              if (e.isCancelled || e.isAllDay || e.showAs === 'free') return false;
+              return fb.isFloatingBlockEvent(
+                { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+                block,
+              );
+            });
+            if (existingBlockEvent) {
+              const eStartMs = evTime(existingBlockEvent.start).toMillis();
+              const eEndMs = evTime(existingBlockEvent.end).toMillis();
+              const overlapsProposed = eStartMs < meetingEndMs && eEndMs > meetingStartMs;
+              if (overlapsProposed && aligned !== eStartMs) {
+                const newStart = DateTime.fromMillis(aligned).setZone(timezone);
+                const newEnd = newStart.plus({ minutes: block.duration_minutes });
+                pendingBlockMoves.push({
+                  eventId: existingBlockEvent.id,
+                  blockName: block.name,
+                  currentSubject: existingBlockEvent.subject ?? block.name,
+                  currentStartHHMM: DateTime.fromMillis(eStartMs).setZone(timezone).toFormat('HH:mm'),
+                  currentEndHHMM: DateTime.fromMillis(eEndMs).setZone(timezone).toFormat('HH:mm'),
+                  newStartIso: newStart.toISO()!,
+                  newEndIso: newEnd.toISO()!,
+                  newStartHHMM: newStart.toFormat('HH:mm'),
+                  newEndHHMM: newEnd.toFormat('HH:mm'),
+                });
+              }
+            }
           }
         }
 
         // ── Fully free ──────────────────────────────────────────────────────────
         if (directConflicts.length === 0 && bufferOnly.length === 0 && !lunchViolation) {
+          // v2.1.1 — active-mode in-turn block move. When
+          // calendar_health_mode='active' AND a floating block event would
+          // need to shift to accommodate this meeting, move it now via
+          // updateMeeting so the "yes forward the invite" answer matches
+          // the calendar state the colleague will see. Failures fall back
+          // to "yes free" without the move (safer than a false no).
+          const activeMode = profile.behavior.calendar_health_mode === 'active';
+          const movesDone: string[] = [];
+          if (activeMode && pendingBlockMoves.length > 0) {
+            for (const mv of pendingBlockMoves) {
+              try {
+                await updateMeeting({
+                  userEmail,
+                  meetingId: mv.eventId,
+                  start: mv.newStartIso,
+                  end: mv.newEndIso,
+                  timezone,
+                });
+                movesDone.push(`moved ${mv.blockName} ${mv.currentStartHHMM}→${mv.newStartHHMM}`);
+                logger.info('check_join_availability active-mode: block moved in-turn', {
+                  eventId: mv.eventId, blockName: mv.blockName,
+                  from: mv.currentStartHHMM, to: mv.newStartHHMM,
+                });
+              } catch (err) {
+                logger.warn('In-turn block move failed — proceeding without it', {
+                  eventId: mv.eventId, err: String(err).slice(0, 200),
+                });
+              }
+            }
+          }
+          const movesLine = movesDone.length > 0
+            ? ` I ${movesDone.join(' and ')} to make room.`
+            : '';
           return {
             can_join: true,
             time: timeStr,
             duration_min: durationMin,
             subject,
-            message: `${ownerFirst} is free at that time. Tell ${requesterName} to forward the calendar invite.`,
+            blocks_moved: movesDone.length > 0 ? movesDone : undefined,
+            message: `${ownerFirst} is free at that time.${movesLine} Tell ${requesterName} to forward the calendar invite.`,
             _note: 'Do NOT book anything on the calendar. Just tell the colleague to forward the invite.',
           };
         }
@@ -1320,6 +1401,10 @@ Location (auto-determined — do NOT set manually):
 Coord slot rules (auto-enforced by find_available_slots): ${profile.meetings.min_slot_buffer_hours}h min buffer from now for colleagues (1h for owner); ≥2h between proposed options, at least one on a different day.
 
 Negotiation: participants disagree → ping-pong (try existing choices). Still stuck → open-ended renegotiation (up to 2 rounds). Still stuck → escalate to ${firstName}.
+
+LARGE-GROUP PARTITIONING — when ${firstName} asks for a meeting with 5+ people, DON'T call coordinate_meeting with all of them. Too many calendars to reconcile; the coord state machine warns ≥5 key participants. Instead: ask ${firstName} ONCE who are the 1-4 people whose schedule truly matters, and who's there FYI. Everyone he names as key → \`participants\`; the rest → \`just_invite\`. Single clarifying question, then proceed.
+
+RETRY-ON-DECLINE — when you've already run coordinate_meeting and an approval path failed (owner rejected a rule-exception, no slot fit, participant pulled out), AND ${firstName} replies with a new range / extended window / narrowed participant list, you must re-call coordinate_meeting with the new parameters — do NOT report "couldn't find time" a second time without having tried the new constraints. Read the decline reply carefully: "try next week", "two weeks out", "push it later" → extend \`search_from\`/\`search_to\`; "just Amazia, skip Maayan" → narrow participants. One retry with the fresh constraints before giving up again.
 
 --- ROUTE 2 DETAILS ---
 

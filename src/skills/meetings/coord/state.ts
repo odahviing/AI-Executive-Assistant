@@ -64,6 +64,16 @@ export async function initiateCoordination(
     isUrgent?: boolean;
     senderRole?: 'owner' | 'colleague';
     senderUserId?: string;
+    // v2.1.1 — MOVE intent. When set, the coord reshuffles an existing
+    // meeting instead of creating a new one. Participant DMs are phrased
+    // as "can we shift..." and the terminal booking step calls
+    // moveMeeting on `existing.id` rather than createMeeting.
+    moveExistingEvent?: {
+      id: string;
+      currentStartIso: string;    // original start, for DM framing
+      currentEndIso: string;
+      conflictReason?: string;    // optional — e.g. "conflicts with the Fulcrum Product Sync 14:00"
+    };
   }
 ): Promise<string> {
   const mpimMembers = new Set(params.mpimMemberIds ?? []);
@@ -147,8 +157,17 @@ export async function initiateCoordination(
       slotsMetadata,
       ...(params.needsDurationApproval ? { needsDurationApproval: true } : {}),
       ...(params.isUrgent ? { isUrgent: true } : {}),
+      ...(params.moveExistingEvent ? {
+        moveContext: {
+          currentStart: params.moveExistingEvent.currentStartIso,
+          currentEnd: params.moveExistingEvent.currentEndIso,
+          conflictReason: params.moveExistingEvent.conflictReason ?? null,
+        },
+      } : {}),
     }),
     last_calendar_check: new Date().toISOString(),
+    intent: params.moveExistingEvent ? 'move' : 'schedule',
+    existing_event_id: params.moveExistingEvent?.id,
   });
 
   cancelOrphanCoordJobs(params.ownerUserId, params.subject, jobId);
@@ -261,6 +280,13 @@ export async function initiateCoordination(
         proposedSlots: params.proposedSlots,
         jobId,
         profile: params.profile,
+        moveContext: params.moveExistingEvent
+          ? {
+              currentStartIso: params.moveExistingEvent.currentStartIso,
+              currentEndIso: params.moveExistingEvent.currentEndIso,
+              conflictReason: params.moveExistingEvent.conflictReason,
+            }
+          : undefined,
       });
       await shadowNotify(params.profile, {
         channel: params.ownerChannel,
@@ -304,6 +330,13 @@ async function sendCoordDM(
     proposedSlots: SlotWithLocation[];
     jobId: string;
     profile: UserProfile;
+    // v2.1.1 — when intent='move', frame the DM as "can we shift our
+    // existing sync" rather than "find a time for a new meeting".
+    moveContext?: {
+      currentStartIso: string;
+      currentEndIso: string;
+      conflictReason?: string;
+    };
   }
 ): Promise<void> {
   const slackConn = getConnection(params.profile.user.slack_user_id, 'slack');
@@ -355,7 +388,20 @@ async function sendCoordDM(
     : '';
   const topicLine = params.topic ? ` It's about ${params.topic}.` : '';
 
-  const body = `${params.ownerName} asked me to find a time for a ${params.durationMin}-min meeting with you${othersLine}.${topicLine}\n\nHere are a few options — which works best for you?\n${slotLines}\n\nLet me know which one you prefer, or if none of these work I'll find something else.`;
+  // v2.1.1 — MOVE vs SCHEDULE phrasing. A move is never a "new meeting" —
+  // framing it that way would confuse the participant. We say: there's a
+  // conflict at the current time; pick a new slot and I'll move it.
+  let body: string;
+  if (params.moveContext) {
+    const curDt = DateTime.fromISO(params.moveContext.currentStartIso).setZone(params.participant.tz);
+    const curLabel = `${curDt.toFormat('EEEE, d MMMM')} at ${curDt.toFormat('HH:mm')}`;
+    const conflictClause = params.moveContext.conflictReason
+      ? ` — ${params.moveContext.conflictReason}`
+      : '';
+    body = `small scheduling conflict on ${params.ownerName}'s side for our "${params.subject}"${othersLine}${conflictClause}. Any chance we shift it from ${curLabel}? Here are a few options that work for him:\n${slotLines}\n\nWhich of these works for you? (Happy to suggest other times if none fit.)`;
+  } else {
+    body = `${params.ownerName} asked me to find a time for a ${params.durationMin}-min meeting with you${othersLine}.${topicLine}\n\nHere are a few options — which works best for you?\n${slotLines}\n\nLet me know which one you prefer, or if none of these work I'll find something else.`;
+  }
 
   const message = `${introLine}${body}`;
 

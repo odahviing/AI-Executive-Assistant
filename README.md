@@ -28,6 +28,35 @@ This principle outranks speed, completeness, and elegance in every tradeoff.
 
 ---
 
+## Active calendar-health mode (v2.1.1)
+
+A single profile flag — `behavior.calendar_health_mode` — flips Maelle between two modes when she runs `check_calendar_health`:
+
+- **`passive` (default)** — detects issues and reports them to the owner. Owner asks for fixes; Maelle executes per-tool.
+- **`active`** — detects AND executes the safe fixes in one pass. Everything still surfaces via shadow DMs + daily brief so the owner can see exactly what happened, but Maelle does the reshuffle work herself.
+
+What `active` does autonomously:
+
+- **Books every missing floating block** on days it applies to (lunch, coffee break, thinking time, whatever the profile defines under `schedule.floating_blocks`). Quarter-aligned, buffer-aware.
+- **Tags uncategorized meetings** with a high-confidence Sonnet classifier against the profile's `categories`. Ambiguous stays untagged.
+- **Reshuffles lunch / floating blocks inside their window** to accommodate new meetings (no coord needed — elastic by definition).
+- **Runs a move-coord on internal-only overlaps** where a clear movable side exists. DMs attendees of the movable meeting, proposes alternate slots, books once they agree.
+- **Auto-moves 1:1s and small internal meetings off a surprise-vacation day.** Protected meetings (4+ attendees, any external, or matched by `meetings.protected[]`) stay flagged for the owner instead.
+- **DMs the owner on busy days** (low free time / 6+ meetings / no 30-min unbroken block) with proposed candidates to push. No auto-move; owner decides.
+- **Auto-accepts counter-offers from move-coord participants** when the counter is same ISO week AND passes all scheduling rules (buffer, work hours, floating-block windows). Otherwise falls back to owner approval.
+
+What `active` WILL NOT do:
+
+- Touch any meeting with an external attendee.
+- Touch a meeting with ≥4 effective attendees.
+- Touch anything listed in `meetings.protected[]` (by name or category).
+- Resolve an OOF conflict on a protected meeting (10-person strategy session on a sudden vacation day stays flagged; the two 1:1s get moved).
+- Bypass owner approval when a proposed change breaks a rule (buffer violation, out-of-hours, lunch window can't absorb the shift).
+
+Flip `calendar_health_mode: active` in the profile yaml when you're ready. It's additive — everything a `passive` Maelle used to do still works; `active` just does MORE in the same call.
+
+---
+
 ## How It Works
 
 The agent is composed of **Core modules** (always on) and **Skills** (opt-in per profile). Skills send messages through the **Connection interface** — a transport-agnostic surface that Slack implements today, email and WhatsApp tomorrow. Inbound messages arrive through the **Connector** layer (Slack Bolt app, future email/WhatsApp webhooks).

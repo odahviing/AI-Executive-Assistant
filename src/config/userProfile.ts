@@ -209,10 +209,19 @@ const UserProfileSchema = z.object({
     min_slot_buffer_hours: z.number().min(0).max(12).default(4),
     physical_meetings_require_office_day: z.boolean(),
     room_email: z.string().email().optional(),   // e.g. "meeting@company.com" — used to book physical meeting rooms
+    // v2.1.1 — each entry must supply EITHER name (subject match, existing)
+    // OR category (Outlook-category match, new). This is additive-compatible:
+    // existing profiles with only `name` keep working. When the owner adds an
+    // Outlook category (e.g. "Protected") in the future, a single yaml entry
+    // `{category: "Protected", rule: "never_move"}` auto-protects every event
+    // tagged with it — no code change.
     protected: z.array(z.object({
-      name: z.string(),
+      name: z.string().optional(),
+      category: z.string().optional(),
       rule: z.enum(['never_move', 'never_override']),
       recurring: z.boolean().optional(),
+    }).refine(p => !!p.name || !!p.category, {
+      message: 'protected entry must have either `name` or `category`',
     })),
   }),
 
@@ -247,6 +256,16 @@ const UserProfileSchema = z.object({
     // autonomous action (DMs sent, meetings booked, etc.) even if no approval needed.
     // Lets the owner catch bugs in real time. Set to false once v1 is stable.
     v1_shadow_mode: z.boolean().default(false),
+    // v2.1.1 — calendar-health mode. Same routine, same tool, different
+    // outcome:
+    //   passive (default) → detect issues + return report. Sonnet narrates
+    //     to the owner, owner asks for fixes, Maelle executes per-tool.
+    //   active → detect + execute safe fixes in one pass. Missing floating
+    //     blocks get booked (via book_lunch / floating-blocks helper),
+    //     missing categories get set (high-confidence classifier only),
+    //     busy-day threshold breaches fire a DM to the owner. Internal-
+    //     overlap auto-resolve ships in v2.2 (needs move-coord state).
+    calendar_health_mode: z.enum(['passive', 'active']).default('passive'),
   }),
 
   // Rescheduling rules — now strongly typed with discriminated union
