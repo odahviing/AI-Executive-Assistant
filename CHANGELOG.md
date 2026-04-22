@@ -2,6 +2,66 @@
 
 ---
 
+## 2.1.0 — floating blocks (lunch + generalized), elastic within window + day-scoped
+
+Lunch used to be a hardcoded, immutable calendar event: if a meeting wanted the slot lunch sat on, the meeting got rejected. The owner said: "lunch is just one example — there could be coffee breaks Thursday only, thinking-time blocks, etc. These should all be elastic within their window and config-driven, not hardcoded." This release ships the generalization + fixes the original lunch-immutability bug.
+
+### Added
+
+- **`schedule.floating_blocks` YAML array.** Each entry: `name`, `preferred_start`, `preferred_end`, `duration_minutes`, `can_skip`, optional `days: ["Thursday"]` / `["Sunday","Monday","Wednesday","Thursday"]` for day-of-week scoping, optional `match_subject_regex` / `match_category` for calendar-event detection, optional `default_subject` / `default_category` for booking. Example uses: `coffee_break` Thursday 16:00–17:00 (60 min), `thinking_time` every weekday 09:00–10:00 (60 min), `gym_window` Sundays 07:00–09:00 (45 min).
+- **`schedule.lunch` auto-promotes to a floating block named `lunch`.** Existing profiles keep working unchanged — no migration required. A custom `floating_blocks` entry named `lunch` overrides the auto-promoted one.
+- **New module `src/utils/floatingBlocks.ts`** — single source of truth. Exports `getFloatingBlocks(profile)`, `blockAppliesOnDay(block, dayName, profile)`, `isFloatingBlockEvent(event, block)`, `findAlignedSlotForBlock(block, date, tz, busy, bufferMin)`. Every call site that used to ask "is this lunch?" / "can lunch still fit?" now asks this module.
+
+### Fixed
+
+- **Floating blocks are ELASTIC within their window — no more "meeting rejected because it overlaps lunch".** `findAvailableSlots` no longer treats the lunch event as an immutable busy block. Two-part fix: (1) floating-block events are subtracted from the base busy pool so the `isFree` collision check won't reject slots where the block currently sits; (2) after a slot passes `isFree`, every block that applies on that day is verified to still have a quarter-aligned buffer-compliant slot somewhere in its window after the proposed meeting lands. A block with `can_skip:true` that genuinely has no room doesn't block the meeting — just doesn't get booked that day. Moving a block OUTSIDE its window still requires `create_approval(kind=lunch_bump)` — elasticity is within-window only. Same generalization applied to `check_join_availability` (was lunch-hardcoded).
+- **`book_lunch` is day-scope aware.** If the profile says `lunch.days: ["Sunday","Monday","Wednesday","Thursday"]` and someone asks to book Tuesday lunch, the tool refuses honestly with `not_applicable_today` and names the configured days. Previously it would try to book anyway.
+- **`book_lunch` now delegates to the floating-blocks helper.** Identifies the block (defaulting to the lunch block), runs the same quarter-alignment + buffer logic as the 2.0.7 fix — but via shared code. When (future) profiles add a coffee_break block and someone wants to book that instance, the same handler works — it's no longer lunch-specific internally. The tool name stays `book_lunch` for back-compat.
+
+### Changed
+
+- **Meetings system-prompt section enumerates all floating blocks with day-scope.** Was: one hardcoded line describing lunch. Now: one line per configured block showing `name (window, duration, day-scope, can-skip)`. Adding a coffee break to YAML instantly surfaces it in the prompt — no code change needed.
+- **New prompt rule `FLOATING BLOCKS are ELASTIC WITHIN THEIR WINDOW`** in the meetings section. Explains the owner's mental model: Maelle may move a block to another quarter-hour inside its window without asking; moving it out of the window requires `lunch_bump` approval. Pairs with the tool behavior so Sonnet's narration matches what the code does.
+- **New base-prompt rule 2e — Narrate YOUR actions, not just resulting state.** When the owner asks about something Maelle moved/booked earlier in THIS conversation, she should lead with the action ("I moved Sunday lunch from 11:55 to 12:00") instead of re-reading the calendar and describing the resulting state as if it was always there. Addresses the "she fixed it and then didn't remember she fixed it" observation.
+
+### Removed
+
+- **`canLunchFitAfterBooking` in `connectors/graph/calendar.ts`** — replaced by the generalized floating-blocks feasibility loop. Zero behavioral loss; all its logic lives in the helper now.
+
+### Bundled from this session (previously uncommitted)
+
+- **Slack `\<\>` escape strip** (`connections/slack/formatting.ts`). Sonnet markdown-safe-escapes literal `<>` in calendar event titles (e.g. `Reflectiz<>Strauss` → `Reflectiz\<\>Strauss`); Slack doesn't use backslash escaping so the slashes rendered literally. Added `replace(/\\</g, '<')` + `replace(/\\>/g, '>')` to the Slack formatter alongside the `**` → `*` and `##` strips.
+- **Retro outreach-orphan backfill** (`src/core/approvals/outreachOrphanBackfill.ts`). The v2.0.7 sibling-outreach cleanup inside `updateCoordJob` only fires on NEW terminal transitions — pre-v2.0.7 bookings left zombies behind. New startup migration runs 30s after boot alongside the approval backfill: (1) for every terminal coord in the last 30 days, closes matching outreach rows to `done` and cancels their pending `outreach_expiry` / `outreach_decision` tasks; (2) for any remaining `no_response` outreach without a decision task, schedules one 2 owner-workdays out. Idempotent.
+- **`book_lunch` quarter-hour alignment** (originally 2.0.8 territory, now in this release). Previously `book_lunch` picked `prev` (end of previous meeting or window start) — produced lunches at `:50` / `:55`. Now enforces `:00/:15/:30/:45` alignment deterministically + applies the profile's `buffer_minutes` before and after when there's a neighboring meeting. This was the 2.0.8 fix but got rolled into the 2.1.0 floating-blocks refactor since the new helper owns alignment centrally.
+
+### Verified
+
+- `npm run typecheck` clean.
+- `findAvailableSlots`, `check_join_availability`, `book_lunch` all route through the same `utils/floatingBlocks` helper — single source of truth.
+- Idan's existing YAML (`schedule.lunch: { preferred_start: 11:30, preferred_end: 13:30, duration_minutes: 25, can_skip: true }`) produces one floating block named `lunch` applying to all his work days — no behavior change for him.
+
+### Migration
+
+- Existing profiles with only `schedule.lunch` keep working — lunch auto-promotes to a floating block. No YAML changes required.
+- To add new blocks: append entries under `schedule.floating_blocks:` in the user YAML. E.g.:
+  ```yaml
+  schedule:
+    floating_blocks:
+      - name: "coffee_break"
+        preferred_start: "16:00"
+        preferred_end: "17:00"
+        duration_minutes: 15
+        can_skip: true
+        days: ["Thursday"]
+      - name: "thinking_time"
+        preferred_start: "09:00"
+        preferred_end: "10:00"
+        duration_minutes: 60
+        can_skip: true
+  ```
+
+---
+
 ## 2.0.7 — silence-gap close + one approval path + orphan kill at source + dead-code sweep
 
 Addresses the bug wave around the April 22 brief: Yael asked for a slot-bump, Maelle silently stored it to `pending_requests`, owner never heard. Michal DM'd about a bank visit, Maelle replied, owner never heard. Amazia "three open threads" turned out to be two zombie outreach rows + one correct booking. Three root causes this release: inbound colleague path never shadow-notified, three overlapping tools (store_request / escalate_to_user / create_approval) with the owner-facing one blocked in the colleague path, and coord-booked outreach never cleaned up its siblings.

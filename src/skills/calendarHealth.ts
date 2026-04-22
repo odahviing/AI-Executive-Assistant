@@ -343,44 +343,61 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
 
       case 'book_lunch': {
         const date = args.date as string;
-        const lunch = profile.schedule.lunch;
+        // v2.1 — book_lunch generalized via floating_blocks. Still called
+        // "book_lunch" (back-compat) but now delegates to the floating-
+        // block helper. The "lunch" block is always present (auto-
+        // promoted from schedule.lunch). Day-scope check too: if the
+        // profile has declared lunch.days and the requested date isn't
+        // in them, refuse the booking honestly.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
+        const blocks = fb.getFloatingBlocks(profile);
+        const block = blocks.find(b => b.name === 'lunch') ?? blocks[0];
+        if (!block) {
+          return { error: 'no_lunch_block', message: 'No lunch / floating block configured in profile.' };
+        }
+        const dayName = DateTime.fromISO(date, { zone: timezone }).toFormat('EEEE');
+        if (!fb.blockAppliesOnDay(block, dayName, profile)) {
+          return {
+            error: 'not_applicable_today',
+            message: `${block.name} isn't scheduled for ${dayName} in your profile (days: ${(block.days ?? ['every work day']).join(', ')}).`,
+          };
+        }
 
-        // Get events for the day to find a free slot in the lunch window
+        // Get events for the day to find a free slot in the block window
         let events: CalendarEvent[];
         try {
           events = await getCalendarEvents(userEmail, date, date, timezone);
         } catch (err) {
-          logger.error('Calendar health: failed to fetch events for lunch booking', { err });
+          logger.error('book_lunch: failed to fetch events', { err });
           return { error: 'Failed to fetch calendar events.' };
         }
 
-        const lunchWindowStart = DateTime.fromISO(`${date}T${lunch.preferred_start}`, { zone: timezone });
-        const lunchWindowEnd = DateTime.fromISO(`${date}T${lunch.preferred_end}`, { zone: timezone });
-        const lunchDurationMs = lunch.duration_minutes * 60 * 1000;
+        const windowStart = DateTime.fromISO(`${date}T${block.preferred_start}`, { zone: timezone });
+        const windowEnd = DateTime.fromISO(`${date}T${block.preferred_end}`, { zone: timezone });
 
-        // v1.6.4 — check whether a lunch event already exists in (or touching)
-        // the lunch window, so we don't double-book AND the LLM can narrate
-        // correctly via the created:false signal. A "lunch event" is any
-        // event whose subject matches /lunch/i or is categorized 'Lunch'.
-        const existingLunch = events.find(e => {
+        // Idempotency: if the block's event already exists in the window,
+        // return created:false so the LLM narrates "already booked".
+        const existingEvent = events.find(e => {
           if (e.isAllDay || e.isCancelled || e.showAs === 'free') return false;
-          const subject = String(e.subject ?? '').toLowerCase();
-          const categories: string[] = Array.isArray((e as any).categories) ? (e as any).categories : [];
-          const looksLikeLunch = /\blunch\b|ארוחת\s*צהריים/i.test(subject) || categories.includes('Lunch');
-          if (!looksLikeLunch) return false;
+          const matches = fb.isFloatingBlockEvent(
+            { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+            block,
+          );
+          if (!matches) return false;
           const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
           const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
-          return eStart.toMillis() < lunchWindowEnd.toMillis() && eEnd.toMillis() > lunchWindowStart.toMillis();
+          return eStart.toMillis() < windowEnd.toMillis() && eEnd.toMillis() > windowStart.toMillis();
         });
-        if (existingLunch) {
-          const eStart = parseGraphDt(existingLunch.start.dateTime, existingLunch.start.timeZone, timezone);
-          const eEnd = parseGraphDt(existingLunch.end.dateTime, existingLunch.end.timeZone, timezone);
+        if (existingEvent) {
+          const eStart = parseGraphDt(existingEvent.start.dateTime, existingEvent.start.timeZone, timezone);
+          const eEnd = parseGraphDt(existingEvent.end.dateTime, existingEvent.end.timeZone, timezone);
           return {
             ok: true,
             created: false,
             already_existed: true,
-            event_id: existingLunch.id,
-            subject: existingLunch.subject,
+            event_id: existingEvent.id,
+            subject: existingEvent.subject,
             start: eStart.toFormat('HH:mm'),
             end: eEnd.toFormat('HH:mm'),
             date,
@@ -388,53 +405,38 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
           };
         }
 
-        // Get busy blocks within the lunch window
+        // Busy blocks in the window, EXCLUDING events that are this block
+        // (we're about to book one; don't let a stale one self-block).
         const busyInWindow = events
           .filter(e => {
             if (e.isAllDay || e.isCancelled || e.showAs === 'free') return false;
+            if (fb.isFloatingBlockEvent(
+              { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+              block,
+            )) return false;
             const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
             const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
-            return eStart.toMillis() < lunchWindowEnd.toMillis() && eEnd.toMillis() > lunchWindowStart.toMillis();
+            return eStart.toMillis() < windowEnd.toMillis() && eEnd.toMillis() > windowStart.toMillis();
           })
           .map(e => ({
-            start: Math.max(parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis(), lunchWindowStart.toMillis()),
-            end: Math.min(parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(), lunchWindowEnd.toMillis()),
-          }))
-          .sort((a, b) => a.start - b.start);
+            start: Math.max(parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis(), windowStart.toMillis()),
+            end: Math.min(parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(), windowEnd.toMillis()),
+          }));
 
-        // Merge overlapping
-        const merged: Array<{ start: number; end: number }> = [];
-        for (const block of busyInWindow) {
-          if (merged.length > 0 && block.start <= merged[merged.length - 1].end) {
-            merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, block.end);
-          } else {
-            merged.push({ ...block });
-          }
-        }
-
-        // Find first free block >= lunch duration
-        let bestStart: number | null = null;
-        let prev = lunchWindowStart.toMillis();
-        for (const block of merged) {
-          if (block.start - prev >= lunchDurationMs) {
-            bestStart = prev;
-            break;
-          }
-          prev = block.end;
-        }
-        if (bestStart === null && lunchWindowEnd.toMillis() - prev >= lunchDurationMs) {
-          bestStart = prev;
-        }
-
+        const bufferMinutes = profile.meetings.buffer_minutes ?? 5;
+        const bestStart = fb.findAlignedSlotForBlock(
+          block, date, timezone, busyInWindow, bufferMinutes,
+        );
         if (bestStart === null) {
           return {
             error: 'no_room',
-            message: `No room for a ${lunch.duration_minutes}-minute lunch between ${lunch.preferred_start} and ${lunch.preferred_end} on ${date}. The window is fully booked.`,
+            message: `No room for a ${block.duration_minutes}-minute ${block.name} between ${block.preferred_start} and ${block.preferred_end} on ${date}. The window is fully booked once quarter-hour alignment and the ${bufferMinutes}-min buffer are applied.`,
           };
         }
 
+        const lunch = { duration_minutes: block.duration_minutes };  // preserve downstream naming
         const lunchStart = DateTime.fromMillis(bestStart).setZone(timezone);
-        const lunchEnd = lunchStart.plus({ minutes: lunch.duration_minutes });
+        const lunchEnd = lunchStart.plus({ minutes: block.duration_minutes });
 
         // v1.7.8 — category is no longer hardcoded. Sonnet picks from
         // profile.categories (the owner's real Outlook categories, injected

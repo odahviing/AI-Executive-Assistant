@@ -1043,43 +1043,54 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
 
         const bufferOnly = relevantEvents.filter(ev => !directConflicts.includes(ev));
 
-        // Lunch check
-        const lunch = profile.schedule.lunch;
-        const lunchStartMs = DateTime.fromISO(`${dayStr}T${lunch.preferred_start}`, { zone: timezone }).toMillis();
-        const lunchEndMs = DateTime.fromISO(`${dayStr}T${lunch.preferred_end}`, { zone: timezone }).toMillis();
+        // v2.1 — generalized floating-blocks violation check. Used to be
+        // lunch-only; now iterates every block that applies on this day
+        // (lunch + any custom block). A block is violated only when no
+        // aligned-and-buffered slot remains for it after adding the
+        // proposed meeting. Elastic detection: calendar events that
+        // already ARE this block are excluded from busy — they'll be
+        // moved, not blocked-against.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
+        const floatingBlocks = fb.getFloatingBlocks(profile);
+        const joinDayName = DateTime.fromISO(dayStr, { zone: timezone }).toFormat('EEEE');
+        const blockBufferMin = profile.meetings.buffer_minutes ?? 5;
         let lunchViolation = false;
+        const violatedBlocks: string[] = [];
+        for (const block of floatingBlocks) {
+          if (!fb.blockAppliesOnDay(block, joinDayName, profile)) continue;
+          const wStart = DateTime.fromISO(`${dayStr}T${block.preferred_start}`, { zone: timezone }).toMillis();
+          const wEnd = DateTime.fromISO(`${dayStr}T${block.preferred_end}`, { zone: timezone }).toMillis();
+          if (meetingStartMs >= wEnd || meetingEndMs <= wStart) continue;  // no overlap
 
-        if (meetingStartMs < lunchEndMs && meetingEndMs > lunchStartMs) {
-          // Meeting overlaps lunch window — check if lunch can still fit
-          const busyInLunch = [
-            ...events.filter(ev => {
-              if (ev.isCancelled || ev.isAllDay || ev.showAs === 'free') return false;
-              return evTime(ev.start).toMillis() < lunchEndMs && evTime(ev.end).toMillis() > lunchStartMs;
-            }).map(ev => ({
-              start: Math.max(evTime(ev.start).toMillis(), lunchStartMs),
-              end: Math.min(evTime(ev.end).toMillis(), lunchEndMs),
-            })),
-            // Add the meeting we'd be joining
-            { start: Math.max(meetingStartMs, lunchStartMs), end: Math.min(meetingEndMs, lunchEndMs) },
-          ].sort((a, b) => a.start - b.start);
-
-          // Merge and find max free block
-          const merged: Array<{ start: number; end: number }> = [];
-          for (const block of busyInLunch) {
-            if (merged.length > 0 && block.start <= merged[merged.length - 1].end) {
-              merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, block.end);
-            } else {
-              merged.push({ ...block });
+          const busyInWindow: Array<{ start: number; end: number }> = [];
+          for (const evt of events) {
+            if (evt.isCancelled || evt.isAllDay || evt.showAs === 'free') continue;
+            if (fb.isFloatingBlockEvent(
+              { subject: evt.subject, categories: (evt as unknown as { categories?: unknown }).categories },
+              block,
+            )) continue;  // elastic
+            const eStart = evTime(evt.start).toMillis();
+            const eEnd = evTime(evt.end).toMillis();
+            if (eStart < wEnd && eEnd > wStart) {
+              busyInWindow.push({
+                start: Math.max(eStart, wStart),
+                end: Math.min(eEnd, wEnd),
+              });
             }
           }
-          let maxFreeMin = 0;
-          let prev = lunchStartMs;
-          for (const block of merged) {
-            maxFreeMin = Math.max(maxFreeMin, (block.start - prev) / 60_000);
-            prev = block.end;
+          busyInWindow.push({
+            start: Math.max(meetingStartMs, wStart),
+            end: Math.min(meetingEndMs, wEnd),
+          });
+
+          const aligned = fb.findAlignedSlotForBlock(
+            block, dayStr, timezone, busyInWindow, blockBufferMin,
+          );
+          if (aligned === null && !block.can_skip) {
+            lunchViolation = true;
+            violatedBlocks.push(block.name);
           }
-          maxFreeMin = Math.max(maxFreeMin, (lunchEndMs - prev) / 60_000);
-          if (maxFreeMin < lunch.duration_minutes) lunchViolation = true;
         }
 
         // ── Fully free ──────────────────────────────────────────────────────────
@@ -1145,7 +1156,7 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
         // ── Buffer or lunch violation only → escalate to owner ──────────────────
         const violations: string[] = [];
         if (bufferOnly.length > 0) violations.push(`buffer between meetings (${profile.meetings.buffer_minutes}-min gap)`);
-        if (lunchViolation) violations.push('lunch protection');
+        if (lunchViolation) violations.push(`floating-block protection (${violatedBlocks.join(', ')})`);
 
         return {
           can_join: 'needs_approval',
@@ -1184,6 +1195,15 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
     const home = profile.schedule.home_days;
     const lunch = profile.schedule.lunch;
     const firstName = profile.user.name.split(' ')[0];
+    // v2.1 — enumerate all floating blocks (lunch + any custom) with their
+    // day-scope so the prompt describes reality, not just lunch.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
+    const blocks = fb.getFloatingBlocks(profile);
+    const blocksLine = blocks.map(b => {
+      const dayScope = b.days && b.days.length > 0 ? b.days.join('/') : 'every work day';
+      return `${b.name} (${b.preferred_start}–${b.preferred_end}, ${b.duration_minutes} min, ${dayScope}${b.can_skip ? ', can skip' : ', must fit'})`;
+    }).join(' · ');
     return `
 MEETINGS SKILL
 Everything about booking meetings — direct calendar operations AND multi-party Slack coordination — lives here. This is the only skill that touches the calendar.
@@ -1192,8 +1212,10 @@ ${firstName.toUpperCase()}'S SCHEDULE — these are HARD RULES. Proposing a time
 - Office days: ${officeDays} · ${office.hours_start}–${office.hours_end}
 - Home days: ${homeDays} · ${home.hours_start}–${home.hours_end}
 - Days not listed above are days OFF. Never propose work meetings on those days.
-- Lunch window: ${lunch.preferred_start}–${lunch.preferred_end} (${lunch.duration_minutes} min, ${lunch.can_skip ? 'can skip if needed' : 'must fit'}).
+- Floating blocks (elastic within their window): ${blocksLine || 'none configured'}.
 - Buffer between meetings: the allowed durations (${profile.meetings.allowed_durations.join(' / ')} min) ALREADY bake in ${profile.meetings.buffer_minutes} min of trailing buffer by design — a 55-min meeting at 17:00 ends 17:55, leaving 5 min before 18:00 automatically. You do NOT need to add another 5-min gap BEFORE a new meeting. If a previous meeting ends at 17:00, a new meeting can start at 17:00 (connected) — that is fine and preferred. You may offer 17:15 as an alternative if ${firstName} wants a gap.
+
+FLOATING BLOCKS are ELASTIC WITHIN THEIR WINDOW. Lunch, coffee breaks, thinking time, any other profile-defined block — these are NOT fixed slots. You may freely move them to a different quarter-hour inside the window (:00/:15/:30/:45) if that's what it takes to book a meeting. No approval needed when the block STAYS in its window with enough room for its full duration + buffer. Moving a block OUTSIDE its window (e.g. lunch bumped to 14:00 when window is 11:30–13:30) requires \`create_approval(kind=lunch_bump)\`. find_available_slots already treats blocks as elastic when returning slots; when you book a meeting that displaces a block, call \`move_meeting\` on the block event to a new aligned slot in its window.
 
 SLOT START TIMES — ALWAYS :00 / :15 / :30 / :45. No exceptions when YOU propose a time.
 - If a raw calendar gap begins at 14:40 (previous meeting ended 14:40), propose 14:45 — NOT 14:40.

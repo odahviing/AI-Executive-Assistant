@@ -313,56 +313,11 @@ function computeDayQualityFreeMinutes(
   return totalFreeMin;
 }
 
-/**
- * Check whether lunch can still fit in the lunch window after adding a proposed slot.
- * Returns true if there's a contiguous free block ≥ lunchDurationMinutes remaining.
- */
-function canLunchFitAfterBooking(
-  dayDate: string,
-  timezone: string,
-  lunchStart: string,
-  lunchEnd: string,
-  lunchDurationMinutes: number,
-  busyBlocks: Array<{ start: Date; end: Date }>,
-  proposedStart: Date,
-  proposedEnd: Date,
-): boolean {
-  const lStartMs = DateTime.fromISO(`${dayDate}T${lunchStart}`, { zone: timezone }).toMillis();
-  const lEndMs   = DateTime.fromISO(`${dayDate}T${lunchEnd}`,   { zone: timezone }).toMillis();
-
-  // If proposed slot doesn't overlap lunch window at all → no issue
-  if (proposedEnd.getTime() <= lStartMs || proposedStart.getTime() >= lEndMs) return true;
-
-  // Collect all busy blocks in lunch window (existing + proposed)
-  const allBlocks = [
-    ...busyBlocks.filter(b => b.start.getTime() < lEndMs && b.end.getTime() > lStartMs),
-    { start: proposedStart, end: proposedEnd },
-  ].map(b => ({
-    start: Math.max(b.start.getTime(), lStartMs),
-    end:   Math.min(b.end.getTime(), lEndMs),
-  })).sort((a, b) => a.start - b.start);
-
-  // Merge overlapping
-  const merged: Array<{ start: number; end: number }> = [];
-  for (const block of allBlocks) {
-    if (merged.length > 0 && block.start <= merged[merged.length - 1].end) {
-      merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, block.end);
-    } else {
-      merged.push({ ...block });
-    }
-  }
-
-  // Find largest contiguous free block remaining in lunch window
-  let maxFreeMin = 0;
-  let prev = lStartMs;
-  for (const block of merged) {
-    maxFreeMin = Math.max(maxFreeMin, (block.start - prev) / 60_000);
-    prev = block.end;
-  }
-  maxFreeMin = Math.max(maxFreeMin, (lEndMs - prev) / 60_000);
-
-  return maxFreeMin >= lunchDurationMinutes;
-}
+// v2.1 — former `canLunchFitAfterBooking` retired. Replaced by the
+// generalized floating-blocks feasibility loop inside findAvailableSlots,
+// which uses `utils/floatingBlocks.findAlignedSlotForBlock` (lunch + any
+// custom block, day-scoped, quarter-aligned, buffer-compliant, elastic
+// detection of matching calendar events).
 
 /**
  * Meeting mode (v1.6.4) — steers the slot search.
@@ -487,6 +442,84 @@ export async function findAvailableSlots(params: {
       ?? profile?.meetings.free_time_per_office_day_hours ?? 0)) * 60;
     const lunch = profile?.schedule.lunch;
 
+    // v2.1 — floating-block feasibility. For every configured floating
+    // block (lunch + any custom block, day-scoped via block.days), verify
+    // that AFTER placing the proposed meeting here the block still has an
+    // aligned, buffer-compliant slot somewhere in its window. Detected
+    // calendar events that ARE a floating block are treated as elastic:
+    // excluded from the busy-block pool for THAT block's feasibility
+    // check (since Maelle can move them). The block-aware path replaces
+    // the hardcoded lunch-only check below.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fb = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
+    const floatingBlocks = profile ? fb.getFloatingBlocks(profile) : [];
+    const blockBufferMin = profile?.meetings.buffer_minutes ?? 5;
+
+    // v2.1 — fetch owner's own events for the search range so we can tell
+    // WHICH busy slots are floating-block events (lunch, coffee break, etc).
+    // getFreeBusy gives status-only, no subjects; to detect a block we need
+    // subject/category. One fetch, cached for the whole slot walk.
+    // Non-fatal: if this fails, blocks are treated as non-elastic (safer).
+    let ownerEventsForFb: CalendarEvent[] = [];
+    if (profile && floatingBlocks.length > 0) {
+      try {
+        ownerEventsForFb = await getCalendarEvents(
+          params.userEmail,
+          params.searchFrom,
+          params.searchTo,
+          params.timezone,
+        );
+      } catch (err) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const logger = require('../../utils/logger').default;
+        logger.warn('findAvailableSlots — owner-events fetch failed, floating blocks treated as non-elastic', {
+          err: String(err),
+        });
+      }
+    }
+
+    // v2.1 — remove floating-block time ranges from the base busy pool.
+    // Without this, the isFree collision check below would reject any
+    // slot that overlaps where lunch currently sits — even though lunch
+    // is elastic and Maelle is allowed to move it within its window.
+    // Collect block-event ranges and subtract from allBusy (exact-match
+    // drop; we don't split partials since floating blocks don't overlap
+    // other events by construction).
+    if (floatingBlocks.length > 0 && ownerEventsForFb.length > 0) {
+      const blockRanges: Array<{ start: number; end: number }> = [];
+      for (const evt of ownerEventsForFb) {
+        if (evt.isCancelled || evt.isAllDay || evt.showAs === 'free') continue;
+        for (const block of floatingBlocks) {
+          if (fb.isFloatingBlockEvent(
+            { subject: evt.subject, categories: (evt as unknown as { categories?: unknown }).categories },
+            block,
+          )) {
+            const eStart = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' })
+              .setZone(params.timezone).toMillis();
+            const eEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
+              .setZone(params.timezone).toMillis();
+            blockRanges.push({ start: eStart, end: eEnd });
+            break;  // one block-match is enough to exclude this event
+          }
+        }
+      }
+      if (blockRanges.length > 0) {
+        // In-place filter: drop any busy whose range matches a block range
+        // within 1-minute tolerance (Graph / Luxon rounding slack).
+        const TOLERANCE_MS = 60 * 1000;
+        for (let i = allBusy.length - 1; i >= 0; i--) {
+          const b = allBusy[i];
+          const bs = b.start.getTime();
+          const be = b.end.getTime();
+          if (blockRanges.some(r =>
+            Math.abs(r.start - bs) <= TOLERANCE_MS && Math.abs(r.end - be) <= TOLERANCE_MS,
+          )) {
+            allBusy.splice(i, 1);
+          }
+        }
+      }
+    }
+
     // Per-day work hours + day-type classifier (office / home / other).
     const classifyDay = (dayName: string): 'office' | 'home' | 'other' => {
       if (officeDayNames.includes(dayName)) return 'office';
@@ -588,13 +621,61 @@ export async function findAvailableSlots(params: {
           }
         }
       }
-      if (lunch) {
+      // v2.1 — floating-block feasibility (replaces the old hardcoded
+      // lunch-only check). For every block that applies to THIS day,
+      // verify a quarter-aligned buffer-compliant slot still exists in
+      // the window after adding the proposed meeting. Detected events
+      // that ARE this block are excluded from the busy-block pool —
+      // Maelle can reshuffle them inside the window. Blocks that don't
+      // apply on this day (e.g. "Thursday coffee break" on a Monday) or
+      // that are `can_skip:true` and truly have no room simply skip the
+      // feasibility check for this slot.
+      if (profile && floatingBlocks.length > 0) {
         const dayDate = cursorDt.toFormat('yyyy-MM-dd');
-        if (!canLunchFitAfterBooking(
-          dayDate, params.timezone,
-          lunch.preferred_start, lunch.preferred_end, lunch.duration_minutes,
-          allBusy, cursor, slotEnd,
-        )) {
+        let blockConflict = false;
+        for (const block of floatingBlocks) {
+          if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
+
+          const winStart = fb.windowMsForDay(dayDate, block.preferred_start, params.timezone);
+          const winEnd = fb.windowMsForDay(dayDate, block.preferred_end, params.timezone);
+          // Proposed slot touches this block's window?
+          if (slotEnd.getTime() <= winStart || cursor.getTime() >= winEnd) continue;
+
+          // Build busyInWindow from OWNER EVENTS for this day,
+          // EXCLUDING any event that looks like THIS block (because
+          // Maelle can move it) and INCLUDING the proposed meeting.
+          const busyInWindow: Array<{ start: number; end: number }> = [];
+          for (const evt of ownerEventsForFb) {
+            if (evt.isCancelled || evt.isAllDay || evt.showAs === 'free') continue;
+            if (fb.isFloatingBlockEvent(
+              { subject: evt.subject, categories: (evt as unknown as { categories?: unknown }).categories },
+              block,
+            )) continue;  // elastic — skip
+            const eStart = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' })
+              .setZone(params.timezone).toMillis();
+            const eEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
+              .setZone(params.timezone).toMillis();
+            if (eStart < winEnd && eEnd > winStart) {
+              busyInWindow.push({
+                start: Math.max(eStart, winStart),
+                end: Math.min(eEnd, winEnd),
+              });
+            }
+          }
+          busyInWindow.push({
+            start: Math.max(cursor.getTime(), winStart),
+            end: Math.min(slotEnd.getTime(), winEnd),
+          });
+
+          const aligned = fb.findAlignedSlotForBlock(
+            block, dayDate, params.timezone, busyInWindow, blockBufferMin,
+          );
+          if (aligned === null && !block.can_skip) {
+            blockConflict = true;
+            break;
+          }
+        }
+        if (blockConflict) {
           cursor = new Date(cursor.getTime() + step);
           continue;
         }

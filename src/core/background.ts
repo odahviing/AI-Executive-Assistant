@@ -7,6 +7,7 @@ import { runDueTasks } from '../tasks/runner';
 import { materializeRoutineTasks } from '../tasks/routineMaterializer';
 import { ensureBriefingCron, updateBriefingCronChannel } from '../tasks/crons';
 import { backfillOrphanApprovals } from './approvals/orphanBackfill';
+import { backfillOutreachOrphans } from './approvals/outreachOrphanBackfill';
 import logger from '../utils/logger';
 
 // v1.5.1 — tightened scope: DM only, 24h window, reply in thread, last unread
@@ -31,6 +32,15 @@ export function startBackgroundTimer(
     backfillOrphanApprovals(app, profiles).catch(err =>
       logger.error('Orphan-approval backfill error', { err: String(err) })
     );
+    // v2.0.8 — same window: clean up sibling outreach_jobs left behind by
+    // coords that booked/cancelled/abandoned BEFORE the v2.0.7 sibling-
+    // cleanup in updateCoordJob existed. Also schedules outreach_decision
+    // tombstones for any bare no_response rows. Idempotent.
+    try {
+      backfillOutreachOrphans(profiles);
+    } catch (err) {
+      logger.error('Outreach-orphan backfill error', { err: String(err) });
+    }
   }, 30_000);
 
   // v1.6.0 — single-pipeline background loop. Every former sweep is now a

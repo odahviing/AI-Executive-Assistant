@@ -78,7 +78,7 @@ Each user is configured via a YAML file in `config/users/`. The profile defines:
 - Identity (name, role, timezone, language)
 - Company context (`company_brief` — a short paragraph so the assistant knows the business)
 - Assistant identity (name, persona, Slack credentials)
-- Work schedule (office days, home days, hours, lunch)
+- Work schedule (office days, home days, hours, lunch, custom floating blocks — coffee break, thinking time, gym window — all elastic within their own window and day-of-week scoped)
 - Meeting rules (allowed durations, buffer, protected meetings, rescheduling policy)
 - Priorities and VIP contacts
 - Which skills are active
