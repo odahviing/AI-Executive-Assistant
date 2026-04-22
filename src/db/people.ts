@@ -453,7 +453,22 @@ export function formatPeopleMemoryForPrompt(
 // the data layer so a future togglable persona skill (issue #3) can call it
 // conditionally without the orchestrator having to know.
 
-const SOCIAL_STALE_COUNT_THRESHOLD = 3;
+// v2.1.2 — lowered from 3 to 2. Two neutral initiations on the same topic
+// is already enough signal that the person doesn't want to talk about it;
+// three was too many — by the time we hit stale Maelle had already asked
+// three times and felt robotic. The "re-ping" frequency from the owner's
+// POV scales directly with this number. Pairs with tighter prompt wording
+// below so Sonnet actually honors STALE and moves to a fresh topic or an
+// open-discovery question instead of revisiting.
+const SOCIAL_STALE_COUNT_THRESHOLD = 2;
+
+// v2.1.2 — "you've been too silent" threshold. When Maelle hasn't initiated
+// a social moment in this many hours (and the person isn't flagged avoidant),
+// we elevate the instruction from "you MAY start one" to "you SHOULD start
+// one this turn — go find new ground." 72h chosen because 24h is the daily
+// gate and people reasonably expect more than "every third day" from someone
+// who's supposed to feel like a teammate.
+const SOCIAL_LONG_SILENCE_HOURS = 72;
 
 /**
  * Builds a per-person social context block injected into the system prompt.
@@ -540,6 +555,27 @@ export function buildSocialContextBlock(slackId: string, timezone: string): stri
   const isStale = (t: typeof topics[number]) =>
     t.count >= SOCIAL_STALE_COUNT_THRESHOLD && t.quality === 'neutral';
 
+  // v2.1.2 — universe of topic areas Maelle can explore. When the available
+  // pool is thin or empty, we suggest unused areas here so she's never
+  // stranded without ideas. Each existing topic is matched by its `name`
+  // enum; if a seed area is already present in `topics` (even as a recent
+  // or stale one) we skip it. Names match the `topic` enum shape used by
+  // note_about_person so Sonnet can pass it straight through.
+  const SEED_TOPIC_AREAS: Array<{ name: string; example: string }> = [
+    { name: 'hobby', example: 'games / reading / sports you play' },
+    { name: 'family', example: 'kids, partner, parents' },
+    { name: 'weekend', example: 'weekend plans or highlights' },
+    { name: 'exercise', example: 'running / gym / yoga routine' },
+    { name: 'travel', example: 'upcoming trips or recent one' },
+    { name: 'food', example: 'favorite places / cooking / coffee ritual' },
+    { name: 'books', example: 'what they\'re reading' },
+    { name: 'shows', example: 'what they\'re watching' },
+    { name: 'health', example: 'sleep, energy, wellbeing' },
+    { name: 'neighborhood', example: 'where they live, local spots' },
+  ];
+  const existingTopicNames = new Set(topics.map(t => t.name));
+  const unusedSeeds = SEED_TOPIC_AREAS.filter(s => !existingTopicNames.has(s.name));
+
   if (topics.length > 0) {
     const recentTopics    = topics.filter(t => t.last_used >= yesterday);
     const notRecent       = topics.filter(t => t.last_used < yesterday);
@@ -555,7 +591,7 @@ export function buildSocialContextBlock(slackId: string, timezone: string): stri
     if (engagedTopics.length) topicLines.push(`  Available — engaged (worth revisiting): ${engagedTopics.map(topicLabel).join(', ')}`);
     if (neutralTopics.length) topicLines.push(`  Available — flat but not stale (could try once more): ${neutralTopics.map(topicLabel).join(', ')}`);
     if (recentTopics.length)  topicLines.push(`  INITIATION COOLDOWN (discussed within last 24h — do NOT bring these up yourself; if THEY mention it, respond warmly): ${recentTopics.map(topicLabel).join(', ')}`);
-    if (staleTopics.length)   topicLines.push(`  STALE — DO NOT REVISIT (asked ${SOCIAL_STALE_COUNT_THRESHOLD}+ times, never progressed): ${staleTopics.map(topicLabel).join(', ')}`);
+    if (staleTopics.length)   topicLines.push(`  STALE — OFF LIMITS (asked ${SOCIAL_STALE_COUNT_THRESHOLD}+ times, quality stayed neutral — the person does NOT want to talk about this): ${staleTopics.map(topicLabel).join(', ')}`);
     lines.push(`Topic history:\n${topicLines.join('\n')}`);
 
     // v1.7.4 — random pick when 2+ available so Maelle doesn't cycle the same
@@ -571,11 +607,32 @@ export function buildSocialContextBlock(slackId: string, timezone: string): stri
     canMaelleInitiate &&
     topics.some(t => t.last_used < yesterday && !isStale(t));
 
+  // v2.1.2 — "too silent" escalation. When Maelle hasn't initiated anything
+  // in >= SOCIAL_LONG_SILENCE_HOURS, switch from permissive ("you may")
+  // to imperative ("you SHOULD this turn"). Works in tandem with the seed
+  // topic suggestions so Sonnet is never stranded.
+  const longSilence = canMaelleInitiate && hoursAgoInit >= SOCIAL_LONG_SILENCE_HOURS;
+
   if (canMaelleInitiate) {
     if (hasFreshTopic) {
-      lines.push(`→ Find ONE natural moment after the work is done. Pick a fresh available topic (never one on INITIATION COOLDOWN or marked STALE). 1–2 sentences. MANDATORY: the moment you ask a personal question — even before they answer, even if they never answer — call note_about_person (or note_about_self if this person is the owner) with initiated_by="maelle", the enum topic, and a SPECIFIC free-form subject (e.g. topic="hobby", subject="clair obscur game"; topic="family", subject="daughter's school play"). The subject is what goes on 24h cooldown, not the enum — so be specific. After the conversation, consider calling update_person_profile if you learned something about their engagement, style, or role.`);
+      const urgency = longSilence
+        ? `It has been ${Math.round(hoursAgoInit / 24)} days since you last started a social moment with this person — too long. You MUST find a natural moment this turn.`
+        : `Find ONE natural moment after the work is done.`;
+      lines.push(`→ ${urgency} Pick a fresh available topic (never one on INITIATION COOLDOWN or STALE). 1–2 sentences. MANDATORY: the moment you ask a personal question — even before they answer, even if they never answer — call note_about_person (or note_about_self if this person is the owner) with initiated_by="maelle", the enum topic, and a SPECIFIC free-form subject (e.g. topic="hobby", subject="clair obscur game"; topic="family", subject="daughter's school play"). The subject is what goes on 24h cooldown, not the enum — so be specific. After the conversation, consider calling update_person_profile if you learned something about their engagement, style, or role.`);
     } else {
-      lines.push(`→ NO FRESH TOPICS available (everything on cooldown, stale, or empty). If a social moment fits naturally, try ONE open discovery question to find new ground. Examples to adapt to context: "what do you like to do after work?", "anything interesting going on outside work?", "anything I should know about you that I don't?". 1 sentence, soft, never pushy. MANDATORY: the moment you ask, call note_about_person (or note_about_self if this person is the owner) with initiated_by="maelle", topic that best fits ("other" if truly open), and a specific subject describing what you asked (e.g. subject="open after-work question"). If they don't bite, that subject just goes on cooldown — no harm. Engagement-level avoidant/minimal → DO NOT initiate even an open question; respect the signal.`);
+      // No available topics — either everything's on cooldown, stale, or
+      // we never had any. In v2.1.2 this path is MANDATORY, not "if natural":
+      // silence for 72+ hours IS the bug, and the fix is to go find new
+      // ground rather than wait for a "natural moment" that never comes in
+      // a task-heavy conversation. Seed suggestions give Sonnet concrete
+      // options she hasn't tried yet.
+      const seedLine = unusedSeeds.length > 0
+        ? `Topic areas you have NOT explored with this person yet — pick one: ${unusedSeeds.slice(0, 6).map(s => `${s.name} (${s.example})`).join(' · ')}.`
+        : 'You have touched every standard topic area. Go open-ended — "anything good going on outside work?" / "how\'s life?".';
+      const urgency = longSilence
+        ? `It has been ${Math.round(hoursAgoInit / 24)} days since you last started a social moment — too long. You MUST ask ONE question this turn. Not optional.`
+        : `You MUST ask ONE social question this turn — ideally after you deliver the task, but do ask. Silence is not the right answer when topics are stale / on cooldown and you're DUE. The "if a moment feels natural" softener is gone: find the moment, don't wait for it.`;
+      lines.push(`→ ${urgency} ${seedLine} One sentence, soft, never pushy. MANDATORY: the moment you ask, call note_about_person (or note_about_self if this person is the owner) with initiated_by="maelle", the enum topic that best fits ("other" if truly open), and a specific subject describing what you asked (e.g. subject="open weekend question"). If they don't bite, that subject just goes on cooldown — no harm. Engagement-level avoidant → DO NOT initiate (respect the signal); engagement-level minimal → keep it very light, one open-ended question.`);
     }
   } else {
     lines.push(`→ If they bring up something personal, respond warmly and call note_about_person (or note_about_self if this person is the owner) with initiated_by="person" and a specific subject. Do NOT start a social topic yourself. Any subject on INITIATION COOLDOWN above is OFF-LIMITS for you to bring up again — if they don't mention it, neither do you. Anything marked STALE is permanently OFF-LIMITS for initiation.`);

@@ -2,6 +2,37 @@
 
 ---
 
+## 2.1.2 — social-layer fix (Maelle asks real social questions, not just the same one)
+
+Owner observation: *"still no social question, even once for the last 5 days with Maelle and we're talking all the time."* DB walk showed the literal count was non-zero — Maelle had initiated six times over 10 days — but four of those six were re-asks of the same "clair obscur axons progress" topic, with a note in her own interaction log reading *"fourth time asking, still don't have his answer."* Two failure modes compounded: the stale-topic threshold was too lax, and the "no fresh topics" fallback was too soft to actually trigger in a task-heavy conversation.
+
+### Fixed
+
+- **`SOCIAL_STALE_COUNT_THRESHOLD: 3 → 2`** in `src/db/people.ts`. Two neutral initiations on the same (topic + subject) now marks it STALE and off-limits. Three was too many — by the time a topic hit stale, the owner had already been re-asked the same dead question three times. Ripples directly into how "robotic" Maelle feels.
+- **Seed topic areas injected into the SOCIAL CONTEXT block.** When Maelle's available pool is empty or stale, the prompt now lists concrete topic areas she hasn't tried with this person yet (family, weekend, exercise, travel, food, books, shows, health, neighborhood, plus hobby). Diffed against existing topics so suggestions are always fresh. Sonnet no longer has to invent a topic from nothing — she has a menu.
+- **"No fresh topics" fallback is mandatory, not permissive.** Prompt block for this branch used to say *"If a social moment fits naturally, try ONE open discovery question"* — the *"if fits naturally"* softener let Sonnet skip whenever the turn looked transactional, which is always. New wording: *"You MUST ask ONE social question this turn — ideally after you deliver the task, but do ask. Silence is not the right answer when topics are stale / on cooldown and you're DUE. The 'if a moment feels natural' softener is gone: find the moment, don't wait for it."*
+- **"Too silent" escalation at 72h.** New `SOCIAL_LONG_SILENCE_HOURS = 72`. When Maelle hasn't initiated in 3+ days (and the person isn't avoidant), the instruction upgrades from *"find ONE natural moment"* to *"It has been N days since you last started a social moment with this person — too long. You MUST find a natural moment this turn."* Same code path, imperative tone.
+- **STALE rule strengthened in the block.** Was *"STALE — DO NOT REVISIT (asked 3+ times, never progressed)"*. Now *"STALE — OFF LIMITS (asked 2+ times, quality stayed neutral — the person does NOT want to talk about this)."* Reframes the signal as "don't push" rather than "we have data."
+- **Static SOCIAL LAYER prompt rules tightened** in `src/core/orchestrator/systemPrompt.ts`:
+  - New **VARIETY matters more than recency** rule: if a topic has two neutral pings, STOP — pick a different area.
+  - New explicit *"Don't hide behind 'not a natural moment'"* line. In task-heavy conversations no moment ever feels natural; mandatory means mandatory.
+  - Closing framing: *"a real EA asks her boss how his weekend was, what his kids are up to, whether he tried that new restaurant. If you never start, you're a transaction surface, not a person."*
+
+### Not changed (filed for later)
+
+- Auto-updating `profile.engagement_level` to `minimal` when a person shows repeat neutrals across multiple distinct topics. Worth doing — would naturally soften Maelle's cadence for genuinely-reserved people — but not this patch. The threshold drop + seed suggestions + mandatory-open-discovery should already fix the behavior for an engaged owner; the engagement_level heuristic becomes useful mainly for people who really do want less social chat.
+
+### Verified
+
+- `npm run typecheck` clean.
+- Walked Idan's people_memory row as the regression test: one topic on cooldown (clair obscur, yesterday), the rest of the SEED_TOPIC_AREAS are all unused → next turn she gets a concrete menu of family / weekend / exercise / travel / food / books she can pick from, plus a MUST-ask line since it's been >72h since the last real new topic (the May 11 clair obscur seed note doesn't count as "new exploration").
+
+### Migration
+
+- No schema changes. No profile changes required.
+
+---
+
 ## 2.1.1 — active calendar-health mode (autonomy layer)
 
 Takes the floating-blocks work from v2.1.0 and adds the autonomy layer on top. One flag in the profile (`behavior.calendar_health_mode`) toggles `check_calendar_health` between "passive — detect and report" (today's behavior, still the default) and "active — detect and execute the safe fixes in the same call." Owner stays in the loop on everything via shadow DMs + daily brief, but Maelle does the reshuffle work herself.
