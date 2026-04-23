@@ -2,6 +2,79 @@
 
 ---
 
+## 2.1.4 — smart health-check window, cadence-aware moves, attendee-only guards, third-party-booking verifier
+
+Bundle of scenario-driven fixes. Five behavior changes with real teeth, plus filing two follow-up tickets.
+
+### Added — smart calendar-health window
+
+New helper `computeHealthCheckWindow(profile)` in `src/utils/workHours.ts`. Rule: `start = today`, `end = end of current workweek`. If that window is ≤24h (we're on the last workday already), extend by 7 calendar days so there's actual runway to coordinate moves. `check_calendar_health` uses this as the default when `start_date` / `end_date` args are omitted — Sonnet doesn't do date math anymore, the tool picks the right window itself.
+
+### Added — cadence-aware move-coord window
+
+New helper `getNextSeriesOccurrenceAfter(userEmail, seriesMasterId, afterIso)` in `connectors/graph/calendar.ts`. When active-mode auto-starts a move-coord on an overlap or OOF conflict AND the movable event is a recurring occurrence, the slot search `searchTo` is now capped at `nextOccurrence - 1min`. Prevents Maelle from pushing a weekly Brett biweekly into the week where the next biweekly already lives (cadence duplication). Biweekly can still move across the off-week; weekly stays inside its week. Non-recurring events keep the full default window.
+
+### Added — privacy-aware conflict phrasing
+
+New `sanitizeConflictReason(event, ownerFirstName)` in `utils/meetingProtection.ts`. When Maelle DMs a colleague asking to move their meeting because of a conflict on the owner's side, she discloses the subject by default (*"overlaps with 'Fulcrum Product Sync'"*). But when the kept meeting is flagged `sensitivity: 'private' | 'confidential'` OR categorised with a `/private/i` category, she says *"overlaps with another meeting Idan has"* — never leaks a private subject to an external attendee. Applied at all coord-initiate sites from the active-mode fix loop.
+
+### Added — attendee-only guards on update_meeting / move_meeting
+
+Graph rejects PATCH from non-organizers. Until now Maelle would cheerfully offer *"want me to add a location"* on a meeting a third party organized, then either silently fail or produce a recovery fiction. New `getEventOrganizer(userEmail, meetingId)` helper + pre-check in both `update_meeting` and `move_meeting` tool handlers: if `organizer.emailAddress.address` is not the owner's email, refuse early with *"Can't modify X — [organizer] organized it, [owner] is just an attendee. I can message them to request the change, or decline on [owner]'s side."* Deterministic, no chance of fake-success narration.
+
+New prompt rule in `meetings.ts` — **ATTENDEE-ONLY EVENTS**. Spells out the attendee-vs-organizer distinction, lists the three legitimate attendee actions (accept/decline/tentative, read, remove-from-my-calendar), and bans offering "add location" / "move" / "change subject" on meetings the owner didn't organize. Complements the code guard.
+
+### Added — verifier for third-party-booked meetings
+
+When Maelle proposes times to a colleague who books on THEIR side (classic: Michal+Inbar bank visit — *"Wed 29 Apr noon works, confirm with Inbar"*), the invite arrives on the owner's calendar without going through Maelle. Until now she'd narrate *"still waiting to hear back"* next morning even though the meeting was already there.
+
+- New columns on `outreach_jobs`: `proposed_slots` (JSON array of ISO strings) + `subject_keyword` (text). Idempotent migration.
+- New optional args on `message_colleague`: `proposed_slots` + `subject_keyword`. Sonnet populates them when messaging a colleague with specific times.
+- New helper `verifyScheduledOutcome(input, calendarEvents, profile)` in `utils/verifyScheduledOutcome.ts`. For each proposed slot's date, scans the owner's calendar for events matching by subject-keyword fuzzy match (case-insensitive substring + token overlap) + attendee-email tiebreaker. Returns `{ status: 'none' | 'booked_compliant' | 'booked_conflict', event?, issues? }`.
+- Wired into `tasks/briefs.ts`: on brief assembly, fetches owner's calendar for today+30 days, runs the verifier per outreach/coord row with `proposed_slots`. Matching outreach rows get `status='done'` after the brief sends; matching items carry a `verified_outcome` field.
+- Brief prompt: new **VERIFIED OUTCOMES** rule. `booked_compliant` → narrate as done (*"Michal and Inbar booked it — Wed 29 Apr at noon, you're set"*). `booked_conflict` → surface issues for owner decision (*"booked at 17:30 — but past your work hours. Approve or should I push back?"*).
+
+### Fixed — brief narration respects `await_reply=0`
+
+Brief prompt's outreach section used to always narrate `status='sent'` as "sent, awaiting reply" — even when `await_reply=0` (fire-and-forget message, Maelle didn't expect a reply). New status label branch: `await_reply=0` → *"sent — they're handling it on their side"*. New **AWAIT-REPLY AWARENESS** rule in the prompt reinforces: don't say "waiting" for outreach where `awaitsReply=false`.
+
+### Added — approval reminder at halfway point (rolled up from the session)
+
+New `approval_reminder` task type + dispatcher. Fires at midpoint of an approval expiry window. If the approval is still `pending`, DMs owner *"still waiting on X — approve, decline, or should I close it?"*. No-ops if resolved. Cascade-cancels on every resolve path (both `setApprovalDecision` and `updateCoordJob` terminal).
+
+### Added — work-time expiry base (rolled up from the session)
+
+New `workTimeBaseFromNow(profile)` helper. When an approval is created at 20:00 (colleague replied late), expiry no longer starts counting from 20:00 — it counts from the owner's next work-time start. Applied to both `create_approval` (tasks/skill.ts) and coord-path `emitWaitingOwnerApproval` (profile threaded through all 11 call sites). A 20:00 approval now gets its full window of owner-work-hours.
+
+### Added — explicit @-mentions override thread sweep (rolled up)
+
+New THREAD CONTEXT rule in `meetings.ts`. *"Meeting with @Amazia and @Brett"* invites only those two. *"Let's meet about this"* without names sweeps thread participants.
+
+### Added — research refusal offers web-search fallback (rolled up)
+
+New RESEARCH REQUESTS rule in colleague-path systemPrompt. Non-owner asks for research → refuse the deep skill AND offer `web_search` / `web_extract` as light alternative in the same reply.
+
+### Updated — ticket [#30](https://github.com/odahviing/AI-Executive-Assistant/issues/30) reframed
+
+Tentative-reservation ticket body corrected per owner's clarification. Slot PROPOSALS are not reservations. The reservation window opens only when a requester picks a specific slot AND needs to verify/confirm with their side. Three-state model documented (offer → verification window → booked/released).
+
+### Filed — follow-up tickets
+
+- **[#33](https://github.com/odahviing/AI-Executive-Assistant/issues/33)** — Respond to invite on owner's side (Low). Adds `respond_to_invite(meeting_id, response)` so Maelle can accept/decline/tentative an attendee-only invite. Defensive half (the guard that refuses invalid PATCH) is in v2.1.4; proactive half (the explicit accept/decline action) is this ticket.
+
+### Verified
+
+- `npm run typecheck` clean.
+- Scenario walkthroughs on the Michal bank case, Brett biweekly vs Don interview overlap, attendee-only Bank Hapoalim meeting all mapped against the new code paths.
+
+### Migration
+
+- Idempotent `ALTER TABLE outreach_jobs ADD COLUMN proposed_slots / subject_keyword` on next startup. Existing rows NULL → verifier skips them.
+- Yaml can (optionally) add `behavior.calendar_health_mode: "active"` to turn on the full autonomy layer — defaults to `passive`.
+- One-off reconfigure script at `scripts/local/v2_1_4_reconfigure.cjs` consolidates the three duplicate calendar-health routines into one clean routine + flips active mode. Run manually, not committed (local scripts/ gitignored).
+
+---
+
 ## 2.1.3 — approval reminder + work-time expiry base + scenario polish
 
 Bundle of scenario-driven fixes uncovered during the walkthrough round. Three real behavior changes + two small prompt tightenings.

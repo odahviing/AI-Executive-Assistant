@@ -5,6 +5,9 @@ import type { UserProfile } from '../config/userProfile';
 import { config } from '../config';
 import { getUnseenEvents, markEventsSeen, getDb, getPreferences } from '../db';
 import { getOpenTasksForOwner, getCompletedUninformedTasks, markTaskInformed } from './index';
+import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calendar';
+import { verifyScheduledOutcome, type ScheduleOutcome } from '../utils/verifyScheduledOutcome';
+import { updateOutreachJob } from '../db';
 import logger from '../utils/logger';
 
 // ── Relative time helper ──────────────────────────────────────────────────────
@@ -38,6 +41,10 @@ interface BriefingData {
   // instead of guessing from first names (which is unreliable for non-Western
   // names like "Amazia").
   peopleGender: Record<string, 'he' | 'she' | 'they'>;
+  // v2.1.4 — outreach_jobs ids the verifier determined are effectively
+  // booked (matching event landed on owner's calendar). Caller flips them
+  // to status='done' after the brief is sent so they don't resurface.
+  outreachToClose: string[];
 }
 
 function pronounFor(gender: string | null | undefined): 'he' | 'she' | 'they' {
@@ -46,13 +53,34 @@ function pronounFor(gender: string | null | undefined): 'he' | 'she' | 'they' {
   return 'they';
 }
 
-function collectBriefingData(ownerUserId: string, timezone: string): BriefingData {
+async function collectBriefingData(
+  ownerUserId: string,
+  timezone: string,
+  profile: UserProfile,
+): Promise<BriefingData> {
   const db = getDb();
   const items: RichItem[] = [];
   const outreachIds: string[] = [];
   const coordIds: string[] = [];
+  const outreachToClose: string[] = [];  // v2.1.4 — outreach rows where verifier detected a booking
 
   const sevenDaysAgo = DateTime.now().minus({ days: 7 }).toUTC().toISO()!;
+
+  // v2.1.4 — pre-fetch owner's calendar events for the next 21 days so the
+  // outcome verifier can check whether third parties booked anything at the
+  // slots Maelle proposed. Bounded to when any outreach/coord with
+  // proposed_slots actually references dates in this window. One fetch
+  // covers all the verifier calls below.
+  let ownerCalendarEvents: CalendarEvent[] = [];
+  try {
+    const calFrom = DateTime.now().setZone(timezone).minus({ days: 2 }).toFormat('yyyy-MM-dd');
+    const calTo = DateTime.now().setZone(timezone).plus({ days: 30 }).toFormat('yyyy-MM-dd');
+    ownerCalendarEvents = await getCalendarEvents(profile.user.email, calFrom, calTo, timezone);
+  } catch (err) {
+    logger.warn('brief verifier — calendar fetch failed, skipping outcome verification', {
+      err: String(err).slice(0, 200),
+    });
+  }
 
   // ── Outreach jobs ──────────────────────────────────────────────────────────
   const outreachJobs = db.prepare(`
@@ -78,15 +106,45 @@ function collectBriefingData(ownerUserId: string, timezone: string): BriefingDat
       } catch (_) {}
     }
 
+    // v2.1.4 — honor await_reply=0 so brief doesn't narrate a
+    // fire-and-forget outreach as "waiting to hear back" when Maelle
+    // explicitly didn't expect a reply.
+    const awaitsReply = (job.await_reply ?? 1) === 1;
     const statusLabel = {
       pending_scheduled: `scheduled to go out ${job.scheduled_at ? relativeTime(job.scheduled_at, timezone) : 'soon'}`,
-      sent: 'sent, awaiting reply',
+      sent: awaitsReply ? 'sent, awaiting reply' : 'sent — they\'re handling it on their side',
       replied: 'replied',
       no_response: 'no response yet',
     }[job.status as string] ?? job.status;
 
+    // v2.1.4 — verify outcome: if this outreach proposed specific times and
+    // a matching event showed up on the calendar (third party booked it),
+    // report that instead of "still waiting".
+    let verifiedOutcome: ScheduleOutcome | null = null;
+    if (ownerCalendarEvents.length > 0 && job.proposed_slots) {
+      try {
+        const slots = JSON.parse(job.proposed_slots) as string[];
+        verifiedOutcome = verifyScheduledOutcome(
+          {
+            proposedSlots: Array.isArray(slots) ? slots : [],
+            subjectKeyword: job.subject_keyword ?? undefined,
+            colleagueSlackId: job.colleague_slack_id,
+          },
+          ownerCalendarEvents,
+          profile,
+        );
+        if (verifiedOutcome.status !== 'none') {
+          outreachToClose.push(job.id);
+        }
+      } catch (err) {
+        logger.warn('brief verifier — outreach verify threw, falling back', {
+          id: job.id, err: String(err).slice(0, 200),
+        });
+      }
+    }
+
     outreachIds.push(job.id);
-    items.push({
+    const item: RichItem = {
       kind: 'outreach',
       colleague: job.colleague_name,
       topic: msgPreview,
@@ -97,7 +155,19 @@ function collectBriefingData(ownerUserId: string, timezone: string): BriefingDat
         : undefined,
       theyReplied: !!replyPreview,
       replyPreview: replyPreview ?? undefined,
-    });
+      awaitsReply,
+    };
+    if (verifiedOutcome && verifiedOutcome.status !== 'none' && verifiedOutcome.event) {
+      const ev = verifiedOutcome.event;
+      const eStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).setZone(timezone);
+      item.verified_outcome = {
+        status: verifiedOutcome.status,
+        event_subject: ev.subject ?? '',
+        event_when: eStart.toFormat('EEEE d MMM \'at\' HH:mm'),
+        issues: verifiedOutcome.issues,
+      };
+    }
+    items.push(item);
   }
 
   // ── Coordination jobs (v1.6: coord_jobs is the only table) ───────────────
@@ -131,8 +201,30 @@ function collectBriefingData(ownerUserId: string, timezone: string): BriefingDat
       if (keyNames.length > 0) participantNames = keyNames.join(', ');
     } catch (_) {}
 
+    // v2.1.4 — verify outcome for non-terminal coords with proposed slots.
+    // Same logic as outreach: if a matching event landed on the calendar,
+    // surface it.
+    let coordVerifiedOutcome: ScheduleOutcome | null = null;
+    const isTerminal = ['booked', 'cancelled', 'abandoned'].includes(job.status as string);
+    if (!isTerminal && ownerCalendarEvents.length > 0 && job.proposed_slots) {
+      try {
+        const slots = JSON.parse(job.proposed_slots) as string[];
+        if (Array.isArray(slots) && slots.length > 0) {
+          coordVerifiedOutcome = verifyScheduledOutcome(
+            { proposedSlots: slots, subjectKeyword: job.subject },
+            ownerCalendarEvents,
+            profile,
+          );
+        }
+      } catch (err) {
+        logger.warn('brief verifier — coord verify threw, falling back', {
+          id: job.id, err: String(err).slice(0, 200),
+        });
+      }
+    }
+
     coordIds.push(job.id);
-    items.push({
+    const coordItem: RichItem = {
       kind: 'coordination',
       colleague: participantNames,
       subject: job.subject,
@@ -140,7 +232,18 @@ function collectBriefingData(ownerUserId: string, timezone: string): BriefingDat
       status: statusLabel,
       proposedSlot: slot,
       updatedWhen: relativeTime(job.updated_at, timezone),
-    });
+    };
+    if (coordVerifiedOutcome && coordVerifiedOutcome.status !== 'none' && coordVerifiedOutcome.event) {
+      const ev = coordVerifiedOutcome.event;
+      const eStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).setZone(timezone);
+      coordItem.verified_outcome = {
+        status: coordVerifiedOutcome.status,
+        event_subject: ev.subject ?? '',
+        event_when: eStart.toFormat('EEEE d MMM \'at\' HH:mm'),
+        issues: coordVerifiedOutcome.issues,
+      };
+    }
+    items.push(coordItem);
   }
 
   // ── Incoming colleague messages (events table, type=message) ──────────────
@@ -238,7 +341,7 @@ function collectBriefingData(ownerUserId: string, timezone: string): BriefingDat
     }
   }
 
-  return { items, outreachIds, coordIds, completedTaskIds, peopleGender };
+  return { items, outreachIds, coordIds, completedTaskIds, peopleGender, outreachToClose };
 }
 
 // ── Generate briefing with Sonnet ────────────────────────────────────────────
@@ -296,6 +399,14 @@ TASK OWNERSHIP — critical distinction:
 - Only put something in ACTION ITEMS if ${firstName} genuinely needs to make a decision or provide input Maelle can't make herself. An item already waiting on an external reply (colleague, bank) is NOT an action item for ${firstName} — it's something Maelle is watching.
 - outreach at "no_response" with no decision yet → surface it, but frame as "X hasn't replied — want me to try again or drop it?" Don't dramatize.
 - If an outreach is effectively done (coord booked, owner handled it directly) don't resurface it just because it's in the data. Roll it into the colleague's paragraph as past-tense closure.
+
+AWAIT-REPLY AWARENESS:
+- If an outreach item has awaitsReply=false, DO NOT narrate it as "waiting to hear back" / "still waiting". That outreach was a fire-and-forget message — ${firstName} didn't expect a reply, so Maelle isn't waiting. Narrate it as "I let X know" / "I told X" / "sent — they're handling it." past-tense, closed loop.
+
+VERIFIED OUTCOMES — a meeting Maelle proposed was booked by someone else:
+When an item carries a verified_outcome field, the verifier found a matching meeting on ${firstName}'s calendar for a slot Maelle previously proposed. That means the colleague (or their assistant / counterpart) booked it themselves — not Maelle. Narrate accordingly, do NOT say "still waiting".
+- verified_outcome.status="booked_compliant" → the meeting is on the calendar, within ${firstName}'s rules. Narrate as done: "Michal and Inbar booked it — Wed 29 Apr at noon, you're set." Include event_when. Past tense, closed.
+- verified_outcome.status="booked_conflict" → the meeting landed BUT its time breaks a rule (out of hours, lunch clash, etc.). Surface it with the issues list so ${firstName} can decide. Example: "Michal booked the bank visit — Wed 29 Apr 17:30 — but it's past your work hours. Approve or should I push back and ask her to move it?" Use the issues list verbatim when useful.
 
 PRONOUNS — use the provided gender data, NEVER guess from a name. The PEOPLE_GENDER map below gives the correct pronoun (he / she / they) for every person referenced. If a person isn't in the map, use "they". Names like Amazia, Yael, Oran, Onn can be male or female — check the map. Don't guess.
 
@@ -369,7 +480,20 @@ export async function sendMorningBriefing(
   }
 
   // Collect everything that's happened / in-flight
-  const { items, outreachIds, coordIds, completedTaskIds, peopleGender } = collectBriefingData(ownerUserId, profile.user.timezone);
+  const { items, outreachIds, coordIds, completedTaskIds, peopleGender, outreachToClose } = await collectBriefingData(ownerUserId, profile.user.timezone, profile);
+
+  // v2.1.4 — close outreach rows that the verifier determined are booked.
+  // They'll drop off tomorrow's brief (status='done' → filter excludes them).
+  if (outreachToClose && outreachToClose.length > 0) {
+    for (const id of outreachToClose) {
+      try {
+        updateOutreachJob(id, { status: 'done' });
+      } catch (err) {
+        logger.warn('brief verifier — close outreach failed', { id, err: String(err).slice(0, 200) });
+      }
+    }
+    logger.info('brief verifier — outreach rows closed via verified outcome', { count: outreachToClose.length });
+  }
 
   // Mark sent TODAY before generating (prevents duplicate on restart mid-generation)
   const { logEvent } = require('../db');

@@ -31,7 +31,7 @@ export interface OutreachJob {
   message: string;
   scheduled_at?: string;  // if set, do not send until this datetime
   await_reply: number;
-  status: 'sent' | 'replied' | 'no_response' | 'cancelled' | 'pending_scheduled';
+  status: 'sent' | 'replied' | 'no_response' | 'cancelled' | 'pending_scheduled' | 'done' | 'expired' | 'failed';
   reply_text?: string;
   sent_at?: string;
   reply_deadline?: string;
@@ -44,6 +44,16 @@ export interface OutreachJob {
   // fall through to the default "report reply to owner" behavior.
   intent?: string;
   context_json?: string;
+  // v2.1.4 — when the outreach proposed specific times to the colleague
+  // and the colleague (or someone on their side) will send an invite back
+  // to Idan, these fields capture enough structure for the brief verifier
+  // to match incoming calendar events to this outreach. proposed_slots is
+  // a JSON array of ISO timestamps (what Maelle offered). subject_keyword
+  // is a short string (e.g. "bank visit" / "Privacy GTM") used to fuzzy-
+  // match the calendar event subject. Both optional — legacy rows have
+  // NULL and skip verification.
+  proposed_slots?: string;    // JSON array of ISO strings
+  subject_keyword?: string;
 }
 
 export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' | 'updated_at'>): string {
@@ -53,11 +63,13 @@ export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' 
     INSERT INTO outreach_jobs (
       id, owner_user_id, owner_channel, owner_thread_ts,
       colleague_slack_id, colleague_name, colleague_tz, message, await_reply, status,
-      sent_at, reply_deadline, scheduled_at, intent, context_json
+      sent_at, reply_deadline, scheduled_at, intent, context_json,
+      proposed_slots, subject_keyword
     ) VALUES (
       @id, @owner_user_id, @owner_channel, @owner_thread_ts,
       @colleague_slack_id, @colleague_name, @colleague_tz, @message, @await_reply, @status,
-      @sent_at, @reply_deadline, @scheduled_at, @intent, @context_json
+      @sent_at, @reply_deadline, @scheduled_at, @intent, @context_json,
+      @proposed_slots, @subject_keyword
     )
   `).run({
     id,
@@ -75,6 +87,8 @@ export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' 
     scheduled_at: params.scheduled_at ?? null,
     intent: params.intent ?? null,
     context_json: params.context_json ?? null,
+    proposed_slots: params.proposed_slots ?? null,
+    subject_keyword: params.subject_keyword ?? null,
   });
   return id;
 }

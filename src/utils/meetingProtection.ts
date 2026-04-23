@@ -68,6 +68,39 @@ export function isProtected(event: CalendarEvent, profile: UserProfile): Protect
 }
 
 /**
+ * v2.1.4 — privacy-aware conflict phrasing. When Maelle DMs a colleague
+ * asking to move their meeting because of a conflict on the owner's side,
+ * she explains what she's conflicting WITH. Default: include the kept
+ * meeting's subject ("overlaps with 'Fulcrum Product Sync'"). But when the
+ * kept meeting is PRIVATE — sensitivity flagged or categorised as Private —
+ * she discloses only the fact ("overlaps with another meeting Idan has").
+ * Never leaks the subject/body of a private event to an external attendee.
+ *
+ * Privacy signals (any one triggers the sanitization):
+ *   - sensitivity === 'private' or 'confidential'
+ *   - any category matches a profile-defined private category (default
+ *     matches 'Private' substring — Idan's profile uses exactly that name)
+ */
+export function sanitizeConflictReason(
+  keptEvent: CalendarEvent,
+  ownerFirstName: string,
+): string {
+  const sensitivity = keptEvent.sensitivity;
+  const categories = Array.isArray((keptEvent as unknown as { categories?: unknown }).categories)
+    ? ((keptEvent as unknown as { categories: string[] }).categories)
+    : [];
+  const isPrivate =
+    sensitivity === 'private'
+    || sensitivity === 'confidential'
+    || categories.some(c => /private/i.test(c));
+  if (isPrivate) {
+    return `overlaps with another meeting ${ownerFirstName} has`;
+  }
+  const subject = keptEvent.subject || 'another meeting';
+  return `overlaps with "${subject}"`;
+}
+
+/**
  * Given two overlapping events, return the one Maelle may move autonomously
  * (the "movable side"), or null if both are protected. Ties go to the later
  * start time (newer meeting yields to older — arbitrary but stable).

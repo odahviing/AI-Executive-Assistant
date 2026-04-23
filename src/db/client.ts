@@ -164,6 +164,14 @@ function initSchema(db: Database.Database): void {
     // the reply dispatcher routes incoming replies to the right skill handler.
     `ALTER TABLE outreach_jobs ADD COLUMN intent TEXT`,
     `ALTER TABLE outreach_jobs ADD COLUMN context_json TEXT`,
+    // v2.1.4 — when message_colleague proposes specific dates/times (e.g.
+    // "noon works Wed 29 Apr for the bank visit"), Sonnet now passes the
+    // structured proposed_slots (ISO dates) + subject_keyword alongside
+    // the free-text message. Used at brief time to verify whether a
+    // third-party booked the meeting on Idan's calendar and close the
+    // outreach narration honestly.
+    `ALTER TABLE outreach_jobs ADD COLUMN proposed_slots TEXT`,
+    `ALTER TABLE outreach_jobs ADD COLUMN subject_keyword TEXT`,
     // Defensive: older coord_jobs may be missing subject (was hit by injection-driven writes)
     `ALTER TABLE coord_jobs ADD COLUMN subject TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE coord_jobs ADD COLUMN topic TEXT`,

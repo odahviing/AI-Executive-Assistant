@@ -109,6 +109,15 @@ Only send messages the user explicitly asks for — never reach out to people on
                 original_end: { type: 'string', description: 'Optional — the meeting\'s current end time (ISO).' },
               },
             },
+            proposed_slots: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Optional, but STRONGLY RECOMMENDED when your message proposes specific dates / times the colleague might act on (e.g. "Wed 29 Apr noon works for the bank visit"). Pass the proposed start timestamps as ISO strings (owner timezone OK). The brief verifier uses this at report time to check whether the colleague actually booked a meeting at one of your proposed slots — so Maelle can say "they booked it at noon" instead of "still waiting to hear back" when the invite has already landed on the calendar.',
+            },
+            subject_keyword: {
+              type: 'string',
+              description: 'Optional, used alongside proposed_slots. A short keyword from the meeting topic ("bank visit", "Privacy GTM", "interview with Don") that will appear in the calendar event subject when it\'s booked. The verifier fuzzy-matches event subjects against this so a third party (Yael, Michal, etc.) who books on their side still gets matched back to this outreach.',
+            },
           },
           required: ['colleague_slack_id', 'colleague_name', 'message', 'await_reply'],
         },
@@ -153,6 +162,17 @@ Only send messages the user explicitly asks for — never reach out to people on
           ? JSON.stringify(args.context)
           : undefined;
 
+        // v2.1.4 — stash proposed_slots + subject_keyword on the outreach row
+        // so the brief verifier can match third-party-booked meetings back to
+        // this outreach. Only set when Sonnet actually supplied them.
+        const proposedSlotsArg = Array.isArray(args.proposed_slots) ? args.proposed_slots as string[] : null;
+        const proposedSlotsJson = proposedSlotsArg && proposedSlotsArg.length > 0
+          ? JSON.stringify(proposedSlotsArg)
+          : undefined;
+        const subjectKeywordArg = typeof args.subject_keyword === 'string' && args.subject_keyword.trim()
+          ? args.subject_keyword.trim()
+          : undefined;
+
         const jobId = createOutreachJob({
           owner_user_id: userId,
           owner_channel: context.channelId,
@@ -168,6 +188,8 @@ Only send messages the user explicitly asks for — never reach out to people on
           scheduled_at: sendAt,
           intent,
           context_json: contextPayload,
+          proposed_slots: proposedSlotsJson,
+          subject_keyword: subjectKeywordArg,
         });
 
         logger.info('message_colleague — outreach row created', {

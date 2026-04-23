@@ -756,6 +756,95 @@ export interface UpdateMeetingParams {
  * GET. Used by update_meeting and move_meeting to block changes to the
  * series root while allowing single-occurrence edits.
  */
+/**
+ * v2.1.4 — find the next occurrence of a recurring series after a given
+ * ISO timestamp. Used by active-mode move-coord to cap the slot search so
+ * Maelle doesn't propose moving a weekly meeting into a date where the
+ * NEXT weekly instance already lives (would duplicate the cadence).
+ *
+ * Query Graph's `/events/{seriesMasterId}/instances` endpoint — returns
+ * expanded occurrences of the series within a date range. Pick the first
+ * one with a start strictly after `afterIso`.
+ *
+ * Returns null when:
+ *   - the series has no more occurrences after `afterIso` (end of series)
+ *   - the Graph call fails (fail-open — caller treats as "no cap")
+ *   - seriesMasterId is empty
+ *
+ * Lookahead window: 60 days. Weekly / biweekly always fit; a monthly
+ * cadence would fit twice; yearly recurrences fall outside — accept that
+ * trade-off, a yearly event uncapped is rare and the safer cap is fine.
+ */
+export async function getNextSeriesOccurrenceAfter(
+  userEmail: string,
+  seriesMasterId: string,
+  afterIso: string,
+): Promise<string | null> {
+  if (!seriesMasterId) return null;
+  try {
+    const client = getClient();
+    const afterDt = DateTime.fromISO(afterIso).toUTC();
+    const startQueryIso = afterDt.plus({ minutes: 1 }).toISO()!;
+    const endQueryIso = afterDt.plus({ days: 60 }).toISO()!;
+    const resp = await client
+      .api(`/users/${userEmail}/events/${seriesMasterId}/instances`)
+      .query({ startDateTime: startQueryIso, endDateTime: endQueryIso })
+      .select('id,start,isCancelled')
+      .top(5)
+      .get();
+    const items: Array<{ id: string; start?: { dateTime: string; timeZone: string }; isCancelled?: boolean }>
+      = resp?.value ?? [];
+    for (const inst of items) {
+      if (inst.isCancelled) continue;
+      if (!inst.start?.dateTime) continue;
+      // Graph returns instance start in the series' original timezone; normalise to UTC.
+      const instStartIso = DateTime
+        .fromISO(inst.start.dateTime, { zone: inst.start.timeZone ?? 'utc' })
+        .toUTC()
+        .toISO()!;
+      if (instStartIso > afterIso) return instStartIso;
+    }
+    return null;
+  } catch (err) {
+    logger.warn('getNextSeriesOccurrenceAfter — failed, returning null (fail-open)', {
+      seriesMasterId, err: String(err).slice(0, 200),
+    });
+    return null;
+  }
+}
+
+/**
+ * v2.1.4 — who organized a calendar event? Used by update_meeting /
+ * move_meeting guards to refuse mutations on meetings the owner didn't
+ * organize (Graph would reject the PATCH anyway, but we fail early with a
+ * human error message + avoid Maelle narrating a fake success).
+ *
+ * Returns null when the Graph call fails — caller treats as "unknown, allow".
+ */
+export async function getEventOrganizer(
+  userEmail: string,
+  meetingId: string,
+): Promise<{ name?: string; address: string } | null> {
+  try {
+    const client = getClient();
+    const event = await client
+      .api(`/users/${userEmail}/events/${meetingId}`)
+      .select('id,organizer')
+      .get();
+    const addr = event?.organizer?.emailAddress?.address;
+    if (!addr) return null;
+    return {
+      name: event.organizer.emailAddress.name,
+      address: String(addr).toLowerCase(),
+    };
+  } catch (err) {
+    logger.warn('getEventOrganizer — failed, returning null (fail-open)', {
+      meetingId, err: String(err).slice(0, 200),
+    });
+    return null;
+  }
+}
+
 export async function getEventType(userEmail: string, meetingId: string): Promise<{
   type?: 'singleInstance' | 'occurrence' | 'exception' | 'seriesMaster';
   subject?: string;

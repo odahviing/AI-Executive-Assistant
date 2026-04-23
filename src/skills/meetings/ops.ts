@@ -691,6 +691,31 @@ export class SchedulingSkill {
       }
 
       case 'update_meeting': {
+        // v2.1.4 — attendee-only guard. If the event's organizer is not the
+        // owner, the owner is an ATTENDEE on someone else's meeting. Graph
+        // rejects PATCH from non-organizers, but the error message is
+        // unhelpful; refuse early with a clear human message so Maelle
+        // doesn't offer a fake "I'll add the location" then silently fail.
+        try {
+          const { getEventOrganizer } = await import('../../connectors/graph/calendar');
+          const organizer = await getEventOrganizer(userEmail, args.meeting_id as string);
+          if (organizer && organizer.address !== userEmail.toLowerCase()) {
+            const ownerFirst = context.profile.user.name.split(' ')[0];
+            logger.info('update_meeting refused — owner is attendee, not organizer', {
+              meetingId: args.meeting_id, organizer: organizer.address,
+            });
+            return {
+              error: 'not_organizer',
+              meeting_subject: args.meeting_subject,
+              organizer_name: organizer.name ?? organizer.address,
+              organizer_email: organizer.address,
+              message: `Can't modify "${args.meeting_subject}" — ${organizer.name ?? organizer.address} organized it, ${ownerFirst} is just an attendee. I can message them to request the change, or decline on ${ownerFirst}'s side. I cannot change the subject, location, or body of a meeting he didn't organize.`,
+            };
+          }
+        } catch (err) {
+          logger.warn('update_meeting attendee-only guard threw — proceeding', { err: String(err) });
+        }
+
         // v1.8.8 — block series-level mutations on recurring meetings. If the
         // event is a seriesMaster, updating it would change every occurrence,
         // which is almost never what the owner wants. Refuse and hand back
@@ -744,6 +769,27 @@ export class SchedulingSkill {
       }
 
       case 'move_meeting': {
+        // v2.1.4 — same attendee-only guard as update_meeting.
+        try {
+          const { getEventOrganizer } = await import('../../connectors/graph/calendar');
+          const organizer = await getEventOrganizer(userEmail, args.meeting_id as string);
+          if (organizer && organizer.address !== userEmail.toLowerCase()) {
+            const ownerFirst = context.profile.user.name.split(' ')[0];
+            logger.info('move_meeting refused — owner is attendee, not organizer', {
+              meetingId: args.meeting_id, organizer: organizer.address,
+            });
+            return {
+              error: 'not_organizer',
+              meeting_subject: args.meeting_subject,
+              organizer_name: organizer.name ?? organizer.address,
+              organizer_email: organizer.address,
+              message: `Can't move "${args.meeting_subject}" — ${organizer.name ?? organizer.address} organized it, ${ownerFirst} is just an attendee. I can message them to request a reschedule, or decline on ${ownerFirst}'s side. I cannot change the time of a meeting he didn't organize.`,
+            };
+          }
+        } catch (err) {
+          logger.warn('move_meeting attendee-only guard threw — proceeding', { err: String(err) });
+        }
+
         // v1.8.8 — same series-master block as update_meeting. Moving a
         // seriesMaster would shift every occurrence in the series. Single
         // occurrence moves (type='occurrence' or 'exception') are allowed;

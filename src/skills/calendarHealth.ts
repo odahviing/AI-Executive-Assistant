@@ -139,11 +139,11 @@ Use this proactively when the owner asks about their schedule, or when they ask 
           properties: {
             start_date: {
               type: 'string',
-              description: 'Start date YYYY-MM-DD. Defaults to today.',
+              description: 'Start date YYYY-MM-DD. Defaults to today. When omitted, the tool uses a smart default window: today → end of the owner\'s current workweek, extended by 7 days when ≤24h remain (so there\'s runway to coordinate moves).',
             },
             end_date: {
               type: 'string',
-              description: 'End date YYYY-MM-DD. Defaults to end of current week.',
+              description: 'End date YYYY-MM-DD. Defaults paired with start_date — see above. Only override when you have a specific reason (e.g. owner asked "check next month").',
             },
             mode: {
               type: 'string',
@@ -238,11 +238,14 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
     switch (toolName) {
 
       case 'check_calendar_health': {
-        const clockNow = DateTime.now().setZone(timezone);
-        // Late-night adjustment: before 5am the user is still in "yesterday"
-        const now = clockNow.hour < 5 ? clockNow.minus({ days: 1 }).startOf('day') : clockNow;
-        const startDate = (args.start_date as string) ?? now.toFormat('yyyy-MM-dd');
-        const endDate = (args.end_date as string) ?? now.endOf('week').toFormat('yyyy-MM-dd');
+        // v2.1.4 — default window is owner-rule-driven (today → end of
+        // workweek; extend 7 days when ≤24h left). Explicit args still
+        // override. See utils/workHours.computeHealthCheckWindow.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { computeHealthCheckWindow } = require('../utils/workHours') as typeof import('../utils/workHours');
+        const defaultWindow = computeHealthCheckWindow(profile);
+        const startDate = (args.start_date as string) ?? defaultWindow.startDate;
+        const endDate = (args.end_date as string) ?? defaultWindow.endDate;
         // v2.1.1 — mode resolution. Explicit arg wins; else profile default.
         const mode: 'passive' | 'active' =
           (args.mode === 'active' || args.mode === 'passive')
@@ -610,7 +613,27 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                         .filter(Boolean);
 
                       const searchFrom = DateTime.fromISO(issue.date, { zone: timezone }).plus({ days: 1 }).startOf('day').toUTC().toISO()!;
-                      const searchTo = DateTime.fromISO(issue.date, { zone: timezone }).plus({ days: 7 }).endOf('day').toUTC().toISO()!;
+                      let searchTo = DateTime.fromISO(issue.date, { zone: timezone }).plus({ days: 7 }).endOf('day').toUTC().toISO()!;
+                      // v2.1.4 — cadence-aware cap for recurring meetings
+                      // displaced by a surprise OOF. Can't push a weekly
+                      // forward into a week that already has its next
+                      // instance; cap at (next occurrence - 1min).
+                      const conflictingSeriesId = (conflicting as unknown as { seriesMasterId?: string }).seriesMasterId;
+                      if (conflictingSeriesId) {
+                        // eslint-disable-next-line @typescript-eslint/no-require-imports
+                        const cal = require('../connectors/graph/calendar') as typeof import('../connectors/graph/calendar');
+                        const nextInstance = await cal.getNextSeriesOccurrenceAfter(
+                          userEmail, conflictingSeriesId, mStart.toUTC().toISO()!,
+                        );
+                        if (nextInstance) {
+                          const capped = DateTime.fromISO(nextInstance).minus({ minutes: 1 }).toUTC().toISO()!;
+                          if (capped < searchTo) searchTo = capped;
+                          logger.info('OOF move-coord: capped search at next series occurrence', {
+                            conflictingId: conflicting.id, seriesMasterId: conflictingSeriesId,
+                            nextInstance, capped,
+                          });
+                        }
+                      }
                       const slots = await findAvailableSlots({
                         userEmail,
                         timezone,
@@ -654,7 +677,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                             id: conflicting.id,
                             currentStartIso: mStart.toISO()!,
                             currentEndIso: mEnd.toISO()!,
-                            conflictReason: `Idan is out of office on ${issue.date}`,
+                            conflictReason: `${profile.user.name.split(' ')[0]} is out of office on ${issue.date}`,
                           },
                         });
                         issue.fixed = true;
@@ -755,10 +778,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                     const mEnd = parseGraphDt(movable.end.dateTime, movable.end.timeZone, timezone);
                     const durationMin = Math.round(mEnd.diff(mStart, 'minutes').minutes);
 
-                    // Find fresh slots to propose. Search the same day + the
-                    // following day — keep the reshuffle close to the
-                    // original time so the participant isn't time-shifted
-                    // by days.
+                    // Find fresh slots to propose.
                     const participantsRaw = (movable.attendees ?? []).filter(a => {
                       const status = a.status?.response;
                       return status !== 'declined' && status !== 'none';
@@ -767,8 +787,39 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                       .map(a => a.emailAddress.address)
                       .filter(Boolean);
 
+                    // v2.1.4 — cadence-aware search window. For recurring
+                    // occurrences, cap `searchTo` at the next instance of
+                    // the same series (exclusive) — moving Brett's biweekly
+                    // forward past the next biweekly would duplicate the
+                    // cadence. For non-recurring meetings, use the legacy
+                    // +2 days window. Fail-open: if the series lookup fails,
+                    // proceed with default window (safer to propose than to
+                    // stall silently).
                     const searchFrom = DateTime.fromISO(issue.date, { zone: timezone }).startOf('day').toUTC().toISO()!;
-                    const searchTo = DateTime.fromISO(issue.date, { zone: timezone }).plus({ days: 2 }).endOf('day').toUTC().toISO()!;
+                    let searchTo = DateTime.fromISO(issue.date, { zone: timezone }).plus({ days: 2 }).endOf('day').toUTC().toISO()!;
+                    const movableSeriesId = (movable as unknown as { seriesMasterId?: string }).seriesMasterId;
+                    if (movableSeriesId) {
+                      // eslint-disable-next-line @typescript-eslint/no-require-imports
+                      const cal = require('../connectors/graph/calendar') as typeof import('../connectors/graph/calendar');
+                      const nextInstance = await cal.getNextSeriesOccurrenceAfter(
+                        userEmail, movableSeriesId, mStart.toUTC().toISO()!,
+                      );
+                      if (nextInstance) {
+                        // Cap at 1 minute before the next instance — strict
+                        // exclusion so the slot search can't land on the
+                        // same moment as the next cadence firing.
+                        const capped = DateTime.fromISO(nextInstance).minus({ minutes: 1 }).toUTC().toISO()!;
+                        // Only apply the cap if it's EARLIER than the
+                        // default window. If the next occurrence is far out
+                        // (single non-recurring or rare cadence), keep the
+                        // narrow default.
+                        if (capped < searchTo) searchTo = capped;
+                        logger.info('Overlap move-coord: capped search at next series occurrence', {
+                          movableId: movable.id, seriesMasterId: movableSeriesId,
+                          originalSearchTo: searchTo, nextInstance, capped,
+                        });
+                      }
+                    }
                     const slots = await findAvailableSlots({
                       userEmail,
                       timezone,
@@ -815,7 +866,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                           id: movable.id,
                           currentStartIso: mStart.toISO()!,
                           currentEndIso: mEnd.toISO()!,
-                          conflictReason: `overlaps with "${kept.subject}"`,
+                          conflictReason: protection.sanitizeConflictReason(kept, profile.user.name.split(' ')[0]),
                         },
                       });
                       issue.fixed = true;

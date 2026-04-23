@@ -79,6 +79,76 @@ export function addWorkdays(fromIso: string, n: number, profile: UserProfile): s
 }
 
 /**
+ * v2.1.4 — default date window for the daily calendar health check.
+ *
+ * Rule (owner simplification):
+ *   start = today (local date, start of day)
+ *   end   = the owner's last workday of the current week, at end-of-hours
+ *   if (end - start) <= 24 hours → extend end by 7 calendar days
+ *
+ * The <=24h branch catches "we're already on the last workday" — no point
+ * checking only today; push the window into next week so there's actually
+ * runway to coordinate moves with colleagues. Otherwise the window is
+ * today through end of workweek (Sun-Thu for Idan's profile).
+ *
+ * Returns YYYY-MM-DD strings so the health-check tool can plug them in
+ * directly. Deterministic — Sonnet doesn't compute dates.
+ */
+export function computeHealthCheckWindow(profile: UserProfile): {
+  startDate: string;
+  endDate: string;
+} {
+  const tz = profile.user.timezone;
+  const officeDays = profile.schedule.office_days.days as string[];
+  const homeDays = profile.schedule.home_days.days as string[];
+  const workDaySet = new Set<string>([...officeDays, ...homeDays]);
+
+  const now = DateTime.now().setZone(tz);
+
+  // Walk forward up to 7 days to find the LAST workday of the current
+  // 7-day window ending today. More precisely: starting from today,
+  // find the furthest workday reachable within the next 6 days that
+  // has no non-work day between it and today-or-forward.
+  // Simpler approach: walk today..today+6, collect every day that's a
+  // workday, the last one wins. That gives "end of workweek" for a
+  // Sun-Thu profile when run on Sunday (→ Thursday) or on Thursday (→
+  // Thursday itself).
+  let endWorkday = now;
+  for (let i = 0; i < 7; i++) {
+    const d = now.plus({ days: i });
+    if (workDaySet.has(d.toFormat('EEEE'))) {
+      endWorkday = d;
+    }
+    // Stop walking once we hit a non-workday AFTER at least one workday —
+    // that's the boundary between this workweek and next. Prevents picking
+    // next week's days.
+    if (!workDaySet.has(d.toFormat('EEEE')) && i > 0) break;
+  }
+
+  // Compute the end-of-work-hours timestamp for the selected endWorkday.
+  // Pick the correct hours_end based on office vs home day.
+  const dayName = endWorkday.toFormat('EEEE');
+  const isOffice = officeDays.includes(dayName);
+  const hoursEnd = isOffice
+    ? profile.schedule.office_days.hours_end
+    : profile.schedule.home_days.hours_end;
+  const [eh, em] = hoursEnd.split(':').map(Number);
+  const endDt = endWorkday.set({ hour: eh, minute: em, second: 0, millisecond: 0 });
+
+  // If the full window is <= 24 hours, we're essentially out of runway
+  // this week. Extend into next week so there's time to coordinate moves.
+  const hoursInWindow = endDt.diff(now, 'hours').hours;
+  const finalEnd = hoursInWindow <= 24
+    ? endDt.plus({ days: 7 })
+    : endDt;
+
+  return {
+    startDate: now.toFormat('yyyy-MM-dd'),
+    endDate: finalEnd.toFormat('yyyy-MM-dd'),
+  };
+}
+
+/**
  * v2.1.3 — base timestamp for owner-workday expiry calculations.
  * Returns NOW when the owner is currently within their work hours, else
  * the ISO of the next work-time start.
