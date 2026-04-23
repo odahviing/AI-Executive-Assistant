@@ -324,7 +324,19 @@ Plan: approved by ${followUps.length > 0 ? 'owner (with follow-up)' : 'owner'} b
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`;
 
 sh('git add -A');
-sh(`git commit -m ${JSON.stringify(commitMessage)}`);
+// v2.1.5 — bypass the shell for commit so markdown backticks in the commit
+// message (from the issue title / plan prose) don't trigger bash command
+// substitution. Previous `sh(git commit -m "..."`)` shelled through /bin/sh,
+// which interpreted backticks in the body and failed with "end of file
+// unexpected" whenever a fix involved code-quoted identifiers. spawnSync
+// with argv array passes the message to git as a single arg, unexpanded.
+{
+  const r = spawnSync('git', ['commit', '-m', commitMessage], { encoding: 'utf8' });
+  if (r.status !== 0) {
+    console.error('git commit failed:', r.stderr || r.stdout);
+    process.exit(1);
+  }
+}
 sh('git push');
 const sha = sh('git rev-parse HEAD');
 
