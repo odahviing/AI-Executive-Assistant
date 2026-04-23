@@ -775,7 +775,17 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
     }
   }
 
-  if (!finalReply) {
+  // v2.1.5 — never synthesize recovery text on a colleague-facing turn.
+  // The recovery pass was built to cover "owner asked Maelle to delete X,
+  // tool succeeded, Claude went silent, owner needs confirmation." In a
+  // colleague conversation the same mechanism fabricates owner-narrative
+  // text ("Yael mentioned she's planning to fly to Boston") and delivers
+  // it to the colleague as if Maelle said it. Colleague-facing text must
+  // only be what Claude itself wrote — if the main pass went silent, the
+  // honest outcome is silence. Owner path keeps the recovery safety net.
+  const isColleagueFacing = input.senderRole === 'colleague' && !input.isOwnerInGroup;
+
+  if (!finalReply && !isColleagueFacing) {
     // v1.6.5 — recovery call. The model ran tools but produced no text.
     // Silence (the v1.6.4 behavior) was honest but jarring. Instead we run
     // ONE more Claude pass with a tight system prompt: "you just handled

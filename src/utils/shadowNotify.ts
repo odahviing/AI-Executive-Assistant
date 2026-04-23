@@ -41,15 +41,19 @@ export async function shadowNotify(
   try {
     const text = `🔍 _*${params.action}:* ${params.detail}_`;
 
-    // v2.0.6 — if the caller passed a channel + threadTs AND the channel is a
-    // Slack DM (id starts with 'D'), post in-thread there. Any coord/outreach
-    // that the owner started in a thread flows this way so the shadow messages
-    // stay inside the conversation the owner is already reading. Non-DM
-    // channels (colleague DMs, MPIMs, public channels) fall through to
-    // sendDirect to the owner — that's the security floor: colleagues never
-    // see shadow/debug content. No cache needed; postToChannel either succeeds
-    // or we fall back cleanly.
-    if (params.channel && params.threadTs && params.channel.startsWith('D')) {
+    // v2.0.6 — if the caller passed a channel + threadTs AND the channel is
+    // the owner's own DM, post in-thread there. Any coord/outreach that the
+    // owner started in a thread flows this way so the shadow messages stay
+    // inside the conversation the owner is already reading.
+    //
+    // v2.1.5 — the prior check was `channel.startsWith('D')` which was wrong:
+    // every 1:1 Slack DM starts with 'D', including colleague DMs. That
+    // leaked shadow content into colleague threads. The in-thread path is
+    // now gated on the cached owner-DM channel id — matches only when the
+    // caller-provided channel is the verified owner DM. First-ever call
+    // (cache empty) falls through to sendDirect, which populates the cache.
+    const knownOwnerDm = ownerDmChannelCache.get(ownerId);
+    if (params.channel && params.threadTs && knownOwnerDm && params.channel === knownOwnerDm) {
       const res = await conn.postToChannel(params.channel, text, { threadTs: params.threadTs });
       if (res.ok) {
         ownerDmChannelCache.set(ownerId, params.channel);

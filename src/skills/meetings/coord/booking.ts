@@ -384,7 +384,18 @@ export async function bookCoordination(
     ? ` (${justInviteParticipants.map(p => p.name).join(', ')} also invited)`
     : '';
 
-  if (!suppressOwnerConfirm) {
+  // v2.1.5 — skip the standalone "Done —" owner post when the in-group
+  // "All confirmed!" above already landed in the owner's channel + thread.
+  // Happens for MPIM coords (group_channel === owner_channel) and any
+  // channel-initiated coord where the owner is in the group. Prevents the
+  // duplicate "one message in thread, one right after" noise; the earlier
+  // group post already told the owner what happened.
+  const ownerAlreadyNotifiedViaGroup = inGroupConfirm.some(
+    p => p.group_channel === job.owner_channel
+      && (p.group_thread_ts ?? undefined) === (job.owner_thread_ts ?? undefined),
+  );
+
+  if (!suppressOwnerConfirm && !ownerAlreadyNotifiedViaGroup) {
     await slackConn.postToChannel(
       job.owner_channel,
       `Done — "${job.subject}" booked with ${keyNames}${extraSuffix} on ${slotDt.toFormat("EEEE, d MMMM 'at' HH:mm")}${locationLine}.${closing}`,

@@ -26,6 +26,72 @@ function formatIsoTime(iso: string): string {
   const m = /T(\d{2}:\d{2})/.exec(iso);
   return m ? m[1] : iso;
 }
+
+// v2.1.5 — build synthetic busy blocks covering everything OUTSIDE the owner's
+// work hours (and all-day busy for non-work days) across the given range. Used
+// only for colleague-path get_free_busy calls so raw free gaps returned to
+// Sonnet never include out-of-hours time. Rule enforcement in code — the LLM
+// literally cannot narrate a 09:00 slot to a colleague when office day starts
+// 10:30 because that window is no longer present as "free" in the data.
+function buildOutOfHoursBusy(
+  startDate: string,
+  endDate: string,
+  profile: UserProfileType,
+  timezone: string,
+): Array<{ start: string; end: string; status: 'oof' }> {
+  const blocks: Array<{ start: string; end: string; status: 'oof' }> = [];
+  const rangeStart = DateTime.fromISO(startDate, { zone: timezone });
+  const rangeEnd = DateTime.fromISO(endDate, { zone: timezone });
+  if (!rangeStart.isValid || !rangeEnd.isValid) return blocks;
+  const officeDays = profile.schedule.office_days.days;
+  const homeDays = profile.schedule.home_days.days;
+  const dayName = (dt: DateTime) => dt.toFormat('cccc');
+  const hhmmToMinutes = (s: string): number => {
+    const [h, m] = s.split(':').map(n => parseInt(n, 10));
+    return (h * 60) + m;
+  };
+  for (let d = rangeStart.startOf('day'); d <= rangeEnd; d = d.plus({ days: 1 })) {
+    const name = dayName(d);
+    const isOffice = officeDays.includes(name as typeof officeDays[number]);
+    const isHome = homeDays.includes(name as typeof homeDays[number]);
+    const dayStart = d.startOf('day');
+    const dayEnd = d.endOf('day');
+    if (!isOffice && !isHome) {
+      // Non-work day — block the whole day.
+      blocks.push({
+        start: dayStart.toISO() ?? `${d.toISODate()}T00:00:00`,
+        end: dayEnd.toISO() ?? `${d.toISODate()}T23:59:59`,
+        status: 'oof',
+      });
+      continue;
+    }
+    const spec = isOffice ? profile.schedule.office_days : profile.schedule.home_days;
+    const startMin = hhmmToMinutes(spec.hours_start);
+    const endMin = hhmmToMinutes(spec.hours_end);
+    // Morning block: 00:00 → hours_start
+    if (startMin > 0) {
+      const morningEnd = dayStart.plus({ minutes: startMin });
+      blocks.push({
+        start: dayStart.toISO() ?? `${d.toISODate()}T00:00:00`,
+        end: morningEnd.toISO() ?? `${d.toISODate()}T${spec.hours_start}:00`,
+        status: 'oof',
+      });
+    }
+    // Evening block: hours_end → end of day
+    if (endMin < 24 * 60) {
+      const eveningStart = dayStart.plus({ minutes: endMin });
+      blocks.push({
+        start: eveningStart.toISO() ?? `${d.toISODate()}T${spec.hours_end}:00`,
+        end: dayEnd.toISO() ?? `${d.toISODate()}T23:59:59`,
+        status: 'oof',
+      });
+    }
+  }
+  return blocks;
+}
+// Local alias for the profile type without adding another import — re-use the
+// one imported below. Ts hoists type-only imports so this works.
+type UserProfileType = import('../../config/userProfile').UserProfile;
 import type { UserProfile } from '../../config/userProfile';
 import {
   getCalendarEvents,
@@ -536,7 +602,27 @@ export class SchedulingSkill {
 
       case 'get_free_busy':
         try {
-          return await getFreeBusy(userEmail, args.emails as string[], args.start_date as string, args.end_date as string, timezone);
+          const raw = await getFreeBusy(userEmail, args.emails as string[], args.start_date as string, args.end_date as string, timezone);
+          // v2.1.5 — for colleague-context asks, synthesize out-of-work-hours
+          // busy blocks on the OWNER's row so the free gaps returned to Sonnet
+          // are already clipped to Idan's work hours. A colleague should not
+          // be able to learn that 09:00 is free when Idan's office day starts
+          // at 10:30 — out-of-hours availability requires explicit owner
+          // override, not a drive-by "check get_free_busy" bypass. Owner-path
+          // calls get raw data (owner knows their own schedule and may
+          // genuinely want to see all gaps).
+          const isColleaguePath = context.senderRole === 'colleague' && context.isOwnerInGroup !== true;
+          if (isColleaguePath && Array.isArray(args.emails) && (args.emails as string[]).includes(userEmail)) {
+            const ownerBusy = raw[userEmail] ?? [];
+            const synthetic = buildOutOfHoursBusy(
+              args.start_date as string,
+              args.end_date as string,
+              context.profile,
+              timezone,
+            );
+            raw[userEmail] = [...ownerBusy, ...synthetic];
+          }
+          return raw;
         } catch (err) {
           if (err instanceof GraphPermissionError) {
             return {

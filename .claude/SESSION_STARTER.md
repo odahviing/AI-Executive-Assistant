@@ -17,9 +17,11 @@ When the owner says "wrap up" / "close the patch" / "cut a version" / "day close
 
 ---
 
-## Where we are — v2.1.4 just shipped
+## Where we are — v2.1.5 just shipped
 
 The autonomy layer is real. `behavior.calendar_health_mode: 'passive' | 'active'` toggles `check_calendar_health` between detect-and-report (passive, default) and detect-and-execute-safe-fixes (active). Active mode auto-books missing floating blocks, tags uncategorized events with high-confidence classifier, reshuffles floating-block overlaps in-window, starts move-coords with attendees for internal-only double-bookings (cadence-aware — can't push weekly meetings into a week where the next cadence instance lives), auto-clears 1:1s from surprise-vacation days, DMs owner on busy days. All gated by deterministic protection rules (≥4 attendees / any external / matched by `meetings.protected[].name` or `.category`). Shadow DMs everywhere via `v1_shadow_mode`. Prior milestone — v2.0.0 closed issue #1 (Connection interface rollout); the four-layer model (core / skills / connections / utils) is honest and enforced.
+
+v2.1.5 closed seven bugs from a day of external QA — big three: (1) `shadowNotify` no longer leaks into colleague threads (was gating on `startsWith('D')` which matches every Slack DM; now gated on cached owner-DM match); (2) the recovery pass is skipped entirely on colleague-facing turns so synthesized owner-narrative text can't land in a colleague's DM — colleague-facing text is only what Claude itself wrote; (3) `get_free_busy` in colleague-context now clips owner's availability to work hours via a new `buildOutOfHoursBusy` helper — 10:00 on an office day starting 10:30 literally isn't in the data Sonnet sees. Also: meetingReschedule counter auto-accept (mirrors v2.1.1 coord move-intent), outreach DM threading (new `dm_message_ts` + `dm_channel_id` columns), coord message dedup (MPIM bookings went from 3 messages to 1), built-in briefing visible in `get_routines`. Filed [#41](https://github.com/odahviing/AI-Executive-Assistant/issues/41) (investigate if recovery pass still earns its keep, Low).
 
 Notable v2.1.x capabilities to remember:
 - **Floating blocks** (v2.1.0) — `schedule.floating_blocks` YAML; lunch auto-promoted. Elastic within window, day-scoped via `days: []`. Moving OUT of window needs `create_approval(kind=lunch_bump)`.
@@ -28,6 +30,7 @@ Notable v2.1.x capabilities to remember:
 - **Smart health-check window** (v2.1.4) — `computeHealthCheckWindow(profile)` default; cadence cap via `getNextSeriesOccurrenceAfter`.
 - **Attendee-only guards** (v2.1.4) — `update_meeting` / `move_meeting` refuse PATCH when owner isn't organizer. New `respond_to_invite` tool for accept/decline is filed as [#33](https://github.com/odahviing/AI-Executive-Assistant/issues/33), not built yet.
 - **Third-party-booking verifier** (v2.1.4) — `outreach_jobs.proposed_slots` + `subject_keyword` columns; brief matches pending outreach against calendar events, narrates "Michal booked it" instead of "still waiting". Honors `await_reply=0`.
+- **Colleague-surface hygiene** (v2.1.5) — `shadowNotify` requires cached owner-DM match before in-thread; recovery pass skipped on colleague turns; `get_free_busy` colleague-context synthesizes out-of-hours busy. Three independent guards, all code-enforced.
 - **Social layer** (v2.1.2) — stale threshold dropped to 2, seed topics injected when pool empty, "MUST ask" when silent 72h+, VARIETY > recency.
 
 ## Open improvement tickets (GitHub)
@@ -41,6 +44,7 @@ Consult before proposing anything that might already be filed:
 - **[#31](https://github.com/odahviing/AI-Executive-Assistant/issues/31)** — Book travel buffer on offsite meetings (Low)
 - **[#32](https://github.com/odahviing/AI-Executive-Assistant/issues/32)** — Retry move-coord on refusal (High) — participant refusal → earlier-bias round-2
 - **[#33](https://github.com/odahviing/AI-Executive-Assistant/issues/33)** — Respond to invite on owner's side (Low) — accept/decline tool
+- **[#41](https://github.com/odahviing/AI-Executive-Assistant/issues/41)** — Investigate if recovery pass still earns its keep (Low) — firing-rate + usefulness audit
 
 ## Focus going forward
 

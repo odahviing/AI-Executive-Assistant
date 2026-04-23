@@ -172,6 +172,11 @@ function initSchema(db: Database.Database): void {
     // outreach narration honestly.
     `ALTER TABLE outreach_jobs ADD COLUMN proposed_slots TEXT`,
     `ALTER TABLE outreach_jobs ADD COLUMN subject_keyword TEXT`,
+    // v2.1.5 — store the Slack ts + channel of the initial outreach DM so
+    // follow-up sends (confirmations after approval, relay messages) thread
+    // into the same DM conversation instead of creating fresh top-level DMs.
+    `ALTER TABLE outreach_jobs ADD COLUMN dm_message_ts TEXT`,
+    `ALTER TABLE outreach_jobs ADD COLUMN dm_channel_id TEXT`,
     // Defensive: older coord_jobs may be missing subject (was hit by injection-driven writes)
     `ALTER TABLE coord_jobs ADD COLUMN subject TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE coord_jobs ADD COLUMN topic TEXT`,

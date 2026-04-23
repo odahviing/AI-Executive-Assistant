@@ -393,15 +393,27 @@ export async function handleCoordReply(
     last_participant_activity_at: new Date().toISOString(),
   });
 
-  // Acknowledge
+  // v2.1.5 — compute allResponded BEFORE the ack so we can skip the
+  // "I'll confirm once everyone responds" line when this yes-vote completes
+  // the round. The booking confirmation from resolveCoordination follows
+  // moments later and is the real response; the intermediate ack just
+  // added noise (three messages in a thread where one was right).
+  const keyParticipants = updatedParticipants.filter(p => !p.just_invite);
+  const allResponded = keyParticipants.every(p => p.response !== null && p.response !== 'maybe');
+
+  // Acknowledge — suppress the wait-ack when a yes-vote completes the round.
   const ackText = response === 'no'
     ? `Got it — I'll find some other options and come back to you.`
-    : `Great, noted! I'll confirm once everyone responds.`;
+    : allResponded
+      ? null   // booking confirmation is about to arrive; skip the interim ack
+      : `Great, noted! I'll confirm once everyone responds.`;
 
   const ackInThread = participant.contacted_via === 'group' && job.owner_channel === params.channelId;
-  await slackConn.postToChannel(params.channelId, ackText, {
-    threadTs: ackInThread ? (job.owner_thread_ts ?? undefined) : undefined,
-  });
+  if (ackText !== null) {
+    await slackConn.postToChannel(params.channelId, ackText, {
+      threadTs: ackInThread ? (job.owner_thread_ts ?? undefined) : undefined,
+    });
+  }
 
   // Shadow
   const slotLabel = preferredSlot
@@ -417,9 +429,6 @@ export async function handleCoordReply(
     detail: `${participant.name} responded to "${job.subject}": ${responseLabel}`,
   });
 
-  // Check if all KEY participants responded
-  const keyParticipants = updatedParticipants.filter(p => !p.just_invite);
-  const allResponded = keyParticipants.every(p => p.response !== null && p.response !== 'maybe');
   if (allResponded) {
     await resolveCoordination(job.id, params.profile);
   }

@@ -375,8 +375,8 @@ IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if
       case 'get_routines': {
         const routines = db.prepare(`
           SELECT * FROM routines
-          WHERE owner_user_id = ? AND status != 'deleted' AND is_system = 0
-          ORDER BY created_at ASC
+          WHERE owner_user_id = ? AND status != 'deleted'
+          ORDER BY is_system ASC, created_at ASC
         `).all(ownerUserId) as Routine[];
 
         if (routines.length === 0) {
@@ -387,13 +387,14 @@ IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if
         const formatted = routines.map(r => {
           const schedStr = formatSchedule(r, profile.user.timezone, profileWorkDays);
           const paused   = r.status === 'paused' ? ' *(paused)*' : '';
+          const builtIn  = r.is_system === 1 ? ' *(built-in)*' : '';
           const lastRun  = r.last_run_at
             ? `Last ran ${DateTime.fromISO(r.last_run_at).setZone(profile.user.timezone).toFormat('EEE d MMM')}. `
             : 'Never run yet. ';
           const nextRun  = r.next_run_at
             ? DateTime.fromISO(r.next_run_at).setZone(profile.user.timezone).toFormat('EEE d MMM HH:mm')
             : 'unscheduled';
-          return `• [${r.id}] *${r.title}*${paused}\n  ${schedStr} — ${lastRun}Next: ${nextRun}`;
+          return `• [${r.id}] *${r.title}*${paused}${builtIn}\n  ${schedStr} — ${lastRun}Next: ${nextRun}`;
         }).join('\n');
 
         return { routines, formatted, count: routines.length };

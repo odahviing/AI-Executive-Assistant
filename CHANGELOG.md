@@ -2,6 +2,60 @@
 
 ---
 
+## 2.1.5 — shadow + recovery no longer leak to colleagues, deterministic work-hours guard
+
+Seven bug fixes from a day of external QA. The biggest two close a class of owner-context leakage onto colleague-facing surfaces (shadow messages landing in colleague threads, recovery pass synthesizing owner-narrative text for colleagues). One code-level hardening makes out-of-hours availability unreachable via `get_free_busy` in the colleague path. The rest are coordination polish — message dedup on MPIM bookings, ts-threaded follow-ups, counter auto-accept for solo reschedules, visibility of the built-in briefing.
+
+### Fixed — shadow messages leaking to colleague threads
+
+`shadowNotify` previously took the in-thread path on any channel starting with `D` — which is every 1:1 Slack DM, including colleague DMs. Shadow content (`🔍 Yael Aharon → me: I said: "..."`) was ending up inside the colleague's thread. Gate rewritten: in-thread only fires when the caller-provided channel matches the cached owner-DM channel. First-ever call (cold cache) falls through to `sendDirect(ownerId)` and populates the cache. MPIMs and public channels unchanged (they never satisfied `startsWith('D')` to begin with). File: `src/utils/shadowNotify.ts`. [#35](https://github.com/odahviing/aI-Executive-Assistant/issues/35)
+
+### Fixed — recovery pass no longer fabricates colleague-facing text
+
+The v1.6.5 recovery pass exists to cover "action tool succeeded, Claude forgot to narrate, owner would be confused by silence." When a colleague turn ended with only a memory-internal tool call (e.g. `note_about_person`), the recovery pass fired anyway with a prompt hardcoded to owner framing — synthesizing owner-narrative text like *"Yael mentioned she's planning to fly to Boston. Follow up if relevant."* and delivering it to the colleague. Recovery (and the tool-grounded fallback that runs after it) now skip entirely on colleague-facing turns. Colleague-facing text is only what Claude itself wrote; if the main pass went silent, silence is the honest outcome. Owner path keeps the recovery safety net. File: `src/core/orchestrator/index.ts`. Follow-up [#41](https://github.com/odahviing/AI-Executive-Assistant/issues/41) filed to investigate whether the owner-side recovery pass still earns its keep. [#38](https://github.com/odahviing/AI-Executive-Assistant/issues/38)
+
+### Fixed — out-of-work-hours availability unreachable via get_free_busy for colleagues
+
+Colleague-path `get_free_busy` now synthesizes out-of-work-hours busy blocks on the owner's row before returning. If the office day starts 10:30, the window 00:00–10:30 is returned as busy (`status: 'oof'`). Out-of-hours slots literally aren't present in the data Sonnet sees — she can't narrate 09:00 as available to a colleague because it's not "free" in the response. Owner-path calls (`senderRole === 'owner'` or owner-in-group) still get raw data so the owner sees their own calendar accurately. Plus a tool-description guard ("do not use to present meeting-time options") and a new `COORDINATION` prompt rule banning slot pre-narration before calling `coordinate_meeting`. Files: `src/skills/meetings/ops.ts`, `src/skills/meetings.ts`. [#39](https://github.com/odahviing/AI-Executive-Assistant/issues/39)
+
+### Added — counter auto-accept on meetingReschedule path
+
+Mirrors the v2.1.1 coord move-intent auto-accept. When `message_colleague` with `intent='meeting_reschedule'` gets a counter-offer reply (*"works but 09:30 would be better"*), and active mode is on AND the counter is same ISO week AND passes every schedule rule (narrow-window `findAvailableSlots` check), Maelle moves the meeting and shadow-DMs the owner — no ping for approval. "15 minutes earlier on work time" is her job, not owner's. Counters outside same week, or that break a rule, still route to owner approval. File: `src/skills/meetingReschedule.ts`. [#36](https://github.com/odahviing/AI-Executive-Assistant/issues/36)
+
+### Added — outreach DM threading (ts captured, confirmations thread back)
+
+`outreach_jobs` gains `dm_message_ts` + `dm_channel_id` columns. `message_colleague` DM branch stores the Slack ts + channel after successful send. The meetingReschedule approved-branch confirmation now threads into the original outreach DM via `postToChannel(dm_channel_id, msg, {threadTs: dm_message_ts})` — no more fresh top-level DM for the "Great, moved to 14:30" reply. Counter auto-accept path threads the same way. Legacy rows (no ts recorded) fall back to `sendDirect`. Idempotent migration. Files: `src/db/client.ts`, `src/db/jobs.ts`, `src/skills/outreach.ts`, `src/skills/meetingReschedule.ts`. [#37](https://github.com/odahviing/AI-Executive-Assistant/issues/37)
+
+### Fixed — duplicate booking messages on group-thread coords
+
+Two changes:
+- The *"Great, noted! I'll confirm once everyone responds."* ack in `coord/reply.ts` is now suppressed when the yes-vote is the last one needed — booking confirmation follows in the next breath and is the real response. `allResponded` is computed BEFORE the ack so the gate works.
+- In `coord/booking.ts`, the standalone *"Done — booked with …"* owner post is suppressed when the in-group *"All confirmed!"* post already landed in the owner's channel + thread. Match is exact: `group_channel === owner_channel && group_thread_ts === owner_thread_ts`. Covers MPIM coords and any channel-initiated coord where the owner is in the group. Private-DM coord path unchanged.
+
+Three messages collapsed to one. [#40](https://github.com/odahviing/AI-Executive-Assistant/issues/40)
+
+### Fixed — rescheduling alternatives can no longer overlap the original meeting
+
+New `RESCHEDULING ALTERNATIVES` prompt rule in `src/skills/meetings.ts` extends the existing `OPTIONS QUESTIONS` guard to cover reschedule phrasing ("can we move this?" / "can you shift it?"). Forces `find_available_slots` instead of raw-calendar narration. The slot finder already rejects overlaps via free/busy — the bug was purely that the LLM wasn't being told to use it for the reschedule path. Trap documented in-prompt: *"seeing 'free from 9:00 before the meeting' and suggesting 9:00 — a 55-min meeting at 9:00 ends 9:55, which overlaps the original 9:15–10:10 block still on the calendar."* [#36](https://github.com/odahviing/AI-Executive-Assistant/issues/36)
+
+### Fixed — coord topic no longer echoed back to the participant who said it
+
+`topic` param description on `coordinate_meeting` was *"only if the user told you explicitly"* — ambiguous enough that the LLM would populate it from a participant's own message ("we'll shoot 2 videos") and then include it in the coord DM back to that participant. Tightened to *"set ONLY if the OWNER (not a colleague or participant) explicitly told you the meeting purpose in this conversation. Never derive this from something a participant said."* [#39](https://github.com/odahviing/AI-Executive-Assistant/issues/39)
+
+### Fixed — built-in briefing visible in get_routines
+
+`get_routines` was filtering `AND is_system = 0`, hiding the morning briefing row from the LLM. Owner would ask *"what routines do you have?"* and hear *"no daily briefing set up"* — same morning she'd already sent one. Filter removed; system routines now appear in the list ordered first, tagged with a `*(built-in)*` label. `update_routine` and `delete_routine` still carry their own `AND is_system = 0` guards so accidental mutation is impossible. No prompt change — owner's note: "if it's there, it's there; if not, not." File: `src/tasks/crons.ts`. [#34](https://github.com/odahviing/AI-Executive-Assistant/issues/34)
+
+### Migration
+
+Two idempotent `ALTER TABLE outreach_jobs ADD COLUMN` statements added to `db/client.ts` for `dm_message_ts` + `dm_channel_id`. Legacy rows have NULL and degrade gracefully to `sendDirect`.
+
+### Not changed
+
+- Auto-triage auto-build commit path — the shell-escape bug in `scripts/auto-build.mjs` (literal `\n` in commit messages breaking `sh -c`) still present. All 7 fixes were built manually after the Approved auto-build runs failed at the commit step. Separate ticket territory.
+
+---
+
 ## 2.1.4 — smart health-check window, cadence-aware moves, attendee-only guards, third-party-booking verifier
 
 Bundle of scenario-driven fixes. Five behavior changes with real teeth, plus filing two follow-up tickets.

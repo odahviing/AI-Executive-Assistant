@@ -125,7 +125,7 @@ Override with custom_location if a specific external venue is needed.`,
               },
             },
             subject: { type: 'string', description: 'Meeting title' },
-            topic: { type: 'string', description: 'What the meeting is about — only if the user told you explicitly' },
+            topic: { type: 'string', description: 'What the meeting is about — set ONLY if the OWNER (not a colleague or participant) explicitly told you the meeting purpose in this conversation. Never derive this from something a participant said, even if they described the agenda; restating their own words back to them in the coordination DM is redundant and awkward. When in doubt, omit.' },
             duration_min: { type: 'number', description: 'Duration in minutes. Default options: 10 (quick), 25 (short), 40 (meeting), 55 (hour). Owner can request any value.' },
             custom_location: {
               type: 'string',
@@ -276,7 +276,8 @@ Use ONLY for:
 Do NOT use for:
 - "Is he free at 3pm today to join my meeting" → use check_join_availability (specific time, existing meeting context)
 - Checking colleague availability before scheduling → use coordinate_meeting
-- Needing actual bookable slots (with buffers, rules) → use find_available_slots`,
+- Needing actual bookable slots (with buffers, rules) → use find_available_slots
+- Presenting meeting-time options to anyone. Free/busy data does not apply schedule rules (office-day start, thinking-time, lunch, buffer). For bookable options, use find_available_slots (owner asks "when am I free") or coordinate_meeting (meeting needs to be arranged).`,
         input_schema: {
           type: 'object',
           properties: {
@@ -1330,6 +1331,9 @@ If you don't actually know which rule find_available_slots used to reject, say: 
 OPTIONS QUESTIONS → ALWAYS go through find_available_slots first:
 If ${firstName} asks "what are my options / when am I free / find me a slot / do I have time for X / what's open next week" — call find_available_slots. Do NOT reason from get_calendar / analyze_calendar event lists to propose specific start times. Those tools return raw events — they do not apply buffer, lunch, thinking-time, day type, or slot alignment.
 
+RESCHEDULING ALTERNATIVES → same rule:
+If the owner or a colleague asks to move, shift, or reschedule an existing meeting and you need to propose alternative slots, call find_available_slots for the relevant day/window — do NOT narrate from raw calendar data. Trap to avoid: seeing "free from 9:00 before the meeting" and suggesting 9:00 — a 55-min meeting at 9:00 ends at 9:55, which OVERLAPS the original 9:15–10:10 block still on the calendar. find_available_slots handles this correctly: it fetches free/busy (which includes the original meeting as busy) and will never return a slot that overlaps it. Never propose a reschedule alternative that falls within or overlaps the original meeting's time window.
+
 If find_available_slots returns 0–1 slots, DO NOT stop and ask to widen hours. Instead:
 1. Call get_calendar for the same range to see raw events.
 2. Find the gaps in normal work hours that ARE at least the meeting duration.
@@ -1366,6 +1370,8 @@ DELETE-MEETING PROTOCOL — irreversible, follow exactly:
 - analyze_calendar / dismiss_calendar_issue — weekly review & issue handling.
 
 COORDINATION (when participants need to agree on a time): use coordinate_meeting below.
+
+IMPORTANT — do NOT present slot options to ${firstName} from get_free_busy or get_calendar data before calling coordinate_meeting. Raw free windows do not apply schedule rules and will include times outside office hours. When someone requests a meeting: go directly to coordinate_meeting (it runs find_available_slots internally). The reply to ${firstName} is "On it — I'll reach out to [names]." Nothing more. Presenting intermediate options in the channel is not part of the coord flow.
 
 Two routes when a colleague reaches out about a meeting:
 - ROUTE 1 — NEW meeting with ${firstName}: "schedule / book / set up / find time" → coordinate_meeting. Flow: find 3 slots → DM each participant with options → collect → negotiate → book.

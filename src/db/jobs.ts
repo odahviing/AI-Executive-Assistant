@@ -54,6 +54,12 @@ export interface OutreachJob {
   // NULL and skip verification.
   proposed_slots?: string;    // JSON array of ISO strings
   subject_keyword?: string;
+  // v2.1.5 — Slack ts + channel of the initial outreach DM. Used by
+  // follow-up sends (confirmation after approval, relay handlers) to
+  // thread back into the same DM conversation instead of creating a
+  // fresh top-level DM.
+  dm_message_ts?: string;
+  dm_channel_id?: string;
 }
 
 export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' | 'updated_at'>): string {

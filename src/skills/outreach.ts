@@ -334,6 +334,17 @@ Only send messages the user explicitly asks for — never reach out to people on
           updateOutreachJob(jobId, { status: 'cancelled', reply_text: `Send failed: ${outcome.reason}` });
           return { ok: false, error: outcome.reason, detail: outcome.detail };
         }
+        // v2.1.5 — record the Slack ts + DM channel so follow-up sends
+        // (post-approval confirmation, relay replies) can thread back
+        // into this conversation instead of starting a fresh top-level
+        // DM. Non-blocking: if the connection omitted either field we
+        // just skip the update and behave like a legacy row.
+        if (outcome.ts || outcome.ref) {
+          updateOutreachJob(jobId, {
+            dm_message_ts: outcome.ts,
+            dm_channel_id: outcome.ref,
+          });
+        }
         logger.info('message_colleague — DM sent', {
           jobId,
           colleague: args.colleague_name,
