@@ -7,35 +7,54 @@ Read these two memory files before doing anything:
 - C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/project_overview.md
 - C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/project_architecture.md
 
-When the owner says "wrap up" / "close the patch" / "cut a version" / "day close" → follow `.claude/WRAP_UP.md` step-by-step. That's the end-of-session housekeeping process (auto-triage commits + owner's session work → single version bump + CHANGELOG + commit + push).
+Plus these feedback memories (cross-session rules the owner has set):
+- C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/feedback_bundle_signals.md
+- C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/feedback_ticket_titles.md
+- C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/feedback_version_workflow.md
+- C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/feedback_versioning.md
+
+When the owner says "wrap up" / "close the patch" / "cut a version" / "day close" → follow `.claude/WRAP_UP.md` step-by-step.
 
 ---
 
-## Where we are — v2.0.0 just shipped
+## Where we are — v2.1.4 just shipped
 
-Issue #1 (Connection interface rollout) is closed. The whole messaging layer is now abstracted: skills import only `connections/types` + `connections/registry`, and all three transports (Slack / email / WhatsApp — Slack is the only one wired up today, the other two are on the roadmap) will plug in through the same `Connection` interface. The coord state machine moved from `connectors/slack/coord*` to `src/skills/meetings/coord/`. `shadowNotify`, coord dispatchers, and every skill file are transport-agnostic — zero `@slack/bolt` imports outside `src/connectors/slack/` and `src/connections/slack/`.
+The autonomy layer is real. `behavior.calendar_health_mode: 'passive' | 'active'` toggles `check_calendar_health` between detect-and-report (passive, default) and detect-and-execute-safe-fixes (active). Active mode auto-books missing floating blocks, tags uncategorized events with high-confidence classifier, reshuffles floating-block overlaps in-window, starts move-coords with attendees for internal-only double-bookings (cadence-aware — can't push weekly meetings into a week where the next cadence instance lives), auto-clears 1:1s from surprise-vacation days, DMs owner on busy days. All gated by deterministic protection rules (≥4 attendees / any external / matched by `meetings.protected[].name` or `.category`). Shadow DMs everywhere via `v1_shadow_mode`. Prior milestone — v2.0.0 closed issue #1 (Connection interface rollout); the four-layer model (core / skills / connections / utils) is honest and enforced.
 
-## Focus for v2.x
+Notable v2.1.x capabilities to remember:
+- **Floating blocks** (v2.1.0) — `schedule.floating_blocks` YAML; lunch auto-promoted. Elastic within window, day-scoped via `days: []`. Moving OUT of window needs `create_approval(kind=lunch_bump)`.
+- **Coord MOVE intent** (v2.1.1) — `coord_jobs.intent: 'schedule' | 'move'`. Move-coords reshuffle an existing event via `updateMeeting` on the occurrence id (series untouched for recurring).
+- **Approval reminder + work-time expiry** (v2.1.3) — DM at halfway of approval window; expiry rebased off owner's next work time so 20:00 approvals don't lose 13 off-hours.
+- **Smart health-check window** (v2.1.4) — `computeHealthCheckWindow(profile)` default; cadence cap via `getNextSeriesOccurrenceAfter`.
+- **Attendee-only guards** (v2.1.4) — `update_meeting` / `move_meeting` refuse PATCH when owner isn't organizer. New `respond_to_invite` tool for accept/decline is filed as [#33](https://github.com/odahviing/AI-Executive-Assistant/issues/33), not built yet.
+- **Third-party-booking verifier** (v2.1.4) — `outreach_jobs.proposed_slots` + `subject_keyword` columns; brief matches pending outreach against calendar events, narrates "Michal booked it" instead of "still waiting". Honors `await_reply=0`.
+- **Social layer** (v2.1.2) — stale threshold dropped to 2, seed topics injected when pool empty, "MUST ask" when silent 72h+, VARIETY > recency.
 
-Two priorities now that the framework is clean:
+## Open improvement tickets (GitHub)
 
-1. **Make sure the framework scales when needed.** The four-layer split is honest for the first time. Every new capability we add has to respect the boundary:
-   - Skills speak through `Connection` primitives — never `app.client.*` anywhere under `src/skills/`.
-   - New core modules go through `src/core/` + `CORE_MODULES` registry.
-   - Transport additions (email, WhatsApp) implement the `Connection` interface in `src/connections/<name>/` and register themselves at startup in `connectors/<name>/app.ts` (or equivalent).
-   - Task dispatchers that send messages MUST resolve their transport via `getConnection(ownerId, 'slack')` — don't reach for `app.client.*` directly.
-   - If you're tempted to cross a boundary "just for this one thing," that's the signal to either extend the `Connection` interface or add a new layer-4 utility.
+Consult before proposing anything that might already be filed:
+- **[#3](https://github.com/odahviing/AI-Executive-Assistant/issues/3)** — Make persona memory toggleable skill (Low)
+- **[#12](https://github.com/odahviing/AI-Executive-Assistant/issues/12)** — Improve Hebrew voice quality (Low)
+- **[#22](https://github.com/odahviing/AI-Executive-Assistant/issues/22)** — Cross-connector skill architecture (High) — design-only, gates #4/#5
+- **[#23](https://github.com/odahviing/AI-Executive-Assistant/issues/23)** — Unified contact across connections (Low, blocked)
+- **[#30](https://github.com/odahviing/AI-Executive-Assistant/issues/30)** — Reserve slot on participant pick (Medium) — tentative reservation in verification window
+- **[#31](https://github.com/odahviing/AI-Executive-Assistant/issues/31)** — Book travel buffer on offsite meetings (Low)
+- **[#32](https://github.com/odahviing/AI-Executive-Assistant/issues/32)** — Retry move-coord on refusal (High) — participant refusal → earlier-bias round-2
+- **[#33](https://github.com/odahviing/AI-Executive-Assistant/issues/33)** — Respond to invite on owner's side (Low) — accept/decline tool
 
-2. **Build new features now that v1 items are finally past us.** The roadmap is in the README:
-   - WhatsApp owner-sync connector (second `Connection` implementation — biggest integration test of the port)
-   - Email connector (third transport)
-   - Inbound workflows (triggers that run skills end-to-end)
-   - Meeting notes preparation (1:1 briefs + post-meeting summaries)
-   - Plus anything else that comes up in day-to-day use.
+## Focus going forward
+
+1. **Autonomy refinement.** The autonomy layer works; next round is tightening: retry-on-refusal (#32), tentative-reservation lifecycle (#30), invite-response tool (#33).
+2. **Transport additions.** Email + WhatsApp connectors sit behind the Connection interface built in v2.0.0. #22 gates real work on them.
+3. **Daily QA from real use.** Every brief + every coord exposes bugs. Pattern from this session: owner sends a screenshot, I trace against code, propose, wait for green light.
+
+## Known dead fields worth cleaning
+
+`behavior.rescheduling_style`, `behavior.adaptive_learning`, `behavior.escalate_after_days`, `behavior.can_contact_others_via_slack`, `behavior.autonomous_meeting_creation` — all declared in the yaml schema but NEVER read in the code. The only `behavior` fields actually wired are `v1_shadow_mode` and `calendar_health_mode`. Worth a cleanup ticket but not filed yet.
 
 ## Bugs are expected
 
-External QA starts now — more people testing, new usage patterns, new classes of bugs. When one lands, follow the usual flow (propose, don't fix; verify in code before trusting memory; code for determinism, prompts for judgment).
+External QA is active. When a bug lands, follow the usual flow (propose, don't fix; verify in code before trusting memory; code for determinism, prompts for judgment).
 
 ---
 
