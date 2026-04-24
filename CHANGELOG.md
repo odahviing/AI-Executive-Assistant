@@ -2,6 +2,42 @@
 
 ---
 
+## 2.1.6 — meeting state-change cascade, calendar pagination, post-delete verification, event-id scrub
+
+Four fixes prompted by day-after-2.1.5 QA. The biggest is a centralized cleanup helper — every meeting mutation (move, update, delete) now runs the same cascade that closes pending approvals, cancels follow-up tasks, and closes outreach rows tied to that meeting. The other three harden specific failure modes: `get_calendar` silently truncated at 100 events (now paginates), `delete_meeting` trusted the Graph response (now re-verifies), and raw Graph event IDs leaked into owner-facing narration (now stripped).
+
+### Added — single-choke-point cleanup on every meeting mutation
+
+New helper `src/utils/closeMeetingArtifacts.ts`. One function, called after every successful `move_meeting` / `update_meeting` / `delete_meeting` in `src/skills/meetings/ops.ts`. It:
+
+- Resolves pending approvals whose payload references the meeting_id (keys checked: `meeting_id` / `existing_event_id` / `event_id` / `external_event_id`) to `status='superseded'`, and cancels their sibling `approval_expiry` + `approval_reminder` tasks.
+- Closes outreach_jobs with `intent='meeting_reschedule'` whose `context_json` references the meeting_id to `status='done'`, and cancels their `outreach_expiry` + `outreach_decision` follow-up tasks.
+- Cancels open `follow_up` / `reminder` tasks whose `payload_json` references the meeting_id.
+
+Fixes the "Yael asked to move, we handled it, but 'Needs your input' + 'Active reminder to update Yael' still show in open tasks" bug. Doesn't matter who initiated (owner or colleague) — the mutation is the terminal event, artifacts close. Additive to the existing coord-terminal cascade in `updateCoordJob`; double-cascading is idempotent. Never throws — calendar is source of truth, DB cleanup is best-effort.
+
+### Fixed — get_calendar no longer truncates at 100 events
+
+`getCalendarEvents` in `src/connectors/graph/calendar.ts` used `$top: 100` with no pagination. Graph returns an `@odata.nextLink` when more pages exist; the code ignored it. Over multi-week ranges with multiple recurring series, the query silently capped at the first 100 events chronologically and Sonnet narrated the truncation boundary as if it were real (*"The series doesn't seem to have instances beyond Jun 11"*). Now follows `@odata.nextLink` to completion. Hard cap 1000 events to prevent runaway queries; logs a warning if the cap is hit. All callers benefit — brief, bulk delete, analyze_calendar, find_available_slots (via internal get_calendar_events calls), check_join_availability.
+
+### Fixed — delete_meeting verifies the event is actually gone
+
+Previously `await deleteMeeting(...)` trusted the Graph 200 OK and returned `{success: true}`. Graph occasionally returns success on DELETE while the event persists (transient partial failures, recurring exception edge cases), and the tool would happily confirm "Cancelled 'X'" when X was still on the calendar — then blame "sync delay" when the owner pointed it out. New helper `verifyEventDeleted(userEmail, meetingId)` in `calendar.ts` runs a follow-up `GET /events/{id}` and returns `true` only on 404. Wired into the `delete_meeting` handler: if the event is still retrievable, the tool returns `{success: false, error: 'still_present_after_delete'}` with a message telling the LLM to narrate truthfully. Per-event check, so bulk delete loops catch partial failures individually.
+
+### Fixed — Graph event IDs no longer leak into owner-facing text
+
+Occasional narrations like *"here's what I'll delete: `AAMkADVmMjY1NmJm...Ij18-ewAEA==`"* leaked the opaque Graph identifiers. A human EA would never quote an internal ID. New `GRAPH_ID_RE` in `src/utils/textScrubber.ts` matches `AAMk` + 40+ base64url characters (with optional backtick wrap) and strips them via `scrubInternalLeakage`. Runs on every outbound text path, so any tool that accidentally returns IDs in a field Sonnet quotes will be caught regardless of prompt drift.
+
+### Migration
+
+No schema changes. Cleanup helper reads existing payload_json / context_json fields already populated by Sonnet when creating approvals / outreach jobs. Cascade effectiveness scales with how consistently Sonnet includes `meeting_id` in those payloads — already the common pattern for `intent='meeting_reschedule'` outreach rows (guaranteed via `RescheduleContext.meeting_id`). Follow-up tasks created by Sonnet may or may not include meeting_id in the payload; prompt tightening to make it a convention is a future pass.
+
+### Not changed
+
+- Auto-build commit shell-escape already fixed in 2.1.5 (commit [ce45698](https://github.com/odahviing/AI-Executive-Assistant/commit/ce45698)). Future Approved labels will build themselves.
+
+---
+
 ## 2.1.5 — shadow + recovery no longer leak to colleagues, deterministic work-hours guard
 
 Seven bug fixes from a day of external QA. The biggest two close a class of owner-context leakage onto colleague-facing surfaces (shadow messages landing in colleague threads, recovery pass synthesizing owner-narrative text for colleagues). One code-level hardening makes out-of-hours availability unreachable via `get_free_busy` in the colleague path. The rest are coordination polish — message dedup on MPIM bookings, ts-threaded follow-ups, counter auto-accept for solo reschedules, visibility of the built-in briefing.

@@ -100,6 +100,7 @@ import {
   findAvailableSlots,
   createMeeting,
   deleteMeeting,
+  verifyEventDeleted,
   updateMeeting,
   GraphPermissionError,
 } from '../../connectors/graph/calendar';
@@ -110,6 +111,7 @@ import {
   dismissCalendarIssue,
   buildIssueKey,
 } from '../../db';
+import { closeMeetingArtifacts } from '../../utils/closeMeetingArtifacts';
 
 // ── Calendar event processing ─────────────────────────────────────────────────
 
@@ -833,6 +835,11 @@ export class SchedulingSkill {
           subject:    args.new_subject as string | undefined,
           categories: args.category ? [args.category as string] : undefined,
         });
+        closeMeetingArtifacts({
+          ownerUserId: context.profile.user.slack_user_id,
+          meetingId: args.meeting_id as string,
+          reason: 'updated',
+        });
         auditLog({
           action: 'update_meeting',
           source: context.channel,
@@ -905,6 +912,11 @@ export class SchedulingSkill {
           start: args.new_start as string,
           end: args.new_end as string,
         });
+        closeMeetingArtifacts({
+          ownerUserId: context.profile.user.slack_user_id,
+          meetingId: args.meeting_id as string,
+          reason: 'moved',
+        });
         auditLog({
           action: 'move_meeting',
           source: context.channel,
@@ -928,6 +940,34 @@ export class SchedulingSkill {
 
       case 'delete_meeting': {
         await deleteMeeting(userEmail, args.meeting_id as string);
+        // v2.1.6 — verify the delete actually landed. Graph can return 200 OK
+        // on the DELETE but still retain the event (rare: partial failures,
+        // recurring-series exception edge cases). Without this check the LLM
+        // would claim "cancelled" even when the event was still on the
+        // calendar, and then blame "sync delay" when the owner pointed it
+        // out. Now the tool returns the truth and the LLM narrates that.
+        const confirmedGone = await verifyEventDeleted(userEmail, args.meeting_id as string);
+        if (!confirmedGone) {
+          auditLog({
+            action: 'delete_meeting',
+            source: context.channel,
+            actor: context.userId,
+            target: args.meeting_id as string,
+            details: { subject: args.meeting_subject, reason: 'still_present_after_delete' },
+            outcome: 'failure',
+          });
+          return {
+            success: false,
+            error: 'still_present_after_delete',
+            subject: args.meeting_subject,
+            message: `Delete call returned success but "${args.meeting_subject}" is still on the calendar. Tell the owner honestly — don't claim it's deleted.`,
+          };
+        }
+        closeMeetingArtifacts({
+          ownerUserId: context.profile.user.slack_user_id,
+          meetingId: args.meeting_id as string,
+          reason: 'deleted',
+        });
         auditLog({
           action: 'delete_meeting',
           source: context.channel,

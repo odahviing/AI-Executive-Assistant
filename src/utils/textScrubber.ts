@@ -44,8 +44,18 @@ const TOOL_NAME_RE = new RegExp(`\\b(?:${TOOL_NAMES.join('|')})\\b`, 'g');
 // uses this shape; known internal flags always do. Safe to strip generically.
 const SENTINEL_RE = /\b[A-Z]{2,}(?:_[A-Z0-9]+)+\b/g;
 
+// v2.1.6 — Microsoft Graph event/calendar IDs are opaque base64url blobs that
+// start with "AAMk" and run 100+ chars. A human EA never quotes an internal
+// identifier; the LLM occasionally did when narrating "here's what I'll
+// delete". Deterministic strip prevents the leak regardless of prompt drift.
+// Matches the ID standalone, or wrapped in Slack inline-code backticks, or in
+// the "AAMk...==" terminal padding form. Very long run (≥40) avoids false
+// positives on accidental AAMk words.
+const GRAPH_ID_RE = /`?AAMk[A-Za-z0-9+/=_-]{40,}`?/g;
+
 export function scrubInternalLeakage(text: string): string {
   return text
+    .replace(GRAPH_ID_RE, '')
     .replace(/ - /g, ', ')            // hyphen-separator AI tell
     .replace(SENTINEL_RE, '')
     .replace(TOOL_NAME_RE, '')

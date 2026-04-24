@@ -191,8 +191,18 @@ export async function getCalendarEvents(
 
   logger.info('Querying calendar', { userEmail, start: cleanStart, end: cleanEnd });
 
+  // v2.1.6 — follow @odata.nextLink until exhausted (or a sane hard cap).
+  // Previous single-shot `.query({$top: 100})` silently truncated at 100
+  // events, leading to bugs like "the series doesn't seem to have instances
+  // beyond Jun 11" when the series in fact ran through July — Graph returned
+  // the first 100 chronologically, the LLM saw no nextLink handling, and the
+  // narration described a false terminal boundary. Hard cap of 1000 prevents
+  // runaway queries on accidentally-enormous ranges while comfortably
+  // covering realistic multi-month calendar views.
+  const HARD_CAP = 1000;
   try {
-    const response = await client
+    const events: CalendarEvent[] = [];
+    let request: any = client
       .api(`/users/${userEmail}/calendarView`)
       .header('Prefer', `outlook.timezone="${timezone}"`)
       .query({
@@ -201,12 +211,32 @@ export async function getCalendarEvents(
         $select: 'id,subject,start,end,isAllDay,importance,showAs,sensitivity,categories,organizer,attendees,isCancelled,isOnlineMeeting,onlineMeetingUrl,bodyPreview,type,seriesMasterId',
         $orderby: 'start/dateTime',
         $top: 100,
-      })
-      .get();
+      });
 
-    const count = response.value?.length ?? 0;
-    logger.info('Calendar events fetched', { count, start: cleanStart, end: cleanEnd });
-    return response.value || [];
+    while (request && events.length < HARD_CAP) {
+      const response: any = await request.get();
+      const page: CalendarEvent[] = response.value ?? [];
+      events.push(...page);
+      const nextLink: string | undefined = response['@odata.nextLink'];
+      if (!nextLink) break;
+      // Graph SDK accepts the full nextLink as an api() URL and preserves the
+      // cursor/skipToken. Drop Prefer/query — they're baked into the cursor.
+      request = client.api(nextLink);
+    }
+
+    const truncated = events.length >= HARD_CAP;
+    logger.info('Calendar events fetched', {
+      count: events.length,
+      start: cleanStart,
+      end: cleanEnd,
+      truncated,
+    });
+    if (truncated) {
+      logger.warn('Calendar fetch hit HARD_CAP — result may be incomplete', {
+        userEmail, start: cleanStart, end: cleanEnd, cap: HARD_CAP,
+      });
+    }
+    return events;
   } catch (err) {
     logger.error('Failed to fetch calendar events', { err, userEmail, startDate, endDate });
     throw err;
@@ -905,6 +935,34 @@ export async function deleteMeeting(
 ): Promise<void> {
   const client = getClient();
   await client.api(`/users/${userEmail}/events/${meetingId}`).delete();
+}
+
+/**
+ * v2.1.6 — post-delete verification. Returns true when Graph confirms the
+ * event is no longer retrievable (HTTP 404 on GET), false when it's still
+ * there despite the delete call returning success. Any other error is
+ * treated as "unknown / assume still present" so the caller narrates
+ * honestly rather than falsely confirming a delete. Mirrors the spirit of
+ * `create_meeting`'s pre-check (same trust-but-verify principle for
+ * calendar-mutating ops).
+ */
+export async function verifyEventDeleted(
+  userEmail: string,
+  meetingId: string,
+): Promise<boolean> {
+  const client = getClient();
+  try {
+    await client.api(`/users/${userEmail}/events/${meetingId}`).get();
+    // Event still exists — delete did NOT land.
+    return false;
+  } catch (err: any) {
+    const code = err?.statusCode ?? err?.code;
+    if (code === 404 || code === 'ErrorItemNotFound') return true;
+    logger.warn('verifyEventDeleted: unexpected error, assuming NOT deleted', {
+      meetingId, code, message: err?.message,
+    });
+    return false;
+  }
 }
 
 export async function createMeeting(params: CreateMeetingParams): Promise<string> {
