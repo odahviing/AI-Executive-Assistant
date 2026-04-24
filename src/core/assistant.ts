@@ -2,7 +2,9 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
 import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonNote, appendPersonInteraction, recordSocialMoment, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, type SocialTopicQuality, type PersonProfile, type PersonInteraction } from '../db';
-import { markPendingEngagement } from './socialEngagement';
+// v2.2 — socialEngagement module retired. Owner social signals are now
+// tracked by the Social Engine on the orchestrator's post-turn pass; the
+// per-turn "engagement upgrader" is no longer needed.
 import { DateTime } from 'luxon';
 import logger from '../utils/logger';
 
@@ -294,6 +296,10 @@ Call this after interactions — not during them. It's a background update.`,
               type: 'string',
               description: 'Hebrew spelling of the person\'s name. Save once when you have a reliable spelling — either you see them write their name in Hebrew, or the owner teaches you. e.g. "אלינור אבני" or "עידן כהן". Avoid guessing transliterations.',
             },
+            engagement_rank: {
+              type: 'number',
+              description: 'Numeric social engagement rank 0–3. 0=don\'t initiate social with them (opt-out), 1=minimal, 2=neutral (default for new), 3=loves to chat. Set ONLY when the owner explicitly directs you ("rank Yael at 3", "never ping Ysrael" → 0). Don\'t auto-set — the system auto-adjusts based on ping responses.',
+            },
           },
           required: ['colleague_slack_id', 'colleague_name'],
         },
@@ -492,15 +498,12 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
           summary: `${timelineTag} ${note}`,
         });
 
-        // Record the social moment with quality, who initiated it, and the
-        // specific subject (the subject is what drives the 24h cooldown).
+        // v2.2 — topic/quality/subject arguments are accepted for tool-schema
+        // back-compat but the legacy topic-tracking in people_memory is
+        // retired. The call below only updates last_social_at + last_initiated_at
+        // (cooldown gate for colleague rapport). Topic memory for the owner
+        // lives in the Social Engine now.
         recordSocialMoment(slackId, topic, quality, initiatedBy, subject);
-
-        // If Maelle initiated with a subject, arm the post-turn engagement
-        // classifier for the next user message in this thread (v2.0.2).
-        if (initiatedBy === 'maelle' && subject) {
-          markPendingEngagement({ threadTs: context.threadTs, slackId, topic, subject });
-        }
 
         logger.info('Social note saved', { slackId, name, topic, subject, quality, initiatedBy });
         return { saved: true, name, topic, subject, quality };
@@ -539,15 +542,11 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
           summary: `${timelineTag} ${note}`,
         });
 
-        // Social moment with quality, initiator, and the (topic+subject) cooldown key
+        // v2.2 — legacy topic quality tracking retired. recordSocialMoment
+        // still updates last_social_at + last_initiated_at for the 24h gate.
+        // Owner topic memory is now owned by the Social Engine, which fires
+        // automatically on every owner turn — no explicit tool call needed.
         recordSocialMoment(slackId, topic, quality, initiatedBy, subject);
-
-        // Arm the post-turn engagement classifier for the next owner reply
-        // in this thread (v2.0.2). Only when Maelle asked (owner's own
-        // volunteered shares have real quality already).
-        if (initiatedBy === 'maelle' && subject) {
-          markPendingEngagement({ threadTs: context.threadTs, slackId, topic, subject });
-        }
 
         logger.info('Owner self-note saved', { slackId, topic, subject, quality, initiatedBy });
         return { saved: true, scope: 'owner', topic, subject, quality };
@@ -604,6 +603,17 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
           response_speed:      args.response_speed      as PersonProfile['response_speed'],
           collaboration_notes: args.collaboration_notes as string | undefined,
         });
+
+        // v2.2 — owner directive override for engagement_rank. Tool only
+        // accepts this arg when owner explicitly tells Sonnet to set a rank
+        // (prompt rule in the tool description). Audit-logged with
+        // reason='owner_directive'.
+        if (typeof args.engagement_rank === 'number') {
+          const clamped = Math.max(0, Math.min(3, Math.round(args.engagement_rank))) as 0 | 1 | 2 | 3;
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { setEngagementRank } = require('../db') as typeof import('../db');
+          setEngagementRank(slackId, clamped, 'owner_directive');
+        }
 
         logger.info('Person profile updated', { slackId, name, fields: Object.keys(args).filter(k => k !== 'colleague_slack_id' && k !== 'colleague_name') });
         return { updated: true, name };

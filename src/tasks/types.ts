@@ -33,7 +33,23 @@ export type TaskType =
   // v1.7.2 — Summary skill action-item follow-ups. At due_at the dispatcher
   // DMs the assignee asking for a status update; the reply flows back to the
   // owner via the existing outreach reply pipeline.
-  | 'summary_action_followup';
+  | 'summary_action_followup'
+  // v2.2 — weekly decay pass for the Social Engine. Walks every owner's
+  // active topics and subtracts 1 from each topic not touched in the last
+  // 7 days. Topics hitting score 0 flip to dormant (Maelle stops raising
+  // them; owner can still revive). System task, auto-reschedules every 7d.
+  | 'social_decay'
+  // v2.2 — hourly tick that evaluates proactive colleague-outreach candidates.
+  // Runs every hour in owner-agnostic fashion (system activity). For each
+  // known colleague, checks whether their LOCAL time is inside the 13:00-15:00
+  // mid-day window, engagement_rank > 0, cooldown respected, no active
+  // conversation. Picks at most one per owner per day and sends a short
+  // warm ping via Sonnet. Self-reschedules every hour.
+  | 'social_outreach_tick'
+  // v2.2 — rank-adjustment feedback for proactive pings. Scheduled 48h after
+  // a ping fires; checks whether the colleague replied, adjusts
+  // engagement_rank accordingly (no reply → -1; engaged reply → +1).
+  | 'social_ping_rank_check';
 
 export type TaskStatus =
   | 'new'                // created, not started yet (may have a future due_at)

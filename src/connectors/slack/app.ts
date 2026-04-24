@@ -557,17 +557,11 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // so the user sees the eye emoji exactly when Maelle is committing to a reply.
       addReadReceipt();
 
-      // v2.0.2 — if a social question was asked in this thread's previous turn,
-      // classify whether the user's reply was engaged and upgrade topic quality.
-      // Fires before orchestrator so the upgrade lands in people_memory before
-      // the next social-context block is built for this turn.
-      try {
-        const { checkAndUpgradeEngagement } = await import('../../core/socialEngagement');
-        const Anthropic = (await import('@anthropic-ai/sdk')).default;
-        await checkAndUpgradeEngagement({ threadTs, userReply: text, anthropic: new Anthropic() });
-      } catch (err) {
-        logger.warn('socialEngagement — pre-orchestrator check failed', { err: String(err).slice(0, 200) });
-      }
+      // v2.2 — the legacy socialEngagement upgrader is retired. Owner-side
+      // social signals are now tracked by the new Social Engine
+      // (src/core/social/) on the orchestrator's post-turn pass. Colleague
+      // rapport no longer tracks topic quality upgrades; only
+      // notes/interactions remain as memory primitives.
 
       logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name });
       const result = await runOrchestrator({

@@ -1063,7 +1063,13 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             body: '<p>Lunch break — booked by your executive assistant.</p>',
             isOnline: false,
             categories: lunchCategories,
-            sensitivity: 'personal',
+            // v2.1.7 — no sensitivity tag. Previous `sensitivity: 'personal'`
+            // made Maelle re-label her own lunches as "private block" /
+            // "personal event" in weekly reviews (her prompt rules skip or
+            // generic-label personal events). Owner's stance: if something
+            // is secret he marks it private; a lunch block doesn't need
+            // hiding. Floating-block detection is subject-regex-based, so
+            // this change doesn't affect isFloatingBlockEvent matching.
             userEmail,
             timezone,
           });

@@ -269,6 +269,96 @@ function initSchema(db: Database.Database): void {
   // may still tentatively fill `gender` when confirmed=0.
   try { db.exec(`ALTER TABLE people_memory ADD COLUMN gender_confirmed INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
 
+  // v2.2 — Social Engine retires the legacy `social_topics` JSON blob on
+  // people_memory. Topics + categories now live in proper tables
+  // (social_categories / social_topics_v2 / social_engagements). Drop the
+  // old column so stale reads can't resurface. Owner accepted the reset —
+  // not much social data pre-v2.2 worth preserving.
+  try { db.exec(`ALTER TABLE people_memory DROP COLUMN social_topics`); } catch (_) {}
+
+  // v2.2 — numeric engagement rank per person (0..3). Replaces the 5-level
+  // `engagement_level` string in profile_json for all new writes. Default 2
+  // (neutral) so new contacts start with benefit of the doubt. Rank moves
+  // based on signal: colleague replies well → +1; Maelle pings into the
+  // void → -1; rank 0 = don't initiate (opt-out). See engagementRank.ts.
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN engagement_rank INTEGER NOT NULL DEFAULT 2`); } catch (_) {}
+
+  // v2.2 — audit trail for engagement_rank changes. Small table so we can
+  // answer "why is Ysrael at rank 0?". Reasons: no_reply / reply_engaged /
+  // reply_brief / colleague_initiated / colleague_deflected / owner_directive.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS engagement_rank_log (
+      id            TEXT PRIMARY KEY,
+      slack_id      TEXT NOT NULL,
+      delta         INTEGER NOT NULL,
+      new_rank      INTEGER NOT NULL,
+      reason        TEXT NOT NULL,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_engagement_rank_log_slack ON engagement_rank_log(slack_id, created_at DESC);
+  `);
+
+  // v2.2 — Social Engine tables.
+  db.exec(`
+    -- Fixed list of 30 top-level interest categories seeded per owner on first
+    -- startup. No new categories are created at runtime. care_level starts
+    -- 'unknown' and migrates based on signal accumulation across the topics
+    -- under it (code-driven, not prompt-driven).
+    CREATE TABLE IF NOT EXISTS social_categories (
+      id                TEXT PRIMARY KEY,
+      owner_user_id     TEXT NOT NULL,
+      label             TEXT NOT NULL,
+      care_level        TEXT NOT NULL DEFAULT 'unknown',
+      -- unknown | low | medium | high — moves slowly via signal aggregation
+      signals_positive  INTEGER NOT NULL DEFAULT 0,
+      signals_negative  INTEGER NOT NULL DEFAULT 0,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(owner_user_id, label)
+    );
+    CREATE INDEX IF NOT EXISTS idx_social_categories_owner ON social_categories(owner_user_id);
+
+    -- Topics live UNDER a category. Created on first mention (by owner or by
+    -- Maelle). engagement_score drives lifecycle: starts at 3, moves with
+    -- engagements, weekly -1 decay on untouched actives, floor at 0 flips
+    -- status to 'dormant'. Dormant rows stay (category-level memory retained)
+    -- — Maelle can't raise them, owner can revive by re-mentioning.
+    CREATE TABLE IF NOT EXISTS social_topics_v2 (
+      id                TEXT PRIMARY KEY,
+      owner_user_id     TEXT NOT NULL,
+      category_id       TEXT NOT NULL,
+      label             TEXT NOT NULL,
+      engagement_score  INTEGER NOT NULL DEFAULT 3,
+      status            TEXT NOT NULL DEFAULT 'active',   -- active | dormant
+      last_touched_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      last_touched_by   TEXT NOT NULL DEFAULT 'owner',    -- owner | maelle
+      raised_count      INTEGER NOT NULL DEFAULT 1,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_social_topics_v2_owner ON social_topics_v2(owner_user_id, status);
+    CREATE INDEX IF NOT EXISTS idx_social_topics_v2_cat ON social_topics_v2(category_id);
+
+    -- Append-only engagement log. One row per social exchange. Enables rate-
+    -- limit checks ("did Maelle already use today's slot?"), score auditing,
+    -- and weekly decay pass ("which topics went 7+ days without an entry?").
+    CREATE TABLE IF NOT EXISTS social_engagements (
+      id            TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL,
+      topic_id      TEXT,        -- null when engagement is category-level only
+      category_id   TEXT NOT NULL,
+      direction     TEXT NOT NULL,
+      -- owner_initiated | maelle_initiated | owner_response | maelle_response
+      signal        TEXT NOT NULL DEFAULT 'none',
+      -- positive | neutral | negative | none
+      score_delta   INTEGER NOT NULL DEFAULT 0,
+      turn_ref      TEXT,        -- thread_ts or similar — audit trail
+      created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_social_engagements_owner ON social_engagements(owner_user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_social_engagements_topic ON social_engagements(topic_id);
+  `);
+
   // Routines — recurring instructions that run automatically on a schedule
   db.exec(`
     CREATE TABLE IF NOT EXISTS routines (

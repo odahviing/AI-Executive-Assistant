@@ -12,7 +12,9 @@ export interface PersonNote {
 
 export type PersonGender = 'male' | 'female' | 'unknown';
 
-export type SocialTopicQuality = 'neutral' | 'engaged' | 'good';
+export type PersonSocialTopicQuality = 'neutral' | 'engaged' | 'good';
+// Back-compat alias during v2.2 migration; prefer PersonSocialTopicQuality.
+export type SocialTopicQuality = PersonSocialTopicQuality;
 
 /**
  * Rich social topic record — tracks quality of engagement per topic
@@ -29,10 +31,10 @@ export type SocialTopicQuality = 'neutral' | 'engaged' | 'good';
  *
  * Rows with the same `name` but different `subject` are separate topics.
  */
-export interface SocialTopic {
+export interface PersonSocialTopic {
   name: string;                   // enum category: "family", "sport", "hobby", ...
   subject?: string;               // free-form specific subject under that category
-  quality: SocialTopicQuality;    // neutral=brief answer, engaged=opened up, good=really connected
+  quality: PersonSocialTopicQuality; // neutral=brief answer, engaged=opened up, good=really connected
   count: number;                  // how many times this topic came up
   last_used: string;              // YYYY-MM-DD
 }
@@ -116,25 +118,14 @@ export function setPersonNameHe(slackId: string, nameHe: string): void {
 }
 
 /**
- * Parse social_topics from DB — handles both old string[] format and new SocialTopic[] format.
+ * v2.2 — Social Engine retired the `people_memory.social_topics` column. This
+ * function is kept as a no-op stub during the migration so legacy call sites
+ * compile; all topic tracking has moved to the dedicated `social_topics_v2`
+ * table managed by `src/db/socialTopics.ts` (owner-scoped) and future work
+ * for per-colleague rapport.
  */
-export function parseSocialTopics(json: string): SocialTopic[] {
-  try {
-    const raw = JSON.parse(json || '[]');
-    if (!Array.isArray(raw) || raw.length === 0) return [];
-    // Migrate old format (string[]) to new format
-    if (typeof raw[0] === 'string') {
-      return (raw as string[]).map(name => ({
-        name: name.toLowerCase().trim(),
-        quality: 'neutral' as SocialTopicQuality,
-        count: 1,
-        last_used: new Date().toISOString().split('T')[0],
-      }));
-    }
-    return raw as SocialTopic[];
-  } catch {
-    return [];
-  }
+export function parseSocialTopics(_json: string): PersonSocialTopic[] {
+  return [];
 }
 
 /**
@@ -291,48 +282,25 @@ export function appendPersonInteraction(slackId: string, interaction: Omit<Perso
  */
 export function recordSocialMoment(
   slackId: string,
-  topic: string,
-  quality: SocialTopicQuality = 'neutral',
+  _topic: string,
+  _quality: PersonSocialTopicQuality = 'neutral',
   initiatedBy: 'maelle' | 'person' = 'maelle',
-  subject?: string,
+  _subject?: string,
 ): void {
+  // v2.2 — `social_topics` column retired; topic tracking for the owner now
+  // lives in `social_topics_v2` (owner-scoped Social Engine). For colleague
+  // rapport the cooldown-only behavior remains — we still update
+  // last_social_at and last_initiated_at so the 24h Maelle-initiation gate
+  // keeps working. Topic/quality/subject arguments accepted but ignored.
   const db = getDb();
-  const row = db.prepare('SELECT social_topics, last_initiated_at FROM people_memory WHERE slack_id = ?').get(slackId) as any;
+  const row = db.prepare('SELECT slack_id FROM people_memory WHERE slack_id = ?').get(slackId) as any;
   if (!row) return;
 
-  const topics = parseSocialTopics(row.social_topics || '[]');
-  const normalisedTopic   = topic.toLowerCase().trim();
-  const normalisedSubject = subject?.toLowerCase().trim() || undefined;
-  const today = new Date().toISOString().split('T')[0];
   const now = new Date().toISOString();
-
-  // Match on (topic + subject). A subject-less legacy row with the same topic
-  // does NOT match a new subject-bearing row — we want them as separate entries.
-  const existing = topics.find(t =>
-    t.name === normalisedTopic && (t.subject ?? undefined) === normalisedSubject,
-  );
-  if (existing) {
-    // Upgrade quality — never downgrade (neutral → engaged → good)
-    const qualityOrder: SocialTopicQuality[] = ['neutral', 'engaged', 'good'];
-    if (qualityOrder.indexOf(quality) > qualityOrder.indexOf(existing.quality)) {
-      existing.quality = quality;
-    }
-    existing.count += 1;
-    existing.last_used = today;
-  } else {
-    topics.push({ name: normalisedTopic, subject: normalisedSubject, quality, count: 1, last_used: today });
-  }
-
-  const updates: Record<string, unknown> = {
-    last_social_at: now,
-    social_topics: JSON.stringify(topics),
-  };
-
-  // Only update last_initiated_at when Maelle started the social moment
+  const updates: Record<string, unknown> = { last_social_at: now };
   if (initiatedBy === 'maelle') {
     updates.last_initiated_at = now;
   }
-
   const setClause = Object.keys(updates).map(k => `${k} = @${k}`).join(', ');
   db.prepare(`UPDATE people_memory SET ${setClause}, updated_at = datetime('now') WHERE slack_id = @slack_id`)
     .run({ ...updates, slack_id: slackId });
@@ -453,30 +421,19 @@ export function formatPeopleMemoryForPrompt(
 // the data layer so a future togglable persona skill (issue #3) can call it
 // conditionally without the orchestrator having to know.
 
-// v2.1.2 — lowered from 3 to 2. Two neutral initiations on the same topic
-// is already enough signal that the person doesn't want to talk about it;
-// three was too many — by the time we hit stale Maelle had already asked
-// three times and felt robotic. The "re-ping" frequency from the owner's
-// POV scales directly with this number. Pairs with tighter prompt wording
-// below so Sonnet actually honors STALE and moves to a fresh topic or an
-// open-discovery question instead of revisiting.
-const SOCIAL_STALE_COUNT_THRESHOLD = 2;
-
-// v2.1.2 — "you've been too silent" threshold. When Maelle hasn't initiated
-// a social moment in this many hours (and the person isn't flagged avoidant),
-// we elevate the instruction from "you MAY start one" to "you SHOULD start
-// one this turn — go find new ground." 72h chosen because 24h is the daily
-// gate and people reasonably expect more than "every third day" from someone
-// who's supposed to feel like a teammate.
-const SOCIAL_LONG_SILENCE_HOURS = 72;
+// v2.2 — SOCIAL_STALE_COUNT_THRESHOLD, SOCIAL_LONG_SILENCE_HOURS, and
+// SEED_TOPIC_AREAS retired. Owner-side topic management migrated to the
+// Social Engine (`src/core/social/` + `src/db/socialTopics.ts`). The
+// colleague context block below surfaces profile + notes + interactions
+// without the stale/cooldown machinery.
 
 /**
- * Builds a per-person social context block injected into the system prompt.
- * Tells Claude whether a social moment is due, what's already known, which
- * topics have been covered (and which are stale or on cooldown), so she
- * doesn't repeat herself.
- *
- * Returns '' for unknown people (no row in people_memory) — caller can skip.
+ * Builds a per-person social context block injected into the system prompt
+ * for COLLEAGUE turns (owner turns use the new Social Engine directive
+ * instead). Surfaces engagement level, profile, recent interactions, and
+ * notes. Topic history (stale-count / cooldown / seed topics) was retired
+ * in v2.2 — that machinery is owner-scoped now and lives in the Social
+ * Engine. Returns '' for unknown people.
  */
 export function buildSocialContextBlock(slackId: string, timezone: string): string {
   const person = getPersonMemory(slackId);
@@ -488,25 +445,26 @@ export function buildSocialContextBlock(slackId: string, timezone: string): stri
   const canMaelleInitiate = hoursAgoInit >= 24;
 
   const notes: PersonNote[]    = JSON.parse(person.notes || '[]');
-  const topics                 = parseSocialTopics(person.social_topics || '[]');
   const profile: PersonProfile = (() => {
     try { return JSON.parse(person.profile_json || '{}'); } catch { return {}; }
   })();
 
   const lines: string[] = [`SOCIAL CONTEXT — ${person.name}`];
 
-  // Engagement level gate — if they're avoidant, don't push.
-  const engagementLevel = profile.engagement_level ?? 'neutral';
-  if (engagementLevel === 'avoidant') {
-    lines.push(`Engagement level: AVOIDANT — this person consistently avoids personal exchanges. Do NOT initiate social chat. Be professional and warm, but skip personal topics entirely unless they bring it up themselves.`);
+  // v2.2 — numeric engagement rank 0..3. Replaces the legacy string enum.
+  // Auto-adjusts based on ping response signal (engagementRank.ts).
+  const rank = (person as any).engagement_rank as number | undefined;
+  const rankValue = typeof rank === 'number' ? rank : 2;
+  if (rankValue === 0) {
+    lines.push(`Engagement rank: 0 — this person has signalled they don't want social exchanges with you. Do NOT initiate social chat. Stay strictly professional. If THEY bring something personal up, respond warmly and briefly — don't milk it.`);
     return lines.join('\n');
   }
-  if (engagementLevel === 'minimal') {
-    lines.push(`Engagement level: minimal — they rarely engage socially. Keep social moments very light; don't push if they seem uninterested.`);
-  } else if (engagementLevel === 'friendly') {
-    lines.push(`Engagement level: friendly — they respond warmly. Social moments work well with this person.`);
-  } else if (engagementLevel === 'interactive') {
-    lines.push(`Engagement level: interactive — they proactively chat. Be warm and reciprocate their energy.`);
+  if (rankValue === 1) {
+    lines.push(`Engagement rank: 1/3 — minimal. They reply when pinged but don't lean in. Keep social moments very light and short; don't push.`);
+  } else if (rankValue === 2) {
+    lines.push(`Engagement rank: 2/3 — open / neutral. Normal social cadence works.`);
+  } else if (rankValue === 3) {
+    lines.push(`Engagement rank: 3/3 — loves to chat. Be warm and reciprocate their energy; they'll carry the conversation.`);
   }
 
   // Profile summary — show anything known
@@ -549,93 +507,10 @@ export function buildSocialContextBlock(slackId: string, timezone: string): stri
     lines.push(`Personal notes: none yet — good opportunity to learn something`);
   }
 
-  // Topic history with cooldown / stale detection / random pick
-  const yesterday = now.minus({ hours: 24 }).toFormat('yyyy-MM-dd');
-  const topicLabel = (t: typeof topics[number]) => t.subject ? `${t.name}:${t.subject}` : t.name;
-  const isStale = (t: typeof topics[number]) =>
-    t.count >= SOCIAL_STALE_COUNT_THRESHOLD && t.quality === 'neutral';
-
-  // v2.1.2 — universe of topic areas Maelle can explore. When the available
-  // pool is thin or empty, we suggest unused areas here so she's never
-  // stranded without ideas. Each existing topic is matched by its `name`
-  // enum; if a seed area is already present in `topics` (even as a recent
-  // or stale one) we skip it. Names match the `topic` enum shape used by
-  // note_about_person so Sonnet can pass it straight through.
-  const SEED_TOPIC_AREAS: Array<{ name: string; example: string }> = [
-    { name: 'hobby', example: 'games / reading / sports you play' },
-    { name: 'family', example: 'kids, partner, parents' },
-    { name: 'weekend', example: 'weekend plans or highlights' },
-    { name: 'exercise', example: 'running / gym / yoga routine' },
-    { name: 'travel', example: 'upcoming trips or recent one' },
-    { name: 'food', example: 'favorite places / cooking / coffee ritual' },
-    { name: 'books', example: 'what they\'re reading' },
-    { name: 'shows', example: 'what they\'re watching' },
-    { name: 'health', example: 'sleep, energy, wellbeing' },
-    { name: 'neighborhood', example: 'where they live, local spots' },
-  ];
-  const existingTopicNames = new Set(topics.map(t => t.name));
-  const unusedSeeds = SEED_TOPIC_AREAS.filter(s => !existingTopicNames.has(s.name));
-
-  if (topics.length > 0) {
-    const recentTopics    = topics.filter(t => t.last_used >= yesterday);
-    const notRecent       = topics.filter(t => t.last_used < yesterday);
-    const staleTopics     = notRecent.filter(isStale);
-    const availableTopics = notRecent.filter(t => !isStale(t));
-
-    const goodTopics    = availableTopics.filter(t => t.quality === 'good');
-    const engagedTopics = availableTopics.filter(t => t.quality === 'engaged');
-    const neutralTopics = availableTopics.filter(t => t.quality === 'neutral');
-
-    const topicLines: string[] = [];
-    if (goodTopics.length)    topicLines.push(`  Available — great (go deeper): ${goodTopics.map(topicLabel).join(', ')}`);
-    if (engagedTopics.length) topicLines.push(`  Available — engaged (worth revisiting): ${engagedTopics.map(topicLabel).join(', ')}`);
-    if (neutralTopics.length) topicLines.push(`  Available — flat but not stale (could try once more): ${neutralTopics.map(topicLabel).join(', ')}`);
-    if (recentTopics.length)  topicLines.push(`  INITIATION COOLDOWN (discussed within last 24h — do NOT bring these up yourself; if THEY mention it, respond warmly): ${recentTopics.map(topicLabel).join(', ')}`);
-    if (staleTopics.length)   topicLines.push(`  STALE — OFF LIMITS (asked ${SOCIAL_STALE_COUNT_THRESHOLD}+ times, quality stayed neutral — the person does NOT want to talk about this): ${staleTopics.map(topicLabel).join(', ')}`);
-    lines.push(`Topic history:\n${topicLines.join('\n')}`);
-
-    // v1.7.4 — random pick when 2+ available so Maelle doesn't cycle the same
-    // top-of-list topic every initiation.
-    if (canMaelleInitiate && availableTopics.length >= 2) {
-      const pool = [...availableTopics].sort(() => Math.random() - 0.5);
-      const pick = pool[0];
-      lines.push(`→ RANDOM PICK from available pool this turn: ${topicLabel(pick)} (quality=${pick.quality}). If you initiate, prefer this one — varies which subject you raise so the conversation feels natural over time.`);
-    }
-  }
-
-  const hasFreshTopic =
-    canMaelleInitiate &&
-    topics.some(t => t.last_used < yesterday && !isStale(t));
-
-  // v2.1.2 — "too silent" escalation. When Maelle hasn't initiated anything
-  // in >= SOCIAL_LONG_SILENCE_HOURS, switch from permissive ("you may")
-  // to imperative ("you SHOULD this turn"). Works in tandem with the seed
-  // topic suggestions so Sonnet is never stranded.
-  const longSilence = canMaelleInitiate && hoursAgoInit >= SOCIAL_LONG_SILENCE_HOURS;
-
   if (canMaelleInitiate) {
-    if (hasFreshTopic) {
-      const urgency = longSilence
-        ? `It has been ${Math.round(hoursAgoInit / 24)} days since you last started a social moment with this person — too long. You MUST find a natural moment this turn.`
-        : `Find ONE natural moment after the work is done.`;
-      lines.push(`→ ${urgency} Pick a fresh available topic (never one on INITIATION COOLDOWN or STALE). 1–2 sentences. MANDATORY: the moment you ask a personal question — even before they answer, even if they never answer — call note_about_person (or note_about_self if this person is the owner) with initiated_by="maelle", the enum topic, and a SPECIFIC free-form subject (e.g. topic="hobby", subject="clair obscur game"; topic="family", subject="daughter's school play"). The subject is what goes on 24h cooldown, not the enum — so be specific. After the conversation, consider calling update_person_profile if you learned something about their engagement, style, or role.`);
-    } else {
-      // No available topics — either everything's on cooldown, stale, or
-      // we never had any. In v2.1.2 this path is MANDATORY, not "if natural":
-      // silence for 72+ hours IS the bug, and the fix is to go find new
-      // ground rather than wait for a "natural moment" that never comes in
-      // a task-heavy conversation. Seed suggestions give Sonnet concrete
-      // options she hasn't tried yet.
-      const seedLine = unusedSeeds.length > 0
-        ? `Topic areas you have NOT explored with this person yet — pick one: ${unusedSeeds.slice(0, 6).map(s => `${s.name} (${s.example})`).join(' · ')}.`
-        : 'You have touched every standard topic area. Go open-ended — "anything good going on outside work?" / "how\'s life?".';
-      const urgency = longSilence
-        ? `It has been ${Math.round(hoursAgoInit / 24)} days since you last started a social moment — too long. You MUST ask ONE question this turn. Not optional.`
-        : `You MUST ask ONE social question this turn — ideally after you deliver the task, but do ask. Silence is not the right answer when topics are stale / on cooldown and you're DUE. The "if a moment feels natural" softener is gone: find the moment, don't wait for it.`;
-      lines.push(`→ ${urgency} ${seedLine} One sentence, soft, never pushy. MANDATORY: the moment you ask, call note_about_person (or note_about_self if this person is the owner) with initiated_by="maelle", the enum topic that best fits ("other" if truly open), and a specific subject describing what you asked (e.g. subject="open weekend question"). If they don't bite, that subject just goes on cooldown — no harm. Engagement-level avoidant → DO NOT initiate (respect the signal); engagement-level minimal → keep it very light, one open-ended question.`);
-    }
+    lines.push(`→ Find ONE natural moment to check in after the work is done. One short human question, not pushy. Engagement-level avoidant → DO NOT initiate; engagement-level minimal → keep it very light.`);
   } else {
-    lines.push(`→ If they bring up something personal, respond warmly and call note_about_person (or note_about_self if this person is the owner) with initiated_by="person" and a specific subject. Do NOT start a social topic yourself. Any subject on INITIATION COOLDOWN above is OFF-LIMITS for you to bring up again — if they don't mention it, neither do you. Anything marked STALE is permanently OFF-LIMITS for initiation.`);
+    lines.push(`→ If they bring up something personal, respond warmly. Do NOT start a social topic yourself on this turn — you already initiated recently.`);
   }
 
   return lines.join('\n');

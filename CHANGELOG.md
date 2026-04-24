@@ -2,6 +2,78 @@
 
 ---
 
+## 2.2.0 — Social Engine: bi-directional topic engine + proactive colleague outreach
+
+First real social layer. Two subsystems, same primitives, different lanes.
+
+**Owner ↔ Maelle (Social Engine).** 30 fixed top-level interest categories seeded per owner on startup (family, kids, gaming, tech, travel, etc — plain nouns, non-overlapping). Within a category, topics are created on first mention: "Clair Obscur" under gaming, "Berlin trip" under travel. Topics carry an engagement_score (0–10 cap), status (active|dormant), and last-touched metadata. A pre-pass Sonnet classifier tags every owner message as task|social|other; task always wins (social machinery skips entirely). Social turns produce a deterministic directive (celebrate|engage|revive_ack|continue|raise_new|none) the LLM reads to pick tone and mode. Round-robin rotation within the continuation pool prevents Maelle from hammering the same topic — she picks topics she hasn't touched in 3+ days first. Weekly decay pass drops -1 from active topics untouched 7+ days; topics hitting 0 flip to dormant (kept in memory, Maelle won't raise them, owner can revive by mentioning them again).
+
+**Maelle → Colleague (proactive outreach).** Hourly tick runs as a system activity (owner-time-agnostic). Each hour it sweeps known colleagues, finds those currently in their LOCAL 13:00–15:00 mid-day window, on a work day in their timezone, outside Maelle's 5-day cooldown with them, with engagement_rank > 0, and with prior interaction history. Picks one per owner per day, generates a short warm human ping via Sonnet tool_use, sends it, shadow-DMs the owner, and schedules a rank-check 48h out. The rank-check looks at the colleague's reply: engaged reply (>30 chars) → rank +1; no reply in 48h → rank -1. Colleagues who stop engaging drift to rank 0 and Maelle stops initiating with them until they reach out first. Config gated by `behavior.proactive_colleague_social.enabled` (default false — opt-in per profile).
+
+**Fixes the "rude response" class.** The pre-pass classifier catches "One Axos down!" as a positive share, directive tells Sonnet to celebrate and not pivot to tasks. The old recovery pass (already colleague-gated in 2.1.5) no longer has the chance to generate owner-narrative text about a colleague since the social layer now handles owner turns explicitly.
+
+### Added
+
+- `src/db/socialTopics.ts` — Social Engine CRUD: categories, topics, engagements, scoring, weekly decay (`runWeeklyDecay`).
+- `src/db/engagementRank.ts` — per-person numeric 0–3 rank (replaces legacy 5-level string enum). `adjustEngagementRank(slackId, delta, reason)` with audit log to `engagement_rank_log`. Migrates legacy `profile_json.engagement_level` at startup.
+- `src/core/social/classifyOwnerIntent.ts` — Sonnet tool_use classifier for every owner turn (task|social|other).
+- `src/core/social/reconcileTopic.ts` — fuzzy topic matcher + first-mention creation + dormant revival.
+- `src/core/social/stateMachine.ts` — deterministic directive producer. Round-robin continuation; category-aware.
+- `src/core/social/logEngagement.ts` — post-turn score + engagement log writer. FirstMention flag prevents double-counting when a topic is created and scored in the same turn.
+- `src/tasks/dispatchers/socialDecay.ts` — weekly decay, self-rescheduling 7d.
+- `src/tasks/dispatchers/socialOutreachTick.ts` — hourly proactive colleague ping.
+- `src/tasks/dispatchers/socialPingRankCheck.ts` — 48h-after rank adjustment.
+- `scripts/stress-test-social.mjs` — in-memory 7-day simulator covering three scenarios (owner silent / owner chatty / dead topic). Run via `node scripts/stress-test-social.mjs`. Sweet spot finding: 3–5 active topics per person is the natural equilibrium.
+- New task types: `social_decay`, `social_outreach_tick`, `social_ping_rank_check`.
+- `update_person_profile` tool gains `engagement_rank: 0|1|2|3` optional arg for owner-directive override ("never ping Ysrael" → rank 0).
+- Profile YAML: `behavior.proactive_colleague_social` block — `{ enabled, daily_window_hours, cooldown_days, skip_weekends }`, default disabled.
+
+### Changed
+
+- Orchestrator owner-path now runs the social pre-pass before the tool loop. Directive injected as a system prompt block. Post-turn logger fires when directive was non-none.
+- `buildSocialContextBlock` surfaces the new numeric `engagement_rank` instead of the legacy string `engagement_level`. Topic history section removed — handled by the Social Engine now (for owner turns the directive replaces it).
+- Orchestrator splits social context: owner turns use the directive; colleague turns use the simplified people_memory context block.
+
+### Fixed
+
+- "Rude response" class of bug: Maelle no longer defaults to "what do you need from me?" when the owner shares a win, vents, or small-talks. The pre-pass classifier tags it, the state machine produces a celebrate/engage directive, Sonnet reads the directive and stays in human mode.
+- Round-robin topic selection prevents Maelle from asking about the same topic every continuation turn.
+- Double-count bug where a newly-created topic + owner_initiated score boost would push a new topic from 0 → 5 → 10 in one turn.
+
+### Removed
+
+- Legacy `people_memory.social_topics` JSON column — dropped on startup migration (owner OK'd reset).
+- `src/core/socialEngagement.ts` post-turn quality upgrader — owner signals now logged by `logEngagement.ts`, colleague rapport no longer tracks topic-quality upgrades.
+- `SOCIAL_STALE_COUNT_THRESHOLD`, `SOCIAL_LONG_SILENCE_HOURS`, `SEED_TOPIC_AREAS` from `db/people.ts` — replaced by engagement_score + decay + fixed category list.
+- `markPendingEngagement` / `checkAndUpgradeEngagement` call sites retired from orchestrator + `assistant.ts`.
+
+### Migration
+
+- `ALTER TABLE people_memory DROP COLUMN social_topics` (legacy JSON retired)
+- `ALTER TABLE people_memory ADD COLUMN engagement_rank INTEGER NOT NULL DEFAULT 2`
+- New tables: `social_categories`, `social_topics_v2`, `social_engagements`, `engagement_rank_log`
+- On startup, `migrateLegacyEngagementLevel` translates `profile_json.engagement_level` strings → numeric rank (avoidant→0, minimal→1, neutral→2, friendly→3, interactive→3). Idempotent.
+
+### Follow-up tickets
+
+- [#43](https://github.com/odahviing/aI-Executive-Assistant/issues/43) — Learn colleague timezones proactively (Medium). Proactive outreach gates strictly on timezone; colleagues without one are filtered out. Ticket covers active learning paths.
+
+### Stress-test findings
+
+Run `node scripts/stress-test-social.mjs` any time. Current findings:
+
+- **Owner silent, Maelle initiates daily**: round-robin alternates topics correctly. Scores decay from 5 to 2 over 6 days of neutral responses. Maelle raises a new topic when continuation pool drops below score threshold.
+- **Owner raises new topic daily for 7 days**: all land at score 5 (owner-initiated boost). Spread cleanly across categories. No saturation risk under the 30-category ceiling.
+- **Dead topic (Maelle raises, owner always flat)**: hits dormant in ~3 days. Maelle stops trying. Clean exit behavior.
+- **Sweet spot**: 3–5 active topics per person. Below that, round-robin degenerates. Above that, the dormant graveyard grows faster than decay clears it.
+
+### Not changed
+
+- Colleague rapport no longer tracks per-topic quality (dropped with the legacy column). `notes`, `interaction_log`, `engagement_rank`, `profile_json` retained. The colleague-side equivalent of the Social Engine is a future pass — primitives are there (categories, topics, engagements could be scoped per-person), not scoped for 2.2.
+- Proactive raise_new / continue path for the owner Social Engine (state machine supports it, no tick wired in the orchestrator). Fires only when owner initiates today.
+
+---
+
 ## 2.1.6 — meeting state-change cascade, calendar pagination, post-delete verification, event-id scrub
 
 Four fixes prompted by day-after-2.1.5 QA. The biggest is a centralized cleanup helper — every meeting mutation (move, update, delete) now runs the same cascade that closes pending approvals, cancels follow-up tasks, and closes outreach rows tied to that meeting. The other three harden specific failure modes: `get_calendar` silently truncated at 100 events (now paginates), `delete_meeting` trusted the Graph response (now re-verifies), and raw Graph event IDs leaked into owner-facing narration (now stripped).

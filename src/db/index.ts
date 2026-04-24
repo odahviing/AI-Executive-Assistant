@@ -9,3 +9,5 @@ export * from './events';
 export * from './calendarIssues';
 export * from './approvals';
 export * from './summarySessions';
+export * from './socialTopics';
+export * from './engagementRank';

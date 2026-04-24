@@ -73,6 +73,99 @@ export async function initProfile(
   ensureBriefingCron(profile);
   updateBriefingCronChannel(profile.user.slack_user_id, dmChannel);
 
+  // v2.2 — Social Engine: seed the 30 fixed categories for this owner on
+  // first startup. Idempotent via UNIQUE(owner_user_id, label) + count check.
+  // Rows stay seeded across restarts; topics created at runtime as the owner
+  // brings them up (or as Maelle raises new ones).
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const social = require('../db/socialTopics') as typeof import('../db/socialTopics');
+    social.ensureCategoriesSeeded(profile.user.slack_user_id);
+  } catch (err) {
+    logger.warn('Social categories seeding threw — continuing', { err: String(err) });
+  }
+
+  // v2.2 — Migrate legacy profile_json.engagement_level strings to numeric
+  // engagement_rank. Idempotent; only affects rows still at the default.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const rank = require('../db/engagementRank') as typeof import('../db/engagementRank');
+    rank.migrateLegacyEngagementLevel();
+  } catch (err) {
+    logger.warn('Legacy engagement_level migration threw — continuing', { err: String(err) });
+  }
+
+  // v2.2 — Social Engine: ensure a social_decay task exists. Self-perpetuating
+  // cadence — the dispatcher reschedules itself 7 days out on completion.
+  // We only need to plant the seed once. Idempotent via skill_ref uniqueness
+  // (the dispatcher won't create a duplicate if one is already pending).
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getDb } = require('../db') as typeof import('../db');
+    const existing = getDb().prepare(`
+      SELECT id FROM tasks
+      WHERE type = 'social_decay'
+        AND owner_user_id = ?
+        AND status IN ('new', 'scheduled', 'in_progress')
+      LIMIT 1
+    `).get(profile.user.slack_user_id);
+    if (!existing) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { createTask } = require('../tasks') as typeof import('../tasks');
+      const firstDue = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      createTask({
+        owner_user_id: profile.user.slack_user_id,
+        owner_channel: dmChannel,
+        type: 'social_decay',
+        status: 'new',
+        title: 'Social weekly decay pass',
+        description: 'System maintenance — decays active topics untouched 7+ days.',
+        due_at: firstDue,
+        skill_ref: `social_decay_${profile.user.slack_user_id}`,
+        context: '{}',
+        who_requested: 'system',
+      });
+      logger.info('Social decay task seeded', { ownerUserId: profile.user.slack_user_id, firstDue });
+    }
+  } catch (err) {
+    logger.warn('Social decay task seeding threw — continuing', { err: String(err) });
+  }
+
+  // v2.2 — Proactive colleague outreach: hourly tick. System activity,
+  // owner-time-agnostic. Dispatcher short-circuits when
+  // profile.behavior.proactive_colleague_social.enabled is falsy.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getDb } = require('../db') as typeof import('../db');
+    const existing = getDb().prepare(`
+      SELECT id FROM tasks
+      WHERE type = 'social_outreach_tick'
+        AND owner_user_id = ?
+        AND status IN ('new', 'scheduled', 'in_progress')
+      LIMIT 1
+    `).get(profile.user.slack_user_id);
+    if (!existing) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { createTask } = require('../tasks') as typeof import('../tasks');
+      const firstDue = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      createTask({
+        owner_user_id: profile.user.slack_user_id,
+        owner_channel: dmChannel,
+        type: 'social_outreach_tick',
+        status: 'new',
+        title: 'Proactive colleague outreach tick',
+        description: 'Hourly sweep for colleagues in their mid-day window; sends at most one ping per day.',
+        due_at: firstDue,
+        skill_ref: `social_outreach_tick_${profile.user.slack_user_id}`,
+        context: '{}',
+        who_requested: 'system',
+      });
+      logger.info('Social outreach tick seeded', { ownerUserId: profile.user.slack_user_id, firstDue });
+    }
+  } catch (err) {
+    logger.warn('Social outreach tick seeding threw — continuing', { err: String(err) });
+  }
+
   // v1.5.1 — checkMissedBriefing is gone. If today's briefing was missed,
   // the routine's next_run_at is in the past and the materializer will
   // insert a task on the next 5-min tick; the runner's lateness policy

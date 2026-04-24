@@ -266,6 +266,21 @@ const UserProfileSchema = z.object({
     //     busy-day threshold breaches fire a DM to the owner. Internal-
     //     overlap auto-resolve ships in v2.2 (needs move-coord state).
     calendar_health_mode: z.enum(['passive', 'active']).default('passive'),
+    // v2.2 — proactive colleague social. When enabled, a system-level
+    // hourly tick picks one colleague per day whose LOCAL time is in the
+    // mid-day window and sends a short warm check-in. Rank-aware
+    // (engagement_rank 0 = opt-out) + cooldown + no weekend.
+    proactive_colleague_social: z.object({
+      enabled: z.boolean().default(false),
+      daily_window_hours: z.tuple([z.number(), z.number()]).default([13, 15]),
+      cooldown_days: z.number().default(5),
+      skip_weekends: z.boolean().default(true),
+    }).default({
+      enabled: false,
+      daily_window_hours: [13, 15],
+      cooldown_days: 5,
+      skip_weekends: true,
+    }),
   }),
 
   // Rescheduling rules — now strongly typed with discriminated union

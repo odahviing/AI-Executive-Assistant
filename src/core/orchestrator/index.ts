@@ -1,6 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../../config';
 import { buildSystemPromptParts } from './systemPrompt';
+import { classifyOwnerIntent, type OwnerIntentClassification } from '../social/classifyOwnerIntent';
+import { reconcileTopic } from '../social/reconcileTopic';
+import { chooseSocialDirective, formatDirectiveForPromptBlock, type SocialDirective, noDirective } from '../social/stateMachine';
 import { getSkillTools, executeSkillTool } from '../../skills/registry';
 import type { UserProfile } from '../../config/userProfile';
 import type { SkillContext, ChannelId } from '../../skills/types';
@@ -187,6 +190,40 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
     ? `${userMessage}\n\n[SYSTEM NOTE — not from ${profile.user.name.split(' ')[0]}: ${input.extraInstruction}]`
     : userMessage;
 
+  // v2.2 — Social Engine pre-pass. Runs BEFORE the main tool loop on owner
+  // turns only. Produces a directive: either a social mode (celebrate /
+  // engage / revive_ack) or 'none'. Injects into the system prompt so the
+  // LLM has explicit ground truth about how to respond. Task always wins:
+  // if the classifier returns kind='task', directive is 'none' — social
+  // machinery stays silent for that turn, full task flow runs unchanged.
+  let socialDirective: SocialDirective = noDirective();
+  let socialClassification: OwnerIntentClassification | null = null;
+  const isOwnerTurn = input.senderRole === 'owner' || input.isOwnerInGroup === true;
+  if (isOwnerTurn && userMessage && userMessage.trim().length > 1) {
+    try {
+      socialClassification = await classifyOwnerIntent({
+        anthropic,
+        ownerMessage: userMessage,
+        profile,
+      });
+      const reconciled = reconcileTopic({
+        ownerUserId: profile.user.slack_user_id,
+        categoryHint: socialClassification.social?.category_hint,
+        topicLabelHint: socialClassification.social?.topic_label_hint,
+        initiator: 'owner',
+      });
+      socialDirective = chooseSocialDirective({
+        ownerUserId: profile.user.slack_user_id,
+        classification: socialClassification,
+        reconciled,
+      });
+    } catch (err) {
+      logger.warn('Social pre-pass threw — continuing without directive', { err: String(err).slice(0, 300) });
+      socialDirective = noDirective();
+      socialClassification = null;
+    }
+  }
+
   // Build the current turn. When images are attached (v1.7.1), the user
   // message becomes a content array `[image, ..., text]` so Sonnet sees the
   // actual pixels — much higher fidelity than a pre-described summary.
@@ -304,13 +341,23 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
     }
   }
 
-  // Social engagement context — injected for every person Maelle talks to
-  const socialBlock = buildSocialContextBlock(input.userId, input.profile.user.timezone);
+  // Social engagement context — colleague-rapport memory (people_memory-based).
+  // v2.2 — only injected on COLLEAGUE turns now. Owner turns use the new
+  // Social Engine directive below instead; the two systems serve different
+  // layers (owner ↔ Maelle vs Maelle ↔ colleague).
+  const socialBlock = isOwnerTurn
+    ? ''
+    : buildSocialContextBlock(input.userId, input.profile.user.timezone);
+
+  // v2.2 — Social Directive block. Populated by the pre-pass above.
+  // When mode === 'none' this is empty and has no effect on the prompt.
+  const socialDirectiveBlock = formatDirectiveForPromptBlock(socialDirective);
 
   const systemBlocksDynamic = [
     promptParts.dynamic,
     threadContextBlock,
     socialBlock,
+    socialDirectiveBlock,
   ].filter(Boolean).join('\n\n');
 
   const systemBlocks: Anthropic.TextBlockParam[] = promptParts.static
@@ -995,6 +1042,26 @@ Rules:
       });
     } catch (err) {
       logger.warn('Inbound-colleague shadow notify threw — continuing', { err: String(err) });
+    }
+  }
+
+  // v2.2 — Social Engine post-turn logging. Only fires when the owner's turn
+  // was classified as social AND produced a directive. One row into the
+  // engagements log + score delta on the topic + category signal nudge.
+  // Covers "One Axos down!" style moments: owner initiates → topic created
+  // or matched → owner_initiated row with a positive delta.
+  if (socialDirective.mode !== 'none' && isOwnerTurn && socialClassification) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { logOwnerInitiated } = require('../social/logEngagement') as typeof import('../social/logEngagement');
+      logOwnerInitiated({
+        ownerUserId: profile.user.slack_user_id,
+        directive: socialDirective,
+        classification: socialClassification,
+        turnRef: threadTs ?? null,
+      });
+    } catch (err) {
+      logger.warn('Social post-turn logger threw — non-fatal', { err: String(err).slice(0, 300) });
     }
   }
 
