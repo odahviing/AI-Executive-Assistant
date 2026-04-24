@@ -4,6 +4,7 @@ import { buildSystemPromptParts } from './systemPrompt';
 import { classifyOwnerIntent, type OwnerIntentClassification } from '../social/classifyOwnerIntent';
 import { reconcileTopic } from '../social/reconcileTopic';
 import { chooseSocialDirective, formatDirectiveForPromptBlock, type SocialDirective, noDirective } from '../social/stateMachine';
+import { generateSocialCoda } from '../social/generateCoda';
 import { getSkillTools, executeSkillTool } from '../../skills/registry';
 import type { UserProfile } from '../../config/userProfile';
 import type { SkillContext, ChannelId } from '../../skills/types';
@@ -190,30 +191,35 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
     ? `${userMessage}\n\n[SYSTEM NOTE — not from ${profile.user.name.split(' ')[0]}: ${input.extraInstruction}]`
     : userMessage;
 
-  // v2.2 — Social Engine pre-pass. Runs BEFORE the main tool loop on owner
-  // turns only. Produces a directive: either a social mode (celebrate /
-  // engage / revive_ack) or 'none'. Injects into the system prompt so the
-  // LLM has explicit ground truth about how to respond. Task always wins:
-  // if the classifier returns kind='task', directive is 'none' — social
-  // machinery stays silent for that turn, full task flow runs unchanged.
+  // v2.2.1 — Social Engine pre-pass. Runs on BOTH owner AND colleague turns.
+  // Classifier tags kind (task/social/other). Reconciler finds/creates a
+  // topic scoped to the person (owner or colleague) of this turn. State
+  // machine produces a directive. Directive is injected into the system
+  // prompt; Sonnet phrases. Task always wins.
   let socialDirective: SocialDirective = noDirective();
   let socialClassification: OwnerIntentClassification | null = null;
   const isOwnerTurn = input.senderRole === 'owner' || input.isOwnerInGroup === true;
-  if (isOwnerTurn && userMessage && userMessage.trim().length > 1) {
+  // person-of-the-turn: owner id on owner turns, colleague id on colleague turns
+  const turnPersonSlackId = isOwnerTurn ? profile.user.slack_user_id : input.userId;
+  const turnSenderRole: 'owner' | 'colleague' = isOwnerTurn ? 'owner' : 'colleague';
+  if (userMessage && userMessage.trim().length > 1) {
     try {
       socialClassification = await classifyOwnerIntent({
         anthropic,
         ownerMessage: userMessage,
         profile,
+        senderRole: turnSenderRole,
+        senderName: input.senderName,
       });
       const reconciled = reconcileTopic({
         ownerUserId: profile.user.slack_user_id,
+        personSlackId: turnPersonSlackId,
         categoryHint: socialClassification.social?.category_hint,
         topicLabelHint: socialClassification.social?.topic_label_hint,
-        initiator: 'owner',
+        initiator: turnSenderRole,
       });
       socialDirective = chooseSocialDirective({
-        ownerUserId: profile.user.slack_user_id,
+        personSlackId: turnPersonSlackId,
         classification: socialClassification,
         reconciled,
       });
@@ -1045,23 +1051,116 @@ Rules:
     }
   }
 
-  // v2.2 — Social Engine post-turn logging. Only fires when the owner's turn
-  // was classified as social AND produced a directive. One row into the
-  // engagements log + score delta on the topic + category signal nudge.
-  // Covers "One Axos down!" style moments: owner initiates → topic created
-  // or matched → owner_initiated row with a positive delta.
-  if (socialDirective.mode !== 'none' && isOwnerTurn && socialClassification) {
+  // v2.2.1 — Social Engine post-turn logging. Fires on owner OR colleague
+  // turns when a directive was produced. Writes engagement log row, bumps
+  // score delta on the topic, nudges category signals.
+  //
+  // For proactive-slot ('other' kind → continue/raise_new mode), the
+  // direction is maelle_initiated; logMaelleInitiated handles that. For
+  // social-kind turns (person initiated), logPersonInitiated handles it.
+  if (socialDirective.mode !== 'none' && socialClassification) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { logOwnerInitiated } = require('../social/logEngagement') as typeof import('../social/logEngagement');
-      logOwnerInitiated({
-        ownerUserId: profile.user.slack_user_id,
-        directive: socialDirective,
-        classification: socialClassification,
-        turnRef: threadTs ?? null,
-      });
+      const { logPersonInitiated, logMaelleInitiated } = require('../social/logEngagement') as typeof import('../social/logEngagement');
+      if (socialClassification.kind === 'social') {
+        logPersonInitiated({
+          ownerUserId: profile.user.slack_user_id,
+          personSlackId: turnPersonSlackId,
+          senderRole: turnSenderRole,
+          directive: socialDirective,
+          classification: socialClassification,
+          turnRef: threadTs ?? null,
+        });
+      } else if ((socialDirective.mode === 'continue' || socialDirective.mode === 'raise_new') && socialDirective.topic) {
+        // Proactive piggyback fired. Log as Maelle-initiated with neutral signal
+        // (the reply — if any — will be captured on the next turn via the
+        // in-conversation rank-check path, tracked separately).
+        logMaelleInitiated({
+          ownerUserId: profile.user.slack_user_id,
+          topic: socialDirective.topic,
+          signal: 'none',
+          turnRef: threadTs ?? null,
+        });
+      }
     } catch (err) {
       logger.warn('Social post-turn logger threw — non-fatal', { err: String(err).slice(0, 300) });
+    }
+  }
+
+  // v2.2.1 — in-conversation rank adjustment for colleague social turns.
+  // If this colleague replied socially AND Maelle initiated social with them
+  // in the last 24h (piggyback or continuation), nudge engagement_rank based
+  // on reply length + sentiment. Rank 0 = opt-out; colleagues who never
+  // engage drift there. Rank 3 = high-engagers; replying well lifts them.
+  if (
+    turnSenderRole === 'colleague'
+    && socialClassification?.kind === 'social'
+    && socialClassification.social?.sentiment
+  ) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { adjustRankFromColleagueResponse } = require('../social/logEngagement') as typeof import('../social/logEngagement');
+      adjustRankFromColleagueResponse({
+        colleagueSlackId: input.userId,
+        replyText: userMessage,
+        sentiment: socialClassification.social.sentiment,
+      });
+    } catch (err) {
+      logger.warn('In-conversation rank adjustment threw — non-fatal', { err: String(err).slice(0, 300) });
+    }
+  }
+
+  // v2.2.1 Pattern 1 — slack-available task turns → social coda.
+  // Task always wins, BUT if the task produced a "parking" tool call (coord
+  // initiated, message_colleague await_reply, create_approval, outreach_send)
+  // then Maelle has nothing else to do this moment — she's waiting on
+  // someone. That's the right time to weave in social if the 24h cadence
+  // gate passes. One short additional sentence appended to the task reply.
+  // Never hijacks the task response; always starts with the task.
+  if (
+    socialClassification?.kind === 'task'
+    && finalReply
+    && finalReply.trim().length > 0
+    && toolCallSummaries.length > 0
+  ) {
+    const parkingToolPattern = /^\[(coordinate_meeting|message_colleague|create_approval|outreach_send)/;
+    const hadParkingCall = toolCallSummaries.some(s => parkingToolPattern.test(s));
+    if (hadParkingCall) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { directiveForProactiveSlot } = require('../social/stateMachine') as typeof import('../social/stateMachine');
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { logMaelleInitiated } = require('../social/logEngagement') as typeof import('../social/logEngagement');
+        const codaDirective = directiveForProactiveSlot({ personSlackId: turnPersonSlackId });
+        if (codaDirective.mode === 'continue' || codaDirective.mode === 'raise_new') {
+          const coda = await generateSocialCoda({
+            profile,
+            directive: codaDirective,
+            senderRole: turnSenderRole,
+            senderFirstName: turnSenderRole === 'owner'
+              ? profile.user.name.split(' ')[0]
+              : (input.senderName?.split(' ')[0] ?? 'there'),
+          });
+          if (coda && coda.trim().length > 0) {
+            finalReply = `${finalReply.trim()}\n\n${coda.trim()}`;
+            if (codaDirective.topic) {
+              logMaelleInitiated({
+                ownerUserId: profile.user.slack_user_id,
+                topic: codaDirective.topic,
+                signal: 'none',
+                turnRef: threadTs ?? null,
+              });
+            }
+            logger.info('Social coda appended to task turn', {
+              personSlackId: turnPersonSlackId,
+              mode: codaDirective.mode,
+              topic: codaDirective.topicLabel,
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn('Social coda generation threw — continuing without coda', { err: String(err).slice(0, 300) });
+      }
     }
   }
 

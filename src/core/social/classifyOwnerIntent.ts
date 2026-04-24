@@ -1,21 +1,23 @@
 /**
- * Pre-pass classifier on every owner-path turn (v2.2).
+ * Pre-pass intent classifier (v2.2.1).
  *
- * The orchestrator runs this BEFORE the main tool loop. One Sonnet call with
- * a strict tool_use schema → guaranteed JSON. Output decides whether the
- * Social Engine fires for this turn or is skipped entirely.
+ * Runs BEFORE the main tool loop on every OWNER or COLLEAGUE turn. One
+ * Sonnet call with strict tool_use schema → guaranteed JSON. Output decides
+ * whether the Social Engine fires for this turn or is skipped entirely.
  *
- *   kind = 'task'   → owner wants Maelle to DO something (book, move, check,
- *                     remind, research, update memory). Skip social. No
- *                     directive, no prompt block.
- *   kind = 'social' → owner is being a person (share, vent, small-talk, joke,
- *                     ask about her weekend). Fire the Social Engine.
+ *   kind = 'task'   → the person wants Maelle to DO something (book, move,
+ *                     check, remind, research). Skip social.
+ *   kind = 'social' → the person is being a person (share, vent, small-talk,
+ *                     joke, ask about Maelle). Fire the Social Engine.
  *   kind = 'other'  → one-word ack / "ok" / "thanks" / greeting with no
- *                     follow-on. Skip social, no task either. Default reply.
+ *                     follow-on. Skip social; piggyback proactive social
+ *                     may fire if 24h+ silence.
  *
- * TASK ALWAYS WINS. If a message is genuinely mixed ("book the meeting, btw
- * did you have a nice weekend?") we still classify as 'task'. Social can
- * come back naturally in a later turn.
+ * TASK ALWAYS WINS. Mixed messages ("book the meeting, btw did you have a
+ * nice weekend?") classify as 'task'; social comes back in a later turn.
+ *
+ * The function name kept as classifyOwnerIntent for back-compat; it now
+ * works for colleague turns too via the senderName + senderRole args.
  *
  * Fails open — any classifier error returns kind='other' so the tool loop
  * runs normally without social context.
@@ -42,9 +44,11 @@ export interface OwnerIntentClassification {
 
 export async function classifyOwnerIntent(params: {
   anthropic: Anthropic;
-  ownerMessage: string;
+  ownerMessage: string;          // message content (from owner or colleague)
   profile: UserProfile;
-  recentContext?: string; // optional short snippet of prior turns
+  senderRole?: 'owner' | 'colleague';
+  senderName?: string;           // colleague display name when senderRole='colleague'
+  recentContext?: string;
 }): Promise<OwnerIntentClassification> {
   const { anthropic, ownerMessage, profile, recentContext } = params;
 
@@ -52,46 +56,47 @@ export async function classifyOwnerIntent(params: {
     return { kind: 'other' };
   }
 
-  const firstName = profile.user.name.split(' ')[0];
+  const ownerFirst = profile.user.name.split(' ')[0];
+  const senderRole = params.senderRole ?? 'owner';
+  const senderName = senderRole === 'owner' ? ownerFirst : (params.senderName ?? 'the colleague');
   const categoryList = FIXED_CATEGORIES.join(', ');
 
-  const systemPrompt = `You classify a single message from ${firstName} (an executive) to his AI assistant Maelle.
+  const isOwner = senderRole === 'owner';
+  const directionExamples = isOwner
+    ? "'share' (telling Maelle about his life), 'ask_maelle' (asking Maelle something personal), 'reaction' (responding to something Maelle said earlier)"
+    : "'share' (telling Maelle about their own life), 'ask_maelle' (asking Maelle something, e.g. about her weekend or about " + ownerFirst + "), 'reaction' (responding to something Maelle said earlier)";
+
+  const systemPrompt = `You classify a single message from ${senderName} (${isOwner ? `${ownerFirst} — the executive who owns this account` : `a colleague talking to Maelle, who works for ${ownerFirst}`}) to the AI assistant Maelle.
 
 Output EXACTLY ONE tool call to classify_intent. No prose.
 
 Three classes:
 
-1) TASK — ${firstName} wants Maelle to DO something actionable. Examples:
-   "book the meeting", "move the 3pm", "delete sales sync", "what's on my calendar today",
-   "any open tasks you have?", "find a slot with Amazia", "remind me Monday to update Yael",
-   "check if the brief went out", "research X". If the message contains a request, a question
-   about state, or an instruction to act — it's a task.
+1) TASK — ${senderName} wants Maelle to DO something actionable. Examples:
+   ${isOwner
+     ? `"book the meeting", "move the 3pm", "delete sales sync", "what's on my calendar today", "any open tasks you have?", "find a slot with Amazia", "remind me Monday", "research X"`
+     : `"can you find a time for us to meet with ${ownerFirst}?", "can ${ownerFirst} join at 4pm?", "reschedule tomorrow to 5pm", "what's his availability next week?", "let him know I can't make it"`}.
+   If the message contains a request, a question about state, or an instruction to act — task.
 
-2) SOCIAL — ${firstName} is being a PERSON. No action requested. Examples:
-   "One Axos down!", "just got back from a great run", "my kid said the funniest thing",
-   "I'm exhausted today", "how was your weekend?" (asking Maelle), "did you see the new elden ring update?",
-   "feeling good today", "argh, hate Mondays". Sharing a win, venting, small-talk, asking Maelle
-   something personal, reacting to life.
+2) SOCIAL — ${senderName} is being a PERSON. No action requested. Examples:
+   "One Axos down!", "just got back from a great run", "I'm exhausted today",
+   "how was your weekend?" (asking Maelle), "did you see the game last night?",
+   "feeling good today". Sharing, venting, small-talk, asking Maelle something personal.
 
-3) OTHER — minimal acknowledgement, greeting with no follow-on, short reply to Maelle's prior
-   message that's neither a task nor a meaningful social share. Examples: "ok", "thanks",
-   "cool", "morning", "got it", "hi". Also: confirmations like "yes do it" (in a thread where
-   Maelle is waiting for approval — that's task-adjacent but doesn't need social handling).
+3) OTHER — minimal acknowledgement, greeting, one-word reply to Maelle's prior turn.
+   "ok", "thanks", "cool", "morning", "got it", "hi".
 
-TASK ALWAYS WINS. If a message is genuinely mixed ("book the meeting, btw hope you had a good
-weekend") — classify as TASK. Social can come back in a later turn.
+TASK ALWAYS WINS. Mixed messages classify as TASK.
 
 For SOCIAL, also determine:
-- direction: 'share' (${firstName} telling Maelle about his life), 'ask_maelle' (asking Maelle
-  something personal), 'reaction' (responding to something Maelle said earlier)
-- category_hint: pick ONE from this fixed list if the message fits, else leave empty:
+- direction: ${directionExamples}
+- category_hint: pick ONE from this global list if the message fits, else leave empty:
   ${categoryList}
 - topic_label_hint: a short 2-4 word label for the specific topic inside that category
-  (e.g. "Clair Obscur progress", "new keyboard build", "weekend hike"). Optional.
-- sentiment: 'positive' (win, excitement, satisfaction), 'negative' (venting, frustration,
-  bad news), 'neutral' (factual share without clear valence).
+  (e.g. "Clair Obscur", "new keyboard build", "weekend hike"). Optional.
+- sentiment: 'positive' | 'negative' | 'neutral'.
 
-${recentContext ? `\nRecent conversation context (for reference only — classify the LAST owner message):\n${recentContext}\n` : ''}`;
+${recentContext ? `\nRecent conversation context (for reference only — classify the LAST message from ${senderName}):\n${recentContext}\n` : ''}`;
 
   try {
     const resp = await anthropic.messages.create({

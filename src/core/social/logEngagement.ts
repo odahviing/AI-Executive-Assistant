@@ -1,43 +1,33 @@
 /**
- * Post-turn engagement logger (v2.2).
+ * Post-turn engagement logger (v2.2.1).
  *
- * Called by the orchestrator AFTER the reply is produced, whenever the social
- * pre-pass decided a non-'none' directive fired. Writes one row to the
- * social_engagements log, applies a score delta to the involved topic (if
- * any), and nudges the category's signal counters so care_level can drift.
+ * Called by the orchestrator AFTER a reply is produced, when the social
+ * pre-pass fired a non-'none' directive. Writes one row to social_engagements,
+ * applies score delta to the topic (if any), and nudges category signal
+ * counters.
  *
- * Two triggers:
- *
- * 1) `logOwnerInitiated` — owner said something social. The classification
- *    already ran; the reconciler created/matched a topic. We log the owner's
- *    initiation and apply a positive score bump.
- *
- * 2) `logMaelleInitiated` — Maelle proactively raised or continued a topic.
- *    (Not wired yet in this pass — scaffolding for the future "proactive
- *    social tick" path. Left here so the logging surface is complete.)
- *
- * Upgrade-on-response logic (the v2.0.2 pattern of upgrading quality when
- * the owner engages with depth) is deliberately NOT ported. The new model
- * tracks score deltas per-engagement directly — each owner response after
- * a Maelle initiation writes its own row with the appropriate score_delta.
- * The state machine and reconciler decide when; this function just writes.
+ * Works for owner turns (person_slack_id = owner) and colleague turns
+ * (person_slack_id = colleague.slack_id).
  */
 
 import {
   applyScoreDelta,
   incrementCategorySignals,
   logEngagementRow,
+  lastMaelleInitiatedAt,
   type EngagementDirection,
   type EngagementSignal,
   type SocialTopic,
+  type TopicToucher,
 } from '../../db/socialTopics';
+import { adjustEngagementRank } from '../../db/engagementRank';
 import type { SocialDirective } from './stateMachine';
 import type { OwnerIntentClassification } from './classifyOwnerIntent';
 import logger from '../../utils/logger';
 
-// Scoring table — aligned with the design locked in for v2.2.
-//
-// Cap at 10, floor at 0 (enforced inside applyScoreDelta).
+const RANK_RESPONSE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const BRIEF_REPLY_CHAR_LIMIT = 30;
+
 export function scoreDeltaFor(params: {
   direction: EngagementDirection;
   signal: EngagementSignal;
@@ -45,8 +35,8 @@ export function scoreDeltaFor(params: {
 }): number {
   const { direction, signal, newTopic } = params;
 
-  if (direction === 'owner_initiated') {
-    return newTopic ? 5 : 3; // Owner surfacing a topic gets the biggest boost
+  if (direction === 'owner_initiated' || direction === 'colleague_initiated') {
+    return newTopic ? 5 : 3;
   }
 
   if (direction === 'maelle_initiated') {
@@ -57,16 +47,10 @@ export function scoreDeltaFor(params: {
   }
 
   if (direction === 'maelle_response') {
-    // Maelle responding to something owner brought up — we don't re-score
-    // here, owner_initiated already bumped. Engagement log gets the row
-    // (audit trail) but score_delta is 0.
     return 0;
   }
 
-  if (direction === 'owner_response') {
-    // Owner replying to a Maelle-initiated turn. The valence of their
-    // response is what changes the score — effectively the same table as
-    // maelle_initiated but attached to owner_response for the audit log.
+  if (direction === 'owner_response' || direction === 'colleague_response') {
     if (signal === 'positive') return 3;
     if (signal === 'neutral') return -1;
     if (signal === 'negative') return -3;
@@ -76,20 +60,19 @@ export function scoreDeltaFor(params: {
   return 0;
 }
 
-export function logOwnerInitiated(params: {
+export function logPersonInitiated(params: {
   ownerUserId: string;
+  personSlackId: string;
+  senderRole: 'owner' | 'colleague';
   directive: SocialDirective;
   classification: OwnerIntentClassification | null;
   turnRef?: string | null;
 }): void {
-  const { ownerUserId, directive, classification, turnRef } = params;
+  const { ownerUserId, personSlackId, senderRole, directive, classification, turnRef } = params;
 
-  // No topic / no category → nothing meaningful to log. Classifier may have
-  // returned 'social' without category hint (rare, generic small talk) — we
-  // skip the log since there's no topic_id / category_id FK target.
   const categoryIdFromTopic = directive.topic?.category_id;
   const fallbackCategoryId = directive.categoryLabel
-    ? deriveCategoryIdFromLabel(ownerUserId, directive.categoryLabel)
+    ? `cat_global_${directive.categoryLabel}`
     : null;
   const categoryId = categoryIdFromTopic ?? fallbackCategoryId;
   if (!categoryId) return;
@@ -101,45 +84,40 @@ export function logOwnerInitiated(params: {
     ? 'negative'
     : 'neutral';
 
+  const direction: EngagementDirection = senderRole === 'owner' ? 'owner_initiated' : 'colleague_initiated';
+  const initiator: TopicToucher = senderRole;
+
   const firstMention = directive.firstMention;
-  const delta = scoreDeltaFor({
-    direction: 'owner_initiated',
-    signal,
-    newTopic: firstMention,
-  });
+  const delta = scoreDeltaFor({ direction, signal, newTopic: firstMention });
 
   try {
-    // Double-count guard: when the topic was just created by the reconciler
-    // this turn, the initial score already reflects the owner-initiated
-    // boost (createTopic seeded it at 5 for owner). Log the engagement row
-    // for the audit trail, but skip applyScoreDelta — otherwise one mention
-    // would double-bump from 5 → 10 in a single turn.
     if (topicId && delta !== 0 && !firstMention) {
-      applyScoreDelta(topicId, delta, 'owner');
+      applyScoreDelta(topicId, delta, initiator);
     }
 
     logEngagementRow({
       ownerUserId,
+      personSlackId,
       topicId,
       categoryId,
-      direction: 'owner_initiated',
+      direction,
       signal,
       scoreDelta: delta,
       turnRef: turnRef ?? null,
     });
 
-    // Positive signals nudge the category's care_level up; negatives nudge down.
     if (signal === 'positive') incrementCategorySignals(categoryId, 'positive');
     else if (signal === 'negative') incrementCategorySignals(categoryId, 'negative');
   } catch (err) {
-    logger.warn('logOwnerInitiated threw — non-fatal', { err: String(err).slice(0, 300) });
+    logger.warn('logPersonInitiated threw — non-fatal', { err: String(err).slice(0, 300) });
   }
 }
 
 /**
- * Scaffolding for when a proactive-social-tick path is added. Not called
- * anywhere in v2.2's owner-turn flow (Maelle-initiated social currently
- * doesn't land in the main orchestrator path). Safe to invoke manually.
+ * Logs a Maelle-initiated social moment (proactive or continuation). Used by
+ * the piggyback path. Signal defaults to 'none' at the moment of initiation;
+ * the in-conversation rank-check pass updates the row (or writes a response
+ * row) once the person replies.
  */
 export function logMaelleInitiated(params: {
   ownerUserId: string;
@@ -157,6 +135,7 @@ export function logMaelleInitiated(params: {
     if (delta !== 0) applyScoreDelta(topic.id, delta, 'maelle');
     logEngagementRow({
       ownerUserId,
+      personSlackId: topic.person_slack_id,
       topicId: topic.id,
       categoryId: topic.category_id,
       direction: 'maelle_initiated',
@@ -171,6 +150,41 @@ export function logMaelleInitiated(params: {
   }
 }
 
-function deriveCategoryIdFromLabel(ownerUserId: string, label: string): string {
-  return `cat_${ownerUserId}_${label}`.replace(/[^a-zA-Z0-9_]/g, '_');
+/**
+ * In-conversation rank adjustment (v2.2.1).
+ *
+ * When a colleague replies inside an active conversation, check whether
+ * the reply is a response to a recent Maelle-initiated social moment
+ * (piggyback ping or continuation). If so, nudge the colleague's
+ * engagement_rank:
+ *   - positive + reply length > 30 chars → +1
+ *   - negative                           → -1
+ *   - neutral / brief                    → 0 (no change)
+ *
+ * Fires only when the last Maelle initiation for this person was within
+ * the last 24h. Older than that, we assume any current reply is a fresh
+ * conversation, not a response. The proactive-ping path
+ * (`social_ping_rank_check`) still handles its 48h window separately for
+ * out-of-conversation DMs.
+ */
+export function adjustRankFromColleagueResponse(params: {
+  colleagueSlackId: string;
+  replyText: string;
+  sentiment: EngagementSignal;
+}): void {
+  const lastInit = lastMaelleInitiatedAt(params.colleagueSlackId);
+  if (!lastInit) return;
+  const sinceMs = Date.now() - new Date(lastInit).getTime();
+  if (sinceMs > RANK_RESPONSE_WINDOW_MS) return;
+
+  const len = params.replyText.trim().length;
+  if (params.sentiment === 'negative') {
+    adjustEngagementRank(params.colleagueSlackId, -1, 'reply_brief');
+  } else if (params.sentiment === 'positive' && len > BRIEF_REPLY_CHAR_LIMIT) {
+    adjustEngagementRank(params.colleagueSlackId, 1, 'reply_engaged');
+  }
+  // neutral/short → no change (still engagement, just not boosting)
 }
+
+// Back-compat alias (v2.2.0 called this logOwnerInitiated)
+export const logOwnerInitiated = logPersonInitiated;

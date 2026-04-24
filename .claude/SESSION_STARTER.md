@@ -15,6 +15,8 @@ Plus these feedback memories (cross-session rules the owner has set):
 
 When the owner says "wrap up" / "close the patch" / "cut a version" / "day close" → follow `.claude/WRAP_UP.md` step-by-step.
 
+When the owner says "test scenario N" / "run scenario N" / "simulate scenario N" (or similar) → open `.claude/test-scenarios.md`, read that scenario in full, then code-trace it against the current files on disk (do not trust memory) and produce a report: what works, what doesn't, what shouldn't happen, plus concrete fix suggestions. **This is a paper exercise — never execute the scenario for real. No live DMs, no real calendar writes, no DB writes, no tool calls against the running system.** The only allowed side effect is reading source files. No auto-fixing — owner decides fix-now vs file-a-ticket.
+
 ---
 
 ## Where we are — v2.2.0 just shipped

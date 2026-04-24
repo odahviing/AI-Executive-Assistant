@@ -2,6 +2,77 @@
 
 ---
 
+## 2.2.1 — Social Engine extension: per-person topics, piggyback proactive, task-coda social
+
+Follow-up to v2.2.0 resolving scenario audit findings. Three shape-changes to the Social Engine plus two new tickets scoped.
+
+### Changed — Social Engine now per-person, not owner-only
+
+The 30 categories stay **global** (a single seeded set for all persons), but topics are now scoped per-`person_slack_id` under those categories. Idan's "Clair Obscur" and Yael's "Clair Obscur" are separate rows under the same global `gaming` category row. Same for engagements — every log row carries the person it concerns.
+
+- Migration: new `person_slack_id` column on `social_topics_v2` and `social_engagements`. Existing rows backfill to `owner_user_id` (their original scope). Old per-owner category rows get wiped so the global seed can repopulate cleanly.
+- Classifier (`classifyOwnerIntent.ts`) now runs on colleague turns too — senderRole-aware prompt so it asks the right question of the right speaker. Kind values unchanged (task | social | other).
+- Reconciler (`reconcileTopic.ts`) takes `personSlackId` — creates/matches topics in the right person's scope.
+- State machine unchanged in shape; all functions now scoped by person.
+- Logger (`logEngagement.ts`) distinguishes `owner_initiated` / `colleague_initiated` / `maelle_initiated` / response variants; signal-aware score deltas.
+
+### Added — piggyback proactive social on 'other'-kind turns
+
+When a turn classifies as `kind='other'` (acks, greetings, no follow-on), `directiveForProactiveSlot` fires for the person of the turn. If 24h+ since Maelle's last initiation with them AND a continuable or raise-new directive is available, social injects into the prompt block. Maelle weaves social into her reply to THIS thread — no separate DM. Works for owner and colleague turns symmetrically.
+
+### Added — in-conversation rank adjustment
+
+New `adjustRankFromColleagueResponse` in `logEngagement.ts`. On colleague turns classified as social, if Maelle initiated social with this person in the last 24h, nudge `engagement_rank`:
+- Positive sentiment + reply length > 30 chars → +1
+- Negative sentiment → -1
+- Neutral / brief → 0 (no change)
+
+Runs as a post-turn pass. Complements the 48h `social_ping_rank_check` task for the proactive-DM path.
+
+### Added — Pattern 1: social coda on slack-available task turns
+
+Task always wins — but when a task produces a "parking" tool call (`coordinate_meeting`, `message_colleague`, `create_approval`, `outreach_send`) Maelle has nothing else to do this moment. New post-turn hook detects parking calls, checks cadence gates via `directiveForProactiveSlot`, and if eligible generates ONE coda sentence via a small Sonnet `tool_use` call. Appended after the task reply, never replacing it. New module `src/core/social/generateCoda.ts`.
+
+Rules encoded:
+- Task reply comes first, social never truncates task content
+- One sentence only, no "By the way" / "Also" prefix, no "let me know if you need anything"
+- Once per 24h per person (same cadence gate as piggyback)
+- Never fires on immediate-completion tasks (`create_meeting`, `delete_meeting`, pure reads) — only when Maelle is waiting on someone else
+
+Example flow:
+- Idan: "book a meeting with John"
+- Maelle: *"On it — reaching out to John, I'll let you know when he replies.\n\nHow's the gaming going this week?"*
+- Coda appended because `message_colleague` was the parking call and the 24h gate passed.
+
+### Added — `.claude/test-scenarios.md`
+
+Ten standalone real-life scenarios for pressure-testing Maelle after builds. Plain-English stories, not code specs. Idan triggers a paper walkthrough with "test scenario N" / "run scenario N"; the chat that hears it opens the file, code-traces the scenario against current files on disk, and produces a report (works / doesn't work / shouldn't happen + concrete fix suggestions). Paper exercise only — no live tool calls, no real DMs, no DB writes.
+
+Scenarios cover: cold introduction with timezone negotiation, follow-up crossing midnight, domino booking with conflict resolution, mass-close of open tasks, three-way calendar collision, interview notes with iterative drafts, messy morning briefing, elastic lunch bumping, voice-note reschedule catch, four-people-three-continents coord.
+
+### Added — SESSION_STARTER.md trigger for scenario runs
+
+One new paragraph near the top: "When the owner says 'test scenario N' / 'run scenario N' / 'simulate scenario N' → open `.claude/test-scenarios.md`, code-trace it, produce a report. Paper exercise — never execute for real. No live DMs, no calendar writes, no DB writes."
+
+### Added — Tickets filed
+
+- [#43](https://github.com/odahviing/aI-Executive-Assistant/issues/43) scope expanded to cover timezone inference from scheduling cues, coord state machine "clarify and resume," attendee-TZ-aware `findAvailableSlots`, and structured working-hours per person.
+- [#44](https://github.com/odahviing/AI-Executive-Assistant/issues/44) new Low improvement — web-search-before-social to enrich first-time openers with public context.
+
+### Config
+
+- `behavior.proactive_colleague_social.enabled` stays default `false` (opt-in per profile). Idan's profile YAML flips it to `true` to activate the hourly outreach tick.
+
+### Known gaps (not fixed in 2.2.1)
+
+- **Post-booking social injection**: after a coord books, the colleague-facing confirmation is still templated (not Sonnet-generated). So if the colleague doesn't react after the confirmation, Maelle can't weave in social there. Workaround: social fires on the colleague's next reactive turn if any. Potential future fix: Sonnet-generate the booking confirmation so a social coda can be folded in when appropriate.
+- **Silent-ignore rank drop in-conversation**: if Maelle raises social via piggyback and the colleague literally doesn't respond at all, there's no rank drop (the adjuster only fires on next social reply). The 48h proactive-ping rank check only applies to `social_outreach_tick` path. Future: a scheduled `social_piggyback_rank_check` analog.
+- **Owner-initiated DM when no active thread**: Maelle can only piggyback on turns Idan sends. If Idan goes silent for days, no proactive ping to him. Scenario 3 step 3.8 covered partially (works if Idan sends 'other' or 'task-with-parking'). Full fix would be a tick analog for the owner.
+
+All three are tracked as scenario findings; none block today's use.
+
+---
+
 ## 2.2.0 — Social Engine: bi-directional topic engine + proactive colleague outreach
 
 First real social layer. Two subsystems, same primitives, different lanes.

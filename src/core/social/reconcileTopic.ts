@@ -1,35 +1,32 @@
 /**
- * Topic reconciler (v2.2).
+ * Topic reconciler (v2.2.1).
  *
  * Translates a classifier hint ({category, topic_label}) into a concrete
- * (categoryId, topicId) pair. Creates topic rows on first mention so the
- * engagement log can reference them. Revives dormant topics when owner
- * mentions them again.
+ * (categoryId, topicId) pair scoped to a specific PERSON (owner or colleague).
+ * Creates topic rows on first mention so the engagement log can reference them.
+ * Revives dormant topics when the person mentions them again.
  *
- * Fuzzy matching is intentionally generous — a topic label is a short human
- * phrase ("Clair Obscur", "Clair Obscur axons", "clair obscur progress"
- * should all map to the same topic). Levenshtein would be overkill; a
- * normalized-substring strategy is sufficient at this scale (few topics per
- * category, conversational labels).
+ * Categories are global. Topics are per-(owner, person).
  */
 
 import {
   type SocialCategory,
   type SocialTopic,
+  type TopicToucher,
   getCategoryByLabel,
-  getActiveTopicsForCategory,
-  getDormantTopicsForOwner,
+  getActiveTopicsForPersonCategory,
+  getDormantTopicsForPerson,
   createTopic,
   reviveTopic,
 } from '../../db/socialTopics';
 import logger from '../../utils/logger';
 
 export type ReconcileAction =
-  | 'matched_active'        // existing active topic matched
-  | 'revived_dormant'       // owner revived a dormant topic
-  | 'created_under_category'// new topic created under a known category
-  | 'category_only'         // category matched but no topic label given
-  | 'no_category';          // classifier gave no category hint — no-op
+  | 'matched_active'          // existing active topic matched
+  | 'revived_dormant'         // person revived a dormant topic
+  | 'created_under_category'  // new topic created under a known category
+  | 'category_only'           // category matched but no topic label given
+  | 'no_category';            // classifier gave no category hint — no-op
 
 export interface ReconcileResult {
   action: ReconcileAction;
@@ -39,21 +36,20 @@ export interface ReconcileResult {
 
 export function reconcileTopic(params: {
   ownerUserId: string;
+  personSlackId: string;
   categoryHint?: string;
   topicLabelHint?: string;
-  initiator: 'owner' | 'maelle';
+  initiator: TopicToucher;
 }): ReconcileResult {
-  const { ownerUserId, categoryHint, topicLabelHint, initiator } = params;
+  const { ownerUserId, personSlackId, categoryHint, topicLabelHint, initiator } = params;
 
   if (!categoryHint) {
     return { action: 'no_category', category: null, topic: null };
   }
 
-  const category = getCategoryByLabel(ownerUserId, categoryHint);
+  const category = getCategoryByLabel(categoryHint);
   if (!category) {
-    // Shouldn't happen — classifier only returns categories from FIXED_CATEGORIES
-    // and those are all seeded on startup. Log and bail.
-    logger.warn('reconcileTopic — category hint not found in DB', { categoryHint, ownerUserId });
+    logger.warn('reconcileTopic — category hint not in global set', { categoryHint });
     return { action: 'no_category', category: null, topic: null };
   }
 
@@ -63,47 +59,45 @@ export function reconcileTopic(params: {
 
   const normalized = normalizeLabel(topicLabelHint);
 
-  // Try to match an existing active topic under this category
-  const active = getActiveTopicsForCategory(category.id);
+  // Match existing active topic for this person under this category
+  const active = getActiveTopicsForPersonCategory(personSlackId, category.id);
   const activeMatch = active.find(t => labelsMatch(normalizeLabel(t.label), normalized));
   if (activeMatch) {
     return { action: 'matched_active', category, topic: activeMatch };
   }
 
-  // Try to match a dormant topic for this owner (any category, then verify)
-  const dormant = getDormantTopicsForOwner(ownerUserId);
+  // Try dormant revive (same person + same category)
+  const dormant = getDormantTopicsForPerson(personSlackId);
   const dormantMatch = dormant.find(
     t => t.category_id === category.id && labelsMatch(normalizeLabel(t.label), normalized),
   );
   if (dormantMatch) {
-    if (initiator === 'owner') {
+    // Revival allowed only when initiator is the person themself (owner or colleague).
+    // Maelle cannot unilaterally revive a dormant topic.
+    if (initiator === 'owner' || initiator === 'colleague') {
       const revived = reviveTopic(dormantMatch.id, true);
       return { action: 'revived_dormant', category, topic: revived };
     }
-    // Maelle cannot revive dormant topics on her own — spec rule.
-    // Treat as no-match and DO NOT create a duplicate; return category-only.
     return { action: 'category_only', category, topic: null };
   }
 
-  // No match — create a new topic. Per owner instruction: create on first
-  // mention so the category accumulates signal (evidence of caring).
+  // Create on first mention. Person-initiated (owner/colleague) starts at 5;
+  // Maelle-initiated starts at 3.
+  const initialScore = (initiator === 'owner' || initiator === 'colleague') ? 5 : 3;
   const created = createTopic({
     ownerUserId,
+    personSlackId,
     categoryId: category.id,
     label: topicLabelHint.trim(),
     createdBy: initiator,
-    initialScore: initiator === 'owner' ? 5 : 3, // owner-initiated gets head start
+    initialScore,
   });
 
   return { action: 'created_under_category', category, topic: created };
 }
 
 /**
- * Normalize a topic label for fuzzy matching:
- *   - lowercase
- *   - strip punctuation
- *   - collapse whitespace
- *   - remove common filler words
+ * Normalize a topic label for fuzzy matching.
  */
 function normalizeLabel(label: string): string {
   const FILLER = new Set([
@@ -122,12 +116,6 @@ function normalizeLabel(label: string): string {
   return cleaned;
 }
 
-/**
- * Two labels match if one is a substring of the other, or if they share
- * a significant number of tokens. Loose by design — conversational labels
- * like "Clair Obscur", "Clair Obscur axons", "clair obscur lately" should
- * all resolve to the same topic.
- */
 function labelsMatch(a: string, b: string): boolean {
   if (a.length === 0 || b.length === 0) return false;
   if (a === b) return true;

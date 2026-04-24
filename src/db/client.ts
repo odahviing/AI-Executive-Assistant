@@ -299,17 +299,22 @@ function initSchema(db: Database.Database): void {
   `);
 
   // v2.2 — Social Engine tables.
+  //
+  // v2.2.1 refactor: categories are GLOBAL (30 fixed labels, shared across
+  // owner and all colleagues). Topics + engagements are per-person via
+  // `person_slack_id` — that way Maelle can track Idan's gaming interests
+  // AND Yael's gaming interests as separate rows under the same global
+  // `gaming` category row. The person_slack_id column ("owner" or a
+  // colleague's Slack id) is the identity axis for all topic tracking.
   db.exec(`
-    -- Fixed list of 30 top-level interest categories seeded per owner on first
-    -- startup. No new categories are created at runtime. care_level starts
-    -- 'unknown' and migrates based on signal accumulation across the topics
-    -- under it (code-driven, not prompt-driven).
+    -- Global fixed list of 30 top-level interest categories. Seeded once on
+    -- startup, no new categories ever created at runtime. Shared across
+    -- everyone Maelle tracks (owner + colleagues).
     CREATE TABLE IF NOT EXISTS social_categories (
       id                TEXT PRIMARY KEY,
-      owner_user_id     TEXT NOT NULL,
+      owner_user_id     TEXT NOT NULL DEFAULT 'global',
       label             TEXT NOT NULL,
       care_level        TEXT NOT NULL DEFAULT 'unknown',
-      -- unknown | low | medium | high — moves slowly via signal aggregation
       signals_positive  INTEGER NOT NULL DEFAULT 0,
       signals_negative  INTEGER NOT NULL DEFAULT 0,
       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
@@ -318,46 +323,67 @@ function initSchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_social_categories_owner ON social_categories(owner_user_id);
 
-    -- Topics live UNDER a category. Created on first mention (by owner or by
-    -- Maelle). engagement_score drives lifecycle: starts at 3, moves with
-    -- engagements, weekly -1 decay on untouched actives, floor at 0 flips
-    -- status to 'dormant'. Dormant rows stay (category-level memory retained)
-    -- — Maelle can't raise them, owner can revive by re-mentioning.
+    -- Topics live UNDER a (global) category AND are scoped per-person.
+    -- Created on first mention (by the person or by Maelle). engagement_score
+    -- drives lifecycle: starts at 3-5, moves with engagements, weekly -1 decay
+    -- on untouched actives, floor at 0 flips status to 'dormant'.
     CREATE TABLE IF NOT EXISTS social_topics_v2 (
       id                TEXT PRIMARY KEY,
-      owner_user_id     TEXT NOT NULL,
+      owner_user_id     TEXT NOT NULL,    -- the owner whose world this topic lives in
+      person_slack_id   TEXT NOT NULL DEFAULT '',   -- whom this topic is about (owner id or colleague id)
       category_id       TEXT NOT NULL,
       label             TEXT NOT NULL,
       engagement_score  INTEGER NOT NULL DEFAULT 3,
       status            TEXT NOT NULL DEFAULT 'active',   -- active | dormant
       last_touched_at   TEXT NOT NULL DEFAULT (datetime('now')),
-      last_touched_by   TEXT NOT NULL DEFAULT 'owner',    -- owner | maelle
+      last_touched_by   TEXT NOT NULL DEFAULT 'owner',    -- 'owner' | 'maelle' | 'colleague'
       raised_count      INTEGER NOT NULL DEFAULT 1,
       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_social_topics_v2_owner ON social_topics_v2(owner_user_id, status);
     CREATE INDEX IF NOT EXISTS idx_social_topics_v2_cat ON social_topics_v2(category_id);
+    CREATE INDEX IF NOT EXISTS idx_social_topics_v2_person ON social_topics_v2(person_slack_id, status);
 
-    -- Append-only engagement log. One row per social exchange. Enables rate-
-    -- limit checks ("did Maelle already use today's slot?"), score auditing,
-    -- and weekly decay pass ("which topics went 7+ days without an entry?").
+    -- Append-only engagement log. One row per social exchange, scoped per-person.
     CREATE TABLE IF NOT EXISTS social_engagements (
-      id            TEXT PRIMARY KEY,
-      owner_user_id TEXT NOT NULL,
-      topic_id      TEXT,        -- null when engagement is category-level only
-      category_id   TEXT NOT NULL,
-      direction     TEXT NOT NULL,
-      -- owner_initiated | maelle_initiated | owner_response | maelle_response
-      signal        TEXT NOT NULL DEFAULT 'none',
+      id              TEXT PRIMARY KEY,
+      owner_user_id   TEXT NOT NULL,
+      person_slack_id TEXT NOT NULL DEFAULT '',
+      topic_id        TEXT,
+      category_id     TEXT NOT NULL,
+      direction       TEXT NOT NULL,
+      -- owner_initiated | colleague_initiated | maelle_initiated |
+      -- owner_response | colleague_response | maelle_response
+      signal          TEXT NOT NULL DEFAULT 'none',
       -- positive | neutral | negative | none
-      score_delta   INTEGER NOT NULL DEFAULT 0,
-      turn_ref      TEXT,        -- thread_ts or similar — audit trail
-      created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+      score_delta     INTEGER NOT NULL DEFAULT 0,
+      turn_ref        TEXT,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_social_engagements_owner ON social_engagements(owner_user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_social_engagements_topic ON social_engagements(topic_id);
+    CREATE INDEX IF NOT EXISTS idx_social_engagements_person ON social_engagements(person_slack_id, created_at DESC);
   `);
+
+  // v2.2.1 — migrate existing per-owner category rows to the new GLOBAL
+  // scope. Idempotent: if we've already migrated, the DELETE matches 0 rows.
+  // Owner OK'd a social-data reset, so we wipe category rows + stale topic
+  // rows that lack person_slack_id (migration stamp) and the startup seed
+  // re-creates the global 30.
+  try { db.exec(`ALTER TABLE social_topics_v2 ADD COLUMN person_slack_id TEXT NOT NULL DEFAULT ''`); } catch (_) {}
+  try { db.exec(`ALTER TABLE social_engagements ADD COLUMN person_slack_id TEXT NOT NULL DEFAULT ''`); } catch (_) {}
+  // Any pre-2.2.1 topic row has empty person_slack_id. Set it to owner_user_id
+  // so it stays attached to the owner (the only scope in 2.2.0).
+  try {
+    db.prepare(`UPDATE social_topics_v2 SET person_slack_id = owner_user_id WHERE person_slack_id = ''`).run();
+    db.prepare(`UPDATE social_engagements SET person_slack_id = owner_user_id WHERE person_slack_id = ''`).run();
+  } catch (_) {}
+  // Wipe old per-owner category rows so the global-scope seed is clean.
+  // Safe — the global seed immediately re-creates the 30 labels.
+  try {
+    db.prepare(`DELETE FROM social_categories WHERE owner_user_id != 'global'`).run();
+  } catch (_) {}
 
   // Routines — recurring instructions that run automatically on a schedule
   db.exec(`
