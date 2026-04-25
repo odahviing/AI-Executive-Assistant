@@ -75,6 +75,14 @@ function buildSkillMap(): Map<SkillId, Skill> {
         return new KnowledgeBaseSkill();
       },
     },
+    {
+      id: 'persona',
+      loader: () => {
+        // v2.2.3 (#3) — togglable social / off-topic chat layer.
+        const { PersonaSkill } = require('./persona');
+        return new PersonaSkill();
+      },
+    },
   ];
 
   const map = new Map<SkillId, Skill>();

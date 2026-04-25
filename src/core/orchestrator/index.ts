@@ -183,6 +183,19 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
     preview: userMessage.slice(0, 80),
   });
 
+  // v2.2.3 — clear the proactive-ping anti-spam lock when a colleague sends
+  // an inbound message. Their reply (to anything — the prior proactive ping
+  // itself, a task-driven DM Maelle sent, or a fresh ask of their own) is the
+  // signal they're engaged. Outbound messages Maelle sends DON'T clear the
+  // lock — only a real inbound from them.
+  if (input.senderRole === 'colleague' && input.userId) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { clearProactivePendingOnInbound } = require('../../db') as typeof import('../../db');
+      clearProactivePendingOnInbound(input.userId);
+    } catch (_) { /* never block message handling */ }
+  }
+
   // v1.6.2 — claim-checker retry path: allow appending a one-shot nudge to the
   // current user message so the model knows why it's being re-invoked. Never
   // persisted to conversation history (callers pass it as extraInstruction
@@ -191,18 +204,19 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
     ? `${userMessage}\n\n[SYSTEM NOTE — not from ${profile.user.name.split(' ')[0]}: ${input.extraInstruction}]`
     : userMessage;
 
-  // v2.2.1 — Social Engine pre-pass. Runs on BOTH owner AND colleague turns.
-  // Classifier tags kind (task/social/other). Reconciler finds/creates a
-  // topic scoped to the person (owner or colleague) of this turn. State
-  // machine produces a directive. Directive is injected into the system
-  // prompt; Sonnet phrases. Task always wins.
+  // v2.2.3 (#3) — Social Engine pre-pass GATED on the persona skill being
+  // active in this profile. When persona is off, skip the classifier Sonnet
+  // call entirely + leave directive empty — saves an API call per turn and
+  // keeps the prompt clean of social context. Read fresh per turn so a YAML
+  // edit takes effect on the next message (no caching).
   let socialDirective: SocialDirective = noDirective();
   let socialClassification: OwnerIntentClassification | null = null;
   const isOwnerTurn = input.senderRole === 'owner' || input.isOwnerInGroup === true;
   // person-of-the-turn: owner id on owner turns, colleague id on colleague turns
   const turnPersonSlackId = isOwnerTurn ? profile.user.slack_user_id : input.userId;
   const turnSenderRole: 'owner' | 'colleague' = isOwnerTurn ? 'owner' : 'colleague';
-  if (userMessage && userMessage.trim().length > 1) {
+  const personaActive = (profile.skills as any)?.persona === true;
+  if (personaActive && userMessage && userMessage.trim().length > 1) {
     try {
       // Give the classifier the last few turns so it can detect "Maelle just
       // asked a social question and they answered" (→ conversation_state=open)
@@ -357,10 +371,11 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
   }
 
   // Social engagement context — colleague-rapport memory (people_memory-based).
-  // v2.2 — only injected on COLLEAGUE turns now. Owner turns use the new
-  // Social Engine directive below instead; the two systems serve different
-  // layers (owner ↔ Maelle vs Maelle ↔ colleague).
-  const socialBlock = isOwnerTurn
+  // v2.2 — only injected on COLLEAGUE turns. Owner turns use the new Social
+  // Engine directive below instead.
+  // v2.2.3 (#3) — also gated on persona skill being on. With persona off,
+  // colleague turns get no social context block (Maelle stays task-only).
+  const socialBlock = (isOwnerTurn || !personaActive)
     ? ''
     : buildSocialContextBlock(input.userId, input.profile.user.timezone);
 
@@ -1126,8 +1141,12 @@ Rules:
   // someone. That's the right time to weave in social if the 24h cadence
   // gate passes. One short additional sentence appended to the task reply.
   // Never hijacks the task response; always starts with the task.
+  // v2.2.3 (#3) — task-coda piggyback also gated on persona being active.
+  // socialClassification will be null when persona is off, but belt-and-
+  // suspenders the explicit check too.
   if (
-    socialClassification?.kind === 'task'
+    personaActive
+    && socialClassification?.kind === 'task'
     && finalReply
     && finalReply.trim().length > 0
     && toolCallSummaries.length > 0

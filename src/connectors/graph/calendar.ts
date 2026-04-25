@@ -383,12 +383,32 @@ export async function findAvailableSlots(params: {
   // v1.6.4 — auto-expand search until we have ≥3 slots or hit maxSearchDays
   autoExpand?: boolean;            // default true
   maxSearchDays?: number;          // default 21
+  // v2.2.3 (#43) — opt-in deeper search. By default we only filter slots
+  // against the OWNER's busy time + each attendee's working window (cheap, no
+  // assumptions about which of the attendee's meetings are movable). When the
+  // recipient explicitly opts in to "find a time I'm free," pass their email
+  // here to also subtract their busy time from the candidate pool.
+  attendeeBusyEmails?: string[];
+  // v2.2.3 (#43) — per-attendee working windows. Slots that fall outside ANY
+  // listed attendee's workdays / hoursStart..hoursEnd (in their own TZ) are
+  // dropped before Graph cost. Empty / omitted → no clipping.
+  attendeeAvailability?: Array<{
+    email: string;
+    timezone: string;          // IANA
+    workdays: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
+    hoursStart: string;        // 'HH:MM'
+    hoursEnd: string;
+  }>;
 }): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other' }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
   const maxSearchDays = params.maxSearchDays ?? 21;
   const travelBufferMs = (params.travelBufferMinutes ?? 0) * 60 * 1000;
-  const allEmails = [params.userEmail, ...params.attendeeEmails];
+  // v2.2.3 (#43) — owner-only by default for the busy filter. Don't assume
+  // we can / should move attendee meetings. Their work-window clips below.
+  // Opt-in deeper search: caller passes attendeeBusyEmails after recipient
+  // says "yes look at my calendar."
+  const busyFilterEmails = [params.userEmail, ...(params.attendeeBusyEmails ?? [])];
 
   // v1.6.4 — auto-expand loop. Start with the caller's window; if we find
   // fewer than 3 candidates (empirically the point at which pickSpreadSlots
@@ -406,7 +426,7 @@ export async function findAvailableSlots(params: {
     const windowFrom = params.searchFrom;
     const windowTo = currentTo.toISO()!;
 
-    const busyMap = await getFreeBusy(params.userEmail, allEmails, windowFrom, windowTo, params.timezone);
+    const busyMap = await getFreeBusy(params.userEmail, busyFilterEmails, windowFrom, windowTo, params.timezone);
 
     // v2.0.3 — Graph's getSchedule returns scheduleItems in UTC (the ISO
     // strings have no timezone suffix and are NOT in the request timezone).
@@ -490,8 +510,11 @@ export async function findAvailableSlots(params: {
     // getFreeBusy gives status-only, no subjects; to detect a block we need
     // subject/category. One fetch, cached for the whole slot walk.
     // Non-fatal: if this fails, blocks are treated as non-elastic (safer).
+    // v2.2.3 (scenario 9 row 7) — also used for the all-day-busy block
+    // injection below, so fetch whenever a profile is available, not only
+    // when floating blocks are configured.
     let ownerEventsForFb: CalendarEvent[] = [];
-    if (profile && floatingBlocks.length > 0) {
+    if (profile) {
       try {
         ownerEventsForFb = await getCalendarEvents(
           params.userEmail,
@@ -502,9 +525,34 @@ export async function findAvailableSlots(params: {
       } catch (err) {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const logger = require('../../utils/logger').default;
-        logger.warn('findAvailableSlots — owner-events fetch failed, floating blocks treated as non-elastic', {
+        logger.warn('findAvailableSlots — owner-events fetch failed', {
           err: String(err),
         });
+      }
+    }
+
+    // v2.2.3 (scenario 9 row 7) — all-day busy events should block their
+    // entire day. Owner direction:
+    //   isAllDay && showAs === 'free'  → ignore (already handled, getFreeBusy
+    //                                     filters status='free' at line 420)
+    //   isAllDay && showAs !== 'free'  → block the entire day
+    // Graph getFreeBusy SHOULD return all-day busy as full-day busy intervals,
+    // but this is the belt-and-suspenders pass — explicit + deterministic.
+    // Pushing duplicate ranges into allBusy is idempotent (slot walker just
+    // checks for overlap).
+    if (ownerEventsForFb.length > 0) {
+      for (const evt of ownerEventsForFb) {
+        if (!evt.isAllDay) continue;
+        if (evt.isCancelled) continue;
+        if (evt.showAs === 'free') continue;  // PTO marked free / WFH "available" / etc
+        // All-day busy / oof / tentative / workingElsewhere → full-day block.
+        // Graph all-day events span midnight-to-midnight in their declared zone;
+        // parse and treat as the whole local day.
+        const dayStart = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' })
+          .setZone(params.timezone).startOf('day').toJSDate();
+        const dayEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
+          .setZone(params.timezone).endOf('day').toJSDate();
+        allBusy.push({ start: dayStart, end: dayEnd });
       }
     }
 
@@ -634,6 +682,36 @@ export async function findAvailableSlots(params: {
       if (!isFree) {
         cursor = new Date(cursor.getTime() + step);
         continue;
+      }
+      // v2.2.3 (#43) — per-attendee work-window clip. Drop slots that fall
+      // outside ANY attendee's working window in their own TZ. No Graph cost
+      // (pure math against people_memory data threaded in by the caller).
+      // Attendees with no availability data are skipped (no clip — back-compat).
+      if (params.attendeeAvailability && params.attendeeAvailability.length > 0) {
+        const slotOutsideAnyAttendee = params.attendeeAvailability.some(att => {
+          try {
+            const attStart = DateTime.fromJSDate(cursor).setZone(att.timezone);
+            const attEnd = DateTime.fromJSDate(slotEnd).setZone(att.timezone);
+            if (!attStart.isValid || !attEnd.isValid) return false;
+            const attDay = attStart.toFormat('EEEE') as 'Sunday'|'Monday'|'Tuesday'|'Wednesday'|'Thursday'|'Friday'|'Saturday';
+            if (!att.workdays.includes(attDay)) return true;  // outside their workdays
+            // Compare HH:MM as minutes-of-day in attendee TZ
+            const [shH, shM] = att.hoursStart.split(':').map(Number);
+            const [ehH, ehM] = att.hoursEnd.split(':').map(Number);
+            const startMin = attStart.hour * 60 + attStart.minute;
+            const endMin = attEnd.hour * 60 + attEnd.minute;
+            const winStart = shH * 60 + shM;
+            const winEnd = ehH * 60 + ehM;
+            // Slot must START at or after winStart AND END at or before winEnd
+            return startMin < winStart || endMin > winEnd;
+          } catch {
+            return false;  // any parse error → don't filter on this attendee
+          }
+        });
+        if (slotOutsideAnyAttendee) {
+          cursor = new Date(cursor.getTime() + step);
+          continue;
+        }
       }
       if (profile) {
         // v1.6.11 — threshold depends on whether this is an office or home day

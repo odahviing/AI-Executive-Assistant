@@ -299,6 +299,14 @@ function initSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE people_memory ADD COLUMN gender_set_by TEXT`); } catch (_) {}
   try { db.exec(`ALTER TABLE people_memory ADD COLUMN working_hours_auto TEXT`); } catch (_) {}
 
+  // v2.2.3 — proactive ping anti-spam lock. Set when socialOutreachTick sends
+  // a proactive ping; cleared ONLY when the person sends an inbound message
+  // (their reply to anything — proactive or task-driven). Outbound messages
+  // (including Maelle's task-driven DMs to them) DON'T clear the lock — only
+  // a real signal from them that they're engaged. Filtered out of pickCandidate
+  // so no second proactive ping until they respond.
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN proactive_pending INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
+
   // v2.2 — audit trail for engagement_rank changes. Small table so we can
   // answer "why is Ysrael at rank 0?". Reasons: no_reply / reply_engaged /
   // reply_brief / colleague_initiated / colleague_deflected / owner_directive.

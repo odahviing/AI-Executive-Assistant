@@ -50,6 +50,7 @@ interface CandidateRow {
   interaction_log: string;
   notes: string;
   profile_json: string;
+  proactive_pending: number;  // 0 | 1 — anti-spam lock from a prior unanswered ping
 }
 
 interface ProactiveConfig {
@@ -116,6 +117,10 @@ function pickCandidate(
     if (r.slack_id === ownerSlackId) return false;
     if (!r.timezone) return false;
     if ((r.engagement_rank ?? 2) <= 0) return false;
+
+    // v2.2.3 — anti-spam: don't ping again until they reply to the prior ping.
+    // The lock cleared automatically on any inbound message from them.
+    if (r.proactive_pending === 1) return false;
 
     // Must have a fresh interaction (≤ 48h) — covers both social and any
     // other recent activity (meeting, message, conversation). Old contacts
@@ -255,6 +260,18 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
   };
 
   try {
+    // v2.2.3 (#3) — short-circuit when the persona skill is off in this profile.
+    // No proactive social engagement at all (which is what this whole tick is
+    // for). Don't even reschedule — tick dies out naturally; if owner flips
+    // persona back on, the catch-up startup hook will re-seed.
+    const personaActive = (profile.skills as any)?.persona === true;
+    if (!personaActive) {
+      logger.debug('social_outreach_tick skipped — persona skill off', {
+        ownerUserId: profile.user.slack_user_id,
+      });
+      return;
+    }
+
     if (!cfg.enabled) {
       logger.debug('social_outreach_tick skipped — disabled in profile', {
         ownerUserId: profile.user.slack_user_id,
@@ -273,7 +290,7 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
     const db = getDb();
     const rows = db.prepare(`
       SELECT slack_id, name, timezone, engagement_rank, last_initiated_at, last_social_at,
-             interaction_log, notes, profile_json
+             interaction_log, notes, profile_json, proactive_pending
       FROM people_memory
     `).all() as CandidateRow[];
 
@@ -344,12 +361,14 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
       ref: outcome.ref ?? null,
     });
 
-    // Update people_memory last_social_at + last_initiated_at
+    // Update people_memory last_social_at + last_initiated_at + flip the
+    // anti-spam lock on. Cleared next time the person sends an inbound message.
     db.prepare(`
       UPDATE people_memory
-      SET last_social_at = datetime('now'),
+      SET last_social_at    = datetime('now'),
           last_initiated_at = datetime('now'),
-          updated_at = datetime('now')
+          proactive_pending = 1,
+          updated_at        = datetime('now')
       WHERE slack_id = ?
     `).run(pick.slack_id);
 

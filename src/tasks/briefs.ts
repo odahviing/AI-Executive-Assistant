@@ -479,6 +479,28 @@ export async function sendMorningBriefing(
     }
   }
 
+  // v2.2.3 (scenario 7 row 1) — sweep DB for artifacts pointing at meetings
+  // that have vanished from the calendar (organizer cancelled externally).
+  // Cascade fires the standard closeMeetingArtifacts cleanup so the brief
+  // doesn't surface "needs your input" for events that no longer exist.
+  // Best-effort: never throws, never blocks brief generation.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { cleanupVanishedMeetingArtifacts } = require('../utils/cleanupVanishedMeetingArtifacts') as
+      typeof import('../utils/cleanupVanishedMeetingArtifacts');
+    const swept = await cleanupVanishedMeetingArtifacts({
+      ownerUserId,
+      ownerEmail: profile.user.email,
+    });
+    if (swept.cleaned > 0) {
+      logger.info('Brief pre-pass: closed orphan artifacts for vanished meetings', {
+        ownerUserId, ...swept,
+      });
+    }
+  } catch (err) {
+    logger.warn('Brief pre-pass cleanup threw — continuing', { err: String(err).slice(0, 200) });
+  }
+
   // Collect everything that's happened / in-flight
   const { items, outreachIds, coordIds, completedTaskIds, peopleGender, outreachToClose } = await collectBriefingData(ownerUserId, profile.user.timezone, profile);
 

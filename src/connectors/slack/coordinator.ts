@@ -33,7 +33,7 @@ import {
 import { findAvailableSlots, pickSpreadSlots } from '../graph/calendar';
 import { initiateCoordination } from '../../skills/meetings/coord/state';
 import { determineSlotLocation, type SlotWithLocation } from '../../skills/meetings/coord/utils';
-import { searchPeopleMemory } from '../../db/people';
+import { searchPeopleMemory, getPersonMemory } from '../../db/people';
 import logger from '../../utils/logger';
 
 // ── Working-hour helpers ─────────────────────────────────────────────────────
@@ -395,6 +395,33 @@ export async function handleOutreachReply(
         ...schedule.home_days.days,
       ] as string[];
 
+      // v2.2.3 (#43) — build per-attendee work window from people_memory
+      // (effective working hours: manual override → auto from TZ default).
+      // Slots that fall outside an attendee's window get clipped pre-Graph,
+      // so Maelle never proposes 03:30 ET to someone in Boston.
+      const attendeeAvailability: NonNullable<Parameters<typeof findAvailableSlots>[0]['attendeeAvailability']> = [];
+      if (colleagueEmail) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getEffectiveWorkingHours } = require('../../utils/workingHoursDefault') as
+            typeof import('../../utils/workingHoursDefault');
+          const personRow = job.colleague_slack_id ? getPersonMemory(job.colleague_slack_id) : null;
+          if (personRow) {
+            const wh = getEffectiveWorkingHours(personRow);
+            const tz = personRow.timezone;
+            if (wh && tz) {
+              attendeeAvailability.push({
+                email: colleagueEmail,
+                timezone: tz,
+                workdays: wh.workdays,
+                hoursStart: wh.hoursStart,
+                hoursEnd: wh.hoursEnd,
+              });
+            }
+          }
+        } catch (_) { /* fail open — no clip on this attendee */ }
+      }
+
       const slots = await findAvailableSlots({
         userEmail: params.profile.user.email,
         timezone: ownerTz,
@@ -410,6 +437,10 @@ export async function handleOutreachReply(
         meetingMode: 'either',  // coord outreach — location determined later
         autoExpand: false,
         profile: params.profile,
+        // v2.2.3 (#43) — owner-only busy filter by default (no
+        // attendeeBusyEmails). Attendee status is annotated on chosen slots
+        // separately, post-pick. Recipient can opt in to deeper search later.
+        attendeeAvailability: attendeeAvailability.length > 0 ? attendeeAvailability : undefined,
       });
 
       if (slots.length === 0) {

@@ -377,11 +377,63 @@ async function sendCoordDM(
     hasLastSeen,
   });
 
+  // v2.2.3 (#43) — annotate each slot with this participant's status
+  // (free / busy / tentative / oof) at that exact time. ONE getFreeBusy call
+  // per attendee covering the proposed range. Lets the recipient decide
+  // without Maelle assuming any of their meetings are movable.
+  let slotStatuses: import('../../../utils/annotateSlotsWithAttendeeStatus').AnnotatedSlot<{ start: string; end: string }>[] = [];
+  if (params.participant.email) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { annotateSlotsWithAttendeeStatus } = require('../../../utils/annotateSlotsWithAttendeeStatus') as
+        typeof import('../../../utils/annotateSlotsWithAttendeeStatus');
+      slotStatuses = await annotateSlotsWithAttendeeStatus({
+        slots: params.proposedSlots.map(s => ({ start: s.start, end: s.end })),
+        attendeeEmail: params.participant.email,
+        callerEmail: params.profile.user.email,
+        timezone: params.profile.user.timezone,
+      });
+    } catch (err) {
+      logger.warn('coord DM: status annotation failed — proceeding without tags', {
+        attendee: params.participant.name, err: String(err).slice(0, 200),
+      });
+    }
+  }
+  const statusByStart = new Map(slotStatuses.map(a => [a.slot.start, a.attendeeStatus]));
+
+  // v2.2.3 (#43) — cross-TZ dual rendering. When attendee TZ differs from
+  // owner TZ, show BOTH times so they can quickly see what time it'll be on
+  // each side. Same TZ → owner-time-only (current behavior).
+  const ownerTz = params.profile.user.timezone;
+  const showDualTz = !!params.participant.tz && params.participant.tz !== ownerTz;
+  const ownerFirst = params.ownerName.split(' ')[0];
+
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { statusTag } = require('../../../utils/annotateSlotsWithAttendeeStatus') as
+    typeof import('../../../utils/annotateSlotsWithAttendeeStatus');
+
   const slotLines = params.proposedSlots.map((s, i) => {
     const dt = DateTime.fromISO(s.start).setZone(params.participant.tz);
     const locLabel = s.location ? ` — ${s.location}` : '';
-    return `${i + 1}. ${dt.toFormat('EEEE, d MMMM')} at ${dt.toFormat('HH:mm')}${locLabel}`;
+    const dualTz = showDualTz
+      ? ` / ${DateTime.fromISO(s.start).setZone(ownerTz).toFormat('HH:mm')} ${ownerFirst}'s time`
+      : '';
+    const status = statusByStart.get(s.start);
+    const tag = status ? statusTag(status) : '';
+    const tagPart = tag ? ` (${tag})` : '';
+    return `${i + 1}. ${dt.toFormat('EEEE, d MMMM')} at ${dt.toFormat('HH:mm')}${dualTz}${tagPart}${locLabel}`;
   }).join('\n');
+
+  // v2.2.3 (#43) — when ALL proposed slots show busy/oof for this participant,
+  // offer a one-sentence opt-in to search their calendar. Internal-only —
+  // never offer this to externals (calendar access norms differ + feels invasive).
+  const ownerDomain = params.profile.user.email.split('@')[1];
+  const isInternal = !!params.participant.email && params.participant.email.endsWith(`@${ownerDomain}`);
+  const allBusyOrOof = slotStatuses.length > 0
+    && slotStatuses.every(a => a.attendeeStatus === 'busy' || a.attendeeStatus === 'oof');
+  const optInLine = (isInternal && allBusyOrOof)
+    ? '\n\nLooks like all three are busy on your end — want me to look for times you\'re free?'
+    : '';
 
   const othersLine = params.otherParticipants.length > 0
     ? ` (along with ${params.otherParticipants.join(' and ')})`
@@ -398,9 +450,9 @@ async function sendCoordDM(
     const conflictClause = params.moveContext.conflictReason
       ? ` — ${params.moveContext.conflictReason}`
       : '';
-    body = `small scheduling conflict on ${params.ownerName}'s side for our "${params.subject}"${othersLine}${conflictClause}. Any chance we shift it from ${curLabel}? Here are a few options that work for him:\n${slotLines}\n\nWhich of these works for you? (Happy to suggest other times if none fit.)`;
+    body = `small scheduling conflict on ${params.ownerName}'s side for our "${params.subject}"${othersLine}${conflictClause}. Any chance we shift it from ${curLabel}? Here are a few options that work for him:\n${slotLines}${optInLine}\n\nWhich of these works for you? (Happy to suggest other times if none fit.)`;
   } else {
-    body = `${params.ownerName} asked me to find a time for a ${params.durationMin}-min meeting with you${othersLine}.${topicLine}\n\nHere are a few options — which works best for you?\n${slotLines}\n\nLet me know which one you prefer, or if none of these work I'll find something else.`;
+    body = `${params.ownerName} asked me to find a time for a ${params.durationMin}-min meeting with you${othersLine}.${topicLine}\n\nHere are a few options — which works best for you?\n${slotLines}${optInLine}\n\nLet me know which one you prefer, or if none of these work I'll find something else.`;
   }
 
   const message = `${introLine}${body}`;

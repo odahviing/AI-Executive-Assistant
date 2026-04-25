@@ -136,6 +136,42 @@ export interface PersonMemory {
 const SET_BY_RANK: Record<CoreFieldSetBy, number> = { owner: 3, person: 2, auto: 1 };
 
 /**
+ * v2.2.3 — proactive ping anti-spam lock.
+ *
+ * setProactivePending(slackId)   → fired by socialOutreachTick after a
+ *                                   proactive ping is sent. Locks the person
+ *                                   out of further proactive pings.
+ * clearProactivePendingOnInbound → fired ONLY on a real inbound message from
+ *                                   the person. Their reply (to anything —
+ *                                   the proactive ping itself, or a separate
+ *                                   task-driven DM Maelle sent) is the signal
+ *                                   that they're engaged again.
+ *
+ * Outbound messages Maelle sends (task-driven message_colleague, coord DM,
+ * a second proactive ping) DO NOT clear the lock. Only an inbound from them.
+ *
+ * isProactivePending(slackId)    → read; pickCandidate filters with this.
+ */
+export function setProactivePending(slackId: string): void {
+  const db = getDb();
+  db.prepare(`UPDATE people_memory SET proactive_pending = 1, updated_at = datetime('now') WHERE slack_id = ?`).run(slackId);
+}
+
+export function clearProactivePendingOnInbound(slackId: string): void {
+  if (!slackId) return;
+  const db = getDb();
+  db.prepare(`UPDATE people_memory SET proactive_pending = 0, updated_at = datetime('now') WHERE slack_id = ? AND proactive_pending = 1`).run(slackId);
+}
+
+export function isProactivePending(slackId: string): boolean {
+  const db = getDb();
+  const row = db.prepare(`SELECT proactive_pending FROM people_memory WHERE slack_id = ?`).get(slackId) as
+    | { proactive_pending: number | null }
+    | undefined;
+  return !!(row && row.proactive_pending === 1);
+}
+
+/**
  * v2.2.2 (#46) — single choke-point for writing core attendee fields with
  * provenance enforcement. Returns true when the write happened.
  *
@@ -440,6 +476,11 @@ export function searchPeopleMemory(query: string): PersonMemory[] {
 export function formatPeopleMemoryForPrompt(
   ownerSlackId: string,
   focusSlackIds?: Set<string>,
+  // v2.2.3 (#3) — when persona skill is OFF, render a slim contact line:
+  // identity + tz + state + email + gender, no social fields, no notes,
+  // no interaction log. Defaults to true so legacy callers preserve current
+  // verbose behavior.
+  includeSocial: boolean = true,
 ): string {
   const db = getDb();
   // Exclude the owner AND Maelle's own synthetic SELF:<owner> row (her row is
@@ -463,38 +504,37 @@ export function formatPeopleMemoryForPrompt(
       try { return JSON.parse(p.profile_json || '{}'); } catch { return {}; }
     })();
 
-    const socialLine = p.last_social_at
-      ? `last social: ${p.last_social_at.split('T')[0]}${p.last_social_at.startsWith(today) ? ' (today)' : ''}`
-      : 'no social exchange yet';
+    const stateTag = p.state ? `, state: ${p.state}` : '';
 
-    // Format topics with quality signal. Show subject when present so the LLM
-    // can distinguish "hobby: clair obscur" from "hobby: woodworking".
-    const topicStr = socialTopics.length
+    // v2.2.3 (#3) — social fields (last_social_at, topics) only rendered when
+    // persona skill is on. Off mode = pure operational identity line.
+    const socialLine = includeSocial
+      ? (p.last_social_at
+          ? `last social: ${p.last_social_at.split('T')[0]}${p.last_social_at.startsWith(today) ? ' (today)' : ''}`
+          : 'no social exchange yet')
+      : '';
+    const topicStr = includeSocial && socialTopics.length
       ? socialTopics.map(t => {
           const label = t.subject ? `${t.name}:${t.subject}` : t.name;
           return `${label}(${t.quality})`;
         }).join(', ')
       : '';
-
-    // v2.2.2 (#46) — `missing:` tag dropped per owner direction. Don't
-    // visibility-pressure asking; Slack auto-pull fills most of these silently
-    // and the LEARNING rules cover when an explicit ask is appropriate.
-    // State (v2.2.2) shown when known.
-    const stateTag = p.state ? `, state: ${p.state}` : '';
+    const socialPart = includeSocial ? `, ${socialLine}${topicStr ? `, topics: ${topicStr}` : ''}` : '';
 
     const parts: string[] = [
-      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${p.timezone ? `, tz: ${p.timezone}` : ''}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}, ${socialLine}${topicStr ? `, topics: ${topicStr}` : ''})`,
+      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${p.timezone ? `, tz: ${p.timezone}` : ''}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}${socialPart})`,
     ];
 
-    // Profile dimensions moved to per-person markdown files (v2.2.1). The
-    // catalog + get_person_memory tool surface these on-demand instead of
-    // bloating every owner prompt. Fields still persisted for code paths that
-    // read them deterministically (e.g. timezone for scheduling).
+    // Profile dimensions moved to per-person markdown files (v2.2.1). Fields
+    // still persisted for code paths that read them deterministically.
     void profile;
 
-    // Personal/relationship notes — all of them
-    for (const n of notes) {
-      parts.push(`  ★ [${n.date}] ${n.note}`);
+    // Personal/relationship notes — only when persona is on (the notes are
+    // social context: hobbies, life events, relationship-building bits).
+    if (includeSocial) {
+      for (const n of notes) {
+        parts.push(`  ★ [${n.date}] ${n.note}`);
+      }
     }
 
     // Activity timeline. v1.6.14 — show last 30 entries ONLY for contacts
@@ -503,14 +543,18 @@ export function formatPeopleMemoryForPrompt(
     // ~100-token exchanges can add 3k tokens to every owner turn; capping
     // non-focus at 10 saves a lot without losing context for people Maelle
     // is actively talking to.
+    // v2.2.3 (#3) — interaction log is operational + social mixed; kept on
+    // both modes but trimmed harder when persona off (focus contacts only).
     const isFocus = focusSlackIds?.has(p.slack_id) ?? false;
-    const entryCap = isFocus ? 30 : 10;
-    const log: PersonInteraction[] = (() => {
-      try { return JSON.parse(p.interaction_log || '[]'); } catch { return []; }
-    })();
-    for (const i of log.slice(-entryCap)) {
-      const d = i.date.split('T')[0];
-      parts.push(`  ↳ [${d}] ${i.type}: ${i.summary}`);
+    const entryCap = includeSocial ? (isFocus ? 30 : 10) : (isFocus ? 10 : 0);
+    if (entryCap > 0) {
+      const log: PersonInteraction[] = (() => {
+        try { return JSON.parse(p.interaction_log || '[]'); } catch { return []; }
+      })();
+      for (const i of log.slice(-entryCap)) {
+        const d = i.date.split('T')[0];
+        parts.push(`  ↳ [${d}] ${i.type}: ${i.summary}`);
+      }
     }
 
     return parts.join('\n');

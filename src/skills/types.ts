@@ -61,6 +61,7 @@ export type SkillId =
   | 'whatsapp'
   | 'search'
   | 'research'
+  | 'persona'             // v2.2.3 (#3) — social engine, off-topic chat, proactive outreach
   // legacy aliases — auto-migrated at load time, kept so old YAMLs still boot
   | 'scheduling'          // → meetings
   | 'coordination'        // → meetings

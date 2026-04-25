@@ -2,6 +2,58 @@
 
 ---
 
+## 2.2.3 — Persona toggle (#3) + attendee availability (#43) + 5 scenario fixes
+
+Big patch: closes #3 and #43, plus inline fixes for scenarios 7-9 surfaced this session, plus a real lunch-detection bug from your screenshot.
+
+### Added
+
+**Persona skill (#3)** — togglable social / off-topic chat layer. New `src/skills/persona.ts`. `skills.persona: true | false` (default false). When ON: Social Engine pre-pass, `note_about_person`/`note_about_self` tools, social directive prompt block, social context block in prompt, social outreach tick + decay tasks. When OFF: strictly business — none of the above fires. Read fresh per turn (YAML edit takes effect on next message). Idan's profile flipped to `true` to preserve current behavior.
+
+**Attendee availability honored in slot search (#43)** — owner direction adopted: don't assume attendee meetings are movable. New shape:
+- `findAvailableSlots` accepts `attendeeAvailability[]` (work-window per attendee in their TZ) — slots outside any attendee's window dropped pre-Graph (pure math, no API cost).
+- `findAvailableSlots` accepts `attendeeBusyEmails[]` for opt-in deeper search (default: owner-only busy filter).
+- New `src/utils/annotateSlotsWithAttendeeStatus.ts` — one getFreeBusy call per attendee, returns each slot tagged `free / busy / tentative / oof / unknown`.
+- Coord caller (`connectors/slack/coordinator.ts`) builds availability from people_memory (`getEffectiveWorkingHours`) and threads through.
+- Coord DM render: slot lines now show `(looks free)` / `(you look busy)` / `(you're out of office)` tags. Cross-TZ shows BOTH times: `"Wed 14:00 / 19:00 Idan's time"`.
+- All-busy + internal participant → DM appends opt-in offer: *"Looks like all three are busy on your end — want me to look for times you're free?"* Externals never see this offer.
+
+**Anti-spam lock for proactive social** — new `proactive_pending` column + `setProactivePending` / `clearProactivePendingOnInbound`. When socialOutreachTick sends a proactive ping, the lock flips on. Cleared ONLY by inbound message from that person — outbound (task-driven DM Maelle sends) doesn't clear. Filtered out of `pickCandidate` so no second cold ping until they respond.
+
+**Cleanup cascade for externally-cancelled meetings** (scenario 7 row 1) — new `src/utils/cleanupVanishedMeetingArtifacts.ts`. Brief pre-pass sweeps owner's pending approvals / open follow_up tasks / in-flight reschedule outreach. For each referenced meeting_id, calls `verifyEventDeleted`. Gone from Graph → fires the existing `closeMeetingArtifacts` cascade. Brief no longer surfaces "needs your input" for events the organizer cancelled overnight.
+
+**Floating-block rebalance after mutation** (scenario 8 row 7) — new `src/utils/rebalanceFloatingBlocks.ts`. Wired into `move_meeting` and `create_meeting` handlers. After successful Graph mutation, tries to re-place each affected floating block in its preferred window. Found in-window slot → silent move + shadow DM. No in-window slot → leave overlapping + ping owner (the bumping-out-of-window decision still belongs to him via existing lunch_bump approval flow).
+
+**All-day busy events block their entire day** (scenario 9 row 7) — `findAvailableSlots` now injects all-day busy events as full-day blocks into the busy pool. All-day free events ignored (unchanged). Belt-and-suspenders against Graph free/busy quirks where an all-day offsite could leak through.
+
+### Fixed
+
+**Lunch detection missed real lunch events** (today's screenshot) — `analyzeCalendar` lunch detector still hardcoded `subj.includes('lunch')` (English-only). Owner direction: lunch IS subject-based but Hebrew variants must be covered. Now matches English `lunch` + Hebrew `ארוח` (covers ארוחת/ארוחה) + `צהריים`. Plus new explicit `is_lunch: boolean` flag on every `ProcessedEvent` so `get_calendar` consumers (Sonnet narrating raw events for "how does my week look?") see the marker directly instead of inferring from subject mid-narration.
+
+**socialOutreachTick narrowed** — workdays now Mon-Thu only (safe intersection of IL Sun-Thu and US/EU Mon-Fri). 72h recency gate — proactive ping requires last interaction within 72h. Owner-time-agnostic preserved.
+
+**Log noise** — "no eligible candidate this hour" + system-tick task creation + "Running due tasks" demoted to debug when only social_outreach_tick / social_decay are due. User-facing tasks still log at info.
+
+### Tickets
+
+- Closed [#3](https://github.com/odahviing/AI-Executive-Assistant/issues/3) (persona toggle).
+- Closed [#46](https://github.com/odahviing/AI-Executive-Assistant/issues/46) — already closed in 2.2.2 build.
+- [#43](https://github.com/odahviing/AI-Executive-Assistant/issues/43) implementation in tree — opt-in deeper-search re-coord wiring deferred (owner can decide if needed).
+- Filed [#52](https://github.com/odahviing/AI-Executive-Assistant/issues/52) (action log for undo support, Low) and [#53](https://github.com/odahviing/AI-Executive-Assistant/issues/53) (autonomous reminder action, Medium) earlier in session.
+
+### Migration
+
+- New columns on `people_memory`: `proactive_pending INTEGER NOT NULL DEFAULT 0`. Idempotent ALTER.
+- Profile YAML: `skills.persona: boolean` added (default false). Existing profiles without it get strictly-business Maelle. Idan's profile flipped to `true`.
+
+### Invariants preserved
+
+- Skills still import only from `connections/types` + `connections/registry`.
+- Approvals still the single path for "needs owner input." `move_meeting` colleague-path falls back to approval when rules break.
+- Owner > person > auto provenance unchanged.
+
+---
+
 ## 2.2.2 — Core attendee info: collection layer with provenance (#46)
 
 Closes #46. Three core fields about every person Maelle works with — gender, state (city/country), timezone — now collected with an authority chain (owner > person > auto) so the right value lands in the right place and can't be silently overwritten by a lower-rank source.

@@ -173,6 +173,12 @@ interface ProcessedEvent {
   isOnlineMeeting: boolean;
   onlineMeetingUrl?: string;
   attendees?: string[];
+  // v2.2.3 — explicit lunch marker so Sonnet doesn't have to infer from the
+  // subject string mid-narration. True when the event is a real lunch event
+  // (subject contains "lunch" / Hebrew lunch words) — same rule as
+  // analyzeCalendar's lunch detection. Lets her never miss "is there lunch
+  // on this day" when summarizing a calendar.
+  is_lunch?: boolean;
 }
 
 export function processCalendarEvents(
@@ -234,6 +240,14 @@ export function processCalendarEvents(
       isOnlineMeeting: ev.isOnlineMeeting,
       onlineMeetingUrl: ev.onlineMeetingUrl,
       attendees: attendeeNames.length > 0 ? attendeeNames : undefined,
+      // v2.2.3 — explicit lunch marker. Same subject-based rule as
+      // analyzeCalendar uses; computed once here so every consumer of
+      // ProcessedEvent (get_calendar narration, analyze, brief) sees the
+      // same answer without re-implementing the check.
+      is_lunch: (() => {
+        const subjLower = (subject || '').toLowerCase();
+        return subjLower.includes('lunch') || subjLower.includes('ארוח') || subjLower.includes('צהריים');
+      })(),
     });
   }
 
@@ -464,10 +478,18 @@ export function analyzeCalendar(
     let hasLunch = false;
     let lunchGap: string | undefined;
 
-    // Check if a "Lunch" event is already booked in the lunch window
+    // v2.2.3 — lunch is identified by subject (owner direction: "lunch are
+    // events that there subject is lunch"). Match English "lunch" plus the
+    // common Hebrew forms ("ארוחת צהריים" full / "ארוחה" partial / "צהריים")
+    // since most of Idan's calendar events are in Hebrew. Category is NOT
+    // used — many logistic-categorised events are not lunch.
     const lunchEvent = timedMeetings.find(e => {
       const subj = (e.subject || '').toLowerCase();
-      if (!subj.includes('lunch')) return false;
+      const isLunchSubject =
+        subj.includes('lunch') ||
+        subj.includes('ארוח') ||      // covers ארוחת / ארוחה
+        subj.includes('צהריים');       // "noon" — common Hebrew lunch shorthand
+      if (!isLunchSubject) return false;
       const [sh, sm] = e._localStartTime.split(':').map(Number);
       const evStart = sh * 60 + sm;
       return evStart >= lunchWindowStart && evStart < lunchWindowEnd;
@@ -768,14 +790,29 @@ export class SchedulingSkill {
           location:   args.location  as string | undefined,
           categories:  args.category ? [args.category as string] : ['Meeting'],  // default fallback
           sensitivity: args.category === 'Private' ? 'private' : undefined,
-        }).then(meetingId => ({
-          success: true,
-          meetingId,
-          // v1.8.3 — past-tense summary the reply can quote verbatim. Prevents
-          // Sonnet from narrating the post-action calendar state as a fresh
-          // discovery instead of the result of her own action (issue #26 bug 1).
-          action_summary: `Booked '${args.subject}' for ${formatIsoTime(args.start as string)}–${formatIsoTime(args.end as string)}.`,
-        }));
+        }).then(async meetingId => {
+          // v2.2.3 (scenario 8 row 7) — post-mutation floating-block rebalance.
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { rebalanceFloatingBlocksAfterMutation } = require('../../utils/rebalanceFloatingBlocks') as
+              typeof import('../../utils/rebalanceFloatingBlocks');
+            await rebalanceFloatingBlocksAfterMutation({
+              profile: context.profile,
+              affectedSlotIso: args.start as string,
+              ownerSlackId: context.profile.user.slack_user_id,
+            });
+          } catch (err) {
+            logger.warn('rebalance after create_meeting threw — continuing', { err: String(err).slice(0, 200) });
+          }
+          return {
+            success: true,
+            meetingId,
+            // v1.8.3 — past-tense summary the reply can quote verbatim. Prevents
+            // Sonnet from narrating the post-action calendar state as a fresh
+            // discovery instead of the result of her own action (issue #26 bug 1).
+            action_summary: `Booked '${args.subject}' for ${formatIsoTime(args.start as string)}–${formatIsoTime(args.end as string)}.`,
+          };
+        });
       }
 
       case 'update_meeting': {
@@ -1009,6 +1046,25 @@ export class SchedulingSkill {
           } catch (err) {
             logger.warn('shadowNotify after colleague reschedule failed — continuing', { err: String(err) });
           }
+        }
+
+        // v2.2.3 (scenario 8 row 7) — post-mutation floating-block rebalance.
+        // The new meeting time may have landed on top of lunch (or any
+        // configured floating block). Try to slide the block elsewhere in its
+        // window. If no in-window slot fits, leave it overlapping and ping
+        // the owner (the bumping-out-of-window decision still belongs to him,
+        // via the existing lunch_bump approval flow).
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { rebalanceFloatingBlocksAfterMutation } = require('../../utils/rebalanceFloatingBlocks') as
+            typeof import('../../utils/rebalanceFloatingBlocks');
+          await rebalanceFloatingBlocksAfterMutation({
+            profile: context.profile,
+            affectedSlotIso: args.new_start as string,
+            ownerSlackId: context.profile.user.slack_user_id,
+          });
+        } catch (err) {
+          logger.warn('rebalance after move_meeting threw — continuing', { err: String(err).slice(0, 200) });
         }
 
         return {

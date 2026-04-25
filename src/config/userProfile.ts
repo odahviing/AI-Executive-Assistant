@@ -306,6 +306,13 @@ const UserProfileSchema = z.object({
     whatsapp: z.boolean().default(false),
     search: z.boolean().default(true),
     research: z.boolean().default(false),
+    // v2.2.3 (#3) — persona / social layer. Toggable bonus capability:
+    // off-topic chat, gaming/NBA/family conversation tracking, the 30-category
+    // social engine, proactive colleague pings, hourly outreach tick. Default
+    // false — Maelle is task-only out of the box; opt in to the friend-of-the-
+    // team behavior. The CORE memory layer (gender, name, timezone, state,
+    // preferences, per-person md operational facts) is always on regardless.
+    persona: z.boolean().default(false),
     // Legacy aliases — auto-migrated at runtime; kept optional so old YAMLs boot.
     scheduling: z.boolean().optional(),          // → meetings
     coordination: z.boolean().optional(),        // → meetings
