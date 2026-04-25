@@ -31,9 +31,11 @@ import { FIXED_CATEGORIES } from '../../db/socialTopics';
 export type OwnerIntentKind = 'task' | 'social' | 'other';
 export type OwnerSocialDirection = 'share' | 'ask_maelle' | 'reaction';
 export type OwnerSocialSentiment = 'positive' | 'negative' | 'neutral';
+export type OwnerConversationState = 'open' | 'closing';
 
 export interface OwnerIntentClassification {
   kind: OwnerIntentKind;
+  conversation_state: OwnerConversationState;
   social?: {
     direction: OwnerSocialDirection;
     category_hint?: string;
@@ -53,7 +55,7 @@ export async function classifyOwnerIntent(params: {
   const { anthropic, ownerMessage, profile, recentContext } = params;
 
   if (!ownerMessage || ownerMessage.trim().length === 0) {
-    return { kind: 'other' };
+    return { kind: 'other', conversation_state: 'closing' };
   }
 
   const ownerFirst = profile.user.name.split(' ')[0];
@@ -83,10 +85,25 @@ Three classes:
    "how was your weekend?" (asking Maelle), "did you see the game last night?",
    "feeling good today". Sharing, venting, small-talk, asking Maelle something personal.
 
-3) OTHER — minimal acknowledgement, greeting, one-word reply to Maelle's prior turn.
-   "ok", "thanks", "cool", "morning", "got it", "hi".
+3) OTHER — bare acknowledgement, greeting, or close-out with NO follow-on content.
+   "ok", "thanks", "cool", "morning", "got it", "hi", "yeah", "sure", "later", "gn".
+
+   KEY TEST — cut the opening ack word. Is there still a real sentence left?
+   - "Good. I'm usually dodging — seems easier" → cut "Good.", left with gameplay detail → SOCIAL (not OTHER).
+   - "Yeah we went to the beach, kids loved it" → cut "Yeah", left with a real share → SOCIAL.
+   - "ok" → cut "ok", nothing left → OTHER.
+   - "No. Just playing" → cut "No.", left with "Just playing" — a fact but no hook → OTHER / closing.
+
+   Leading "Good"/"Yeah"/"Sure"/"No" does NOT make the message an ack if substantive content follows.
 
 TASK ALWAYS WINS. Mixed messages classify as TASK.
+
+For EVERY classification (task, social, other), determine conversation_state:
+- 'open' — the person is still in the thread: asking, sharing, continuing, extending.
+  If Maelle just asked a social question (see recent context) and the reply adds ANY detail, that's OPEN — even if brief.
+- 'closing' — the person is winding down: bare ack with no extension, "later", "gotta run", "No. Just playing",
+  or a short reply that gives nothing to build on. Also 'closing' when Maelle's last social question
+  in recent context went unanswered for a long gap and the current message is unrelated — the topic went quiet.
 
 For SOCIAL, also determine:
 - direction: ${directionExamples}
@@ -110,6 +127,7 @@ ${recentContext ? `\nRecent conversation context (for reference only — classif
           type: 'object' as const,
           properties: {
             kind: { type: 'string', enum: ['task', 'social', 'other'] },
+            conversation_state: { type: 'string', enum: ['open', 'closing'] },
             social: {
               type: 'object',
               properties: {
@@ -121,7 +139,7 @@ ${recentContext ? `\nRecent conversation context (for reference only — classif
               required: ['direction', 'sentiment'],
             },
           },
-          required: ['kind'],
+          required: ['kind', 'conversation_state'],
         },
       }],
       tool_choice: { type: 'tool', name: 'classify_intent' },
@@ -132,12 +150,17 @@ ${recentContext ? `\nRecent conversation context (for reference only — classif
     const input = toolUse?.input as OwnerIntentClassification | undefined;
     if (!input || !input.kind) {
       logger.warn('classifyOwnerIntent — no tool_use in response, defaulting to other');
-      return { kind: 'other' };
+      return { kind: 'other', conversation_state: 'closing' };
     }
 
     // Defense: if kind=social but social field missing, collapse to other
     if (input.kind === 'social' && !input.social) {
-      return { kind: 'other' };
+      return { kind: 'other', conversation_state: input.conversation_state ?? 'closing' };
+    }
+
+    // Defense: default conversation_state when missing (shouldn't happen — required in schema)
+    if (!input.conversation_state) {
+      input.conversation_state = 'open';
     }
 
     // Defense: validate category_hint against fixed list (drop if unknown)
@@ -152,6 +175,7 @@ ${recentContext ? `\nRecent conversation context (for reference only — classif
 
     logger.info('classifyOwnerIntent', {
       kind: input.kind,
+      conversation_state: input.conversation_state,
       direction: input.social?.direction,
       category: input.social?.category_hint,
       topic: input.social?.topic_label_hint,
@@ -163,6 +187,6 @@ ${recentContext ? `\nRecent conversation context (for reference only — classif
   } catch (err) {
     // Fail open — classifier failure must never break the main tool loop.
     logger.warn('classifyOwnerIntent threw — defaulting to other', { err: String(err).slice(0, 300) });
-    return { kind: 'other' };
+    return { kind: 'other', conversation_state: 'closing' };
   }
 }

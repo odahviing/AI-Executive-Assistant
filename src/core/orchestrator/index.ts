@@ -204,12 +204,21 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
   const turnSenderRole: 'owner' | 'colleague' = isOwnerTurn ? 'owner' : 'colleague';
   if (userMessage && userMessage.trim().length > 1) {
     try {
+      // Give the classifier the last few turns so it can detect "Maelle just
+      // asked a social question and they answered" (→ conversation_state=open)
+      // vs "Maelle's last question went unanswered, now they're closing out"
+      // (→ conversation_state=closing).
+      const recentContext = conversationHistory
+        .slice(-4)
+        .map(m => `${m.role === 'user' ? (input.senderName ?? profile.user.name.split(' ')[0]) : 'Maelle'}: ${m.content.slice(0, 280)}`)
+        .join('\n');
       socialClassification = await classifyOwnerIntent({
         anthropic,
         ownerMessage: userMessage,
         profile,
         senderRole: turnSenderRole,
         senderName: input.senderName,
+        recentContext: recentContext || undefined,
       });
       const reconciled = reconcileTopic({
         ownerUserId: profile.user.slack_user_id,

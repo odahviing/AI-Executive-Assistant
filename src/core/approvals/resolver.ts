@@ -30,6 +30,7 @@ import {
 import { getDb } from '../../db/client';
 import { getCoordBookingHandler } from './coordBookingHandler';
 import { getFreeBusy } from '../../connectors/graph/calendar';
+import { runPostBookingHealthCheck } from '../../utils/postBookingHealthCheck';
 import logger from '../../utils/logger';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -373,6 +374,18 @@ async function resolveSlotPick(
         status: 'approved',
         decision: { slot_iso: chosenIso, booked: true, subject: result.subject },
       });
+
+      // v2.2.1 — post-booking health check. The fact that this booking went
+      // through approval means it pressured the owner's calendar — the day may
+      // now have new conflicts (Maya still in the slot we just gave to Ron,
+      // floating block displaced, etc). Sweep the affected day and DM the
+      // owner if anything new lands. Fire-and-forget; never blocks the resolver.
+      void runPostBookingHealthCheck({
+        profile: ctx.profile,
+        slotIso: chosenIso,
+        subject: result.subject ?? payload.subject ?? 'meeting',
+      });
+
       return {
         ok: true,
         approval_id: approval.id,

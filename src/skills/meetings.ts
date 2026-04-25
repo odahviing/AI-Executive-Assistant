@@ -326,11 +326,13 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
       },
       {
         name: 'create_meeting',
-        description: `Create a new calendar event directly (no coord needed — use this when the owner already knows the time + attendees). Call coordinate_meeting instead when participants need to agree on a time. Follow the location / category / work-day rules in the prompt section.`,
+        description: `Create a new calendar event directly (no coord needed — use this when the owner already knows the time + attendees). Call coordinate_meeting instead when participants need to agree on a time. Follow the location / category / work-day rules in the prompt section.
+
+LANGUAGE: subject and body MUST be in English regardless of the language you're conversing in. Calendar invites are shared artifacts other people read — their language must be predictable. If the owner instructs in Hebrew, translate to English for the artifact.`,
         input_schema: {
           type: 'object',
           properties: {
-            subject: { type: 'string' },
+            subject: { type: 'string', description: 'Meeting subject — ENGLISH ONLY, even when conversing in Hebrew.' },
             start: { type: 'string', description: 'ISO 8601 datetime in user local timezone' },
             end: { type: 'string', description: 'ISO 8601 datetime in user local timezone' },
             attendees: {
@@ -341,7 +343,7 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
                 required: ['name', 'email'],
               },
             },
-            body: { type: 'string' },
+            body: { type: 'string', description: 'Optional meeting body — ENGLISH ONLY.' },
             is_online: { type: 'boolean' },
             location: { type: 'string' },
             category: { type: 'string', enum: ['Meeting', 'Physical', 'Logistic', 'Private'] },
@@ -353,7 +355,11 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
       },
       {
         name: 'move_meeting',
-        description: `Move (reschedule) an existing meeting to a new time slot. ALWAYS prefer this over delete + recreate — it preserves attendees, the Teams link, and meeting history.`,
+        description: `Move (reschedule) an existing meeting to a new time slot. ALWAYS prefer this over delete + recreate — it preserves attendees, the Teams link, and meeting history.
+
+Owner-path: owner override IS the approval. Move the meeting when he asks.
+
+Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already booked with them, call this directly. The handler runs a rule-compliance check server-side (owner's work hours, work days, buffers, floating blocks, no conflicts). If the new slot passes, the move happens silently and the owner is shadow-notified. If the new slot breaks a rule, the tool returns { needs_owner_approval: true, reason, message } — don't keep trying; fall back to create_approval(kind=meeting_reschedule) with the requested slot so the owner can decide, and tell the colleague warmly that you're checking.`,
         input_schema: {
           type: 'object',
           properties: {

@@ -4,6 +4,7 @@ import { buildSkillsPromptSection, getActiveSkills } from '../../skills/registry
 import { formatPreferencesForPrompt, formatPeopleMemoryForPrompt } from '../../db';
 import { getPendingApprovalsForOwner } from '../../db/approvals';
 import { formatAssistantSelfForPrompt } from '../assistantSelf';
+import { formatPeopleCatalogSync } from '../../memory/peopleMemory';
 
 /**
  * Build the system prompt as two parts for prompt caching:
@@ -93,6 +94,12 @@ Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EE
     : null;
 
   const peopleSection = isOwner ? formatPeopleMemoryForPrompt(user.slack_user_id, focusSlackIds) : null;
+
+  // v2.2.1 — per-person markdown memory catalog (operational facts: residence,
+  // workplace, working hours, comms style). Cheap ~1 line per person + a
+  // sentence of guidance. Full content loads on-demand via get_person_memory.
+  // Owner is just another file in the catalog (no special path).
+  const peopleCatalog = isOwner ? formatPeopleCatalogSync(profile) : '';
 
   // ── Pending approvals (v1.5) ─────────────────────────────────────────────
   // Shown only to the owner. When the owner replies freely (no button), Sonnet
@@ -201,6 +208,7 @@ DEFAULT: when in doubt, don't share. "I can't help with that" beats a leak.`;
 WHAT YOU KNOW ABOUT ${user.name.toUpperCase()} (learned over time):
 ${prefsSection}
 ${peopleSection ? '\n' + peopleSection : ''}
+${peopleCatalog ? '\n' + peopleCatalog : ''}
 ${pendingApprovalsSection}` : '';
 
   const ownerLearningSection = isOwner ? `
@@ -216,6 +224,21 @@ LEARNING
 When ${user.name} tells you something about how they work → call learn_preference.
 When ${user.name} mentions something personal about a colleague → call learn_preference with category "people".
 When a personal moment or joke comes up → save it if it would make future interactions feel more human.
+
+CORE PERSON INFO (collect — don't guess)
+Every contact in WORKSPACE CONTACTS may show a "missing: ..." tag — those are the core fields code paths need to function (gender for Hebrew forms, timezone for scheduling, working_hours for slot intersection, language_preference for reply language). When you're already in a conversation with someone whose core fields are missing AND a natural moment exists, ask once for the most-impactful missing field. Don't interrogate — one field per conversation max. Save via:
+- gender → confirm_gender (after they tell you directly, never from a guess)
+- timezone → update_person_profile.timezone (IANA, e.g. "America/New_York")
+- working hours → update_person_profile.working_hours_structured (workdays + HH:MM start/end)
+- language preference → update_person_profile.language_preference (after they reply in a different language than yours, twice in a row)
+
+Inference cues (treat as STRONG signals — ask once to confirm, then save):
+- "I don't work Sundays" → likely Western TZ (US / EU). Ask "are you US-based?" or similar before saving.
+- "Your morning is my night" / "it's already late here" → ask for the zone, save IANA.
+- They reply in Hebrew when you wrote English (or vice versa) → save language_preference.
+- Mentions of ET/PT/CET/GMT/CEST → save the corresponding IANA zone.
+
+Never silent-guess. Always ask + confirm before saving — wrong values are worse than NULL because they lock in bad scheduling.
 
 INTERACTION MEMORY
 Build a timeline for every person you deal with using log_interaction and note_about_person — see those tool descriptions for exactly when to call them. This is how Maelle remembers. Without these logs, she forgets.

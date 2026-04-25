@@ -862,6 +862,68 @@ export class SchedulingSkill {
       }
 
       case 'move_meeting': {
+        // v2.2.1 — colleague-path rule-compliance gate. When an inbound colleague
+        // DM asks Maelle to move an existing meeting, she can do it autonomously
+        // IF the new slot fits the owner's rules (work hours, work days, buffers,
+        // floating blocks, no conflicts). If the new slot breaks a rule, the tool
+        // refuses and signals needs_owner_approval — Sonnet then falls back to
+        // create_approval(kind=meeting_reschedule). Owner-path callers skip this
+        // check (owner override IS the approval).
+        if (context.senderRole === 'colleague') {
+          const newStart = args.new_start as string | undefined;
+          const newEnd = args.new_end as string | undefined;
+          if (newStart && newEnd) {
+            try {
+              const startDt = DateTime.fromISO(newStart, { zone: timezone });
+              const endDt = DateTime.fromISO(newEnd, { zone: timezone });
+              if (startDt.isValid && endDt.isValid) {
+                const durationMin = Math.max(5, Math.round((endDt.toMillis() - startDt.toMillis()) / 60_000));
+                const { findAvailableSlots } = await import('../../connectors/graph/calendar');
+                const startMs = startDt.toMillis();
+                const fromIso = DateTime.fromMillis(startMs - 60_000).toUTC().toISO();
+                const toIso = DateTime.fromMillis(endDt.toMillis() + 60_000).toUTC().toISO();
+                let validSlots: Array<{ start: string }> = [];
+                if (fromIso && toIso) {
+                  validSlots = await findAvailableSlots({
+                    userEmail,
+                    timezone,
+                    durationMinutes: durationMin,
+                    attendeeEmails: [userEmail],
+                    searchFrom: fromIso,
+                    searchTo: toIso,
+                    profile: context.profile,
+                  });
+                }
+                const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
+                if (!matches) {
+                  const ownerFirst = context.profile.user.name.split(' ')[0];
+                  logger.info('move_meeting colleague-path refused — new slot breaks owner rules', {
+                    meetingId: args.meeting_id, newStart, newEnd, requester: context.userId,
+                  });
+                  return {
+                    needs_owner_approval: true,
+                    reason: 'not_rule_compliant',
+                    meeting_subject: args.meeting_subject,
+                    requested_start: newStart,
+                    requested_end: newEnd,
+                    message: `That time breaks one of ${ownerFirst}'s scheduling rules (work hours, work days, lunch window, or a conflict). I can't move it on my own — I'll check with ${ownerFirst} and come back to you. Call create_approval(kind=meeting_reschedule) with the requested slot so he can decide.`,
+                  };
+                }
+              }
+            } catch (err) {
+              logger.warn('move_meeting colleague-path rule check threw — escalating to approval', { err: String(err) });
+              return {
+                needs_owner_approval: true,
+                reason: 'rule_check_failed',
+                meeting_subject: args.meeting_subject,
+                requested_start: newStart,
+                requested_end: newEnd,
+                message: `I couldn't verify whether that slot fits ${context.profile.user.name.split(' ')[0]}'s rules right now. Raise create_approval(kind=meeting_reschedule) so he can decide.`,
+              };
+            }
+          }
+        }
+
         // v2.1.4 — same attendee-only guard as update_meeting.
         try {
           const { getEventOrganizer } = await import('../../connectors/graph/calendar');
@@ -925,6 +987,30 @@ export class SchedulingSkill {
           details: { subject: args.meeting_subject, new_start: args.new_start, new_end: args.new_end },
           outcome: 'success',
         });
+
+        // v2.2.1 — colleague-path inbound reschedule: shadow-DM the owner so he
+        // sees the move happen even when he wasn't in the approval loop.
+        if (context.senderRole === 'colleague') {
+          try {
+            const { shadowNotify } = await import('../../utils/shadowNotify');
+            const { getPersonMemory } = await import('../../db');
+            const requesterRow = getPersonMemory(context.userId);
+            const requesterName = requesterRow?.name ?? 'a colleague';
+            const whenLocal = DateTime.fromISO(args.new_start as string, { zone: timezone });
+            const whenLabel = whenLocal.isValid
+              ? whenLocal.toFormat('EEE d MMM HH:mm')
+              : formatIsoTime(args.new_start as string);
+            await shadowNotify(context.profile, {
+              channel: context.channelId,
+              threadTs: context.threadTs,
+              action: 'Reschedule auto-accepted',
+              detail: `${requesterName} asked to move "${args.meeting_subject}" — rule-compliant, moved to ${whenLabel}.`,
+            });
+          } catch (err) {
+            logger.warn('shadowNotify after colleague reschedule failed — continuing', { err: String(err) });
+          }
+        }
+
         return {
           success: true,
           moved: args.meeting_subject,

@@ -1,7 +1,14 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
-import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonNote, appendPersonInteraction, recordSocialMoment, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, type SocialTopicQuality, type PersonProfile, type PersonInteraction } from '../db';
+import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonNote, appendPersonInteraction, recordSocialMoment, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, getPersonMemory as getPersonMemoryRow, type SocialTopicQuality, type PersonProfile, type PersonInteraction } from '../db';
+import {
+  readPersonMemory,
+  writePersonSection,
+  resolvePersonSlug,
+  slugifyName,
+  listPersonFiles,
+} from '../memory/peopleMemory';
 // v2.2 — socialEngagement module retired. Owner social signals are now
 // tracked by the Social Engine on the orchestrator's post-turn pass; the
 // per-turn "engagement upgrader" is no longer needed.
@@ -273,7 +280,22 @@ Call this after interactions — not during them. It's a background update.`,
             },
             working_hours: {
               type: 'string',
-              description: 'When they typically work and respond. e.g. "Israel 9am–6pm" or "US Eastern mornings"',
+              description: 'Free-text legacy: when they typically work and respond. e.g. "Israel 9am–6pm" or "US Eastern mornings". Prefer working_hours_structured below for new writes — code paths that intersect availability read the structured shape, not this string.',
+            },
+            working_hours_structured: {
+              type: 'object',
+              description: 'Structured working window — populate alongside working_hours when you have confirmed values. Code paths that intersect attendee availability in slot search read this. Save ONLY when the colleague confirmed the values directly OR when they\'re obvious from a strong signal (explicit mention of their hours, calendar invite metadata). Don\'t guess.',
+              properties: {
+                workdays: {
+                  type: 'array',
+                  description: 'Day names they work on. e.g. ["Sunday","Monday","Tuesday","Wednesday","Thursday"] for Israel; ["Monday","Tuesday","Wednesday","Thursday","Friday"] for US/EU.',
+                  items: { type: 'string', enum: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] },
+                },
+                hoursStart: { type: 'string', description: 'HH:MM in their local time. e.g. "09:00".' },
+                hoursEnd:   { type: 'string', description: 'HH:MM in their local time. e.g. "18:00".' },
+                timezone:   { type: 'string', description: 'Optional IANA TZ — only set if it differs from their people_memory.timezone (rare). e.g. "America/New_York".' },
+              },
+              required: ['workdays', 'hoursStart', 'hoursEnd'],
             },
             role_summary: {
               type: 'string',
@@ -378,6 +400,65 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
           required: ['colleague_slack_id', 'gender'],
         },
       },
+      {
+        name: 'get_person_memory',
+        description: `Load the full markdown notes you have on a person — residence, workplace, working hours, communication style, etc. The owner and colleagues each have (or can have) a file.
+
+Call this when:
+- A person relevant to the current turn appears in the PEOPLE NOTES catalog (see system prompt) and you need the details
+- You want to check what you already know before asking them something you might have asked before
+- Scheduling for them, messaging them, or answering a question about them benefits from the context
+
+Keep calls narrow — one person at a time. If the person isn't in the catalog, there's no file; use update_person_memory to start one when you learn the first real fact.`,
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            person: {
+              type: 'string',
+              description: 'Person identifier — their slug from the PEOPLE NOTES catalog ("amazia-cohen"), their display name ("Amazia Cohen"), or first name ("Amazia"). Slug is most reliable.',
+            },
+          },
+          required: ['person'],
+        },
+      },
+      {
+        name: 'update_person_memory',
+        description: `Write a durable fact about a person into their markdown notes file. This is for OPERATIONAL facts that help you be a better assistant — not for social topics.
+
+Use for facts like:
+- Where they live (residence): "Idan lives in Nes Ziona."
+- Where they work (workplace): "Reflectiz office in Tel Aviv, goes in Mon/Wed/Thu."
+- Working hours: "Responds US Eastern mornings, offline after 5pm ET for school pickup."
+- Communication style: "Prefers brief replies. Never uses greetings."
+- How to address them: "Goes by Ike, not Isaac."
+- Preferred meeting mode: "Always does Teams, even for 1:1s."
+
+Do NOT use for:
+- Social topics / hobbies / family stories — those go to note_about_person or note_about_self. The Social Engine owns that.
+- Ephemeral state (mood today, running late) — that's a log_interaction entry.
+
+Sections: pick a h2 header that describes the fact — "Residence", "Workplace", "Working hours", "Communication style", "What we've discussed", or a new one that fits. If the section already exists in the file, its body will be REPLACED. If it doesn't, the section is APPENDED.
+
+First call for a person auto-creates their md file. Empty-until-real-fact — don't write empty or speculative content just to create a file.`,
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            person: {
+              type: 'string',
+              description: 'Person identifier — slug, display name, or first name. For the owner use his first name (e.g. "Idan") or his slack id.',
+            },
+            section: {
+              type: 'string',
+              description: 'Section header for this fact. Prefer the standard ones: "Residence", "Workplace", "Working hours", "Communication style", "What we\'ve discussed". Case-insensitive match — don\'t create a duplicate header with different casing.',
+            },
+            text: {
+              type: 'string',
+              description: 'The fact, in plain markdown. One or two sentences usually. Be specific — "Idan lives in Nes Ziona" beats "lives south of Tel Aviv".',
+            },
+          },
+          required: ['person', 'section', 'text'],
+        },
+      },
     ];
   }
 
@@ -392,7 +473,7 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
     // ── Colleague hard-blocks ─────────────────────────────────────────────────
     // These operations are owner-only regardless of what the prompt says.
     if (!isOwner) {
-      const ownerOnlyTools = ['learn_preference', 'forget_preference', 'recall_preferences', 'update_person_profile', 'finalize_coord_meeting'];
+      const ownerOnlyTools = ['learn_preference', 'forget_preference', 'recall_preferences', 'update_person_profile', 'update_person_memory', 'get_person_memory', 'finalize_coord_meeting'];
       if (ownerOnlyTools.includes(toolName)) {
         logger.warn('Colleague attempted owner-only tool', { tool: toolName, userId: context.userId });
         return { error: 'not_permitted', reason: 'This action can only be performed by the owner.' };
@@ -577,6 +658,67 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
         return { confirmed: true, name, gender };
       }
 
+      case 'get_person_memory': {
+        const query = (args.person as string | undefined)?.trim();
+        if (!query) return { error: 'empty_person' };
+        const slug = (await resolvePersonSlug(context.profile, query)) ?? slugifyName(query);
+        const content = await readPersonMemory(context.profile, slug);
+        if (content === null) {
+          return {
+            found: false,
+            slug,
+            message: `No memory file yet for "${query}" — no durable facts recorded. Use update_person_memory when you learn one.`,
+          };
+        }
+        logger.info('Person memory fetched', { slug, bytes: content.length });
+        return { found: true, slug, content };
+      }
+
+      case 'update_person_memory': {
+        const query = (args.person as string | undefined)?.trim();
+        const section = (args.section as string | undefined)?.trim();
+        const text = args.text as string | undefined;
+        if (!query) return { error: 'empty_person' };
+        if (!section) return { error: 'empty_section' };
+        if (!text || !text.trim()) return { error: 'empty_text' };
+
+        // Resolve to an existing slug if possible; otherwise create by slug of
+        // the supplied name. Display name prefers the people_memory row for
+        // colleagues, falls back to the supplied query.
+        let slug = await resolvePersonSlug(context.profile, query);
+        let displayName: string | undefined;
+
+        if (!slug) {
+          // New file — try to enrich display name from people_memory if the
+          // query looks like a slack id.
+          const row = getPersonMemoryRow(query);
+          if (row) {
+            displayName = row.name;
+            slug = slugifyName(row.name);
+          } else {
+            displayName = query;
+            slug = slugifyName(query);
+          }
+        } else {
+          // Existing file — use the listed display name
+          const existing = (await listPersonFiles(context.profile)).find(f => f.slug === slug);
+          displayName = existing?.displayName ?? query;
+        }
+
+        const result = await writePersonSection({
+          profile: context.profile,
+          slug,
+          displayName: displayName ?? query,
+          section,
+          text,
+        });
+        if (!result.ok) {
+          logger.warn('update_person_memory failed', { slug, section, err: result.error });
+          return { ok: false, error: result.error };
+        }
+        return { ok: true, slug, section, created: result.created };
+      }
+
       case 'update_person_profile': {
         const slackId = args.colleague_slack_id as string;
         const name    = args.colleague_name as string;
@@ -598,6 +740,7 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
           communication_style: args.communication_style as string | undefined,
           language_preference: args.language_preference as string | undefined,
           working_hours:       args.working_hours       as string | undefined,
+          working_hours_structured: args.working_hours_structured as PersonProfile['working_hours_structured'],
           role_summary:        args.role_summary        as string | undefined,
           reports_to:          args.reports_to          as string | undefined,
           response_speed:      args.response_speed      as PersonProfile['response_speed'],

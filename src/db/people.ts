@@ -60,7 +60,20 @@ export interface PersonProfile {
 
   // When they're typically reachable — learned from timezone and reply patterns
   // e.g. "Israel 9am–6pm" or "US Eastern, responds mornings"
+  // Free-text legacy. New writes should also populate working_hours_structured
+  // so #43 (intersect attendee availability in slot search) can read it.
   working_hours?: string;
+
+  // v2.2.1 (#46) — structured working window. Populated alongside the free-text
+  // legacy when Maelle confirms the data via the colleague. Code paths that
+  // need to intersect (slot search, outreach gating) read this; LLM context
+  // still reads the free-text for natural narration.
+  working_hours_structured?: {
+    workdays: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
+    hoursStart: string;   // 'HH:MM' in `timezone` (or owner's TZ if absent)
+    hoursEnd: string;     // 'HH:MM'
+    timezone?: string;    // IANA — overrides people_memory.timezone for this window when set
+  };
 
   // Their role and what they care about — learned over time
   // e.g. "Heads up sales in EMEA. Focused on Q3 targets and team hiring."
@@ -374,19 +387,26 @@ export function formatPeopleMemoryForPrompt(
         }).join(', ')
       : '';
 
+    // v2.2.1 (#46) — surface missing core fields so Maelle can spot the gap and
+    // ask naturally. "Core" = fields code paths read deterministically:
+    // gender (Hebrew gendered forms), timezone (scheduling + outreach gating),
+    // working_hours_structured (#43 will intersect), language_preference (reply lang).
+    const missingCore: string[] = [];
+    if (!p.gender || p.gender === 'unknown') missingCore.push('gender');
+    if (!p.timezone) missingCore.push('timezone');
+    if (!profile.working_hours_structured) missingCore.push('working_hours');
+    if (!profile.language_preference) missingCore.push('language_preference');
+    const missingTag = missingCore.length > 0 ? `, missing: ${missingCore.join('+')}` : '';
+
     const parts: string[] = [
-      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${p.timezone ? `, tz: ${p.timezone}` : ''}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}, ${socialLine}${topicStr ? `, topics: ${topicStr}` : ''})`,
+      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${p.timezone ? `, tz: ${p.timezone}` : ''}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}, ${socialLine}${topicStr ? `, topics: ${topicStr}` : ''}${missingTag})`,
     ];
 
-    // Profile dimensions — show any that are known
-    if (profile.engagement_level)   parts.push(`  profile: engagement=${profile.engagement_level}`);
-    if (profile.communication_style) parts.push(`  communication: ${profile.communication_style}`);
-    if (profile.language_preference) parts.push(`  language: ${profile.language_preference}`);
-    if (profile.working_hours)       parts.push(`  working hours: ${profile.working_hours}`);
-    if (profile.response_speed)      parts.push(`  response speed: ${profile.response_speed}`);
-    if (profile.role_summary)        parts.push(`  role: ${profile.role_summary}`);
-    if (profile.reports_to)          parts.push(`  reports to: ${profile.reports_to}`);
-    if (profile.collaboration_notes) parts.push(`  collaboration: ${profile.collaboration_notes}`);
+    // Profile dimensions moved to per-person markdown files (v2.2.1). The
+    // catalog + get_person_memory tool surface these on-demand instead of
+    // bloating every owner prompt. Fields still persisted for code paths that
+    // read them deterministically (e.g. timezone for scheduling).
+    void profile;
 
     // Personal/relationship notes — all of them
     for (const n of notes) {

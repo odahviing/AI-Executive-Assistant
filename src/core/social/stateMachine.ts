@@ -49,6 +49,12 @@ export function directiveForPersonSocial(params: {
   const social = classification.social;
   if (!social) return noDirective();
 
+  // Closing signal — person is winding down this topic. Let Maelle sign off
+  // naturally rather than forcing a follow-up that would feel clingy.
+  if (classification.conversation_state === 'closing') {
+    return noDirective();
+  }
+
   const topic = reconciled.topic;
   const firstMention = reconciled.action === 'created_under_category';
 
@@ -208,7 +214,12 @@ export function chooseSocialDirective(params: {
   if (classification.kind === 'social') {
     return directiveForPersonSocial(params);
   }
-  // 'other' — Maelle may proactively piggyback
+  // 'other' — Maelle may proactively piggyback, UNLESS the turn is closing
+  // (bare ack, "later", "No. Just playing"). Forcing a social raise-new onto a
+  // close-out turn reads clingy and often kills the thread.
+  if (classification.conversation_state === 'closing') {
+    return noDirective();
+  }
   return directiveForProactiveSlot({ personSlackId });
 }
 
@@ -223,9 +234,9 @@ export function formatDirectiveForPromptBlock(directive: SocialDirective): strin
   lines.push('');
   lines.push('Mode rules:');
   lines.push('- celebrate: acknowledge the win first. No "what do you need" pivot. A real congrats, specific to what was shared.');
-  lines.push('- engage: follow the thread naturally. One short reaction or follow-up is fine. Don\'t interrogate, don\'t deflect to tasks.');
+  lines.push('- engage: follow the thread naturally. Your reply must PROGRESS the topic — react with something specific, share back, or ask a follow-up that gives the person somewhere to go. A reply that only says "wow cool" is not progress. If YOU just asked a social question and they answered with any substance, stay on that topic — never pivot to "anything work-related" or "let me know if you need anything." The topic stays open until THEY close it (the classifier flags that as conversation_state=closing).');
   lines.push('- revive_ack: note you remember this topic from before. Pick up where it left off.');
-  lines.push('- continue: one short follow-up on a topic from a prior day. Don\'t overdo it.');
+  lines.push('- continue: one short follow-up on a topic from a prior day. Don\'t overdo it. Same rule as engage — progress the topic, never pivot to work.');
   lines.push('- raise_new: one plain human question from a fresh category. No preamble ("speaking of...", "by the way..."). Just ask.');
   lines.push('');
   lines.push('ABOVE ALL: speak like a person, not a service desk. Celebration, empathy, or genuine curiosity IS the response. Don\'t tack "let me know if you need anything" onto social turns.');

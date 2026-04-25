@@ -117,6 +117,13 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   'coordinate_meeting',
   'check_join_availability',
   'web_search',
+  // v2.2.1 — inbound reschedule auto-accept. Colleagues can ask Maelle to move
+  // an existing meeting; the move_meeting handler has a colleague-path gate
+  // that runs a rule-compliance check via findAvailableSlots. Rule-compliant
+  // slot → moves silently + shadow-DMs owner. Rule-breaking slot → returns
+  // needs_owner_approval=true so Sonnet falls back to create_approval. Owner
+  // retains veto via the approval path when rules break.
+  'move_meeting',
 ]);
 
 /**

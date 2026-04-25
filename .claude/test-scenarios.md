@@ -2,9 +2,9 @@
 
 Ten standalone real-life scenarios used to pressure-test Maelle after builds. Each one is independent — running Scenario 5 does not assume Scenarios 1–4 were run. Idan decides which ones to run, when, and why.
 
-**These are not feature-coverage tests.** Every scenario is something that can actually happen in Idan's real Slack, the way real humans actually behave. Scenarios are judged on whether Maelle holds up as a human EA in messy real moments — tone, memory, judgment, continuity, grace under pressure. If a scenario passes cleanly but would never happen in real life, it's not doing its job. Features get exercised because real people naturally use them, not because a matrix says so.
+**These are not feature-coverage tests dressed as stories.** Every scenario is something that can actually happen on Idan's real Slack, the way real humans actually behave in it. Maelle is judged on whether she holds up as a human EA in messy real moments — tone, memory, judgment, continuity, grace under pressure. Skills get exercised because real people use them in real life (Israeli colleagues DO write in Hebrew, product teams DO share PDFs in MPIM groups, daily briefings ARE routines that fire), not because a coverage matrix demands it. If a capability doesn't naturally show up in a real thread, it doesn't belong here.
 
-If something that matters is missing because the core doesn't support it yet, Idan adds a scenario when he builds the core. No pre-engineering.
+If something that matters isn't reflected because the core doesn't support it yet, Idan adds a scenario when he builds the core. No pre-engineering.
 
 ## How to run a scenario
 
@@ -17,23 +17,39 @@ When Idan says "let's test Scenario N" (or "run scenario N", or "simulate 7"), t
 1. Open this file and read Scenario N in full.
 2. Read the current Maelle code paths that the scenario would exercise. Do not trust memory — verify against the files on disk. This is the only allowed side effect: reading files.
 3. Walk through the scenario turn by turn in the chat response. For each step, state what Maelle **should** do and what she **would** actually do given the current code. Narrate it; don't execute it.
-4. Produce a report with three sections:
-   - **Works** — behavior the code actually delivers.
-   - **Doesn't work** — behavior the scenario expects that the current code would fail or get wrong.
-   - **Shouldn't happen** — side effects, leaks, or wrong-tone behavior the code would cause that the scenario didn't ask for.
-5. End with concrete fix suggestions (file + line + what to change), not vague directions.
+4. Produce a report as a **scannable table**, not prose. Break the scenario into its discrete checkpoints (one row per expected behavior). Each row must be self-contained — a reader should understand what was being tested, what was expected, what actually happens, and why it passes or fails, without having to cross-reference the scenario text.
+
+   Status vocabulary:
+   - **✅ Works** — code actually delivers this cleanly.
+   - **⚠️ Partial** — works in some cases but misses edge cases, or works but with the wrong tone / wrong surface / wrong data.
+   - **❌ Not working** — code would fail, skip, or do the wrong thing here.
+   - **🚫 Shouldn't happen** — side effect the scenario didn't ask for (leak, extra DM, wrong recipient, fabrication).
+
+   Format — four columns, one row per checkpoint:
+
+   | # | What the scenario expects | What the code does today | Status |
+   |---|---|---|---|
+   | 1 | Maelle trims her slot options so no single day has more than one, before she sends anything to the colleague. | `findAvailableSlots` in `connectors/graph/calendar.ts` enforces a max-per-day cap in its walker loop — caller gets a pre-filtered list. | ✅ Works |
+   | 2 | Before offering any slots to a stranger, Maelle pauses and asks Idan if it's ok to meet this person (cold-consent gate). | No cold-consent gate anywhere. `initiateCoordination` (`coord/state.ts` ~119) auto-creates a `people_memory` row and DMs the stranger with slot options, zero owner consent. No prompt rule in `systemPrompt.ts` or `meetings.ts` steers toward it. `unknown_person` approval exists but is framed as "missing contact info," not "should we meet." | ❌ Not working |
+   | 3 | After the colleague confirms his timezone, the next slot search is clipped to the overlap of his work hours and Idan's. | Timezone gets stored on the `people_memory` row, but the same-turn re-search doesn't re-clip — it uses the pre-update busy window. Next-turn search would be correct. | ⚠️ Partial |
+   | 4 | Once the meeting is booked, Maelle opens a social topic naturally — the first real conversation between them. | Social engine pre-pass classifier tags the turn, state machine emits `raise_new` directive, prompt injects it. Works. | ✅ Works |
+   | … | | | |
+
+   Each row should read as a complete mini-story: what we were testing, what the code does (with file paths / functions / line numbers where possible), and the verdict. If a reader later asks "what failed in row 2?", the row itself answers that — no need to re-read the scenario.
+
+   After the table, add a short **Fix suggestions** section covering only the ❌ and ⚠️ rows — file + line + concrete change. Skip the ✅ rows.
 
 Idan reviews the report and decides: fix now, file as a ticket, or ignore. No auto-fixing from a scenario run. No real-world actions from a scenario run, ever.
 
 ---
 
-## Scenario 1 — The cold introduction
+## Scenario 1 — The first-time colleague
 
-A person Maelle has never talked to before sends her a message: he'd like 30 minutes with Idan sometime next week. Maelle checks next week and comes back with three options, all clustered heavily on Sunday and Monday. Before sending, she notices two of them are on the same day — she trims to one per day so the three slots span Sunday, Monday, and Tuesday.
+An internal colleague Maelle hasn't talked to before sends her a message: he'd like 30 minutes with Idan sometime next week. Maelle checks next week and comes back with three options, all clustered heavily on Sunday and Monday. Before sending, she notices two of them are on the same day — she trims to one per day so the three slots span Sunday, Monday, and Tuesday.
 
 He replies that he doesn't work Sundays. Something feels off about his earlier phrasing too — the way he wrote the times made her suspect he's not in Israel. She asks him directly if he's US-based. He confirms he's on the East Coast.
 
-Maelle quietly updates what she knows about him (US, Eastern time) and checks with Idan first: this is a cold inbound from someone unknown, is it ok to meet? Idan gives the green light. Maelle goes back to the new guy with three fresh options — this time matching both his working hours and Idan's, Monday through Thursday only. He picks one. Booked.
+Maelle quietly updates what she knows about him (US, Eastern time) and goes back to him with three fresh options — this time matching both his working hours and Idan's, Monday through Thursday only. He picks one. Booked.
 
 Since this is the first real conversation they've had, Maelle finds a natural moment to ask him something personal — turns out he follows the NBA, and that becomes their first shared topic.
 
@@ -41,13 +57,15 @@ Since this is the first real conversation they've had, Maelle finds a natural mo
 
 ## Scenario 2 — The flake
 
-A colleague Idan already knows — internal, builds relationships easily — DMs Maelle on Monday afternoon: "can I get 30 min with Idan Thursday?" Maelle finds Thursday 3pm, confirms, books it.
+A colleague Idan already knows — internal, the relationship-builder type — DMs Maelle on Monday afternoon: "can I get 30 min with Idan Thursday?" Maelle finds Thursday 3pm, confirms, books it.
 
-Wednesday night at 10pm he DMs: "ugh so sorry, something came up, can we push to Friday?" Maelle isn't passive-aggressive about it. She moves the meeting to Friday morning, confirms, and tells Idan in passing that Thursday shifted.
+Wednesday night at 10pm he DMs: "ugh so sorry, something came up, can we push to Friday?" Maelle moves the meeting without being passive-aggressive about it, tells Idan in passing that Thursday shifted.
 
-Friday 9am — an hour before the meeting — he DMs again: "I'm so sorry, can we do next Monday instead? I've been underwater." Maelle handles it, moves again, updates Idan. She notices this is the second reschedule from him in a week but doesn't make a thing of it.
+While Maelle is in that thread, Idan jumps in from the side on his own DM: "oh, and while I've got you — set me a reminder every Friday at 4pm to run through the pipeline before weekend." Maelle creates the recurring reminder, confirms it's set, goes back to handling the reschedule.
 
-Monday 11:30 — 30 minutes before the meeting — he DMs one more time: "I'm running 20 minutes behind, can we push to noon?" Maelle updates the meeting. She tells Idan with a light touch: "Ron's moved this three times now, currently set for noon — want me to let it ride or push back?" Idan says "let it ride, but if he does it again tell him we'll find a better month." Maelle files that away quietly — next time Ron moves something, she knows what Idan wants her to do without asking again.
+Friday 9am — an hour before the rescheduled meeting — the colleague DMs again: "I'm so sorry, can we do next Monday instead? I've been underwater." Maelle moves again, updates Idan.
+
+Monday 11:30 — 30 minutes before the meeting — he DMs once more: "running 20 minutes behind, can we push to noon?" Maelle updates the meeting and tells Idan in passing. Idan: "fine — but if he does it again tell him we'll find a better month for this." Maelle files that away quietly.
 
 ---
 
@@ -69,13 +87,11 @@ Around noon Idan asks Maelle what's on his plate. She comes back with four open 
 
 Idan says: close all four, right now, in this thread.
 
-Maelle sends four messages out in parallel, each in the right tone for the relationship. Replies come back staggered:
-- Liat sends the deck link in 3 minutes. Maelle confirms receipt to Idan inline, closes it.
-- David says "yes sign it." Maelle closes the approval, confirms to Idan.
-- The offsite organizer acknowledges Idan's attendance.
-- Yoni replies not with a yes/no but with "hey can we jump on a quick call instead? it's complicated." Maelle doesn't auto-agree. She pushes back gently: what's the call about? If it's about the thing Idan already asked about, a written answer keeps it moving. If it's something bigger, she'll bring it to Idan.
+Before Maelle fires anything off, she flags one thing: the vendor contract isn't a one-word yes. She has notes on that vendor in Idan's knowledge base from when he reviewed them earlier this year. She pulls the relevant bit and surfaces a short summary inline — "we flagged their SLA terms in January, worth re-reading that paragraph before you sign?" Idan reads, decides he's fine with it, approves.
 
-At end of day Maelle confirms: three done, Yoni pushed back on the format and she's holding the line — Idan can weigh in if he wants to cave.
+Maelle fires the other three in parallel, each in the right tone. Replies come back staggered. Liat sends the deck link within minutes — Maelle confirms receipt to Idan and closes it. The offsite organizer acknowledges Idan's attendance. Yoni, instead of a yes/no, replies "hey can we jump on a quick call instead? it's complicated." Maelle doesn't auto-agree — she pushes back gently, asks what the call is about so they can decide if written works.
+
+As they're closing out, Idan adds one more: "oh, and post in the product-review group that I'll do the spec review Friday morning." That group chat is a standing MPIM with three Israeli teammates — the conversation runs in Hebrew, the spec PDF is pinned at the top of the thread. Maelle steps into the group, reads the recent Hebrew context so her post lands right, and drops a short Hebrew confirmation in the same thread.
 
 ---
 
@@ -93,19 +109,21 @@ Ten minutes later Idan writes back: "actually keep Tomer where he was, I'll dial
 
 ## Scenario 6 — Interview notes that age well
 
-Idan uploads a recording of a candidate interview to Maelle. She transcribes it and drafts a summary. Idan reads the draft and tells her to lose the formal phrasing — no more "aligned on" or "circled back." She redrafts. He reads again and asks her to add the specific thing the candidate said about a technical architecture question. She redrafts once more.
+Tuesday afternoon Idan drops a PDF into his DM with Maelle — a candidate's resume — and says "4pm interview, file this and give me the headlines." Maelle classifies it as knowledge, files it into Idan's candidate notes folder, and hands back a short two-paragraph read.
 
-On the third pass Idan approves. Maelle shares it with him and the internal panelist who was in the room — never the candidate.
+Later that evening he uploads a recording of the actual interview. Maelle transcribes it and drafts a summary. Idan reads the draft and tells her to lose the formal phrasing — no more "aligned on" or "circled back." She redrafts. He reads again and asks her to add the specific thing the candidate said about a technical architecture question. She redrafts once more.
 
-She sets a reminder for three days out to check in with the panelist about the architecture answer specifically.
+On the third pass Idan approves. Maelle shares the full text as a DM to him and the other panelist who was in the room. For the wider team she drops a shorter version — just the decision and the headline signal — into the #interview-panel channel where the rest of the hiring group tracks candidates.
 
-Three days later the reminder fires. Maelle doesn't send a generic nudge. She references the specific technical topic from the interview notes and sends the panelist a warm, concrete ping: Idan wants your read on that Axos answer before Friday — still up for a quick call?
+She files the architecture discussion into the knowledge base under the candidate's folder and sets a reminder for three days out to check in with the panelist.
+
+Three days later the reminder fires. Maelle doesn't send a generic nudge. She pulls the saved notes, references the specific technical topic, and sends the panelist a warm, concrete ping: Idan wants your read on that Axos answer before Friday — still up for a quick call?
 
 ---
 
 ## Scenario 7 — The morning briefing with landmines
 
-Idan's 8am briefing has to narrate a messy overnight:
+Idan's 8am briefing — the daily one that fires on its own — has to narrate a messy overnight:
 - A meeting he had today was silently canceled by the organizer last night. The briefing doesn't say "still waiting on you" about it — that input ask got cleaned up automatically the moment the event disappeared.
 - Three days ago Maelle proposed three slots to Michal for a sync. Michal never formally replied, but Maelle notices an event on Idan's calendar that matches one of the options. The briefing says "Michal picked Tuesday 11am" — not "still waiting on her."
 - Yoni ignored two pings a week ago. The briefing says, "Yoni went quiet, closing it out."
@@ -120,7 +138,7 @@ Iris, who runs a recurring Thursday sync with Idan, messages: can we move Thursd
 
 Noon clips the front of Idan's lunch window. Maelle figures out that if she moves lunch to 12:30 it still fits inside his flex window — so she accepts Iris's move, bumps lunch, and tells Idan in passing ("moved Iris to 12:00, shifted lunch 30 min later, no drama").
 
-Twenty minutes later Iris writes back: "sorry, one more — my calendar shows a conflict I missed, can we actually make it noon to 1pm, a full hour?" Maelle works it out: there's no way to keep lunch inside its flex window now. She stops. She tells Iris she'll check and get back to her, and pings Idan: Iris needs a full hour, which means your lunch shifts out of its usual window — ok? Idan approves. Lunch bumps, meeting gets the full hour. Maelle lets Iris know it's set, without making a production of the back-and-forth.
+Twenty minutes later Iris writes back in Hebrew — short, urgent phrasing, no English this time: her calendar actually shows a conflict she missed, can they make it a full hour, noon to 1pm? Maelle reads the intent across the language switch, works out that there's no way to keep lunch inside its flex window now, and stops. She tells Iris in Hebrew she'll check and get back to her, and pings Idan: Iris needs a full hour, which means your lunch shifts out of its usual window — ok? Idan approves. Lunch bumps, meeting gets the full hour. Maelle lets Iris know in Hebrew it's set, without making a production of the back-and-forth.
 
 ---
 
@@ -132,12 +150,14 @@ Maelle finds today's 3pm with Sarah Cohen, reaches out to her with three Thursda
 
 Ten minutes later Idan messages in text: wait, Thursday is the offsite. Can you bump Sarah to Friday? Maelle catches that Thursday 4pm now conflicts with an all-day offsite she should have noticed before booking. She owns it — no excuses — asks Idan to confirm Friday, and re-coords with Sarah.
 
+That evening Idan sends a photo he snapped at a conference — a speaker's slide with contact info and the speaker's name. "She mentioned your kind of problems, let's reach out next month. File her." Maelle reads the image, tells Idan what she's going to do before she does it ("I've got Rachel Stern from Vortex, email on the slide — file her as a person to reach out to in May?"), waits for his confirmation before writing anything down.
+
 ---
 
 ## Scenario 10 — Four people, three continents
 
-Idan asks Maelle to set up an hour with him, Yael in Tel Aviv, James in London, and Priya in New York, sometime in the next two weeks. Maelle finds the narrow overlap — late Israeli afternoon is mid-afternoon London is morning New York — and sends three slot options to all four.
+Idan asks Maelle to set up an hour with him, Yael in Tel Aviv, James in London, and Priya in New York, sometime in the next two weeks. Maelle finds the narrow overlap — late Israeli afternoon is mid-afternoon London is morning New York — and rather than running four separate DMs she opens a single group chat with all four and proposes three slots there. The conversation plays out in that thread where everyone can see everyone else's response.
 
-Priya replies first, flexible. James picks one or two. Yael doesn't reply. After a few hours of her working day, Maelle nudges Yael one more time. Still silent. She's about to give up and suggest dropping Yael when Yael finally responds: none of the slots work, she has to do school pickup at 5pm Israel time.
+Priya replies first, flexible. James picks one or two. Yael doesn't reply. After a few hours of her working day, Maelle nudges Yael one more time in the group. Still silent. She's about to give up and suggest dropping Yael when Yael finally responds: none of the slots work, she has to do school pickup at 5pm Israel time.
 
-Maelle quietly files away that constraint — Yael can't do anything after 4:30pm Israel going forward — and recalculates. The new intersection is tighter, only a 60-minute band on three days of next week. She sends two fresh options. All four align on one. Booked. She sends Idan a quiet recap of the whole saga on the side.
+Maelle quietly files away that constraint — Yael can't do anything after 4:30pm Israel going forward — and recalculates. The new intersection is tighter, only a 60-minute band on three days of next week. She sends two fresh options back into the same group thread. All four align on one. Booked. She sends Idan a quiet recap of the whole saga on the side.

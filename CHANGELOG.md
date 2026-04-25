@@ -2,6 +2,38 @@
 
 ---
 
+## 2.2.1 — Per-person md memory, inbound reschedule autonomy, social conversation_state, post-approval health check
+
+Scenario-driven session — paper-ran scenarios 1–4 and fixed the gaps that surfaced.
+
+### Added
+
+- **Per-person md memory** (`src/memory/peopleMemory.ts`). Operational facts about people now live as `.md` files under `config/users/<owner>_people/` (KB pattern). Lightly sectioned: Residence, Workplace, Working hours, Communication style, What we've discussed. Catalog (~80 tokens) injects into owner prompt every turn; full content fetched on-demand via `get_person_memory(<slug>)`. Writes via `update_person_memory(<slug>, <section>, <text>)` — empty-until-real-fact. Owner is just another person file. Closes the "Maelle never knew Idan lives in Nes Ziona" gap. The 8-dim `PersonProfile.profile_json` rendering retired from the prompt; structured fields code paths read (gender, timezone, engagement_rank, working_hours_structured) stay in SQLite.
+- **Inbound reschedule auto-accept** (colleague-path `move_meeting` in `skills/meetings/ops.ts`). When a colleague DMs to move a meeting, she mutates the calendar autonomously IF the new slot is rule-compliant — `findAvailableSlots` narrow-window check (work hours, work days, buffers, floating blocks, conflicts). Compliant → silent move + shadow-DM owner. Non-compliant → returns `needs_owner_approval: true`; Sonnet falls back to `create_approval(kind=meeting_reschedule)`. `move_meeting` added to `COLLEAGUE_ALLOWED_TOOLS` with the gate enforced in-handler.
+- **Post-approval health check** (`src/utils/postBookingHealthCheck.ts`). After `slot_pick` / `calendar_conflict` approve+book, sweep the affected day via `analyzeCalendar` and DM owner if new issues land (Maya still in slot we gave Ron, displaced block, etc). Fire-and-forget; never blocks the resolver. Closes the domino gap from scenario 3.
+- **Core attendee-info collection** (#46). `formatPeopleMemoryForPrompt` tags each contact with `missing: <fields>` (gender, timezone, working_hours, language_preference). New CORE PERSON INFO block in owner LEARNING prompt: ask naturally when missing, infer-and-confirm from cues, never silent-guess. New `working_hours_structured: { workdays, hoursStart, hoursEnd, timezone? }` on `PersonProfile`, exposed via `update_person_profile.working_hours_structured` — scaffolding for #43's slot-search intersection.
+
+### Changed
+
+- **Social classifier — `conversation_state: 'open' | 'closing'`** (`src/core/social/classifyOwnerIntent.ts`). New required output, distinct from `kind`. `closing` suppresses social directive in both branches — no force-continuing topics the person is winding down. `engage` directive prompt rewritten: must PROGRESS the topic ("wow cool" isn't progress), never pivot to "anything work-related" unless person closed. OTHER tightened with cut-the-ack test ("Good. I'm usually dodging" → SOCIAL). Recent context (last 4 turns) now passed to classifier so silence-after-question is detectable. Closes the gaming-thread-killed bug.
+- `create_meeting` subject + body must be English regardless of conversation language. Tool description + arg descriptions updated. Calendar invites are shared artifacts; language must be predictable. SummarySkill already enforced English.
+
+### Tickets / process
+
+- Issue #43 split into three: #46 (collection, High — shipped), #43 itself repurposed Medium ("Honor attendee availability in booking and outreach"), #48 (coord clarify-and-resume sub-state, Medium).
+- Filed #45 (save if-then handling rules, Low).
+- Renamed #33 → "Accept or decline calendar invites".
+- Moved #12 (Hebrew voice quality) from Improvement to Roadmap.
+- Scenarios 1 + 2 edited inline (cold-stranger gate dropped, three-reschedules beat dropped).
+
+### Migration
+
+- `PersonProfile.working_hours_structured?: { workdays, hoursStart, hoursEnd, timezone? }` added alongside legacy free-text `working_hours`. JSON column — no schema migration.
+- New dir `config/users/<owner>_people/` created on demand by first `update_person_memory` write. Empty until then.
+- WORKSPACE CONTACTS block in owner prompt no longer renders the 8 `PersonProfile` dimensions — they're md territory now. Existing rows untouched.
+
+---
+
 ## 2.2.0 — Social Engine: bi-directional topic engine + proactive colleague outreach
 
 First real social layer. Three subsystems sharing the same primitives.
