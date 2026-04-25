@@ -103,14 +103,25 @@ export interface PersonInteraction {
   summary: string; // Short headline: "Booked 30min with Idan and Maayan for Thu 10 Apr 14:00"
 }
 
+// v2.2.2 (#46) — provenance for core attendee fields. Authority order:
+// owner > person > auto. Owner can overwrite anyone; person overwrites only
+// auto; auto cannot overwrite a set value. Always write through
+// `setCoreFieldWithProvenance` below — never poke *_set_by columns directly.
+export type CoreFieldSetBy = 'owner' | 'person' | 'auto';
+
 export interface PersonMemory {
   slack_id: string;
   name: string;
   name_he?: string;             // Hebrew spelling, used verbatim when writing in Hebrew
   email?: string;
   timezone?: string;
+  timezone_set_by?: CoreFieldSetBy;
+  state?: string;               // v2.2.2 — free-text location ("Israel", "Boston", "Tel Aviv")
+  state_set_by?: CoreFieldSetBy;
   gender: PersonGender;
-  gender_confirmed?: number;    // 0/1 — 1 means human-confirmed; auto-detectors must not overwrite
+  gender_confirmed?: number;    // 0/1 — kept for back-compat. New code reads gender_set_by.
+  gender_set_by?: CoreFieldSetBy;
+  working_hours_auto?: string;  // JSON: { workdays, hoursStart, hoursEnd } — derived from timezone defaults
   notes: string;                // JSON: PersonNote[]   — personal/relationship knowledge
   interaction_log: string;      // JSON: PersonInteraction[] — chronological activity timeline
   profile_json: string;         // JSON: PersonProfile  — structured behavioral model
@@ -120,6 +131,58 @@ export interface PersonMemory {
   social_topics: string;        // JSON: SocialTopic[]  — rich topic history
   created_at: string;
   updated_at: string;
+}
+
+const SET_BY_RANK: Record<CoreFieldSetBy, number> = { owner: 3, person: 2, auto: 1 };
+
+/**
+ * v2.2.2 (#46) — single choke-point for writing core attendee fields with
+ * provenance enforcement. Returns true when the write happened.
+ *
+ *   field: 'gender' | 'timezone' | 'state'
+ *   by:    'owner' | 'person' | 'auto'
+ *
+ * Authority: owner overrides anyone; person overrides only auto; auto cannot
+ * overwrite anything already set by owner or person. Empty/null current values
+ * are always overwritten.
+ */
+export function setCoreFieldWithProvenance(
+  slackId: string,
+  field: 'gender' | 'timezone' | 'state',
+  value: string,
+  by: CoreFieldSetBy,
+): boolean {
+  if (!value || !value.trim()) return false;
+  const db = getDb();
+  const setByCol = `${field}_set_by` as const;
+  const row = db.prepare(`SELECT ${field} as value, ${setByCol} as setBy FROM people_memory WHERE slack_id = ?`).get(slackId) as
+    | { value: string | null; setBy: CoreFieldSetBy | null }
+    | undefined;
+
+  // No row yet — caller must upsert first; we no-op rather than create.
+  if (!row) return false;
+
+  const currentSetBy = row.setBy ?? null;
+  const currentValue = (row.value ?? '').toString();
+  const newRank = SET_BY_RANK[by];
+  const currentRank = currentSetBy ? SET_BY_RANK[currentSetBy] : 0;
+
+  // Block lower-rank overwrite of an existing value.
+  if (currentValue && currentSetBy && newRank < currentRank) return false;
+  // Same rank, same value — no-op (avoid touching updated_at).
+  if (currentValue === value.trim() && currentSetBy === by) return false;
+
+  db.prepare(
+    `UPDATE people_memory SET ${field} = ?, ${setByCol} = ?, updated_at = datetime('now') WHERE slack_id = ?`,
+  ).run(value.trim(), by, slackId);
+
+  // Side effect: setting gender via this path also flips gender_confirmed for
+  // back-compat readers (gender_confirmed=1 means owner OR person, not auto).
+  if (field === 'gender' && by !== 'auto') {
+    db.prepare(`UPDATE people_memory SET gender_confirmed = 1 WHERE slack_id = ?`).run(slackId);
+  }
+
+  return true;
 }
 
 /** Set or update the Hebrew spelling of a contact's name. */
@@ -152,32 +215,58 @@ export function upsertPersonMemory(params: {
   email?: string;
   timezone?: string;
   gender?: PersonGender;
+  /**
+   * v2.2.2 (#46) — provenance for the timezone write. Defaults to 'auto'
+   * (Slack profile / users.info pulls). Owner-path callers should pass 'owner'
+   * so the value is locked against later auto-overwrite. The COALESCE pattern
+   * here means the timezone is only written when currently NULL; the explicit
+   * provenance helper `setCoreFieldWithProvenance` is the right path for
+   * AUTHORITATIVE overwrites of an existing value.
+   */
+  timezoneSetBy?: CoreFieldSetBy;
 }): void {
   const db = getDb();
+  const tzSetBy: CoreFieldSetBy = params.timezoneSetBy ?? 'auto';
   // NOTE: gender is only written when explicitly supplied AND not 'unknown'.
   // Respect gender_confirmed: never overwrite a confirmed gender here. A
   // confirmed update must go through confirmPersonGender().
   db.prepare(`
-    INSERT INTO people_memory (slack_id, name, email, timezone, gender, last_seen)
-    VALUES (@slack_id, @name, @email, @timezone, @gender, datetime('now'))
+    INSERT INTO people_memory (slack_id, name, email, timezone, timezone_set_by, gender, last_seen)
+    VALUES (@slack_id, @name, @email, @timezone, @tz_set_by, @gender, datetime('now'))
     ON CONFLICT(slack_id) DO UPDATE SET
-      name      = @name,
-      email     = COALESCE(@email, email),
-      timezone  = COALESCE(@timezone, timezone),
-      gender    = CASE
-                    WHEN gender_confirmed = 1 THEN gender
-                    WHEN @gender != 'unknown' THEN @gender
-                    ELSE gender
-                  END,
-      last_seen = datetime('now'),
-      updated_at = datetime('now')
+      name             = @name,
+      email            = COALESCE(@email, email),
+      timezone         = COALESCE(@timezone, timezone),
+      timezone_set_by  = CASE
+                           WHEN @timezone IS NOT NULL AND timezone IS NULL
+                             THEN @tz_set_by
+                           ELSE timezone_set_by
+                         END,
+      gender           = CASE
+                           WHEN gender_confirmed = 1 THEN gender
+                           WHEN @gender != 'unknown' THEN @gender
+                           ELSE gender
+                         END,
+      last_seen        = datetime('now'),
+      updated_at       = datetime('now')
   `).run({
-    slack_id: params.slackId,
-    name:     params.name,
-    email:    params.email    ?? null,
-    timezone: params.timezone ?? null,
-    gender:   params.gender   ?? 'unknown',
+    slack_id:  params.slackId,
+    name:      params.name,
+    email:     params.email    ?? null,
+    timezone:  params.timezone ?? null,
+    tz_set_by: params.timezone ? tzSetBy : null,
+    gender:    params.gender   ?? 'unknown',
   });
+
+  // v2.2.2 (#46) — whenever timezone landed (new or existing), refresh the
+  // auto-derived working hours. Cheap; idempotent inside the helper.
+  if (params.timezone) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { refreshAutoWorkingHours } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
+      refreshAutoWorkingHours(params.slackId);
+    } catch { /* never block memory writes */ }
+  }
 }
 
 /**
@@ -387,19 +476,14 @@ export function formatPeopleMemoryForPrompt(
         }).join(', ')
       : '';
 
-    // v2.2.1 (#46) — surface missing core fields so Maelle can spot the gap and
-    // ask naturally. "Core" = fields code paths read deterministically:
-    // gender (Hebrew gendered forms), timezone (scheduling + outreach gating),
-    // working_hours_structured (#43 will intersect), language_preference (reply lang).
-    const missingCore: string[] = [];
-    if (!p.gender || p.gender === 'unknown') missingCore.push('gender');
-    if (!p.timezone) missingCore.push('timezone');
-    if (!profile.working_hours_structured) missingCore.push('working_hours');
-    if (!profile.language_preference) missingCore.push('language_preference');
-    const missingTag = missingCore.length > 0 ? `, missing: ${missingCore.join('+')}` : '';
+    // v2.2.2 (#46) — `missing:` tag dropped per owner direction. Don't
+    // visibility-pressure asking; Slack auto-pull fills most of these silently
+    // and the LEARNING rules cover when an explicit ask is appropriate.
+    // State (v2.2.2) shown when known.
+    const stateTag = p.state ? `, state: ${p.state}` : '';
 
     const parts: string[] = [
-      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${p.timezone ? `, tz: ${p.timezone}` : ''}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}, ${socialLine}${topicStr ? `, topics: ${topicStr}` : ''}${missingTag})`,
+      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${p.timezone ? `, tz: ${p.timezone}` : ''}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}, ${socialLine}${topicStr ? `, topics: ${topicStr}` : ''})`,
     ];
 
     // Profile dimensions moved to per-person markdown files (v2.2.1). The

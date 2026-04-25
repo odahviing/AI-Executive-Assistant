@@ -283,6 +283,22 @@ function initSchema(db: Database.Database): void {
   // void → -1; rank 0 = don't initiate (opt-out). See engagementRank.ts.
   try { db.exec(`ALTER TABLE people_memory ADD COLUMN engagement_rank INTEGER NOT NULL DEFAULT 2`); } catch (_) {}
 
+  // v2.2.2 (#46) — core attendee info layer.
+  // - state: free-text location (city / country) — drives timezone derivation when set first
+  // - <field>_set_by: provenance tag for the authority chain (owner > person > auto)
+  //   * owner: owner directly told Maelle ("Yael is in Israel")
+  //   * person: the person stated it themselves OR a colleague-self confirm
+  //   * auto:   inferred from Slack profile / image / name LLM
+  //   Owner overrides anyone; person overrides only auto; auto can't overwrite a set value.
+  // - working_hours_auto: JSON {workdays, hoursStart, hoursEnd} derived from timezone defaults
+  //   (Israel TZ → Sun–Thu 09–17, else Mon–Fri 09–17). Distinct from working_hours_structured
+  //   on profile_json (manual override). Readers prefer manual → fall back to auto.
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN state TEXT`); } catch (_) {}
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN state_set_by TEXT`); } catch (_) {}
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN timezone_set_by TEXT`); } catch (_) {}
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN gender_set_by TEXT`); } catch (_) {}
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN working_hours_auto TEXT`); } catch (_) {}
+
   // v2.2 — audit trail for engagement_rank changes. Small table so we can
   // answer "why is Ysrael at rank 0?". Reasons: no_reply / reply_engaged /
   // reply_brief / colleague_initiated / colleague_deflected / owner_directive.

@@ -2,6 +2,45 @@
 
 ---
 
+## 2.2.2 — Core attendee info: collection layer with provenance (#46)
+
+Closes #46. Three core fields about every person Maelle works with — gender, state (city/country), timezone — now collected with an authority chain (owner > person > auto) so the right value lands in the right place and can't be silently overwritten by a lower-rank source.
+
+### Added
+
+- **`setCoreFieldWithProvenance(slackId, field, value, by)`** in `src/db/people.ts` — single choke-point for writing gender / timezone / state with provenance. Owner overrides anyone; person overrides only auto; auto can't overwrite a set value. Anti-spoofing built in.
+- **`state` column** on `people_memory` — free-text location ("Israel", "Boston", "Tel Aviv"). When set, derives + saves a matching IANA timezone via `src/utils/locationTz.ts` (static map for common cases, Sonnet fallback for the long tail). One-way only — knowing ET doesn't reveal Boston vs NYC.
+- **`<field>_set_by` provenance columns** — `gender_set_by`, `timezone_set_by`, `state_set_by`. NULL = legacy/unknown (treated as lowest precedence).
+- **`working_hours_auto` column** + `src/utils/workingHoursDefault.ts` — derived from timezone defaults. Israel TZ → Sun–Thu 09:00–17:00. Other TZ → Mon–Fri 09:00–17:00. `getEffectiveWorkingHours(person)` reader — manual `working_hours_structured` (owner-set) wins over auto.
+- **`Connection.collectCoreInfo?(ref)`** — new optional method on the Connection interface (`src/connections/types.ts`). SlackConnection wraps `users.info` to return `{ timezone, pronouns, imageUrl, email, displayName }`. Future EmailConnection / WhatsAppConnection implement the same shape — no skill code changes when those land. Decoupled per the #22 lesson.
+- **`update_person_profile.state`** — new tool arg. Owner-stated location auto-derives timezone with `set_by='owner'` provenance.
+
+### Changed
+
+- **`upsertPersonMemory`** now accepts optional `timezoneSetBy` arg and writes `timezone_set_by` on first set. Refreshes `working_hours_auto` whenever timezone lands.
+- **`confirm_gender`** is provenance-aware — owner-path call sets `gender_set_by='owner'`, colleague self-confirm sets `gender_set_by='person'`. Higher-rank lock returns `confirmed: false, reason: 'higher_authority_already_set'` so the LLM doesn't claim it saved.
+- **`genderDetect.ts` auto-detection** routes through the provenance helper as `set_by='auto'` — any direct statement from owner / person overrides automatically.
+- **`formatPeopleMemoryForPrompt`** — dropped the `missing: <fields>` tag (owner direction: don't visibility-pressure asking). Now shows `state:` when known.
+- **LEARNING prompt block rewritten.** Dropped the CORE PERSON INFO interrogation rule from 2.2.1. New rule: owner-volunteered facts are highest authority, save immediately. Don't proactively ask owner. Only ask when a task needs a field AND Slack auto-pull came up empty. Person-self statements beat auto; owner can override anything (anti-spoofing).
+
+### Tickets
+
+- Closed #46 (collection layer).
+- Filed [#51](https://github.com/odahviing/AI-Executive-Assistant/issues/51) — Hebrew gender discovery from message content (Low, blocked on email + WhatsApp connector tickets).
+- [#43](https://github.com/odahviing/AI-Executive-Assistant/issues/43) (use attendee availability in booking) — still open Medium. Data is now collected; the slot-search intersection is the remaining work. Scenarios 1 row 6 + 3 row 1 unblock when #43 ships.
+
+### Migration
+
+- New columns added to `people_memory` via idempotent `ALTER TABLE` in `db/client.ts`. NULL legacy values treated as lowest-precedence (auto).
+- `working_hours_auto` populated lazily — first time a person's timezone is read/written via the new path, the column gets filled.
+
+### Invariants preserved
+
+- `gender_confirmed=1` legacy column still set whenever `gender_set_by` is `owner` or `person`. Existing readers see no change in lock semantics.
+- Skills still import only from `src/connections/types` + `src/connections/registry`. The new `collectCoreInfo` method respects the boundary.
+
+---
+
 ## 2.2.1 — Per-person md memory, inbound reschedule autonomy, social conversation_state, post-approval health check
 
 Scenario-driven session — paper-ran scenarios 1–4 and fixed the gaps that surfaced.

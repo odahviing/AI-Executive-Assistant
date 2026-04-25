@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../config';
-import { getPersonMemory, updatePersonGender } from '../db';
+import { getPersonMemory, setCoreFieldWithProvenance } from '../db';
 import type { PersonGender } from '../db';
 import logger from './logger';
 
@@ -158,7 +158,10 @@ export async function detectAndSaveGender(params: {
   }
 
   if (gender !== 'unknown') {
-    updatePersonGender(slackId, gender);
-    logger.debug('Gender saved (auto-detected)', { slackId, name, gender });
+    // v2.2.2 (#46) — go through the provenance choke-point. set_by='auto' so
+    // any direct statement from the person or owner overrides this guess.
+    // The helper writes the gender column itself; no separate update needed.
+    const wrote = setCoreFieldWithProvenance(slackId, 'gender', gender, 'auto');
+    logger.debug('Gender saved (auto-detected)', { slackId, name, gender, wrote });
   }
 }

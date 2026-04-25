@@ -276,7 +276,11 @@ Call this after interactions — not during them. It's a background update.`,
             },
             timezone: {
               type: 'string',
-              description: 'IANA timezone of the person — save whenever you have a signal (they mention ET/PST/GMT, calendar invite location, etc). e.g. "America/New_York", "America/Los_Angeles", "Europe/London", "Australia/Sydney", "Asia/Jerusalem".',
+              description: 'IANA timezone of the person. Save when the owner volunteers it OR a strong signal lands (calendar invite metadata, explicit mention of ET/PST/GMT). e.g. "America/New_York", "Europe/London", "Asia/Jerusalem". When the owner tells you a CITY/COUNTRY use the `state` field instead — Maelle will derive the timezone from it.',
+            },
+            state: {
+              type: 'string',
+              description: 'Free-text location for the person — city, region, or country ("Boston", "New York", "Israel", "London"). Save when the owner volunteers it ("Yael lives in Israel") or the person tells you. State is more useful than timezone alone (Boston ≠ NYC even though both are ET). When state lands, Maelle automatically derives + saves a matching IANA timezone.',
             },
             working_hours: {
               type: 'string',
@@ -653,9 +657,25 @@ First call for a person auto-creates their md file. Empty-until-real-fact — do
         const gender  = args.gender as 'male' | 'female';
         // Make sure the row exists (cheap no-op if it does)
         upsertPersonMemory({ slackId, name });
+
+        // v2.2.2 (#46) — provenance: owner-path call → 'owner' (highest authority,
+        // can overwrite person-set values, anti-spoofing). Colleague-path call
+        // is restricted by the gate above to colleague_slack_id === context.userId
+        // (self-confirm only) — that's 'person' authority.
+        const setBy = isOwner ? 'owner' : 'person';
+        const { setCoreFieldWithProvenance } = require('../db') as typeof import('../db');
+        const wrote = setCoreFieldWithProvenance(slackId, 'gender', gender, setBy);
+        if (!wrote) {
+          // Higher-rank value already locked — surface so the LLM doesn't claim it saved.
+          logger.info('confirm_gender refused — higher-rank provenance already set', { slackId, gender, setBy });
+          return { confirmed: false, reason: 'higher_authority_already_set', name };
+        }
+        // Keep legacy confirmPersonGender side-effect (gender_confirmed=1) — readers
+        // that haven't migrated still see the lock. setCoreFieldWithProvenance also
+        // sets gender_confirmed when by != 'auto', so this is belt-and-suspenders.
         confirmPersonGender(slackId, gender);
-        logger.info('Gender confirmed (human-locked)', { slackId, name, gender, confirmedBy: context.userId });
-        return { confirmed: true, name, gender };
+        logger.info('Gender confirmed (human-locked)', { slackId, name, gender, setBy, confirmedBy: context.userId });
+        return { confirmed: true, name, gender, set_by: setBy };
       }
 
       case 'get_person_memory': {
@@ -723,16 +743,54 @@ First call for a person auto-creates their md file. Empty-until-real-fact — do
         const slackId = args.colleague_slack_id as string;
         const name    = args.colleague_name as string;
         const timezone = args.timezone as string | undefined;
-        const nameHe   = args.name_he as string | undefined;
+        const state   = args.state as string | undefined;
+        const nameHe  = args.name_he as string | undefined;
 
-        // Ensure the person record exists before updating profile.
-        // If a timezone was supplied, write it to the top-level column
-        // (upsertPersonMemory uses COALESCE so existing value is preserved
-        // when timezone is undefined).
-        upsertPersonMemory({ slackId, name, timezone });
+        // v2.2.2 (#46) — owner-path tool. Anything the owner sets here is
+        // owner-stated by definition; route through the provenance helper.
+        // Ensure the row exists first; upsertPersonMemory tracks tz_set_by='owner'
+        // when we pass timezone alongside.
+        upsertPersonMemory({ slackId, name, timezone, timezoneSetBy: 'owner' });
 
         if (nameHe && nameHe.trim()) {
           setPersonNameHe(slackId, nameHe.trim());
+        }
+
+        // v2.2.2 (#46) — STATE: free-text location. Owner-stated → set_by='owner'.
+        // When state lands and timezone wasn't also passed in this same call,
+        // try to derive timezone from the state and save with same provenance.
+        if (state && state.trim()) {
+          const { setCoreFieldWithProvenance } = require('../db') as typeof import('../db');
+          setCoreFieldWithProvenance(slackId, 'state', state.trim(), 'owner');
+          if (!timezone) {
+            // Static-first lookup; Sonnet fallback if needed. Fire-and-forget.
+            void (async () => {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { inferTimezoneFromState } = require('../utils/locationTz') as typeof import('../utils/locationTz');
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { refreshAutoWorkingHours } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
+                const tz = await inferTimezoneFromState(state.trim());
+                if (tz) {
+                  setCoreFieldWithProvenance(slackId, 'timezone', tz, 'owner');
+                  refreshAutoWorkingHours(slackId);
+                }
+              } catch (err) {
+                logger.debug('state→tz derivation failed', { slackId, state, err: String(err).slice(0, 200) });
+              }
+            })();
+          }
+        }
+
+        // v2.2.2 (#46) — when owner passes timezone explicitly, lock it as owner-set.
+        // upsertPersonMemory only writes via COALESCE so an existing value isn't
+        // touched there. Use the provenance helper for an authoritative overwrite.
+        if (timezone && timezone.trim()) {
+          const { setCoreFieldWithProvenance } = require('../db') as typeof import('../db');
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { refreshAutoWorkingHours } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
+          setCoreFieldWithProvenance(slackId, 'timezone', timezone.trim(), 'owner');
+          refreshAutoWorkingHours(slackId);
         }
 
         updatePersonProfile(slackId, {

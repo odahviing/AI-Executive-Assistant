@@ -78,5 +78,26 @@ export function createSlackConnection(app: App, botToken: string): Connection {
       const results = await slackFindChannelByName(app, botToken, query);
       return results.map(c => ({ id: c.id, name: c.name }));
     },
+
+    // v2.2.2 (#46) — pull core info from Slack's user directory. Maps
+    // users.info → { timezone, pronouns, imageUrl, email, displayName }.
+    // Slack doesn't expose a `state` (city/country) field directly, so we
+    // skip that — owner-volunteered or state-from-state-via-locationTz fills.
+    async collectCoreInfo(ref) {
+      try {
+        const info = await app.client.users.info({ token: botToken, user: ref });
+        const u = info.user as any;
+        if (!u) return null;
+        return {
+          timezone:    u?.tz || undefined,
+          pronouns:    u?.profile?.pronouns || undefined,
+          imageUrl:    u?.profile?.image_192 || u?.profile?.image_72 || undefined,
+          email:       u?.profile?.email || undefined,
+          displayName: u?.real_name || u?.name || undefined,
+        };
+      } catch {
+        return null;
+      }
+    },
   };
 }

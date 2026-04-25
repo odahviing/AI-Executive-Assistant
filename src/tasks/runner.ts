@@ -32,7 +32,17 @@ export async function runDueTasks(
   const dueTasks = getTasksDueNow();
   if (dueTasks.length === 0) return;
 
-  logger.info('Running due tasks', { count: dueTasks.length });
+  // v2.2.2 — when the only due task(s) are recurring system ticks (social
+  // outreach / decay), log at debug. Mixed batches and any user-facing tasks
+  // keep the info-level summary so the live log still shows real work.
+  const onlySystemTicks = dueTasks.every(t =>
+    t.type === 'social_outreach_tick' || t.type === 'social_decay',
+  );
+  if (onlySystemTicks) {
+    logger.debug('Running due tasks (system ticks)', { count: dueTasks.length });
+  } else {
+    logger.info('Running due tasks', { count: dueTasks.length });
+  }
 
   for (const task of dueTasks) {
     const profile = [...profiles.values()].find(p => p.user.slack_user_id === task.owner_user_id);

@@ -42,7 +42,13 @@ export function createTask(params: Omit<Task, 'id' | 'created_at' | 'updated_at'
     target_slack_id: params.target_slack_id ?? null,
     target_name: params.target_name ?? null,
   });
-  logger.info('Task created', {
+  // v2.2.2 — recurring system ticks (social_outreach_tick / social_decay)
+  // self-reschedule every hour or every 7 days; logging each creation at info
+  // floods the live log without signal. Demote those to debug; everything
+  // user-facing (reminders, follow-ups, outreach, coord) stays at info.
+  const isSystemTick = params.type === 'social_outreach_tick' || params.type === 'social_decay';
+  const logLevel = isSystemTick ? 'debug' : 'info';
+  logger[logLevel]('Task created', {
     id,
     type: params.type,
     title: params.title,

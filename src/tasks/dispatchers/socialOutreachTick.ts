@@ -76,8 +76,11 @@ function readConfig(profile: UserProfile): ProactiveConfig {
 
 function isWorkday(weekday: number, skipWeekends: boolean): boolean {
   if (!skipWeekends) return true;
-  // Luxon weekday: 1=Mon .. 7=Sun. Default "weekend" is Sat+Sun.
-  return weekday >= 1 && weekday <= 5;
+  // v2.2.2 — Mon–Thu only. Luxon weekday: 1=Mon..7=Sun. The intersection of
+  // every common workweek (IL Sun–Thu, US/EU Mon–Fri) is Mon–Thu — narrowing
+  // here keeps us safely inside business hours regardless of the colleague's
+  // location. Friday and Sunday excluded by design.
+  return weekday >= 1 && weekday <= 4;
 }
 
 function maelleAlreadyPingedToday(ownerUserId: string): boolean {
@@ -103,17 +106,38 @@ function pickCandidate(
   const [startHour, endHour] = config.daily_window_hours;
   const cooldownMs = config.cooldown_days * 24 * 60 * 60 * 1000;
 
+  // v2.2.2 — recency gate. Proactive social only for people interacted with
+  // in the last 72 hours. Owner direction: don't try to start a social topic
+  // with someone you haven't actually talked to recently — week+ old contacts
+  // get pinged cold, which reads transactional, not human.
+  const RECENT_CONTACT_MS = 72 * 60 * 60 * 1000;
+
   const survivors = rows.filter(r => {
     if (r.slack_id === ownerSlackId) return false;
     if (!r.timezone) return false;
     if ((r.engagement_rank ?? 2) <= 0) return false;
 
-    // Must have prior interaction — cold outreach not allowed
-    const hasInteraction = (() => {
-      try { return JSON.parse(r.interaction_log || '[]').length > 0; } catch { return false; }
+    // Must have a fresh interaction (≤ 48h) — covers both social and any
+    // other recent activity (meeting, message, conversation). Old contacts
+    // (week+ silent) are skipped — proactive ping there feels random.
+    const lastSocialMs = r.last_social_at ? new Date(r.last_social_at).getTime() : 0;
+    const lastInteractionMs = (() => {
+      try {
+        const log = JSON.parse(r.interaction_log || '[]') as Array<{ date?: string }>;
+        if (!Array.isArray(log) || log.length === 0) return 0;
+        // interaction_log entries carry an ISO `date`. Pick the freshest.
+        let max = 0;
+        for (const entry of log) {
+          if (!entry?.date) continue;
+          const t = new Date(entry.date).getTime();
+          if (Number.isFinite(t) && t > max) max = t;
+        }
+        return max;
+      } catch { return 0; }
     })();
-    const hasSocial = !!r.last_social_at;
-    if (!hasInteraction && !hasSocial) return false;
+    const lastTouchMs = Math.max(lastSocialMs, lastInteractionMs);
+    if (!lastTouchMs) return false;
+    if (nowUtc.toMillis() - lastTouchMs > RECENT_CONTACT_MS) return false;
 
     // Colleague local time check
     const colleagueLocal = nowUtc.setZone(r.timezone);
@@ -232,7 +256,7 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
 
   try {
     if (!cfg.enabled) {
-      logger.info('social_outreach_tick skipped — disabled in profile', {
+      logger.debug('social_outreach_tick skipped — disabled in profile', {
         ownerUserId: profile.user.slack_user_id,
       });
       return;
@@ -240,7 +264,7 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
 
     // Daily cap: at most one proactive ping per owner per day
     if (maelleAlreadyPingedToday(profile.user.slack_user_id)) {
-      logger.info('social_outreach_tick skipped — already pinged today', {
+      logger.debug('social_outreach_tick skipped — already pinged today', {
         ownerUserId: profile.user.slack_user_id,
       });
       return;
@@ -256,7 +280,9 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
     const nowUtc = DateTime.utc();
     const pick = pickCandidate(rows, cfg, profile.user.slack_user_id, nowUtc);
     if (!pick) {
-      logger.info('social_outreach_tick no eligible candidate this hour', {
+      // Demoted to debug — this is the steady-state outcome 22h/day for an
+      // all-IL contact list and was filling the live log with no signal.
+      logger.debug('social_outreach_tick no eligible candidate this hour', {
         ownerUserId: profile.user.slack_user_id,
         total_rows: rows.length,
       });

@@ -115,6 +115,39 @@ export interface Connection {
 
   /** Look up a channel by name. Empty array if transport has no channels. */
   findChannelByName(query: string): Promise<ConnectionChannel[]>;
+
+  /**
+   * v2.2.2 (#46) — fetch core attendee info from this transport's directory:
+   * timezone, gender hint (pronouns / photo / etc), state if available. Used
+   * to keep `people_memory` populated without asking the owner. Optional —
+   * transports that don't have a directory (some webhook surfaces) just don't
+   * implement it, callers check before invoking.
+   *
+   * Implementations: SlackConnection wraps users.info + pronouns + image;
+   * future EmailConnection might parse a contact card; future WhatsAppConnection
+   * the profile name + (when available) public profile photo.
+   *
+   * Returns null when the ref doesn't resolve. Returned values get persisted
+   * via setCoreFieldWithProvenance with set_by='auto' — owner / person can
+   * override them later.
+   */
+  collectCoreInfo?(ref: string): Promise<CoreInfoFromTransport | null>;
+}
+
+/**
+ * v2.2.2 (#46) — transport-pulled core info shape. All fields optional;
+ * transports fill what they have. Caller persists via setCoreFieldWithProvenance.
+ */
+export interface CoreInfoFromTransport {
+  timezone?: string;       // IANA
+  state?: string;          // free-text city / country if the transport carries it
+  gender?: 'male' | 'female';
+  // Hint URL the caller can pass to genderDetect.detectGenderFromImage for
+  // a photo-based fallback when `gender` itself isn't directly available.
+  imageUrl?: string;
+  pronouns?: string;
+  email?: string;
+  displayName?: string;
 }
 
 /**
