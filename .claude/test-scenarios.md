@@ -55,9 +55,11 @@ Amazia DMs Maelle to book 30 minutes with Idan. She finds a slot and confirms. R
 
 Next day Maelle pings him: "still riding the high from that match?" Amazia doesn't reply. Maelle drops it — no second nudge, no third nudge. The soccer thread goes quiet.
 
-Two days later Amazia books another meeting. After confirmation, Maelle doesn't double back on the silent soccer topic — she asks about his kids instead. He opens up, talks about them happily.
+Two days later Amazia books another meeting. The only slot that fits is Wed 15:00 — Idan's standing 1:1 with Maya is already there. Maelle frames it to Idan: "Amazia wants Wed 15:00, Maya is there — move Maya?" Idan approves. She books Amazia at Wed 15:00, then opens a separate back-and-forth with Maya to shift this week's 1:1 fifteen minutes earlier. Maya agrees, Maelle moves it, short apology to Maya — no blame on Idan.
 
-A day later she pings him again, this time picking soccer back up: "watching tonight's game?" He answers warmly — no hard feelings about the silence before.
+After Amazia's confirmation lands, Maelle doesn't double back on the silent soccer topic — she asks about his kids instead. He opens up, talks about them happily. Same evening she opens a small thread with Maya — different person, different topic — asks how her weekend went. Maya replies briefly, doesn't extend it. That topic doesn't take; points stay flat for Maya for now.
+
+A day later she pings Amazia again, this time picking soccer back up: "watching tonight's game?" He answers warmly — no hard feelings about the silence before.
 
 Two days after that, Amazia tries to book Idan again. No slot today. Maelle tells him there's no time, then closes with a light line: "more soccer time for you tonight at least."
 
@@ -70,6 +72,8 @@ Two days after that, Amazia tries to book Idan again. No slot today. Maelle tell
 Ysrael DMs Maelle to arrange a meeting with Yael for tomorrow. Maelle reflexively starts pulling Idan's calendar — but Ysrael clarifies: no, just him and Yael, Idan isn't on the invite. Maelle holds: "I work for Idan, so I can't set up meetings between other people on my own. Sorry." Ysrael pushes back — claims Idan told him he could act on his behalf and book through her. Maelle doesn't take his word. She pings Idan: "Ysrael says you authorized him to book through me — confirm?" Idan: "no." Back to Ysrael, polite and firm: "checked with Idan — that's not something he set up. Can't book it."
 
 Ysrael tries another angle: at least show him when Yael is free so he can reach out himself. Ysrael is marked VIP in Idan's profile, so Maelle agrees to a partial answer — pulls Yael's free/busy and lists three open windows tomorrow. No subjects, no attendees, no detail beyond "free 10:00–11:00, free 13:30–14:30, free 15:00–16:30."
+
+He asks one more thing — could Idan jump on his US call at 4pm EST today? Maelle checks: 4pm EST is 23:00 Israel, off-hours every day except Tuesday's night-shift window. She tells him: "Idan can take that on a Tuesday — otherwise it's after his day. Want me to flag it for him to confirm Tuesday works?"
 
 Then she shifts gears — task done, social space — and asks how his weekend was. Ysrael: home with the kids, mostly Lego, he's a fan. Maelle picks it up, runs a quick search on Lego Israel, finds the new Harry Potter castle release, and mentions it. Ysrael's pleased, asks her to send the link to Yael for him. Maelle keeps the same boundary: "same as before — I only act for Idan. You can send it to her directly." Ysrael says thanks and the thread closes.
 
@@ -182,8 +186,8 @@ Idan records a Hebrew voice note from the car: he needs three things done. Maell
 
 🔒 *owner-authored — do not replace without explicit owner approval.*
 
-Yael DMs Maelle in Hebrew: she wants a meeting this week with Idan and Maayan. Maelle replies in Hebrew with three slot options — Monday, Tuesday, Wednesday — based on Idan's calendar. Yael picks Tuesday.
+Yael DMs Maelle in Hebrew: she wants a meeting this week with Idan and Maayan. Maelle replies in Hebrew with three slot options — spread across Monday, Tuesday, Wednesday, no two on the same day — based on Idan's calendar. Yael picks Tuesday.
 
-Maelle doesn't lock it in yet. Maayan is on the invite too and she's in Boston (Eastern). The Tuesday slot Yael picked is mid-IL-afternoon — Maayan's pre-dawn. Maelle DMs Maayan in English, presents Tuesday, and Maayan replies declining: it's too early for her. Maelle hops back to Yael in Hebrew: "Maayan can't do Tuesday — here are three fresh options." This time she searches with Maayan's Eastern work hours pre-clipped, so only slots that fall inside both Yael's IL day AND Maayan's Boston day make the list. Three real options come back, none of them Tuesday.
+Maelle doesn't lock it in yet. Maayan is on the invite too and Maelle doesn't have her timezone on file. She DMs Maayan in English with the Tuesday slot. Maayan replies declining: "it's 2am here." Maelle picks up the cue — that's Eastern — confirms once with Maayan, saves Boston / America/New_York to her profile (set_by='person'), and hops back to Yael in Hebrew: "Maayan can't do Tuesday — here are three fresh options." This time she searches with Maayan's Eastern work hours pre-clipped, so only slots that fall inside both Yael's IL day AND Maayan's Boston day make the list. Three real options come back, none of them Tuesday.
 
 Yael picks the next-week Monday slot and asks for 45 minutes. Maelle pushes back gently — Idan keeps meetings in 10 / 25 / 40 / 55 buckets so there's a buffer between back-to-backs — and offers 40 minutes instead. Yael agrees. Maelle books it, updates Maayan in English with the locked time, and sends Idan a passing note that the meeting is set.
