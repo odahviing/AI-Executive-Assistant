@@ -17,6 +17,12 @@ When the owner says "wrap up" / "close the patch" / "cut a version" / "day close
 
 When the owner says "test scenario N" / "run scenario N" / "simulate scenario N" (or similar) → open `.claude/test-scenarios.md`, read that scenario in full, then code-trace it against the current files on disk (do not trust memory) and produce a report: what works, what doesn't, what shouldn't happen, plus concrete fix suggestions. **This is a paper exercise — never execute the scenario for real. No live DMs, no real calendar writes, no DB writes, no tool calls against the running system.** The only allowed side effect is reading source files. No auto-fixing — owner decides fix-now vs file-a-ticket.
 
+**Scenario report format (4 columns):** `# | What the scenario expects | What the code does today | Status` (✅ Works / ⚠️ Partial / ❌ Not working / 🚫 Shouldn't happen). One row per discrete checkpoint; each row self-contained with file:line citations so a reader doesn't need to re-read the scenario. After the table, a short **Fix suggestions** section covering ONLY the ❌ and ⚠️ rows. Skip the ✅ ones.
+
+All 10 scenarios were paper-run against v2.2.3 (sessions through 2026-04-26). Surfaced gaps either fixed inline or filed (#43 + descendants, #51, #52, #53). When re-running scenarios, treat any ❌/⚠️ row identically to the first run — owner may have changed the underlying spec since (scenarios 1 + 2 were reframed mid-session). Always re-read the scenario text fresh, never trust prior reports.
+
+**Edits to scenarios are owner-driven.** If a beat in a scenario reads as "wrong" to you, propose a rewrite — don't just rate it ❌. The owner has reframed scenarios mid-session multiple times when my analysis surfaced that the original scenario expectation didn't match his actual workflow.
+
 ---
 
 ## Where we are — v2.2.0 just shipped
@@ -169,17 +175,17 @@ Both are valid. The rule is: use CODE where we need determinism, use PROMPTS whe
 - **Do not cram judgment into code.** A regex trying to detect "is this message a relay commitment" will miss 10% of cases and add false positives. An LLM pass over the draft can classify by meaning.
 - **Short prompt rules beat long ones.** One sentence the model actually reads is worth ten it skims. When in doubt: delete a rule, don't add one.
 
-### Version
-- Bump patch (1.x.y → 1.x.y+1) when: bug fixes, small improvements, prompt tweaks, file rename/split without behavior change
-- Bump minor (x.y → x.y+1) when: a meaningful new capability, a new skill, a significant behavior change, a schema migration that needs explaining
-- Never bump major (x.0) without explicit instruction
-- Update package.json version at the end of every session where code changed
+### Version — owner is the gatekeeper
+- **Default for the agent: PATCH only.** Even if work feels architectural or substantial, default to bumping patch (`x.y.z → x.y.z+1`). The owner has corrected this multiple times when the agent reached for minor.
+- **Owner defines the version.** Minor / major bumps happen ONLY when the owner says so explicitly ("bump minor", "cut a 2.3 release", etc). Never decide the level autonomously.
+- **Owner calls when to commit.** Tree changes stay in tree until the owner says "commit", "bundle", "ship", "wrap up", "let's finish for today" — only then commit + push. Never commit on your own initiative even after a patch bump.
+- Never bump major (`x.0`) without explicit instruction.
 
 ### Version-bump workflow (what to do at each level)
-- **PATCH** — keep it light. Update `package.json` version + add the `CHANGELOG.md` entry. THAT'S IT. Do NOT commit, do NOT push, do NOT touch memory files or README. The owner runs the patch locally and bundles when ready.
-- **MINOR** — full wrap-up. Update `package.json` + `CHANGELOG.md` + `README.md` (if architecture/public behavior changed) + both memory files + run `npm run typecheck` + commit + push + update/open relevant GitHub issues.
+- **PATCH** — keep it light. Update `package.json` version + add the `CHANGELOG.md` entry. THAT'S IT. Do NOT commit, do NOT push, do NOT touch memory files or README. The owner runs the patch locally and bundles when ready. If owner THEN says "commit + bundle", that's when memory files + README + commit + push happen.
+- **MINOR** — full wrap-up, owner-initiated only. Update `package.json` + `CHANGELOG.md` + `README.md` (if architecture/public behavior changed) + both memory files + run `npm run typecheck` + commit + push + update/open relevant GitHub issues.
 - **MAJOR** — full wrap-up + explicit user instruction required.
-- If unsure whether the work is patch- or minor-sized: ASK before doing the wrap-up.
+- If unsure whether the work is patch- or minor-sized: default to PATCH and let the owner upgrade.
 
 ### CHANGELOG.md
 - **Every version** (patches AND minors) gets an entry — Maelle's history is the changelog, don't silently squash patches
