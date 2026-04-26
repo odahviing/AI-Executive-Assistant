@@ -360,12 +360,9 @@ export async function handleCoordReply(
       `Thanks! Just to make sure I've got it right — could you pick a number (1, 2, or 3) for the options above? Or if none of those work, just tell me what times are better for you and I'll find something else.`,
       { threadTs: params.threadTs },
     );
-    await shadowNotify(params.profile, {
-      channel: job.owner_channel,
-      threadTs: job.owner_thread_ts ?? undefined,
-      action: 'Reply received',
-      detail: `${participant.name} replied to "${job.subject}" — response unclear, asked for clarification`,
-    });
+    // v2.2.4 (bug 3c) — 'Reply received — unclear' shadow dropped. The owner
+    // sees the participant's actual reply through the audit log; an extra DM
+    // for "we asked them to clarify" is per-state-hop noise.
     return true;
   }
 
@@ -415,19 +412,20 @@ export async function handleCoordReply(
     });
   }
 
-  // Shadow
-  const slotLabel = preferredSlot
-    ? DateTime.fromISO(preferredSlot).setZone(params.profile.user.timezone).toFormat('EEE d MMM HH:mm')
-    : 'no slot picked';
-  const responseLabel = response === 'yes'
-    ? `✓ ${slotLabel}`
-    : `✗ can't make any slot${suggestedAlternative ? ` (suggested: "${suggestedAlternative}")` : ''}`;
-  await shadowNotify(params.profile, {
-    channel: job.owner_channel,
-    threadTs: job.owner_thread_ts ?? undefined,
-    action: 'Reply received',
-    detail: `${participant.name} responded to "${job.subject}": ${responseLabel}`,
-  });
+  // v2.2.4 (bug 3c) — 'Reply received' per-vote shadow dropped on the yes
+  // path. The booking confirmation (when allResponded) is the decision-worthy
+  // event and lands moments later. On the no path, the round-2 shadow that
+  // follows carries the same narration ("X countered with …, looking at new
+  // window"). One shadow per cycle, not four.
+  if (response === 'no') {
+    const counterLabel = suggestedAlternative ? ` (suggested: "${suggestedAlternative}")` : '';
+    await shadowNotify(params.profile, {
+      channel: job.owner_channel,
+      threadTs: job.owner_thread_ts ?? undefined,
+      action: 'Counter received',
+      detail: `${participant.name} can't make any slot for "${job.subject}"${counterLabel} — looking for a new window`,
+    });
+  }
 
   if (allResponded) {
     await resolveCoordination(job.id, params.profile);

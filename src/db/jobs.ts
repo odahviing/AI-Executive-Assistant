@@ -110,6 +110,42 @@ export function updateOutreachJob(id: string, updates: Partial<OutreachJob>): vo
   for (const [k, v] of Object.entries(updates)) params[k] = v ?? null;
   db.prepare(`UPDATE outreach_jobs SET ${fields}, updated_at = datetime('now') WHERE id = @id`).run(params);
 
+  // v2.2.4 — defensive linked-task closure. Every outreach has a parent task
+  // created by message_colleague (skill_origin='outreach', skill_ref=jobId).
+  // When the outreach reaches a terminal status, the parent task should
+  // follow. Most call sites already do this explicitly (closeFireAndForget,
+  // the outreach reply pipeline), but newer paths (verifier-driven 'done',
+  // outreach_decision auto-close) didn't — leaving stranded pending tasks
+  // that the v2.2.4 tasks-first brief would re-surface forever. Idempotent:
+  // tasks already in a terminal state won't be touched (the IN clause
+  // narrows it). Cancellation paths cancel the task; success paths complete.
+  const terminalTask = (() => {
+    switch (updates.status) {
+      case 'done':
+      case 'replied':
+        return 'completed';
+      case 'cancelled':
+      case 'expired':
+      case 'failed':
+        return 'cancelled';
+      default:
+        return null;
+    }
+  })();
+  if (terminalTask) {
+    if (terminalTask === 'completed') {
+      db.prepare(
+        `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
+         WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague','pending_owner')`
+      ).run(id);
+    } else {
+      db.prepare(
+        `UPDATE tasks SET status = 'cancelled', updated_at = datetime('now')
+         WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague','pending_owner')`
+      ).run(id);
+    }
+  }
+
   // v1.6.9 — terminal-state history. When an outreach resolves (replied /
   // no_response), write past-tense history to the colleague's
   // interaction_log so Maelle remembers "we talked about X last week" in
@@ -489,6 +525,28 @@ export function updateCoordJob(id: string, updates: Partial<Omit<CoordJob, 'id' 
       logger.warn('updateCoordJob sibling-outreach cleanup threw — non-fatal', {
         err: String(err), coordId: id,
       });
+    }
+
+    // v2.2.4 — defensive linked-task closure on the COORD's parent task.
+    // Every coord has a parent task (skill_origin='meetings', type='coordination',
+    // skill_ref=jobId). The cancelled path of cancelOrphanCoordJobs already
+    // cancels its task, and bookCoordination explicitly completes the task on
+    // success. Mirror those here so any future code path that flips status
+    // through updateCoordJob (without remembering the explicit task update)
+    // still keeps the spine clean. Idempotent — already-terminal tasks won't
+    // match the IN clause.
+    if (terminal === 'booked') {
+      db.prepare(
+        `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
+         WHERE skill_ref = ? AND type = 'coordination'
+         AND status IN ('new','in_progress','pending_colleague','pending_owner')`
+      ).run(id);
+    } else if (terminal === 'cancelled' || terminal === 'abandoned') {
+      db.prepare(
+        `UPDATE tasks SET status = 'cancelled', updated_at = datetime('now')
+         WHERE skill_ref = ? AND type = 'coordination'
+         AND status IN ('new','in_progress','pending_colleague','pending_owner')`
+      ).run(id);
     }
   }
 }

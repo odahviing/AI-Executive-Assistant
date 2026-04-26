@@ -122,6 +122,12 @@ export interface PersonMemory {
   gender_confirmed?: number;    // 0/1 — kept for back-compat. New code reads gender_set_by.
   gender_set_by?: CoreFieldSetBy;
   working_hours_auto?: string;  // JSON: { workdays, hoursStart, hoursEnd } — derived from timezone defaults
+  // v2.2.4 — travel awareness. JSON: { location, from, until } where location
+  // is free text ("Boston", "NYC", "London"), from/until are ISO yyyy-MM-dd.
+  // When set and `until` is in the future, this overrides `state` + `timezone`
+  // + working_hours_auto for slot search and time-of-day display. Cleared
+  // (set to NULL) once `until` is in the past. Read via getCurrentTravel().
+  currently_traveling?: string;
   notes: string;                // JSON: PersonNote[]   — personal/relationship knowledge
   interaction_log: string;      // JSON: PersonInteraction[] — chronological activity timeline
   profile_json: string;         // JSON: PersonProfile  — structured behavioral model
@@ -152,6 +158,63 @@ const SET_BY_RANK: Record<CoreFieldSetBy, number> = { owner: 3, person: 2, auto:
  *
  * isProactivePending(slackId)    → read; pickCandidate filters with this.
  */
+// ── v2.2.4 — travel awareness ────────────────────────────────────────────────
+//
+// People travel. A Tel Aviv person works from Boston for a week, an NYC
+// person flies to London. Stored profile (timezone, state) is the *default*;
+// when they're elsewhere, that should win for slot search and time-of-day
+// reasoning during the window.
+//
+// `currently_traveling` column holds JSON: { location, from, until }. The
+// reader (`getCurrentTravel`) returns null when the window is in the past —
+// callers don't need to filter. Cleanup happens lazily on read; we don't run
+// a sweep.
+
+export interface CurrentTravel {
+  location: string;
+  from:   string;  // ISO yyyy-MM-dd
+  until:  string;  // ISO yyyy-MM-dd
+}
+
+export function setCurrentTravel(slackId: string, travel: CurrentTravel): void {
+  const db = getDb();
+  db.prepare(
+    `UPDATE people_memory SET currently_traveling = ?, updated_at = datetime('now') WHERE slack_id = ?`
+  ).run(JSON.stringify(travel), slackId);
+}
+
+export function clearCurrentTravel(slackId: string): void {
+  const db = getDb();
+  db.prepare(
+    `UPDATE people_memory SET currently_traveling = NULL, updated_at = datetime('now') WHERE slack_id = ?`
+  ).run(slackId);
+}
+
+/**
+ * Returns the active travel record for the person, or null if none / expired.
+ * Lazy cleanup: when the window is in the past, this returns null AND clears
+ * the column so the next reader sees a clean slate.
+ */
+export function getCurrentTravel(slackId: string): CurrentTravel | null {
+  const db = getDb();
+  const row = db.prepare(
+    `SELECT currently_traveling FROM people_memory WHERE slack_id = ?`
+  ).get(slackId) as { currently_traveling?: string | null } | undefined;
+  if (!row || !row.currently_traveling) return null;
+  try {
+    const t = JSON.parse(row.currently_traveling) as CurrentTravel;
+    if (!t.location || !t.from || !t.until) return null;
+    const today = new Date().toISOString().slice(0, 10);
+    if (t.until < today) {
+      clearCurrentTravel(slackId);
+      return null;
+    }
+    return t;
+  } catch (_) {
+    return null;
+  }
+}
+
 export function setProactivePending(slackId: string): void {
   const db = getDb();
   db.prepare(`UPDATE people_memory SET proactive_pending = 1, updated_at = datetime('now') WHERE slack_id = ?`).run(slackId);
@@ -506,6 +569,21 @@ export function formatPeopleMemoryForPrompt(
 
     const stateTag = p.state ? `, state: ${p.state}` : '';
 
+    // v2.2.4 (bug 5) — surface active travel windows in the contact line so
+    // Sonnet sees "currently in Boston until 22 Jun" right next to the
+    // default state/timezone. Stored profile is the default; travel is the
+    // override for the window. Reader auto-clears past trips, so anything
+    // that lands here is current.
+    let travelTag = '';
+    if (p.currently_traveling) {
+      try {
+        const t = JSON.parse(p.currently_traveling) as { location: string; from: string; until: string };
+        if (t.location && t.until && t.until >= today) {
+          travelTag = `, currently in ${t.location} until ${t.until}`;
+        }
+      } catch (_) { /* fail silent — travel field stays unrendered */ }
+    }
+
     // v2.2.3 (#3) — social fields (last_social_at, topics) only rendered when
     // persona skill is on. Off mode = pure operational identity line.
     const socialLine = includeSocial
@@ -522,7 +600,7 @@ export function formatPeopleMemoryForPrompt(
     const socialPart = includeSocial ? `, ${socialLine}${topicStr ? `, topics: ${topicStr}` : ''}` : '';
 
     const parts: string[] = [
-      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${p.timezone ? `, tz: ${p.timezone}` : ''}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}${socialPart})`,
+      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${travelTag}${p.timezone ? `, tz: ${p.timezone}` : ''}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}${socialPart})`,
     ];
 
     // Profile dimensions moved to per-person markdown files (v2.2.1). Fields

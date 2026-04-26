@@ -202,6 +202,16 @@ Call this after interactions — not during them. It's a background update.`,
               type: 'number',
               description: 'Numeric social engagement rank 0–3. 0=don\'t initiate social with them (opt-out), 1=minimal, 2=neutral (default for new), 3=loves to chat. Set ONLY when the owner explicitly directs you ("rank Yael at 3", "never ping Ysrael" → 0). Don\'t auto-set — the system auto-adjusts based on ping responses.',
             },
+            currently_traveling: {
+              type: 'object',
+              description: 'Travel window for the person. Stored profile timezone/state are defaults — when the colleague is travelling somewhere else for a stretch, set this so slot search and time-of-day display use the travel location instead. Set when (a) the colleague volunteers it ("I\'m in Boston next week", "Boston time"), or (b) the owner tells you ("Yael is in NYC for a week"). Pass `clear: true` to wipe a known-stale travel window. The `until` date is when they fly back; the system auto-clears the field once that date passes.',
+              properties: {
+                location: { type: 'string', description: 'Free text: "Boston", "NYC", "London". Use a city when known.' },
+                from:     { type: 'string', description: 'ISO yyyy-MM-dd — first day at the location. If they fly mid-day, use the day they land.' },
+                until:    { type: 'string', description: 'ISO yyyy-MM-dd — last day at the location. If they fly home mid-day, use the day they fly.' },
+                clear:    { type: 'boolean', description: 'Set true to clear an outdated travel window without setting a new one. Use when the owner says "she\'s back" or the trip is over.' },
+              },
+            },
           },
           required: ['colleague_slack_id', 'colleague_name'],
         },
@@ -618,6 +628,27 @@ First call for a person auto-creates their md file. Empty-until-real-fact — do
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { setEngagementRank } = require('../db') as typeof import('../db');
           setEngagementRank(slackId, clamped, 'owner_directive');
+        }
+
+        // v2.2.4 — travel awareness. clear=true wipes; otherwise expects
+        // location/from/until. The tool description tells Sonnet to set this
+        // when colleague volunteers travel info OR owner reports it. Reads
+        // (slot search, pronoun-of-time-of-day) prefer travel over default
+        // tz/state when the window covers `now`.
+        const travel = args.currently_traveling as
+          | { location?: string; from?: string; until?: string; clear?: boolean }
+          | undefined;
+        if (travel && typeof travel === 'object') {
+          const { setCurrentTravel, clearCurrentTravel } = require('../db') as typeof import('../db');
+          if (travel.clear === true) {
+            clearCurrentTravel(slackId);
+          } else if (travel.location && travel.from && travel.until) {
+            setCurrentTravel(slackId, {
+              location: travel.location,
+              from: travel.from,
+              until: travel.until,
+            });
+          }
         }
 
         logger.info('Person profile updated', { slackId, name, fields: Object.keys(args).filter(k => k !== 'colleague_slack_id' && k !== 'colleague_name') });

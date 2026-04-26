@@ -35,6 +35,14 @@ export interface SlotWithLocation {
 /**
  * Determines location for a slot based on the day (office/home),
  * participant count, and whether attendees are internal (same domain).
+ *
+ * v2.2.4 (bug 8b) — `anyParticipantRemote` short-circuits the in-person
+ * branches. When ANY participant is currently traveling, joining remotely
+ * by company policy, or otherwise can't physically be at the office, the
+ * meeting MUST default to Teams (online). Owner could be at the office,
+ * the colleague is in Boston — booking "Idan's Office" as the location is
+ * a lie. Caller computes this flag from people_memory.currently_traveling
+ * (or other signals) and passes it through.
  */
 export function determineSlotLocation(
   slotStart: string,
@@ -42,11 +50,18 @@ export function determineSlotLocation(
   participantCount: number,
   isInternal: boolean,
   customLocation?: string,
+  anyParticipantRemote?: boolean,
 ): { location: string; isOnline: boolean } {
   if (customLocation) {
     // Phone number (e.g. "+972-54-123-4567"): no Teams link, location is the number itself
     const isPhone = /^\+?\d[\d\s\-().]{5,}$/.test(customLocation.trim());
     return { location: customLocation, isOnline: !isPhone };
+  }
+
+  // v2.2.4 (bug 8b) — any participant can't physically be there → online by
+  // default. Skip every in-person branch below.
+  if (anyParticipantRemote) {
+    return { location: '', isOnline: true };
   }
 
   const dt = DateTime.fromISO(slotStart).setZone(profile.user.timezone);

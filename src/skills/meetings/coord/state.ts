@@ -288,12 +288,11 @@ export async function initiateCoordination(
             }
           : undefined,
       });
-      await shadowNotify(params.profile, {
-        channel: params.ownerChannel,
-        threadTs: params.ownerThreadTs,
-        action: 'DM sent',
-        detail: `Sent ${participant.name} slot options for "${params.subject}"`,
-      });
+      // v2.2.4 (bug 3c) — per-participant 'DM sent' shadow dropped. Was
+      // firing once per participant in the loop, contributing to the "4
+      // shadow messages for one coord" noise. The owner sees the coord
+      // initiation through other surfaces; the audit log captures the send
+      // at info level.
     } catch (err) {
       logger.error('Failed to DM participant', { err: String(err), participant: participant.name });
       await shadowNotify(params.profile, {
@@ -765,12 +764,10 @@ export async function startRenegotiation(
     }
   }
 
-  await shadowNotify(profile, {
-    channel: job.owner_channel,
-    threadTs: job.owner_thread_ts ?? undefined,
-    action: 'Renegotiating',
-    detail: noVoters.map(p => p.name).join(', ') + ' — asking what times work',
-  });
+  // v2.2.4 (bug 3c) — 'Renegotiating' state-hop shadow dropped. Round 2
+  // launching is the decision-worthy event; that shadow (state.ts ~929)
+  // carries the consolidated narration with what triggered it. Owner doesn't
+  // need a separate "asking what times work" line in between.
 
   // If ALL no-voters already had preferences — skip waiting, go straight to round 2
   if (needsFollowUp.length === 0) {
@@ -854,8 +851,18 @@ export async function triggerRoundTwo(
   );
   const totalPeople = allParticipants.length + 1;
 
+  // v2.2.4 (bug 8b) — any traveling participant forces online location.
+  let anyTraveling = false;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getCurrentTravel } = require('../../../db') as typeof import('../../../db');
+    for (const p of allParticipants) {
+      if (p.slack_id && getCurrentTravel(p.slack_id)) { anyTraveling = true; break; }
+    }
+  } catch (_) { /* fail open */ }
+
   const slotsWithLocation: SlotWithLocation[] = chosenSlots.map(slotStart => {
-    const loc = determineSlotLocation(slotStart, profile, totalPeople, isInternal);
+    const loc = determineSlotLocation(slotStart, profile, totalPeople, isInternal, undefined, anyTraveling);
     return {
       start: slotStart,
       end: DateTime.fromISO(slotStart).plus({ minutes: job.duration_min }).toISO()!,

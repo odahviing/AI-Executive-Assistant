@@ -2,6 +2,68 @@
 
 ---
 
+## 2.2.4 — 8-bug wave from real Yael reschedule trace + tasks-first brief
+
+A single bad reschedule scenario (Yael in Hebrew asking to move a recurring BiWeekly from Sunday in Israel to a Wednesday afternoon in Boston) surfaced eight independent bugs across language matching, deliberation leak, shadow chatter, outreach handoff, travel awareness, thread propagation, duration handling, and location selection. All eight fixed in one wave. Brief refactored to a tasks-first spine in the same wave (separate root cause, but it was on deck and the wave bundles cleanly).
+
+### Added
+
+**Travel awareness (`currently_traveling`)** — new column on `people_memory`, JSON `{ location, from, until }`. Stored profile (timezone, state) is the *default*; when a colleague is travelling somewhere else for a stretch, this overrides for the window. Set via `update_person_profile.currently_traveling` (owner direction) or by Maelle when the colleague volunteers it ("I'll be in Boston that week"). New helpers `setCurrentTravel` / `clearCurrentTravel` / `getCurrentTravel` in `db/people.ts` — `getCurrentTravel` lazy-clears past windows on read so callers don't filter. Surfaced in WORKSPACE CONTACTS prompt block (`formatPeopleMemoryForPrompt`) as "currently in Boston until 22 Jun" right next to the default state/tz.
+
+**Tasks-first morning briefing** — brief now reads the tasks table as the spine and hydrates outreach/coord-backed tasks via `skill_ref` for narration data. Replaces the prior three-parallel-queries-with-dedup model where outreach_jobs / coord_jobs / tasks each had their own visibility filters and a booked coord could keep resurfacing for 7 days regardless of `informed`. The `completed → informed` two-step now governs every surface uniformly. New `getBriefableTasks(ownerUserId, since)` helper. New helper functions `buildOutreachItem` / `buildCoordItem` / `buildTaskItem` in `briefs.ts`. `BriefingData.outreachIds + coordIds + completedTaskIds` collapsed to one `taskIdsToInform`. Defensive linked-task closure on `updateOutreachJob` (terminal `done`/`replied` → task completed; `cancelled`/`expired`/`failed` → cancelled) and `updateCoordJob` (`booked` → completed; `cancelled`/`abandoned` → cancelled) so any future code path that flips a detail-row terminal status keeps the spine clean.
+
+**Discovery-mode social coda** — `generateSocialCoda` reframed for the empty-topic case. Without an existing topic to continue, the coda used to be free to fabricate ("Are you joining the offsite next month?" when there's no offsite). Now `raise_new` mode prompts Sonnet to ask a *concrete, discoverable* question — something whose answer is a real fact about the person Maelle would save to memory. Explicit ban on inventing events / projects / shared context.
+
+### Changed
+
+**Base prompt language rule generalized.** Existing "current turn wins" rule now sits next to a new "language of artifacts that land elsewhere — match the destination, not this turn" rule. One rule, every skill / tool / coda inherits — owner-facing artifacts (approval ask_text, brief, shadow notifications) always render in owner's language even when the work originated in a Hebrew thread with a colleague. Replaces ad-hoc per-skill language hints.
+
+**Stored profile is a default — fresh signals win.** New base-prompt rule. When a colleague's message contradicts stored profile data ("Boston time" vs stored Asia/Jerusalem), the fresh signal wins for this conversation; ASK to confirm and update via `currently_traveling`, don't DECLARE the profile is right and the signal wrong.
+
+**Anti-deliberation rule.** New base-prompt rule banning "Actually wait", "On second thought", "Let me ask", "Per the instructions" and similar deliberation/self-correction text in user-facing output. Decide, then write the answer.
+
+**Shadow notifications consolidated.** Was firing four separate shadow DMs per coord reshuffle (DM sent → Reply received → Renegotiating → Round 2 started). Now one decision-worthy event per cycle: counter-received-and-acting on it. The intermediate state-hop shadows are dropped.
+
+**`message_colleague` description rewritten** — `intent='meeting_reschedule'` is now MANDATORY (not optional) when the message is about moving an existing meeting, regardless of whether the owner or colleague initiated. Without the intent tag, the colleague's "yes" reply was getting routed to the new-schedule classifier → spawning a duplicate coord instead of patching the existing event. Symptom: colleague says "got it, send me the invite" but no invite arrives.
+
+**Outreach reply classifier (`processOutreachReply`)** — anchors today's date in the prompt so partial date references in replies ("Wed 17 Jun") resolve to the right year. Tightened the SCHEDULE branch: reschedule conversations are CONTINUE not SCHEDULE; SCHEDULE is for fresh meeting requests only.
+
+**Outreach handoff `topic`** — the literal "Handoff from outreach conversation — X prefers ..." phrase is gone from `coord_jobs.topic`. It was internal framing leaking into the colleague's DM.
+
+**Outreach handoff narration** — single-participant handoffs now use gendered pronouns ("she wants" / "he wants") instead of plural "they want", and the framing is human ("My conversation with Yael turned into scheduling — she wants time for X. I'm sending her options now.") instead of templated.
+
+**Location selection (`determineSlotLocation`)** — new `anyParticipantRemote` parameter short-circuits the in-person branches. When any participant is currently traveling (or otherwise remote), the meeting defaults to online. No more "Idan's Office" booked for a meeting where the colleague is in Boston. Wired through every call site: `coordinator.ts` handoff, `meetings.ts coordinate_meeting`, `coord/state.ts triggerRoundTwo`, `coord/booking.ts` fallback.
+
+### Fixed
+
+**Internal reasoning leaked into user-facing replies** — orchestrator was concatenating ALL text blocks Sonnet emitted in a single assistant turn with `\n`. When Sonnet thought aloud (multiple blocks: "Actually wait —", "On second thought —", "Let me ask."), the entire deliberation chain dumped to Slack including raw slack_ids and instruction-quote leaks. Now takes only the LAST text block — that's Sonnet's final answer; multi-paragraph replies are typically a single block with newlines so legitimate replies are preserved. Anti-deliberation base-prompt rule backstops it. Logs a warning when multiple text blocks were emitted so we can tell if Sonnet keeps doing it.
+
+**Outreach reply classifier spawned zombie second handoffs** — every fresh `message_colleague` in a back-and-forth created a new outreach_job, and every reply triggered a fresh handoff classification → duplicate coord coords spawned (zombie second/third handoff DMs landing on the colleague with stale + wrong slot proposals after the original conversation already converged). Idempotency guard added: when a coord_job for this colleague is already in flight in the last 24h, the schedule branch is skipped entirely — reply routes as a CONTINUE relay; owner progresses through the existing coord/reschedule machinery.
+
+**Outreach reply branch broke out of thread** — the CONTINUE branch in `coordinator.ts` opened a fresh DM via `openDM` and posted at top level with no `thread_ts`. v2.1.5 had added `outreach_jobs.dm_message_ts` + `dm_channel_id` precisely so follow-ups could land in the same DM thread; the branch wasn't reading them. Now routes through `Connection.sendDirect(senderId, text, { threadTs: job.dm_message_ts })` with raw-client fallback for the Connection-not-registered edge case.
+
+**Classifier-guessed durations could land at illegal lengths** — `processOutreachReply` extracted a free-text duration guess from Sonnet ("60") and used it directly. Idan's profile has 55 in `meetings.allowed_durations` — a 60-minute slot is explicitly off the menu. Handoff branch now snaps the guess to the nearest entry in `profile.meetings.allowed_durations` before searching slots.
+
+**Coda fabricated topics on cold colleagues** — `raise_new` directive let Sonnet invent specifics ("Are you joining the offsite next month?" when there is no offsite). Discovery-mode prompt rewrite plus owner-path-only gate on the coda branch (no piggyback on colleague turns; the colleague is there for help, not chat).
+
+**Coda language drift** — coda generator had no language hint; defaulted to English regardless of conversation. Now passes `language: 'he' | 'en'` from orchestrator (Hebrew character detection on inbound) so the coda matches the surrounding conversation.
+
+**IANA timezone names leaked into user-facing text** — "she's based in Israel (Asia/Jerusalem)" — `Asia/Jerusalem` is internal data format. New regex strip in `textScrubber.ts` matches IANA tokens (`Region/Subregion`) and replaces with the city/region portion (`Asia/Jerusalem` → `Jerusalem`, `America/New_York` → `New York`).
+
+### Migration
+
+- New column on `people_memory`: `currently_traveling TEXT`. Idempotent ALTER, safe rollback.
+- The `outreach_jobs.briefed_at` column is now dead (read+written by no one); kept for one version for safe rollback, can be dropped in a follow-up patch.
+
+### Invariants preserved
+
+- Skills still import only from `connections/types` + `connections/registry`.
+- Approvals still the single path for "needs owner input."
+- Owner > person > auto provenance unchanged.
+- All LLM calls remain Sonnet 4.6.
+
+---
+
 ## 2.2.3 — Persona toggle (#3) + attendee availability (#43) + 5 scenario fixes
 
 Big patch: closes #3 and #43, plus inline fixes for scenarios 7-9 surfaced this session, plus a real lunch-detection bug from your screenshot.

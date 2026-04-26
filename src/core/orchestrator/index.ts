@@ -461,13 +461,33 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
 
     const toolBlocks = response.content.filter(b => b.type === 'tool_use');
 
-    // No tool calls — this is the final text response
+    // No tool calls — this is the final text response.
+    //
+    // v2.2.4 (bug 2) — take only the LAST text block. Sonnet sometimes emits
+    // multiple text blocks in a single assistant turn when it reasons aloud
+    // ("Actually wait —", "On second thought —", "Let me ask."). Concatenating
+    // ALL of them dumps the entire deliberation chain into Slack and leaks
+    // raw slack_ids, instruction quotes, and self-correction text that the
+    // owner should never see. Sonnet's final user-facing answer is always
+    // the last text block. Multi-paragraph legitimate replies are typically
+    // a SINGLE block with newlines inside it — they're preserved. The
+    // base-prompt rule at systemPrompt.ts ("NO INTERNAL DELIBERATION IN
+    // OUTPUT TEXT") backstops this so Sonnet stops emitting deliberation
+    // blocks in the first place.
     if (toolBlocks.length === 0) {
-      finalReply = response.content
-        .filter(b => b.type === 'text')
-        .map(b => (b as Anthropic.TextBlock).text)
-        .join('\n')
-        .trim();
+      const textBlocks = response.content.filter(b => b.type === 'text') as Anthropic.TextBlock[];
+      const last = textBlocks[textBlocks.length - 1];
+      finalReply = (last?.text ?? '').trim();
+      if (textBlocks.length > 1) {
+        logger.warn('Sonnet emitted multiple text blocks — kept last only', {
+          blocks: textBlocks.length,
+          droppedPreview: textBlocks
+            .slice(0, -1)
+            .map(b => b.text.slice(0, 80).replace(/\s+/g, ' '))
+            .join(' | ')
+            .slice(0, 400),
+        });
+      }
       break;
     }
 
@@ -1150,6 +1170,11 @@ Rules:
     && finalReply
     && finalReply.trim().length > 0
     && toolCallSummaries.length > 0
+    // v2.2.4 (bug 1B) — coda only on OWNER-path turns. Piggybacking proactive
+    // social on a colleague's task reply (e.g. Yael asking to reschedule) is
+    // intrusive — they're there for help, not a chat. Owner-path turns are
+    // where Maelle has earned the moment to weave a human line in.
+    && turnSenderRole === 'owner'
   ) {
     const parkingToolPattern = /^\[(coordinate_meeting|message_colleague|create_approval|outreach_send)/;
     const hadParkingCall = toolCallSummaries.some(s => parkingToolPattern.test(s));
@@ -1161,6 +1186,11 @@ Rules:
         const { logMaelleInitiated } = require('../social/logEngagement') as typeof import('../social/logEngagement');
         const codaDirective = directiveForProactiveSlot({ personSlackId: turnPersonSlackId });
         if (codaDirective.mode === 'continue' || codaDirective.mode === 'raise_new') {
+          // v2.2.4 (bug 1A) — pass conversation language so the coda matches.
+          // Detect from the inbound user message — Hebrew chars present → 'he',
+          // else 'en'. Cheap, deterministic; the coda generator falls back to
+          // English when omitted, so failure mode is graceful.
+          const codaLang: 'he' | 'en' = /[֐-׿]/.test(input.userMessage ?? '') ? 'he' : 'en';
           const coda = await generateSocialCoda({
             profile,
             directive: codaDirective,
@@ -1168,6 +1198,7 @@ Rules:
             senderFirstName: turnSenderRole === 'owner'
               ? profile.user.name.split(' ')[0]
               : (input.senderName?.split(' ')[0] ?? 'there'),
+            language: codaLang,
           });
           if (coda && coda.trim().length > 0) {
             finalReply = `${finalReply.trim()}\n\n${coda.trim()}`;

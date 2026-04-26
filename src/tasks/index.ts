@@ -185,6 +185,49 @@ export function getCompletedUninformedTasks(ownerUserId: string): Task[] {
   `).all(ownerUserId) as Task[];
 }
 
+/**
+ * v2.2.4 — single source for the morning briefing.
+ *
+ * Tasks is the spine. Outreach + coord + reminder/follow_up/research surfaces
+ * all hang off tasks via skill_ref. This query returns every user-facing task
+ * the brief should consider; callers then hydrate outreach- and coord-backed
+ * tasks with detail-row data for richer narration.
+ *
+ * Filters:
+ *   - who_requested != 'system'  → drops every system-tick / *_send /
+ *     *_expiry / *_decision / *_nudge / *_abandon / *_fix task
+ *   - status NOT IN informed/cancelled/failed/stale  → terminal-noisy states
+ *     drop off; `completed` stays in for one more brief, then flips to
+ *     `informed` post-send
+ *   - created_at >= since         → 7-day window matching the existing brief
+ *   - completed tasks bounded by completed_at >= since so old completions
+ *     don't reappear if their parent row stayed alive.
+ */
+export function getBriefableTasks(ownerUserId: string, since: string): Task[] {
+  const db = getDb();
+  return db.prepare(`
+    SELECT * FROM tasks
+    WHERE owner_user_id = ?
+    AND who_requested != 'system'
+    AND status NOT IN ('informed', 'cancelled', 'failed', 'stale')
+    AND created_at >= ?
+    AND (
+      status != 'completed'
+      OR (completed_at IS NOT NULL AND completed_at >= ?)
+    )
+    ORDER BY
+      CASE status
+        WHEN 'pending_owner' THEN 0
+        WHEN 'pending_colleague' THEN 1
+        WHEN 'in_progress' THEN 2
+        WHEN 'new' THEN 3
+        WHEN 'completed' THEN 4
+        ELSE 5
+      END,
+      created_at DESC
+  `).all(ownerUserId, since, since) as Task[];
+}
+
 export function markTaskInformed(id: string): void {
   const db = getDb();
   db.prepare(`UPDATE tasks SET status = 'informed', updated_at = datetime('now') WHERE id = ?`).run(id);

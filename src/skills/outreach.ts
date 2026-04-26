@@ -95,7 +95,7 @@ Only send messages the user explicitly asks for — never reach out to people on
             intent: {
               type: 'string',
               enum: ['meeting_reschedule'],
-              description: 'Optional. Tag the outreach with a specific intent so the colleague\'s reply is handled correctly. Use "meeting_reschedule" when the owner is asking a colleague to MOVE an existing meeting (not to set up a new one). When set, you must also supply the context field with the meeting details. If omitted, the reply is classified generically (done/continue/schedule).',
+              description: 'REQUIRED when the message is about MOVING an existing meeting (not optional). Set to "meeting_reschedule" whenever you\'re relaying a request to shift / postpone / move / pull-forward / cancel an event that\'s already on the calendar — no matter who initiated it (owner asking to move his meeting, or colleague asking to move and you\'re relaying back to them after owner decides). When set, the `context` field MUST also be populated with { meeting_id, proposed_start, proposed_end }. Without this tag the colleague\'s reply gets classified as a NEW scheduling request and a duplicate coord coord spawns instead of patching the existing event — the actual move never happens. Omit ONLY when the message is about a brand-new meeting being scheduled fresh.',
             },
             context: {
               type: 'object',
@@ -382,21 +382,27 @@ When the owner asks you to send someone a message, use message_colleague. Defaul
 
 Never reach out to people on your own. Only on explicit owner request. If the colleague might reply, set await_reply=true so we'll track the response.
 
-## RESCHEDULE EXISTING MEETINGS
+## RESCHEDULE EXISTING MEETINGS — intent + context are MANDATORY
 
-When the owner asks you to ask a colleague to MOVE an existing meeting (e.g. "ask Yael if we can start our weekly 15 minutes earlier"), do NOT use coordinate_meeting — that tool creates NEW meetings. Instead:
+Any message_colleague that talks about MOVING / SHIFTING / RESCHEDULING / CANCELLING an event already on the calendar MUST set intent='meeting_reschedule' AND context. This includes BOTH directions:
+- Owner asks you to relay a move TO a colleague ("ask Yael if we can start our weekly 15 min earlier") — set the intent.
+- Colleague asked owner to move, owner decided, you're relaying back ("Idan agreed — let's do Wed 15:00 Boston time") — STILL set the intent.
 
+Steps:
 1. Call get_calendar to find the existing meeting — note the meeting_id and current start/end.
 2. Call message_colleague with:
    - colleague_slack_id, colleague_name, colleague_tz
-   - message: natural phrasing asking them to move to the new time
+   - message: natural phrasing asking them to move
    - await_reply: true
-   - intent: "meeting_reschedule"
-   - context: { meeting_id, meeting_subject, proposed_start (ISO), proposed_end (ISO), original_start (ISO), original_end (ISO) }
+   - intent: "meeting_reschedule"     ← REQUIRED
+   - context: { meeting_id, meeting_subject, proposed_start (ISO), proposed_end (ISO), original_start (ISO), original_end (ISO) }     ← REQUIRED
 
-When the colleague replies "yes" → the system automatically moves the meeting on the calendar and reports back to the owner.
-When they decline or propose a different time → the system tells the owner; the owner decides next.
+When the colleague replies "yes" → the system automatically calls updateMeeting on the existing event, the calendar moves, the colleague gets the updated invite. NO duplicate coord, NO new meeting spawned.
 
-If you forget intent + context, the reply falls through to the generic classifier and the move will NOT be applied automatically — the owner would have to ask again.`;
+When they decline or propose a different time → the system tells the owner; the owner decides next; if owner accepts the counter, you call message_colleague AGAIN with intent='meeting_reschedule' and the new proposed_start/end so the next yes also auto-moves.
+
+WHAT GOES WRONG IF YOU OMIT THE INTENT TAG: the colleague's reply gets routed to the generic done/continue/schedule classifier, which classifies it as SCHEDULE → spawns a NEW coordination → sends them a fresh DM with new slot options and a generic subject. The original meeting NEVER gets moved on the calendar even after they say yes. Symptom: colleague says "got it, send me the invite" but no invite arrives because nothing was patched.
+
+Use coordinate_meeting ONLY for brand-new meetings that don't exist yet.`;
   }
 }

@@ -307,6 +307,17 @@ function initSchema(db: Database.Database): void {
   // so no second proactive ping until they respond.
   try { db.exec(`ALTER TABLE people_memory ADD COLUMN proactive_pending INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
 
+  // v2.2.4 — travel awareness. Stored profile fields (timezone, state) are
+  // defaults — most of the time correct. People also TRAVEL: a Tel Aviv person
+  // works from Boston for a week, an NYC person flies to London. When the
+  // colleague volunteers travel info ("I'll be in NY next week", "Boston time"),
+  // OR the owner tells Maelle directly ("she's in the US that week"), we
+  // capture it as a travel window. Slot search and timezone display read this
+  // ahead of the default. JSON column: { location: "Boston", from: "2026-06-15",
+  // until: "2026-06-22" } — both dates ISO yyyy-MM-dd in the colleague's local
+  // sense. Cleared automatically once `until` is in the past.
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN currently_traveling TEXT`); } catch (_) {}
+
   // v2.2 — audit trail for engagement_rank changes. Small table so we can
   // answer "why is Ysrael at rank 0?". Reasons: no_reply / reply_engaged /
   // reply_brief / colleague_initiated / colleague_deflected / owner_directive.

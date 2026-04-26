@@ -162,7 +162,15 @@ async function processOutreachReply(params: {
         .join('\n')
     : '';
 
+  // v2.2.4 (bug 4) — anchor today's date in the prompt so date references in
+  // the colleague's reply ("Wed 17 Jun") resolve to the right year. Without
+  // this anchor Sonnet has been parsing "17 Jun" as 2025 even when the
+  // conversation is happening in 2026.
+  const todayIso = new Date().toISOString().slice(0, 10);
+
   const prompt = `You are ${params.assistantName}, executive assistant to ${params.ownerName}.
+
+Today is ${todayIso}. Resolve any partial dates in the reply against today — never assume a past year.
 
 You sent this message to ${params.colleagueName} on behalf of ${params.ownerName}:
 "${params.originalMessage}"${historyText}
@@ -170,12 +178,14 @@ You sent this message to ${params.colleagueName} on behalf of ${params.ownerName
 ${params.colleagueName} just replied: "${params.newReply}"
 
 Decide what to do:
-- If the conversation has turned into SCHEDULING (colleague mentions specific days, times, availability, or wants to set up a meeting) → reply with: SCHEDULE: [subject]|[preferred_day or ""]|[preferred_time like "10:00" or ""]|[duration_min guess 30-60]|[online: true/false]
+- If the conversation has turned into SCHEDULING A NEW MEETING (colleague mentions specific days, times, availability for a new meeting they want to set up) → reply with: SCHEDULE: [subject]|[preferred_day or ""]|[preferred_time like "10:00" or ""]|[duration_min guess 30-60]|[online: true/false]
 - If the colleague gave feedback, suggestions, or edits that ${params.ownerName} now needs to act on → reply with: DONE: [summary + "Want me to apply these now?"]
 - If the task is fully resolved with no further work implied → reply with: DONE: [1-2 sentence summary, no trailing question]
-- If the colleague asked a question or needs more info → reply with: CONTINUE: [your natural response to them, as ${params.assistantName}]
+- If the colleague asked a question or needs more info, OR the reply is about MOVING an existing meeting (counter-times for an event that already exists on the calendar — including "can't make any slot" with a counter-suggestion when we were already moving an existing meeting), OR the reply is a brief acknowledgment that doesn't ask for a new meeting → reply with: CONTINUE: [your natural response to them, as ${params.assistantName}]
 
-IMPORTANT: If the colleague mentioned ANY specific day or time preference, that's SCHEDULE — do NOT continue chatting about times.
+CRITICAL: Reschedule conversations are CONTINUE, NOT SCHEDULE. If the original message ${params.assistantName} sent was about moving an existing meeting (you'll see phrasing like "asked to relay", "move", "shift", "doesn't fit", or it references a specific existing meeting subject), then any counter-time reply is the continuation of that reschedule — not a new meeting request. Use CONTINUE; ${params.ownerName} will decide on the counter through the normal reschedule path.
+
+SCHEDULE is for fresh meeting requests only — colleague says "let's set up time" or "I'd like to grab 30 min" with no existing event being discussed.
 
 Reply with ONLY "DONE: ...", "CONTINUE: ...", or "SCHEDULE: ..." — nothing else.`;
 
@@ -327,12 +337,31 @@ export async function handleOutreachReply(
   ).run(job.id);
 
   if (decision.action === 'continue') {
-    const dmChannel = await openDM(app, params.bot_token, params.senderId);
-    await app.client.chat.postMessage({
-      token: params.bot_token,
-      channel: dmChannel,
-      text: decision.response,
-    });
+    // v2.2.4 (bug 6) — preserve thread context. v2.1.5 added dm_message_ts +
+    // dm_channel_id so follow-ups can land in the same DM thread the outreach
+    // started in. The continue branch was opening a fresh DM and posting at
+    // top level, breaking out of the thread the colleague was reading. Use
+    // the Connection registry with threadTs when we have it; fall back to
+    // sendDirect (no thread) for legacy rows that pre-date the columns.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getConnection } = require('../../connections/registry') as typeof import('../../connections/registry');
+    const conn = getConnection(params.profile.user.slack_user_id, 'slack');
+    if (conn) {
+      const sendOpts = job.dm_message_ts
+        ? { threadTs: job.dm_message_ts }
+        : undefined;
+      await conn.sendDirect(params.senderId, decision.response, sendOpts);
+    } else {
+      // Final fallback — the Connection registry should always be populated
+      // at startup, but if not, post via raw client as before so we don't
+      // silently swallow the reply.
+      const dmChannel = await openDM(app, params.bot_token, params.senderId);
+      await app.client.chat.postMessage({
+        token: params.bot_token,
+        channel: dmChannel,
+        text: decision.response,
+      });
+    }
     conversation.push({ role: 'maelle', text: decision.response });
     updateOutreachJob(job.id, { conversation_json: JSON.stringify(conversation) });
     logger.info('Outreach conversation continued', {
@@ -342,8 +371,46 @@ export async function handleOutreachReply(
     return true;
   }
 
-  // Scheduling handoff — outreach closes, coordination takes over
+  // Scheduling handoff — outreach closes, coordination takes over.
+  //
+  // v2.2.4 (bug 4) — idempotency guard. Without this, every fresh
+  // message_colleague Maelle sends in a back-and-forth creates a new
+  // outreach_job, and every reply from the colleague triggers a fresh handoff
+  // classification — which spawned a new "Handoff from outreach conversation"
+  // coord every cycle (zombie second/third handoffs landing on the colleague
+  // with stale + wrong slot proposals). If a coord_job for this colleague is
+  // already in flight in the last 24h, route as a CONTINUE relay instead —
+  // owner will progress it through the existing coord/reschedule machinery.
   if (decision.action === 'schedule') {
+    const recentCoord = getDb().prepare(`
+      SELECT id, subject FROM coord_jobs
+      WHERE owner_user_id = ?
+        AND status IN ('collecting','resolving','negotiating','waiting_owner')
+        AND participants LIKE ?
+        AND datetime(created_at) >= datetime('now', '-24 hours')
+      ORDER BY created_at DESC LIMIT 1
+    `).get(
+      params.profile.user.slack_user_id,
+      `%${params.senderId}%`,
+    ) as { id: string; subject: string } | undefined;
+
+    if (recentCoord) {
+      logger.info('Outreach → scheduling handoff SKIPPED (active coord exists, treating as continue)', {
+        jobId: job.id,
+        recentCoordId: recentCoord.id,
+        recentCoordSubject: recentCoord.subject,
+      });
+      // Don't spawn a duplicate coord. Treat as a regular relay — close the
+      // outreach as replied with the reply preserved; owner sees it in their
+      // normal flow and decides.
+      updateOutreachJob(job.id, {
+        status: 'replied',
+        reply_text: params.text,
+        conversation_json: JSON.stringify(conversation),
+      });
+      return true;
+    }
+
     logger.info('Outreach → scheduling handoff', { jobId: job.id, details: decision.details });
 
     updateOutreachJob(job.id, {
@@ -361,7 +428,33 @@ export async function handleOutreachReply(
     const colleagueTz = personInfo?.timezone ?? params.profile.user.timezone;
     const colleagueEmail = personInfo?.email ?? undefined;
 
-    const { preferredDay, preferredTime, durationMin, isOnline, subject } = decision.details;
+    const { preferredDay, preferredTime, isOnline, subject } = decision.details;
+    let { durationMin } = decision.details;
+
+    // v2.2.4 (bug 7) — snap classifier-guessed duration to the profile's
+    // allowed_durations ladder. Sonnet's free-text guess in
+    // processOutreachReply has no awareness of which durations the owner
+    // actually books (Idan's BiWeekly is 55 min, never 60 — 60 min meetings
+    // are explicitly off the menu). Pick the allowed duration closest to the
+    // guess so the handoff at least uses a legal length. The handoff path
+    // itself stays subject to bug-4 idempotency; this is a safety net for
+    // the residual case where it does fire on a fresh schedule request.
+    const allowed = params.profile.meetings.allowed_durations;
+    if (Array.isArray(allowed) && allowed.length > 0) {
+      const snapped = allowed.reduce((best, candidate) =>
+        Math.abs(candidate - durationMin) < Math.abs(best - durationMin) ? candidate : best
+      , allowed[0]);
+      if (snapped !== durationMin) {
+        logger.info('Outreach handoff — snapped duration to allowed_durations', {
+          jobId: job.id,
+          fromGuess: durationMin,
+          snappedTo: snapped,
+          allowed,
+        });
+        durationMin = snapped;
+      }
+    }
+
     const ownerTz = params.profile.user.timezone;
     const now = DateTime.now().setZone(ownerTz);
 
@@ -469,8 +562,27 @@ export async function handleOutreachReply(
       const isColleagueInternal = colleagueEmail
         ? colleagueEmail.endsWith(`@${ownerDomain}`)
         : true;
+
+      // v2.2.4 (bug 8b) — if the colleague is currently traveling, force the
+      // location selector online. "Idan's Office" for someone in Boston is a
+      // lie. getCurrentTravel auto-clears past windows; presence here means
+      // the trip is active.
+      let colleagueTraveling = false;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getCurrentTravel } = require('../../db') as typeof import('../../db');
+        colleagueTraveling = !!getCurrentTravel(job.colleague_slack_id);
+      } catch (_) { /* fail open */ }
+
       const proposedSlots: SlotWithLocation[] = chosen.map(slotStart => {
-        const loc = determineSlotLocation(slotStart, params.profile, 2, isColleagueInternal);
+        const loc = determineSlotLocation(
+          slotStart,
+          params.profile,
+          2,
+          isColleagueInternal,
+          undefined,
+          colleagueTraveling,
+        );
         return {
           start: slotStart,
           end: DateTime.fromISO(slotStart).plus({ minutes: durationMin }).toISO()!,
@@ -487,14 +599,28 @@ export async function handleOutreachReply(
         ownerEmail: params.profile.user.email,
         ownerTz,
         subject,
-        topic: `Handoff from outreach conversation — ${job.colleague_name} prefers${preferredDay ? ` ${preferredDay}` : ''}${preferredTime ? ` ${preferredTime}` : ''}`,
+        // v2.2.4 (bug 4) — drop the literal "Handoff from outreach
+        // conversation" phrase. It was internal framing leaking to the
+        // colleague's DM. Topic is omitted; the subject + the coord DM
+        // wording carries enough context, and Sonnet can compose human
+        // narration when topic is empty.
+        topic: undefined,
         durationMin,
         participants: [participant],
         proposedSlots,
         profile: params.profile,
       });
 
-      const handoffMsg = `My chat with ${job.colleague_name} turned into scheduling. They want "${subject}"${preferredDay ? ` on ${preferredDay}` : ''}${preferredTime ? ` around ${preferredTime}` : ''} — I've sent them slot options and started coordination.`;
+      // v2.2.4 (bug 8a) — gendered pronoun + cleaner framing. The previous
+      // template used "They want / sent them" verbatim regardless of whether
+      // there's one or many participants and ignored the colleague's gender.
+      // Single-person handoff says "she" / "he" / "they" based on people_memory.
+      const pronoun = personInfo?.gender === 'female' ? 'she'
+        : personInfo?.gender === 'male' ? 'he'
+        : 'they';
+      const objectPronoun = pronoun === 'she' ? 'her' : pronoun === 'he' ? 'him' : 'them';
+      const verb = pronoun === 'they' ? 'want' : 'wants';
+      const handoffMsg = `My conversation with ${job.colleague_name} turned into scheduling — ${pronoun} ${verb} time for "${subject}"${preferredDay ? ` on ${preferredDay}` : ''}${preferredTime ? ` around ${preferredTime}` : ''}. I'm sending ${objectPronoun} options now.`;
       await app.client.chat.postMessage({
         token: params.bot_token,
         channel: job.owner_channel,

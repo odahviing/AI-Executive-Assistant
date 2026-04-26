@@ -830,8 +830,21 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
         );
         const customLocation = args.custom_location as string | undefined;
 
+        // v2.2.4 (bug 8b) — if any participant is currently traveling, force
+        // online. Stops "Idan's Office" landing on a meeting where someone's
+        // in Boston.
+        let anyTraveling = false;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getCurrentTravel } = require('../db') as typeof import('../db');
+          for (const p of allParticipantsList) {
+            const sid = (p as any).slack_id as string | undefined;
+            if (sid && getCurrentTravel(sid)) { anyTraveling = true; break; }
+          }
+        } catch (_) { /* fail open */ }
+
         const proposedSlots: SlotWithLocation[] = chosenStarts.map(slotStart => {
-          const loc = determineSlotLocation(slotStart, profile, totalPeople, isInternal, customLocation);
+          const loc = determineSlotLocation(slotStart, profile, totalPeople, isInternal, customLocation, anyTraveling);
           return {
             start: slotStart,
             end: DateTime.fromISO(slotStart).plus({ minutes: durationMin }).toISO()!,

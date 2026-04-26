@@ -53,9 +53,23 @@ const SENTINEL_RE = /\b[A-Z]{2,}(?:_[A-Z0-9]+)+\b/g;
 // positives on accidental AAMk words.
 const GRAPH_ID_RE = /`?AAMk[A-Za-z0-9+/=_-]{40,}`?/g;
 
+// v2.2.4 (bug 5b) — IANA timezone strings ("America/New_York", "Asia/Jerusalem",
+// "Europe/London") are internal data-format names. Real EAs say "Boston time"
+// or "Israel" or "London hours" — never "Asia/Jerusalem". Replace with the
+// city/region portion (the part after the last slash, with underscores → spaces).
+// Operates on common shapes: standalone tokens, in parentheses ("(Asia/Jerusalem)"),
+// or wrapped in inline-code. Conservative scope (Region/Subregion[/Sub]) avoids
+// matching non-tz path-like strings.
+const IANA_TZ_RE = /\b(?:Africa|America|Antarctica|Asia|Atlantic|Australia|Europe|Indian|Pacific|Etc)\/[A-Za-z_]+(?:\/[A-Za-z_]+)?\b/g;
+function humanizeIanaToken(match: string): string {
+  const last = match.split('/').pop() ?? match;
+  return last.replace(/_/g, ' ');
+}
+
 export function scrubInternalLeakage(text: string): string {
   return text
     .replace(GRAPH_ID_RE, '')
+    .replace(IANA_TZ_RE, humanizeIanaToken)
     .replace(/ - /g, ', ')            // hyphen-separator AI tell
     .replace(SENTINEL_RE, '')
     .replace(TOOL_NAME_RE, '')

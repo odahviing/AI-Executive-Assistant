@@ -4,7 +4,7 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import { config } from '../config';
 import { getUnseenEvents, markEventsSeen, getDb, getPreferences } from '../db';
-import { getOpenTasksForOwner, getCompletedUninformedTasks, markTaskInformed } from './index';
+import { getBriefableTasks, markTaskInformed, type Task } from './index';
 import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calendar';
 import { verifyScheduledOutcome, type ScheduleOutcome } from '../utils/verifyScheduledOutcome';
 import { updateOutreachJob } from '../db';
@@ -34,9 +34,11 @@ interface RichItem {
 
 interface BriefingData {
   items: RichItem[];
-  outreachIds: string[];
-  coordIds: string[];
-  completedTaskIds: string[];
+  // v2.2.4 — every surfaced task whose status is 'completed' lands here.
+  // After the brief sends, the caller flips each one to 'informed' via the
+  // existing two-step. Replaces the previous outreachIds/coordIds/
+  // completedTaskIds split — tasks is now the only spine.
+  taskIdsToInform: string[];
   // v2.0.3 — name → pronoun map so Sonnet can pick the right pronouns
   // instead of guessing from first names (which is unreliable for non-Western
   // names like "Amazia").
@@ -53,6 +55,178 @@ function pronounFor(gender: string | null | undefined): 'he' | 'she' | 'they' {
   return 'they';
 }
 
+// ── Item builders (v2.2.4 — extracted from collectBriefingData) ──────────────
+//
+// Each builder takes a hydrated detail row (or task) and produces a RichItem
+// in the shape the briefing prompt expects. Keeps collectBriefingData itself
+// short and pure: walk tasks, branch on skill_origin, hand to the right
+// builder.
+
+function buildOutreachItem(
+  job: any,
+  ownerCalendarEvents: CalendarEvent[],
+  profile: UserProfile,
+  timezone: string,
+): RichItem {
+  const msgPreview = (job.message ?? '').slice(0, 200);
+  const replyText = job.reply_text ?? null;
+
+  let replyPreview: string | null = replyText;
+  if (!replyPreview && job.conversation_json) {
+    try {
+      const conv = JSON.parse(job.conversation_json) as Array<{ role: string; content: string }>;
+      const lastColleague = [...conv].reverse().find(m => m.role === 'user');
+      if (lastColleague) replyPreview = lastColleague.content.slice(0, 200);
+    } catch (_) {}
+  }
+
+  const awaitsReply = (job.await_reply ?? 1) === 1;
+  const statusLabel = {
+    pending_scheduled: `scheduled to go out ${job.scheduled_at ? relativeTime(job.scheduled_at, timezone) : 'soon'}`,
+    sent: awaitsReply ? 'sent, awaiting reply' : 'sent — they\'re handling it on their side',
+    replied: 'replied',
+    no_response: 'no response yet',
+  }[job.status as string] ?? job.status;
+
+  let verifiedOutcome: ScheduleOutcome | null = null;
+  if (ownerCalendarEvents.length > 0 && job.proposed_slots) {
+    try {
+      const slots = JSON.parse(job.proposed_slots) as string[];
+      verifiedOutcome = verifyScheduledOutcome(
+        {
+          proposedSlots: Array.isArray(slots) ? slots : [],
+          subjectKeyword: job.subject_keyword ?? undefined,
+          colleagueSlackId: job.colleague_slack_id,
+        },
+        ownerCalendarEvents,
+        profile,
+      );
+    } catch (err) {
+      logger.warn('brief verifier — outreach verify threw, falling back', {
+        id: job.id, err: String(err).slice(0, 200),
+      });
+    }
+  }
+
+  const item: RichItem = {
+    kind: 'outreach',
+    colleague: job.colleague_name,
+    topic: msgPreview,
+    status: statusLabel,
+    sentWhen: job.sent_at ? relativeTime(job.sent_at, timezone) : undefined,
+    scheduledFor: job.scheduled_at && job.status === 'pending_scheduled'
+      ? DateTime.fromISO(job.scheduled_at).setZone(timezone).toFormat('EEEE d MMM')
+      : undefined,
+    theyReplied: !!replyPreview,
+    replyPreview: replyPreview ?? undefined,
+    awaitsReply,
+  };
+  if (verifiedOutcome && verifiedOutcome.status !== 'none' && verifiedOutcome.event) {
+    const ev = verifiedOutcome.event;
+    const eStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).setZone(timezone);
+    item.verified_outcome = {
+      status: verifiedOutcome.status,
+      event_subject: ev.subject ?? '',
+      event_when: eStart.toFormat('EEEE d MMM \'at\' HH:mm'),
+      issues: verifiedOutcome.issues,
+    };
+  }
+  return item;
+}
+
+function buildCoordItem(
+  job: any,
+  ownerCalendarEvents: CalendarEvent[],
+  profile: UserProfile,
+  timezone: string,
+): RichItem {
+  const statusLabel = {
+    collecting:    'collecting participant responses',
+    resolving:     'resolving best slot',
+    negotiating:   'negotiating time',
+    waiting_owner: 'waiting on your approval',
+    confirmed:     'confirmed',
+    booked:        'booked',
+  }[job.status as string] ?? job.status;
+
+  const slot = job.winning_slot
+    ? DateTime.fromISO(job.winning_slot).setZone(timezone).toFormat('EEEE d MMM \'at\' HH:mm')
+    : undefined;
+
+  let participantNames = 'participants';
+  try {
+    const parts = JSON.parse(job.participants || '[]') as Array<{ name?: string; just_invite?: boolean }>;
+    const keyNames = parts.filter(p => !p.just_invite).map(p => p.name).filter(Boolean);
+    if (keyNames.length > 0) participantNames = keyNames.join(', ');
+  } catch (_) {}
+
+  let coordVerifiedOutcome: ScheduleOutcome | null = null;
+  const isTerminal = ['booked', 'cancelled', 'abandoned'].includes(job.status as string);
+  if (!isTerminal && ownerCalendarEvents.length > 0 && job.proposed_slots) {
+    try {
+      const slots = JSON.parse(job.proposed_slots) as string[];
+      if (Array.isArray(slots) && slots.length > 0) {
+        coordVerifiedOutcome = verifyScheduledOutcome(
+          { proposedSlots: slots, subjectKeyword: job.subject },
+          ownerCalendarEvents,
+          profile,
+        );
+      }
+    } catch (err) {
+      logger.warn('brief verifier — coord verify threw, falling back', {
+        id: job.id, err: String(err).slice(0, 200),
+      });
+    }
+  }
+
+  const item: RichItem = {
+    kind: 'coordination',
+    colleague: participantNames,
+    subject: job.subject,
+    topic: job.topic ?? undefined,
+    status: statusLabel,
+    proposedSlot: slot,
+    updatedWhen: relativeTime(job.updated_at, timezone),
+  };
+  if (coordVerifiedOutcome && coordVerifiedOutcome.status !== 'none' && coordVerifiedOutcome.event) {
+    const ev = coordVerifiedOutcome.event;
+    const eStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).setZone(timezone);
+    item.verified_outcome = {
+      status: coordVerifiedOutcome.status,
+      event_subject: ev.subject ?? '',
+      event_when: eStart.toFormat('EEEE d MMM \'at\' HH:mm'),
+      issues: coordVerifiedOutcome.issues,
+    };
+  }
+  return item;
+}
+
+function buildTaskItem(task: Task, timezone: string): RichItem {
+  if (task.status === 'completed') {
+    return {
+      kind: 'completed_task',
+      title: task.title,
+      completedWhen: task.completed_at ? relativeTime(task.completed_at, timezone) : 'recently',
+    };
+  }
+
+  let contextSummary: string | undefined;
+  try {
+    const ctx = JSON.parse(task.context ?? '{}');
+    contextSummary = ctx.message ?? ctx.subject ?? undefined;
+  } catch (_) {}
+
+  return {
+    kind: 'open_task',
+    title: task.title,
+    status: task.status,
+    dueAt: task.due_at ? relativeTime(task.due_at, timezone) : undefined,
+    context: contextSummary,
+  };
+}
+
+// ── Data collection (v2.2.4 — tasks-first) ───────────────────────────────────
+
 async function collectBriefingData(
   ownerUserId: string,
   timezone: string,
@@ -60,17 +234,14 @@ async function collectBriefingData(
 ): Promise<BriefingData> {
   const db = getDb();
   const items: RichItem[] = [];
-  const outreachIds: string[] = [];
-  const coordIds: string[] = [];
-  const outreachToClose: string[] = [];  // v2.1.4 — outreach rows where verifier detected a booking
+  const outreachToClose: string[] = [];   // verifier-detected booked outreach
+  const taskIdsToInform: string[] = [];   // surfaced + completed → flip to 'informed' post-brief
 
   const sevenDaysAgo = DateTime.now().minus({ days: 7 }).toUTC().toISO()!;
 
-  // v2.1.4 — pre-fetch owner's calendar events for the next 21 days so the
+  // v2.1.4 — pre-fetch owner's calendar events for the next ~30 days so the
   // outcome verifier can check whether third parties booked anything at the
-  // slots Maelle proposed. Bounded to when any outreach/coord with
-  // proposed_slots actually references dates in this window. One fetch
-  // covers all the verifier calls below.
+  // slots Maelle proposed. One fetch covers every hydration call below.
   let ownerCalendarEvents: CalendarEvent[] = [];
   try {
     const calFrom = DateTime.now().setZone(timezone).minus({ days: 2 }).toFormat('yyyy-MM-dd');
@@ -82,171 +253,45 @@ async function collectBriefingData(
     });
   }
 
-  // ── Outreach jobs ──────────────────────────────────────────────────────────
-  const outreachJobs = db.prepare(`
-    SELECT * FROM outreach_jobs
-    WHERE owner_user_id = ?
-    AND status NOT IN ('cancelled', 'done')
-    AND created_at >= ?
-    AND (briefed_at IS NULL OR updated_at > briefed_at OR status = 'no_response')
-    ORDER BY updated_at DESC
-    LIMIT 20
-  `).all(ownerUserId, sevenDaysAgo) as any[];
+  // ── Tasks-first walk (v2.2.4) ─────────────────────────────────────────────
+  // Tasks is the spine. Outreach + coord rows are detail tables that hang off
+  // tasks via skill_ref. We query tasks once, then hydrate outreach- and
+  // coord-backed tasks with their detail row for richer narration. The
+  // completed → informed two-step then governs every surface uniformly —
+  // booked coords stop resurfacing the day after one brief informs about
+  // them, replied outreach the same. Replaces the prior three-parallel-queries
+  // structure (outreach_jobs, coord_jobs, tasks all queried independently with
+  // tasks deduped against the others) which left coord/outreach rows stranded
+  // in the brief for 7 days regardless of what 'informed' was doing.
+  const tasks = getBriefableTasks(ownerUserId, sevenDaysAgo);
 
-  for (const job of outreachJobs) {
-    const msgPreview  = (job.message ?? '').slice(0, 200);
-    const replyText   = job.reply_text ?? null;
-
-    let replyPreview: string | null = replyText;
-    if (!replyPreview && job.conversation_json) {
-      try {
-        const conv = JSON.parse(job.conversation_json) as Array<{ role: string; content: string }>;
-        const lastColleague = [...conv].reverse().find(m => m.role === 'user');
-        if (lastColleague) replyPreview = lastColleague.content.slice(0, 200);
-      } catch (_) {}
-    }
-
-    // v2.1.4 — honor await_reply=0 so brief doesn't narrate a
-    // fire-and-forget outreach as "waiting to hear back" when Maelle
-    // explicitly didn't expect a reply.
-    const awaitsReply = (job.await_reply ?? 1) === 1;
-    const statusLabel = {
-      pending_scheduled: `scheduled to go out ${job.scheduled_at ? relativeTime(job.scheduled_at, timezone) : 'soon'}`,
-      sent: awaitsReply ? 'sent, awaiting reply' : 'sent — they\'re handling it on their side',
-      replied: 'replied',
-      no_response: 'no response yet',
-    }[job.status as string] ?? job.status;
-
-    // v2.1.4 — verify outcome: if this outreach proposed specific times and
-    // a matching event showed up on the calendar (third party booked it),
-    // report that instead of "still waiting".
-    let verifiedOutcome: ScheduleOutcome | null = null;
-    if (ownerCalendarEvents.length > 0 && job.proposed_slots) {
-      try {
-        const slots = JSON.parse(job.proposed_slots) as string[];
-        verifiedOutcome = verifyScheduledOutcome(
-          {
-            proposedSlots: Array.isArray(slots) ? slots : [],
-            subjectKeyword: job.subject_keyword ?? undefined,
-            colleagueSlackId: job.colleague_slack_id,
-          },
-          ownerCalendarEvents,
-          profile,
-        );
-        if (verifiedOutcome.status !== 'none') {
-          outreachToClose.push(job.id);
-        }
-      } catch (err) {
-        logger.warn('brief verifier — outreach verify threw, falling back', {
-          id: job.id, err: String(err).slice(0, 200),
-        });
+  for (const task of tasks) {
+    if (task.skill_origin === 'outreach' && task.skill_ref) {
+      const job = db.prepare(`SELECT * FROM outreach_jobs WHERE id = ?`).get(task.skill_ref) as any;
+      if (job) {
+        const item = buildOutreachItem(job, ownerCalendarEvents, profile, timezone);
+        if (item.verified_outcome) outreachToClose.push(job.id);
+        items.push(item);
+      } else {
+        items.push(buildTaskItem(task, timezone));
       }
+    } else if (task.skill_origin === 'meetings' && task.type === 'coordination' && task.skill_ref) {
+      const job = db.prepare(`SELECT * FROM coord_jobs WHERE id = ?`).get(task.skill_ref) as any;
+      if (job) {
+        items.push(buildCoordItem(job, ownerCalendarEvents, profile, timezone));
+      } else {
+        items.push(buildTaskItem(task, timezone));
+      }
+    } else {
+      items.push(buildTaskItem(task, timezone));
     }
-
-    outreachIds.push(job.id);
-    const item: RichItem = {
-      kind: 'outreach',
-      colleague: job.colleague_name,
-      topic: msgPreview,
-      status: statusLabel,
-      sentWhen: job.sent_at ? relativeTime(job.sent_at, timezone) : undefined,
-      scheduledFor: job.scheduled_at && job.status === 'pending_scheduled'
-        ? DateTime.fromISO(job.scheduled_at).setZone(timezone).toFormat('EEEE d MMM')
-        : undefined,
-      theyReplied: !!replyPreview,
-      replyPreview: replyPreview ?? undefined,
-      awaitsReply,
-    };
-    if (verifiedOutcome && verifiedOutcome.status !== 'none' && verifiedOutcome.event) {
-      const ev = verifiedOutcome.event;
-      const eStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).setZone(timezone);
-      item.verified_outcome = {
-        status: verifiedOutcome.status,
-        event_subject: ev.subject ?? '',
-        event_when: eStart.toFormat('EEEE d MMM \'at\' HH:mm'),
-        issues: verifiedOutcome.issues,
-      };
-    }
-    items.push(item);
+    if (task.status === 'completed') taskIdsToInform.push(task.id);
   }
 
-  // ── Coordination jobs (v1.6: coord_jobs is the only table) ───────────────
-  const coordJobs = db.prepare(`
-    SELECT * FROM coord_jobs
-    WHERE owner_user_id = ?
-    AND status NOT IN ('cancelled', 'abandoned')
-    AND created_at >= ?
-    ORDER BY updated_at DESC
-    LIMIT 20
-  `).all(ownerUserId, sevenDaysAgo) as any[];
-
-  for (const job of coordJobs) {
-    const statusLabel = {
-      collecting:    'collecting participant responses',
-      resolving:     'resolving best slot',
-      negotiating:   'negotiating time',
-      waiting_owner: 'waiting on your approval',
-      confirmed:     'confirmed',
-      booked:        'booked',
-    }[job.status as string] ?? job.status;
-
-    const slot = job.winning_slot
-      ? DateTime.fromISO(job.winning_slot).setZone(timezone).toFormat('EEEE d MMM \'at\' HH:mm')
-      : undefined;
-
-    let participantNames = 'participants';
-    try {
-      const parts = JSON.parse(job.participants || '[]') as Array<{ name?: string; just_invite?: boolean }>;
-      const keyNames = parts.filter(p => !p.just_invite).map(p => p.name).filter(Boolean);
-      if (keyNames.length > 0) participantNames = keyNames.join(', ');
-    } catch (_) {}
-
-    // v2.1.4 — verify outcome for non-terminal coords with proposed slots.
-    // Same logic as outreach: if a matching event landed on the calendar,
-    // surface it.
-    let coordVerifiedOutcome: ScheduleOutcome | null = null;
-    const isTerminal = ['booked', 'cancelled', 'abandoned'].includes(job.status as string);
-    if (!isTerminal && ownerCalendarEvents.length > 0 && job.proposed_slots) {
-      try {
-        const slots = JSON.parse(job.proposed_slots) as string[];
-        if (Array.isArray(slots) && slots.length > 0) {
-          coordVerifiedOutcome = verifyScheduledOutcome(
-            { proposedSlots: slots, subjectKeyword: job.subject },
-            ownerCalendarEvents,
-            profile,
-          );
-        }
-      } catch (err) {
-        logger.warn('brief verifier — coord verify threw, falling back', {
-          id: job.id, err: String(err).slice(0, 200),
-        });
-      }
-    }
-
-    coordIds.push(job.id);
-    const coordItem: RichItem = {
-      kind: 'coordination',
-      colleague: participantNames,
-      subject: job.subject,
-      topic: job.topic ?? undefined,
-      status: statusLabel,
-      proposedSlot: slot,
-      updatedWhen: relativeTime(job.updated_at, timezone),
-    };
-    if (coordVerifiedOutcome && coordVerifiedOutcome.status !== 'none' && coordVerifiedOutcome.event) {
-      const ev = coordVerifiedOutcome.event;
-      const eStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).setZone(timezone);
-      coordItem.verified_outcome = {
-        status: coordVerifiedOutcome.status,
-        event_subject: ev.subject ?? '',
-        event_when: eStart.toFormat('EEEE d MMM \'at\' HH:mm'),
-        issues: coordVerifiedOutcome.issues,
-      };
-    }
-    items.push(coordItem);
-  }
-
-  // ── Incoming colleague messages (events table, type=message) ──────────────
+  // ── Incoming colleague messages — independent 4th surface ─────────────────
+  // Not folded into tasks: these are inbound message events not tied to any
+  // tracked outreach/coord (e.g. "Oran sent a group DM that didn't come
+  // through cleanly"). Self-cleans via the actioned=1 flush below.
   const incomingMessages = db.prepare(`
     SELECT * FROM events
     WHERE owner_user_id = ?
@@ -266,64 +311,6 @@ async function collectBriefingData(
     });
   }
 
-  // ── Open user-requested tasks ──────────────────────────────────────────────
-  const openTasks = db.prepare(`
-    SELECT * FROM tasks
-    WHERE owner_user_id = ?
-    AND who_requested != 'system'
-    AND status IN ('new', 'in_progress', 'pending_owner', 'pending_colleague')
-    ORDER BY created_at DESC
-    LIMIT 20
-  `).all(ownerUserId) as any[];
-
-  for (const task of openTasks) {
-    const isAlreadyCovered = task.skill_ref && (
-      outreachJobs.some((j: any) => j.id === task.skill_ref) ||
-      coordJobs.some((j: any) => j.id === task.skill_ref)
-    );
-    if (isAlreadyCovered) continue;
-
-    let contextSummary: string | undefined;
-    try {
-      const ctx = JSON.parse(task.context ?? '{}');
-      contextSummary = ctx.message ?? ctx.subject ?? undefined;
-    } catch (_) {}
-
-    items.push({
-      kind: 'open_task',
-      title: task.title,
-      status: task.status,
-      dueAt: task.due_at ? relativeTime(task.due_at, timezone) : undefined,
-      context: contextSummary,
-    });
-  }
-
-  // ── Recently completed tasks (uninformed) ──────────────────────────────────
-  // v2.0.3 — surface completed tasks ONCE. The model is: completed → informed.
-  // Query below pulls status='completed' only (not 'informed'); after the
-  // briefing sends, the outer function flips each included task via
-  // markTaskInformed so it never re-appears. Previously the briefing didn't
-  // flip completed → informed, so tasks re-surfaced every day for 7 days.
-  const completedTaskIds: string[] = [];
-  const completedTasks = db.prepare(`
-    SELECT * FROM tasks
-    WHERE owner_user_id = ?
-    AND who_requested != 'system'
-    AND status = 'completed'
-    AND completed_at >= ?
-    ORDER BY completed_at DESC
-    LIMIT 10
-  `).all(ownerUserId, sevenDaysAgo) as any[];
-
-  for (const task of completedTasks) {
-    completedTaskIds.push(task.id);
-    items.push({
-      kind: 'completed_task',
-      title: task.title,
-      completedWhen: relativeTime(task.completed_at, timezone),
-    });
-  }
-
   // v2.0.3 — collect gender for every person referenced by name anywhere in
   // the briefing items. Keyed on name (first-name collisions are rare inside
   // one owner's circle; Sonnet resolves from context).
@@ -335,13 +322,12 @@ async function collectBriefingData(
     if (!row.name) continue;
     const firstName = row.name.split(' ')[0];
     peopleGender[row.name] = pronounFor(row.gender);
-    // Also key by first name for easier Sonnet lookup
     if (firstName && !peopleGender[firstName]) {
       peopleGender[firstName] = pronounFor(row.gender);
     }
   }
 
-  return { items, outreachIds, coordIds, completedTaskIds, peopleGender, outreachToClose };
+  return { items, taskIdsToInform, peopleGender, outreachToClose };
 }
 
 // ── Generate briefing with Sonnet ────────────────────────────────────────────
@@ -502,10 +488,12 @@ export async function sendMorningBriefing(
   }
 
   // Collect everything that's happened / in-flight
-  const { items, outreachIds, coordIds, completedTaskIds, peopleGender, outreachToClose } = await collectBriefingData(ownerUserId, profile.user.timezone, profile);
+  const { items, taskIdsToInform, peopleGender, outreachToClose } = await collectBriefingData(ownerUserId, profile.user.timezone, profile);
 
   // v2.1.4 — close outreach rows that the verifier determined are booked.
-  // They'll drop off tomorrow's brief (status='done' → filter excludes them).
+  // updateOutreachJob's terminal hook (v2.2.4) cascades the linked task to
+  // 'completed' so the next brief's tasks-first walk drops them via the
+  // informed two-step.
   if (outreachToClose && outreachToClose.length > 0) {
     for (const id of outreachToClose) {
       try {
@@ -542,10 +530,6 @@ export async function sendMorningBriefing(
     logger.warn('briefs — no Slack connection registered, briefing not sent', { ownerUserId });
   }
 
-  // Mark completed tasks as informed (briefing does NOT set informed — only direct notifications do)
-  // But we still need to track that the briefing mentioned them to avoid re-mentioning
-  // This is handled by the outreach/coord briefed_at stamps below.
-
   // Auto-complete ANY open briefing tasks
   const db = getDb();
   db.prepare(`
@@ -556,34 +540,20 @@ export async function sendMorningBriefing(
     AND lower(title) LIKE '%briefing%'
   `).run(ownerUserId);
 
-  // Stamp briefed_at on outreach and coordination jobs that were included
-  const now = new Date().toISOString();
-  if (outreachIds.length > 0) {
-    const placeholders = outreachIds.map(() => '?').join(',');
-    db.prepare(`UPDATE outreach_jobs SET briefed_at = ? WHERE id IN (${placeholders})`)
-      .run(now, ...outreachIds);
-
-    db.prepare(`
-      UPDATE outreach_jobs SET status = 'done', updated_at = datetime('now')
-      WHERE id IN (${placeholders})
-      AND status IN ('replied')
-      AND await_reply = 0
-    `).run(...outreachIds);
-  }
-  // v1.6 — coord_jobs no longer uses a briefed_at column; the briefing is a
-  // read-only view of the current state. Unread-delta suppression happens via
-  // the events table instead.
-
-  // v2.0.3 — flip completed → informed for tasks included above. Next briefing
-  // queries status='completed' only, so they drop off. Two-step
-  // completed→informed pattern documented in tasks/index.ts.
-  for (const id of completedTaskIds ?? []) {
+  // v2.2.4 — flip every surfaced completed task to 'informed'. Two-step
+  // pattern (completed → informed) now governs all surfaces uniformly:
+  // outreach-, coord-, reminder-, follow-up- backed tasks all drop off the
+  // next brief once flipped. Replaces the prior briefed_at outreach stamps
+  // and the await_reply=0 auto-close — those were per-table workarounds for
+  // the same problem informed already solves at the task layer.
+  for (const id of taskIdsToInform ?? []) {
     markTaskInformed(id);
   }
 
   logger.info('Morning briefing sent (AI-generated)', {
     userId: ownerUserId,
     items: items.length,
+    informed: taskIdsToInform.length,
   });
 }
 

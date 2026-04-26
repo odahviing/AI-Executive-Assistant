@@ -173,7 +173,17 @@ export async function bookCoordination(
       location = slotMeta.location;
       isOnline = slotMeta.isOnline;
     } else {
-      const locInfo = determineSlotLocation(slot, profile, totalPeople, isInternal);
+      // v2.2.4 (bug 8b) — fallback path when slotsMetadata is missing.
+      // Mirror the traveling-participant check upstream paths apply.
+      let anyTraveling = false;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getCurrentTravel } = require('../../../db') as typeof import('../../../db');
+        for (const p of participants) {
+          if (p.slack_id && getCurrentTravel(p.slack_id)) { anyTraveling = true; break; }
+        }
+      } catch (_) { /* fail open */ }
+      const locInfo = determineSlotLocation(slot, profile, totalPeople, isInternal, undefined, anyTraveling);
       location = locInfo.location;
       isOnline = locInfo.isOnline;
     }
