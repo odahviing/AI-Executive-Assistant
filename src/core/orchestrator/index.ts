@@ -70,6 +70,28 @@ function trimHistory(
  * Build a compact one-line summary of a tool call for conversation history.
  * This lets Claude know what it did on previous turns without storing the full JSON.
  */
+// v2.2.5 — outcome-aware summary for mutation tools. The claim-checker reads
+// these summaries to decide if a reply's success language is honest. Without
+// outcome info, a failed move_meeting looked the same as a successful one and
+// "all done" got waved through. Now mutations emit OK or FAILED so the checker
+// can flag false-success drafts.
+function mutationOutcome(result: unknown): { ok: boolean; reason?: string; eventId?: string } {
+  if (result == null || typeof result !== 'object') return { ok: false, reason: 'no_result' };
+  const r = result as Record<string, unknown>;
+  // Common positive shapes: { success: true, ... }, { ok: true, ... }, { meetingId: ... }, { id: ... }
+  // Common negative shapes: { success: false, error: '...' }, { ok: false, reason: '...' }, { warning: '...', needs_confirmation: true }
+  if (r.success === false) return { ok: false, reason: typeof r.error === 'string' ? r.error : 'tool_returned_false' };
+  if (r.ok === false) return { ok: false, reason: typeof r.reason === 'string' ? r.reason : 'tool_returned_false' };
+  if (r.needs_confirmation === true) return { ok: false, reason: typeof r.warning === 'string' ? r.warning : 'needs_confirmation' };
+  if (r.needs_owner_approval === true) return { ok: false, reason: typeof r.reason === 'string' ? r.reason : 'needs_owner_approval' };
+  if (r.success === true || r.ok === true || typeof r.meetingId === 'string' || typeof r.id === 'string' || typeof r.event_id === 'string') {
+    const eventId = (r.meetingId ?? r.id ?? r.event_id) as string | undefined;
+    return { ok: true, eventId };
+  }
+  // No clear shape — be conservative, treat as not-confirmed-success.
+  return { ok: false, reason: 'unclear_result' };
+}
+
 function summarizeToolCall(toolName: string, input: Record<string, unknown>, result: unknown): string {
   try {
     switch (toolName) {
@@ -90,6 +112,22 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
         return `[find_slack_user: "${input.name}"]`;
       case 'message_colleague':
         return `[message_colleague: ${(input as any).colleague_name}]`;
+      // v2.2.5 — mutation tools: read the outcome so the claim-checker sees
+      // FAILED vs OK rather than just "the call ran."
+      case 'create_meeting':
+      case 'move_meeting':
+      case 'update_meeting':
+      case 'delete_meeting':
+      case 'finalize_coord_meeting': {
+        const outcome = mutationOutcome(result);
+        const subj = (input as any).subject ?? (input as any).meeting_id ?? (input as any).new_start ?? '';
+        const subjPart = subj ? ` ${String(subj).slice(0, 40)}` : '';
+        if (outcome.ok) {
+          const idPart = outcome.eventId ? ` event_id=${String(outcome.eventId).slice(0, 16)}…` : '';
+          return `[${toolName} OK${subjPart}${idPart}]`;
+        }
+        return `[${toolName} FAILED${subjPart}${outcome.reason ? `: ${outcome.reason.slice(0, 60)}` : ''}]`;
+      }
       default: {
         // Generic: just tool name + first key-value
         const firstKey = Object.keys(input)[0];

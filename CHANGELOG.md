@@ -2,6 +2,54 @@
 
 ---
 
+## 2.2.5 — Lori onboarding wave: concision finalizer, tool-outcome honesty, slot binding, file routing
+
+The wave that surfaced all of these was a real onboarding scenario: book four sequential meetings (Vision → Structure → Professional Services → Wrap-Up) with a new VP starting next week. The flow exposed deliberation leaking into Slack as walls of text, false "all done" claims when moves silently failed, slots drifting between proposal and booking, file uploads getting auto-misfiled into the KB instead of helping with the actual task, and the lack of an ordering primitive when meetings were sequential. All addressed in this patch with prompt rules + targeted code-level honesty hardening.
+
+### Added
+
+**Concision finalizer (`postReply.ts`)** — new pipeline stage between formatForSlack and claim-check. Triggers on length > 600 chars (excluding list-style replies) OR a deliberation pattern (`actually wait`, `on second thought`, `let me find`, `OK definitive proposal`, `wait, that breaks the order`, etc.). Calls Sonnet with the draft and asks for ONLY the final user-facing answer — strips self-correction, planning narration, intermediate proposals. Capped at ~100 output tokens, ~150 input. Falls back to original on any error. Backstops the base-prompt anti-deliberation rule for cases where Sonnet emits the entire derivation in a single text block (which the v2.2.4 last-text-block fix can't catch — that one only helps with multi-block emissions).
+
+**Outcome-aware tool summaries** — `summarizeToolCall` in `orchestrator/index.ts` now reads the result of mutation tools (`create_meeting` / `move_meeting` / `update_meeting` / `delete_meeting` / `finalize_coord_meeting`) and emits `[<tool> OK event_id=...]` or `[<tool> FAILED: <reason>]` instead of just `[<tool>: ...]`. New `mutationOutcome()` helper detects positive shapes (`success: true`, `ok: true`, `meetingId`, `id`) vs negative shapes (`success: false`, `needs_owner_approval`, `needs_confirmation`, no result). Conservative on unclear shapes (treats as not-confirmed-success).
+
+**`must_be_after_event_id` optional parameter** on `find_available_slots` and `create_meeting`. When the LLM is booking an ordered series, it can pass the predecessor's event id as a constraint — `find_available_slots` clips its earliest candidate to AFTER the predecessor's end (with the predecessor lookup bounded to a ±30-day window so the cost is fixed); `create_meeting` refuses with `error: 'order_violation'` when the proposed start is before the predecessor's end. Composable primitive, no new tables, no series concept — Sonnet self-chains by passing pointers. Optional and additive: existing call sites unchanged.
+
+### Changed
+
+**Claim-checker reads tool outcome, not tool presence** — prompt block updated to explicitly call out the v2.2.5 OK/FAILED markers. Success claims ("booked", "moved", "done", "all done", "locked in", "all four moved") are honest only when the matching summary contains `OK`. Aggregate claims need EVERY relevant mutation this turn to be `OK`; even one `FAILED` flags the aggregate as false. Closes the "Maelle says 'all four locked in' when M1 + M2 actually never landed" pattern.
+
+**Four new prompt rules in `meetings.ts`:**
+
+- *PROPOSED SLOTS ARE BINDING* — when the assistant offers specific slot times to the owner and he replies "book", "go", "yes", "do it", call `create_meeting` with those EXACT times verbatim. Don't re-search, don't round, don't second-guess. The conversation already converged.
+- *REPAIR EXISTING MEETINGS WITH MOVE, NOT CREATE* — when meetings are wrongly placed and the owner asks to fix them, call `move_meeting` on the existing event ids; do NOT call `create_meeting` at the new slot (which would produce a duplicate sitting next to the misplaced original).
+- *VERIFY TOOL RESULT BEFORE NARRATING SUCCESS* — every mutation tool returns a structured result; read it. Failure = no event id / `ok: false` / `needs_confirmation` / etc. Don't say "booked" / "done" / "all done" without verifying. Aggregate claims require every individual mutation this turn to have returned success.
+- *DON'T COMPUTE AVAILABILITY FROM A STALE CALENDAR LISTING* — when the owner asks for an alternative slot, call `find_available_slots` (or `get_calendar` fresh). Don't reason about gaps from a calendar dump fetched earlier in the conversation. Closes the "I proposed 14:00 because Happy Hour ends then — wait, Product Weekly is at 14:00" contradiction.
+
+**File-handling routing (`connectors/slack/app.ts`)** — doc uploads (.txt / .md / .pdf) now route through the orchestrator with the file content embedded in the user message, instead of auto-running `ingestKnowledgeDoc` on every upload. The orchestrator's full prompt + skill catalog decides what to do based on the caption — review meetings against the list, file as KB, summarize a transcript, or ask the owner what's intended. Caption-as-task is honored; KB ingestion no longer auto-fires on every file. Closes the misfile of "Lori onboarding plan" landing as a durable KB doc when the owner had asked for meeting review.
+
+### Fixed
+
+**Deliberation leaked as walls of text** — when Sonnet emits a single text block with the entire derivation embedded ("wait, that breaks the order again", "let me find", "OK definitive clean proposal"), the v2.2.4 last-text-block fix can't catch it (it only helps with multi-block emissions). Concision finalizer above now catches single-block deliberation.
+
+**False "all done" claims when moves silently failed** — the claim-checker previously flagged "you said you sent X, was the tool called?" but didn't validate "you said you booked X, did the tool RETURN success?" Outcome-aware tool summaries + claim-checker prompt update close this. A failed move can no longer get reported as success.
+
+**Slot drift between propose-and-book** — when Maelle proposed Mon 27 Apr 10:30 / Wed 29 Apr 13:15 and the owner said "book all", the bookings landed at different times (Mon 27 Apr 12:15 / Wed 29 Apr 12:30). The PROPOSED SLOTS ARE BINDING rule pushes Sonnet to call `create_meeting` with the exact proposed slot, not re-search.
+
+**Auto-misfile of task-instruction file uploads** — owner sent an onboarding plan with caption "go over the list and mark all the meetings relevant for me", Maelle filed it as `reflectiz/team/lori_onboarding_plan.md` in the KB instead of doing the review. Routing change above. Misfile from before this patch was deleted manually.
+
+### Migration
+
+None — all changes are code-internal. No new schema, no profile-level toggles. `must_be_after_event_id` is optional; existing call sites continue working unchanged.
+
+### Invariants preserved
+
+- Skills still import only from `connections/types` + `connections/registry`.
+- Approvals still the single path for "needs owner input."
+- Owner > person > auto provenance unchanged.
+- All LLM calls remain Sonnet 4.6.
+
+---
+
 ## 2.2.4 — 8-bug wave from real Yael reschedule trace + tasks-first brief
 
 A single bad reschedule scenario (Yael in Hebrew asking to move a recurring BiWeekly from Sunday in Israel to a Wednesday afternoon in Boston) surfaced eight independent bugs across language matching, deliberation leak, shadow chatter, outreach handoff, travel awareness, thread propagation, duration handling, and location selection. All eight fixed in one wave. Brief refactored to a tasks-first spine in the same wave (separate root cause, but it was on deck and the wave bundles cleanly).

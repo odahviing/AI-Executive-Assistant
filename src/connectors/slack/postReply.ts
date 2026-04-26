@@ -73,15 +73,25 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     return;
   }
 
-  // Step 1 — persist the raw draft + tool summaries to conversation history
-  // so Claude's next turn has full context for what ran.
+  // Step 1 (v2.2.5) — concision pass. When Sonnet emits a single text block
+  // with deliberation embedded ("wait,", "let me find", "OK definitive
+  // proposal", "actually,") or a wall of text > 600 chars on a non-list reply,
+  // run a quick rewrite that strips the journey and keeps only the final
+  // user-facing answer. Backstops the base-prompt anti-deliberation rule when
+  // Sonnet ignores it. Cheap (only fires when triggered, ~150 in / ~100 out).
+  // Falls back to the original draft on any error.
+  const finalReply = await runConcisionPassIfNeeded(result.reply, profile);
+
+  // Step 1b — persist what the user will actually see (post-concision) to
+  // history. Future turns reading the conversation see the clean answer, not
+  // the raw deliberation chain.
   const savedContent = result.toolSummaries?.length
-    ? `${result.toolSummaries.join(' ')}\n${result.reply}`
-    : result.reply;
+    ? `${result.toolSummaries.join(' ')}\n${finalReply}`
+    : finalReply;
   appendToConversation(threadTs, channelId, { role: 'assistant', content: savedContent });
 
   // Step 2 — normalize markdown → Slack mrkdwn.
-  let cleanReply = formatForSlack(result.reply);
+  let cleanReply = formatForSlack(finalReply);
 
   // Step 3 — owner-facing claim check (+ corrective retry).
   if (role === 'owner' || isOwnerInGroup) {
@@ -481,6 +491,87 @@ async function runDateVerifierAndMaybeRetry(ctx: DateVerifyContext): Promise<str
     logger.warn('Date verifier threw — sending original reply', { err: String(err) });
   }
   return cleanReply;
+}
+
+// ── v2.2.5 — Concision finalizer ─────────────────────────────────────────────
+//
+// Sonnet sometimes emits a single text block with the entire derivation
+// embedded ("wait, that breaks the order", "let me find", "OK definitive clean
+// proposal"). The base-prompt anti-deliberation rule asks Sonnet to skip that;
+// when she ignores it, this pass catches it. Triggers on either deliberation
+// patterns OR length > 600 chars on a non-list reply. Asks Sonnet to rewrite
+// keeping only the final answer, capped tight. Falls back to the original on
+// any error — never blocks a reply.
+
+const DELIBERATION_RE = /\b(actually wait\b|on second thought\b|let me (?:think|find|check|give|ask|see|try)\b|wait,?\s+(?:that|the|i|let|professional|no)\b|on the other hand\b|on the one hand\b|definitive (?:clean )?proposal\b|hmm,?\s|so the full corrected\b|i need to (?:also )?(?:move|find|give|check)\b|let me give you the clean\b)/i;
+
+function looksLikeAList(text: string): boolean {
+  // List-style replies (numbered or bulleted) are legitimate even when long;
+  // don't trim them. Detect any of: "1." "2." line starts, several "-" line
+  // starts, or several lines starting with a digit.
+  const lines = text.split('\n');
+  const numberedLineCount = lines.filter(l => /^\s*\d+[.)]\s/.test(l)).length;
+  const bulletLineCount = lines.filter(l => /^\s*[-•]\s/.test(l)).length;
+  return numberedLineCount >= 2 || bulletLineCount >= 3;
+}
+
+async function runConcisionPassIfNeeded(rawReply: string, profile: UserProfile): Promise<string> {
+  const trim = rawReply.trim();
+  if (!trim) return trim;
+
+  const tooLong = trim.length > 600 && !looksLikeAList(trim);
+  const hasDeliberation = DELIBERATION_RE.test(trim);
+  if (!tooLong && !hasDeliberation) return trim;
+
+  try {
+    const Anthropic = (await import('@anthropic-ai/sdk')).default;
+    const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+    const ownerFirst = profile.user.name.split(' ')[0];
+    const resp = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 400,
+      tools: [{
+        name: 'rewrite',
+        description: 'Output the cleaned final reply for the user.',
+        input_schema: {
+          type: 'object' as const,
+          properties: { final: { type: 'string' } },
+          required: ['final'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'rewrite' },
+      messages: [{
+        role: 'user',
+        content: `You wrote this draft for ${ownerFirst}'s assistant. Rewrite it as ONLY the final user-facing answer. Strip:
+- self-correction ("wait,", "actually,", "on second thought", "let me", "OK definitive...")
+- planning narration ("I need to find", "let me check", "let me give you the clean")
+- intermediate proposals you rejected mid-thought
+- references to your reasoning process
+
+Keep the answer; drop the journey. Stay under 4 short sentences unless the draft is a numbered/bulleted list, in which case keep the list intact and trim only the prose around it. Match the language of the draft (Hebrew/English).
+
+Draft:
+${trim}`,
+      }],
+    });
+    const tool = resp.content.find((b: { type: string }) => b.type === 'tool_use') as { input?: { final?: string } } | undefined;
+    const final = tool?.input?.final;
+    if (!final || !final.trim()) return trim;
+    const cleaned = final.trim();
+    // Safety: if the rewrite is somehow LONGER than the original, the pass
+    // didn't help — return original. Same if rewrite is suspiciously short
+    // (< 10 chars) which probably means the model truncated.
+    if (cleaned.length >= trim.length || cleaned.length < 10) return trim;
+    logger.info('Concision pass trimmed deliberation', {
+      before: trim.length,
+      after: cleaned.length,
+      triggered: hasDeliberation ? 'pattern' : 'length',
+    });
+    return cleaned;
+  } catch (err) {
+    logger.warn('Concision pass threw — sending original draft', { err: String(err).slice(0, 200) });
+    return trim;
+  }
 }
 
 function escapeRegex(s: string): string {

@@ -673,13 +673,52 @@ export class SchedulingSkill {
               message: `meeting_mode must be one of: in_person, online, either, custom. Got "${mode}". Ask the owner which one applies before calling again.`,
             };
           }
+          // v2.2.5 (C) — must_be_after_event_id: clip searchFrom to AFTER the
+          // predecessor's end. Optional; when omitted, behavior is unchanged.
+          // Predecessor lookup via getCalendarEvents window around the
+          // searchFrom date — saves a per-event-id roundtrip and is bounded.
+          let effectiveSearchFrom = args.search_from as string;
+          const mustBeAfterId = args.must_be_after_event_id as string | undefined;
+          if (mustBeAfterId) {
+            try {
+              const probeFrom = DateTime.fromISO(args.search_from as string, { zone: timezone })
+                .minus({ days: 30 }).toFormat('yyyy-MM-dd');
+              const probeTo = DateTime.fromISO(args.search_to as string, { zone: timezone })
+                .plus({ days: 30 }).toFormat('yyyy-MM-dd');
+              const events = await getCalendarEvents(userEmail, probeFrom, probeTo, timezone);
+              const predecessor = events.find(e => e.id === mustBeAfterId);
+              if (predecessor) {
+                const predEnd = DateTime.fromISO(predecessor.end.dateTime, { zone: predecessor.end.timeZone ?? 'utc' })
+                  .setZone(timezone);
+                const requestedFrom = DateTime.fromISO(args.search_from as string, { zone: timezone });
+                if (predEnd.toMillis() > requestedFrom.toMillis()) {
+                  effectiveSearchFrom = predEnd.toISO()!;
+                  logger.info('find_available_slots — clipped searchFrom to after predecessor', {
+                    predecessorId: mustBeAfterId,
+                    predecessorEnd: predEnd.toISO(),
+                    originalFrom: args.search_from,
+                    clippedFrom: effectiveSearchFrom,
+                  });
+                }
+              } else {
+                logger.warn('find_available_slots — must_be_after_event_id not found, ignoring', {
+                  eventId: mustBeAfterId,
+                });
+              }
+            } catch (err) {
+              logger.warn('find_available_slots — predecessor lookup threw, ignoring constraint', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          }
+
           try {
             return await findAvailableSlots({
               userEmail,
               timezone,
               durationMinutes: args.duration_minutes as number,
               attendeeEmails: args.attendee_emails as string[],
-              searchFrom: args.search_from as string,
+              searchFrom: effectiveSearchFrom,
               searchTo: args.search_to as string,
               preferMorning: args.prefer_morning as boolean | undefined,
               meetingMode: mode as import('../../connectors/graph/calendar').MeetingMode,
@@ -707,6 +746,47 @@ export class SchedulingSkill {
         const attendees = args.attendees as Array<{ name: string; email: string }>;
         const assistantEmail = context.profile.assistant.email;
         const ownerEmail = context.profile.user.email;
+
+        // v2.2.5 (C) — must_be_after_event_id ordering guard. When the LLM
+        // booking is part of an ordered series, refuse if the proposed start
+        // is BEFORE the predecessor's end. Lets owner book M2 with a
+        // must_be_after pointer to M1 and trust the order; the tool catches
+        // accidental order breaks deterministically.
+        const mustBeAfterId = args.must_be_after_event_id as string | undefined;
+        if (mustBeAfterId) {
+          try {
+            const { DateTime: DT } = await import('luxon');
+            const requestedStart = DT.fromISO(args.start as string, { zone: timezone });
+            const probeFrom = requestedStart.minus({ days: 30 }).toFormat('yyyy-MM-dd');
+            const probeTo = requestedStart.plus({ days: 1 }).toFormat('yyyy-MM-dd');
+            const events = await getCalendarEvents(userEmail, probeFrom, probeTo, timezone);
+            const predecessor = events.find(e => e.id === mustBeAfterId);
+            if (predecessor) {
+              const predEnd = DT.fromISO(predecessor.end.dateTime, { zone: predecessor.end.timeZone ?? 'utc' })
+                .setZone(timezone);
+              if (requestedStart.toMillis() < predEnd.toMillis()) {
+                logger.info('create_meeting refused — must_be_after_event_id ordering violated', {
+                  predecessorId: mustBeAfterId,
+                  predecessorEnd: predEnd.toISO(),
+                  requestedStart: requestedStart.toISO(),
+                });
+                return {
+                  success: false,
+                  error: 'order_violation',
+                  message: `That start time (${requestedStart.toFormat("EEE d MMM 'at' HH:mm")}) is BEFORE the predecessor meeting "${predecessor.subject ?? 'unknown'}" ends (${predEnd.toFormat("EEE d MMM 'at' HH:mm")}). The series must stay in order. Pick a slot after that.`,
+                };
+              }
+            } else {
+              logger.warn('create_meeting — must_be_after_event_id not found in nearby calendar; proceeding without order check', {
+                eventId: mustBeAfterId,
+              });
+            }
+          } catch (err) {
+            logger.warn('create_meeting — predecessor lookup threw, skipping order check', {
+              err: String(err).slice(0, 200),
+            });
+          }
+        }
 
         // Remove the owner if Claude accidentally added them (owner is organizer)
         // Also strip the assistant if Claude added her despite instructions — she has calendar access

@@ -852,15 +852,14 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         ? (message as any).thread_ts as string
         : ts;
 
-      // Document branch (v2.0.2, multi-file in v2.0.7) — owner-only. Every
-      // .txt/.md/.pdf in the upload gets processed sequentially (not in
-      // parallel — Anthropic rate limits + we want deterministic thread
-      // order). Each file posts its own confirmation in the thread. The
-      // classifier inside ingestKnowledgeDoc decides transcript vs
-      // knowledge_doc vs other per file:
-      //   - transcript → existing SummarySkill flow (requires summary: true)
-      //   - knowledge_doc → file under KB (requires knowledge: true)
-      //   - other → polite refusal
+      // Document branch — owner-only. Every .txt/.md/.pdf in the upload gets
+      // downloaded + parsed sequentially, then routed through the orchestrator
+      // as a normal turn with the file content embedded in the user message
+      // (v2.2.5 restructure). Sonnet's full skill catalog + system prompt
+      // decides what to do: review meetings against the list, file as KB,
+      // summarize a transcript, or ask the owner what's intended. Replaces
+      // the prior auto-classify path that misfiled task instructions as KB
+      // because the classifier saw file shape, not caption intent.
       const docFiles = (files ?? []).filter((f: any) => {
         const mt = String(f.mimetype || '');
         const ft = String(f.filetype || '');
@@ -868,9 +867,6 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           || ft === 'text' || ft === 'txt' || ft === 'markdown' || ft === 'md' || ft === 'pdf';
       });
       if (docFiles.length > 0 && senderRole1v1 === 'owner') {
-        const summaryActive = ((profile.skills as any)?.summary === true || (profile.skills as any)?.meeting_summaries === true);
-        const knowledgeActive = ((profile.skills as any)?.knowledge === true || (profile.skills as any)?.knowledge_base === true);
-
         logger.info('Document files received in DM', {
           channel: channelId,
           user: message.user,
@@ -878,6 +874,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           files: docFiles.map((f: any) => ({ filetype: f.filetype, mimetype: f.mimetype, size: f.size })),
         });
         client.reactions.add({ channel: channelId, timestamp: message.ts, name: 'thread' }).catch(() => {});
+
         setImmediate(async () => {
           const saySafe = async (text: string) => {
             try {
@@ -892,20 +889,31 @@ export function createSlackAppForProfile(profile: UserProfile): App {
 
           const caption = ((message as any).text as string | undefined)?.trim() ?? '';
 
-          const processOneDoc = async (docFile: any, index: number, total: number): Promise<void> => {
+          // v2.2.5 (D) — route file uploads through the orchestrator. The
+          // previous flow auto-classified every doc and either filed it as KB
+          // or refused, ignoring the owner's caption. Now: download + parse
+          // each doc, build a synthetic user message that includes the caption
+          // and the file text (capped), and let the orchestrator decide via
+          // its full skill catalog. Caption asks to review meetings → calendar
+          // tools fire. Caption asks to save → Sonnet calls knowledge tools.
+          // Empty caption with content that looks like a transcript → Sonnet
+          // can recognize and route. The auto-misfile path is gone.
+
+          // Download + parse all docs first; bail individually on failure.
+          const FILE_TEXT_CAP = 20000;
+          const parsedDocs: Array<{ label: string; text: string; truncated: boolean }> = [];
+          for (let i = 0; i < docFiles.length; i++) {
+            const docFile = docFiles[i];
             const isPdf = String(docFile.mimetype || '') === 'application/pdf' || String(docFile.filetype || '') === 'pdf';
-            const fileLabel = docFile.name || docFile.title || `file ${index + 1}`;
-            const prefix = total > 1 ? `[${index + 1}/${total}] ${fileLabel}: ` : '';
+            const fileLabel = docFile.name || docFile.title || `file ${i + 1}`;
             try {
               const dl = await fetch(docFile.url_private, {
                 headers: { Authorization: `Bearer ${assistant.slack.bot_token}` },
               });
               if (!dl.ok) {
-                logger.warn('Doc download failed', { status: dl.status, file: fileLabel });
-                await saySafe(`${prefix}Couldn't open that one, try sending it again?`);
-                return;
+                await saySafe(`Couldn't open ${fileLabel}, try sending it again?`);
+                continue;
               }
-
               let text: string;
               if (isPdf) {
                 try {
@@ -916,96 +924,61 @@ export function createSlackAppForProfile(profile: UserProfile): App {
                   text = parsed.text || '';
                 } catch (err) {
                   logger.warn('PDF parse failed', { err: String(err).slice(0, 200), file: fileLabel });
-                  await saySafe(`${prefix}Couldn't read that PDF (maybe scanned images or encrypted). Send a text version?`);
-                  return;
+                  await saySafe(`Couldn't read ${fileLabel} (maybe scanned images or encrypted). Send a text version?`);
+                  continue;
                 }
               } else {
                 text = await dl.text();
               }
-
-              if (text.trim().length < 50) {
-                await saySafe(`${prefix}Looks empty, was the export complete?`);
-                return;
+              if (text.trim().length < 10) {
+                await saySafe(`${fileLabel} looks empty, was the export complete?`);
+                continue;
               }
-
-              const sourceHint = fileLabel;
-              if (!isPdf) {
-                const Anthropic = (await import('@anthropic-ai/sdk')).default;
-                const anthropic = new Anthropic();
-                const { ingestKnowledgeDoc } = await import('../../skills/knowledge');
-                const ingestResult = await ingestKnowledgeDoc({
-                  profile,
-                  text,
-                  sourceHint,
-                  ownerCaption: caption || undefined,
-                  anthropic,
-                });
-
-                if (ingestResult.kind === 'rejected' && ingestResult.reason === 'transcript') {
-                  if (!summaryActive) {
-                    await saySafe(`${prefix}Looks like a meeting transcript. To summarize meetings, enable \`summary: true\` in your profile and restart me.`);
-                    return;
-                  }
-                  const { ingestTranscriptUpload } = await import('../../skills/summary');
-                  const result = await ingestTranscriptUpload({
-                    text,
-                    caption,
-                    ownerUserId: profile.user.slack_user_id,
-                    threadTs,
-                    channelId,
-                    profile,
-                  });
-                  const preface = result.kind === 'created'
-                    ? `Here's a draft, let me know what to change before we send it out.`
-                    : result.kind === 'overridden_new_meeting'
-                      ? `New transcript noted, replacing the previous one with this draft.`
-                      : `Got your edits, here's the updated version.`;
-                  await saySafe(`${prefix}${preface}\n\n${result.rendered}`);
-                  appendToConversation(threadTs, channelId, {
-                    role: 'assistant',
-                    content: `[Summary draft posted]\n${result.rendered}`,
-                    ts: undefined,
-                  });
-                  return;
-                }
-
-                if (!knowledgeActive) {
-                  await saySafe(`${prefix}I'd file this under your knowledge base, but \`knowledge\` is off in your profile. Flip it on and restart me.`);
-                  return;
-                }
-                await postIngestResult(ingestResult, async (t) => saySafe(`${prefix}${t}`));
-                return;
-              }
-
-              // PDF path — direct knowledge ingest
-              if (!knowledgeActive) {
-                await saySafe(`${prefix}I can't file PDFs yet because \`knowledge\` is off in your profile. Flip it on and restart me.`);
-                return;
-              }
-              const Anthropic = (await import('@anthropic-ai/sdk')).default;
-              const anthropic = new Anthropic();
-              const { ingestKnowledgeDoc } = await import('../../skills/knowledge');
-              const result = await ingestKnowledgeDoc({
-                profile,
-                text,
-                sourceHint,
-                ownerCaption: caption || undefined,
-                anthropic,
+              const truncated = text.length > FILE_TEXT_CAP;
+              parsedDocs.push({
+                label: fileLabel,
+                text: truncated ? text.slice(0, FILE_TEXT_CAP) : text,
+                truncated,
               });
-              await postIngestResult(result, async (t) => saySafe(`${prefix}${t}`));
             } catch (err) {
-              logger.error('Doc ingestion failed', { err: String(err).slice(0, 400), file: fileLabel });
+              logger.error('Doc download/parse failed', { err: String(err).slice(0, 400), file: fileLabel });
               const msg = isOverloadError(err)
-                ? `${prefix}Quick coffee break, ping me again in a couple of minutes?`
-                : `${prefix}Something jammed on my end, try that one again in a minute?`;
+                ? `Quick coffee break, ping me again in a couple of minutes?`
+                : `Something jammed reading ${fileLabel}, try that one again in a minute?`;
               await saySafe(msg);
             }
-          };
-
-          // Sequential loop — each file gets its own confirmation.
-          for (let i = 0; i < docFiles.length; i++) {
-            await processOneDoc(docFiles[i], i, docFiles.length);
           }
+
+          if (parsedDocs.length === 0) return;
+
+          // Build a synthetic user message: caption + each file's content.
+          // Orchestrator sees this as the user turn; appendToConversation
+          // already runs inside processMessage so future turns see the file.
+          const fileBlocks = parsedDocs.map(d => {
+            const trunc = d.truncated ? `\n[…file truncated at ${FILE_TEXT_CAP} chars]` : '';
+            return `\n\n[Attached file: ${d.label}]\n${d.text}${trunc}`;
+          }).join('');
+          const augmentedText = caption
+            ? `${caption}${fileBlocks}`
+            : `[Owner uploaded ${parsedDocs.length === 1 ? 'a file' : `${parsedDocs.length} files`} with no caption.]${fileBlocks}`;
+
+          // Route through processMessage like any other DM turn.
+          await processMessage({
+            senderId: message.user as string,
+            text: augmentedText,
+            channelId,
+            ts,
+            threadTs,
+            say: (msg: { text: string; thread_ts?: string }) => client.chat.postMessage({
+              token: assistant.slack.bot_token,
+              channel: channelId,
+              thread_ts: msg.thread_ts ?? threadTs,
+              text: msg.text,
+            }),
+            client,
+            isChannel: false,
+            isMpim: false,
+          });
         });
         return;
       }
