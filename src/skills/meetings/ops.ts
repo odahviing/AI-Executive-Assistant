@@ -871,6 +871,30 @@ export class SchedulingSkill {
           categories:  args.category ? [args.category as string] : ['Meeting'],  // default fallback
           sensitivity: args.category === 'Private' ? 'private' : undefined,
         }).then(async meetingId => {
+          // v2.2.5 (#54) — post-create verification. Graph occasionally returns
+          // 200 OK + an event id on writes that didn't actually land (sync
+          // delays, race conditions). Re-read by id and confirm the start time
+          // matches before declaring success. On failure, downstream layers see
+          // {success:false} so the action tape, claim-checker, and brief all
+          // narrate honestly instead of asserting a write that didn't happen.
+          const { verifyEventCreated } = await import('../../connectors/graph/calendar');
+          const verify = await verifyEventCreated(userEmail, meetingId, args.start as string, timezone);
+          if (!verify.ok) {
+            logger.warn('create_meeting verify failed — Graph returned id but readback drifted', {
+              meetingId, reason: verify.reason,
+              expected: 'expected' in verify ? verify.expected : undefined,
+              got: 'got' in verify ? verify.got : undefined,
+            });
+            const subject = args.subject as string;
+            const message = verify.reason === 'not_found'
+              ? `I tried to book '${subject}' but couldn't read it back from the calendar afterward — the booking may not have landed. Want me to retry?`
+              : `I created '${subject}' but the calendar shows it at ${verify.got} instead of ${verify.expected}. Something drifted on the write — want me to delete and retry?`;
+            return {
+              success: false,
+              error: verify.reason === 'not_found' ? 'created_but_missing' : 'created_but_drift',
+              message,
+            };
+          }
           // v2.2.3 (scenario 8 row 7) — post-mutation floating-block rebalance.
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1091,6 +1115,34 @@ export class SchedulingSkill {
           start: args.new_start as string,
           end: args.new_end as string,
         });
+
+        // v2.2.5 (#54) — post-move verification. Graph PATCH can return 200 OK
+        // without the change landing (sync delays, race conditions). Re-read
+        // the event by id and confirm the start matches the requested move
+        // target. Fail-fast: if verify fails, skip the closeMeetingArtifacts
+        // cascade, audit success log, shadow notify, and rebalance — none of
+        // those should fire on a move that didn't actually happen.
+        {
+          const { verifyEventMoved } = await import('../../connectors/graph/calendar');
+          const verify = await verifyEventMoved(userEmail, args.meeting_id as string, args.new_start as string, timezone);
+          if (!verify.ok) {
+            logger.warn('move_meeting verify failed — Graph accepted PATCH but readback drifted', {
+              meetingId: args.meeting_id, reason: verify.reason,
+              expected: 'expected' in verify ? verify.expected : undefined,
+              got: 'got' in verify ? verify.got : undefined,
+            });
+            const subject = args.meeting_subject as string;
+            const message = verify.reason === 'not_found'
+              ? `I tried to move '${subject}' but couldn't find it on the calendar afterward — the move may not have landed. Want me to investigate?`
+              : `I tried to move '${subject}' to ${verify.expected} but the calendar still shows it at ${verify.got}. Graph accepted the change but didn't apply it — want me to retry?`;
+            return {
+              success: false,
+              error: verify.reason === 'not_found' ? 'moved_but_missing' : 'move_did_not_land',
+              message,
+            };
+          }
+        }
+
         closeMeetingArtifacts({
           ownerUserId: context.profile.user.slack_user_id,
           meetingId: args.meeting_id as string,

@@ -1043,6 +1043,89 @@ export async function verifyEventDeleted(
   }
 }
 
+// v2.2.5 (#54) — post-create / post-move verification. Mirrors the spirit of
+// verifyEventDeleted: re-read the event from Graph after a write to confirm it
+// actually landed at the requested time. Microsoft Graph occasionally returns
+// 200 OK on writes that don't take effect (sync delays, lost writes, race
+// conditions). With the new action tape pinning successful mutations into the
+// owner system prompt, a silent failure would make Maelle assert "I moved X"
+// against the owner's pushback. These verifiers turn that into honest
+// `success:false` so the tape never lists a write that didn't land.
+//
+// Tolerance: ±60s on start. Graph normalizes ISO formats (Z vs offset) and
+// occasional truncation of milliseconds; tighter than 60s produces false
+// drifts. Subject drift is intentionally NOT checked — Outlook normalizes
+// whitespace/emojis/quote styles, that's a separate problem class, not a
+// silent-write failure.
+export type VerifyResult =
+  | { ok: true }
+  | { ok: false; reason: 'not_found' | 'start_drift'; got?: string; expected?: string };
+
+const VERIFY_TOLERANCE_MS = 60_000;
+
+async function verifyEventStartMatches(
+  userEmail: string,
+  meetingId: string,
+  expectedStartIso: string,
+  expectedTimezone: string,
+): Promise<VerifyResult> {
+  const client = getClient();
+  let evt: { start?: { dateTime: string; timeZone?: string } };
+  try {
+    evt = await client.api(`/users/${userEmail}/events/${meetingId}`).get();
+  } catch (err: any) {
+    const code = err?.statusCode ?? err?.code;
+    if (code === 404 || code === 'ErrorItemNotFound') {
+      return { ok: false, reason: 'not_found' };
+    }
+    // Network blip / auth blip / unknown error: treat as unknown and return ok
+    // to avoid false-positive failures. The honest move is to NOT block on
+    // verifier errors — let downstream layers (claim-checker, brief) catch
+    // anything that's actually wrong.
+    logger.warn('verifyEventStartMatches: readback threw, assuming OK', {
+      meetingId, code, message: err?.message,
+    });
+    return { ok: true };
+  }
+  if (!evt?.start?.dateTime) {
+    return { ok: false, reason: 'not_found' };
+  }
+  const got = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' });
+  const expected = DateTime.fromISO(expectedStartIso, { zone: expectedTimezone });
+  if (!got.isValid || !expected.isValid) {
+    logger.warn('verifyEventStartMatches: invalid datetime, assuming OK', {
+      meetingId, gotRaw: evt.start.dateTime, expectedRaw: expectedStartIso,
+    });
+    return { ok: true };
+  }
+  const diff = Math.abs(got.toMillis() - expected.toMillis());
+  if (diff <= VERIFY_TOLERANCE_MS) return { ok: true };
+  return {
+    ok: false,
+    reason: 'start_drift',
+    got: got.setZone(expectedTimezone).toFormat("EEE d MMM 'at' HH:mm"),
+    expected: expected.toFormat("EEE d MMM 'at' HH:mm"),
+  };
+}
+
+export async function verifyEventCreated(
+  userEmail: string,
+  meetingId: string,
+  expectedStartIso: string,
+  expectedTimezone: string,
+): Promise<VerifyResult> {
+  return verifyEventStartMatches(userEmail, meetingId, expectedStartIso, expectedTimezone);
+}
+
+export async function verifyEventMoved(
+  userEmail: string,
+  meetingId: string,
+  expectedStartIso: string,
+  expectedTimezone: string,
+): Promise<VerifyResult> {
+  return verifyEventStartMatches(userEmail, meetingId, expectedStartIso, expectedTimezone);
+}
+
 export async function createMeeting(params: CreateMeetingParams): Promise<string> {
   const client = getClient();
 

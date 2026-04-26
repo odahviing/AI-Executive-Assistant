@@ -118,9 +118,10 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
       case 'move_meeting':
       case 'update_meeting':
       case 'delete_meeting':
-      case 'finalize_coord_meeting': {
+      case 'finalize_coord_meeting':
+      case 'book_lunch': {
         const outcome = mutationOutcome(result);
-        const subj = (input as any).subject ?? (input as any).meeting_id ?? (input as any).new_start ?? '';
+        const subj = (input as any).subject ?? (input as any).meeting_id ?? (input as any).new_start ?? (input as any).date ?? '';
         const subjPart = subj ? ` ${String(subj).slice(0, 40)}` : '';
         if (outcome.ok) {
           const idPart = outcome.eventId ? ` event_id=${String(outcome.eventId).slice(0, 16)}…` : '';
@@ -138,6 +139,29 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
   } catch {
     return `[${toolName}]`;
   }
+}
+
+// v2.2.5 — Action tape. Scans the assistant turns in this thread's conversation
+// history for successful mutation tool summaries (the `[<tool> OK ...]` markers
+// emitted by summarizeToolCall above) and pins them at the top of the system
+// prompt as a fact block. Replaces the prompt-rule attempts (RULE 2e in
+// systemPrompt.ts and the calendarHealth "RULE 2e principle" reference) which
+// kept rotting — Sonnet ignores rules but can't ignore pinned data.
+//
+// Failed mutations (`[<tool> FAILED ...]`) are intentionally excluded — only
+// confirmed successes belong on the tape. The closing line acknowledges the
+// tool-trust gap (Graph can return OK on a write that didn't actually land):
+// when the owner pushes back, Maelle re-checks instead of insisting.
+const MUTATION_OK_RE = /\[(?:create_meeting|move_meeting|update_meeting|delete_meeting|finalize_coord_meeting|book_lunch) OK[^\]]*\]/g;
+
+function extractActionTape(history: Array<{ role: 'user' | 'assistant'; content: string }>): string[] {
+  const out: string[] = [];
+  for (const msg of history) {
+    if (msg.role !== 'assistant') continue;
+    const matches = msg.content.match(MUTATION_OK_RE);
+    if (matches) out.push(...matches);
+  }
+  return out.slice(-20);
 }
 
 export interface OrchestratorInput {
@@ -408,6 +432,18 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
     }
   }
 
+  // v2.2.5 — Action tape: pin the mutation tool calls Maelle made earlier in
+  // this thread so she can't narrate her own actions as discoveries one turn
+  // later. Replaces the rotting RULE 2e prompt rule. Owner-only (colleagues
+  // don't see Maelle's action history) and only when threadTs is present.
+  let actionTapeBlock = '';
+  if (input.senderRole === 'owner' && threadTs) {
+    const tape = extractActionTape(input.conversationHistory);
+    if (tape.length > 0) {
+      actionTapeBlock = `\n\nACTIONS YOU TOOK IN THIS THREAD:\n${tape.map(t => `- ${t}`).join('\n')}\n\nWhen the owner asks about anything in this list, lead with what YOU did — not what the calendar currently shows. If he says it didn't happen or the calendar shows otherwise, do NOT insist on this list — re-check via get_calendar and reconcile honestly. The list is what the tool reported, not ground truth.`;
+    }
+  }
+
   // Social engagement context — colleague-rapport memory (people_memory-based).
   // v2.2 — only injected on COLLEAGUE turns. Owner turns use the new Social
   // Engine directive below instead.
@@ -424,6 +460,7 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
   const systemBlocksDynamic = [
     promptParts.dynamic,
     threadContextBlock,
+    actionTapeBlock,
     socialBlock,
     socialDirectiveBlock,
   ].filter(Boolean).join('\n\n');

@@ -2,6 +2,39 @@
 
 ---
 
+## 2.2.6 — action tape + post-mutation verification (close the "she booked it then forgot" loop)
+
+Real screenshot from the owner: Maelle booked 7 lunches, owner thanked her, next turn she narrated "looks like all 7 were already on the calendar — the system had placed them when we planned the slots." Same bug class as issue #26 bug 1 (move-and-forget), the v2.1.0 RULE 2e, and the v2.1.3 same-turn RULE 2e expansion — three prior prompt-only attempts that all rotted. This patch replaces the prompt rule with a fact block Sonnet can't ignore, and closes the silent-failure gap that made the fact block unsafe to lean on.
+
+### Added
+
+**Action tape pinned to owner system prompt** — every owner turn with a `threadTs` now gets an `ACTIONS YOU TOOK IN THIS THREAD:` block listing the `[<tool> OK ...]` markers extracted from this thread's conversation history (mutation tools only, capped at 20 entries). Built in `orchestrator/index.ts` next to the existing `threadContextBlock`. Closing line acknowledges the tool-trust gap explicitly: *"If he says it didn't happen or the calendar shows otherwise, do NOT insist on this list — re-check via get_calendar and reconcile honestly. The list is what the tool reported, not ground truth."* Replaces the rotting RULE 2e prompt rule with pinned data.
+
+**Post-mutation verification for create + move (closes [#54](https://github.com/odahviing/AI-Executive-Assistant/issues/54))** — new `verifyEventCreated` and `verifyEventMoved` exports in `connectors/graph/calendar.ts` mirror the v2.1.6 `verifyEventDeleted` pattern. Both delegate to a private `verifyEventStartMatches` that re-reads the event by id post-write and confirms the start time matches the requested value (±60s tolerance for Graph ISO normalization). Wired into `create_meeting` (after `createMeeting()` resolves, before the floating-block rebalance) and `move_meeting` (after `updateMeeting()`, gated on `args.new_start`, fail-fast before `closeMeetingArtifacts` / audit / shadow / rebalance — none of those cascades fire on a move that didn't land). On drift or 404, returns `{success: false, error: 'created_but_drift' | 'created_but_missing' | 'move_did_not_land' | 'moved_but_missing'}` so the action tape, claim-checker, and brief all see FAILED and narrate honestly. One Graph round-trip per mutation. Verifier errors (network blips) treat as OK to avoid false-positive blocks.
+
+**`book_lunch` joined the outcome-aware tool list** — `summarizeToolCall` in `orchestrator/index.ts` now emits `[book_lunch OK ...]` / `[book_lunch FAILED ...]` markers for `book_lunch` calls alongside the other five mutation tools, so book_lunch outcomes enter the action tape.
+
+### Removed
+
+**RULE 2e (`systemPrompt.ts`)** — both SAME-TURN and FOLLOW-UP TURNS halves. Replaced by the action tape, which gives Sonnet the data she was missing instead of asking her to remember a rule. Keeping the rule alongside the tape would be duplicate prompt spam. The dangling "RULE 2e principle" cross-reference in `calendarHealth.ts` reworded to drop the dead pointer.
+
+### Fixed
+
+**She booked the meetings, then forgot she booked them** — owner-confirmed pattern from this session's screenshot. The combination of action tape (pinned facts) + post-mutation verification (silent-failure detection at the tool boundary) closes the loop end-to-end: Sonnet always sees what she did, and what she sees is always what actually landed.
+
+### Invariants preserved
+
+- Skills still import only from `connections/types` + `connections/registry`.
+- Approvals still the single path for "needs owner input."
+- All LLM calls remain Sonnet 4.6.
+- Action tape is owner-only (colleague turns don't inject Maelle's action history) and only when `threadTs` is present.
+
+### Migration
+
+None. All changes are code-internal. Existing `verifyEventDeleted` callers unchanged. New verifier exports are additive.
+
+---
+
 ## 2.2.5 — Lori onboarding wave: concision finalizer, tool-outcome honesty, slot binding, file routing
 
 The wave that surfaced all of these was a real onboarding scenario: book four sequential meetings (Vision → Structure → Professional Services → Wrap-Up) with a new VP starting next week. The flow exposed deliberation leaking into Slack as walls of text, false "all done" claims when moves silently failed, slots drifting between proposal and booking, file uploads getting auto-misfiled into the KB instead of helping with the actual task, and the lack of an ordering primitive when meetings were sequential. All addressed in this patch with prompt rules + targeted code-level honesty hardening.
