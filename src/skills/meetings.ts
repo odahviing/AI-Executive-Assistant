@@ -74,6 +74,7 @@ Use ONLY when there is no existing meeting yet and people need to find a time to
 - Move an existing meeting → message_colleague with intent='meeting_reschedule'
 - Check if the owner can join a colleague's meeting → check_join_availability
 - Just check free/busy without booking → get_free_busy
+- Book a slot that was already verbally agreed in this MPIM conversation (owner + participant are both present and have confirmed) → use create_meeting directly. Calling coordinate_meeting here sends the participant fresh slot DMs and re-opens a negotiation they already closed.
 
 Flow:
 1. Find 3 available slots on the owner's calendar (respecting buffers, thinking time, lunch)
@@ -1399,6 +1400,11 @@ DELETE-MEETING PROTOCOL — irreversible, follow exactly:
 COORDINATION (when participants need to agree on a time): use coordinate_meeting below.
 
 IMPORTANT — do NOT present slot options to ${firstName} from get_free_busy or get_calendar data before calling coordinate_meeting. Raw free windows do not apply schedule rules and will include times outside office hours. When someone requests a meeting: go directly to coordinate_meeting (it runs find_available_slots internally). The reply to ${firstName} is "On it — I'll reach out to [names]." Nothing more. Presenting intermediate options in the channel is not part of the coord flow.
+
+MPIM BOOKING SHORTCUT: When the owner AND the participant are both in this MPIM conversation and the participant has already verbally confirmed a slot in this thread:
+- Call create_meeting with that slot. That is the whole action.
+- Do NOT call coordinate_meeting. It will DM the participant new slot options and re-start a negotiation they already finished.
+- Deciding factor: is the participant reachable right here in this conversation? Yes → create_meeting. No (they are not in this conversation) → coordinate_meeting.
 
 Two routes when a colleague reaches out about a meeting:
 - ROUTE 1 — NEW meeting with ${firstName}: "schedule / book / set up / find time" → coordinate_meeting. Flow: find 3 slots → DM each participant with options → collect → negotiate → book.
