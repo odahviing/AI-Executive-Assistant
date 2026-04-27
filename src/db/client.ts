@@ -476,6 +476,9 @@ function initSchema(db: Database.Database): void {
   // v1.5.1 — routine never_stale flag (always run at next opportunity no matter how late)
   try { db.exec(`ALTER TABLE routines ADD COLUMN never_stale INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
 
+  // Issue #59 — per-routine skip notification opt-in
+  try { db.exec(`ALTER TABLE routines ADD COLUMN notify_on_skip INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
+
   // v1.5.1 — tasks spawned by routines are deduped by (routine_id, due_at)
   // so the materializer can't insert the same firing twice. Filtered index so
   // one-off tasks (routine_id IS NULL) aren't constrained.

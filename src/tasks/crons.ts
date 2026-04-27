@@ -29,6 +29,7 @@ export interface Routine {
   run_count: number;
   is_system: number;        // 1=system cron (briefing), 0=user-created
   never_stale: number;      // v1.5.1 — 1=always run even when late, 0=apply cadence-based skip thresholds
+  notify_on_skip: number;   // Issue #59 — 1=DM owner when a firing is skipped, 0=silent (default)
 }
 
 /**
@@ -256,6 +257,10 @@ IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if
               type: 'boolean',
               description: 'If true, this routine must run at the next opportunity no matter how late — the normal cadence-based skip thresholds (4h for daily, 24h for every-few-days, 48h for weekly, 1 week for monthly) do not apply. Use for critical things the owner explicitly wants run even when delayed. Default false.',
             },
+            notify_on_skip: {
+              type: 'boolean',
+              description: 'If true, send a DM when a scheduled firing is skipped because it ran too late. Use only for routines the owner depends on (e.g. morning brief, deadline reminders). Default false — silent skip is correct for low-stakes routines.',
+            },
           },
           required: ['title', 'prompt', 'schedule_type', 'schedule_time'],
         },
@@ -283,6 +288,7 @@ IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if
             schedule_day:  { type: 'string' },
             status:        { type: 'string', enum: ['active', 'paused'], description: 'Pause or resume the routine' },
             never_stale:   { type: 'boolean', description: 'Toggle the always-run-even-late flag. See create_routine for semantics.' },
+            notify_on_skip: { type: 'boolean', description: 'Toggle the skip-notification flag. See create_routine for semantics.' },
           },
           required: ['routine_id'],
         },
@@ -344,13 +350,14 @@ IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if
         const nextRunAt = computeNextRunAt(scheduleType, scheduleTime, scheduleDay, profile.user.timezone, undefined, getProfileWorkDays(profile));
 
         const neverStale = args.never_stale === true ? 1 : 0;
+        const notifyOnSkip = args.notify_on_skip === true ? 1 : 0;
         db.prepare(`
           INSERT INTO routines (
             id, owner_user_id, owner_channel, title, prompt,
-            schedule_type, schedule_time, schedule_day, status, next_run_at, run_count, is_system, never_stale
+            schedule_type, schedule_time, schedule_day, status, next_run_at, run_count, is_system, never_stale, notify_on_skip
           ) VALUES (
             @id, @owner_user_id, @owner_channel, @title, @prompt,
-            @schedule_type, @schedule_time, @schedule_day, 'active', @next_run_at, 0, 0, @never_stale
+            @schedule_type, @schedule_time, @schedule_day, 'active', @next_run_at, 0, 0, @never_stale, @notify_on_skip
           )
         `).run({
           id,
@@ -363,6 +370,7 @@ IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if
           schedule_day: scheduleDay,
           next_run_at: nextRunAt,
           never_stale: neverStale,
+          notify_on_skip: notifyOnSkip,
         });
 
         const nextDt = DateTime.fromISO(nextRunAt).setZone(profile.user.timezone);
@@ -412,6 +420,7 @@ IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if
         if (args.prompt != null) updates.prompt = args.prompt;
         if (args.status != null) updates.status = args.status;
         if (args.never_stale != null) updates.never_stale = args.never_stale ? 1 : 0;
+        if (args.notify_on_skip != null) updates.notify_on_skip = args.notify_on_skip ? 1 : 0;
 
         const newType = (args.schedule_type as string | undefined) ?? routine.schedule_type;
         const newTime = (args.schedule_time as string | undefined) ?? routine.schedule_time;
@@ -476,6 +485,7 @@ Good uses:
 SCHEDULE RULES:
 - "weekdays" means the user's configured work days: ${workDaysStr} — NOT Mon–Fri unless that matches
 - Before creating a routine, ALWAYS call get_routines first to check for duplicates. If a similar one exists, update it instead.
+- Add \`notify_on_skip: true\` to flag a routine as important — I'll DM you if a firing is skipped.
 
 When creating a routine, write the prompt as a complete, self-contained instruction.
 

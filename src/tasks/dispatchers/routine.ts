@@ -5,6 +5,7 @@ import { assessLateness } from '../lateness';
 import { sendMorningBriefing } from '../briefs';
 import { scrubInternalLeakage } from '../../utils/textScrubber';
 import { getConnection } from '../../connections/registry';
+import { DateTime } from 'luxon';
 import type { Routine } from '../crons';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
@@ -58,6 +59,29 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     getDb().prepare(
       `UPDATE routines SET last_result = @res, updated_at = datetime('now') WHERE id = @id`
     ).run({ id: routine.id, res: `Skipped (${verdict.reason})` });
+
+    if (routine.notify_on_skip === 1) {
+      try {
+        const conn = getConnection(profile.user.slack_user_id, 'slack');
+        if (conn) {
+          const nextTs = routine.next_run_at;
+          const nextFormatted = nextTs
+            ? DateTime.fromISO(nextTs).setZone(profile.user.timezone).toFormat("EEE d MMM 'at' HH:mm")
+            : 'when I next catch up';
+          await conn.sendDirect(
+            profile.user.slack_user_id,
+            `Just so you know — your *${routine.title}* routine was due earlier, ` +
+            `but by the time it reached the top of the queue it was too late to run it usefully, ` +
+            `so I skipped this round. Next one is ${nextFormatted}.`,
+          );
+        }
+      } catch (notifyErr) {
+        logger.warn('notify_on_skip DM failed in dispatcher', {
+          routineId: routine.id,
+          err: String(notifyErr),
+        });
+      }
+    }
     return;
   }
 

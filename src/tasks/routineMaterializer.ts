@@ -20,6 +20,7 @@ import type { UserProfile } from '../config/userProfile';
 import { computeNextRunAt, getProfileWorkDays, type Routine } from './crons';
 import { assessLateness } from './lateness';
 import { createTask } from './index';
+import { getConnection } from '../connections/registry';
 import logger from '../utils/logger';
 
 function getDueRoutines(): Routine[] {
@@ -169,6 +170,28 @@ export async function materializeRoutineTasks(
         previousNextRunAt: routine.next_run_at,
         advancedTo: nextFuture,
       });
+
+      // Issue #59 — notify owner if they opted in
+      if ((routine as any).notify_on_skip === 1) {
+        try {
+          const conn = getConnection(routine.owner_user_id, 'slack');
+          if (conn) {
+            const nextDt = DateTime.fromISO(nextFuture).setZone(profile.user.timezone);
+            const nextFormatted = nextDt.toFormat("EEE d MMM 'at' HH:mm");
+            await conn.sendDirect(
+              routine.owner_user_id,
+              `Just so you know — your *${routine.title}* routine was due earlier, ` +
+              `but by the time I came back online it was too late to run it usefully, ` +
+              `so I skipped this round. Next one is ${nextFormatted}.`,
+            );
+          }
+        } catch (notifyErr) {
+          logger.warn('notify_on_skip DM failed in materializer', {
+            routineId: routine.id,
+            err: String(notifyErr),
+          });
+        }
+      }
     }
 
     // Advance routine.next_run_at to the first future firing. Even if we
