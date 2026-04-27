@@ -53,7 +53,10 @@ export async function sendDM(
   botToken: string,
   userId: string,
   text: string,
-  opts: { threadTs?: string } = {},
+  opts: {
+    threadTs?: string;
+    attachments?: Array<{ sourceUrl: string; filename?: string }>;
+  } = {},
 ): Promise<SendOutcome> {
   try {
     const open = await app.client.conversations.open({ token: botToken, users: userId });
@@ -66,6 +69,42 @@ export async function sendDM(
       text,
       ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}),
     });
+
+    // v2.2.7 — attachments. Download each Slack file URL with bot-token auth,
+    // then re-upload to the same channel under the same thread (or under the
+    // text message's own ts when no explicit thread). Failures don't fail the
+    // send — text already landed; we log and move on. Slack file URLs require
+    // Authorization: Bearer <bot_token> to download.
+    if (opts.attachments && opts.attachments.length > 0 && res.ts) {
+      const threadForAttachments = opts.threadTs ?? res.ts;
+      for (const att of opts.attachments) {
+        try {
+          const fileResp = await fetch(att.sourceUrl, {
+            headers: { Authorization: `Bearer ${botToken}` },
+          });
+          if (!fileResp.ok) {
+            logger.warn('sendDM attachment download failed', {
+              url: att.sourceUrl, status: fileResp.status,
+            });
+            continue;
+          }
+          const buf = Buffer.from(await fileResp.arrayBuffer());
+          const filename = att.filename || att.sourceUrl.split('/').pop() || 'attachment';
+          await app.client.files.uploadV2({
+            token: botToken,
+            channel_id: channelId,
+            thread_ts: threadForAttachments,
+            file: buf,
+            filename,
+          });
+        } catch (err) {
+          logger.warn('sendDM attachment upload failed', {
+            url: att.sourceUrl, err: String(err).slice(0, 200),
+          });
+        }
+      }
+    }
+
     return { ok: true, channel_id: channelId, ts: res.ts };
   } catch (err: any) {
     const detail = err?.data?.error ?? err?.message ?? String(err);

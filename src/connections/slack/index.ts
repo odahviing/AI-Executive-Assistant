@@ -41,7 +41,10 @@ export function createSlackConnection(app: App, botToken: string): Connection {
     // `app.client.chat.postMessage` call sites will migrate through here.
 
     async sendDirect(recipientRef, text, opts) {
-      const outcome = await sendDM(app, botToken, recipientRef, formatForSlack(text), { threadTs: opts?.threadTs });
+      const outcome = await sendDM(app, botToken, recipientRef, formatForSlack(text), {
+        threadTs: opts?.threadTs,
+        attachments: opts?.attachments,
+      });
       return toSendResult(outcome);
     },
 

@@ -299,6 +299,10 @@ export async function bookCoordination(
         body: job.topic ? `Topic: ${job.topic}` : undefined,
         isOnline,
         location: location || undefined,
+        // v2.2.7 — match the direct create_meeting path's fallback. Without
+        // this, coord-booked meetings landed uncategorized; the direct path
+        // already defaults to 'Meeting' via skills/meetings/ops.ts.
+        categories: ['Meeting'],
       });
     }
   } catch (err) {

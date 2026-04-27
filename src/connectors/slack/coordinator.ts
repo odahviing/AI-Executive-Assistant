@@ -425,7 +425,25 @@ export async function handleOutreachReply(
 
     const peopleMatches = searchPeopleMemory(job.colleague_name);
     const personInfo = peopleMatches.length > 0 ? peopleMatches[0] : null;
-    const colleagueTz = personInfo?.timezone ?? params.profile.user.timezone;
+    // v2.2.6 (S8 critical) — travel-aware TZ resolution. When the colleague is
+    // currently traveling, use their travel TZ for both slot rendering (dual
+    // times in the DM) and downstream participant.tz consumers. Stored TZ is
+    // the baseline; travel record overrides for the active window.
+    let colleagueTz = personInfo?.timezone ?? params.profile.user.timezone;
+    if (job.colleague_slack_id) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getCurrentTravel } = require('../../db/people') as typeof import('../../db/people');
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { inferTimezoneFromStateStatic } = require('../../utils/locationTz') as
+          typeof import('../../utils/locationTz');
+        const travel = getCurrentTravel(job.colleague_slack_id);
+        if (travel) {
+          const travelTz = inferTimezoneFromStateStatic(travel.location);
+          if (travelTz) colleagueTz = travelTz;
+        }
+      } catch (_) { /* fail open — keep stored TZ */ }
+    }
     const colleagueEmail = personInfo?.email ?? undefined;
 
     const { preferredDay, preferredTime, isOnline, subject } = decision.details;
@@ -496,12 +514,34 @@ export async function handleOutreachReply(
       if (colleagueEmail) {
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getEffectiveWorkingHours } = require('../../utils/workingHoursDefault') as
+          const { getEffectiveWorkingHours, defaultWorkingHoursForTz } = require('../../utils/workingHoursDefault') as
             typeof import('../../utils/workingHoursDefault');
           const personRow = job.colleague_slack_id ? getPersonMemory(job.colleague_slack_id) : null;
           if (personRow) {
-            const wh = getEffectiveWorkingHours(personRow);
-            const tz = personRow.timezone;
+            let wh = getEffectiveWorkingHours(personRow);
+            let tz = personRow.timezone;
+            // v2.2.6 (S8 critical) — when colleague is currently traveling, use
+            // the travel TZ + work hours derived from it, not the stored
+            // default. Stored profile is the baseline; travel record overrides
+            // for the active window. Without this, slot search clips to the
+            // colleague's home work hours and misses the right Boston-day
+            // slots when they're actually in Boston.
+            if (job.colleague_slack_id) {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { getCurrentTravel } = require('../../db/people') as typeof import('../../db/people');
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { inferTimezoneFromStateStatic } = require('../../utils/locationTz') as
+                typeof import('../../utils/locationTz');
+              const travel = getCurrentTravel(job.colleague_slack_id);
+              if (travel) {
+                const travelTz = inferTimezoneFromStateStatic(travel.location);
+                if (travelTz) {
+                  tz = travelTz;
+                  const defaults = defaultWorkingHoursForTz(travelTz);
+                  wh = { ...defaults, source: 'auto' };
+                }
+              }
+            }
             if (wh && tz) {
               attendeeAvailability.push({
                 email: colleagueEmail,

@@ -970,13 +970,27 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
   };
 }
 
+/**
+ * v2.2.7 — Normalize an ISO datetime for Graph's `dateTime` field. Graph honors
+ * any offset/Z in `dateTime` over the sibling `timeZone` field, so an ISO with
+ * `Z` lands the event in UTC even when we also send timeZone='Asia/Jerusalem'.
+ * Strip the offset, convert to the target timezone's wall-clock, emit zoneless.
+ * Fix-once-here so every Graph mutation is consistent regardless of what
+ * shape Sonnet (or any caller) handed us.
+ */
+function normalizeForGraph(iso: string, tz: string): string {
+  const dt = DateTime.fromISO(iso, { setZone: true });
+  if (!dt.isValid) return iso;  // fail open — let Graph reject if truly malformed
+  return dt.setZone(tz).toISO({ includeOffset: false, suppressMilliseconds: true })!;
+}
+
 export async function updateMeeting(params: UpdateMeetingParams): Promise<void> {
   const client = getClient();
 
   const patch: Record<string, unknown> = {};
   if (params.subject)    patch.subject    = params.subject;
-  if (params.start)      patch.start      = { dateTime: params.start, timeZone: params.timezone };
-  if (params.end)        patch.end        = { dateTime: params.end,   timeZone: params.timezone };
+  if (params.start)      patch.start      = { dateTime: normalizeForGraph(params.start, params.timezone), timeZone: params.timezone };
+  if (params.end)        patch.end        = { dateTime: normalizeForGraph(params.end,   params.timezone), timeZone: params.timezone };
   if (params.body)       patch.body       = { contentType: 'HTML', content: params.body };
   if (params.categories) patch.categories = params.categories;
 
@@ -1152,8 +1166,8 @@ export async function createMeeting(params: CreateMeetingParams): Promise<string
       contentType: 'HTML',
       content: params.body || `<p>Meeting scheduled by your executive assistant.</p>`,
     },
-    start: { dateTime: params.start, timeZone: params.timezone },
-    end: { dateTime: params.end, timeZone: params.timezone },
+    start: { dateTime: normalizeForGraph(params.start, params.timezone), timeZone: params.timezone },
+    end:   { dateTime: normalizeForGraph(params.end,   params.timezone), timeZone: params.timezone },
     attendees: params.attendees.map(a => ({
       emailAddress: { address: a.email, name: a.name },
       type: 'required',

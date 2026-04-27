@@ -40,6 +40,19 @@ export interface SendOptions {
   bcc?: string[];
   /** Subject, email only. */
   subject?: string;
+  /**
+   * v2.2.7 — Optional file attachments. Transport-specific shape: each
+   * attachment carries a transport-native locator (e.g. Slack permalink or
+   * url_private) the Connection knows how to fetch + re-upload. Other
+   * transports may interpret or ignore. Today: SlackConnection.sendDirect
+   * implements; other methods + transports ignore.
+   */
+  attachments?: Array<{
+    /** Transport-native file locator. For Slack: permalink or url_private. */
+    sourceUrl: string;
+    /** Optional override for the filename used when re-uploading. */
+    filename?: string;
+  }>;
 }
 
 /**

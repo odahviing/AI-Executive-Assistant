@@ -205,10 +205,15 @@ export function getCurrentTravel(slackId: string): CurrentTravel | null {
     const t = JSON.parse(row.currently_traveling) as CurrentTravel;
     if (!t.location || !t.from || !t.until) return null;
     const today = new Date().toISOString().slice(0, 10);
+    // Past trip → auto-clear and treat as not active.
     if (t.until < today) {
       clearCurrentTravel(slackId);
       return null;
     }
+    // Future trip (saved ahead of departure) → not active yet, fall back to
+    // stored profile. Do NOT clear — the record is still useful, it just
+    // shouldn't override TZ until the trip actually starts.
+    if (t.from > today) return null;
     return t;
   } catch (_) {
     return null;

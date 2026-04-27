@@ -2,6 +2,54 @@
 
 ---
 
+## 2.3.0 — Connection attachments + Graph TZ honesty + travel-aware coord + first auto-triage end-to-end
+
+The wave that closes the loop on Connection-layer file support, fixes a quiet Graph timezone bug that made meetings book "at the right time" but stamped UTC, makes coord slot search travel-aware (S8 fix), and ships the first issue to round-trip cleanly through the auto-triage pipeline. Plus a brief-prompt fix for a self-contradicting morning brief and a workflow-side fix for the multi-label-at-creation race that had been silently skipping triage.
+
+### Added
+
+**File attachments on `message_colleague`** — `Connection.SendOptions.attachments` is a new optional field on `src/connections/types.ts`: `Array<{ sourceUrl, filename? }>`. Slack-specific shape today (other transports may interpret or ignore). `SlackConnection.sendDirect` downloads each Slack file URL with bot-token auth then re-uploads via `client.files.uploadV2` to the recipient's DM under the same thread; failures log + continue (text already posted, attachments are best-effort). `message_colleague` tool gains an `attachments[]` arg with snake_case `slack_file_url`; the DM branch maps to camelCase `sourceUrl` at the boundary. Architecturally the right cut: skills go through Connection (per the four-layer rule), other transports get to implement attachments their own way when they land. Closes S6's image-attachment gap.
+
+**Per-routine `notify_on_skip` flag** (closes [#59](https://github.com/odahviing/AI-Executive-Assistant/issues/59), shipped via auto-triage commit [`ce059e7`](https://github.com/odahviing/AI-Executive-Assistant/commit/ce059e7)) — new `notify_on_skip INTEGER NOT NULL DEFAULT 0` column on `routines`. Default off preserves current quiet behavior. Owner opts in per routine via `update_routine` / `create_routine` tools. Two skip paths now check the flag: (1) `routineMaterializer.ts` `else` branch when all missed slots are past threshold; (2) `dispatchers/routine.ts` when the runner picks up a stale task. When set, sends one human-EA-toned DM ("Just so you know — your *X* routine was due earlier, but it was too late to run it usefully, so I skipped this round. Next one is …"). System routines (the morning brief) need a follow-up — `update_routine` filter `is_system = 0` blocks toggling the flag on them; tracked separately.
+
+**`normalizeForGraph(iso, tz)` in calendar.ts** — strips any offset/`Z` from incoming ISO timestamps and re-emits in the target timezone's wall-clock, zoneless. Wired into both `createMeeting` and `updateMeeting` (start + end). Closes a quiet bug where Sonnet sometimes passed `'2026-04-29T07:30:00Z'` thinking she was being precise — Graph honored the `Z` and stored events in UTC even though we sent `timeZone: 'Asia/Jerusalem'` next to it. Owner-visible symptom: meeting booked at the right wall-clock time but tagged UTC instead of his TZ. Now every Graph mutation is consistent regardless of what shape the caller handed us.
+
+### Changed
+
+**Coord slot search is travel-aware (S8 critical)** — `coordinator.ts` now calls `getCurrentTravel(slackId)` before building both `colleagueTz` (used for participant.tz / dual-TZ rendering) and `attendeeAvailability` (used for slot-window clipping). When active, derives the IANA TZ via `inferTimezoneFromStateStatic(travel.location)` and recomputes work hours via `defaultWorkingHoursForTz`. Yael flying to Boston now gets slot search clipped to Mon-Fri 09:00-17:00 ET and the DM shows both Boston and Israel times, instead of clipping to her stored Israel hours. Two call sites (line 428 + line 502) both updated; shared travel-resolution at the boundary. Static map covers ~50 common cities; locations outside the map fall back to stored TZ (tracked in [#55](https://github.com/odahviing/AI-Executive-Assistant/issues/55) as low-priority follow-up).
+
+**`getCurrentTravel` honors `from > today`** — past trips still auto-clear; future trips (saved ahead of departure) now return `null` so the stored profile remains the source of truth until the trip actually starts. Closes a small gap surfaced during the S8 trace: setting "Yael in Boston Jun 1-7" today wouldn't have made today's coord behave as if she were already there.
+
+**Coord booking now sets a category fallback** — [coord/booking.ts:303](src/skills/meetings/coord/booking.ts:303) passes `categories: ['Meeting']` to `createMeeting`. Direct create_meeting tool already had this fallback; coord didn't. Coord-booked meetings were landing uncategorized — Outlook color tags missing in the calendar grid. Now matches.
+
+**Brief prompt — no self-contradiction** — [briefs.ts:386](src/tasks/briefs.ts:386) gains a NO SELF-CONTRADICTION rule. If a colleague paragraph closes an item ("nothing to do", "handled", "booked"), the same item MUST NOT appear in ACTION ITEMS. Closes the owner-screenshot pattern where Maelle said "Yael's BiWeekly is booked, nothing to do there" and then listed the same booking under ACTION ITEMS as something to verify.
+
+**Scenario 4 trimmed** — [.claude/test-scenarios.md](.claude/test-scenarios.md) — within-threshold lateness no longer expects a preamble DM. Per owner: short delays inside the lateness window are fine to fire silently; only full skips are worth flagging (see #59 for the per-routine opt-in to notify on skip).
+
+### CI
+
+**Auto-triage workflow accepts multi-label opened race** ([`6945eee`](https://github.com/odahviing/AI-Executive-Assistant/commit/6945eee)) — when an issue is created with multiple labels at once (Bug + Medium), GitHub fires `opened` + a `labeled` event per label; concurrency-cancellation kills earlier runs and the surviving event might be `labeled (Medium)` which the old `if:` rejected. New condition: in the labeled clause, also accept events where Bug is on the issue regardless of which specific label triggered. Triage now runs on whichever event survives the race. Surfaced via #57 (the first bug filed via auto-triage, before this fix); resolved end-to-end on #59.
+
+### Migration
+
+`ALTER TABLE routines ADD COLUMN notify_on_skip INTEGER NOT NULL DEFAULT 0` — idempotent migration in `db/client.ts initSchema()`. All existing routines stay silent-skip (default 0). Owner opts in per routine.
+
+### Invariants preserved
+
+- Skills still import only from `connections/types` + `connections/registry`. Attachments flow through Connection, not direct `app.client.files.uploadV2` calls from skills.
+- Approvals still the single path for "needs owner input."
+- All LLM calls remain Sonnet 4.6.
+- Action tape (v2.2.6) + post-mutation verification (v2.2.6) untouched. The new `normalizeForGraph` complements them — verifier's ±60s tolerance covers the round-trip.
+
+### Out of scope
+
+- System routine carve-out for `notify_on_skip` (would let owner toggle on the morning brief). File as follow-up.
+- Auto-triage `if:` re-tightening to skip re-runs on Approved-label adds (the fix worked but now over-fires; tracked but not landed in this version).
+- File attachments on `sendBroadcast` / `sendGroupConversation` / `postToChannel` — same Slack mechanics work, scope kept to DM for this version.
+- Action items "don't fish for confirmation" rule — owner deferred.
+
+---
+
 ## 2.2.6 — action tape + post-mutation verification (close the "she booked it then forgot" loop)
 
 Real screenshot from the owner: Maelle booked 7 lunches, owner thanked her, next turn she narrated "looks like all 7 were already on the calendar — the system had placed them when we planned the slots." Same bug class as issue #26 bug 1 (move-and-forget), the v2.1.0 RULE 2e, and the v2.1.3 same-turn RULE 2e expansion — three prior prompt-only attempts that all rotted. This patch replaces the prompt rule with a fact block Sonnet can't ignore, and closes the silent-failure gap that made the fact block unsafe to lean on.

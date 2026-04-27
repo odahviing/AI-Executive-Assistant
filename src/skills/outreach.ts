@@ -118,6 +118,24 @@ Only send messages the user explicitly asks for — never reach out to people on
               type: 'string',
               description: 'Optional, used alongside proposed_slots. A short keyword from the meeting topic ("bank visit", "Privacy GTM", "interview with Don") that will appear in the calendar event subject when it\'s booked. The verifier fuzzy-matches event subjects against this so a third party (Yael, Michal, etc.) who books on their side still gets matched back to this outreach.',
             },
+            attachments: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  slack_file_url: {
+                    type: 'string',
+                    description: 'Slack permalink or url_private of a file shared earlier in this conversation (image, PDF, etc.).',
+                  },
+                  filename: {
+                    type: 'string',
+                    description: 'Optional filename override for the upload.',
+                  },
+                },
+                required: ['slack_file_url'],
+              },
+              description: 'Optional. Attach Slack files (images, PDFs) to the outgoing DM. Pass file URLs from earlier in the conversation — e.g. an image the owner shared, or a chart a colleague suggested. DM only — channel posts ignore this. Each file is downloaded with the bot token and re-uploaded to the recipient\'s DM under the same thread.',
+            },
           },
           required: ['colleague_slack_id', 'colleague_name', 'message', 'await_reply'],
         },
@@ -329,7 +347,20 @@ Only send messages the user explicitly asks for — never reach out to people on
         }
 
         // DM branch: send directly to the colleague
-        const outcome = await connection.sendDirect(args.colleague_slack_id as string, args.message as string);
+        // v2.2.7 — optional file attachments (S6). Tool schema uses
+        // snake_case slack_file_url for Sonnet ergonomics; SendOptions uses
+        // camelCase sourceUrl. Map at the boundary.
+        const attachmentsArg = Array.isArray(args.attachments)
+          ? (args.attachments as Array<{ slack_file_url: string; filename?: string }>).map(a => ({
+              sourceUrl: a.slack_file_url,
+              filename: a.filename,
+            }))
+          : undefined;
+        const outcome = await connection.sendDirect(
+          args.colleague_slack_id as string,
+          args.message as string,
+          attachmentsArg ? { attachments: attachmentsArg } : undefined,
+        );
         if (!outcome.ok) {
           updateOutreachJob(jobId, { status: 'cancelled', reply_text: `Send failed: ${outcome.reason}` });
           return { ok: false, error: outcome.reason, detail: outcome.detail };
