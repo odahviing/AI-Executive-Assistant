@@ -15,7 +15,11 @@ concurrency:
 
 jobs:
   build:
-    if: github.event.label.name == 'Approved'
+    # v2.3.1 — DEACTIVATED alongside auto-triage per owner direction. Owner
+    # ships fixes through Claude Code interactively; the auto-build path
+    # raced auto-triage's re-runs and shipped Plan v1 vs v2 mismatches.
+    # Re-enable by removing the `false &&` once the triage gap is closed.
+    if: false && github.event.label.name == 'Approved'
 
     runs-on: ubuntu-latest
     permissions:

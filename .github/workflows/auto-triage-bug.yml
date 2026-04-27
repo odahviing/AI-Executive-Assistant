@@ -26,9 +26,14 @@ concurrency:
 
 jobs:
   triage:
-    # Trigger when: Bug label added, OR Revise label added, OR issue opened with Bug label
-    # Skip bot-authored issues. Skip if already Proposed AND this isn't a Revise event.
+    # v2.3.1 — Auto-triage DEACTIVATED per owner direction. The diagnoses
+    # were missing the session/memory context needed to produce useful plans
+    # (irrelevant data, wrong solutions, no awareness of prior decisions).
+    # Owner is back to filing issues for Claude Code to fix interactively.
+    # Code retained — flip the `false &&` below to re-enable when context
+    # plumbing is improved.
     if: |
+      false &&
       github.event.issue.author_association != 'NONE' &&
       (
         (github.event.action == 'opened' && contains(github.event.issue.labels.*.name, 'Bug')) ||
