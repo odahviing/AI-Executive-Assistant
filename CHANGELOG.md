@@ -2,6 +2,63 @@
 
 ---
 
+## 2.3.1 — 23-bug interactive sweep (coord state machine, floating block determinism, OOF, proactive social, more)
+
+A long working session pulling 7 GitHub bug reports + 5 chat-screenshot bugs + 11 follow-on atomic issues into a single wave. Pattern: owner files / I propose / he revises / we land. Single-shot triage was too lossy without session memory; this version is the interactive output. Auto-triage workflows deactivated alongside this wave (see CI section).
+
+### Coord state machine
+
+- **#62 — Inactive coordination** — three sub-bugs in the colleague-initiated coord path: (1) `[connectors/slack/app.ts:631](src/connectors/slack/app.ts:631)` await `initiateCoordination` and capture its result; on `no_participants` / `no_connection` post a corrective shadow to the owner so failures don't get masked by the prior "I started X" reply. (2) `[coord/state.ts:108](src/skills/meetings/coord/state.ts:108)` auto-add the requesting colleague as participant when it's clearly 1:1 with the owner (zero other non-owner participants). For the interview-style "arrange Idan with X" case (other participants present), don't auto-add — Sonnet asks if unclear. (3) Defense remains the existing owner auto-add at line 87.
+- **#65 — Booked duplicate meetings** — two sub-bugs. (1) `[approvals/resolver.ts:429](src/core/approvals/resolver.ts:429)` `resolveGenericApprove` now updates `coord_jobs.duration_min` to the approved value AND clears `needsDurationApproval` from notes. Single source of truth — no two durations alive at once. (2) `[coord/booking.ts:292](src/skills/meetings/coord/booking.ts:292)` cross-turn idempotency check mirrors the v2.2.5 ops.ts pre-create dedup (±2 min on subject + start). Coord-side bookings can no longer create a second event next to a direct create.
+- **B8-i — Snap non-standard duration upfront** in `coordinate_meeting` handler. When the requested duration is within 10 min of an allowed value, snap immediately and tell the requester ("set up at 40 min, that's standard — let me know if you actually need 45"). Approval gate only fires when the snap delta is too large to be obvious. Closes the "two durations parallel forever" pattern at the source.
+
+### Floating blocks
+
+- **#61 / B1 — Lunch placement done in chat instead of code** — `move_meeting` in [`ops.ts`](src/skills/meetings/ops.ts) now detects floating-block events (via `isFloatingBlockEvent` + `getFloatingBlocks`), runs `findAlignedSlotForBlock` with the caller's `new_start` as a hint, and uses the deterministic in-window aligned slot. If no in-window slot fits, refuses with `error: 'no_in_window_slot'` and points at `lunch_bump` approval. Owner-directed in-window moves no longer ask permission. Closes the recurring "Sonnet does time math, gets the window check wrong, fabricates a default position, asks for exception" pattern. Verifier and post-mutation rebalance use the effective (post-snap) start.
+- **#64 / B7 — Floating block ignored after first round in coord** — `[coord/booking.ts:212](src/skills/meetings/coord/booking.ts:212)` conflict pre-check now filters floating blocks out (they're elastic by definition; the slot finder already accounted for them). Post-create rebalance fires via `rebalanceFloatingBlocksAfterMutation` so the displaced block lands cleanly in its window.
+
+### Calendar / OOF
+
+- **Screenshot D / B16 — OOF detection on `showAs=free` events** — `[calendarHealth.ts:358](src/skills/calendarHealth.ts:358)` keyword-based OOF detection (vacation/oof/holiday/pto in subject) removed entirely. Owner direction: trust `showAs` only. If owner marks a day OOF in Outlook it's OOF; otherwise it isn't. Free-marked all-day events with vacation-keyword subjects no longer fire false conflicts.
+- **#67 / B11 — Mid-day calendar-health DM noise** — `[postBookingHealthCheck.ts](src/utils/postBookingHealthCheck.ts)` no longer auto-DMs the owner with raw issue lists after coord booking. Daily morning routine still surfaces issues; mid-day decisions go through normal approval mechanisms (calendar_conflict, oof_conflict). Telemetry log retained for future "Maelle decides to act" path.
+- **#67 / B12 — `busy_day` issue type removed entirely** — owner never asked for "rough days" alerts. `[calendarHealth.ts:454](src/skills/calendarHealth.ts:454)` busy-day generator deleted; `[calendarHealth.ts:902](src/skills/calendarHealth.ts:902)` busy-day DM block deleted. Active mode now only surfaces conflict / OOF / missing-block / buffer issues.
+- **#63 / B5 + B6 — Wrong TZ in briefing** — (1) `[ops.ts:127](src/skills/meetings/ops.ts:127)` `parseGraphDateTime` now `setZone(fallbackTz)` after parsing; UTC-stamped events render in owner-local TZ instead of UTC. (2) `[connectors/graph/calendar.ts:230](src/connectors/graph/calendar.ts:230)` `Prefer: outlook.timezone` header re-attached on `@odata.nextLink` requests; previously dropped, leading to mixed-TZ pagination results.
+
+### Proactive social
+
+- **#66 / B10 — Proactive ping fires when disabled** — `[socialOutreachTick.ts:262](src/tasks/dispatchers/socialOutreachTick.ts:262)` persona-off and feature-disabled guards moved OUT of the `try-finally`. Previously `finally` re-scheduled the tick unconditionally, so disabling the feature never killed the loop. Both early-exits now `completeTask` and return cleanly.
+- **Lori ping / B18 — Eligibility requires real interaction history** — `[socialOutreachTick.ts:128](src/tasks/dispatchers/socialOutreachTick.ts:128)` filter now checks `interaction_log` for at least one `message_received` (colleague → Maelle) entry, then applies the 72h recency gate to that. Mentions in summaries, owner references, and Maelle-initiated outbound no longer qualify someone for proactive outreach.
+- **Mike DM / B17 — Ping content quality** — `generatePing` in [`socialOutreachTick.ts`](src/tasks/dispatchers/socialOutreachTick.ts) rewritten. Now reads `getAllTopicsForPerson(slackId)` for the colleague's active social topics (passed as JSON) + 15-question discovery pool fallback. Hard ban on meeting/work/task references. Removed `interaction_log` (work-shaped) from inputs entirely — only social topics + personal notes feed the ping.
+
+### Honesty & process
+
+- **B22 — False email-confirmation promises** — new CHANNELS YOU CAN REACH PEOPLE THROUGH block in `[systemPrompt.ts](src/core/orchestrator/systemPrompt.ts)` reads from `listConnections(profileId)` at prompt-build time and lists the active transports. When email/WhatsApp connectors are added, they auto-appear. Plus 1 line clarifying calendar invites are Outlook's job, not Maelle's. Replaces the wrong "tell Sonnet what she doesn't have" framing.
+- **B20 + B21 — Self-contradiction + duplicate questions in one reply** — concision pass in `[postReply.ts](src/connectors/slack/postReply.ts)` extended with a third trigger: `looksSelfIncoherent` (≥2 question marks OR ≥2 "if-then" branches over the same unknown). Rewrite prompt extended with explicit instructions to drop hedge fans, pick one question, drop self-answering. Code-driven detection, Sonnet-driven judgment — matches owner's "process oriented, not prompt" framing.
+- **B14a + B14b — Oran DM error leaked plumbing into wrong thread** — `[coord/state.ts:504](src/skills/meetings/coord/state.ts:504)` falls back to `searchPeopleMemory` lookup before throwing missing-slack_id error (resolves "she should know him from past mentions"). Failed-DM shadow text rewritten in human-EA tone (no "has no slack_id"). Shadow now posts top-level in owner DM (no `threadTs`) so failures don't leak into unrelated active conversations.
+- **B23 — Default invite body** — `[calendar.ts](src/connectors/graph/calendar.ts)` `CreateMeetingParams.defaultBodyAuthor` optional field. Three call sites pass `${assistant.name}, ${owner.first_name} Assistant` — invites now read "Meeting booked by Maelle, Idan Assistant" instead of "scheduled by your executive assistant".
+- **B19 — System routine `notify_on_skip` carve-out (#59 follow-up)** — `[crons.ts:411](src/tasks/crons.ts:411)` `update_routine` now allows `notify_on_skip` toggle on `is_system=1` routines (morning brief). Other fields stay immutable. The original auto-triage shipped Plan v1 without this; now caught up.
+- **B15 — Brief multi-conflict aggregation** — `[briefs.ts:386](src/tasks/briefs.ts:386)` new prompt rule: when several meetings need owner decision on the same day, bundle them inline ("Wednesday has 3 meetings on your OOF (A, B, C) — which do you want me to move?") instead of per-item bullet enumeration with separate questions per item.
+
+### Prompt cleanup (per owner: don't spam the prompt)
+
+- **RULE 10 (Lunch window respect)** removed from `[systemPrompt.ts](src/core/orchestrator/systemPrompt.ts)`. With B1's deterministic move_meeting helper, the window check + outside-window approval flow are enforced in code; the prompt rule was redundant.
+- **FLOATING BLOCKS elastic-within-window rule** at `[meetings.ts:1367](src/skills/meetings.ts:1367)` trimmed from a long teaching paragraph to a one-line pointer at `move_meeting` + the `lunch_bump` approval for outside-window moves. The "how to align / when no approval needed" details are now in code.
+- **OUT OF BOUNDS proposal rule** at `[meetings.ts:1414](src/skills/meetings.ts:1414)` trimmed to drop the lunch-window reference (now redundant with B1) and `book_lunch` mention. Work-hours / buffer parts kept.
+
+### CI
+
+- **Auto-triage and auto-build workflows DEACTIVATED** ([13565e9](https://github.com/odahviing/coderepo/commit/13565e9)). Per owner direction: the agent diagnoses produced by auto-triage were missing the session/memory context (project_overview, feedback files, prior decisions) that interactive Claude Code uses to produce useful plans. Both workflows have logic intact but gated off via `if: false &&` at the top — they never fire on issue events. Re-enable by removing the `false &&` once the triage's input context can include memory + cross-session state.
+
+### Migration
+
+None. All changes are code-internal. Floating-block prompt cleanup is back-compat (the helper handles what the prompt was teaching).
+
+### Closed
+
+- [#61](https://github.com/odahviing/AI-Executive-Assistant/issues/61), [#62](https://github.com/odahviing/AI-Executive-Assistant/issues/62), [#63](https://github.com/odahviing/AI-Executive-Assistant/issues/63), [#64](https://github.com/odahviing/AI-Executive-Assistant/issues/64), [#65](https://github.com/odahviing/AI-Executive-Assistant/issues/65), [#66](https://github.com/odahviing/AI-Executive-Assistant/issues/66), [#67](https://github.com/odahviing/AI-Executive-Assistant/issues/67) — all closed in this version.
+
+---
+
 ## 2.3.0 — Connection attachments + Graph TZ honesty + travel-aware coord + first auto-triage end-to-end
 
 The wave that closes the loop on Connection-layer file support, fixes a quiet Graph timezone bug that made meetings book "at the right time" but stamped UTC, makes coord slot search travel-aware (S8 fix), and ships the first issue to round-trip cleanly through the auto-triage pipeline. Plus a brief-prompt fix for a self-contradicting morning brief and a workflow-side fix for the multi-label-at-creation race that had been silently skipping triage.

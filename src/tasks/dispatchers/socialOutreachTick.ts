@@ -122,27 +122,32 @@ function pickCandidate(
     // The lock cleared automatically on any inbound message from them.
     if (r.proactive_pending === 1) return false;
 
-    // Must have a fresh interaction (≤ 48h) — covers both social and any
-    // other recent activity (meeting, message, conversation). Old contacts
-    // (week+ silent) are skipped — proactive ping there feels random.
-    const lastSocialMs = r.last_social_at ? new Date(r.last_social_at).getTime() : 0;
-    const lastInteractionMs = (() => {
+    // v2.3.1 (B18 / Lori ping) — eligibility now requires a real INBOUND
+    // interaction history (the colleague has actually messaged Maelle),
+    // not just any activity. Owner direction: "only when they are speaking,
+    // the counter starts." Mentions in summaries, owner-driven references,
+    // and Maelle-initiated outbound don't qualify a person for proactive
+    // outreach. Real conversation = real eligibility.
+    const lastInboundMs = (() => {
       try {
-        const log = JSON.parse(r.interaction_log || '[]') as Array<{ date?: string }>;
+        const log = JSON.parse(r.interaction_log || '[]') as Array<{ date?: string; type?: string }>;
         if (!Array.isArray(log) || log.length === 0) return 0;
-        // interaction_log entries carry an ISO `date`. Pick the freshest.
         let max = 0;
         for (const entry of log) {
           if (!entry?.date) continue;
+          // 'message_received' = colleague → Maelle, the unambiguous inbound.
+          // Other types ('message_sent' = outbound; 'meeting_booked' /
+          // 'coordination' = system events) don't count as the person
+          // initiating contact.
+          if (entry.type !== 'message_received') continue;
           const t = new Date(entry.date).getTime();
           if (Number.isFinite(t) && t > max) max = t;
         }
         return max;
       } catch { return 0; }
     })();
-    const lastTouchMs = Math.max(lastSocialMs, lastInteractionMs);
-    if (!lastTouchMs) return false;
-    if (nowUtc.toMillis() - lastTouchMs > RECENT_CONTACT_MS) return false;
+    if (!lastInboundMs) return false;                                          // never spoken → ineligible
+    if (nowUtc.toMillis() - lastInboundMs > RECENT_CONTACT_MS) return false;   // silent > 72h → skip
 
     // Colleague local time check
     const colleagueLocal = nowUtc.setZone(r.timezone);
@@ -185,28 +190,84 @@ function pickCandidate(
   return withoutActive[0];
 }
 
+// v2.3.1 (B17) — discovery question pool. Used when the person has zero
+// active social topics. Owner direction: "if no topic, make an open question
+// that helps discover one." Pool is intentionally generic + invites a
+// non-trivial reply (not a yes/no closer). Keep additions to short, friendly
+// open-ended questions a real EA might ask in a hallway.
+const DISCOVERY_QUESTIONS = [
+  'any cool plans for the weekend?',
+  'just curious — any hobbies you\'re into outside of work?',
+  'anything fun you\'ve been watching or reading lately?',
+  'how was the weekend?',
+  'any travel coming up?',
+  'what\'s been keeping you busy lately outside the office?',
+  'any new music or shows you\'d recommend?',
+  'how\'s the family / pets / home stuff going?',
+  'discovered any good places to eat lately?',
+  'anything you\'ve been geeking out about recently?',
+  'any sports or teams you\'re following?',
+  'how\'s your week going so far?',
+  'doing anything fun this evening?',
+  'what\'s the best part of your week been?',
+  'planning anything for the upcoming weekend?',
+];
+
 async function generatePing(params: {
   anthropic: Anthropic;
   ownerName: string;
   colleagueName: string;
-  recentInteractions: string[];
+  colleagueSlackId: string;
   recentNotes: string[];
 }): Promise<string | null> {
-  const prompt = `You're Maelle, ${params.ownerName}'s executive assistant. You're casually checking in on ${params.colleagueName} — short, warm, human. One line. No "sorry to bother", no "just wanted to reach out", no AI-ish tells.
+  // v2.3.1 (B17) — pull this person's active social topics so Sonnet can
+  // follow up on something real (the categories+topics already capture what
+  // they've talked about with Maelle/owner). Owner direction: "share JSON
+  // of current topic interactions and let Sonnet choose for it."
+  let activeTopics: Array<{ category: string; topic: string; engagement_score: number; last_touched: string | null }> = [];
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getAllTopicsForPerson } = require('../../db/socialTopics') as typeof import('../../db/socialTopics');
+    const rows = getAllTopicsForPerson(params.colleagueSlackId);
+    activeTopics = rows.map(r => ({
+      category: r.category_id,
+      topic: r.label,
+      engagement_score: r.engagement_score,
+      last_touched: r.last_touched_at,
+    }));
+  } catch (err) {
+    logger.warn('generatePing — getAllTopicsForPerson threw, proceeding without topics', {
+      err: String(err).slice(0, 120),
+    });
+  }
 
-Recent exchanges with ${params.colleagueName} (oldest→newest):
-${params.recentInteractions.length > 0 ? params.recentInteractions.slice(-5).map(s => `  - ${s}`).join('\n') : '  (no recent log)'}
+  // Pick 3 random discovery questions for the fallback pool.
+  const fallbackPool = (() => {
+    const shuffled = [...DISCOVERY_QUESTIONS].sort(() => Math.random() - 0.5);
+    return shuffled.slice(0, 3);
+  })();
+
+  const prompt = `You're Maelle, ${params.ownerName}'s executive assistant. You're casually checking in on ${params.colleagueName} — like a friendly teammate, NOT to do work. One short sentence.
+
+ABSOLUTE RULES — do NOT break:
+- This is a SOCIAL ping. NEVER ask about meetings, scheduling, syncs, projects, tasks, work updates, deadlines, "are we still on for…", "all set for…", or anything work-related. The whole point is non-task conversation.
+- One short sentence, friendly, no more.
+- Use ${params.colleagueName}'s first name.
+- Never mention ${params.ownerName} unless natural to the topic.
+- No emoji unless prior context strongly indicates the colleague uses them.
+- No "sorry to bother", "just wanted to reach out", "hope I'm not interrupting" — get to it.
+
+HOW TO PICK WHAT TO ASK:
+1. ACTIVE TOPICS — if ${params.colleagueName} has any active social topics (below), prefer following up on the freshest one with a real question. Example: topic "marathon training" → "how's the marathon training going?". Topic "kitchen reno" → "kitchen reno still in progress, or done?".
+2. PERSONAL NOTES — second priority. If notes mention something concrete worth asking about (a hobby, a recent trip), ask about that.
+3. DISCOVERY FALLBACK — if neither of the above gives something real, pick ONE from this discovery pool (don't invent a fake topic):
+${fallbackPool.map(q => `   - "${q}"`).join('\n')}
+
+Active social topics for ${params.colleagueName} (JSON):
+${JSON.stringify(activeTopics, null, 2)}
 
 Personal notes on ${params.colleagueName}:
-${params.recentNotes.length > 0 ? params.recentNotes.slice(-3).map(s => `  - ${s}`).join('\n') : '  (no notes)'}
-
-Rules:
-- One short sentence, no more
-- If there's a specific thing from the log worth asking about, ask about that (e.g. "how'd the Berlin trip go?" / "did you finish the new keyboard build?")
-- If nothing specific, a simple warm check-in is fine ("hope your week's good!")
-- Use ${params.colleagueName}'s first name
-- Never mention ${params.ownerName} unless natural
-- No emoji unless the prior log shows ${params.colleagueName} uses them`;
+${params.recentNotes.length > 0 ? params.recentNotes.slice(-3).map(s => `  - ${s}`).join('\n') : '  (no notes)'}`;
 
   try {
     const resp = await params.anthropic.messages.create({
@@ -259,26 +320,29 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
     }
   };
 
+  // v2.3.1 (B10 / #66) — persona-off + disabled checks moved OUT of the
+  // try-finally block. The finally re-schedules unconditionally; before
+  // this fix, returning early from the try still ran the finally, so
+  // disabling proactive social didn't actually stop the tick — the loop
+  // re-spawned itself every hour. Now: kill the loop cleanly, complete
+  // the task so it doesn't sit in the queue.
+  const personaActive = (profile.skills as any)?.persona === true;
+  if (!personaActive) {
+    logger.debug('social_outreach_tick skipped — persona skill off (loop terminates)', {
+      ownerUserId: profile.user.slack_user_id,
+    });
+    completeTask(task.id);
+    return;
+  }
+  if (!cfg.enabled) {
+    logger.debug('social_outreach_tick skipped — disabled in profile (loop terminates)', {
+      ownerUserId: profile.user.slack_user_id,
+    });
+    completeTask(task.id);
+    return;
+  }
+
   try {
-    // v2.2.3 (#3) — short-circuit when the persona skill is off in this profile.
-    // No proactive social engagement at all (which is what this whole tick is
-    // for). Don't even reschedule — tick dies out naturally; if owner flips
-    // persona back on, the catch-up startup hook will re-seed.
-    const personaActive = (profile.skills as any)?.persona === true;
-    if (!personaActive) {
-      logger.debug('social_outreach_tick skipped — persona skill off', {
-        ownerUserId: profile.user.slack_user_id,
-      });
-      return;
-    }
-
-    if (!cfg.enabled) {
-      logger.debug('social_outreach_tick skipped — disabled in profile', {
-        ownerUserId: profile.user.slack_user_id,
-      });
-      return;
-    }
-
     // Daily cap: at most one proactive ping per owner per day
     if (maelleAlreadyPingedToday(profile.user.slack_user_id)) {
       logger.debug('social_outreach_tick skipped — already pinged today', {
@@ -307,18 +371,18 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
     }
 
     const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
-    const interactions: string[] = (() => {
-      try { return (JSON.parse(pick.interaction_log || '[]') as Array<{ summary?: string }>).map(i => i.summary || '').filter(Boolean); } catch { return []; }
-    })();
     const notes: string[] = (() => {
       try { return (JSON.parse(pick.notes || '[]') as Array<{ note?: string }>).map(n => n.note || '').filter(Boolean); } catch { return []; }
     })();
 
+    // v2.3.1 (B17) — interaction_log dropped from ping inputs. Owner direction:
+    // social topics + personal notes are the right inputs; recent activity log
+    // (often work-related) was steering Sonnet toward task-shaped pings.
     const message = await generatePing({
       anthropic,
       ownerName: profile.user.name,
       colleagueName: pick.name,
-      recentInteractions: interactions,
+      colleagueSlackId: pick.slack_id,
       recentNotes: notes,
     });
     if (!message) {

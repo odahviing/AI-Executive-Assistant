@@ -21,6 +21,7 @@ import {
 } from './coordinator';
 import { isMessageForAssistant } from './relevance';
 import { initiateCoordination } from '../../skills/meetings/coord/state';
+import { getConnection } from '../../connections/registry';
 import { handleCoordReply } from '../../skills/meetings/coord/reply';
 import { forceBookCoordinationByOwner } from '../../skills/meetings/coord/booking';
 import { type SlotWithLocation } from '../../skills/meetings/coord/utils';
@@ -627,11 +628,19 @@ export function createSlackAppForProfile(profile: UserProfile): App {
             continue;
           }
 
-          // All other actions are truly fire-and-forget
+          // v2.3.1 (B3) — coordinate_meeting awaited so we know if it
+          // actually started. Previously fire-and-forget, which let the
+          // outer postReply shadow notify the owner that "coord started"
+          // before initiateCoordination had a chance to fail with
+          // no_participants / no_connection. Now: if it returns a failure
+          // status, post a follow-up to the owner explaining what didn't
+          // happen — Maelle's own "I started X" text already went out, so
+          // a heads-up is the honest move. finalize_coord_meeting kept its
+          // own error-posting branch.
           (async () => {
             try {
               if (action.action === 'coordinate_meeting') {
-                await initiateCoordination({
+                const result = await initiateCoordination({
                   ownerUserId: action.ownerUserId as string,
                   ownerChannel: channelId,
                   ownerThreadTs: threadTs,
@@ -650,6 +659,26 @@ export function createSlackAppForProfile(profile: UserProfile): App {
                   senderRole: action._senderRole as 'owner' | 'colleague' | undefined,
                   senderUserId: action._senderUserId as string | undefined,
                 });
+                // Failure modes: 'no_participants' (after filtering, nothing
+                // left to DM), 'no_connection' (Slack registry empty). On
+                // success, returns the new coord_job id. Anything other than
+                // those two strings = success.
+                if (result === 'no_participants' || result === 'no_connection') {
+                  const subject = action.subject as string;
+                  const reasonHuman = result === 'no_participants'
+                    ? `I couldn't resolve any participants for the "${subject}" coord — the people I tried to reach didn't have Slack IDs I could use. Want to try again with their IDs in the message, or have them DM me directly?`
+                    : `I tried to start the "${subject}" coord but my Slack connection isn't responding right now. Try again in a moment.`;
+                  try {
+                    const conn = getConnection(action.ownerUserId as string, 'slack');
+                    if (conn) {
+                      await conn.sendDirect(action.ownerUserId as string, reasonHuman, { threadTs });
+                    }
+                  } catch (notifyErr) {
+                    logger.warn('coordinate_meeting failure notify failed', {
+                      err: String(notifyErr).slice(0, 200),
+                    });
+                  }
+                }
               } else if (action.action === 'finalize_coord_meeting') {
                 const result = await forceBookCoordinationByOwner(
                   action.job_id as string,

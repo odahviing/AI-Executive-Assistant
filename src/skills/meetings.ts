@@ -622,12 +622,47 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
           }
         }
 
-        // ── Duration validation ─────────────────────────────────────────────────
-        const durationMin = args.duration_min as number;
+        // ── Duration validation (v2.3.1 — B8) ──────────────────────────────────
+        // Owner direction: don't keep two durations alive in the system. Either
+        // pick the right one upfront, or wait for owner approval — never both.
+        // Strategy (i): when colleague requests a non-standard duration with an
+        // OBVIOUS snap target (≤5 min off a standard length), snap immediately
+        // and use the standard. Sonnet tells the requester "I went with N
+        // instead of M since that's standard" in the reply text. If the
+        // requester pushes back, THAT response triggers the original approval
+        // path — but until then, only one duration is alive (the standard one).
+        let durationMin = args.duration_min as number;
+        const requestedDurationMin = durationMin;
         const allowedDurations = profile.meetings.allowed_durations;
         const isStandardDuration = allowedDurations.includes(durationMin);
-        // Non-standard duration from colleague → flag for owner approval before booking
-        const needsDurationApproval = !isStandardDuration && context.senderRole === 'colleague';
+        let snappedFromNonStandard = false;
+
+        if (!isStandardDuration && context.senderRole === 'colleague') {
+          // Find the closest allowed duration. ≤10 min delta = obvious snap.
+          // Larger deltas (e.g. 90 → 60 or 30) are too consequential — fall
+          // back to approval rather than silently halving.
+          const SNAP_TOLERANCE_MIN = 10;
+          let nearest = allowedDurations[0];
+          let nearestDelta = Math.abs(durationMin - nearest);
+          for (const d of allowedDurations) {
+            const delta = Math.abs(durationMin - d);
+            if (delta < nearestDelta) { nearest = d; nearestDelta = delta; }
+          }
+          if (nearestDelta <= SNAP_TOLERANCE_MIN) {
+            durationMin = nearest;
+            snappedFromNonStandard = true;
+            logger.info('coordinate_meeting — snapped non-standard duration to nearest allowed', {
+              requested: requestedDurationMin, snapped: durationMin, delta: nearestDelta,
+              requester: context.userId,
+            });
+          }
+        }
+
+        // Only escalate to approval when snap failed (delta too large). Owner
+        // sees the gate ONLY for cases where Sonnet couldn't snap cleanly —
+        // most non-standard requests (45 → 40, 50 → 55) snap silently.
+        const isStandardAfterSnap = allowedDurations.includes(durationMin);
+        const needsDurationApproval = !isStandardAfterSnap && context.senderRole === 'colleague';
 
         // ── Validate slack_ids ──────────────────────────────────────────────────
         const validatedParticipants = (args.participants as any[]).map((p: any) => {
@@ -898,7 +933,9 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
         return {
           _requires_slack_client: true,
           _status: 'queued_not_sent',
-          _note: 'SUCCESS — coord initiated, DMs are dispatching now. This is NOT a failure. Do NOT call coordinate_meeting again this turn (the idempotency guard will refuse it). Do NOT say Done/Sent/Confirmed because DMs haven\'t landed yet — say "On it — I\'ll reach out now" and STOP.',
+          _note: snappedFromNonStandard
+            ? `SUCCESS — coord initiated at ${durationMin} min (snapped from requested ${requestedDurationMin} min, which isn't one of ${context.profile.user.name.split(' ')[0]}'s standard durations). When you reply, mention the snap to the requester so it's not surprising — e.g. "set up at ${durationMin} min, that's what ${context.profile.user.name.split(' ')[0]} runs by default — let me know if you actually need ${requestedDurationMin}". If they push back wanting the original duration, call create_approval(kind="duration_override") for owner to decide.`
+            : 'SUCCESS — coord initiated, DMs are dispatching now. This is NOT a failure. Do NOT call coordinate_meeting again this turn (the idempotency guard will refuse it). Do NOT say Done/Sent/Confirmed because DMs haven\'t landed yet — say "On it — I\'ll reach out now" and STOP.',
           action: 'coordinate_meeting',
           ownerUserId,
           ownerName,
@@ -908,6 +945,8 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
           subject: args.subject,
           topic: args.topic,
           durationMin,
+          requestedDurationMin: snappedFromNonStandard ? requestedDurationMin : undefined,
+          snappedFromNonStandard,
           proposedSlots,
           foundSlotCount: foundCount,
           needsDurationApproval,
@@ -1325,7 +1364,7 @@ ${firstName.toUpperCase()}'S SCHEDULE — these are HARD RULES. Proposing a time
 - Floating blocks (elastic within their window): ${blocksLine || 'none configured'}.
 - Buffer between meetings: the allowed durations (${profile.meetings.allowed_durations.join(' / ')} min) ALREADY bake in ${profile.meetings.buffer_minutes} min of trailing buffer by design — a 55-min meeting at 17:00 ends 17:55, leaving 5 min before 18:00 automatically. You do NOT need to add another 5-min gap BEFORE a new meeting. If a previous meeting ends at 17:00, a new meeting can start at 17:00 (connected) — that is fine and preferred. You may offer 17:15 as an alternative if ${firstName} wants a gap.
 
-FLOATING BLOCKS are ELASTIC WITHIN THEIR WINDOW. Lunch, coffee breaks, thinking time, any other profile-defined block — these are NOT fixed slots. You may freely move them to a different quarter-hour inside the window (:00/:15/:30/:45) if that's what it takes to book a meeting. No approval needed when the block STAYS in its window with enough room for its full duration + buffer. Moving a block OUTSIDE its window (e.g. lunch bumped to 14:00 when window is 11:30–13:30) requires \`create_approval(kind=lunch_bump)\`. find_available_slots already treats blocks as elastic when returning slots; when you book a meeting that displaces a block, call \`move_meeting\` on the block event to a new aligned slot in its window.
+FLOATING BLOCKS (lunch, coffee, thinking time, any profile-defined block): elastic within their window. To MOVE one inside its window — even if ${firstName} says "right after the X meeting" or "shift to 14:00" — just call \`move_meeting\` with your best target time. The handler snaps to the right aligned slot deterministically (window check, buffer, quarter-alignment all in code) and refuses with a clear error if no in-window slot fits. Don't compute the slot in your head, don't fabricate a "default" position, don't ask permission for in-window moves. Moving OUTSIDE the window still requires \`create_approval(kind=lunch_bump)\`.
 
 SLOT START TIMES — ALWAYS :00 / :15 / :30 / :45. No exceptions when YOU propose a time.
 - If a raw calendar gap begins at 14:40 (previous meeting ended 14:40), propose 14:45 — NOT 14:40.
@@ -1372,9 +1411,9 @@ Exception where narrating from raw calendar is fine on first turn:
 - ${firstName} asked for a duration that is NOT one of your allowed durations (e.g. "a 90-min workshop"). The slot finder won't help. Just narrate what's free.
 
 PROPOSING TIMES OUT OF BOUNDS — the human move:
-When find_available_slots returns nothing usable AND you can see a raw free gap on the calendar (e.g. from get_calendar) that falls OUTSIDE ${firstName}'s schedule hours / the lunch window / the buffer rules, you MAY propose it — but you MUST flag the violation explicitly and ask for approval before booking. Example:
+When find_available_slots returns nothing usable AND you can see a raw free gap on the calendar (e.g. from get_calendar) that falls OUTSIDE ${firstName}'s schedule hours or buffer rules, you MAY propose it — but you MUST flag the violation explicitly and ask for approval before booking. Example:
   "Thursday 9:00 is open but it's before your office-day start (10:30) — want me to book it anyway as a one-off, or try a later slot?"
-Never propose an out-of-bounds time as if it were a normal option. Never call create_meeting / book_lunch / finalize_coord_meeting on an out-of-bounds time without explicit ${firstName} confirmation this turn. "Want me to book it?" and then they say yes → fine. Silent booking → never.
+Never propose an out-of-bounds time as if it were a normal option. Never call create_meeting / finalize_coord_meeting on an out-of-bounds time without explicit ${firstName} confirmation this turn. "Want me to book it?" and then they say yes → fine. Silent booking → never. (Floating-block out-of-window moves go through create_approval(kind=lunch_bump) — see FLOATING BLOCKS rule above.)
 
 DIRECT OPS (when time + attendees are already known):
 - create_meeting — book a new event immediately. Follow location/category/work-day rules (see detailed rules further down).

@@ -355,9 +355,14 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
           }
 
           // ── OOF conflicts ──────────────────────────────────────────────────
-          const oofEvents = dayEvents.filter(e =>
-            e.showAs === 'oof' || (e.isAllDay && (e.subject || '').toLowerCase().match(/vacation|oof|out of office|holiday|pto/))
-          );
+          // v2.3.1 (B16) — trust showAs only. Owner pushed back on keyword
+          // matching: if an event is marked SHOW AS FREE in Outlook, it's
+          // free regardless of subject text. Previous logic let an all-day
+          // event with subject containing "vacation"/"oof"/"holiday"/"pto"
+          // upgrade to OOF even when showAs=free, generating false conflicts
+          // for every meeting on that day. Only Outlook's explicit OOF
+          // status counts now.
+          const oofEvents = dayEvents.filter(e => e.showAs === 'oof');
           if (oofEvents.length > 0) {
             const meetings = nonAllDay.filter(e =>
               e.showAs === 'busy' || e.showAs === 'tentative'
@@ -446,22 +451,13 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             }
             longestGap = Math.max(longestGap, workEndMin - prev);
 
-            const meetingCount = nonAllDay.length;
-            const BUSY_COUNT_THRESHOLD = 6;
-            const MIN_CONTINUOUS_GAP = 30;
-
-            const reasons: string[] = [];
-            if (freeMin < freeTimeThresholdMin) reasons.push(`only ${Math.round(freeMin / 60 * 10) / 10}h free (threshold ${freeTimeThresholdHours}h)`);
-            if (meetingCount > BUSY_COUNT_THRESHOLD) reasons.push(`${meetingCount} meetings`);
-            if (longestGap < MIN_CONTINUOUS_GAP) reasons.push(`no ${MIN_CONTINUOUS_GAP}-min unbroken block`);
-            if (reasons.length > 0) {
-              issues.push({
-                type: 'busy_day',
-                date: dayStr,
-                description: `${dayName} ${dayStr} is rough — ${reasons.join(', ')}`,
-                suggestion: 'Pick a lower-priority meeting to push.',
-              });
-            }
+            // v2.3.1 (B12 / #67) — busy_day issue type removed per owner.
+            // He never asked for it; the alerts came from a heuristic he
+            // didn't request. Calendar health now only flags conflict, OOF,
+            // and buffer issues. Variables above (freeMin, longestGap,
+            // nonAllDay) intentionally left in place — they're cheap to
+            // compute and other detectors might want them later.
+            void freeMin; void longestGap; void nonAllDay;
           }
 
           cursor = cursor.plus({ days: 1 });
@@ -894,29 +890,10 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             }
           }
 
-          // Busy-day DM: one real DM to the owner with the busy days this
-          // run found. Real DM (not shadow) because this needs the owner's
-          // decision. De-dup via a task-row with (kind=busy_day_alert,
-          // date-range) — if a previous run already alerted for this
-          // range today, skip.
-          const busyDays = issues.filter(i => i.type === 'busy_day');
-          if (busyDays.length > 0) {
-            try {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
-              const conn = getConnection(ownerUserId, 'slack');
-              if (conn) {
-                const lines = busyDays.map(d => `• ${d.description}`).join('\n');
-                const dmText = `Heads up — rough day${busyDays.length === 1 ? '' : 's'} ahead:\n${lines}\n\nWant me to suggest what to push?`;
-                await conn.sendDirect(ownerUserId, dmText);
-                logger.info('Calendar health active-mode: busy-day DM sent', {
-                  ownerUserId, days: busyDays.map(d => d.date),
-                });
-              }
-            } catch (err) {
-              logger.warn('Busy-day DM failed — non-fatal', { err: String(err) });
-            }
-          }
+          // v2.3.1 (B12 / #67) — busy_day DM removed per owner direction.
+          // He never asked for "rough day" alerts and they were firing
+          // unsolicited. Active mode now only handles conflict / OOF /
+          // missing-block / buffer issues.
 
           logger.info('Calendar health: active mode complete', {
             ownerUserId, fixesApplied, totalIssues: issues.length,
@@ -1060,7 +1037,8 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             start: lunchStart.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
             end: lunchEnd.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
             attendees: [],
-            body: '<p>Lunch break — booked by your executive assistant.</p>',
+            // v2.3.1 (B23) — invite-body attribution names this assistant + owner.
+            body: `<p>Lunch break — booked by ${profile.assistant.name}, ${profile.user.name.split(' ')[0]} Assistant.</p>`,
             isOnline: false,
             categories: lunchCategories,
             // v2.1.7 — no sensitivity tag. Previous `sensitivity: 'personal'`

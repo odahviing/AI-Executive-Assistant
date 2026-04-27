@@ -515,13 +515,35 @@ function looksLikeAList(text: string): boolean {
   return numberedLineCount >= 2 || bulletLineCount >= 3;
 }
 
+// v2.3.1 (B20 + B21) — self-coherence trigger. Counts question marks and the
+// kind of "if-then" hedges that indicate Sonnet wrote a question AND answered
+// every possible variant. Both are signs of a reply that asks the same thing
+// twice or contradicts itself within one breath. Trigger is shape-based; the
+// rewrite Sonnet judges whether to actually fix.
+function looksSelfIncoherent(text: string): boolean {
+  // Two or more "?" (multiple questions in one message — usually duplicates
+  // or a question that gets re-asked at the end of the same reply).
+  const questionCount = (text.match(/\?/g) || []).length;
+  if (questionCount >= 2) return true;
+  // Hedge-then-answer pattern: "If X is Y... If X is Z..." in the same reply.
+  // Cheap shape detector — if the same topic appears with multiple "if"
+  // branches, the reply is fanning out instead of committing.
+  const ifBranches = (text.match(/\b[Ii]f\s+(it'?s|that's|the|this|you|today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)/g) || []).length;
+  if (ifBranches >= 2) return true;
+  return false;
+}
+
 async function runConcisionPassIfNeeded(rawReply: string, profile: UserProfile): Promise<string> {
   const trim = rawReply.trim();
   if (!trim) return trim;
 
   const tooLong = trim.length > 600 && !looksLikeAList(trim);
   const hasDeliberation = DELIBERATION_RE.test(trim);
-  if (!tooLong && !hasDeliberation) return trim;
+  // v2.3.1 (B20 + B21) — broaden the concision pass to also catch
+  // self-contradiction (asks question + answers it in same reply) and
+  // duplicate questions. Shape-detected here; Sonnet decides what to do.
+  const isIncoherent = looksSelfIncoherent(trim);
+  if (!tooLong && !hasDeliberation && !isIncoherent) return trim;
 
   try {
     const Anthropic = (await import('@anthropic-ai/sdk')).default;
@@ -548,6 +570,11 @@ async function runConcisionPassIfNeeded(rawReply: string, profile: UserProfile):
 - intermediate proposals you rejected mid-thought
 - references to your reasoning process
 
+v2.3.1 ADDITIONS:
+- Self-contradiction: if the draft asks a question AND also answers it ("what date? — That's a Tuesday, so it fits..."), pick ONE. Either ask cleanly and stop, OR commit to the answer and skip the question. Never both.
+- Duplicate questions: if the same question is asked more than once in the draft (top + bottom, restated, etc.), keep one — the cleanest version, usually at the end.
+- Hedging branches: "If A then X. If B then Y. If C then Z." over the SAME unknown is fanning out instead of committing. Pick the most likely branch and act, OR ask which one and stop. Don't enumerate all of them.
+
 Keep the answer; drop the journey. Stay under 4 short sentences unless the draft is a numbered/bulleted list, in which case keep the list intact and trim only the prose around it. Match the language of the draft (Hebrew/English).
 
 Draft:
@@ -565,7 +592,7 @@ ${trim}`,
     logger.info('Concision pass trimmed deliberation', {
       before: trim.length,
       after: cleaned.length,
-      triggered: hasDeliberation ? 'pattern' : 'length',
+      triggered: isIncoherent ? 'incoherent' : (hasDeliberation ? 'pattern' : 'length'),
     });
     return cleaned;
   } catch (err) {

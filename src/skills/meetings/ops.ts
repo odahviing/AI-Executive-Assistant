@@ -127,10 +127,16 @@ function parseGraphDateTime(dateTimeStr: string, eventTimeZone: string, fallback
   const tz = eventTimeZone || fallbackTz;
   // If the string already has a Z or offset, parse as-is and convert
   if (clean.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(clean)) {
-    return DateTime.fromISO(clean).setZone(tz);
+    // v2.3.1 (B5 / #63) — convert to fallbackTz for display, not the event's
+    // own zone. Without this, a UTC-stamped event renders as UTC in briefings
+    // even when the owner is in Asia/Jerusalem. Idempotent when fallbackTz
+    // matches the parsed zone.
+    return DateTime.fromISO(clean).setZone(fallbackTz);
   }
   // No offset → Graph returned it in the event's timezone (via Prefer header)
-  return DateTime.fromISO(clean, { zone: tz });
+  // v2.3.1 (B5 / #63) — same fix: re-zone to fallbackTz so display is owner-local
+  // even when Graph honored an event-side declared zone like "UTC".
+  return DateTime.fromISO(clean, { zone: tz }).setZone(fallbackTz);
 }
 
 /**
@@ -870,6 +876,8 @@ export class SchedulingSkill {
           location:   args.location  as string | undefined,
           categories:  args.category ? [args.category as string] : ['Meeting'],  // default fallback
           sensitivity: args.category === 'Private' ? 'private' : undefined,
+          // v2.3.1 (B23) — invite-body attribution names this assistant + owner.
+          defaultBodyAuthor: `${context.profile.assistant.name}, ${context.profile.user.name.split(' ')[0]} Assistant`,
         }).then(async meetingId => {
           // v2.2.5 (#54) — post-create verification. Graph occasionally returns
           // 200 OK + an event id on writes that didn't actually land (sync
@@ -1108,12 +1116,81 @@ export class SchedulingSkill {
           logger.warn('move_meeting recurring-preflight failed — proceeding', { err: String(err) });
         }
 
+        // v2.3.1 (B1 / #61) — deterministic floating-block alignment. When the
+        // meeting being moved is a floating block (lunch, coffee, etc.), don't
+        // trust args.new_start verbatim — Sonnet keeps doing time math in
+        // chat and getting it wrong (window check, buffer, alignment). Run
+        // findAlignedSlotForBlock with args.new_start as a HINT to compute
+        // the correct slot; if no in-window slot fits, refuse with a clear
+        // pointer to lunch_bump approval. Owner-directed moves no longer ask
+        // permission for in-window adjustments — code computes the right
+        // answer once.
+        let effectiveStart = args.new_start as string;
+        let effectiveEnd   = args.new_end   as string;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const fb = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
+          const blocks = fb.getFloatingBlocks(context.profile);
+          // Identify whether the meeting being moved is a floating block. We
+          // need its current event to match against blocks. Cheap probe via
+          // the day's events using args.new_start as the day target.
+          const newStartDt = DateTime.fromISO(args.new_start as string, { zone: timezone });
+          if (newStartDt.isValid) {
+            const dayStr = newStartDt.toFormat('yyyy-MM-dd');
+            const dayEvents = await getCalendarEvents(userEmail, dayStr, dayStr, timezone);
+            const movingEvent = dayEvents.find(e => e.id === args.meeting_id);
+            const matchedBlock = movingEvent ? blocks.find(b => fb.isFloatingBlockEvent(movingEvent, b)) : null;
+            if (matchedBlock) {
+              // Build the busy-window list for findAlignedSlotForBlock.
+              // Exclude the floating block itself (it's about to move).
+              const wStart = fb.windowMsForDay(dayStr, matchedBlock.preferred_start, timezone);
+              const wEnd   = fb.windowMsForDay(dayStr, matchedBlock.preferred_end,   timezone);
+              const busy = dayEvents
+                .filter(e => e.id !== args.meeting_id && !e.isCancelled && e.showAs !== 'free')
+                .map(e => ({
+                  start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' }).toMillis(),
+                  end:   DateTime.fromISO(e.end.dateTime,   { zone: e.end.timeZone   ?? 'utc' }).toMillis(),
+                }))
+                .filter(b => b.end > wStart && b.start < wEnd)
+                .map(b => ({ start: Math.max(b.start, wStart), end: Math.min(b.end, wEnd) }));
+              const buffer = context.profile.meetings.buffer_minutes ?? 5;
+              const alignedMs = fb.findAlignedSlotForBlock(matchedBlock, dayStr, timezone, busy, buffer);
+              if (alignedMs === null) {
+                logger.info('move_meeting refused — no in-window slot for floating block', {
+                  meetingId: args.meeting_id, block: matchedBlock.name, hint: args.new_start,
+                });
+                return {
+                  success: false,
+                  error: 'no_in_window_slot',
+                  message: `No room in the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name} after that hint. To move it OUTSIDE the window, raise create_approval(kind='lunch_bump') with the desired slot.`,
+                };
+              }
+              const alignedDt = DateTime.fromMillis(alignedMs).setZone(timezone);
+              const alignedEndDt = alignedDt.plus({ minutes: matchedBlock.duration_minutes });
+              const alignedStartIso = alignedDt.toISO()!;
+              const alignedEndIso   = alignedEndDt.toISO()!;
+              if (alignedStartIso !== effectiveStart) {
+                logger.info('move_meeting — floating block snapped to aligned slot', {
+                  meetingId: args.meeting_id, block: matchedBlock.name,
+                  hint: args.new_start, snapped: alignedStartIso,
+                });
+              }
+              effectiveStart = alignedStartIso;
+              effectiveEnd   = alignedEndIso;
+            }
+          }
+        } catch (err) {
+          logger.warn('move_meeting floating-block alignment threw — proceeding with caller args', {
+            err: String(err).slice(0, 200),
+          });
+        }
+
         await updateMeeting({
           userEmail,
           timezone,
           meetingId: args.meeting_id as string,
-          start: args.new_start as string,
-          end: args.new_end as string,
+          start: effectiveStart,
+          end: effectiveEnd,
         });
 
         // v2.2.5 (#54) — post-move verification. Graph PATCH can return 200 OK
@@ -1124,7 +1201,9 @@ export class SchedulingSkill {
         // those should fire on a move that didn't actually happen.
         {
           const { verifyEventMoved } = await import('../../connectors/graph/calendar');
-          const verify = await verifyEventMoved(userEmail, args.meeting_id as string, args.new_start as string, timezone);
+          // v2.3.1 (B1) — verify against the EFFECTIVE start (post-snap for
+          // floating blocks), not the original args.new_start hint.
+          const verify = await verifyEventMoved(userEmail, args.meeting_id as string, effectiveStart, timezone);
           if (!verify.ok) {
             logger.warn('move_meeting verify failed — Graph accepted PATCH but readback drifted', {
               meetingId: args.meeting_id, reason: verify.reason,
@@ -1192,7 +1271,7 @@ export class SchedulingSkill {
             typeof import('../../utils/rebalanceFloatingBlocks');
           await rebalanceFloatingBlocksAfterMutation({
             profile: context.profile,
-            affectedSlotIso: args.new_start as string,
+            affectedSlotIso: effectiveStart,
             ownerSlackId: context.profile.user.slack_user_id,
           });
         } catch (err) {

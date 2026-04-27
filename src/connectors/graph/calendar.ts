@@ -72,6 +72,12 @@ export interface CreateMeetingParams {
   sensitivity?: 'normal' | 'personal' | 'private' | 'confidential';
   userEmail: string;
   timezone: string;
+  // v2.3.1 (B23) — when `body` is not provided, the default attribution line
+  // names this assistant + owner instead of "your executive assistant".
+  // E.g. "Maelle, Idan Assistant". Pass `${assistant.name}, ${owner first name} Assistant`
+  // from the call site where profile is in scope. When omitted, falls back to
+  // the legacy generic line for back-compat.
+  defaultBodyAuthor?: string;
 }
 
 // ── Calendar reads ────────────────────────────────────────────────────────────
@@ -219,9 +225,11 @@ export async function getCalendarEvents(
       events.push(...page);
       const nextLink: string | undefined = response['@odata.nextLink'];
       if (!nextLink) break;
-      // Graph SDK accepts the full nextLink as an api() URL and preserves the
-      // cursor/skipToken. Drop Prefer/query — they're baked into the cursor.
-      request = client.api(nextLink);
+      // Graph SDK accepts the full nextLink as an api() URL. The cursor
+      // preserves the QUERY (filter/select/orderby) but NOT request HEADERS.
+      // v2.3.1 (B6 / #63) — re-attach Prefer so subsequent pages also come
+      // back in the owner's timezone instead of defaulting to UTC.
+      request = client.api(nextLink).header('Prefer', `outlook.timezone="${timezone}"`);
     }
 
     const truncated = events.length >= HARD_CAP;
@@ -1160,11 +1168,14 @@ export async function createMeeting(params: CreateMeetingParams): Promise<string
     ? undefined
     : params.location;
 
+  const defaultBody = params.defaultBodyAuthor
+    ? `<p>Meeting booked by ${params.defaultBodyAuthor}.</p>`
+    : `<p>Meeting scheduled by your executive assistant.</p>`;
   const event: Record<string, unknown> = {
     subject: params.subject,
     body: {
       contentType: 'HTML',
-      content: params.body || `<p>Meeting scheduled by your executive assistant.</p>`,
+      content: params.body || defaultBody,
     },
     start: { dateTime: normalizeForGraph(params.start, params.timezone), timeZone: params.timezone },
     end:   { dateTime: normalizeForGraph(params.end,   params.timezone), timeZone: params.timezone },

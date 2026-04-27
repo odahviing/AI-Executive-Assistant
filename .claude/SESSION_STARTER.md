@@ -25,9 +25,24 @@ All 10 scenarios were paper-run against v2.2.3 (sessions through 2026-04-26). Su
 
 ---
 
-## Where we are — v2.2.0 just shipped
+## Where we are — v2.3.1 just shipped
 
-The autonomy layer is real. `behavior.calendar_health_mode: 'passive' | 'active'` toggles `check_calendar_health` between detect-and-report (passive, default) and detect-and-execute-safe-fixes (active). Active mode auto-books missing floating blocks, tags uncategorized events with high-confidence classifier, reshuffles floating-block overlaps in-window, starts move-coords with attendees for internal-only double-bookings (cadence-aware — can't push weekly meetings into a week where the next cadence instance lives), auto-clears 1:1s from surprise-vacation days, DMs owner on busy days. All gated by deterministic protection rules (≥4 attendees / any external / matched by `meetings.protected[].name` or `.category`). Shadow DMs everywhere via `v1_shadow_mode`. Prior milestone — v2.0.0 closed issue #1 (Connection interface rollout); the four-layer model (core / skills / connections / utils) is honest and enforced.
+**Operational state (v2.3.1):**
+- **Auto-triage + auto-build are OFF.** Both workflows in tree but gated `if: false &&` (commit 13565e9). Reason: single-shot triage was missing the session/memory context that interactive Claude Code uses, and plans drifted (irrelevant data, wrong root causes, re-introducing already-rejected solutions). Owner is back to filing GitHub issues for INTERACTIVE fixing here. **GitHub remains the bug data source** — keep using `gh issue list/view` to read what owner has filed; just don't expect any auto-build pipeline to ship them.
+- **PM2 + deploy watcher are OFF.** Owner runs `npm run dev` directly. Every change requires owner to restart his process — no auto-pull from origin/master. Plan accordingly when committing: changes don't take effect on his machine until he pulls + restarts.
+
+**Default workflow when owner files / shows a bug:**
+1. **Understand.** Read the issue body + screenshot. Code-trace against current files on disk. Don't guess.
+2. **Propose.** Write up: what's broken, where (file:line), and the proposed fix. Code vs prompt — prefer code for determinism, prompt for judgment (per CLAUDE.md).
+3. **Discuss.** Wait for owner to revise / push back / approve. He often re-frames or rejects the agent's first read — that iteration IS the value.
+4. **Build.** Only after explicit approval. Typecheck. Stop.
+Never auto-fix. Never bundle multiple fixes without owner saying so.
+
+**Default version bump: PATCH** unless owner explicitly says minor. He has corrected this multiple times.
+
+**v2.3.1 wave** (the most recent): 23 atomic bugs fixed across one long working session. 7 GitHub issues (#61-#67) closed. Coord state machine cluster (B3/B4/B8/B9), `move_meeting` deterministic floating-block alignment (#61 / B1 — closes the recurring "Sonnet does time math wrong" pattern by routing through `findAlignedSlotForBlock`), OOF detection trusts `showAs` only (B16), `busy_day` issue type removed entirely (B12), TZ display fixes (B5/B6), proactive tick try-finally fix + content quality + eligibility gate (B10/B17/B18), CHANNELS-you-can-reach block in system prompt replacing capability-absence framing (B22), concision pass extended for self-contradiction + duplicate questions (B20/B21), Oran error humanized + threadTs dropped on failure shadows (B14a/b), invite body attribution (B23), `update_routine` system-routine carve-out for `notify_on_skip` (B19), brief multi-conflict aggregation (B15). Prompt cleanup: RULE 10 removed, FLOATING BLOCKS rule trimmed (now in code).
+
+**Earlier (v2.2.x context still relevant):** action tape pinned to owner system prompt (v2.2.6); post-mutation verification for create + move (v2.2.6); travel-aware coord (v2.3.0); file attachments on `message_colleague` via Connection.SendOptions.attachments (v2.3.0); `normalizeForGraph` strips Z/offset before Graph mutations (v2.3.0). The autonomy layer (`behavior.calendar_health_mode: passive | active`, deterministic protection rules, shadow DMs via `v1_shadow_mode`) ships from v2.1.1; the Connection interface (four-layer model) from v2.0.0. Social Engine (30 fixed categories, per-person topics, three initiation paths) ships from v2.2.0.
 
 v2.2.0 is the **Social Engine** — first real minor bump in the 2.x line. Two parallel subsystems that together make Maelle read as a person, not a service desk:
 
@@ -39,23 +54,21 @@ v2.2.0 is the **Social Engine** — first real minor bump in the 2.x line. Two p
 
 Filed [#43](https://github.com/odahviing/AI-Executive-Assistant/issues/43) (timezone learning, Medium) — proactive outreach gates strictly on colleague timezone.
 
-v2.1.6 added a centralized meeting-mutation cascade (`closeMeetingArtifacts`), calendar pagination (`@odata.nextLink` follow), post-delete verification (`verifyEventDeleted`), and Graph event-ID scrub. Full details in CHANGELOG.
-
-v2.1.5 closed seven bugs from a day of external QA — big three: (1) `shadowNotify` no longer leaks into colleague threads (was gating on `startsWith('D')` which matches every Slack DM; now gated on cached owner-DM match); (2) the recovery pass is skipped entirely on colleague-facing turns so synthesized owner-narrative text can't land in a colleague's DM — colleague-facing text is only what Claude itself wrote; (3) `get_free_busy` in colleague-context now clips owner's availability to work hours via a new `buildOutOfHoursBusy` helper — 10:00 on an office day starting 10:30 literally isn't in the data Sonnet sees. Also: meetingReschedule counter auto-accept (mirrors v2.1.1 coord move-intent), outreach DM threading (new `dm_message_ts` + `dm_channel_id` columns), coord message dedup (MPIM bookings went from 3 messages to 1), built-in briefing visible in `get_routines`. Filed [#41](https://github.com/odahviing/AI-Executive-Assistant/issues/41) (investigate if recovery pass still earns its keep, Low).
-
-Notable v2.1.x capabilities to remember:
-- **Floating blocks** (v2.1.0) — `schedule.floating_blocks` YAML; lunch auto-promoted. Elastic within window, day-scoped via `days: []`. Moving OUT of window needs `create_approval(kind=lunch_bump)`.
-- **Coord MOVE intent** (v2.1.1) — `coord_jobs.intent: 'schedule' | 'move'`. Move-coords reshuffle an existing event via `updateMeeting` on the occurrence id (series untouched for recurring).
-- **Approval reminder + work-time expiry** (v2.1.3) — DM at halfway of approval window; expiry rebased off owner's next work time so 20:00 approvals don't lose 13 off-hours.
-- **Smart health-check window** (v2.1.4) — `computeHealthCheckWindow(profile)` default; cadence cap via `getNextSeriesOccurrenceAfter`.
-- **Attendee-only guards** (v2.1.4) — `update_meeting` / `move_meeting` refuse PATCH when owner isn't organizer. New `respond_to_invite` tool for accept/decline is filed as [#33](https://github.com/odahviing/AI-Executive-Assistant/issues/33), not built yet.
-- **Third-party-booking verifier** (v2.1.4) — `outreach_jobs.proposed_slots` + `subject_keyword` columns; brief matches pending outreach against calendar events, narrates "Michal booked it" instead of "still waiting". Honors `await_reply=0`.
-- **Colleague-surface hygiene** (v2.1.5) — `shadowNotify` requires cached owner-DM match before in-thread; recovery pass skipped on colleague turns; `get_free_busy` colleague-context synthesizes out-of-hours busy. Three independent guards, all code-enforced.
-- **Meeting-mutation cascade** (v2.1.6) — `closeMeetingArtifacts` helper fires after every `move_meeting` / `update_meeting` / `delete_meeting` — pending approvals + follow_up/reminder tasks + outreach_jobs referencing the meeting_id all close automatically. One choke point, no duplication; safer than expecting every mutation site to remember. Idempotent with the coord-terminal cascade.
-- **Calendar fetch pagination** (v2.1.6) — `getCalendarEvents` follows `@odata.nextLink` (cap 1000); previous `$top: 100` single-shot truncated multi-week queries silently.
-- **Social Engine** (v2.2.0) — owner↔Maelle bi-directional topic tracking with 30 fixed categories + numeric engagement_score + weekly decay + round-robin continuation. Pre-pass classifier (`core/social/classifyOwnerIntent.ts`) decides task|social|other; task always wins. Directive injected as prompt block. Fixes "rude response" bug class.
-- **Proactive colleague outreach** (v2.2.0) — hourly `social_outreach_tick` (system activity, owner-time-agnostic). Colleague-local 13:00-15:00 mid-day window, workday-only, rank-aware, cooldown-gated. 48h rank-check auto-adjusts engagement_rank 0-3. Opt-in via `behavior.proactive_colleague_social.enabled`.
-- **Social layer** (v2.1.2) — stale threshold dropped to 2, seed topics injected when pool empty, "MUST ask" when silent 72h+, VARIETY > recency.
+**Capabilities to remember (each was a previous wave; live and used):**
+- **Floating blocks** (v2.1.0 + v2.3.1 / B1) — `schedule.floating_blocks` YAML; lunch auto-promoted; elastic within window. `move_meeting` is now deterministic for floating blocks (helper-aligned + window-checked, refuses outside-window with `lunch_bump` pointer).
+- **Action tape** (v2.2.6) — `ACTIONS YOU TOOK IN THIS THREAD` block in owner system prompt lists `[<tool> OK ...]` markers from this thread's history.
+- **Post-mutation verification** (v2.2.6, #54) — `verifyEventCreated` + `verifyEventMoved` mirror v2.1.6 `verifyEventDeleted`. Wired into `create_meeting` + `move_meeting`.
+- **Travel-aware coord** (v2.3.0, S8) — `coordinator.ts` reads `getCurrentTravel(slackId)` before building `colleagueTz` AND `attendeeAvailability`.
+- **Connection attachments** (v2.3.0) — `Connection.SendOptions.attachments` on `message_colleague`. Slack downloads + re-uploads via `files.uploadV2`.
+- **`normalizeForGraph(iso, tz)`** (v2.3.0) — strips Z/offset before Graph mutations; fixes UTC-stamping when Sonnet passes Z-suffixed timestamps.
+- **OOF detection trusts `showAs === 'oof'` only** (v2.3.1 / B16) — no keyword matching.
+- **Proactive social** (v2.2.0 + v2.3.1 fixes) — `social_outreach_tick` reads social topics + 15-question discovery pool. Hard ban on meeting/work/task references. Eligibility requires real `message_received` history. Disabled by default.
+- **CHANNELS YOU CAN REACH PEOPLE THROUGH** block in system prompt (v2.3.1 / B22) — reads `listConnections(profileId)` at prompt-build; capability framing via what's available, not what's missing.
+- **Concision + self-coherence pass** (v2.2.5 + v2.3.1 / B20+B21) — `looksSelfIncoherent` trigger added (≥2 question marks OR ≥2 if-then branches).
+- **Autonomy layer** (v2.1.1) — `behavior.calendar_health_mode: 'passive' | 'active'` toggles autofix vs report-only.
+- **Connection interface** (v2.0.0) — four-layer model (core / skills / connections / utils); skills NEVER import from connectors/slack.
+- **Social Engine** (v2.2.0) — 30 fixed categories, per-person topics, round-robin continuation, weekly decay, `social_topics_v2`.
+- **Persona skill** (v2.2.3) — togglable; off = no proactive social anywhere.
 
 ## Open improvement tickets (GitHub)
 
@@ -72,9 +85,9 @@ Consult before proposing anything that might already be filed:
 
 ## Focus going forward
 
-1. **Autonomy refinement.** The autonomy layer works; next round is tightening: retry-on-refusal (#32), tentative-reservation lifecycle (#30), invite-response tool (#33).
-2. **Transport additions.** Email + WhatsApp connectors sit behind the Connection interface built in v2.0.0. #22 gates real work on them.
-3. **Daily QA from real use.** Every brief + every coord exposes bugs. Pattern from this session: owner sends a screenshot, I trace against code, propose, wait for green light.
+1. **Bug stability sprint.** Owner is running interactive bug-test sessions (file → propose → discuss → build, no auto-anything) until the agent is stable. Expect more sessions like the v2.3.1 wave: lots of small atomic bugs, often with cross-cutting roots, often via screenshots.
+2. **Autonomy refinement.** Tickets like #32 (retry-on-refusal), #30 (tentative reservations), #33 (invite responses) are queued.
+3. **Transport additions.** Email + WhatsApp connectors sit behind the Connection interface (v2.0.0). #22 gates real work on them.
 
 ## Known dead fields worth cleaning
 

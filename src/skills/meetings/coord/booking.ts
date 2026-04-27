@@ -209,8 +209,19 @@ export async function bookCoordination(
     );
     const slotStartMs = DateTime.fromISO(slot).toMillis();
     const slotEndMs = endDt.toMillis();
+    // v2.3.1 (B7 / #64) — floating blocks (lunch, coffee, etc.) are elastic
+    // and were ALREADY accounted for when findAvailableSlots produced this
+    // candidate slot. Re-flagging them as a "conflict" at booking time is
+    // exactly what made Maelle "forget" her own suggestion and escalate to
+    // owner approval. Filter them out here; they get re-placed elsewhere in
+    // their window via rebalanceFloatingBlocksAfterMutation post-create.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fb = require('../../../utils/floatingBlocks') as typeof import('../../../utils/floatingBlocks');
+    const blocks = fb.getFloatingBlocks(profile);
     const hasConflict = existingEvents.some(ev => {
       if (ev.isCancelled || ev.showAs === 'free') return false;
+      // Floating blocks are elastic — not real conflicts.
+      if (blocks.some(b => fb.isFloatingBlockEvent(ev, b))) return false;
       const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone }).toMillis();
       const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone }).toMillis();
       return evStart < slotEndMs && evEnd > slotStartMs;
@@ -273,7 +284,7 @@ export async function bookCoordination(
   // event rather than creating a fresh one. Graph preserves attendees +
   // Teams link + history on PATCH (same as move_meeting). When intent is
   // 'schedule' (default, historical path), we createMeeting as before.
-  let newEventId: string;
+  let newEventId: string | undefined;
   try {
     const isMove = job.intent === 'move' && !!job.existing_event_id;
     if (isMove) {
@@ -289,21 +300,77 @@ export async function bookCoordination(
         jobId, eventId: newEventId, slot,
       });
     } else {
-      newEventId = await createMeeting({
-        userEmail: profile.user.email,
-        timezone: profile.user.timezone,
-        subject: job.subject,
-        start: slot,
-        end: endDt.toISO()!,
-        attendees: participants.map(p => ({ name: p.name, email: p.email || '' })),
-        body: job.topic ? `Topic: ${job.topic}` : undefined,
-        isOnline,
-        location: location || undefined,
-        // v2.2.7 — match the direct create_meeting path's fallback. Without
-        // this, coord-booked meetings landed uncategorized; the direct path
-        // already defaults to 'Meeting' via skills/meetings/ops.ts.
-        categories: ['Meeting'],
-      });
+      // v2.3.1 (B9 / #65) — cross-turn idempotency check. Mirror the dedup
+      // logic ops.ts create_meeting:824-855 has. Without it, when a direct
+      // create_meeting already booked this slot (e.g. Sonnet bypassing a
+      // gate-stuck coord, see #65), bookCoordination would create a second
+      // event next to the first one. Same subject + same start (±2 min) on
+      // the owner's calendar → return the existing id, skip the create.
+      try {
+        const requestedSubject = job.subject.trim();
+        const startDt = DateTime.fromISO(slot, { zone: profile.user.timezone });
+        const probeDate = startDt.toFormat('yyyy-MM-dd');
+        const startMs = startDt.toMillis();
+        const existingEvents = await getCalendarEvents(profile.user.email, probeDate, probeDate, profile.user.timezone);
+        const duplicate = existingEvents.find(ev => {
+          if (ev.isCancelled) return false;
+          const evSubject = (ev.subject ?? '').trim();
+          if (evSubject.toLowerCase() !== requestedSubject.toLowerCase()) return false;
+          const evStartMs = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone }).toMillis();
+          return Math.abs(evStartMs - startMs) <= 2 * 60 * 1000;
+        });
+        if (duplicate) {
+          logger.warn('bookCoordination idempotent short-circuit — same subject+start already on calendar', {
+            jobId, subject: requestedSubject, start: slot, existingEventId: duplicate.id,
+          });
+          newEventId = duplicate.id;
+        }
+      } catch (err) {
+        logger.warn('bookCoordination dedup pre-check failed — proceeding with create', {
+          jobId, err: String(err).slice(0, 200),
+        });
+      }
+
+      if (!newEventId) {
+        newEventId = await createMeeting({
+          userEmail: profile.user.email,
+          timezone: profile.user.timezone,
+          subject: job.subject,
+          start: slot,
+          end: endDt.toISO()!,
+          attendees: participants.map(p => ({ name: p.name, email: p.email || '' })),
+          body: job.topic ? `Topic: ${job.topic}` : undefined,
+          isOnline,
+          location: location || undefined,
+          // v2.2.7 — match the direct create_meeting path's fallback. Without
+          // this, coord-booked meetings landed uncategorized; the direct path
+          // already defaults to 'Meeting' via skills/meetings/ops.ts.
+          categories: ['Meeting'],
+          // v2.3.1 (B23) — invite-body attribution.
+          defaultBodyAuthor: `${profile.assistant.name}, ${profile.user.name.split(' ')[0]} Assistant`,
+        });
+      }
+    }
+
+    // v2.3.1 (B7 / #64) — post-create floating block rebalance. The conflict
+    // check above filtered floating blocks out (so booking proceeds), but
+    // the new event may now sit on top of e.g. lunch. Re-place the affected
+    // block elsewhere in its window via the existing helper.
+    if (newEventId && !isMove) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { rebalanceFloatingBlocksAfterMutation } = require('../../../utils/rebalanceFloatingBlocks') as
+          typeof import('../../../utils/rebalanceFloatingBlocks');
+        await rebalanceFloatingBlocksAfterMutation({
+          profile,
+          affectedSlotIso: slot,
+          ownerSlackId: profile.user.slack_user_id,
+        });
+      } catch (err) {
+        logger.warn('rebalance after coord booking threw — continuing', {
+          jobId, err: String(err).slice(0, 200),
+        });
+      }
     }
   } catch (err) {
     logger.error('Calendar booking failed for coordination', { err: String(err), jobId });

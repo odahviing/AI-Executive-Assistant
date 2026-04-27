@@ -409,11 +409,29 @@ IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if
       }
 
       case 'update_routine': {
+        // v2.3.1 (B19 / #59 follow-up) — system-routine carve-out for
+        // notify_on_skip ONLY. The morning brief is the primary use case for
+        // notify_on_skip, but the original guard rejected any update on
+        // is_system=1 routines, so the owner couldn't toggle the flag on it.
+        // Now: fetch without the is_system filter; if it's a system routine,
+        // only notify_on_skip is mutable. All other fields stay locked.
         const routine = db.prepare(
-          'SELECT * FROM routines WHERE id = ? AND owner_user_id = ? AND is_system = 0'
+          'SELECT * FROM routines WHERE id = ? AND owner_user_id = ?'
         ).get(args.routine_id as string, ownerUserId) as Routine | null;
 
         if (!routine) return { error: 'Routine not found' };
+
+        if (routine.is_system === 1) {
+          if (args.notify_on_skip == null) {
+            return { error: 'Built-in routines cannot be modified — only their skip-notification setting can be changed.' };
+          }
+          const newVal = args.notify_on_skip ? 1 : 0;
+          db.prepare(
+            `UPDATE routines SET notify_on_skip = ?, updated_at = datetime('now') WHERE id = ?`
+          ).run(newVal, args.routine_id as string);
+          logger.info('System routine notify_on_skip toggled', { id: args.routine_id, value: newVal });
+          return { updated: true, routine_id: args.routine_id };
+        }
 
         const updates: Record<string, unknown> = {};
         if (args.title  != null) updates.title  = args.title;

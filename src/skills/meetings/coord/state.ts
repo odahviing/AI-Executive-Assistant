@@ -30,6 +30,7 @@ import {
   cancelOrphanCoordJobs,
   upsertPersonMemory,
   getPersonMemory,
+  searchPeopleMemory,
   type PersonInteraction,
   type CoordParticipant,
   type CoordJob,
@@ -102,6 +103,51 @@ export async function initiateCoordination(
         } as CoordParticipant,
         ...params.participants,
       ];
+    }
+
+    // v2.3.1 (B4 / #62) — auto-add the requesting colleague when the meeting
+    // is clearly 1:1 with the owner. Without this, Yael saying "let's set up
+    // a meeting with Idan" doesn't include herself in participants, the
+    // filter strips owner out, count goes to zero → silent no_participants.
+    // NUANCE: only fire on clear 1:1 (zero other non-owner participants).
+    // For interview-style "arrange Idan with X" — where X is a third party
+    // and Yael isn't joining — don't auto-add Yael. Ambiguous mid-cases
+    // (Sonnet unsure who's joining) get caught by the system prompt rule
+    // in meetings.ts COORDINATION block telling her to ask first.
+    if (params.senderUserId) {
+      const requesterIncluded = params.participants.some(p => p.slack_id === params.senderUserId);
+      const otherParticipantsCount = params.participants
+        .filter(p => p.slack_id !== params.ownerUserId && p.slack_id !== params.senderUserId)
+        .length;
+      if (!requesterIncluded && otherParticipantsCount === 0) {
+        logger.info('Requesting colleague auto-added (1:1 with owner case)', {
+          senderUserId: params.senderUserId,
+          subject: params.subject,
+        });
+        // Try to resolve the requester's name + email from people_memory; fall
+        // back to a placeholder name + empty email if not found (coord can
+        // still DM them via slack_id).
+        let requesterName = 'Colleague';
+        let requesterEmail: string | undefined;
+        let requesterTz: string | undefined;
+        try {
+          const row = getPersonMemory(params.senderUserId);
+          if (row) {
+            requesterName  = row.name || requesterName;
+            requesterEmail = row.email || undefined;
+            requesterTz    = row.timezone || undefined;
+          }
+        } catch (_) { /* fail open — placeholder name is acceptable */ }
+        params.participants = [
+          ...params.participants,
+          {
+            name: requesterName,
+            slack_id: params.senderUserId,
+            email: requesterEmail,
+            tz: requesterTz,
+          } as CoordParticipant,
+        ];
+      }
     }
   }
 
@@ -295,11 +341,23 @@ export async function initiateCoordination(
       // at info level.
     } catch (err) {
       logger.error('Failed to DM participant', { err: String(err), participant: participant.name });
+      // v2.3.1 (B14a + B14b) — humanize the error text AND pin it to a
+      // standalone DM (no threadTs) so it doesn't leak into an unrelated
+      // conversation thread the owner happens to be reading. A failed DM
+      // is operational news, not in-conversation context — keep it visible
+      // and isolated.
+      const errStr = String(err);
+      const humanDetail = errStr.includes('no slack_id')
+        ? `I tried to message ${participant.name} for the "${params.subject}" coord, but I don't have a Slack ID for them yet. Want me to add their contact, or skip them on this one?`
+        : errStr.includes('user_not_found')
+          ? `I couldn't reach ${participant.name} for the "${params.subject}" coord — Slack didn't recognize the user. They may be a guest account or the ID may be off.`
+          : `Couldn't reach ${participant.name} for the "${params.subject}" coord — got "${errStr.slice(0, 80)}".`;
       await shadowNotify(params.profile, {
         channel: params.ownerChannel,
-        threadTs: params.ownerThreadTs,
+        // threadTs intentionally omitted — failures land top-level in the
+        // owner's DM, never threaded under an unrelated conversation.
         action: 'DM failed',
-        detail: `Could not reach ${participant.name} — ${String(err).slice(0, 120)}. Check their Slack ID in contacts.`,
+        detail: humanDetail,
       });
     }
   }
@@ -455,6 +513,25 @@ async function sendCoordDM(
   }
 
   const message = `${introLine}${body}`;
+
+  // v2.3.1 (B14a) — fall-back resolution. Owner direction: "she knows who
+  // Oran is — he's on Slack, mentioned in the past." So before declaring
+  // unknown, try people_memory by name. If found there, use that slack_id
+  // (and keep the participant object updated for downstream use).
+  if (!params.participant.slack_id && params.participant.name) {
+    try {
+      const matches = searchPeopleMemory(params.participant.name);
+      if (matches.length === 1 && /^U[A-Z0-9]{7,11}$/.test(matches[0].slack_id)) {
+        logger.info('sendCoordDM — resolved missing slack_id from people_memory', {
+          name: params.participant.name, resolved: matches[0].slack_id,
+        });
+        params.participant.slack_id = matches[0].slack_id;
+        if (!params.participant.email && matches[0].email) {
+          params.participant.email = matches[0].email;
+        }
+      }
+    } catch (_) { /* fail open — original error path catches truly unknown */ }
+  }
 
   if (!params.participant.slack_id) {
     throw new Error(`Participant ${params.participant.name} has no slack_id — cannot DM`);

@@ -55,35 +55,22 @@ export async function runPostBookingHealthCheck(params: {
     const analysis = analyzeCalendar(processed, dateStr, dateStr, profile, dismissed);
 
     const issues = analysis.flatMap(d => d.issues ?? []);
-    if (issues.length === 0) {
-      logger.info('postBookingHealthCheck: clean day, no DM', { dateStr, subject });
-      return;
-    }
 
-    const conn = getConnection(profile.user.slack_user_id, 'slack');
-    if (!conn) {
-      logger.warn('postBookingHealthCheck: no Slack connection, skipping DM', { ownerId: profile.user.slack_user_id });
-      return;
-    }
-
-    const dayLabel = slotDt.toFormat('EEEE d MMM');
-    const issueLines = issues.slice(0, 6).map(i => {
-      const sev = i.severity ? ` (${i.severity})` : '';
-      return `• ${i.type}${sev}: ${i.detail}`;
-    });
-    const moreLine = issues.length > 6 ? `\n• ...and ${issues.length - 6} more` : '';
-    const text = [
-      `Booked "${subject}" — ${dayLabel} now has ${issues.length} issue${issues.length === 1 ? '' : 's'}:`,
-      ...issueLines,
-      moreLine,
-      '',
-      'Want me to look at fixing them?',
-    ].filter(Boolean).join('\n');
-
-    await conn.sendDirect(profile.user.slack_user_id, text);
-    logger.info('postBookingHealthCheck: DM sent', {
+    // v2.3.1 (B11 / #67) — auto-DM removed. Owner direction: he gets a full
+    // morning report from the daily routine; he doesn't want a mid-day
+    // disruption summary every time he approves a coord booking. Issues
+    // that require his decision should already surface through the regular
+    // approval mechanism (calendar_conflict, oof_conflict approvals); ones
+    // she can fix herself flow through active-mode in the morning sweep.
+    // Keep the analysis call (telemetry + a hook for future "Maelle decides
+    // to act" without prompting owner) but drop the unsolicited DM.
+    logger.info('postBookingHealthCheck: ran silently', {
       dateStr, subject, issueCount: issues.length,
+      issueTypes: issues.map(i => i.type),
     });
+
+    // Suppress unused-import warnings — getConnection is no longer used here.
+    void getConnection;
   } catch (err) {
     logger.warn('postBookingHealthCheck threw — swallowed', {
       slotIso, subject, err: String(err).slice(0, 300),
