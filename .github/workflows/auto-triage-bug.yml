@@ -33,7 +33,7 @@ jobs:
       (
         (github.event.action == 'opened' && contains(github.event.issue.labels.*.name, 'Bug')) ||
         (github.event.action == 'reopened' && contains(github.event.issue.labels.*.name, 'Bug')) ||
-        (github.event.action == 'labeled' && (github.event.label.name == 'Bug' || github.event.label.name == 'Revise'))
+        (github.event.action == 'labeled' && (github.event.label.name == 'Bug' || github.event.label.name == 'Revise' || contains(github.event.issue.labels.*.name, 'Bug')))
       ) &&
       !(github.event.action == 'labeled' && github.event.label.name == 'Bug' && contains(github.event.issue.labels.*.name, 'Proposed'))
 
