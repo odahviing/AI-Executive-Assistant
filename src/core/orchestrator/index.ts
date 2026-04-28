@@ -1153,17 +1153,28 @@ Rules:
       const { shadowNotify } = await import('../../utils/shadowNotify');
       const who = input.senderName ?? input.userId;
       const replyPreview = finalReply.slice(0, 200).replace(/\s+/g, ' ').trim();
-      const toolHint = toolCallSummaries.length > 0
-        ? ` (${[...new Set(toolCallSummaries.map(s => {
-            const m = s.match(/^\[([a-z_]+)/);
-            return m ? m[1] : '';
-          }).filter(Boolean))].join(', ')})`
-        : '';
+      // v2.3.2 — guard on the distinct/non-empty tool list, NOT the raw array.
+      // Previously the guard used `toolCallSummaries.length > 0` which still
+      // emitted ` (${join(', ')})` when every summary failed the regex —
+      // producing dangling " ()" / " (, )" tails on the shadow line.
+      const distinctTools = [...new Set(
+        toolCallSummaries
+          .map(s => s.match(/^\[([a-z_]+)/)?.[1] ?? '')
+          .filter(name => name.length > 0)
+      )];
+      const toolHint = distinctTools.length > 0 ? ` (${distinctTools.join(', ')})` : '';
+      // v2.3.2 — conversation-keyed shadow threading. Every shadow from THIS
+      // colleague Slack thread collapses into one owner-DM thread. Different
+      // threads (new top-level message → new threadTs) get fresh shadow
+      // threads. No timeout — the threadTs itself is the conversation
+      // boundary.
       await shadowNotify(profile, {
         channel: input.channelId,
         threadTs,
         action: `${who} → me`,
         detail: `I said: "${replyPreview}"${toolHint}`,
+        conversationKey: threadTs,
+        conversationHeader: `Conversation with ${who}`,
       });
     } catch (err) {
       logger.warn('Inbound-colleague shadow notify threw — continuing', { err: String(err) });

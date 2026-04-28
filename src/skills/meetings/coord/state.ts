@@ -783,6 +783,10 @@ async function tryNextPingPongSlot(
     threadTs: job.owner_thread_ts ?? undefined,
     action: 'Negotiating',
     detail: `Asking ${didntPickThis.map(p => p.name).join(', ')} if ${slotLabel} works (suggested by ${suggesterNames})`,
+    // v2.3.2 — group all coord-progress shadows for THIS coord under one
+    // owner-DM thread, keyed on the coord_job id.
+    conversationKey: `coord:${job.id}`,
+    conversationHeader: `Coord: "${job.subject}"`,
   });
 }
 
@@ -1015,5 +1019,7 @@ export async function triggerRoundTwo(
     threadTs: job.owner_thread_ts ?? undefined,
     action: 'Round 2 started',
     detail: `New slots found within ${preferenceNames}'s window — re-asking ${reVoters.map(p => p.name).join(', ')}`,
+    conversationKey: `coord:${job.id}`,
+    conversationHeader: `Coord: "${job.subject}"`,
   });
 }

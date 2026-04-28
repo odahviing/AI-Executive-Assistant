@@ -50,7 +50,9 @@ export class MeetingsSkill implements Skill {
   // the tool definitions and prompt. Only its executeToolCall is used.
   private readonly ops = new _LegacyOpsSkill();
 
-  getTools(_profile: UserProfile): Anthropic.Tool[] {
+  getTools(profile: UserProfile): Anthropic.Tool[] {
+    const allowedDurations = profile.meetings.allowed_durations.join('/');
+    const bufferMin = profile.meetings.buffer_minutes;
     return [
       {
         name: 'find_slack_user',
@@ -68,7 +70,7 @@ export class MeetingsSkill implements Skill {
       },
       {
         name: 'coordinate_meeting',
-        description: `Set up a NEW meeting from scratch. Finds slots, DMs participants, books once they agree.
+        description: `Set up a NEW meeting from scratch. Finds slots, then either presents annotated options to the REQUESTER (internal-only fast path) or DMs each participant for a vote (external/mixed coord state machine). Books once a slot is confirmed.
 
 Use ONLY when there is no existing meeting yet and people need to find a time together. Do NOT use to:
 - Move an existing meeting → message_colleague with intent='meeting_reschedule'
@@ -76,9 +78,19 @@ Use ONLY when there is no existing meeting yet and people need to find a time to
 - Just check free/busy without booking → get_free_busy
 - Book a slot that was already verbally agreed in this MPIM conversation (owner + participant are both present and have confirmed) → use create_meeting directly. Calling coordinate_meeting here sends the participant fresh slot DMs and re-opens a negotiation they already closed.
 
-Flow:
-1. Find 3 available slots on the owner's calendar (respecting buffers, thinking time, lunch)
-2. DM each key participant with the 3 options (including location per slot)
+Two flows depending on participant mix:
+
+INTERNAL-ONLY FAST PATH (v2.3.2) — every participant has an internal email (same domain as the owner):
+1. Find 3 slots on the owner's calendar
+2. Read each internal attendee's free/busy via Graph (no DMs to anyone)
+3. Return slots ANNOTATED with each attendee's status — sorted with all-free slots first
+4. You present the slots to the REQUESTER directly in this conversation, e.g. "Tue 10:00 (everyone free) / Wed 14:00 (Amazia busy) / Thu 11:00 (everyone free) — which works?"
+5. When the requester picks, call create_meeting to book — internal attendees get a heads-up DM after the fact ("Hi Amazia, Oran asked, I checked your calendar, booked Tue 10:00")
+6. If the requester pushes back wanting only all-free options and we showed mixed, call coordinate_meeting AGAIN with a tighter search range (next-week, narrower window) to retry
+
+EXTERNAL OR MIXED PATH — at least one participant has an external email or no email at all:
+1. Find 3 slots on owner's calendar — when the mix includes internal attendees, internal busy time is pre-subtracted so externals never see internal-busy options
+2. DM each key participant with the 3 options
 3. Collect responses — negotiate if needed (ping-pong then open-ended, up to 2 rounds)
 4. Book the meeting and send calendar invites
 
@@ -86,7 +98,7 @@ Two tiers of attendees:
 - participants: will be DM'd to pick a slot (max 4). For a 1-on-1, just one person.
 - just_invite: added to calendar invite only — no DM, no slot selection.
 
-Duration: defaults are 10/25/40/55 minutes. The owner can request any duration. If a colleague requests a non-standard duration, coordinate normally but verify with the owner before booking.
+Duration: standard durations are ${allowedDurations} minutes (each bakes in a ${bufferMin}-min trailing buffer by design). When a colleague asks for a casual round number ("30 min", "an hour", "45 min", "15 min") that isn't in the standard list, just call coordinate_meeting with their stated value — the system silently snaps it to the nearest allowed duration when the delta is ≤10 min. Do NOT ask the colleague to pick between standards or correct them; that reads pedantic. The owner can request any duration. Approval only fires when the snap can't be made cleanly (delta >10 min — e.g. 90 min when allowed is ${allowedDurations}).
 
 Date range: if not specified, search from now going forward until 3 valid options are found.
 
@@ -195,7 +207,7 @@ DISAMBIGUATION vs resolve_approval:
       },
       {
         name: 'check_join_availability',
-        description: `Check if the owner can join an EXISTING meeting the colleague is organising. Use when a colleague asks "is ${_profile.user.name.split(' ')[0]} free at X", "can ${_profile.user.name.split(' ')[0]} join our meeting", "we'd love ${_profile.user.name.split(' ')[0]} in our call".
+        description: `Check if the owner can join an EXISTING meeting the colleague is organising. Use when a colleague asks "is ${profile.user.name.split(' ')[0]} free at X", "can ${profile.user.name.split(' ')[0]} join our meeting", "we'd love ${profile.user.name.split(' ')[0]} in our call".
 
 Route 2 — the COLLEAGUE owns the meeting and its invite. Maelle does NOT book or add anyone. She only confirms availability so the colleague can send the invite themselves.
 
@@ -268,10 +280,10 @@ If the meeting is NOT yet booked and they need to find a time together, use coor
       },
       {
         name: 'get_free_busy',
-        description: `Check free/busy data for ${_profile.user.name.split(' ')[0]}'s own calendar over a date range — e.g. "when is ${_profile.user.name.split(' ')[0]} free this week?".
+        description: `Check free/busy data for ${profile.user.name.split(' ')[0]}'s own calendar over a date range — e.g. "when is ${profile.user.name.split(' ')[0]} free this week?".
 
 Use ONLY for:
-- ${_profile.user.name.split(' ')[0]}'s own calendar
+- ${profile.user.name.split(' ')[0]}'s own calendar
 - Open-ended "when is he free" ranges
 
 Do NOT use for:
@@ -291,11 +303,11 @@ Do NOT use for:
       },
       {
         name: 'find_available_slots',
-        description: `Find open slots on ${_profile.user.name}'s own calendar — useful when you need to know what times are free before proposing options. NEVER call this directly for colleague scheduling; coordinate_meeting already handles that flow.
+        description: `Find open slots on ${profile.user.name}'s own calendar — useful when you need to know what times are free before proposing options. NEVER call this directly for colleague scheduling; coordinate_meeting already handles that flow.
 
-Before calling this tool: ASK ${_profile.user.name.split(' ')[0]} TWO HUMAN QUESTIONS first if you don't already know the answer. Do NOT use the words "meeting_mode" or list four options — that's robotic. Ask like a person:
+Before calling this tool: ASK ${profile.user.name.split(' ')[0]} TWO HUMAN QUESTIONS first if you don't already know the answer. Do NOT use the words "meeting_mode" or list four options — that's robotic. Ask like a person:
   • "In person or online?"
-  • If in-person and the venue isn't ${_profile.user.name.split(' ')[0]}'s office: "Where?" + "Roughly how long is the trip each way?"
+  • If in-person and the venue isn't ${profile.user.name.split(' ')[0]}'s office: "Where?" + "Roughly how long is the trip each way?"
 
 Then YOU pick the right meeting_mode based on what they said:
   • "online" / "Teams" / "Zoom" / "call" / "video" → meeting_mode='online'
@@ -332,6 +344,10 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
       {
         name: 'create_meeting',
         description: `Create a new calendar event directly (no coord needed — use this when the owner already knows the time + attendees). Call coordinate_meeting instead when participants need to agree on a time. Follow the location / category / work-day rules in the prompt section.
+
+Owner-path: owner override IS the approval — book it.
+
+Colleague-path (v2.3.2): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book the 1:1. The handler enforces server-side: single colleague-attendee (the requester themselves — multi-party still goes through coordinate_meeting), rule-compliant slot (work hours, work days, buffers, floating blocks, no conflicts via findAvailableSlots), then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
 
 LANGUAGE: subject and body MUST be in English regardless of the language you're conversing in. Calendar invites are shared artifacts other people read — their language must be predictable. If the owner instructs in Hebrew, translate to English for the artifact.`,
         input_schema: {
@@ -802,6 +818,15 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
                 timezone,
                 durationMinutes: durationMin,
                 attendeeEmails: participantEmails,
+                // v2.3.2 — also subtract INTERNAL attendees' busy time. Owner
+                // direction (mixed-case): pre-filter slots by internal
+                // free/busy so externals never see options where Amazia is
+                // already booked. Externals' busy is unreadable via Graph and
+                // stays out of this filter — they get DM'd with the surviving
+                // slots through the regular coord state machine. Pure-internal
+                // coords short-circuit through the fast-path below before
+                // reaching the coord state machine at all.
+                attendeeBusyEmails: participantEmails,
                 searchFrom: searchFromDate,
                 searchTo: searchEndDate,
                 preferMorning: true,
@@ -928,6 +953,94 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             participantCount: (args.participants as any[]).length,
             participantEmails,
           });
+        }
+
+        // ── v2.3.2 — internal-only fast path ─────────────────────────────────
+        // When EVERY participant (key + just_invite) has an internal email,
+        // we can read their free/busy via Graph and skip the coord state
+        // machine entirely. Maelle presents 3 annotated slots to the
+        // REQUESTER directly in the same conversation; the requester picks;
+        // Sonnet calls create_meeting (now allowed in colleague-path) to
+        // book. No async DM-then-wait. No "Amazia hasn't replied yet".
+        //
+        // Owner direction: at least 1 all-free slot → present what we have
+        // with annotations on the busy ones. Requester pushes back ("must be
+        // when everyone's free") → re-search with strict filter (handled by
+        // Sonnet next turn re-calling coordinate_meeting). 0 owner-free slots
+        // → fall through to extend / approval (existing path handles that).
+        //
+        // External-or-mixed: skip the fast path, use the regular coord state
+        // machine. The DM annotation logic in coord/state.ts hides internal
+        // attendee status from external recipients (v2.3.2 mixed-case fix).
+        try {
+          const { isAllInternalParticipants } = await import('../utils/attendeeScope');
+          const allInternal = isAllInternalParticipants(allParticipants as Array<{ email?: string }>, context.profile);
+          if (allInternal && proposedSlots.length > 0) {
+            // Annotate each slot per non-owner non-self attendee.
+            const { annotateSlotsWithAttendeeStatus } = await import('../utils/annotateSlotsWithAttendeeStatus');
+            const annotateTargets = allParticipants
+              .filter((p: any) => p.email && (p.email as string).toLowerCase() !== userEmail.toLowerCase())
+              .map((p: any) => ({ name: p.name as string, email: p.email as string }));
+
+            const perAttendeeStatuses = await Promise.all(
+              annotateTargets.map(async target => {
+                const annotated = await annotateSlotsWithAttendeeStatus({
+                  slots: proposedSlots,
+                  attendeeEmail: target.email,
+                  callerEmail: userEmail,
+                  timezone,
+                });
+                return { name: target.name, statuses: annotated.map(a => a.attendeeStatus) };
+              })
+            );
+
+            // Build per-slot status map: slot → [{name, status}]
+            const annotatedSlots = proposedSlots.map((slot, idx) => ({
+              start: slot.start,
+              end: slot.end,
+              location: slot.location,
+              isOnline: slot.isOnline,
+              attendeeStatus: perAttendeeStatuses.map(a => ({
+                name: a.name,
+                status: a.statuses[idx] ?? 'unknown' as const,
+              })),
+              allFree: perAttendeeStatuses.every(a => a.statuses[idx] === 'free'),
+            }));
+
+            // Sort: all-free first, then mixed.
+            annotatedSlots.sort((a, b) => Number(b.allFree) - Number(a.allFree));
+
+            logger.info('coordinate_meeting — internal fast-path: presenting annotated slots to requester', {
+              participantCount: allParticipants.length,
+              slotsAllFree: annotatedSlots.filter(s => s.allFree).length,
+              slotsMixed: annotatedSlots.filter(s => !s.allFree).length,
+              requester: context.userId,
+            });
+
+            return {
+              _internal_fast_path: true,
+              _note: 'INTERNAL FAST PATH — present these annotated slots to the REQUESTER directly in this conversation, no DMs to anyone else. Phrase it like a human EA: lead with the all-free option(s), name any "busy" slots honestly so the requester can choose. When the requester picks (number, time, or "the second one"), call create_meeting to book — internal attendees get a heads-up DM after the fact. If the requester pushes back wanting only all-free slots and we showed mixed, call coordinate_meeting again with a tighter search range. Do NOT call coordinate_meeting a second time this turn — that\'s an idempotent no-op.',
+              action: 'present_slots_to_requester',
+              subject: args.subject,
+              topic: args.topic,
+              durationMin,
+              proposedSlots: annotatedSlots,
+              participants: allParticipants.map((p: any) => ({
+                name: p.name,
+                email: p.email,
+                slack_id: p.slack_id,
+                just_invite: p.just_invite === true,
+              })),
+              requesterUserId: context.userId,
+              snappedFromNonStandard,
+              requestedDurationMin: snappedFromNonStandard ? requestedDurationMin : undefined,
+            };
+          }
+        } catch (err) {
+          logger.warn('coordinate_meeting fast-path threw — falling through to coord state machine', {
+            err: String(err).slice(0, 200),
+          });
+          // fall through to existing coord flow
         }
 
         return {
@@ -1473,7 +1586,7 @@ THREAD CONTEXT — who to invite when ${firstName} asks for a meeting FROM a cha
 - **If he asks for a meeting with NO specific names** ("let's do a meeting about this"): invite everyone who was @-mentioned earlier in the thread OR who replied to the thread. Thread participants become the invite list. Skip bots, skip ${firstName} himself, skip duplicates.
 - Subject: derive from the thread content — usually the topic of the discussion ("Understanding why we lost the client", "Q3 planning follow-up"). One-line, specific, don't ask unless context is genuinely ambiguous.
 
-Duration: standard 10/25/40/55 min. Owner can request anything; a colleague requesting non-standard triggers owner-approval before booking.
+Duration: standards are ${profile.meetings.allowed_durations.join('/')} min (each bakes in ${profile.meetings.buffer_minutes}-min trailing buffer). When a colleague asks for a casual round number ("30 min", "an hour", "45 min", "15 min"), just call coordinate_meeting with their stated value — the system snaps silently to the nearest standard when delta ≤10 min. Don't bounce them with "closest options are X or Y"; that's pedantic. Owner can request anything. Approval only fires for big deltas the snap can't bridge.
 
 Location (auto-determined — do NOT set manually):
 - Office days (${officeDays}): ≤3 people → ${firstName}'s Office + Teams; >3 → Meeting Room + Teams.
@@ -1502,6 +1615,19 @@ GENERAL: if you don't have someone's Slack ID, call find_slack_user first. Route
 Thread context: "see the thread above / about what we discussed" → derive subject yourself, don't ask. Active contributors = participants; lightly mentioned = just_invite.
 
 Important: after coordinate_meeting, don't ask for approval — just "On it." Never claim booked until a participant confirms. Participants can reply outside the thread — system matches by context. When mentioning times to colleagues, use ACTUAL duration (55 min from 14:00 = 14:00–14:55, never 14:00–15:00).
+
+NARRATION HONESTY — name only the people getting DMs:
+${firstName} is the IMPLICIT organizer of every coord — coord slots are pre-filtered against ${firstName}'s calendar, so ${firstName} never receives a "pick a slot" DM (the system silently drops him from the DM list). When narrating coord-start (to ${firstName} OR to a colleague), name ONLY the people who are actually being DM'd: the participants. Do NOT say "I'll send slot options to ${firstName} and Amazia" — that's a lie when ${firstName} isn't in the DM list. just_invite folks aren't being DM'd either; they're calendar-only.
+- 1:1 colleague-initiated: "On it — I'll send Amazia the options and book on ${firstName}'s calendar once she picks."
+- Multi-participant: "On it — I'll send Amazia and Maayan a few options. I'll book once both confirm."
+- Mixed (DM + just_invite): "On it — I'll reach out to Amazia with options; Onn will get the calendar invite once we have a time."
+
+INTERNAL-ONLY FAST PATH (v2.3.2) — when ALL participants are internal (same email domain as ${firstName}), coordinate_meeting returns _internal_fast_path=true with annotated slots and action='present_slots_to_requester'. NO DMs were sent. You present the slots to the REQUESTER directly in this conversation:
+- Lead with all-free slots if any exist; tag busy ones honestly ("Amazia busy")
+- Phrase like a human EA: "Tuesday 10:00 works for everyone. Wednesday 14:00 also works for you, but Amazia's booked then. Which sounds good?" — NOT "1. Tue 10:00 (free) 2. Wed 14:00 (busy)" with numbered list and bracketed status. The data carries the structure; you carry the voice.
+- When the requester picks (number, time, "the second one", "Tuesday works"), call create_meeting to book directly — attendees get a heads-up DM after the fact.
+- If they push back wanting only all-free slots and we showed mixed, re-call coordinate_meeting with a tighter / later search range. ONE retry, then escalate to ${firstName} via create_approval if still no fit.
+- For external or mixed coords, the regular DM-and-poll flow runs; do NOT call create_meeting yourself — wait for the coord state machine to confirm.
 
 MEETINGS HONESTY RULES (these extend RULE 1/2/5 in the base honesty block):
 
@@ -1535,7 +1661,7 @@ Work week: ${firstName}'s work days are ${profile.schedule.office_days.days.join
 
 Re-verify owner availability before forwarding one participant's "yes" to another: call get_free_busy for ${firstName} at the proposed slot BEFORE DMing participant B. Calendar may have shifted since the initial search. If owner's now blocked, go back to A for a different slot — don't DM B with a stale time.
 
-TIMEZONES: each person in WORKSPACE CONTACTS may have a "tz:" field — use it. Propose slots in THEIR timezone terms ("12-3p ET = 19-22 my side"), not yours. If they give a time window in their zone (ET/PT/GMT/etc.), respect it — never volunteer slots outside it. If you don't know their tz yet, assume ${profile.user.timezone}; if the conversation reveals a new tz, save it via update_person_profile (don't overwrite confirmed ones without strong signal).
+TIMEZONES: each person in WORKSPACE CONTACTS may have a "tz:" field — use it. Propose slots in THEIR timezone terms ("12-3p ET = 19-22 my side"), not yours. If they give a time window in their zone (ET/PT/GMT/etc.), respect it — never volunteer slots outside it. If you don't know their tz yet, assume ${profile.user.timezone}; if the conversation reveals a new tz, save it via update_personprofile (don't overwrite confirmed ones without strong signal).
 
 CALENDAR SCOPE with colleagues (${firstName}'s calendar is already visible via Outlook — the issue is scope, not leaking):
 - OK to share ONE specific event tied to the slot being scheduled ("he has Simon at 10 Monday, want me to see if that can move?").

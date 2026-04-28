@@ -1,6 +1,8 @@
 import { App, LogLevel } from '@slack/bolt';
 import { config } from '../../config';
 import { runOrchestrator } from '../../core/orchestrator';
+import { isBriefRequest } from '../../core/briefIntent';
+import { sendMorningBriefing } from '../../tasks/briefs';
 import type { ChannelId } from '../../skills/types';
 import type { UserProfile } from '../../config/userProfile';
 import {
@@ -563,6 +565,28 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // (src/core/social/) on the orchestrator's post-turn pass. Colleague
       // rapport no longer tracks topic quality upgrades; only
       // notes/interactions remain as memory primitives.
+
+      // v2.3.2 — deterministic brief-request short-circuit (owner DM only).
+      // When the owner asks "didn't get my morning update" / "send the brief"
+      // etc., route directly to sendMorningBriefing(force=true). Skips the
+      // orchestrator entirely so Sonnet can't improvise a calendar rundown
+      // with fabricated open items + "your window is X" framing.
+      // Cheap regex pre-filter inside isBriefRequest gates the LLM call.
+      if (role === 'owner' && !isChannel && !isMpim && !images?.length) {
+        try {
+          if (await isBriefRequest(userMessage)) {
+            logger.info('Brief request detected — short-circuiting to sendMorningBriefing', {
+              senderId, channelId, preview: userMessage.slice(0, 80),
+            });
+            await sendMorningBriefing(app, profile, channelId, true);
+            return;
+          }
+        } catch (err) {
+          logger.warn('Brief short-circuit threw — falling through to orchestrator', {
+            err: String(err).slice(0, 200),
+          });
+        }
+      }
 
       logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name });
       const result = await runOrchestrator({

@@ -20,6 +20,22 @@ import logger from './logger';
 /** Per-profile cache of the owner's DM channel id. */
 const ownerDmChannelCache: Map<string, string> = new Map();
 
+/**
+ * v2.3.2 — shadow threading cache. Key = `${ownerId}:${conversationKey}` →
+ * the owner-DM ts of the FIRST shadow we sent for that conversation. Every
+ * subsequent shadow with the same conversationKey threads under that ts.
+ *
+ * Conversation key is the inbound Slack threadTs in most cases (colleague DM
+ * conversations, owner DM conversations, MPIM coord threads). Different
+ * threads = different conversation keys = different shadow threads in the
+ * owner's DM. No timeout — Slack threadTs is unique-per-thread, so two
+ * conversations a week apart naturally get different keys.
+ *
+ * Process-wide; restart re-anchors with one extra top-level shadow per
+ * still-active key (acceptable cost).
+ */
+const shadowThreadAnchors: Map<string, string> = new Map();
+
 export async function shadowNotify(
   profile: UserProfile,
   params: {
@@ -27,6 +43,24 @@ export async function shadowNotify(
     threadTs?: string;
     action: string;   // short label, e.g. "DM sent", "Meeting booked"
     detail: string;   // one line, e.g. "Sent Simon 3 slot options for 'Q3 review'"
+    /**
+     * v2.3.2 — optional conversation key for shadow threading. When passed,
+     * the first shadow with this key creates a top-level owner-DM message
+     * (with a header line); every subsequent shadow with the same key
+     * threads under it. Use the inbound colleague threadTs for inbound-
+     * colleague shadows, owner_thread_ts for coord-side shadows, or any
+     * stable per-conversation id. Omit for system shadows (cron ticks,
+     * dispatchers without a conversation context) — those stay top-level.
+     */
+    conversationKey?: string;
+    /**
+     * v2.3.2 — optional one-line header for the FIRST shadow on a new
+     * conversation key. Renders as a top-level "🔍 *Conversation header*"
+     * line so the owner can scan their DM and tell what each thread is
+     * about (e.g. "Conversation with Isaac Moddel"). Ignored on
+     * subsequent shadows in the same thread.
+     */
+    conversationHeader?: string;
   }
 ): Promise<void> {
   if (!profile.behavior.v1_shadow_mode) return;
@@ -40,6 +74,44 @@ export async function shadowNotify(
 
   try {
     const text = `🔍 _*${params.action}:* ${params.detail}_`;
+
+    // v2.3.2 — conversation-key threading takes priority. If the caller
+    // tagged this shadow with a conversationKey, use the cached anchor (or
+    // create one) so all shadows from this conversation collapse into one
+    // owner-DM thread. Independent of the caller's channel — works for
+    // colleague-DM conversations and coord state machine alike.
+    if (params.conversationKey) {
+      const cacheKey = `${ownerId}:${params.conversationKey}`;
+      const anchorTs = shadowThreadAnchors.get(cacheKey);
+      const ownerDm = ownerDmChannelCache.get(ownerId);
+
+      if (anchorTs && ownerDm) {
+        // Thread under existing anchor.
+        const res = await conn.postToChannel(ownerDm, text, { threadTs: anchorTs });
+        if (res.ok) return;
+        logger.info('shadowNotify thread post failed, falling back to fresh anchor', {
+          reason: res.reason, detail: res.detail, action: params.action,
+        });
+        // fall through: re-anchor below
+      }
+
+      // First shadow on this conversationKey (or anchor lost). Post a
+      // top-level header + this shadow's body, then cache the resulting ts
+      // as the anchor for subsequent shadows on the same key.
+      const headerLine = params.conversationHeader
+        ? `🔍 *${params.conversationHeader}*\n${text}`
+        : text;
+      const res = await conn.sendDirect(ownerId, headerLine);
+      if (!res.ok) {
+        logger.warn('shadowNotify (conversation-key, first send) failed', {
+          reason: res.reason, detail: res.detail, action: params.action,
+        });
+        return;
+      }
+      if (res.ref) ownerDmChannelCache.set(ownerId, res.ref);
+      if (res.ts) shadowThreadAnchors.set(cacheKey, res.ts);
+      return;
+    }
 
     // v2.0.6 — if the caller passed a channel + threadTs AND the channel is
     // the owner's own DM, post in-thread there. Any coord/outreach that the

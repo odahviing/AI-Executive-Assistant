@@ -22,6 +22,10 @@ const CORE_MODULES = [ASSISTANT_MODULE, OUTREACH_MODULE, TASKS_MODULE, CRONS_MOD
  * not crashed. This means unbuilt/stub skills never take down the service.
  */
 
+// v2.3.2 — process-wide guard against per-turn debug spam from yaml toggles
+// pointing at not-yet-implemented skills. Keyed `${profileId}:${skillId}`.
+const warnedMissingSkills = new Set<string>();
+
 function tryLoadSkill(name: string, loader: () => Skill): Skill | null {
   try {
     return loader();
@@ -132,6 +136,13 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   // needs_owner_approval=true so Sonnet falls back to create_approval. Owner
   // retains veto via the approval path when rules break.
   'move_meeting',
+  // v2.3.2 — inbound 1:1 booking auto-accept. When a colleague has confirmed
+  // slot + duration + subject in this DM, Maelle calls create_meeting directly
+  // instead of falling back to "you send the invite" or kicking off a redundant
+  // coordinate_meeting DM. The handler enforces: single colleague-attendee
+  // (themselves), rule-compliant slot, English subject. Auto shadow-DMs owner.
+  // Same trust pattern as v2.2.1 move_meeting — rule-compliance is the gate.
+  'create_meeting',
 ]);
 
 /**
@@ -157,7 +168,14 @@ export function getActiveSkills(profile: UserProfile): Skill[] {
     if (!enabled) continue;
     const skill = SKILL_MAP.get(id as SkillId);
     if (!skill) {
-      if (enabled) {
+      // v2.3.2 — warn once per (profile, skill) per process. getActiveSkills
+      // is called 4× per orchestrator turn (tools, exec, prompt, section),
+      // and three forward-looking yaml toggles produced 12 debug lines per
+      // turn pre-fix. Cache key is profile.user.slack_user_id : id so a typo
+      // still surfaces once for whichever owner has it.
+      const cacheKey = `${profile.user.slack_user_id}:${id}`;
+      if (!warnedMissingSkills.has(cacheKey)) {
+        warnedMissingSkills.add(cacheKey);
         logger.debug(`Skill "${id}" is enabled in profile but not available — skipping`, {
           user: profile.user.name,
         });

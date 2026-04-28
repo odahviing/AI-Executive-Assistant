@@ -3,9 +3,10 @@ import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import { config } from '../config';
-import { getUnseenEvents, markEventsSeen, getDb, getPreferences } from '../db';
+import { markEventsSeen, getDb, getPreferences } from '../db';
 import { getBriefableTasks, markTaskInformed, type Task } from './index';
 import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calendar';
+import { processCalendarEvents } from '../skills/meetings/ops';
 import { verifyScheduledOutcome, type ScheduleOutcome } from '../utils/verifyScheduledOutcome';
 import { updateOutreachJob } from '../db';
 import logger from '../utils/logger';
@@ -253,6 +254,62 @@ async function collectBriefingData(
     });
   }
 
+  // ── Calendar surface (v2.3.2) ─────────────────────────────────────────────
+  // Today's + tomorrow's meetings, structured for the brief Sonnet pass.
+  // Reuses processCalendarEvents (privacy mask, free-event strip, attendee
+  // extraction, online detection) so the brief sees the same shape every
+  // other consumer does. Pushed first so they appear at the top of the
+  // items JSON Sonnet reads.
+  if (ownerCalendarEvents.length > 0) {
+    try {
+      const processed = processCalendarEvents(
+        ownerCalendarEvents,
+        profile.user.email,
+        profile.user.name,
+        timezone,
+      );
+      const todayLocal = DateTime.now().setZone(timezone).toFormat('yyyy-MM-dd');
+      const tomorrowLocal = DateTime.now().setZone(timezone).plus({ days: 1 }).toFormat('yyyy-MM-dd');
+
+      const summarize = (evs: typeof processed) => evs
+        .filter(e => !e.isCancelled && e._eventType === 'mine')
+        .sort((a, b) => a._localStartTime.localeCompare(b._localStartTime))
+        .map(e => ({
+          subject: e.subject,
+          start: e._localStartTime,
+          end: e._localEndTime,
+          duration_min: e._durationMin,
+          all_day: e.isAllDay,
+          attendees: e.attendees,
+          is_online: e.isOnlineMeeting,
+          categories: e.categories,
+          is_lunch: e.is_lunch,
+        }));
+
+      const todays = summarize(processed.filter(e => e._localDate === todayLocal));
+      const tomorrows = summarize(processed.filter(e => e._localDate === tomorrowLocal));
+
+      if (todays.length > 0) {
+        items.push({
+          kind: 'calendar_today',
+          date: DateTime.now().setZone(timezone).toFormat('EEEE d MMM'),
+          events: todays,
+        });
+      }
+      if (tomorrows.length > 0) {
+        items.push({
+          kind: 'calendar_tomorrow',
+          date: DateTime.now().setZone(timezone).plus({ days: 1 }).toFormat('EEEE d MMM'),
+          events: tomorrows,
+        });
+      }
+    } catch (err) {
+      logger.warn('brief — calendar surface build threw, skipping today/tomorrow section', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
   // ── Tasks-first walk (v2.2.4) ─────────────────────────────────────────────
   // Tasks is the spine. Outreach + coord rows are detail tables that hang off
   // tasks via skill_ref. We query tasks once, then hydrate outreach- and
@@ -288,28 +345,14 @@ async function collectBriefingData(
     if (task.status === 'completed') taskIdsToInform.push(task.id);
   }
 
-  // ── Incoming colleague messages — independent 4th surface ─────────────────
-  // Not folded into tasks: these are inbound message events not tied to any
-  // tracked outreach/coord (e.g. "Oran sent a group DM that didn't come
-  // through cleanly"). Self-cleans via the actioned=1 flush below.
-  const incomingMessages = db.prepare(`
-    SELECT * FROM events
-    WHERE owner_user_id = ?
-    AND type IN ('message', 'outreach_reply')
-    AND actioned = 0
-    AND created_at >= ?
-    ORDER BY created_at DESC
-    LIMIT 10
-  `).all(ownerUserId, sevenDaysAgo) as any[];
-
-  for (const ev of incomingMessages) {
-    items.push({
-      kind: 'incoming_message',
-      from: ev.actor ?? 'unknown',
-      summary: ev.detail ?? ev.title ?? '',
-      when: relativeTime(ev.created_at, timezone),
-    });
-  }
+  // v2.3.2 — events table NO LONGER feeds the brief. The tasks-spine (above)
+  // owns every briefable item; events stays a write-only audit log surface
+  // consumed by `recall_interactions` and the on-demand `get_briefing` tool.
+  // Reason: every inbound colleague DM was logged with actioned=0 and
+  // surfaced once per brief regardless of whether Maelle had handled it in
+  // real-time, the owner had read it directly, or a downstream coord/booking
+  // had already informed about it. The tasks.informed two-step (v2.2.4)
+  // already does "show once, then drop" correctly for items that matter.
 
   // v2.0.3 — collect gender for every person referenced by name anywhere in
   // the briefing items. Keyed on name (first-name collisions are rare inside
@@ -350,10 +393,14 @@ async function generateBriefingText(
 
   const systemPrompt = `You are writing a morning briefing for ${firstName} from their AI executive assistant ${profile.assistant.name}.
 
-STRUCTURE:
-- Start with just the time-of-day greeting ("Morning —") — NOT "here's what happened while you were away"
-- Group every item by PERSON. One short paragraph per colleague — not per item. If Amazia has three things going on, they collapse into one Amazia paragraph.
-- End with an ACTION ITEMS section if there's anything that needs ${firstName}'s decision or input (not just a status update). Skip the section entirely when there's nothing to decide.
+STRUCTURE (in this order):
+1. Time-of-day greeting ("Morning —"). Nothing else on this line.
+2. TODAY'S CALENDAR — only if a calendar_today item is present. Short list, one line per meeting: time, subject, key attendee(s), location/online tag. No prose around it. Skip lunch and short personal blocks unless they're the only items. NEVER add "your window is X" / "it's a short day" / "you finish at Y" framing — ${firstName} already knows his own schedule shape.
+3. TOMORROW (one short line) — only if calendar_tomorrow is present AND there's something notable: an external meeting, an overlap, a big-deal item. Skip if tomorrow is routine. Don't enumerate every meeting — this is a heads-up, not a second calendar.
+4. PER-PERSON paragraphs — one short paragraph per colleague who has open / recently-changed work. If Amazia has three things going on, they collapse into one Amazia paragraph. Skip people with nothing new.
+5. ACTION ITEMS section — only if there's something that needs ${firstName}'s decision or input. Skip the section entirely when there's nothing to decide.
+
+FORMAT:
 - Plain text only. Use • for bullets. Use *single asterisks* for bold (Slack style). NEVER use **double asterisks**.
 
 WHAT GETS SURFACED:
@@ -428,7 +475,6 @@ function buildFallbackBriefing(items: RichItem[], profile: UserProfile): string 
   for (const item of items) {
     if (item.kind === 'outreach')        lines.push(`• ${item.colleague}: ${item.status}`);
     if (item.kind === 'coordination')    lines.push(`• ${item.colleague} / ${item.subject}: ${item.status}`);
-    if (item.kind === 'incoming_message') lines.push(`• ${item.from} messaged (${item.when})`);
     if (item.kind === 'open_task')       lines.push(`• ${item.title}`);
     if (item.kind === 'completed_task')  lines.push(`• Done: ${item.title}`);
   }
@@ -516,9 +562,11 @@ export async function sendMorningBriefing(
     detail: DateTime.now().setZone(profile.user.timezone).toFormat('yyyy-MM-dd'),
   });
 
+  // markEventsSeen kept — `seen` flag still drives the on-demand `get_briefing`
+  // tool (tasks/skill.ts) which surfaces unseen events on owner request.
+  // The `actioned=1` flush is gone in v2.3.2: no reader of `actioned=0`
+  // remains after the brief stopped reading the events table.
   markEventsSeen(ownerUserId);
-  const db2 = getDb();
-  db2.prepare(`UPDATE events SET actioned = 1 WHERE owner_user_id = ? AND actioned = 0`).run(ownerUserId);
 
   // Generate natural language briefing via Sonnet. SlackConnection internally
   // applies formatForSlack so no explicit formatting needed at the call site.

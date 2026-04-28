@@ -218,6 +218,8 @@ export async function handleCoordReply(
                 threadTs: job.owner_thread_ts ?? undefined,
                 action: 'Auto-accepted counter',
                 detail: `${participant.name} countered "${job.subject}" to ${counterDt.toFormat('EEEE d MMM HH:mm')} — same week, within your rules, so I moved it. Let me know if you'd rather I hadn't.`,
+                conversationKey: `coord:${job.id}`,
+                conversationHeader: `Coord: "${job.subject}"`,
               });
               // Ack the participant
               await slackConn.postToChannel(params.channelId, `Works — I've moved "${job.subject}" to ${counterDt.toFormat('EEEE d MMM, HH:mm')}. See you then.`, {
@@ -292,6 +294,8 @@ export async function handleCoordReply(
       threadTs: job.owner_thread_ts ?? undefined,
       action: 'Follow-up received',
       detail: `${participant.name} followed up on "${job.subject}": "${params.text.trim().slice(0, 200)}"`,
+      conversationKey: `coord:${job.id}`,
+      conversationHeader: `Coord: "${job.subject}"`,
     });
     return true;
   }
@@ -424,6 +428,8 @@ export async function handleCoordReply(
       threadTs: job.owner_thread_ts ?? undefined,
       action: 'Counter received',
       detail: `${participant.name} can't make any slot for "${job.subject}"${counterLabel} — looking for a new window`,
+      conversationKey: `coord:${job.id}`,
+      conversationHeader: `Coord: "${job.subject}"`,
     });
   }
 
@@ -581,6 +587,8 @@ async function handlePreferenceReply(
       threadTs: job.owner_thread_ts ?? undefined,
       action: 'Preference received',
       detail: `${participant.name} said they prefer ${text} — still waiting for ${stillWaiting.map(p => p.name).join(', ')}`,
+      conversationKey: `coord:${job.id}`,
+      conversationHeader: `Coord: "${job.subject}"`,
     });
     return;
   }

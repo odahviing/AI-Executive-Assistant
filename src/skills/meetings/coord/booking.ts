@@ -489,6 +489,8 @@ export async function bookCoordination(
     threadTs: job.owner_thread_ts ?? undefined,
     action: 'Meeting booked',
     detail: `"${job.subject}" with ${keyNames} on ${slotDt.toFormat("EEE d MMM HH:mm")}${locationLine}`,
+    conversationKey: `coord:${job.id}`,
+    conversationHeader: `Coord: "${job.subject}"`,
   });
 
   logEvent({

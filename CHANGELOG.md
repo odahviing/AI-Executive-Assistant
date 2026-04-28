@@ -2,6 +2,58 @@
 
 ---
 
+## 2.3.2 — Brief redesign + internal-coord fast-path + colleague-path booking + shadow threading
+
+A multi-front session: rewrote the morning brief to lead with today's calendar instead of a stale events feed; gave Maelle a direct booking path when a colleague has confirmed slot+duration+subject in conversation; added an internal-only fast-path to coordinate_meeting that skips the DM-and-poll round when every attendee's free/busy is readable via Graph; collapsed shadow-DM spam by threading per Slack conversation. Plus the Bug 3 wave from 28 Apr (toolHint trailing parens, narration honesty, duration auto-snap) and a process-wide warn-once cache for stub-skill yaml entries.
+
+### Added
+
+- **Internal-only coord fast-path** ([`meetings.ts`](src/skills/meetings.ts), [`utils/attendeeScope.ts`](src/utils/attendeeScope.ts)) — when every participant in a `coordinate_meeting` call has the owner's email domain, Maelle skips the coord state machine entirely. Reads each attendee's free/busy via Graph, annotates the 3 proposed slots with per-attendee status, sorts all-free first, returns `action: 'present_slots_to_requester'`. Sonnet presents the annotated slots to the REQUESTER directly in the conversation; the requester picks; Sonnet calls `create_meeting` to book. Closes the latency gap that made Oran (waiting on Amazia's async DM reply) give up and book via Calendly. New helper `isAllInternalParticipants(participants, profile)` is the gate.
+- **Colleague-path `create_meeting`** — `create_meeting` added to `COLLEAGUE_ALLOWED_TOOLS` ([`registry.ts`](src/skills/registry.ts)). Same trust pattern as v2.2.1 `move_meeting`: `[ops.ts:751](src/skills/meetings/ops.ts:751)` colleague-path gate enforces (a) attendees are requester themselves OR internal-domain (externals require coord), (b) slot passes owner's rules via narrow-window `findAvailableSlots`, (c) auto shadow-DMs owner on success, (d) post-booking heads-up DMs to non-self internal attendees ("Hi Amazia, Oran asked for a meeting with you and Idan, I checked your calendar and booked Tue 09:00"). Removes the "go ahead and send him the invite" punt where Maelle did 90% of the work then made the colleague organize it.
+- **Today's calendar in the morning brief** ([`briefs.ts`](src/tasks/briefs.ts)) — `collectBriefingData` now produces `kind: 'calendar_today'` and `kind: 'calendar_tomorrow'` items via `processCalendarEvents` (privacy mask, free-event strip, attendee extraction reused). Brief system prompt restructured: time-of-day greeting → today's calendar (one line per meeting) → tomorrow heads-up if anything notable → per-person paragraphs → ACTION ITEMS. Explicit ban on "your window is X / it's a short day" framing — owner already knows his own schedule.
+- **Deterministic brief-request routing** ([`core/briefIntent.ts`](src/core/briefIntent.ts), [`connectors/slack/app.ts`](src/connectors/slack/app.ts)) — when the owner messages "didn't get my morning update" / "send the brief" / "what's on today" in a DM, route deterministically to `sendMorningBriefing(force=true)` BEFORE the orchestrator runs. Two-stage classifier: cheap regex pre-filter (≤100 chars, brief/morning-update/rundown patterns) → Sonnet yes/no judge that distinguishes "brief me" from "brief me ON Yael". Removes the failure mode where Sonnet improvised a calendar rundown via raw `get_calendar` calls.
+- **Shadow-DM threading per conversation** ([`utils/shadowNotify.ts`](src/utils/shadowNotify.ts)) — new optional `conversationKey` + `conversationHeader` params. Process-wide `Map<key, ownerDmTs>` cache: first shadow on a key creates a top-level "🔍 *Conversation header*" message in owner's DM and caches the resulting ts; subsequent shadows with the same key thread under it. Wired at: inbound-colleague shadow (key = colleague threadTs), colleague-path move_meeting / create_meeting (same), coord-side state.ts/reply.ts/booking.ts shadows (key = `coord:${job.id}`). Security shadows (rate limits, injection blocked, judge SUSPICIOUS) and "DM failed" stay top-level intentionally — they need attention, not threading. Replaces the 20-shadow flood from a single colleague conversation with one collapsible thread.
+
+### Changed
+
+- **Mixed-coord internal busy pre-filter** — `coordinate_meeting` now passes `attendeeBusyEmails: participantEmails` to `findAvailableSlots` for the internal-domain participants. Externals (in mixed coords) only see slots where the internal attendees are also free. Their own busy state is unreadable via Graph as before.
+- **Brief no longer reads `events` table** — removed the `incomingMessages` block from `collectBriefingData` and the post-send `actioned=1` flush from `sendMorningBriefing`. Tasks-spine (v2.2.4) is now the only source for the brief; `tasks.informed` is the only dedup mechanism. Events table stays a write-only log surface, consumed on demand by `recall_interactions` and the `get_briefing` tool. Closes the resurfacing pattern where every inbound colleague DM lingered as actioned=0 and got narrated again at next morning brief, even after Maelle handled it in real-time.
+- **Duration auto-snap prompt** ([`meetings.ts`](src/skills/meetings.ts) — tool description + COORDINATION block) — now parameterized on `profile.meetings.allowed_durations` and `profile.meetings.buffer_minutes` instead of hardcoded `10/25/40/55`. Different owner with `[25, 50, 135]` and `buffer_minutes: 5` gets the right phrasing automatically. Sonnet learns: when colleague asks for "30 min" / "an hour" / "45 min", call coordinate_meeting with their stated value; system snaps silently for delta ≤10 min. No more "30 minutes isn't one of the standard durations, the closest options are 25 or 40" pedantic bounce.
+- **Narration-honesty rule** ([`meetings.ts`](src/skills/meetings.ts) ROUTE 1) — Sonnet must name only the people getting DMs in coord narration. "Slots going to Idan and Amazia" was a lie when only Amazia is being DM'd (owner is the implicit organizer). Three honest example phrasings included for 1:1 / multi / mixed.
+- **GitHub label axes (memory)** — improvements use High/Medium/Low (priority); features use Roadmap/Next/Idea (commitment-stage). Two parallel tracks, never mix. Saved as a feedback memory after [#22](https://github.com/odahviing/AI-Executive-Assistant/issues/22) was relabeled `Improvement+High → Feature+Next`.
+
+### Fixed
+
+- **#32 closed (won't-fix-yet)** — retry move-coord on refusal. Owner reframed: most refusals come with a counter time (handled by `parseTimePreference`); pure refusals fall through to owner-approval which works fine via shadow DM. The "earlier-bias retry" needed five-and conditions (active mode + overlap + pure refuse + earlier slots free + original window forward-biased) that don't show up often. High-priority framing was aspirational, not pressure-driven.
+- **Shadow toolHint trailing `()` / `(, )`** — [`orchestrator/index.ts:1156`](src/core/orchestrator/index.ts:1156) was guarding the parens emit on `toolCallSummaries.length > 0` (raw array) but building the inner content from a filtered subset. When summaries existed but none matched the `^\[([a-z_]+)` regex, we still emitted ` (${empty})`. Now: compute distinct/non-empty tool list FIRST, guard on its length. Empty list → no parens at all.
+- **`social_outreach_tick` log spam** ([`tasks/dispatchers/socialOutreachTick.ts`](src/tasks/dispatchers/socialOutreachTick.ts)) — `pickCandidate` refactored: extracted `lastInboundMs` helper, single-pass `classifyRow` with typed `RejectReason`, returns `{ pick, dropped, late_drops }`. The "no eligible candidate this hour" debug log now shows the per-reason rejection breakdown plus names of late-stage drops (cooldown / active_conversation) — names appear when there's something interesting to surface. Active-conversation SQL fetch moved up-front (one query, gone from the second filter).
+- **Stub-skill yaml warn-once** ([`skills/registry.ts:142`](src/skills/registry.ts:142)) — `getActiveSkills` is called 4× per orchestrator turn; three forward-looking yaml toggles (`email_drafting`, `proactive_alerts`, `whatsapp`) produced 12 debug log lines per turn. Process-wide `Set<${profileId}:${skillId}>` cache: log once per profile-skill, then silent. Yaml typos still surface once at first call.
+
+### Removed
+
+- **`incoming_message` case in `buildFallbackBriefing`** — dead after the events-block removal.
+- **Dead `getUnseenEvents` import in briefs.ts** — was a leftover.
+
+### Migration
+
+None. No schema changes. `events` table still written; just no longer read by the brief.
+
+### Invariants preserved
+
+- Shadow notify still gated on `behavior.v1_shadow_mode`.
+- `create_meeting` colleague-path enforces rule-compliance via `findAvailableSlots` (same gate as v2.2.1 `move_meeting`).
+- Coord state machine unchanged for external/mixed; only the search call gained `attendeeBusyEmails` for internal participants.
+- Owner-initiated coord flow unchanged — fast-path applies regardless of who initiated, but the request-to-pick step is the same.
+
+### Not changed
+
+- The `coord_jobs` schema and the coord state machine (collecting / resolving / negotiating / waiting_owner / confirmed / booked) — fast-path bypasses them entirely.
+- `create_meeting` for owner path — unchanged.
+- `move_meeting` colleague-path (v2.2.1) — unchanged.
+- Auto-triage / auto-build CI — still gated `if: false &&` (deactivated in 2.3.1).
+
+---
+
 ## 2.3.1 — 23-bug interactive sweep (coord state machine, floating block determinism, OOF, proactive social, more)
 
 A long working session pulling 7 GitHub bug reports + 5 chat-screenshot bugs + 11 follow-on atomic issues into a single wave. Pattern: owner files / I propose / he revises / we land. Single-shot triage was too lossy without session memory; this version is the interactive output. Auto-triage workflows deactivated alongside this wave (see CI section).

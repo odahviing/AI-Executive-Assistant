@@ -98,96 +98,131 @@ function maelleAlreadyPingedToday(ownerUserId: string): boolean {
   return !!row;
 }
 
+// v2.2.2 — recency gate. Proactive social only for people interacted with
+// in the last 72 hours. Owner direction: don't try to start a social topic
+// with someone you haven't actually talked to recently — week+ old contacts
+// get pinged cold, which reads transactional, not human.
+const RECENT_CONTACT_MS = 72 * 60 * 60 * 1000;
+
+type RejectReason =
+  | 'is_owner'
+  | 'no_timezone'
+  | 'rank_zero'
+  | 'pending_lock'
+  | 'never_inbound'
+  | 'silent_>72h'
+  | 'invalid_tz'
+  | 'outside_window'
+  | 'weekend'
+  | 'cooldown'
+  | 'active_conversation';
+
+// "Late" reasons are the ones where the person was otherwise eligible and
+// only lost on a downstream gate — those names are useful in the log
+// ("Lori would have been pinged but she's in cooldown until tomorrow").
+// The early reasons (outside_window, never_inbound) are routine bulk drops;
+// counting them is enough.
+const LATE_DROP_REASONS = new Set<RejectReason>(['cooldown', 'active_conversation']);
+
+interface PickResult {
+  pick: CandidateRow | null;
+  dropped: Partial<Record<RejectReason, number>>;
+  late_drops: Array<{ name: string; reason: RejectReason }>;
+}
+
+function lastInboundMs(interactionLog: string): number {
+  // 'message_received' = colleague → Maelle, the unambiguous inbound.
+  // Outbound and system events don't count as the person initiating.
+  try {
+    const log = JSON.parse(interactionLog || '[]') as Array<{ date?: string; type?: string }>;
+    if (!Array.isArray(log) || log.length === 0) return 0;
+    let max = 0;
+    for (const entry of log) {
+      if (!entry?.date || entry.type !== 'message_received') continue;
+      const t = new Date(entry.date).getTime();
+      if (Number.isFinite(t) && t > max) max = t;
+    }
+    return max;
+  } catch { return 0; }
+}
+
+function classifyRow(
+  r: CandidateRow,
+  config: ProactiveConfig,
+  ownerSlackId: string,
+  nowUtc: DateTime,
+  activeSet: Set<string>,
+): RejectReason | null {
+  if (r.slack_id === ownerSlackId) return 'is_owner';
+  if (!r.timezone) return 'no_timezone';
+  if ((r.engagement_rank ?? 2) <= 0) return 'rank_zero';
+  if (r.proactive_pending === 1) return 'pending_lock';
+
+  // v2.3.1 (B18) — real INBOUND history required. Owner direction: "only
+  // when they are speaking, the counter starts." Maelle-initiated outbound
+  // doesn't qualify a person for proactive outreach.
+  const lastInbound = lastInboundMs(r.interaction_log);
+  if (!lastInbound) return 'never_inbound';
+  if (nowUtc.toMillis() - lastInbound > RECENT_CONTACT_MS) return 'silent_>72h';
+
+  const colleagueLocal = nowUtc.setZone(r.timezone);
+  if (!colleagueLocal.isValid) return 'invalid_tz';
+  const [startHour, endHour] = config.daily_window_hours;
+  if (colleagueLocal.hour < startHour || colleagueLocal.hour >= endHour) return 'outside_window';
+  if (!isWorkday(colleagueLocal.weekday, config.skip_weekends)) return 'weekend';
+
+  if (r.last_initiated_at) {
+    const cooldownMs = config.cooldown_days * 24 * 60 * 60 * 1000;
+    const since = nowUtc.toMillis() - new Date(r.last_initiated_at).getTime();
+    if (since < cooldownMs) return 'cooldown';
+  }
+
+  if (activeSet.has(r.slack_id)) return 'active_conversation';
+
+  return null;
+}
+
 function pickCandidate(
   rows: CandidateRow[],
   config: ProactiveConfig,
   ownerSlackId: string,
   nowUtc: DateTime,
-): CandidateRow | null {
-  const [startHour, endHour] = config.daily_window_hours;
-  const cooldownMs = config.cooldown_days * 24 * 60 * 60 * 1000;
-
-  // v2.2.2 — recency gate. Proactive social only for people interacted with
-  // in the last 72 hours. Owner direction: don't try to start a social topic
-  // with someone you haven't actually talked to recently — week+ old contacts
-  // get pinged cold, which reads transactional, not human.
-  const RECENT_CONTACT_MS = 72 * 60 * 60 * 1000;
-
-  const survivors = rows.filter(r => {
-    if (r.slack_id === ownerSlackId) return false;
-    if (!r.timezone) return false;
-    if ((r.engagement_rank ?? 2) <= 0) return false;
-
-    // v2.2.3 — anti-spam: don't ping again until they reply to the prior ping.
-    // The lock cleared automatically on any inbound message from them.
-    if (r.proactive_pending === 1) return false;
-
-    // v2.3.1 (B18 / Lori ping) — eligibility now requires a real INBOUND
-    // interaction history (the colleague has actually messaged Maelle),
-    // not just any activity. Owner direction: "only when they are speaking,
-    // the counter starts." Mentions in summaries, owner-driven references,
-    // and Maelle-initiated outbound don't qualify a person for proactive
-    // outreach. Real conversation = real eligibility.
-    const lastInboundMs = (() => {
-      try {
-        const log = JSON.parse(r.interaction_log || '[]') as Array<{ date?: string; type?: string }>;
-        if (!Array.isArray(log) || log.length === 0) return 0;
-        let max = 0;
-        for (const entry of log) {
-          if (!entry?.date) continue;
-          // 'message_received' = colleague → Maelle, the unambiguous inbound.
-          // Other types ('message_sent' = outbound; 'meeting_booked' /
-          // 'coordination' = system events) don't count as the person
-          // initiating contact.
-          if (entry.type !== 'message_received') continue;
-          const t = new Date(entry.date).getTime();
-          if (Number.isFinite(t) && t > max) max = t;
-        }
-        return max;
-      } catch { return 0; }
-    })();
-    if (!lastInboundMs) return false;                                          // never spoken → ineligible
-    if (nowUtc.toMillis() - lastInboundMs > RECENT_CONTACT_MS) return false;   // silent > 72h → skip
-
-    // Colleague local time check
-    const colleagueLocal = nowUtc.setZone(r.timezone);
-    if (!colleagueLocal.isValid) return false;
-    const h = colleagueLocal.hour;
-    if (h < startHour || h >= endHour) return false;
-    if (!isWorkday(colleagueLocal.weekday, config.skip_weekends)) return false;
-
-    // Cooldown
-    if (r.last_initiated_at) {
-      const since = nowUtc.toMillis() - new Date(r.last_initiated_at).getTime();
-      if (since < cooldownMs) return false;
-    }
-    return true;
-  });
-
-  if (survivors.length === 0) return null;
-
-  // Skip anyone with an active conversation (mid-flight outreach)
+): PickResult {
+  // Active-conversation set fetched once up-front so classifyRow stays pure.
   const db = getDb();
-  const activeIds = db.prepare(`
+  const activeRows = db.prepare(`
     SELECT DISTINCT colleague_slack_id FROM outreach_jobs
     WHERE owner_user_id = ?
       AND status IN ('sent', 'replied')
       AND datetime(created_at) >= datetime('now', '-3 days')
-  `).all((survivors[0] as any).owner_user_id ?? ownerSlackId) as Array<{ colleague_slack_id: string }>;
-  const activeSet = new Set(activeIds.map(r => r.colleague_slack_id));
-  const withoutActive = survivors.filter(r => !activeSet.has(r.slack_id));
-  if (withoutActive.length === 0) return null;
+  `).all(ownerSlackId) as Array<{ colleague_slack_id: string }>;
+  const activeSet = new Set(activeRows.map(r => r.colleague_slack_id));
 
-  // Round-robin: sort by rank desc, then by "longest since Maelle last
-  // pinged" ascending (older last_initiated_at = higher priority)
-  withoutActive.sort((a, b) => {
+  const survivors: CandidateRow[] = [];
+  const dropped: Partial<Record<RejectReason, number>> = {};
+  const lateDrops: Array<{ name: string; reason: RejectReason }> = [];
+
+  for (const r of rows) {
+    const reason = classifyRow(r, config, ownerSlackId, nowUtc, activeSet);
+    if (reason === null) {
+      survivors.push(r);
+      continue;
+    }
+    dropped[reason] = (dropped[reason] ?? 0) + 1;
+    if (LATE_DROP_REASONS.has(reason)) lateDrops.push({ name: r.name, reason });
+  }
+
+  if (survivors.length === 0) return { pick: null, dropped, late_drops: lateDrops };
+
+  // Round-robin: rank desc, then "longest since Maelle last pinged" ascending.
+  survivors.sort((a, b) => {
     if (b.engagement_rank !== a.engagement_rank) return b.engagement_rank - a.engagement_rank;
     const aTs = a.last_initiated_at ? new Date(a.last_initiated_at).getTime() : 0;
     const bTs = b.last_initiated_at ? new Date(b.last_initiated_at).getTime() : 0;
     return aTs - bTs;
   });
 
-  return withoutActive[0];
+  return { pick: survivors[0], dropped, late_drops: lateDrops };
 }
 
 // v2.3.1 (B17) — discovery question pool. Used when the person has zero
@@ -359,13 +394,18 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
     `).all() as CandidateRow[];
 
     const nowUtc = DateTime.utc();
-    const pick = pickCandidate(rows, cfg, profile.user.slack_user_id, nowUtc);
+    const { pick, dropped, late_drops } = pickCandidate(rows, cfg, profile.user.slack_user_id, nowUtc);
     if (!pick) {
-      // Demoted to debug — this is the steady-state outcome 22h/day for an
-      // all-IL contact list and was filling the live log with no signal.
+      // Steady-state outcome 22h/day for an all-IL contact list — debug only.
+      // `dropped` shows the reason breakdown so "why is nobody being pinged"
+      // is answerable from one log line; `late_drops` names the people who
+      // were otherwise eligible and lost on cooldown / active-conversation
+      // (the interesting near-misses).
       logger.debug('social_outreach_tick no eligible candidate this hour', {
         ownerUserId: profile.user.slack_user_id,
         total_rows: rows.length,
+        dropped,
+        ...(late_drops.length > 0 ? { late_drops } : {}),
       });
       return;
     }

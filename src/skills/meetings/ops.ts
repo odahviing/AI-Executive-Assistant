@@ -753,6 +753,111 @@ export class SchedulingSkill {
         const assistantEmail = context.profile.assistant.email;
         const ownerEmail = context.profile.user.email;
 
+        // v2.3.2 — colleague-path booking gate. When a colleague has
+        // confirmed slot + duration + subject in this DM (1:1 or fast-path
+        // multi-internal flow), Maelle calls create_meeting directly instead
+        // of falling back to "you send the invite" or kicking off a redundant
+        // coordinate_meeting. Same trust pattern as v2.2.1 move_meeting:
+        // rule-compliance is the gate.
+        // Guards (in code, not prompt):
+        //   - 1:1 case: just the requesting colleague — always allowed
+        //   - multi-internal: every additional attendee must have an internal
+        //     email (same domain as owner). Externals require coord (we can't
+        //     check their free/busy or trust they'll see the invite as fast
+        //     as we'd like).
+        //   - new slot must pass the owner's scheduling rules via
+        //     findAvailableSlots narrow-window check
+        //   - on success, auto shadow-DM the owner + post-booking heads-up
+        //     DMs to non-self internal attendees ("Oran asked, I checked
+        //     your calendar, booked Tue 14:00")
+        if (context.senderRole === 'colleague') {
+          // Guard A — attendees must be: requester themselves OR internal
+          // (same domain). Anything else (external, missing email) requires
+          // coord. Resolve requester's email from people_memory.
+          try {
+            const { getPersonMemory } = await import('../../db');
+            const requesterRow = getPersonMemory(context.userId);
+            const requesterEmail = (requesterRow?.email ?? '').toLowerCase();
+            const requesterName = requesterRow?.name ?? '';
+            const ownerDomain = ownerEmail.includes('@') ? ownerEmail.split('@')[1].toLowerCase() : '';
+            const disallowed = attendees.filter(a => {
+              const e = (a.email ?? '').toLowerCase();
+              if (!e) return true;  // missing email → can't classify, refuse
+              if (e === ownerEmail.toLowerCase()) return false;
+              if (assistantEmail && e === assistantEmail.toLowerCase()) return false;
+              if (requesterEmail && e === requesterEmail) return false;
+              // Name-match fallback for the requester when emails don't line up
+              if (requesterName && a.name && a.name.toLowerCase() === requesterName.toLowerCase()) return false;
+              // v2.3.2 — internal attendees allowed (multi-internal fast-path).
+              if (ownerDomain && e.endsWith('@' + ownerDomain)) return false;
+              return true;  // external or unclassifiable → refuse
+            });
+            if (disallowed.length > 0) {
+              const ownerFirst = context.profile.user.name.split(' ')[0];
+              logger.info('create_meeting colleague-path refused — external/unclassifiable attendees', {
+                requester: context.userId,
+                disallowed: disallowed.map(a => a.email || a.name),
+              });
+              return {
+                success: false,
+                error: 'external_requires_coord',
+                message: `Some of those attendees are external (or I don't have their email). Externals need to go through coordinate_meeting so they get DM'd with slot options — I can't book directly on ${ownerFirst}'s calendar without checking their availability. Call coordinate_meeting with the full participant list instead.`,
+              };
+            }
+          } catch (err) {
+            logger.warn('create_meeting colleague-path attendee resolve threw — proceeding to rule check', {
+              err: String(err).slice(0, 200),
+            });
+          }
+
+          // Guard B — slot rule-compliance via findAvailableSlots narrow window.
+          try {
+            const startDt = DateTime.fromISO(args.start as string, { zone: timezone });
+            const endDt = DateTime.fromISO(args.end as string, { zone: timezone });
+            if (startDt.isValid && endDt.isValid) {
+              const durationMin = Math.max(5, Math.round((endDt.toMillis() - startDt.toMillis()) / 60_000));
+              const { findAvailableSlots } = await import('../../connectors/graph/calendar');
+              const startMs = startDt.toMillis();
+              const fromIso = DateTime.fromMillis(startMs - 60_000).toUTC().toISO();
+              const toIso = DateTime.fromMillis(endDt.toMillis() + 60_000).toUTC().toISO();
+              let validSlots: Array<{ start: string }> = [];
+              if (fromIso && toIso) {
+                validSlots = await findAvailableSlots({
+                  userEmail,
+                  timezone,
+                  durationMinutes: durationMin,
+                  attendeeEmails: [userEmail],
+                  searchFrom: fromIso,
+                  searchTo: toIso,
+                  profile: context.profile,
+                });
+              }
+              const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
+              if (!matches) {
+                const ownerFirst = context.profile.user.name.split(' ')[0];
+                logger.info('create_meeting colleague-path refused — slot breaks owner rules', {
+                  start: args.start, end: args.end, requester: context.userId,
+                });
+                return {
+                  success: false,
+                  error: 'not_rule_compliant',
+                  message: `That time breaks one of ${ownerFirst}'s scheduling rules (work hours, work days, lunch window, or a conflict). I can't book it on my own — call create_approval(kind=policy_exception) so he can decide.`,
+                };
+              }
+            }
+          } catch (err) {
+            logger.warn('create_meeting colleague-path rule check threw — escalating to approval', {
+              err: String(err).slice(0, 200),
+            });
+            const ownerFirst = context.profile.user.name.split(' ')[0];
+            return {
+              success: false,
+              error: 'rule_check_failed',
+              message: `I couldn't verify whether that slot fits ${ownerFirst}'s rules right now. Raise create_approval(kind=policy_exception) so he can decide.`,
+            };
+          }
+        }
+
         // v2.2.5 (C) — must_be_after_event_id ordering guard. When the LLM
         // booking is part of an ordered series, refuse if the proposed start
         // is BEFORE the predecessor's end. Lets owner book M2 with a
@@ -809,7 +914,6 @@ export class SchedulingSkill {
         }
 
         // Work day validation — warn if outside work schedule
-        const { DateTime } = await import('luxon');
         const startDt = DateTime.fromISO(args.start as string, { zone: timezone });
         const dayName = startDt.toFormat('EEEE');
         const allWorkDays = [
@@ -916,6 +1020,82 @@ export class SchedulingSkill {
           } catch (err) {
             logger.warn('rebalance after create_meeting threw — continuing', { err: String(err).slice(0, 200) });
           }
+
+          // v2.3.2 — colleague-path booking: shadow-DM the owner so he
+          // sees the book happen even when he wasn't in the loop. Mirrors the
+          // v2.2.1 move_meeting shadow on inbound reschedule. Threaded under
+          // the colleague conversation key so all shadows from this thread
+          // group together in the owner's DM.
+          if (context.senderRole === 'colleague') {
+            try {
+              const { shadowNotify } = await import('../../utils/shadowNotify');
+              const { getPersonMemory } = await import('../../db');
+              const requesterRow = getPersonMemory(context.userId);
+              const requesterName = requesterRow?.name ?? 'a colleague';
+              const whenLocal = DateTime.fromISO(args.start as string, { zone: timezone });
+              const whenLabel = whenLocal.isValid
+                ? whenLocal.toFormat('EEE d MMM HH:mm')
+                : formatIsoTime(args.start as string);
+              await shadowNotify(context.profile, {
+                channel: context.channelId,
+                threadTs: context.threadTs,
+                action: 'Meeting booked',
+                detail: `${requesterName} confirmed slot in DM — booked "${args.subject}" for ${whenLabel}.`,
+                conversationKey: context.threadTs,
+                conversationHeader: `Conversation with ${requesterName}`,
+              });
+            } catch (err) {
+              logger.warn('shadowNotify after colleague create_meeting failed — continuing', { err: String(err).slice(0, 200) });
+            }
+
+            // v2.3.2 — post-booking heads-up DMs to non-self internal
+            // attendees. The fast-path skipped DMs during slot search (we
+            // checked their calendars directly via Graph) — they deserve a
+            // soft "this just got booked" so they aren't surprised by the
+            // calendar invite. Phrased like a human EA: "Hi Amazia, Oran
+            // asked for a meeting with you and Idan — I checked your
+            // calendar and booked it for Tue 09:00. See you then." Lookup
+            // by email via searchPeopleMemory; skip silently if no slack_id
+            // available (the calendar invite still went out).
+            try {
+              const { searchPeopleMemory, getPersonMemory } = await import('../../db');
+              const { getConnection } = await import('../../connections/registry');
+              const conn = getConnection(context.profile.user.slack_user_id, 'slack');
+              if (conn) {
+                const requesterRow = getPersonMemory(context.userId);
+                const requesterName = requesterRow?.name ?? 'a colleague';
+                const requesterEmail = (requesterRow?.email ?? '').toLowerCase();
+                const ownerFirst = context.profile.user.name.split(' ')[0];
+                const ownerDomain = ownerEmail.includes('@') ? ownerEmail.split('@')[1].toLowerCase() : '';
+                const whenLocal = DateTime.fromISO(args.start as string, { zone: timezone });
+                const whenLabel = whenLocal.isValid
+                  ? whenLocal.toFormat('EEEE d MMM \'at\' HH:mm')
+                  : formatIsoTime(args.start as string);
+                for (const att of attendees) {
+                  const e = (att.email ?? '').toLowerCase();
+                  if (!e) continue;
+                  if (e === ownerEmail.toLowerCase()) continue;
+                  if (e === requesterEmail) continue;
+                  if (assistantEmail && e === assistantEmail.toLowerCase()) continue;
+                  if (!ownerDomain || !e.endsWith('@' + ownerDomain)) continue;  // internal only
+                  const matches = searchPeopleMemory(e);
+                  const targetSlackId = matches.find(m => (m.email ?? '').toLowerCase() === e)?.slack_id;
+                  if (!targetSlackId) {
+                    logger.debug('post-booking heads-up DM skipped — no slack_id for attendee', { email: e });
+                    continue;
+                  }
+                  const heuristicFirstName = att.name.split(' ')[0];
+                  const text = `Hi ${heuristicFirstName} — ${requesterName} asked for a meeting with you and ${ownerFirst}. I checked your calendar and booked "${args.subject}" for ${whenLabel}. See you then.`;
+                  void conn.sendDirect(targetSlackId, text).catch(err => {
+                    logger.warn('post-booking heads-up DM failed', { email: e, err: String(err).slice(0, 200) });
+                  });
+                }
+              }
+            } catch (err) {
+              logger.warn('post-booking heads-up DMs threw — continuing', { err: String(err).slice(0, 200) });
+            }
+          }
+
           return {
             success: true,
             meetingId,
@@ -1238,6 +1418,8 @@ export class SchedulingSkill {
 
         // v2.2.1 — colleague-path inbound reschedule: shadow-DM the owner so he
         // sees the move happen even when he wasn't in the approval loop.
+        // v2.3.2 — threaded under the colleague conversation key so all
+        // shadows from this thread group together in the owner's DM.
         if (context.senderRole === 'colleague') {
           try {
             const { shadowNotify } = await import('../../utils/shadowNotify');
@@ -1253,6 +1435,8 @@ export class SchedulingSkill {
               threadTs: context.threadTs,
               action: 'Reschedule auto-accepted',
               detail: `${requesterName} asked to move "${args.meeting_subject}" — rule-compliant, moved to ${whenLabel}.`,
+              conversationKey: context.threadTs,
+              conversationHeader: `Conversation with ${requesterName}`,
             });
           } catch (err) {
             logger.warn('shadowNotify after colleague reschedule failed — continuing', { err: String(err) });
