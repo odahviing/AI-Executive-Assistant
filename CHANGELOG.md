@@ -2,6 +2,55 @@
 
 ---
 
+## 2.3.3 — Owner-override-as-approval cluster + scheduling honesty + coda safety + office address
+
+A long sweep of small bugs from a half-day of real chat use, all clustered around the same theme: Maelle was over-protecting the owner from his own decisions. The fixes restore the human-EA pattern — flag the cost, then act on what was asked. Plus a 2-mode extension to the existing `claimChecker` to catch coda hallucinations, and a yaml field for the actual office address so calendar invites stop saying "Idan's Office" with no street name.
+
+### Added
+
+- **`profile.meetings.office_location` yaml field** — `{ label, address, parking }` all optional. `determineSlotLocation` and `create_meeting` body fill in the real address for physical meetings so external attendees on the invite know where to go. Backwards-compatible — empty field falls back to the legacy "${name}'s Office" label.
+- **`find_available_slots.relaxed: bool` (owner-only)** — bypasses focus-time protection, lunch / floating-block windows, and work-hour strictness. KEEPS the 5-min between-meeting buffer (sacred). Sonnet calls it as the second pass after a strict-empty result; MUST flag in narration which soft rule each surfaced slot breaks ("breaks your focus protection / squeezes lunch — book?"). Closes the "nothing clean tomorrow" pattern that hid 75-min open windows because of a 15-min buffer.
+- **`find_available_slots.ignore_attendee_availability: bool`** — for "find me times I'm free, I'll handle the others" scenarios. Default false (auto-load attendee availability — see Changed below).
+- **claimChecker `mode: 'coda'`** — second mode on the existing fact-checker. Validates a generated social coda against the recipient's people_memory snapshot — flags invented facts ("kind of wild that she shares my name" when no name overlap exists) and gossipy commentary about third parties ("hope she's at least competent"). Reuses the same JSON contract + fail-open semantics as action mode. Orchestrator drops the coda silently when flagged. No new file, no new prompts in `generateCoda.ts` — extends a battle-tested function.
+- **Coda → engagement-rank tracking** — every coda now calls `recordSocialMoment` to set `last_initiated_at` and schedules a `social_ping_rank_check` task 48h out. Dispatcher gains a `kind: 'coda'` branch that compares `last_social_at > coda_at_iso`: not engaged → `-1` to engagement_rank with a new reason `no_social_response_to_coda`. Repeated ignores drift the colleague to rank 0 (opt-out), exactly as designed.
+
+### Changed
+
+- **`find_available_slots` auto-loads attendee availability from people_memory** — for any attendee with a known timezone + working hours (manual `working_hours_structured` or auto-derived), the tool builds an `attendeeAvailability` entry and pre-clips slots to their window. Brett (Boston/EST) no longer gets proposed 10:15 IL (3:15 ET). Sonnet doesn't have to remember to pass `attendeeAvailability` — code does it.
+- **`coordinate_meeting` enriches missing emails for internal attendees** — when an attendee comes in with name only (or slack_id without email), the handler tries people_memory first (by slack_id, then by name) and falls back to Slack `users.info` via the existing `Connection.collectCoreInfo` interface. Closes the silent annotation gap where `just_invite[].email` is optional and Sonnet sometimes omits it. Externals that resolve to nothing keep their missing-email status (correctly downgrades them out of the v2.3.2 fast-path).
+- **`coordinate_meeting` busy-pre-filter for mixed coords** — the existing search now passes `attendeeBusyEmails` for internal attendees in mixed (internal + external) coords. Externals only see slots where the internal attendees are also free.
+- **textScrubber em-dash filter** — old hyphen-only `\.replace(/ - /g, ', ')` extended to `\.replace(/ [-—] /g, ', ')`. Catches both regular sentence-separator hyphens AND em-dashes (which were leaking despite the prompt rule). Time-range en-dashes ("12:00–12:55") and word-internal hyphens ("10-minute") untouched. The prompt rule at `systemPrompt.ts:375` stays — code is the backstop.
+- **`create_meeting` body scrubbed before Graph** — calendar invites now go through `scrubInternalLeakage` before reaching Outlook. Previously bypassed the formatForSlack scrub path; now they don't.
+- **`move_meeting` floating-block branch — owner override** — when owner-path AND `args.new_start` is in-window, the handler uses the hint as-is (no `findAlignedSlotForBlock` snap, no conflict refusal). Out-of-window still refuses with the lunch_bump pointer. Colleague-path keeps the existing strict alignment + conflict guard. Owner saying "move lunch to 11:30" no longer gets fought because Elan happens to be at 11:30 — owner override is the approval, the conflict shows on the calendar for him to sort.
+
+### Fixed (prompt-only)
+
+- **Owner-explicit time + conflict** — meetings prompt added rule: when owner names a specific time and there's a conflict, narrate the conflict and ask "keep 12:00?" not "find different?". Owner-override IS the approval — don't reframe as alternatives.
+- **External-meeting online/in-person ASK rule** — clarify ONLY when there's no clear remote signal. Different-TZ attendee in people_memory, "3pm ET" mentioned, "from Boston" mentioned → online by default, no ask. "At our office" / "in person" → physical, no ask. Otherwise ask whoever you're talking to (not the other party).
+- **Floating blocks vs colleague meetings ownership** — short rule: floating blocks are Maelle's call (move/skip silently), colleague conflicts need owner's call. Don't bundle them in one question.
+- **Verify the goal before suggesting collateral moves** — short rule: if extending meeting X requires Y to be free, check Y first; don't suggest moving Z to make room when Y will block anyway. Closes the "want me to shift FNX?" pattern when Amazia was already blocked.
+- **Trimmed find_available_slots fallback rule** — replaced "call get_calendar to find gaps yourself" with "re-call relaxed=true and flag the broken rule". Cleaner path, less manual math.
+
+### Invariants preserved
+
+- 5-min between-meeting buffer is never bypassed, even in relaxed mode.
+- Colleague-path scheduling rules unchanged. All new owner-override paths are gated on `senderRole === 'owner' || isOwnerInGroup === true`.
+- Coda validator fails open — better one weird coda than dropping every coda when the validator API blips.
+- Email enrichment is a soft fallback — externals that don't resolve still get the regular coord state machine (no new owner-friction).
+
+### Migration
+
+None. New yaml field is optional. New tool args are optional. New rank-change reason is additive to the union.
+
+### Not changed
+
+- The `coord_jobs` schema, the coord state machine, the v2.3.2 internal-only fast path — all unchanged.
+- `claimChecker` default behavior (action mode) — unchanged. New `'coda'` mode is opt-in via the `mode` parameter.
+- `move_meeting` colleague-path floating-block behavior — unchanged (still requires alignment + conflict-free).
+- Auto-triage / auto-build CI — still gated `if: false &&` (deactivated in 2.3.1).
+
+---
+
 ## 2.3.2 — Brief redesign + internal-coord fast-path + colleague-path booking + shadow threading
 
 A multi-front session: rewrote the morning brief to lead with today's calendar instead of a stale events feed; gave Maelle a direct booking path when a colleague has confirmed slot+duration+subject in conversation; added an internal-only fast-path to coordinate_meeting that skips the DM-and-poll round when every attendee's free/busy is readable via Graph; collapsed shadow-DM spam by threading per Slack conversation. Plus the Bug 3 wave from 28 Apr (toolHint trailing parens, narration honesty, duration auto-snap) and a process-wide warn-once cache for stub-skill yaml entries.

@@ -1286,7 +1286,63 @@ Rules:
               : (input.senderName?.split(' ')[0] ?? 'there'),
             language: codaLang,
           });
+          // v2.3.2 (2B) — validate coda against people_memory before appending.
+          // Catches the "shares my name" / "marathon training" hallucinations
+          // (invented facts) and gossipy commentary about third parties.
+          // Reuses claimChecker with mode='coda' so the same JSON contract /
+          // fail-open semantics apply. Fails open: if the validator can't
+          // reach a verdict, the coda still ships (better one weird coda than
+          // dropping every coda when the API blips).
+          let codaPassed = true;
           if (coda && coda.trim().length > 0) {
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { checkReplyClaims } = require('../../utils/claimChecker') as
+                typeof import('../../utils/claimChecker');
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { getPersonMemory } = require('../../db') as typeof import('../../db');
+              const personRow = getPersonMemory(turnPersonSlackId);
+              // Build a compact text snapshot of what we know about the
+              // recipient. Notes (free-text) + topics (categories/labels) +
+              // state/timezone are the inputs Sonnet should be riffing on.
+              const snapshot: string[] = [];
+              if (personRow) {
+                if (personRow.state) snapshot.push(`state: ${personRow.state}`);
+                if (personRow.timezone) snapshot.push(`timezone: ${personRow.timezone}`);
+                if (personRow.notes) {
+                  try {
+                    const notes = JSON.parse(personRow.notes) as Array<{ note?: string }>;
+                    for (const n of notes.slice(-10)) if (n.note) snapshot.push(`note: ${n.note}`);
+                  } catch { /* ignore */ }
+                }
+              }
+              const recipientName = input.senderName ?? personRow?.name ?? turnPersonSlackId;
+              const verdict = await checkReplyClaims({
+                reply: coda,
+                toolSummaries: [],
+                bookingOccurred: false,
+                ownerFirstName: profile.user.name.split(' ')[0],
+                mode: 'coda',
+                coda: {
+                  recipientName,
+                  recipientFactsSnapshot: snapshot.length > 0 ? snapshot.join('\n') : '(no notes / topics on record)',
+                },
+              });
+              if (verdict.claimed_action === true) {
+                codaPassed = false;
+                logger.info('Coda dropped by validator', {
+                  reason: verdict.action_type, summary: verdict.action_summary,
+                  codaPreview: coda.slice(0, 120),
+                });
+              }
+            } catch (err) {
+              logger.warn('Coda validator threw — letting coda through (fail-open)', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          }
+
+          if (coda && coda.trim().length > 0 && codaPassed) {
             finalReply = `${finalReply.trim()}\n\n${coda.trim()}`;
             if (codaDirective.topic) {
               logMaelleInitiated({
@@ -1294,6 +1350,54 @@ Rules:
                 topic: codaDirective.topic,
                 signal: 'none',
                 turnRef: threadTs ?? null,
+              });
+            }
+            // v2.3.2 (C1) — record the coda as a Maelle-initiated social moment
+            // on the PERSON (not just the topic). Sets people_memory.last_initiated_at
+            // so the 24h response window opens AND the rank-check below has a
+            // reference. Discovery codas (raise_new without a known topic, like
+            // "anything fun outside work?") had no topic → previously skipped this
+            // log → person rank stayed default forever even when ignored.
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { recordSocialMoment } = require('../../db') as typeof import('../../db');
+              recordSocialMoment(turnPersonSlackId, '', 'neutral', 'maelle');
+            } catch (err) {
+              logger.warn('coda recordSocialMoment threw — continuing', {
+                err: String(err).slice(0, 200),
+              });
+            }
+            // v2.3.2 (C2) — schedule a rank-check 48h out. The dispatcher
+            // checks people_memory.last_social_at vs last_initiated_at: if the
+            // person hasn't engaged socially in the window → -1 to engagement
+            // rank. Repeated ignores drift the person to rank 0 (opt-out).
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { createTask } = require('../../tasks/index') as typeof import('../../tasks/index');
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { DateTime: DT } = require('luxon') as typeof import('luxon');
+              const dueAt = DT.utc().plus({ hours: 48 }).toISO();
+              if (dueAt) {
+                createTask({
+                  owner_user_id: profile.user.slack_user_id,
+                  owner_channel: input.channelId,
+                  type: 'social_ping_rank_check',
+                  status: 'new',
+                  title: `Rank check (coda) — ${input.senderName ?? turnPersonSlackId}`,
+                  description: 'Check whether the colleague engaged socially after a coda fired.',
+                  due_at: dueAt,
+                  skill_ref: `coda_${threadTs ?? 'no_thread'}_${turnPersonSlackId}`,
+                  context: JSON.stringify({
+                    kind: 'coda',
+                    colleague_slack_id: turnPersonSlackId,
+                    coda_at_iso: DT.utc().toISO(),
+                  }),
+                  who_requested: 'system',
+                });
+              }
+            } catch (err) {
+              logger.warn('coda rank-check schedule threw — continuing', {
+                err: String(err).slice(0, 200),
               });
             }
             logger.info('Social coda appended to task turn', {

@@ -337,6 +337,14 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
               type: 'string',
               description: 'OPTIONAL. When set, the search clips its earliest slot to AFTER the end of the referenced event. Use when the user is booking an ordered series ("first M1, then M2 must come after M1, then M3 after M2…") to enforce ordering as a constraint instead of solving order in your head. Pass the event id from get_calendar of the predecessor meeting. Omit when there is no predecessor.',
             },
+            ignore_attendee_availability: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). By default, the tool auto-loads each attendee\'s working hours + timezone from people_memory and clips slots to their windows. Set true to skip that — e.g. owner explicitly says "find times when I\'m free, don\'t worry about the others, I\'ll check with them" or you only need owner-side availability. When true, slots are returned as if the attendee list were empty for window-clipping purposes.',
+            },
+            relaxed: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). Owner-only "show me everything" mode. When true, the search bypasses focus-time protection, lunch / floating-block windows, and work-hour strictness — but ALWAYS keeps the 5-min buffer between meetings (sacred). Use ONLY when the strict pass returned 0 / too few options AND the owner is asking "what else is open?". When you present these slots to the owner, MUST flag the soft rule each one breaks: "outside your work hours", "would land on your lunch", "leaves only X min of focus time". Owner decides whether to book.',
+            },
           },
           required: ['duration_minutes', 'attendee_emails', 'search_from', 'search_to', 'meeting_mode'],
         },
@@ -345,7 +353,13 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
         name: 'create_meeting',
         description: `Create a new calendar event directly (no coord needed — use this when the owner already knows the time + attendees). Call coordinate_meeting instead when participants need to agree on a time. Follow the location / category / work-day rules in the prompt section.
 
-Owner-path: owner override IS the approval — book it.
+ONLINE vs IN-PERSON for EXTERNAL attendees (v2.3.2): when at least one attendee has an email outside ${profile.user.email.split('@')[1]}, you must determine the meeting mode before booking. CLARIFY UNLESS one of these signals already tells you:
+- Their people_memory entry shows a different timezone than the owner — they're remote → online (no need to ask)
+- The conversation explicitly mentions a TZ or remote location ("3pm ET", "from Boston", "we'll do it on Zoom") → online
+- The conversation explicitly mentions in-person ("at our office", "in person", "they'll come over") → physical
+- Otherwise: ASK whoever you're talking to right now. Owner-path → ask owner. Colleague-path (external in your DM) → ask the external. Don't reach across to bother the other party.
+
+Once mode is settled: online → is_online=true, location optional. Physical at owner's office → is_online=false, leave location blank (the system fills in office address from yaml). Physical elsewhere → is_online=false, location=that venue.
 
 Colleague-path (v2.3.2): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book the 1:1. The handler enforces server-side: single colleague-attendee (the requester themselves — multi-party still goes through coordinate_meeting), rule-compliant slot (work hours, work days, buffers, floating blocks, no conflicts via findAvailableSlots), then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
 
@@ -932,6 +946,60 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
         }));
         const allParticipants = [...(args.participants as any[]), ...justInviteList];
 
+        // ── v2.3.2 (4F) — enrich missing emails for INTERNAL attendees ─────
+        // For internal teammates, Slack already has their email — no need to
+        // ask the owner. Two-step lookup per attendee with a missing email:
+        //   1. people_memory (cheap, by slack_id or name)
+        //   2. Slack collectCoreInfo (by slack_id) — falls back to users.info
+        // Externals that resolve to nothing keep their missing-email status,
+        // which downgrades them out of the v2.3.2 fast-path (handled below).
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { searchPeopleMemory, getPersonMemory: getPersonMemoryRow } =
+            require('../db') as typeof import('../db');
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getConnection: getConn } = require('../connections/registry') as
+            typeof import('../connections/registry');
+          const slackConn = getConn(profile.user.slack_user_id, 'slack');
+          for (const p of allParticipants as any[]) {
+            if (p.email) continue;
+            // Step 1 — people_memory
+            if (p.slack_id) {
+              const row = getPersonMemoryRow(p.slack_id as string);
+              if (row?.email) { p.email = row.email; continue; }
+            }
+            if (!p.email && p.name) {
+              const matches = searchPeopleMemory(p.name as string);
+              const row = matches.find(m => (m.name ?? '').toLowerCase() === (p.name as string).toLowerCase());
+              if (row?.email) {
+                p.email = row.email;
+                if (!p.slack_id && row.slack_id) p.slack_id = row.slack_id;
+                continue;
+              }
+            }
+            // Step 2 — Slack lookup (only when we have a slack_id)
+            if (!p.email && p.slack_id && slackConn?.collectCoreInfo) {
+              try {
+                const info = await slackConn.collectCoreInfo(p.slack_id as string);
+                if (info?.email) {
+                  p.email = info.email;
+                  logger.info('coordinate_meeting — email enriched from Slack', {
+                    slack_id: p.slack_id, name: p.name,
+                  });
+                }
+              } catch (err) {
+                logger.warn('coordinate_meeting — Slack collectCoreInfo threw, skipping enrich', {
+                  slack_id: p.slack_id, err: String(err).slice(0, 200),
+                });
+              }
+            }
+          }
+        } catch (err) {
+          logger.warn('coordinate_meeting — attendee enrichment threw, proceeding with input as-is', {
+            err: String(err).slice(0, 200),
+          });
+        }
+
         // ── Slot-count transparency ─────────────────────────────────────────
         // Removed the user-facing "Only N slots came up — want me to extend?"
         // note: coordinate_meeting dispatches DMs asynchronously via the action
@@ -1500,6 +1568,16 @@ Bad: "Here's what I found going day by day: Sunday... Monday... Tuesday... Wedne
 
 When nothing fits, give ONE line: "Nothing clean next week — Tuesday 11:00 is the closest but it would leave you under 2h of focus time. Want me to book it anyway, or widen the search?" Don't enumerate every rejected slot.
 
+VERIFY THE GOAL BEFORE SUGGESTING COLLATERAL MOVES — when ${firstName} asks for something (extend a meeting, fit a longer slot, add a person) and you're tempted to suggest "I'll move X to make room", FIRST verify the original goal is achievable. If extending Sales BiWeekly requires Amazia and Amazia's blocked, say "Amazia's tied up till 17:00 so we can't extend that one" — do NOT propose moving FNX as a wasted half-solution.
+
+FLOATING BLOCKS ARE YOUR CALL, COLLEAGUE MEETINGS NEED ${firstName.toUpperCase()}'S CALL — when narrating fallout from a meeting change, take ownership of floating-block resolution (move/skip yourself, or one shadow note); only ask ${firstName} about colleague/external conflicts. Don't bundle them in one question.
+
+OWNER-EXPLICIT TIME — override IS the approval:
+When ${firstName} names a SPECIFIC TIME for a booking ("book Gilly at 12pm Thursday", "schedule it for 14:30", "let's do 9am tomorrow") AND that time has conflicts (overlap with other meeting, breaks buffer, lands in lunch / OOF window), narrate the conflicts honestly so he sees the impact — then ask whether to PROCEED WITH HIS TIME, NOT whether to find a different one. He's allowed to override his own rules. Examples:
+- WRONG: "12:00 is blocked — overlaps Elan + Lunch. Want me to find a clean 55-min slot on Thursday instead?"
+- RIGHT: "Got it — 12:00 Thursday. Heads up: that overlaps Elan (11:30–12:10) and your lunch block (12:15–12:40), and runs to 12:55 right into Happy Hour. Want me to book it at 12:00 and we'll sort the others, or pick a different time?"
+This applies to create_meeting AND move_meeting AND any time owner says "do it at X" with X being a specific clock time. Don't reframe to alternatives — surface the cost, ask permission to proceed.
+
 WHY A SLOT DOESN'T WORK — name the actual rule:
 When explaining why a day/slot is blocked, say the specific rule, not "gaps too short". Honest reasons:
 - "would leave under 2h of focus time" (thinking-time rule)
@@ -1514,11 +1592,13 @@ If ${firstName} asks "what are my options / when am I free / find me a slot / do
 RESCHEDULING ALTERNATIVES → same rule:
 If the owner or a colleague asks to move, shift, or reschedule an existing meeting and you need to propose alternative slots, call find_available_slots for the relevant day/window — do NOT narrate from raw calendar data. Trap to avoid: seeing "free from 9:00 before the meeting" and suggesting 9:00 — a 55-min meeting at 9:00 ends at 9:55, which OVERLAPS the original 9:15–10:10 block still on the calendar. find_available_slots handles this correctly: it fetches free/busy (which includes the original meeting as busy) and will never return a slot that overlaps it. Never propose a reschedule alternative that falls within or overlaps the original meeting's time window.
 
-If find_available_slots returns 0–1 slots, DO NOT stop and ask to widen hours. Instead:
-1. Call get_calendar for the same range to see raw events.
-2. Find the gaps in normal work hours that ARE at least the meeting duration.
-3. Offer those gaps upfront with the specific rule each one breaks. Example: "Slim pickings. Real gaps: Sunday 13:15–15:30 (home day, leaves 20 min of your 1h home focus) and Monday 14:45–16:00 (leaves 1h15 after — under your 2h office focus). Either work?"
-4. ${firstName} can accept ("yes, Monday") or reject ("no, find something else"). If he accepts a rule-breaking slot, book it. If he rejects everything, THEN ask about extended hours.
+If find_available_slots returns 0–1 slots for ${firstName}, DO NOT stop and say "nothing clean". Re-call find_available_slots with relaxed=true (owner-only mode). It bypasses focus-time protection, lunch / floating-block windows, and work-hour strictness — but always keeps the 5-min between-meeting buffer. Returns the additional slots.
+
+When narrating relaxed-mode slots, MUST flag the soft rule each one breaks so ${firstName} sees the trade-off:
+- "13:15 lands on your lunch window — book anyway?"
+- "16:30 is past your usual 15:30 finish on home days — book anyway?"
+- "11:00 leaves only 1h of focus time after — book anyway?"
+${firstName} can accept ("yes, Monday") or reject ("no, find something else"). If he accepts a rule-breaking slot, book it. If he rejects everything AND you haven't already used relaxed mode AND he says he wants more options, THEN ask about extending the date range or moving other meetings.
 
 Exception where narrating from raw calendar is fine on first turn:
 - ${firstName} asked for a duration that is NOT one of your allowed durations (e.g. "a 90-min workshop"). The slot finder won't help. Just narrate what's free.

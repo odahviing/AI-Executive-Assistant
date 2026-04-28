@@ -81,9 +81,84 @@ export async function handleCoordReply(
     } catch { return []; }
   };
 
+  const slotsFor = (j: CoordJob): string[] => {
+    try { return JSON.parse(j.proposed_slots) as string[]; } catch { return []; }
+  };
+
+  // v2.3.2 — pending vote check. The recency safety net only fires when the
+  // sender hasn't already responded; a colleague who picked yesterday and
+  // sends a casual chat today shouldn't get pulled back into the coord.
+  const senderHasPendingVote = (j: CoordJob): boolean => {
+    try {
+      const parts = JSON.parse(j.participants) as CoordParticipant[];
+      const me = parts.find(p => p.slack_id === params.senderId);
+      return !!me && me.response === null;
+    } catch { return false; }
+  };
+
+  // v2.3.2 — pre-LLM deterministic gate. Catches the "Amazia quoted the slot
+  // text back" pattern + the "we just DM'd them, anything they say is likely
+  // about it" pattern. Both bypass `isCoordReplyByContext` (which is too
+  // strict on bare confirmations like "it is ok").
+  //
+  // Layer 1: slot-label substring match. If the message text contains a
+  // date-time label that matches one of THIS coord's proposed slots (using
+  // the same format we sent in the DM), confidence is high enough to skip
+  // the LLM gate.
+  //
+  // Layer 2: recency-based softening. If the sender has a pending vote in a
+  // coord whose last DM landed in the last RECENT_REPLY_WINDOW_MIN minutes,
+  // override the gate. The intuition: a colleague who JUST got slot options
+  // and sends a vague "ok" / "sure" / "sounds good" moments later is almost
+  // certainly responding to those slots, not opening a new topic.
+  const RECENT_REPLY_WINDOW_MIN = 10;
+
+  const slotLabelMatchFor = (j: CoordJob): boolean => {
+    const slots = slotsFor(j);
+    if (slots.length === 0) return false;
+    const tz = params.profile.user.timezone;
+    const text = params.text;
+    for (const iso of slots) {
+      const dt = DateTime.fromISO(iso).setZone(tz);
+      if (!dt.isValid) continue;
+      // Match the same label format used in `sendCoordDM`
+      // ("Thursday, 30 April at 13:30"). Substring check is enough — we
+      // don't need an exact match, the colleague might prefix/suffix.
+      const fullLabel = dt.toFormat("EEEE, d MMMM 'at' HH:mm");
+      if (text.includes(fullLabel)) return true;
+      // Looser fallback — date + time without "at" wording.
+      const looser = dt.toFormat("d MMMM") + ' ' + dt.toFormat('HH:mm');
+      if (text.includes(looser)) return true;
+    }
+    return false;
+  };
+
+  const recentDmTo = (j: CoordJob): boolean => {
+    try {
+      const parts = JSON.parse(j.participants) as CoordParticipant[];
+      const me = parts.find(p => p.slack_id === params.senderId);
+      const lastDmIso = (me as any)?.dm_sent_at as string | undefined;
+      if (!lastDmIso) return false;
+      const sent = DateTime.fromISO(lastDmIso);
+      if (!sent.isValid) return false;
+      const ageMin = DateTime.utc().diff(sent.toUTC(), 'minutes').minutes;
+      return ageMin <= RECENT_REPLY_WINDOW_MIN;
+    } catch { return false; }
+  };
+
   let job: CoordJob;
 
-  if (jobs.length === 1) {
+  // Layer 1 + 2 — try deterministic / recency match across pending-vote jobs
+  // first. If exactly one job matches, lock to it and skip the LLM gate.
+  const pendingJobs = jobs.filter(senderHasPendingVote);
+  const deterministicMatch = pendingJobs.filter(j => slotLabelMatchFor(j) || recentDmTo(j));
+  if (deterministicMatch.length === 1) {
+    job = deterministicMatch[0];
+    logger.info('Coord reply: deterministic / recency match — bypassing LLM gate', {
+      jobId: job.id, sender: params.senderId,
+      reason: slotLabelMatchFor(job) ? 'slot_label_match' : 'recent_dm',
+    });
+  } else if (jobs.length === 1) {
     const isRelevant = await isCoordReplyByContext(params.text, jobs[0].subject, namesFor(jobs[0]));
     if (!isRelevant) return false;
     job = jobs[0];
@@ -359,9 +434,30 @@ export async function handleCoordReply(
     response = 'no';
   }
   if (response === 'maybe') {
+    // v2.3.2 — human phrasing for ambiguous-reply confirmation. Owner direction:
+    // never say "pick a number 1/2/3" — that reads like a bot form. Name the
+    // slots and ask plainly. Single slot → "just verifying X works for you?".
+    // Multiple slots → "was that <a> or <b>?".
+    const tz = params.profile.user.timezone;
+    const slotLabels = proposedSlots.map(iso => {
+      const dt = DateTime.fromISO(iso).setZone(tz);
+      return dt.isValid ? dt.toFormat("EEEE 'at' HH:mm") : iso;
+    });
+    let clarification: string;
+    if (slotLabels.length === 0) {
+      clarification = `Just want to make sure I've got that right — which time works for you?`;
+    } else if (slotLabels.length === 1) {
+      clarification = `Just verifying — ${slotLabels[0]} works for you?`;
+    } else if (slotLabels.length === 2) {
+      clarification = `Just to make sure — was that ${slotLabels[0]} or ${slotLabels[1]}?`;
+    } else {
+      const last = slotLabels[slotLabels.length - 1];
+      const rest = slotLabels.slice(0, -1).join(', ');
+      clarification = `Just to make sure — was that ${rest}, or ${last}? Or none of those — happy to find something else.`;
+    }
     await slackConn.postToChannel(
       params.channelId,
-      `Thanks! Just to make sure I've got it right — could you pick a number (1, 2, or 3) for the options above? Or if none of those work, just tell me what times are better for you and I'll find something else.`,
+      clarification,
       { threadTs: params.threadTs },
     );
     // v2.2.4 (bug 3c) — 'Reply received — unclear' shadow dropped. The owner

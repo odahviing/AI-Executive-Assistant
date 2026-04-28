@@ -209,6 +209,15 @@ const UserProfileSchema = z.object({
     min_slot_buffer_hours: z.number().min(0).max(12).default(4),
     physical_meetings_require_office_day: z.boolean(),
     room_email: z.string().email().optional(),   // e.g. "meeting@company.com" — used to book physical meeting rooms
+    // v2.3.2 (1C) — owner's actual office address for physical meetings.
+    // Lands in the calendar invite location so external attendees know where
+    // to go (vs. just "Idan's Office" label which means nothing to them).
+    // All fields optional — if unset, fall back to the legacy label-only behavior.
+    office_location: z.object({
+      label: z.string().optional(),     // override the "${name}'s Office" label
+      address: z.string().optional(),   // street address, building, floor
+      parking: z.string().optional(),   // parking instructions for visitors
+    }).optional(),
     // v2.1.1 — each entry must supply EITHER name (subject match, existing)
     // OR category (Outlook-category match, new). This is additive-compatible:
     // existing profiles with only `name` keep working. When the owner adds an

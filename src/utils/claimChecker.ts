@@ -43,9 +43,22 @@ export interface ClaimCheckInput {
     isMpim: boolean;
     participantSlackIds: string[];   // all non-bot member IDs in the MPIM
   };
+  // v2.3.2 (2B) — second mode. Default 'action' = existing behavior (false
+  // action claims). 'coda' = check a generated social coda for invented facts
+  // or gossipy commentary about a third party. Same JSON shape; caller checks
+  // claimed_action and drops the coda when true.
+  mode?: 'action' | 'coda';
+  coda?: {
+    recipientName: string;
+    /** Compact text snapshot of what we actually know about the recipient
+     *  from people_memory (notes, topics, state, timezone, etc.). The check
+     *  treats anything stated in the coda but not present here as an
+     *  invented fact. */
+    recipientFactsSnapshot: string;
+  };
 }
 
-export type ClaimActionType = 'message' | 'book' | 'task' | 'other' | null;
+export type ClaimActionType = 'message' | 'book' | 'task' | 'other' | 'invented_fact' | 'gossipy' | null;
 
 export interface ClaimCheckResult {
   claimed_action: boolean;
@@ -59,6 +72,9 @@ export interface ClaimCheckResult {
 
 /** Heuristic skip — short trivially-safe replies don't need a round-trip. */
 function needsCheck(input: ClaimCheckInput): boolean {
+  // v2.3.2 (2B) — coda mode always checks. Codas are SHORT by design but
+  // every word matters; the "shares my name" hallucination was 9 words.
+  if (input.mode === 'coda') return true;
   if (input.bookingOccurred) return false;      // deterministic proof of the only booking claim type
   if (input.reply.length < 60) return false;    // too short to plausibly carry a compound false claim
   return true;
@@ -85,7 +101,52 @@ export async function checkReplyClaims(input: ClaimCheckInput): Promise<ClaimChe
         : '(none listed)'}\n  Inline mentions of these participants in the reply are LEGITIMATE addressing (greeting/directing them in the shared room). Do NOT treat them as phantom sends.\n`
     : '';
 
-  const prompt = `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
+  // v2.3.2 (2B) — coda mode prompt. Same JSON shape as action mode (so
+  // callers don't branch on the result type), different judgment criteria.
+  // Detects (a) facts stated about the recipient that aren't in our snapshot,
+  // (b) commentary about a third party named in the coda. Either → drop coda.
+  const codaPrompt = input.mode === 'coda' && input.coda
+    ? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
+
+You audit a generated SOCIAL CODA — a one-line human aside the assistant ${input.ownerFirstName}'s assistant just composed to append to a task reply. Your job: catch invented facts and gossipy third-party commentary before the coda gets sent.
+
+RECIPIENT: ${input.coda.recipientName}
+
+WHAT WE ACTUALLY KNOW ABOUT ${input.coda.recipientName} (from our memory):
+${input.coda.recipientFactsSnapshot}
+
+DRAFT CODA:
+"""
+${input.reply}
+"""
+
+Two failure modes — flag if EITHER is present:
+
+(1) INVENTED FACT — the coda asserts something specific about ${input.coda.recipientName} that is NOT in the memory snapshot above. Examples:
+- "How's the marathon training going?" when training isn't in their memory
+- "Kind of wild that she shares my name" when no such overlap is in memory (and isn't a real overlap a sane reader would see)
+- "Excited for your trip to Boston" when no Boston trip is in memory
+- "Hope the kitchen reno wraps up soon" when no kitchen reno is in memory
+Generic open questions ("anything fun outside work lately?", "how was the weekend?", "any travel coming up?") are NOT invented facts — they don't claim anything, they ask. Don't flag those.
+
+(2) GOSSIPY THIRD-PARTY COMMENTARY — the coda contains evaluative commentary (positive OR negative) about a person named in the coda OTHER than ${input.coda.recipientName} themselves. Examples:
+- "Hope she's at least competent" about a third person — gossip
+- "Such a great pick for the role" about a third person — also off-tone (commentary on others)
+Mentioning a third party neutrally ("looking forward to your meeting with X") is fine. Only flag evaluative judgment.
+
+Output schema (REUSE the action-checker shape so callers don't branch):
+{
+  "claimed_action": boolean,    // true = drop the coda
+  "action_type": "invented_fact" | "gossipy" | null,
+  "target_name": string | null,  // for gossipy: the third party named; for invented_fact: the recipient
+  "action_summary": string | null  // one-line reason
+}
+
+If the coda passes both checks (no invented facts, no gossipy commentary), set claimed_action=false and other fields null.
+Reminder: JSON only. Start with { end with }. No prose.`
+    : null;
+
+  const prompt = codaPrompt ?? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
 You audit draft replies from an executive assistant for false action claims before they get sent. The assistant's principal is ${input.ownerFirstName}.
 

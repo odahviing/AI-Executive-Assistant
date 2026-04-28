@@ -70,7 +70,21 @@ export function determineSlotLocation(
 
   if (isOfficeDay) {
     // Office day: ≤3 people → Idan's Office, >3 → Meeting Room. Always Teams link.
-    const location = participantCount > 3 ? 'Meeting Room' : `${profile.user.name.split(' ')[0]}'s Office`;
+    // v2.3.2 (1C) — when profile.meetings.office_location is configured, use
+    // its real address instead of the bare "${name}'s Office" label so
+    // externals on the invite know where to go. Label/address/parking all
+    // optional in the yaml; unset fields fall back to the legacy label.
+    const officeLoc = profile.meetings.office_location;
+    let location: string;
+    if (participantCount > 3) {
+      location = 'Meeting Room';
+    } else {
+      const baseLabel = officeLoc?.label ?? `${profile.user.name.split(' ')[0]}'s Office`;
+      const parts = [baseLabel];
+      if (officeLoc?.address) parts.push(officeLoc.address);
+      if (officeLoc?.parking) parts.push(`Parking: ${officeLoc.parking}`);
+      location = parts.join(' — ');
+    }
     return { location, isOnline: true };
   }
 

@@ -407,6 +407,15 @@ export async function findAvailableSlots(params: {
     hoursStart: string;        // 'HH:MM'
     hoursEnd: string;
   }>;
+  // v2.3.2 (2A) — owner-override "show me everything" mode. When true:
+  //   - skips focus-time protection (free_time_per_office/home_day_hours)
+  //   - skips floating-block feasibility check (lunch/coffee/etc. windows)
+  //   - widens hours to 07-22 (same as extendedHours)
+  // ALWAYS keeps the 5-min buffer between meetings (sacred).
+  // Day type (work day vs day off) is also still respected.
+  // Caller is expected to narrate to the owner that these slots break their
+  // soft rules ("outside your focus protection / lunch window / normal hours").
+  relaxed?: boolean;
 }): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other' }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
@@ -613,7 +622,10 @@ export async function findAvailableSlots(params: {
       return 'other';
     };
     const getWorkHoursForDay = (dayName: string): { startMin: number; endMin: number } | null => {
-      if (profile && !params.extendedHours) {
+      // v2.3.2 (2A) — `relaxed` mode treats hours as extended (07-22), same
+      // as the explicit `extendedHours` flag. Owner can override their own
+      // work hours when they ask for "show me everything".
+      if (profile && !params.extendedHours && !params.relaxed) {
         const { office_days, home_days } = profile.schedule;
         if (officeDayNames.includes(dayName)) {
           const [sh, sm] = office_days.hours_start.split(':').map(Number);
@@ -721,7 +733,9 @@ export async function findAvailableSlots(params: {
           continue;
         }
       }
-      if (profile) {
+      // v2.3.2 (2A) — focus-time protection skipped in relaxed mode. Owner
+      // explicitly opted in; he sees the trade-off in the narration.
+      if (profile && !params.relaxed) {
         // v1.6.11 — threshold depends on whether this is an office or home day
         const dayType = classifyDay(dayName);
         const thresholdMin =
@@ -746,7 +760,9 @@ export async function findAvailableSlots(params: {
       // apply on this day (e.g. "Thursday coffee break" on a Monday) or
       // that are `can_skip:true` and truly have no room simply skip the
       // feasibility check for this slot.
-      if (profile && floatingBlocks.length > 0) {
+      // v2.3.2 (2A) — floating-block feasibility skipped in relaxed mode.
+      // Owner sees the trade-off in narration ("squeezes lunch").
+      if (profile && floatingBlocks.length > 0 && !params.relaxed) {
         const dayDate = cursorDt.toFormat('yyyy-MM-dd');
         let blockConflict = false;
         for (const block of floatingBlocks) {

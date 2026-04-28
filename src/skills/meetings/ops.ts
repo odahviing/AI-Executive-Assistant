@@ -718,21 +718,80 @@ export class SchedulingSkill {
             }
           }
 
+          // v2.3.2 (5B/5C) — auto-load attendee availability from people_memory.
+          // For each attendee email we know in people_memory with a timezone,
+          // build an attendeeAvailability entry (working hours + workdays in
+          // their TZ). The slot finder pre-clips slots to the intersection of
+          // every attendee's window — so Brett (Boston/EST) won't get
+          // proposed 10:15 IL (3:15 ET). Owner can opt out via
+          // `ignore_attendee_availability: true` for "find times I'm free,
+          // I'll handle the others" scenarios.
+          const attendeeEmails = (args.attendee_emails as string[]) ?? [];
+          const ignoreAvailability = args.ignore_attendee_availability === true;
+          let attendeeAvailability: Array<{
+            email: string;
+            timezone: string;
+            workdays: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
+            hoursStart: string;
+            hoursEnd: string;
+          }> | undefined;
+
+          if (!ignoreAvailability && attendeeEmails.length > 0) {
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { searchPeopleMemory } = require('../../db') as typeof import('../../db');
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { getEffectiveWorkingHours } = require('../../utils/workingHoursDefault') as
+                typeof import('../../utils/workingHoursDefault');
+              const built: typeof attendeeAvailability = [];
+              for (const email of attendeeEmails) {
+                const lower = email.toLowerCase();
+                if (lower === userEmail.toLowerCase()) continue;
+                const matches = searchPeopleMemory(email);
+                const person = matches.find(m => (m.email ?? '').toLowerCase() === lower);
+                if (!person?.timezone) continue;
+                const wh = getEffectiveWorkingHours(person);
+                if (!wh) continue;
+                built.push({
+                  email,
+                  timezone: person.timezone,
+                  workdays: wh.workdays,
+                  hoursStart: wh.hoursStart,
+                  hoursEnd: wh.hoursEnd,
+                });
+              }
+              if (built.length > 0) {
+                attendeeAvailability = built;
+                logger.info('find_available_slots — auto-loaded attendee availability', {
+                  attendees: built.map(b => `${b.email}(${b.timezone}, ${b.hoursStart}-${b.hoursEnd})`),
+                });
+              }
+            } catch (err) {
+              logger.warn('find_available_slots — attendee availability auto-load threw, proceeding without', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          }
+
           try {
             return await findAvailableSlots({
               userEmail,
               timezone,
               durationMinutes: args.duration_minutes as number,
-              attendeeEmails: args.attendee_emails as string[],
+              attendeeEmails,
               searchFrom: effectiveSearchFrom,
               searchTo: args.search_to as string,
               preferMorning: args.prefer_morning as boolean | undefined,
               meetingMode: mode as import('../../connectors/graph/calendar').MeetingMode,
               travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
+              attendeeAvailability,
               minBufferHours: (context.senderRole === 'owner' || context.isOwnerInGroup === true)
                 ? 1
                 : (context.profile.meetings.min_slot_buffer_hours ?? 4),
               profile: context.profile,
+              // v2.3.2 (2A) — relaxed mode opt-in (owner-only). Bypasses
+              // focus / lunch / work-hours; keeps the 5-min between-meeting buffer.
+              relaxed: args.relaxed === true && context.senderRole === 'owner',
             });
           } catch (err) {
             if (err instanceof GraphPermissionError) {
@@ -975,9 +1034,36 @@ export class SchedulingSkill {
           start:      args.start    as string,
           end:        args.end      as string,
           attendees,
-          body:       args.body     as string | undefined,
+          // v2.3.2 (1E) — invite body scrubbed for tool-name leaks, em-dash
+          // separator, IANA tz strings, etc. Slack-side replies route through
+          // formatForSlack which calls scrubInternalLeakage; invites bypass
+          // that path and were leaking the same patterns.
+          body: (() => {
+            const raw = args.body as string | undefined;
+            if (!raw) return undefined;
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { scrubInternalLeakage } = require('../../utils/textScrubber') as typeof import('../../utils/textScrubber');
+            return scrubInternalLeakage(raw);
+          })(),
           isOnline:   args.is_online as boolean,
-          location:   args.location  as string | undefined,
+          // v2.3.2 (1C) — fill in real office address from yaml when this is
+          // a physical meeting at owner's office (is_online=false, no custom
+          // location given). Sonnet shouldn't have to remember the address;
+          // it lives in profile.meetings.office_location and we splice it in
+          // here so the calendar invite carries something externals can act
+          // on instead of a meaningless "Idan's Office" string.
+          location: ((): string | undefined => {
+            const userLoc = args.location as string | undefined;
+            if (userLoc && userLoc.trim().length > 0) return userLoc;
+            if (args.is_online === true) return undefined;
+            const officeLoc = context.profile.meetings.office_location;
+            if (!officeLoc) return undefined;
+            const parts: string[] = [];
+            if (officeLoc.label) parts.push(officeLoc.label);
+            if (officeLoc.address) parts.push(officeLoc.address);
+            if (officeLoc.parking) parts.push(`Parking: ${officeLoc.parking}`);
+            return parts.length > 0 ? parts.join(' — ') : undefined;
+          })(),
           categories:  args.category ? [args.category as string] : ['Meeting'],  // default fallback
           sensitivity: args.category === 'Private' ? 'private' : undefined,
           // v2.3.1 (B23) — invite-body attribution names this assistant + owner.
@@ -1334,6 +1420,57 @@ export class SchedulingSkill {
                 .filter(b => b.end > wStart && b.start < wEnd)
                 .map(b => ({ start: Math.max(b.start, wStart), end: Math.min(b.end, wEnd) }));
               const buffer = context.profile.meetings.buffer_minutes ?? 5;
+
+              // v2.3.2 (3A) — owner-explicit hint respects target as-is when
+              // in-window. Don't snap to a different slot, don't refuse on
+              // conflict. findAlignedSlotForBlock conflated window-check and
+              // conflict-check; for owner-explicit moves only the window
+              // matters — owner overrides any conflict (it shows as a normal
+              // calendar overlap she can sort separately, e.g. she said
+              // "I'll move Elan after"). Out-of-window still refuses, that's
+              // the lunch_bump approval territory.
+              const isOwnerPath = context.senderRole === 'owner' || context.isOwnerInGroup === true;
+              if (isOwnerPath) {
+                const hintStartMs = newStartDt.toMillis();
+                const hintEndMs = hintStartMs + matchedBlock.duration_minutes * 60 * 1000;
+                if (hintStartMs >= wStart && hintEndMs <= wEnd) {
+                  effectiveStart = newStartDt.toISO()!;
+                  effectiveEnd = newStartDt
+                    .plus({ minutes: matchedBlock.duration_minutes })
+                    .toISO()!;
+                  logger.info('move_meeting (owner) — floating block in-window, using hint as-is', {
+                    meetingId: args.meeting_id, block: matchedBlock.name, hint: args.new_start,
+                  });
+                } else {
+                  logger.info('move_meeting refused — owner hint out of window for floating block', {
+                    meetingId: args.meeting_id, block: matchedBlock.name, hint: args.new_start,
+                    window: `${matchedBlock.preferred_start}-${matchedBlock.preferred_end}`,
+                  });
+                  return {
+                    success: false,
+                    error: 'out_of_window',
+                    message: `${args.new_start} is outside the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name}. To move it OUTSIDE the window, raise create_approval(kind='lunch_bump').`,
+                  };
+                }
+                // Skip the colleague-path findAlignedSlotForBlock branch below.
+                return await updateMeeting({
+                  userEmail, timezone,
+                  meetingId: args.meeting_id as string,
+                  start: effectiveStart, end: effectiveEnd,
+                }).then(async () => {
+                  closeMeetingArtifacts({
+                    ownerUserId: context.profile.user.slack_user_id,
+                    meetingId: args.meeting_id as string,
+                    reason: 'moved',
+                  });
+                  return {
+                    success: true,
+                    action_summary: `Moved ${matchedBlock.name} to ${formatIsoTime(effectiveStart)}.`,
+                  };
+                });
+              }
+
+              // Colleague-path — keep existing alignment + conflict guard.
               const alignedMs = fb.findAlignedSlotForBlock(matchedBlock, dayStr, timezone, busy, buffer);
               if (alignedMs === null) {
                 logger.info('move_meeting refused — no in-window slot for floating block', {

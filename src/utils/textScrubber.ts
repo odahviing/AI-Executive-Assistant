@@ -70,7 +70,12 @@ export function scrubInternalLeakage(text: string): string {
   return text
     .replace(GRAPH_ID_RE, '')
     .replace(IANA_TZ_RE, humanizeIanaToken)
-    .replace(/ - /g, ', ')            // hyphen-separator AI tell
+    // v2.3.2 — sentence-separator dashes. Both forms ("foo - bar" and the
+    // em-dash "foo — bar") are AI writing tells and the prompt rule alone
+    // doesn't stick. Replace with comma so the sentence still flows. Tight
+    // pattern (space-dash-space) so word-internal hyphens ("10-minute",
+    // "well-known") and time-range en-dashes ("12:00–12:55") are untouched.
+    .replace(/ [-—] /g, ', ')
     .replace(SENTINEL_RE, '')
     .replace(TOOL_NAME_RE, '')
     .replace(/`\s*`/g, '')             // empty inline code spans left over

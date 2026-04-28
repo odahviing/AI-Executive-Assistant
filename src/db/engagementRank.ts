@@ -38,6 +38,7 @@ export type RankChangeReason =
   | 'reply_engaged'
   | 'reply_brief'
   | 'no_reply_to_ping'
+  | 'no_social_response_to_coda'   // v2.3.2 (C2) — coda fired, person didn't engage socially in 48h
   | 'colleague_deflected'
   | 'owner_directive'
   | 'migration_from_legacy'
