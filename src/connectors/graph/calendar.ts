@@ -57,6 +57,34 @@ export interface FreeBusySlot {
   start: string;
   end: string;
   status: 'free' | 'busy' | 'tentative' | 'oof' | 'workingElsewhere' | 'unknown';
+  // Explicit IANA zone the start/end strings are expressed in. Set by
+  // parseGraphFreeBusySlot. Without this annotation, downstream consumers
+  // (Sonnet via get_free_busy, util code) silently treat raw Graph strings
+  // as if they were already local — which has bitten us repeatedly when an
+  // attendee in another zone is read as if their busy block were in the
+  // owner's zone.
+  _timezone?: string;
+}
+
+/**
+ * Single chokepoint for parsing Graph getSchedule's scheduleItems.
+ * Graph returns dateTimes as UTC wall-clock strings WITHOUT an explicit
+ * offset suffix, regardless of the timeZone field set in the request.
+ * We parse as UTC, re-zone to the caller's requested zone, and emit an
+ * ISO string that includes the offset — so the TZ context is encoded
+ * in the data itself, not lost in transit.
+ */
+export function parseGraphFreeBusySlot(item: any, requestedTz: string): FreeBusySlot {
+  const start = DateTime.fromISO(item.start.dateTime, { zone: 'utc' })
+    .setZone(requestedTz);
+  const end = DateTime.fromISO(item.end.dateTime, { zone: 'utc' })
+    .setZone(requestedTz);
+  return {
+    start: start.isValid ? start.toISO()! : item.start.dateTime,
+    end: end.isValid ? end.toISO()! : item.end.dateTime,
+    status: item.status,
+    _timezone: requestedTz,
+  };
 }
 
 export interface CreateMeetingParams {
@@ -276,11 +304,9 @@ export async function getFreeBusy(
 
     const result: Record<string, FreeBusySlot[]> = {};
     for (const schedule of response.value || []) {
-      result[schedule.scheduleId] = (schedule.scheduleItems || []).map((item: any) => ({
-        start: item.start.dateTime,
-        end: item.end.dateTime,
-        status: item.status,
-      }));
+      result[schedule.scheduleId] = (schedule.scheduleItems || []).map((item: any) =>
+        parseGraphFreeBusySlot(item, timezone),
+      );
     }
     return result;
   } catch (err: any) {
@@ -445,19 +471,22 @@ export async function findAvailableSlots(params: {
 
     const busyMap = await getFreeBusy(params.userEmail, busyFilterEmails, windowFrom, windowTo, params.timezone);
 
-    // v2.0.3 — Graph's getSchedule returns scheduleItems in UTC (the ISO
-    // strings have no timezone suffix and are NOT in the request timezone).
-    // The previous code parsed them as Israel local time, shifting every
-    // busy block by the owner's timezone offset. That let a recurring
-    // meeting at 11:00 local (08:00 UTC) appear free at 11:00 local because
-    // the busy block was interpreted as 08:00 local. Parse as UTC explicitly.
+    // FreeBusySlot.start/end now carry an explicit IANA offset (set by
+    // parseGraphFreeBusySlot inside getFreeBusy). Luxon honors that offset
+    // when parsing, so .toJSDate() yields the correct absolute moment
+    // regardless of the second-arg zone hint. Historical context: Graph's
+    // getSchedule returns wall-clock-as-UTC without any offset; we used to
+    // parse with { zone: 'utc' } to compensate, which broke the moment
+    // anyone changed the call site without knowing the convention. The
+    // chokepoint helper makes the convention live in the data, not the
+    // reader.
     const allBusy: Array<{ start: Date; end: Date }> = [];
     for (const slots of Object.values(busyMap)) {
       for (const slot of slots) {
         if (slot.status !== 'free') {
           allBusy.push({
-            start: DateTime.fromISO(slot.start, { zone: 'utc' }).toJSDate(),
-            end:   DateTime.fromISO(slot.end,   { zone: 'utc' }).toJSDate(),
+            start: DateTime.fromISO(slot.start).toJSDate(),
+            end:   DateTime.fromISO(slot.end).toJSDate(),
           });
         }
       }

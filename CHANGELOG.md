@@ -2,6 +2,41 @@
 
 ---
 
+## 2.3.4 — Source-of-truth fixes: interaction-log filter + free/busy TZ chokepoint + claim-checker retry honesty + delete-series guard
+
+Four bugs from one evening of real chat use, all about stale snapshots overriding current state. Maelle was narrating an old `meeting_booked` log line as if it were tomorrow's calendar; reading a free/busy response in the wrong timezone because the strings carried no offset; and after a claim-checker false-positive, re-reading the calendar and narrating her own move as someone else's. Plus defense-in-depth: `delete_meeting` finally got the same seriesMaster preflight that `move_meeting` and `update_meeting` already had.
+
+### Added
+
+- **`parseGraphFreeBusySlot(item, requestedTz)` chokepoint** ([`connectors/graph/calendar.ts`](src/connectors/graph/calendar.ts)) — single helper for parsing every Graph `getSchedule` scheduleItem. Graph returns dateTimes as UTC-zoneless strings regardless of the request's `timeZone` field; the helper parses as UTC, re-zones to the requested zone, and emits ISO with the explicit offset (`13:00:00.000+03:00` instead of bare `13:00:00`). `FreeBusySlot` gained `_timezone?: string` so the zone travels with the data, not in convention. `getFreeBusy` now routes every slot through it; three downstream consumers (`findAvailableSlots`, `annotateSlotsWithAttendeeStatus`, `resolver.ts`) dropped the now-misleading `{ zone: 'utc' }` parse hint — the offset in the string carries the same information unambiguously.
+- **`delete_meeting` seriesMaster guard** ([`skills/meetings/ops.ts:1615`](src/skills/meetings/ops.ts:1615)) — `getEventType` preflight that mirrors the v1.8.8 `update_meeting` and `move_meeting` guards. If the id resolves to a `seriesMaster`, returns `error: 'recurring_series_master'` with a human refusal pointing Sonnet at occurrence-id usage. Defense-in-depth — `get_calendar` via Graph `calendarView` returns occurrence ids (not masters), so a master id should never reach here through the normal path. But if it ever does, a single mistake won't wipe the entire recurring series.
+
+### Changed
+
+- **`formatPeopleMemoryForPrompt` and `buildSocialContextBlock` filter `meeting_booked` / `coordination`** ([`db/people.ts`](src/db/people.ts)) — calendar-state snapshot types no longer surface in the prompt-rendered Recent Activity block. The calendar is the source of truth for meetings; memory is for relational facts (conversations, messages, social pings). Lori's `interaction_log` had three `meeting_booked` snapshots — two with old April dates and one with the May reschedule — and Sonnet narrated the older April entry as fact ("Lori onboarding session isn't showing on tomorrow's calendar, want me to check what happened?"). The DB log itself is untouched; only the prompt-rendering filter changed.
+- **Claim-checker `book`-type guard covers all calendar mutations** ([`connectors/slack/postReply.ts:261`](src/connectors/slack/postReply.ts:261)) — `matchingToolAlreadyRan` for `book` verdicts was checking `/\[(create_meeting|finalize_coord_meeting)/` only. Now covers all five mutation tools: `move_meeting`, `update_meeting`, `delete_meeting`, `book_lunch` added to the regex. Closes the FNX bug where a `move_meeting OK` + correct confirmation got a false-positive claim-checker verdict, the retry fired, and the retry — which doesn't see THIS turn's tool calls in `conversationHistory` — re-read the calendar and wrote "FNX is already at 14:00, looks like it was moved at some point during our conversation." She doesn't remember she moved it because the action tape only walks PRIOR turns; the current turn's actions weren't visible.
+- **Claim-checker retry nudge carries this-turn tool summaries** ([`postReply.ts:294`](src/connectors/slack/postReply.ts:294)) — defense-in-depth for the case where the retry IS legitimate (genuine over-claim with no matching tool call). The corrective nudge now appends `"For context, in THIS SAME TURN you already executed: [tool summaries]. Don't re-run those — and don't narrate their effects as if someone else did them."` so Sonnet on retry has visibility into what the first attempt did, even though her draft is being thrown out. Empty-list path keeps the nudge clean.
+
+### Invariants preserved
+
+- Graph timezone parsing chokepoint is one helper — no per-call-site convention. The new ISO-with-offset format is read correctly by Luxon's `fromISO` regardless of any second-arg zone hint, so existing parse code keeps working without changes (the `{ zone: 'utc' }` hint is just visually misleading after the change, not functionally broken).
+- `FreeBusySlot.start/end` shape is unchanged (still `string`); the new `_timezone` field is optional.
+- `delete_meeting` happy path unchanged. The guard only fires on series masters.
+- Action-tape mechanism (v2.2.6) unchanged — the fix lives one layer up, in the claim-checker retry path.
+- `interaction_log` write paths unchanged. The DB still records `meeting_booked` and `coordination` entries; they just don't get rendered into the prompt anymore.
+
+### Migration
+
+None. No schema change, no yaml change, no config change.
+
+### Not changed
+
+- Auto-triage / auto-build CI — still gated `if: false &&` (deactivated in 2.3.1).
+- `move_meeting` and `update_meeting` seriesMaster guards — already in place since v1.8.8.
+- The `meeting_booked` interaction_log entry shape — still written by `db/jobs.ts` after coord booking, still readable for any future code path that wants it.
+
+---
+
 ## 2.3.3 — Owner-override-as-approval cluster + scheduling honesty + coda safety + office address
 
 A long sweep of small bugs from a half-day of real chat use, all clustered around the same theme: Maelle was over-protecting the owner from his own decisions. The fixes restore the human-EA pattern — flag the cost, then act on what was asked. Plus a 2-mode extension to the existing `claimChecker` to catch coda hallucinations, and a yaml field for the actual office address so calendar invites stop saying "Idan's Office" with no street name.

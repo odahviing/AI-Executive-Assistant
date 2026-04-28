@@ -258,7 +258,15 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
         ? /\[message_colleague/.test(toolSummariesText) &&
           (!verdict.target_name || toolSummariesText.toLowerCase().includes(verdict.target_name.toLowerCase()))
         : verdict.action_type === 'book'
-          ? /\[(create_meeting|finalize_coord_meeting)/.test(toolSummariesText)
+          // v2.3.4 — `book` covers any calendar mutation, not just
+          // create+finalize. The narrower regex let a move_meeting + correct
+          // confirmation get retried after a false-positive verdict, and the
+          // retry — which doesn't see THIS turn's tool calls in
+          // conversationHistory — re-read the calendar and narrated her own
+          // move as someone else's ("looks like it was moved at some point
+          // during our conversation"). All five mutation tools should
+          // satisfy a book-type claim.
+          ? /\[(create_meeting|finalize_coord_meeting|move_meeting|update_meeting|delete_meeting|book_lunch)/.test(toolSummariesText)
           : verdict.action_type === 'task'
             ? /\[(create_task|create_approval)/.test(toolSummariesText)
             : false;
@@ -283,10 +291,18 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
     });
 
     const targetLabel = verdict.target_name ?? 'the person mentioned';
+    // v2.3.4 — surface this turn's tool calls into the corrective nudge.
+    // The retry's conversationHistory only carries PRIOR turns; the just-
+    // completed tool calls aren't in it, so without this hint Sonnet can
+    // re-read the calendar and narrate her own actions as someone else's.
+    // Empty-list path keeps the nudge clean for genuine over-claims.
+    const priorActionsHint = (result.toolSummaries ?? []).length > 0
+      ? `\n\nFor context, in THIS SAME TURN you already executed: ${(result.toolSummaries ?? []).join(' ')}. Don't re-run those — and don't narrate their effects as if someone else did them.`
+      : '';
     const nudge =
       verdict.action_type === 'message'
-        ? `Your previous draft claimed you already messaged ${targetLabel}, but no send tool ran. Call message_colleague now to actually send it.`
-        : `Your previous draft claimed you already did something (${verdict.action_summary ?? verdict.action_type ?? 'an action'}) that no tool call in that turn actually performed. Either call the right tool now to actually do it, or rewrite the reply as a plan ("I'll take care of that") instead of a completed claim.`;
+        ? `Your previous draft claimed you already messaged ${targetLabel}, but no send tool ran. Call message_colleague now to actually send it.${priorActionsHint}`
+        : `Your previous draft claimed you already did something (${verdict.action_summary ?? verdict.action_type ?? 'an action'}) that no tool call in that turn actually performed. Either call the right tool now to actually do it, or rewrite the reply as a plan ("I'll take care of that") instead of a completed claim.${priorActionsHint}`;
 
     try {
       const retry = await runOrchestrator({

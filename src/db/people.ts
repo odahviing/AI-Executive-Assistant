@@ -628,13 +628,24 @@ export function formatPeopleMemoryForPrompt(
     // is actively talking to.
     // v2.2.3 (#3) — interaction log is operational + social mixed; kept on
     // both modes but trimmed harder when persona off (focus contacts only).
+    //
+    // v2.3.4 — drop calendar-state snapshot entries (`meeting_booked`,
+    // `coordination`) from the prompt-rendered list. These were lying when
+    // the underlying meeting got moved or cancelled afterwards: Lori's row
+    // had three meeting_booked snapshots — two with the original April dates
+    // and one with the May reschedule — and Sonnet narrated the older April
+    // entry as fact ("Lori onboarding isn't showing on tomorrow's
+    // calendar"). The calendar is the source of truth for meetings; memory
+    // belongs to relational facts (conversations, messages, social pings),
+    // not to point-in-time booking snapshots that go stale silently.
     const isFocus = focusSlackIds?.has(p.slack_id) ?? false;
     const entryCap = includeSocial ? (isFocus ? 30 : 10) : (isFocus ? 10 : 0);
     if (entryCap > 0) {
       const log: PersonInteraction[] = (() => {
         try { return JSON.parse(p.interaction_log || '[]'); } catch { return []; }
       })();
-      for (const i of log.slice(-entryCap)) {
+      const relational = log.filter(i => i.type !== 'meeting_booked' && i.type !== 'coordination');
+      for (const i of relational.slice(-entryCap)) {
         const d = i.date.split('T')[0];
         parts.push(`  ↳ [${d}] ${i.type}: ${i.summary}`);
       }
@@ -721,11 +732,17 @@ export function buildSocialContextBlock(slackId: string, timezone: string): stri
     lines.push(`Maelle-initiated check-in: NOT due — you already started one recently (${h}h until next). If THEY bring up personal topics, respond freely — just don't YOU start it.`);
   }
 
-  // Recent activity
+  // Recent activity. v2.3.4 — drop calendar-state snapshot types
+  // (meeting_booked / coordination) — they go stale when meetings get moved
+  // or cancelled and Sonnet ends up narrating snapshots as if they were
+  // current facts. Relational entries only.
   const interactionLog: PersonInteraction[] = (() => {
     try { return JSON.parse((person as any).interaction_log || '[]'); } catch { return []; }
   })();
-  const recentInteractions = interactionLog.slice(-10);
+  const relationalInteractions = interactionLog.filter(
+    i => i.type !== 'meeting_booked' && i.type !== 'coordination',
+  );
+  const recentInteractions = relationalInteractions.slice(-10);
   if (recentInteractions.length > 0) {
     lines.push(`Recent activity:\n${recentInteractions.map(i => `  [${i.date.split('T')[0]}] ${i.summary}`).join('\n')}`);
   }

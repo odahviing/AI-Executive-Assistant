@@ -52,9 +52,10 @@ export async function annotateSlotsWithAttendeeStatus<S extends { start: string;
     busyRanges = slots
       .filter(s => s.status !== 'free')
       .map(s => ({
-        // v2.0.3 — Graph getSchedule returns UTC zoneless ISO; parse explicitly.
-        start: DateTime.fromISO(s.start, { zone: 'utc' }).toMillis(),
-        end:   DateTime.fromISO(s.end,   { zone: 'utc' }).toMillis(),
+        // FreeBusySlot.start/end carry an explicit offset (set by
+        // parseGraphFreeBusySlot inside getFreeBusy). Luxon honors it.
+        start: DateTime.fromISO(s.start).toMillis(),
+        end:   DateTime.fromISO(s.end).toMillis(),
         status: s.status,
       }));
   } catch (err) {

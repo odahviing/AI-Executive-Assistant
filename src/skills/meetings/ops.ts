@@ -1613,6 +1613,30 @@ export class SchedulingSkill {
       }
 
       case 'delete_meeting': {
+        // Defense-in-depth: refuse a series-level delete if the id resolves to
+        // a seriesMaster. Mirrors the guard in update_meeting and move_meeting.
+        // get_calendar normally returns occurrence ids (Graph calendarView
+        // expands recurring series), so a master id should never reach here
+        // through the normal path — but if it ever does, a one-shot mistake
+        // would wipe an entire recurring series.
+        try {
+          const { getEventType } = await import('../../connectors/graph/calendar');
+          const probe = await getEventType(userEmail, args.meeting_id as string);
+          if (probe?.type === 'seriesMaster') {
+            logger.info('delete_meeting refused on recurring seriesMaster', {
+              meetingId: args.meeting_id,
+              subject: probe.subject,
+            });
+            return {
+              error: 'recurring_series_master',
+              meeting_subject: probe.subject,
+              message: `"${probe.subject}" is a recurring series. Deleting the series here would cancel every occurrence — that's not safe to do automatically. To cancel a single occurrence, call delete_meeting with that occurrence's meeting_id (get it from get_calendar for the specific date). To end the series itself, the owner should do that directly in Outlook.`,
+            };
+          }
+        } catch (err) {
+          logger.warn('delete_meeting recurring-preflight failed — proceeding', { err: String(err) });
+        }
+
         await deleteMeeting(userEmail, args.meeting_id as string);
         // v2.1.6 — verify the delete actually landed. Graph can return 200 OK
         // on the DELETE but still retain the event (rare: partial failures,
