@@ -89,8 +89,7 @@ Pick the single best-fit category. Return confidence=high ONLY when the match is
 
 interface HealthIssue {
   type:
-    | 'missing_floating_block'   // v2.1.1 — generalized from 'missing_lunch'; owner-configured block didn't land on the calendar
-    | 'missing_lunch'             // kept as alias for the lunch-specific block; same shape as missing_floating_block with block_name='lunch'
+    | 'missing_floating_block'   // owner-configured block didn't land on the calendar; block_name carries which one (lunch, coffee, gym, thinking time, ...)
     | 'double_booking'
     | 'oof_conflict'
     | 'missing_category'
@@ -291,7 +290,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             return eventStart.toFormat('yyyy-MM-dd') === dayStr;
           });
 
-          // ── Missing floating blocks (v2.1.1 — generalized from missing_lunch) ──
+          // ── Missing floating blocks ──
           // Every block configured for the profile (lunch + any custom) is
           // checked independently. Only the ones that apply on this day-of-week
           // are in scope. A block is "missing" when no event on the calendar
@@ -307,7 +306,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             });
             if (!hasBlock) {
               issues.push({
-                type: block.name === 'lunch' ? 'missing_lunch' : 'missing_floating_block',
+                type: 'missing_floating_block',
                 date: dayStr,
                 description: `No ${block.name.replace(/_/g, ' ')} on ${dayName} ${dayStr}`,
                 suggestion: `Book a ${block.duration_minutes}-minute ${block.name.replace(/_/g, ' ')} between ${block.preferred_start} and ${block.preferred_end}`,
@@ -520,7 +519,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
         // fix is deterministic or high-confidence; failures fail open (the
         // issue stays flagged, fix_failed=true). Fixes are limited in this
         // release to the safe set:
-        //   - missing_floating_block / missing_lunch → book the block
+        //   - missing_floating_block → book the block
         //   - missing_category → set category when classifier is high-conf
         //   - busy_day → DM the owner with candidates to move (no auto-move)
         // Overlap auto-move (even internal-only) is DEFERRED to v2.2 where
@@ -533,7 +532,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
           });
           for (const issue of issues) {
             try {
-              if (issue.type === 'missing_lunch' || issue.type === 'missing_floating_block') {
+              if (issue.type === 'missing_floating_block') {
                 // Reuse the book_lunch handler path so alignment + buffer +
                 // day-scope rules apply consistently. Call through the same
                 // switch recursively — clean, shares code.
@@ -862,7 +861,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                           id: movable.id,
                           currentStartIso: mStart.toISO()!,
                           currentEndIso: mEnd.toISO()!,
-                          conflictReason: protection.sanitizeConflictReason(kept, profile.user.name.split(' ')[0]),
+                          conflictReason: protection.sanitizeConflictReason(kept, profile.user.name.split(' ')[0], profile),
                         },
                       });
                       issue.fixed = true;

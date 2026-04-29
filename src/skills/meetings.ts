@@ -27,6 +27,7 @@ import { determineSlotLocation, type SlotWithLocation } from './meetings/coord/u
 import { forceBookCoordinationByOwner } from './meetings/coord/booking';
 import logger from '../utils/logger';
 import { DateTime } from 'luxon';
+import { calendarListingFormatRule } from '../utils/calendarListingFormat';
 
 /**
  * MeetingsSkill (v1.6.0) — the single skill responsible for everything about
@@ -53,6 +54,12 @@ export class MeetingsSkill implements Skill {
   getTools(profile: UserProfile): Anthropic.Tool[] {
     const allowedDurations = profile.meetings.allowed_durations.join('/');
     const bufferMin = profile.meetings.buffer_minutes;
+    // Read category enum from yaml instead of hardcoding owner-specific
+    // names. Empty enum is invalid in Anthropic schemas, so a profile
+    // without categories defined gets the field omitted entirely (matches
+    // the v1.7.8 "leave uncategorized rather than guess" rule).
+    const categoryNames = (profile.categories ?? []).map(c => c.name);
+    const categoryEnum = categoryNames.length > 0 ? categoryNames : undefined;
     return [
       {
         name: 'find_slack_user',
@@ -275,7 +282,7 @@ If the meeting is NOT yet booked and they need to find a time together, use coor
           type: 'object',
           properties: {
             event_date: { type: 'string', description: 'Date of the issue YYYY-MM-DD' },
-            issue_type: { type: 'string', enum: ['back_to_back', 'no_buffer', 'no_lunch', 'oof_with_meetings', 'work_on_day_off', 'overlap'], description: 'Type of the calendar issue' },
+            issue_type: { type: 'string', enum: ['back_to_back', 'no_buffer', 'missing_floating_block', 'oof_with_meetings', 'work_on_day_off', 'overlap'], description: 'Type of the calendar issue' },
             detail: { type: 'string', description: 'Brief description of the specific issue' },
             resolution: { type: 'string', enum: ['dismissed', 'resolved'], description: '"dismissed" = user is ok with it, "resolved" = the issue was fixed' },
           },
@@ -389,7 +396,7 @@ LANGUAGE: subject and body MUST be in English regardless of the language you're 
             body: { type: 'string', description: 'Optional meeting body — ENGLISH ONLY.' },
             is_online: { type: 'boolean' },
             location: { type: 'string' },
-            category: { type: 'string', enum: ['Meeting', 'Physical', 'Logistic', 'Private'] },
+            category: categoryEnum ? { type: 'string', enum: categoryEnum } : { type: 'string' },
             add_room_email: { type: 'boolean' },
             override_work_day: { type: 'boolean' },
             must_be_after_event_id: {
@@ -426,7 +433,7 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
           properties: {
             meeting_id:      { type: 'string' },
             meeting_subject: { type: 'string' },
-            category:        { type: 'string', enum: ['Meeting', 'Physical', 'Logistic', 'Private'] },
+            category:        categoryEnum ? { type: 'string', enum: categoryEnum } : { type: 'string' },
             new_subject:     { type: 'string' },
           },
           required: ['meeting_id', 'meeting_subject'],
@@ -1688,6 +1695,8 @@ NON-WORKING DAYS — silence is the default:
 - For day-off questions / weekly reviews / briefings: only mention the day if a BUSINESS meeting (sensitivity=normal, non-cancelled, non-free) appears on it. Personal events (kid pickup, dinner, neighbours, all-day blocks marked private/free) are ${firstName}'s life — don't narrate them.
 - If asked "how does next week look", a day off with no business meetings should produce ONE line MAX or be skipped entirely. Never "Friday is a day off, you have a personal block in the evening — I'll leave it alone." The mention itself is the leak.
 - If ${firstName} explicitly asks about a personal event ("what time is dinner Friday?"), then yes — answer it.
+
+${calendarListingFormatRule(firstName)}
 
 DELETE-MEETING PROTOCOL — irreversible, follow exactly:
 1. When the owner says "delete the X meeting" / "cancel Y" / "remove that": call get_calendar first to find the candidate(s) matching the description. Never guess an event_id.

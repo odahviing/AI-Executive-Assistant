@@ -498,7 +498,7 @@ function initSchema(db: Database.Database): void {
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),
       owner_user_id   TEXT NOT NULL,
       event_date      TEXT NOT NULL,          -- YYYY-MM-DD of the calendar day
-      issue_type      TEXT NOT NULL,          -- double_booking | oof_conflict | back_to_back | no_buffer | no_lunch | oof_with_meetings | work_on_day_off | overlap
+      issue_type      TEXT NOT NULL,          -- double_booking | oof_conflict | back_to_back | no_buffer | missing_floating_block | oof_with_meetings | work_on_day_off | overlap (legacy rows may still carry no_lunch / missing_lunch)
       issue_key       TEXT NOT NULL,          -- unique key (e.g. "double_booking:16:15:Weekly Sales Ops")
       detail          TEXT NOT NULL,          -- human-readable description
       resolution      TEXT NOT NULL DEFAULT 'new',  -- new | approved | to_resolve | resolved | dismissed

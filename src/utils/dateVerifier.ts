@@ -28,6 +28,8 @@ import { DateTime } from 'luxon';
 import Anthropic from '@anthropic-ai/sdk';
 import logger from './logger';
 import { config } from '../config';
+import type { UserProfile } from '../config/userProfile';
+import { getEffectiveToday } from './effectiveToday';
 
 const MONTHS_EN: Record<string, number> = {
   jan: 1, january: 1,
@@ -89,11 +91,13 @@ export interface DateVerifyResult {
   mismatches: DateMismatch[];
 }
 
-function buildLookup(timezone: string): Map<string, number> {
+function buildLookup(profile: UserProfile): Map<string, number> {
   // Maps "MM-DD" → Luxon weekday (1=Mon..7=Sun) across today + 14 days.
   // MM-DD is enough because the LLM won't reference dates outside this
   // horizon in a single reply in practice.
-  const today = DateTime.now().setZone(timezone).startOf('day');
+  // Anchor uses getEffectiveToday so the late-night shift matches the
+  // prompt's DATE LOOKUP table.
+  const today = getEffectiveToday(profile);
   const map = new Map<string, number>();
   for (let i = 0; i < 14; i++) {
     const d = today.plus({ days: i });
@@ -113,13 +117,13 @@ function weekdayName(weekday: number, style: 'en' | 'he'): string {
   return lut[weekday] ?? '';
 }
 
-export async function verifyDates(draft: string, timezone: string, userMessage?: string): Promise<DateVerifyResult> {
+export async function verifyDates(draft: string, profile: UserProfile, userMessage?: string): Promise<DateVerifyResult> {
   const mismatches: DateMismatch[] = [];
   if (!draft || draft.length < 6) return { ok: true, mismatches };
 
   let lookup: Map<string, number>;
   try {
-    lookup = buildLookup(timezone);
+    lookup = buildLookup(profile);
   } catch (err) {
     logger.warn('dateVerifier: could not build lookup — failing open', { err: String(err) });
     return { ok: true, mismatches };
@@ -189,7 +193,7 @@ export async function verifyDates(draft: string, timezone: string, userMessage?:
       const contextMismatches = await verifyBareWeekdayContext({
         draft,
         userMessage,
-        timezone,
+        profile,
       });
       for (const cm of contextMismatches) mismatches.push(cm);
     } catch (err) {
@@ -211,11 +215,15 @@ export async function verifyDates(draft: string, timezone: string, userMessage?:
 async function verifyBareWeekdayContext(params: {
   draft: string;
   userMessage: string;
-  timezone: string;
+  profile: UserProfile;
 }): Promise<DateMismatch[]> {
-  const now = DateTime.now().setZone(params.timezone);
+  // Anchor on effective-today so the lookup matches the prompt's DATE LOOKUP
+  // (post late-night shift). Without this, the classifier sees a different
+  // "Today" / "Tomorrow" than the model wrote against and flags correct
+  // answers as mismatches.
+  const today = getEffectiveToday(params.profile);
   const lookupLines = Array.from({ length: 14 }, (_, i) => {
-    const d = now.plus({ days: i });
+    const d = today.plus({ days: i });
     const label = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toFormat('EEE d MMM');
     return `${label} (${d.toFormat('EEEE')}): ${d.toFormat('yyyy-MM-dd')}`;
   }).join('\n');

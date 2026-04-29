@@ -445,7 +445,7 @@ async function runDateVerifierAndMaybeRetry(ctx: DateVerifyContext): Promise<str
 
   try {
     const { verifyDates, buildDateCorrectionNudge } = await import('../../utils/dateVerifier');
-    const verdict = await verifyDates(cleanReply, profile.user.timezone, userMessage);
+    const verdict = await verifyDates(cleanReply, profile, userMessage);
     if (verdict.ok || verdict.mismatches.length === 0) return cleanReply;
 
     logger.warn('Date verifier: draft has wrong weekday/date pairs — retrying', {
@@ -486,7 +486,7 @@ async function runDateVerifierAndMaybeRetry(ctx: DateVerifyContext): Promise<str
     // twice and the draft ships anyway. String replacement is bounded by the
     // lookup we already computed — safe and always correct.
     const candidate = retriedReply ?? cleanReply;
-    const reverdict = await verifyDates(candidate, profile.user.timezone, userMessage);
+    const reverdict = await verifyDates(candidate, profile, userMessage);
     if (!reverdict.ok && reverdict.mismatches.length > 0) {
       logger.warn('Date verifier: retry still has mismatches — applying deterministic correction', {
         mismatches: reverdict.mismatches,

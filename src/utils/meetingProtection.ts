@@ -68,31 +68,36 @@ export function isProtected(event: CalendarEvent, profile: UserProfile): Protect
 }
 
 /**
- * v2.1.4 — privacy-aware conflict phrasing. When Maelle DMs a colleague
- * asking to move their meeting because of a conflict on the owner's side,
- * she explains what she's conflicting WITH. Default: include the kept
- * meeting's subject ("overlaps with 'Fulcrum Product Sync'"). But when the
- * kept meeting is PRIVATE — sensitivity flagged or categorised as Private —
- * she discloses only the fact ("overlaps with another meeting Idan has").
- * Never leaks the subject/body of a private event to an external attendee.
+ * Privacy-aware conflict phrasing. When Maelle DMs a colleague asking to
+ * move their meeting because of a conflict on the owner's side, she
+ * explains what she's conflicting WITH. Default: include the kept meeting's
+ * subject ("overlaps with 'Fulcrum Product Sync'"). When the kept meeting
+ * is private, she discloses only the fact ("overlaps with another meeting
+ * Idan has"). Never leaks the subject/body of a private event to an
+ * external attendee.
  *
  * Privacy signals (any one triggers the sanitization):
  *   - sensitivity === 'private' or 'confidential'
- *   - any category matches a profile-defined private category (default
- *     matches 'Private' substring — Idan's profile uses exactly that name)
+ *   - any category on the event has `sets_sensitivity_private: true` in
+ *     the owner's yaml (so "what counts as private" lives in the profile,
+ *     not in the code).
  */
 export function sanitizeConflictReason(
   keptEvent: CalendarEvent,
   ownerFirstName: string,
+  profile: UserProfile,
 ): string {
   const sensitivity = keptEvent.sensitivity;
   const categories = Array.isArray((keptEvent as unknown as { categories?: unknown }).categories)
     ? ((keptEvent as unknown as { categories: string[] }).categories)
     : [];
+  const privateCategoryNames = new Set(
+    (profile.categories ?? []).filter(c => c.sets_sensitivity_private).map(c => c.name),
+  );
   const isPrivate =
     sensitivity === 'private'
     || sensitivity === 'confidential'
-    || categories.some(c => /private/i.test(c));
+    || categories.some(c => privateCategoryNames.has(c));
   if (isPrivate) {
     return `overlaps with another meeting ${ownerFirstName} has`;
   }

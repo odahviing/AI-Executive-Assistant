@@ -202,6 +202,13 @@ const UserProfileSchema = z.object({
       blocking_event: z.string(),
       note: z.string().optional(),
     }).optional(),
+    // Owner's mental day boundary. Local-clock hour before which "today"
+    // is still treated as the previous calendar day — late-night work
+    // bleeds backwards into the workday it belongs to. Anchors the prompt's
+    // DATE LOOKUP table and the date verifier's lookup so they agree about
+    // what day "today" / "tomorrow" mean. Format "HH:MM". Default "00:00"
+    // (no shift — owner's day boundary is real midnight).
+    day_boundary_hour: z.string().regex(/^\d{2}:\d{2}$/).default('00:00'),
   }),
 
   meetings: z.object({
@@ -260,6 +267,11 @@ const UserProfileSchema = z.object({
   categories: z.array(z.object({
     name: z.string().min(1),
     description: z.string().min(1),
+    // When true, events created under this category are stamped with
+    // sensitivity='private' on the Graph side. Lets the owner mark a
+    // category as "personal/sensitive" without code knowing the literal
+    // name. Default false.
+    sets_sensitivity_private: z.boolean().optional(),
   })).optional(),
 
   vip_contacts: z.array(VipContactSchema).default([]),

@@ -47,7 +47,7 @@ export async function runPostBookingHealthCheck(params: {
     if (!startIso || !endIso) return;
 
     const events = await getCalendarEvents(profile.user.email, startIso, endIso);
-    const processed = processCalendarEvents(events, profile.user.email, profile.user.name, tz);
+    const processed = processCalendarEvents(events, profile.user.email, profile.user.name, tz, profile);
     const dismissed = (() => {
       try { return getDismissedIssueKeys(profile.user.slack_user_id, dateStr, dateStr); }
       catch { return new Set<string>(); }

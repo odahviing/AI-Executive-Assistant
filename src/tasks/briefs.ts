@@ -10,6 +10,7 @@ import { processCalendarEvents } from '../skills/meetings/ops';
 import { verifyScheduledOutcome, type ScheduleOutcome } from '../utils/verifyScheduledOutcome';
 import { updateOutreachJob } from '../db';
 import logger from '../utils/logger';
+import { calendarListingFormatRule } from '../utils/calendarListingFormat';
 
 // ── Relative time helper ──────────────────────────────────────────────────────
 
@@ -267,6 +268,7 @@ async function collectBriefingData(
         profile.user.email,
         profile.user.name,
         timezone,
+        profile,
       );
       const todayLocal = DateTime.now().setZone(timezone).toFormat('yyyy-MM-dd');
       const tomorrowLocal = DateTime.now().setZone(timezone).plus({ days: 1 }).toFormat('yyyy-MM-dd');
@@ -283,7 +285,7 @@ async function collectBriefingData(
           attendees: e.attendees,
           is_online: e.isOnlineMeeting,
           categories: e.categories,
-          is_lunch: e.is_lunch,
+          is_floating_block: e.is_floating_block,
         }));
 
       const todays = summarize(processed.filter(e => e._localDate === todayLocal));
@@ -395,10 +397,12 @@ async function generateBriefingText(
 
 STRUCTURE (in this order):
 1. Time-of-day greeting ("Morning —"). Nothing else on this line.
-2. TODAY'S CALENDAR — only if a calendar_today item is present. Short list, one line per meeting: time, subject, key attendee(s), location/online tag. No prose around it. Skip lunch and short personal blocks unless they're the only items. NEVER add "your window is X" / "it's a short day" / "you finish at Y" framing — ${firstName} already knows his own schedule shape.
+2. TODAY'S CALENDAR — only if a calendar_today item is present. Apply the CALENDAR LISTING FORMAT block below. Skip the section entirely when no calendar_today item exists.
 3. TOMORROW (one short line) — only if calendar_tomorrow is present AND there's something notable: an external meeting, an overlap, a big-deal item. Skip if tomorrow is routine. Don't enumerate every meeting — this is a heads-up, not a second calendar.
 4. PER-PERSON paragraphs — one short paragraph per colleague who has open / recently-changed work. If Amazia has three things going on, they collapse into one Amazia paragraph. Skip people with nothing new.
 5. ACTION ITEMS section — only if there's something that needs ${firstName}'s decision or input. Skip the section entirely when there's nothing to decide.
+
+${calendarListingFormatRule(firstName)}
 
 FORMAT:
 - Plain text only. Use • for bullets. Use *single asterisks* for bold (Slack style). NEVER use **double asterisks**.

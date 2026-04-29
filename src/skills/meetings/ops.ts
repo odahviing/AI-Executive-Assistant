@@ -179,12 +179,16 @@ interface ProcessedEvent {
   isOnlineMeeting: boolean;
   onlineMeetingUrl?: string;
   attendees?: string[];
-  // v2.2.3 — explicit lunch marker so Sonnet doesn't have to infer from the
-  // subject string mid-narration. True when the event is a real lunch event
-  // (subject contains "lunch" / Hebrew lunch words) — same rule as
-  // analyzeCalendar's lunch detection. Lets her never miss "is there lunch
-  // on this day" when summarizing a calendar.
-  is_lunch?: boolean;
+  // Floating-block marker. When this event matches one of the profile's
+  // configured floating blocks (lunch, coffee break, gym, thinking time,
+  // etc.) the matching block's name is surfaced here. Computed against the
+  // RAW subject — privacy masking later in this same pass replaces the
+  // visible subject with "[Private]" but the detection has already happened,
+  // so private-flagged lunches still get detected correctly. Match goes
+  // through `isFloatingBlockEvent` so it honors the yaml's
+  // `match_subject_regex` + `match_category` (instead of duplicating
+  // keyword lists in two places).
+  is_floating_block?: { name: string } | null;
 }
 
 export function processCalendarEvents(
@@ -192,8 +196,16 @@ export function processCalendarEvents(
   ownerEmail: string,
   ownerName: string,
   timezone: string,
+  profile: UserProfile,
 ): ProcessedEvent[] {
   const result: ProcessedEvent[] = [];
+
+  // Load floating blocks once per pass. Iterated for every event to surface
+  // `is_floating_block` so brief/analyze can treat lunch/coffee/gym
+  // uniformly without redoing keyword matching downstream.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fb = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
+  const floatingBlocks = fb.getFloatingBlocks(profile);
 
   for (const ev of events) {
     // showAs=free → strip entirely before Claude sees it
@@ -246,13 +258,23 @@ export function processCalendarEvents(
       isOnlineMeeting: ev.isOnlineMeeting,
       onlineMeetingUrl: ev.onlineMeetingUrl,
       attendees: attendeeNames.length > 0 ? attendeeNames : undefined,
-      // v2.2.3 — explicit lunch marker. Same subject-based rule as
-      // analyzeCalendar uses; computed once here so every consumer of
-      // ProcessedEvent (get_calendar narration, analyze, brief) sees the
-      // same answer without re-implementing the check.
-      is_lunch: (() => {
-        const subjLower = (subject || '').toLowerCase();
-        return subjLower.includes('lunch') || subjLower.includes('ארוח') || subjLower.includes('צהריים');
+      // Floating-block marker. Match goes against the RAW `ev.subject` —
+      // NOT the masked `subject` computed above — because privacy masking
+      // turns "Lunch" into "[Private]" for sensitivity=private/personal,
+      // and we still need detection to fire. The boolean-shaped output
+      // (just block name) doesn't leak private content. Matcher honors
+      // yaml's schedule.lunch.match_subject_regex + match_category, plus
+      // any entries in schedule.floating_blocks. First match wins.
+      is_floating_block: (() => {
+        for (const block of floatingBlocks) {
+          if (fb.isFloatingBlockEvent(
+            { subject: ev.subject, categories: ev.categories },
+            block,
+          )) {
+            return { name: block.name };
+          }
+        }
+        return null;
       })(),
     });
   }
@@ -263,10 +285,12 @@ export function processCalendarEvents(
 // ── Calendar analysis (detect issues) ────────────────────────────────────────
 
 interface CalendarIssue {
-  type: 'oof_with_meetings' | 'no_buffer' | 'no_lunch' | 'back_to_back' | 'overlap' | 'work_on_day_off';
+  type: 'oof_with_meetings' | 'no_buffer' | 'missing_floating_block' | 'back_to_back' | 'overlap' | 'work_on_day_off';
   severity: 'high' | 'medium' | 'low';
   detail: string;
   suggestedFix?: string;
+  /** Set when type === 'missing_floating_block' — which block (lunch / coffee / gym / etc) is missing. */
+  block_name?: string;
 }
 
 interface DayAnalysis {
@@ -282,8 +306,6 @@ interface DayAnalysis {
     lastMeeting?: string;     // "17:00"
     totalMeetingMin: number;
     freeMinInWorkHours: number;
-    hasLunch: boolean;
-    lunchGap?: string;        // "12:30–13:15"
   };
 }
 
@@ -298,7 +320,11 @@ export function analyzeCalendar(
   const homeDays   = new Set(profile.schedule.home_days.days   as string[]);
   const allWorkDays = new Set([...officeDays, ...homeDays]);
 
-  const lunch = profile.schedule.lunch;
+  // Floating blocks (lunch + any custom). Uses the same matcher every other
+  // code path (slot search, book_lunch, rebalance) uses.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fb = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
+  const floatingBlocks = fb.getFloatingBlocks(profile);
   const bufferMin = profile.meetings.buffer_minutes ?? 15;
   // v1.6.11 — per-day-type focus-time threshold. Office days usually need
   // more protected focus time than home days; profile can set each
@@ -363,7 +389,7 @@ export function analyzeCalendar(
         isWorkDay: false,
         events: workMeetingsOnDayOff,
         issues,
-        stats: { meetingCount: workMeetingsOnDayOff.length, totalMeetingMin: 0, freeMinInWorkHours: 0, hasLunch: false },
+        stats: { meetingCount: workMeetingsOnDayOff.length, totalMeetingMin: 0, freeMinInWorkHours: 0 },
       });
       cursor = cursor.plus({ days: 1 });
       continue;
@@ -468,73 +494,67 @@ export function analyzeCalendar(
       });
     }
 
-    // v2.0.8 — strict lunch semantics. hasLunch is ONLY true when an actual
-    // "Lunch" event is booked in the lunch window. A free gap is not
-    // sufficient — the owner wants a blocked calendar event, otherwise the
-    // gap gets eaten by something else mid-day. If no lunch event exists,
-    // we still compute the largest free gap inside the lunch window so the
-    // no_lunch issue can suggest a specific time ("Want me to block 30 min
-    // starting at 12:30?"), but hasLunch stays false.
-    const [lsH, lsM] = lunch.preferred_start.split(':').map(Number);
-    const [leH, leM] = lunch.preferred_end.split(':').map(Number);
-    const lunchWindowStart = lsH * 60 + lsM;
-    const lunchWindowEnd   = leH * 60 + leM;
-    const minLunchMin = lunch.duration_minutes ?? 30;
+    // Floating-block missing detection. Walk every block configured in the
+    // profile (lunch + any custom). For each block applying on this
+    // day-of-week:
+    //   - "present" means: an event matches via is_floating_block AND its
+    //     start lands inside the block's preferred window. Strict-window
+    //     check matches the prior lunch semantic — a "Lunch" at 18:00 on a
+    //     workday still counts as a missing lunch in its window.
+    //   - missing AND !block.can_skip → emit `missing_floating_block` with
+    //     a suggested start computed from the best free gap inside the
+    //     block's preferred window.
+    // Detection uses ProcessedEvent.is_floating_block (already computed via
+    // isFloatingBlockEvent on the raw subject upstream — so private-flagged
+    // lunches are still detected).
+    const fmt = (min: number) =>
+      `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 
-    let hasLunch = false;
-    let lunchGap: string | undefined;
+    for (const block of floatingBlocks) {
+      if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
 
-    // v2.2.3 — lunch is identified by subject (owner direction: "lunch are
-    // events that there subject is lunch"). Match English "lunch" plus the
-    // common Hebrew forms ("ארוחת צהריים" full / "ארוחה" partial / "צהריים")
-    // since most of Idan's calendar events are in Hebrew. Category is NOT
-    // used — many logistic-categorised events are not lunch.
-    const lunchEvent = timedMeetings.find(e => {
-      const subj = (e.subject || '').toLowerCase();
-      const isLunchSubject =
-        subj.includes('lunch') ||
-        subj.includes('ארוח') ||      // covers ארוחת / ארוחה
-        subj.includes('צהריים');       // "noon" — common Hebrew lunch shorthand
-      if (!isLunchSubject) return false;
-      const [sh, sm] = e._localStartTime.split(':').map(Number);
-      const evStart = sh * 60 + sm;
-      return evStart >= lunchWindowStart && evStart < lunchWindowEnd;
-    });
-    if (lunchEvent) {
-      hasLunch = true;
-      lunchGap = `${lunchEvent._localStartTime}–${lunchEvent._localEndTime}`;
-    }
+      const [bsH, bsM] = block.preferred_start.split(':').map(Number);
+      const [beH, beM] = block.preferred_end.split(':').map(Number);
+      const blockWindowStart = bsH * 60 + bsM;
+      const blockWindowEnd   = beH * 60 + beM;
+      const minBlockMin = block.duration_minutes;
 
-    // Find the best free gap inside the lunch window — used ONLY for the
-    // suggestedFix when no lunch event exists. Does NOT flip hasLunch.
-    let bestGapStart: number | undefined;
-    let bestGapSize = 0;
-    if (!hasLunch) {
+      const blockEvent = timedMeetings.find(e => {
+        if (e.is_floating_block?.name !== block.name) return false;
+        const [sh, sm] = e._localStartTime.split(':').map(Number);
+        const evStart = sh * 60 + sm;
+        return evStart >= blockWindowStart && evStart < blockWindowEnd;
+      });
+      if (blockEvent) continue;  // present, in window — nothing to flag
+
+      // Compute the best free gap inside the block's preferred window for the
+      // suggestedFix narration. Same shape as the prior lunch-only logic.
+      let bestGapStart: number | undefined;
+      let bestGapSize = 0;
       for (const gap of gaps) {
-        const overlapStart = Math.max(gap.start, lunchWindowStart);
-        const overlapEnd   = Math.min(gap.end, lunchWindowEnd);
+        const overlapStart = Math.max(gap.start, blockWindowStart);
+        const overlapEnd   = Math.min(gap.end, blockWindowEnd);
         const overlapSize = overlapEnd - overlapStart;
-        if (overlapSize >= minLunchMin && overlapSize > bestGapSize) {
+        if (overlapSize >= minBlockMin && overlapSize > bestGapSize) {
           bestGapStart = overlapStart;
           bestGapSize = overlapSize;
         }
       }
-    }
 
-    if (!hasLunch && !lunch.can_skip) {
-      const fmt = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
-      const suggestedStart = bestGapStart !== undefined
-        ? fmt(bestGapStart)
-        : lunch.preferred_start;
-      const suggestedFix = bestGapStart !== undefined
-        ? `Want me to block ${minLunchMin} min at ${suggestedStart}?`
-        : `No free gap in your lunch window — want me to bump something and block ${minLunchMin} min at ${suggestedStart}?`;
-      issues.push({
-        type: 'no_lunch',
-        severity: 'medium',
-        detail: `No lunch event booked`,
-        suggestedFix,
-      });
+      if (!block.can_skip) {
+        const suggestedStart = bestGapStart !== undefined ? fmt(bestGapStart) : block.preferred_start;
+        const blockLabel = block.name.replace(/_/g, ' ');
+        const suggestedFix = bestGapStart !== undefined
+          ? `Want me to block ${minBlockMin} min at ${suggestedStart}?`
+          : `No free gap in your ${blockLabel} window — want me to bump something and block ${minBlockMin} min at ${suggestedStart}?`;
+        issues.push({
+          type: 'missing_floating_block',
+          severity: 'medium',
+          detail: `No ${blockLabel} event booked`,
+          suggestedFix,
+          block_name: block.name,
+        });
+      }
     }
 
     const sortedMy = timedMeetings.sort((a, b) => a._localStartTime.localeCompare(b._localStartTime));
@@ -557,8 +577,6 @@ export function analyzeCalendar(
         lastMeeting:  sortedMy[sortedMy.length - 1]?._localEndTime,
         totalMeetingMin,
         freeMinInWorkHours: freeMin,
-        hasLunch,
-        lunchGap,
       },
     });
 
@@ -598,7 +616,7 @@ export class SchedulingSkill {
           args.end_date as string,
           timezone,
         );
-        return processCalendarEvents(rawEvents, userEmail, context.profile.user.name, timezone);
+        return processCalendarEvents(rawEvents, userEmail, context.profile.user.name, timezone, context.profile);
       }
 
       case 'analyze_calendar': {
@@ -608,7 +626,7 @@ export class SchedulingSkill {
           args.end_date as string,
           timezone,
         );
-        const processed = processCalendarEvents(rawEvents, userEmail, context.profile.user.name, timezone);
+        const processed = processCalendarEvents(rawEvents, userEmail, context.profile.user.name, timezone, context.profile);
         const dismissedKeys = getDismissedIssueKeys(
           context.profile.user.slack_user_id,
           args.start_date as string,
@@ -1053,7 +1071,17 @@ export class SchedulingSkill {
             })();
           })(),
           categories:  args.category ? [args.category as string] : ['Meeting'],  // default fallback
-          sensitivity: args.category === 'Private' ? 'private' : undefined,
+          // Stamp sensitivity=private on the Graph event when the chosen
+          // category carries `sets_sensitivity_private: true` in yaml. Reads
+          // from profile rather than hardcoding any specific category name —
+          // a future profile that wants a different category to be its
+          // privacy marker just sets the flag in yaml.
+          sensitivity: (() => {
+            const cat = (args.category as string | undefined) ?? null;
+            if (!cat) return undefined;
+            const match = (context.profile.categories ?? []).find(c => c.name === cat);
+            return match?.sets_sensitivity_private ? 'private' : undefined;
+          })(),
           // v2.3.1 (B23) — invite-body attribution names this assistant + owner.
           defaultBodyAuthor: `${context.profile.assistant.name}, ${context.profile.user.name.split(' ')[0]} Assistant`,
         }).then(async meetingId => {

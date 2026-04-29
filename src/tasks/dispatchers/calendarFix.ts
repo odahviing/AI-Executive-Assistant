@@ -40,7 +40,7 @@ export const dispatchCalendarFix: TaskDispatcher = async (_app, task, profile) =
       logger.warn('calendar_fix — analyzeCalendar not exported, falling back to status-only check');
     } else {
       const raw = await getCalendarEvents(profile.user.email, issue.event_date, issue.event_date, profile.user.timezone);
-      const processed = processCalendarEvents(raw, profile.user.email, profile.user.name, profile.user.timezone);
+      const processed = processCalendarEvents(raw, profile.user.email, profile.user.name, profile.user.timezone, profile);
       const dismissed = getDismissedIssueKeys(profile.user.slack_user_id, issue.event_date, issue.event_date);
       const dayAnalyses = analyzeCalendar(processed, issue.event_date, issue.event_date, profile, dismissed);
       const allIssues: Array<{ type: string; description: string }> = [];

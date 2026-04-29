@@ -5,6 +5,7 @@ import { formatPreferencesForPrompt, formatPeopleMemoryForPrompt } from '../../d
 import { getPendingApprovalsForOwner } from '../../db/approvals';
 import { formatAssistantSelfForPrompt } from '../assistantSelf';
 import { formatPeopleCatalogSync } from '../../memory/peopleMemory';
+import { getEffectiveToday } from '../../utils/effectiveToday';
 
 /**
  * Build the system prompt as two parts for prompt caching:
@@ -46,10 +47,11 @@ export function buildSystemPrompt(
   const localHour = DateTime.now().setZone(user.timezone).hour;
   const timeOfDay = localHour >= 5 && localHour < 12 ? 'morning' : localHour < 17 ? 'afternoon' : localHour < 21 ? 'evening' : 'night';
 
-  // 14-day date lookup — Claude must use this, never calculate dates itself
-  // Late-night adjustment: before 5am the user hasn't slept yet, so "today" = yesterday
-  const clockLocal = DateTime.now().setZone(user.timezone);
-  const todayLocal = localHour < 5 ? clockLocal.minus({ days: 1 }).startOf('day') : clockLocal;
+  // 14-day date lookup — Claude must use this, never calculate dates itself.
+  // Anchor uses the yaml-driven late-night shift via getEffectiveToday so the
+  // prompt and the date verifier agree about what day "today" / "tomorrow"
+  // mean when the owner is up past midnight.
+  const todayLocal = getEffectiveToday(profile);
   const todayDate = todayLocal.toFormat('yyyy-MM-dd');
   const todayStr = todayLocal.toFormat('EEEE, d MMMM yyyy');
   const weekMap = Array.from({ length: 14 }, (_, i) => {
@@ -286,7 +288,7 @@ Calendar events are returned already in the user's local timezone (${user.timezo
 The time in start.dateTime is ALREADY LOCAL — display it exactly as-is. Never add or subtract hours.
 If an event says 18:30, it IS 18:30 in Israel. Do not convert it. Do not adjust it. Just say 6:30 PM.
 
-LATE NIGHT RULE: If the current time is between midnight and 05:00, the user has not slept yet. The DATE LOOKUP above is already adjusted — "Today" is the day the user is still awake in, "Tomorrow" is the next waking day. Trust the table — do not add an extra day.
+LATE NIGHT RULE: If the current time is between midnight and ${profile.schedule.day_boundary_hour}, the user has not slept yet. The DATE LOOKUP above is already adjusted — "Today" is the day the user is still awake in, "Tomorrow" is the next waking day. Trust the table — do not add an extra day.
 ${ownerContextSection}
 
 IDENTITY
