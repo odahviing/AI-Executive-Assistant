@@ -68,10 +68,15 @@ export function getFloatingBlocks(profile: UserProfile): FloatingBlock[] {
       preferred_end: l.preferred_end,
       duration_minutes: l.duration_minutes,
       can_skip: l.can_skip,
-      // Default matcher for "lunch": subject contains /lunch/i in English
-      // or Hebrew, or category 'Lunch'. Can be overridden per-block.
-      match_subject_regex: '\\blunch\\b|ארוחת\\s*צהריים',
-      match_category: 'Lunch',
+      // Default matcher: literal block name with word boundaries (case-insensitive).
+      // Owner can override via schedule.lunch.match_subject_regex /
+      // schedule.lunch.match_category — e.g. to add Hebrew "ארוחת צהריים", or
+      // to recognize "Dinner" / "Coffee" / a custom Outlook category.
+      // `lunch` is only the back-compat name; the matching has always been
+      // overridable, this just stops baking English+Hebrew defaults that
+      // didn't generalize beyond the original profile.
+      match_subject_regex: (l as { match_subject_regex?: string }).match_subject_regex ?? '\\blunch\\b',
+      match_category: (l as { match_category?: string }).match_category ?? 'Lunch',
     };
     out.push(lunchBlock);
     byName.set(lunchBlock.name, lunchBlock);

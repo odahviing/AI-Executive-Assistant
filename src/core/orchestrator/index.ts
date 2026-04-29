@@ -286,7 +286,7 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
       // (→ conversation_state=closing).
       const recentContext = conversationHistory
         .slice(-4)
-        .map(m => `${m.role === 'user' ? (input.senderName ?? profile.user.name.split(' ')[0]) : 'Maelle'}: ${m.content.slice(0, 280)}`)
+        .map(m => `${m.role === 'user' ? (input.senderName ?? profile.user.name.split(' ')[0]) : profile.assistant.name}: ${m.content.slice(0, 280)}`)
         .join('\n');
       socialClassification = await classifyOwnerIntent({
         anthropic,
@@ -451,7 +451,7 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
   // colleague turns get no social context block (Maelle stays task-only).
   const socialBlock = (isOwnerTurn || !personaActive)
     ? ''
-    : buildSocialContextBlock(input.userId, input.profile.user.timezone);
+    : buildSocialContextBlock(input.userId, input.profile.user.timezone, input.profile.assistant.name);
 
   // v2.2 — Social Directive block. Populated by the pre-pass above.
   // When mode === 'none' this is empty and has no effect on the prompt.
@@ -672,6 +672,53 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
         }
       }
 
+      // ── SECURITY: refuse colleague-path create_approval when this
+      // conversation was just flagged SUSPICIOUS by the coord judge ──
+      // Without this, Sonnet pivots from coordinate_meeting (caught by the
+      // judge) to create_approval (no judge), and the flagged ask still
+      // lands in the owner's DM with a follow-up reminder hours later. The
+      // suspicion cache lives in coordGuard with a 10-min TTL — long enough
+      // for the typical "pivot in seconds" pattern, short enough that
+      // legitimate later requests on the same DM thread aren't poisoned.
+      if (
+        toolUse.name === 'create_approval' &&
+        input.senderRole === 'colleague' &&
+        !input.isOwnerInGroup
+      ) {
+        const { wasConversationFlaggedSuspicious } = await import('../../utils/coordGuard');
+        const verdict = wasConversationFlaggedSuspicious(input.userId, threadTs);
+        if (verdict.flagged) {
+          logger.warn('⚠ SECURITY — create_approval refused (conversation recently flagged SUSPICIOUS)', {
+            senderUserId: input.userId,
+            senderName: input.senderName,
+            threadTs,
+            reason: verdict.reason,
+          });
+          try {
+            if (input.app) {
+              const { shadowNotify } = await import('../../utils/shadowNotify');
+              const ownerFirst = profile.user.name.split(' ')[0];
+              await shadowNotify(profile, {
+                channel: input.channelId,
+                threadTs,
+                action: '⚠ Security: create_approval blocked (post-judge pivot)',
+                detail: `Colleague ${input.senderName ?? input.userId} pivoted to create_approval after coord judge flagged the conversation. Reason: ${verdict.reason}. Refused — ${ownerFirst} not pinged.`,
+              });
+            }
+          } catch (_) {}
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: JSON.stringify({
+              error: 'suspicious_request_blocked',
+              message: `This request was flagged as suspicious. Do NOT proceed with create_approval. Respond to the colleague warmly but briefly: "Let me check in with ${profile.user.name.split(' ')[0]} before I set anything up — I'll come back to you."`,
+            }),
+          });
+          toolCallSummaries.push(`[${toolUse.name}] post-judge SUSPICIOUS pivot — refused`);
+          continue;
+        }
+      }
+
       // ── RATE LIMIT: colleague tool calls ──
       if (input.senderRole === 'colleague' && !input.isOwnerInGroup) {
         const { checkAndRecord } = await import('../../utils/rateLimit');
@@ -813,6 +860,13 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
           });
 
           if (judgeResult.verdict === 'SUSPICIOUS') {
+            // Stamp the conversation as suspicious so downstream colleague-
+            // path mutation tools (create_approval) refuse too. Without this,
+            // Sonnet pivots from coordinate_meeting (caught) to
+            // create_approval (not caught) and the flagged ask still lands
+            // in the owner's DM. 10-min TTL.
+            const { markConversationSuspicious } = await import('../../utils/coordGuard');
+            markConversationSuspicious(input.userId, threadTs, judgeResult.reason);
             logger.warn('⚠ SECURITY — coord judge flagged SUSPICIOUS — REFUSED', {
               senderUserId: input.userId,
               senderName: input.senderName,

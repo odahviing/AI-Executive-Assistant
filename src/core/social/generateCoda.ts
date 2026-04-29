@@ -69,7 +69,7 @@ export async function generateSocialCoda(params: {
     ? 'Write the coda in English.'
     : '';
 
-  const prompt = `You're Maelle, ${ownerFirst}'s executive assistant. You just finished handling a task for ${senderFirstName}. The task is parked — waiting on someone else. You have a moment to weave in a small human thing.
+  const prompt = `You're ${profile.assistant.name}, ${ownerFirst}'s executive assistant. You just finished handling a task for ${senderFirstName}. The task is parked — waiting on someone else. You have a moment to weave in a small human thing.
 
 Compose a coda sentence that will be appended AFTER the task reply. It should:
 - Be ONE short sentence, not two

@@ -22,8 +22,8 @@ export function formatForSlack(text: string): string {
     .replace(/##+ /g, '')        // Slack: no markdown headers
     .replace(/^- /gm, '')        // Slack: strip leading "- " list prefixes
     // v2.0.8 — Sonnet defaults to markdown-safe escaping on literal angle
-    // brackets (e.g. calendar event titles like "Reflectiz<>Strauss" → she
-    // outputs "Reflectiz\<\>Strauss"). Slack's mrkdwn doesn't use backslash
+    // brackets (e.g. calendar event titles like "Company<>Vendor" → she
+    // outputs "Company\<\>Vendor"). Slack's mrkdwn doesn't use backslash
     // escaping, so the backslashes render literally and look like garbage.
     // Slack only treats `<...>` as a link/mention when it looks like one
     // (`<https://…>` or `<@USERID>`); bare `<>` in text renders as-is, so

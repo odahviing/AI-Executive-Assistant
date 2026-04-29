@@ -14,7 +14,7 @@
  *
  * Dir layout (per-user, gitignored along with the rest of config/users/):
  *   config/users/<name>_kb/
- *     reflectiz/
+ *     company/
  *       product.md
  *       customers.md
  *       market.md
@@ -25,7 +25,7 @@
  *       culture.md
  *     README.md            ← optional, owner can describe their own structure
  *
- * Section ID = relative path without the `.md` (e.g. "reflectiz/product").
+ * Section ID = relative path without the `.md` (e.g. "company/product").
  * Auto-discovered on every tool call (cheap — small file count, owner edits
  * propagate immediately, no restart needed).
  */
@@ -48,8 +48,8 @@ function kbRootForProfile(profile: UserProfile): string {
 }
 
 interface KbSection {
-  id: string;          // "reflectiz/product"
-  relPath: string;     // "reflectiz/product.md"
+  id: string;          // e.g. "company/product"
+  relPath: string;     // e.g. "company/product.md"
   size: number;        // bytes
 }
 
@@ -440,7 +440,7 @@ export class KnowledgeBaseSkill implements Skill {
       },
       {
         name: 'get_company_knowledge',
-        description: `Fetch the full content of one knowledge section by ID (e.g. "reflectiz/product", "team/leadership"). Use when:
+        description: `Fetch the full content of one knowledge section by ID (e.g. "company/product", "team/leadership"). Use when:
 - Owner asks something specific about the company / product / team
 - You're drafting a summary for a product/strategy/customer/competitive meeting
 - Doing research that needs grounding in real company facts
@@ -452,7 +452,7 @@ Don't pull every section by default — just the ones relevant to the current ta
           properties: {
             section_id: {
               type: 'string',
-              description: 'Section identifier from list_company_knowledge, e.g. "reflectiz/product"',
+              description: 'Section identifier from list_company_knowledge, e.g. "company/product"',
             },
           },
           required: ['section_id'],

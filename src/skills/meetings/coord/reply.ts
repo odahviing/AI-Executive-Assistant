@@ -336,7 +336,8 @@ export async function handleCoordReply(
       await slackConn.postToChannel(job.owner_channel, ownerMsg, {
         threadTs: job.owner_thread_ts ?? undefined,
       });
-      await slackConn.postToChannel(params.channelId, `Got it, I'll run that past Idan.`, {
+      const ownerFirstForRunPast = params.profile.user.name.split(' ')[0];
+      await slackConn.postToChannel(params.channelId, `Got it, I'll run that past ${ownerFirstForRunPast}.`, {
         threadTs: ackInThread ? (job.owner_thread_ts ?? undefined) : undefined,
       });
       return true;
@@ -354,7 +355,8 @@ export async function handleCoordReply(
         `${participant.name} pulled out of "${job.subject}": "${params.text.trim().slice(0, 200)}". I've closed it.`,
         { threadTs: job.owner_thread_ts ?? undefined },
       );
-      await slackConn.postToChannel(params.channelId, `No worries, I'll let Idan know.`, {
+      const ownerFirstForCancel = params.profile.user.name.split(' ')[0];
+      await slackConn.postToChannel(params.channelId, `No worries, I'll let ${ownerFirstForCancel} know.`, {
         threadTs: ackInThread ? (job.owner_thread_ts ?? undefined) : undefined,
       });
       return true;

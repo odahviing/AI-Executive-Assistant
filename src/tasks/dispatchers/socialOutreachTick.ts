@@ -33,6 +33,14 @@ import { config } from '../../config';
 import { shadowNotify } from '../../utils/shadowNotify';
 import logger from '../../utils/logger';
 import type { TaskDispatcher } from './types';
+
+// Module-scope cache of the last "no eligible candidate" breakdown signature
+// per owner. The dispatcher fires hourly and the dropped-reasons shape is
+// usually identical hour after hour ("rank_zero: 1, never_inbound: 20, ..."),
+// which is pure noise. We log the breakdown ONLY when it transitions —
+// shape changes, or a candidate IS picked (the latter clears the cache so
+// the next no-candidate tick logs the transition back to "nothing today").
+const lastNoCandidateSignature = new Map<string, string>();
 import type { UserProfile } from '../../config/userProfile';
 
 const MID_DAY_START_HOUR_DEFAULT = 13;
@@ -396,19 +404,27 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
     const nowUtc = DateTime.utc();
     const { pick, dropped, late_drops } = pickCandidate(rows, cfg, profile.user.slack_user_id, nowUtc);
     if (!pick) {
-      // Steady-state outcome 22h/day for an all-IL contact list — debug only.
-      // `dropped` shows the reason breakdown so "why is nobody being pinged"
-      // is answerable from one log line; `late_drops` names the people who
-      // were otherwise eligible and lost on cooldown / active-conversation
-      // (the interesting near-misses).
-      logger.debug('social_outreach_tick no eligible candidate this hour', {
-        ownerUserId: profile.user.slack_user_id,
-        total_rows: rows.length,
-        dropped,
-        ...(late_drops.length > 0 ? { late_drops } : {}),
-      });
+      // Hourly tick + same dropped breakdown every time = pure noise. Log
+      // ONLY when the signature transitions or there are interesting late
+      // drops (cooldown / active-conversation near-misses). Pure shape
+      // changes are signal; identical-hour-over-hour is not.
+      const signature = JSON.stringify({ total: rows.length, dropped, late: late_drops });
+      const ownerKey = profile.user.slack_user_id;
+      const prev = lastNoCandidateSignature.get(ownerKey);
+      if (prev !== signature) {
+        logger.debug('social_outreach_tick no eligible candidate this hour', {
+          ownerUserId: ownerKey,
+          total_rows: rows.length,
+          dropped,
+          ...(late_drops.length > 0 ? { late_drops } : {}),
+        });
+        lastNoCandidateSignature.set(ownerKey, signature);
+      }
       return;
     }
+    // Candidate picked — clear the cache so the next no-candidate tick
+    // logs the transition back to "nothing today".
+    lastNoCandidateSignature.delete(profile.user.slack_user_id);
 
     const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
     const notes: string[] = (() => {

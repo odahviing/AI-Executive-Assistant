@@ -107,7 +107,7 @@ const UserProfileSchema = z.object({
     timezone: z.string().min(3),
     language: z.string().default('en'),
     units: z.enum(['metric', 'imperial']).default('metric'),
-    company: z.string().optional(),       // e.g. "Reflectiz" — used in identity/persona prompts
+    company: z.string().optional(),       // company name — used in identity/persona prompts
     company_brief: z.string().optional(), // short paragraph injected into system prompt so assistant knows the business
   }),
 
@@ -144,6 +144,15 @@ const UserProfileSchema = z.object({
       preferred_end: z.string().regex(/^\d{2}:\d{2}$/),
       duration_minutes: z.number().min(15).max(120),
       can_skip: z.boolean(),
+      // Optional event-detection hints — same shape as floating_blocks.
+      // `lunch` is just one example of a floating block. Other owners might
+      // care about dinner, a coffee break, a daily walk, prayer time, etc.
+      // The auto-promoted regex defaults to /\b{lunch}\b/i — set these
+      // fields when the events you actually want detected don't match
+      // the literal English word (Hebrew "ארוחת צהריים", Spanish
+      // "almuerzo", a custom Outlook category, etc.).
+      match_subject_regex: z.string().optional(),
+      match_category: z.string().optional(),
     }),
     // v2.1 — generalized floating blocks. A floating block is a protected
     // N-minute period that can live anywhere inside a defined window

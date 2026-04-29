@@ -39,7 +39,7 @@ export class OutreachCoreSkill implements Skill {
   name = 'Outreach';
   description = 'Sends messages to colleagues on behalf of the owner — DMs and channel posts. Always core on any Slack profile.';
 
-  getTools(_profile: UserProfile): Anthropic.Tool[] {
+  getTools(profile: UserProfile): Anthropic.Tool[] {
     return [
       {
         name: 'message_colleague',
@@ -74,7 +74,7 @@ Only send messages the user explicitly asks for — never reach out to people on
             },
             message: {
               type: 'string',
-              description: 'The message to send. Write naturally in first person as Maelle. Be warm and human. For channel posts, do NOT include the @mention — it is added automatically.',
+              description: `The message to send. Write naturally in first person as ${profile.assistant.name}. Be warm and human. For channel posts, do NOT include the @mention — it is added automatically.`,
             },
             await_reply: {
               type: 'boolean',

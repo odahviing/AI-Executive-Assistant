@@ -313,7 +313,7 @@ export async function getFreeBusy(
     logger.error('Failed to fetch free/busy', { err, emails });
 
     // 403 / ErrorAccessDenied means the Azure app lacks Calendars.Read application
-    // permission (admin consent required in the Reflectiz tenant).
+    // permission (admin consent required in the company tenant).
     // Surface this as a typed error so callers can give a useful message.
     if (err?.statusCode === 403 || err?.code === 'ErrorAccessDenied') {
       throw new GraphPermissionError(

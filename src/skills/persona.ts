@@ -61,7 +61,7 @@ export class PersonaSkill implements Skill {
   name = 'Persona';
   description = 'Off-topic chat, social topic tracking, proactive colleague outreach — the friend-of-the-team layer. Optional.';
 
-  getTools(_profile: UserProfile): Anthropic.Tool[] {
+  getTools(profile: UserProfile): Anthropic.Tool[] {
     return [
       {
         name: 'note_about_person',
@@ -124,7 +124,7 @@ Call this when:
 - They volunteer something about themselves worth remembering for richer future chat
 
 Examples:
-- After "I was building you all day" → topic="hobby", subject="building Maelle", note="Spent the day developing Maelle — clearly enjoying the AI/dev work."
+- After "I was building you all day" → topic="hobby", subject="building ${profile.assistant.name}", note="Spent the day developing ${profile.assistant.name} — clearly enjoying the AI/dev work."
 - After "Just got back from skiing in Italy" → topic="travel", subject="ski trip italy", note="Just back from skiing in Italy — sounded relaxed."
 - After "My daughter started first grade today" → topic="family", subject="daughter first grade", note="Daughter started first grade today."
 

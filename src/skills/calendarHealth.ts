@@ -677,7 +677,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                           },
                         });
                         issue.fixed = true;
-                        issue.fix_detail = `Started a move-coord to reschedule "${conflicting.subject}" — Idan's on vacation ${issue.date}. DM'd ${coordParticipants.map(p => p.name).join(' and ')}.`;
+                        issue.fix_detail = `Started a move-coord to reschedule "${conflicting.subject}" — ${profile.user.name.split(' ')[0]}'s on vacation ${issue.date}. DM'd ${coordParticipants.map(p => p.name).join(' and ')}.`;
                         fixesApplied += 1;
                       }
                     }

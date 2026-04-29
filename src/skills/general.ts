@@ -42,7 +42,7 @@ Only omit time_range_days for evergreen questions (company background, general c
           properties: {
             query: {
               type: 'string',
-              description: 'The search query. Be specific. e.g. "weather Tel Aviv today", "USD ILS exchange rate", "Reflectiz cybersecurity news"',
+              description: 'The search query. Be specific. e.g. "weather Tel Aviv today", "USD ILS exchange rate", "[company] industry news"',
             },
             time_range_days: {
               type: 'number',
@@ -235,8 +235,8 @@ export async function tavilyExtract(url: string): Promise<object> {
   }
 
   // extract_depth: advanced handles JS-heavy SPAs and content behind client-side
-  // rendering (common on marketing sites like www.reflectiz.com). basic mode
-  // returned empty content for those pages during KB recovery (2026-04-20).
+  // rendering (common on JS-heavy marketing sites). basic mode returned empty
+  // content for those pages during KB recovery (2026-04-20).
   const res = await fetch('https://api.tavily.com/extract', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

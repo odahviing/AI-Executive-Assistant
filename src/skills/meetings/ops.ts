@@ -658,7 +658,7 @@ export class SchedulingSkill {
             return {
               error: 'calendar_permission_denied',
               message: 'I can read your calendar but I don\'t have permission to check other people\'s availability. ' +
-                'The Azure app needs Calendars.Read application permission granted by a Reflectiz tenant admin. ' +
+                `The Azure app needs Calendars.Read application permission granted by a ${context.profile.user.company ?? 'company'} tenant admin. ` +
                 'Tell the user you cannot check their colleagues\' schedules right now due to a permissions issue, ' +
                 'and ask if they know when those people are free.',
             };
@@ -798,7 +798,7 @@ export class SchedulingSkill {
               return {
                 error: 'calendar_permission_denied',
                 message: 'I can read your calendar but I don\'t have permission to check other people\'s availability. ' +
-                  'The Azure app needs Calendars.Read application permission granted by a Reflectiz tenant admin. ' +
+                  `The Azure app needs Calendars.Read application permission granted by a ${context.profile.user.company ?? 'company'} tenant admin. ` +
                   'Tell the user you cannot find a common slot right now due to a permissions issue, ' +
                   'and ask if they know when those people are free so you can proceed.',
               };

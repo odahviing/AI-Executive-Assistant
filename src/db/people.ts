@@ -677,7 +677,7 @@ export function formatPeopleMemoryForPrompt(
  * in v2.2 — that machinery is owner-scoped now and lives in the Social
  * Engine. Returns '' for unknown people.
  */
-export function buildSocialContextBlock(slackId: string, timezone: string): string {
+export function buildSocialContextBlock(slackId: string, timezone: string, assistantName: string = 'Assistant'): string {
   const person = getPersonMemory(slackId);
   if (!person) return '';
 
@@ -726,10 +726,10 @@ export function buildSocialContextBlock(slackId: string, timezone: string): stri
     const ago = lastInitiatedAt
       ? (hoursAgoInit >= 48 ? `${Math.round(hoursAgoInit / 24)} days ago` : 'yesterday')
       : 'never';
-    lines.push(`Maelle-initiated check-in: DUE (you last started one ${ago})`);
+    lines.push(`${assistantName}-initiated check-in: DUE (you last started one ${ago})`);
   } else {
     const h = Math.round(24 - hoursAgoInit);
-    lines.push(`Maelle-initiated check-in: NOT due — you already started one recently (${h}h until next). If THEY bring up personal topics, respond freely — just don't YOU start it.`);
+    lines.push(`${assistantName}-initiated check-in: NOT due — you already started one recently (${h}h until next). If THEY bring up personal topics, respond freely — just don't YOU start it.`);
   }
 
   // Recent activity. v2.3.4 — drop calendar-state snapshot types

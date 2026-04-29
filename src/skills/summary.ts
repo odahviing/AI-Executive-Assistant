@@ -203,6 +203,7 @@ async function draftSummaryFromTranscript(params: {
     });
   }
 
+  const ownerEmailDomain = params.profile.user.email.split('@')[1] ?? 'company.com';
   const prompt = `You are ${params.profile.assistant.name}, ${params.ownerName}'s personal executive assistant. The owner just sent you a meeting transcript and wants a summary they can share.
 
 Your output is STRICT JSON ONLY — no prose, no markdown, no code fences. Use this shape:
@@ -212,7 +213,7 @@ Your output is STRICT JSON ONLY — no prose, no markdown, no code fences. Use t
   "main_topic": "one sentence — what was this meeting really about",
   "is_external": true|false,    // true if non-company-domain attendees were present
   "attendees": [
-    { "name": "Brett Johnson", "email": "brett@reflectiz.com", "internal": true,  "source": "calendar" },
+    { "name": "Brett Johnson", "email": "brett@${ownerEmailDomain}", "internal": true,  "source": "calendar" },
     { "name": "John Smith",    "email": "john@stripe.com",     "internal": false, "source": "transcript" }
   ],
   "paragraphs": [
@@ -223,7 +224,7 @@ Your output is STRICT JSON ONLY — no prose, no markdown, no code fences. Use t
   "action_items": [
     {
       "assignee_text": "Brett",            // raw label from transcript
-      "description":   "Send the privacy presentation to Idan",
+      "description":   "Send the privacy presentation to ${params.ownerName.split(' ')[0]}",
       "deadline_iso":  "2026-04-17T14:00:00",   // OPTIONAL — only if transcript explicitly stated a deadline
       "deadline_label":"by tomorrow"             // OPTIONAL — human form ("by Friday", "next week")
     }
@@ -455,7 +456,7 @@ DECISION RULES:
 
 EXAMPLES of save:
 - Feedback "more paragraphs per topic than one-liner bullets" → is_style_rule=true, generalizes=true, scope=global
-- Feedback "don't call me Idan in the summary, I was in the meeting" → is_style_rule=true, generalizes=true, scope=global (applies to all first-person summaries)
+- Feedback "don't call me [my name] in the summary, I was in the meeting" → is_style_rule=true, generalizes=true, scope=global (applies to all first-person summaries)
 - Feedback "on interview summary focus on entry/positive/negative/follow-up" → is_style_rule=true, generalizes=true, scope=type-specific, type_name=interview
 
 EXAMPLES of SKIP:
@@ -650,7 +651,7 @@ Do NOT use for per-meeting corrections like "Speaker 1 is Brett" or "remove Yael
           type: 'object',
           properties: {
             key: { type: 'string', description: 'Short snake_case label, e.g. "summary_perspective", "summary_paragraph_spacing"' },
-            value: { type: 'string', description: 'The rule in plain English, e.g. "Write in first person — I/me/my, not Idan/he/his." or "One topic per paragraph, empty line between paragraphs."' },
+            value: { type: 'string', description: 'The rule in plain English, e.g. "Write in first person — I/me/my, not [my name]/he/his." or "One topic per paragraph, empty line between paragraphs."' },
           },
           required: ['key', 'value'],
         },

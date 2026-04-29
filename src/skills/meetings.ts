@@ -160,6 +160,10 @@ Override with custom_location if a specific external venue is needed.`,
               type: 'boolean',
               description: 'Set to true if the colleague explicitly says "urgent" or needs a time before all offered options. Allows relaxed buffer rules with owner approval.',
             },
+            requester_is_attending: {
+              type: 'boolean',
+              description: 'Default true. Set FALSE when the colleague talking to you is the SCHEDULER, not an attendee — e.g. an HR/EA-style coordinator booking an interview between the owner and a candidate, or anyone arranging a meeting they themselves are not joining. When false, the requester is NOT added to participants, their availability is NOT factored in, and they go to just_invite if they want a calendar copy. The cue: "I want to set up a meeting between X and Y", "I\'m scheduling on behalf of...", or any clear signal that the requester is not in the room.',
+            },
           },
           required: ['participants', 'subject', 'duration_min'],
         },
@@ -319,7 +323,7 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
         input_schema: {
           type: 'object',
           properties: {
-            duration_minutes: { type: 'number', enum: [10, 25, 40, 55] },
+            duration_minutes: { type: 'number', enum: profile.meetings.allowed_durations },
             attendee_emails: { type: 'array', items: { type: 'string' } },
             search_from: { type: 'string', description: 'Start of search window in ISO 8601 format' },
             search_to: { type: 'string', description: 'End of search window in ISO 8601 format (auto-expanded up to 21 days if fewer than 3 slots found)' },
@@ -648,6 +652,40 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
               ownerUserId,
               subject: args.subject,
               originalParticipants: participants.map((p: any) => ({ name: p.name, slack_id: p.slack_id })),
+            });
+          }
+        }
+
+        // ── Third-party-scheduler signal (v2.3.5) ──────────────────────────────
+        // When the colleague tells Sonnet "I'm coordinating a meeting between X
+        // and Y, I'm not joining" (HR booking interviews, EA scheduling on
+        // behalf of someone else), Sonnet sets requester_is_attending=false.
+        // Defense-in-depth: drop the requester from `participants` AND
+        // `just_invite` if they slipped in — their availability must NOT be
+        // factored in, and they shouldn't show up on the invite by default.
+        // Sonnet can re-add them to just_invite explicitly if they want a
+        // calendar copy.
+        if (
+          context.senderRole === 'colleague' &&
+          args.requester_is_attending === false &&
+          context.userId
+        ) {
+          const requesterId = context.userId;
+          const beforePartCount = ((args.participants as any[] | undefined) ?? []).length;
+          const beforeInviteCount = ((args.just_invite as any[] | undefined) ?? []).length;
+          args.participants = ((args.participants as any[] | undefined) ?? [])
+            .filter((p: any) => p.slack_id !== requesterId);
+          args.just_invite = ((args.just_invite as any[] | undefined) ?? [])
+            .filter((p: any) => p.slack_id !== requesterId);
+          const afterPartCount = (args.participants as any[]).length;
+          const afterInviteCount = (args.just_invite as any[]).length;
+          if (beforePartCount !== afterPartCount || beforeInviteCount !== afterInviteCount) {
+            logger.info('Third-party-scheduler — requester removed from attendees', {
+              requesterId,
+              senderName: context.senderRole,
+              participantsRemoved: beforePartCount - afterPartCount,
+              justInviteRemoved: beforeInviteCount - afterInviteCount,
+              subject: args.subject,
             });
           }
         }
@@ -1660,6 +1698,14 @@ When ${firstName}'s request has the shape "meeting / sync / find time WITH A, [a
 
 How to decide who goes where when it's still unclear:
 - When in doubt: key decision-makers → participants; observers and FYI attendees → just_invite
+
+THIRD-PARTY SCHEDULER — when the colleague is the COORDINATOR, not an attendee:
+Sometimes the colleague talking to you is just arranging a meeting, not joining it. Examples: an HR/EA scheduling an interview between ${firstName} and an external candidate; a partner asking you to set up a call between ${firstName} and someone else; "I'm helping coordinate a meeting between X and Y". When you see this shape:
+- Set \`requester_is_attending: false\` on coordinate_meeting.
+- Do NOT add the requester to \`participants\` — their availability is irrelevant to the meeting.
+- Add them to \`just_invite\` only if they explicitly want a calendar copy. Otherwise leave them off the invite entirely.
+- The cue: anything that signals the requester isn't in the room — "between ${firstName} and the candidate", "I'm scheduling on behalf of...", "set up a meeting for them".
+- When ambiguous (request could go either way) — ASK ONCE: "are you joining or just coordinating?" — then proceed.
 
 THREAD CONTEXT — who to invite when ${firstName} asks for a meeting FROM a channel thread:
 - **If ${firstName} @-mentions specific people in his meeting request** ("Maelle, let's do a meeting about this with @Amazia and @Brett"): invite ONLY those named people. Ignore everyone else on the thread, even if they mentioned someone or replied. Explicit names override thread-sweep.

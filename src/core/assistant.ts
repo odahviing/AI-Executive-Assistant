@@ -39,8 +39,8 @@ Call this when:
 
 Examples:
 - "prefers calls before noon local time"
-- "Isaac Cohen goes by Ike informally and prefers afternoon calls"
-- "Yael Aharon handles all interview scheduling — treat her meeting requests as high priority"
+- "[Person Name] goes by [Nickname] informally and prefers afternoon calls"
+- "[Person Name] handles all [scope] scheduling — treat their meeting requests as high priority"
 - "Person X and [owner name] have a running joke about always joining calls late"
 
 Do NOT save one-off requests. Save things that should inform future interactions.`,
@@ -93,7 +93,7 @@ Do NOT save one-off requests. Save things that should inform future interactions
       {
         name: 'recall_interactions',
         description: `Look up past interactions with a specific person — messages they sent, meetings coordinated, outreach done.
-Call this when asked "did you talk to X?", "has Dina contacted you?", "what happened with Simon?", or any question about a specific person's recent activity.
+Call this when asked "did you talk to X?", "has [name] contacted you?", "what happened with [name]?", or any question about a specific person's recent activity.
 Always call this before saying you haven't interacted with someone.`,
         input_schema: {
           type: 'object',
@@ -122,7 +122,7 @@ You don't need explicit statements. Infer from behavior:
 - role_summary: piece together from calendar meetings you've seen, topics they mention, side context. "EMEA sales lead, focused on Q3 targets."
 - reports_to: if you learn who their manager is — save it.
 - response_speed: how long they typically take to reply. "immediate", "fast" (under an hour), "hours", "day", "slow", "unreliable".
-- collaboration_notes: people they always appear with in meetings, who they coordinate with. "Often in calls with David and Yael. Runs Monday team sync."
+- collaboration_notes: people they always appear with in meetings, who they coordinate with. "Often in calls with [colleague A] and [colleague B]. Runs Monday team sync."
 
 Only update a field when you have real evidence. Omit fields you don't know yet.
 Call this after interactions — not during them. It's a background update.`,
@@ -152,11 +152,11 @@ Call this after interactions — not during them. It's a background update.`,
             },
             timezone: {
               type: 'string',
-              description: 'IANA timezone of the person. Save when the owner volunteers it OR a strong signal lands (calendar invite metadata, explicit mention of ET/PST/GMT). e.g. "America/New_York", "Europe/London", "Asia/Jerusalem". When the owner tells you a CITY/COUNTRY use the `state` field instead — Maelle will derive the timezone from it.',
+              description: 'IANA timezone of the person. Save when the owner volunteers it OR a strong signal lands (calendar invite metadata, explicit mention of ET/PST/GMT). e.g. "America/New_York", "Europe/London", "Asia/Jerusalem". When the owner tells you a CITY/COUNTRY use the `state` field instead — the system will derive the timezone from it.',
             },
             state: {
               type: 'string',
-              description: 'Free-text location for the person — city, region, or country ("Boston", "New York", "Israel", "London"). Save when the owner volunteers it ("Yael lives in Israel") or the person tells you. State is more useful than timezone alone (Boston ≠ NYC even though both are ET). When state lands, Maelle automatically derives + saves a matching IANA timezone.',
+              description: 'Free-text location for the person — city, region, or country ("Boston", "New York", "Israel", "London"). Save when the owner volunteers it ("[Person] lives in Israel") or the person tells you. State is more useful than timezone alone (Boston ≠ NYC even though both are ET). When state lands, the system automatically derives + saves a matching IANA timezone.',
             },
             working_hours: {
               type: 'string',
@@ -200,11 +200,11 @@ Call this after interactions — not during them. It's a background update.`,
             },
             engagement_rank: {
               type: 'number',
-              description: 'Numeric social engagement rank 0–3. 0=don\'t initiate social with them (opt-out), 1=minimal, 2=neutral (default for new), 3=loves to chat. Set ONLY when the owner explicitly directs you ("rank Yael at 3", "never ping Ysrael" → 0). Don\'t auto-set — the system auto-adjusts based on ping responses.',
+              description: 'Numeric social engagement rank 0–3. 0=don\'t initiate social with them (opt-out), 1=minimal, 2=neutral (default for new), 3=loves to chat. Set ONLY when the owner explicitly directs you ("rank [name] at 3", "never ping [name]" → 0). Don\'t auto-set — the system auto-adjusts based on ping responses.',
             },
             currently_traveling: {
               type: 'object',
-              description: 'Travel window for the person. Stored profile timezone/state are defaults — when the colleague is travelling somewhere else for a stretch, set this so slot search and time-of-day display use the travel location instead. Set when (a) the colleague volunteers it ("I\'m in Boston next week", "Boston time"), or (b) the owner tells you ("Yael is in NYC for a week"). Pass `clear: true` to wipe a known-stale travel window. The `until` date is when they fly back; the system auto-clears the field once that date passes.',
+              description: 'Travel window for the person. Stored profile timezone/state are defaults — when the colleague is travelling somewhere else for a stretch, set this so slot search and time-of-day display use the travel location instead. Set when (a) the colleague volunteers it ("I\'m in Boston next week", "Boston time"), or (b) the owner tells you ("[Person] is in NYC for a week"). Pass `clear: true` to wipe a known-stale travel window. The `until` date is when they fly back; the system auto-clears the field once that date passes.',
               properties: {
                 location: { type: 'string', description: 'Free text: "Boston", "NYC", "London". Use a city when known.' },
                 from:     { type: 'string', description: 'ISO yyyy-MM-dd — first day at the location. If they fly mid-day, use the day they land.' },
@@ -222,7 +222,7 @@ Call this after interactions — not during them. It's a background update.`,
 Call this to create a permanent memory of what happened with someone — work or social.
 
 Call this whenever:
-- A meeting was booked involving this person ("Booked 45min between Idan and Maayan for Thu 10 Apr 14:00")
+- A meeting was booked involving this person ("Booked 45min between [owner] and [person] for Thu 10 Apr 14:00")
 - You sent or scheduled a message to them ("Sent message asking about Q3 timeline")
 - They replied to something ("They confirmed Tuesday 3pm works for the sync")
 - You had a meaningful conversation ("Discussed onboarding plan and new team hire")
@@ -305,7 +305,7 @@ Keep calls narrow — one person at a time. If the person isn't in the catalog, 
           properties: {
             person: {
               type: 'string',
-              description: 'Person identifier — their slug from the PEOPLE NOTES catalog ("amazia-cohen"), their display name ("Amazia Cohen"), or first name ("Amazia"). Slug is most reliable.',
+              description: 'Person identifier — their slug from the PEOPLE NOTES catalog (e.g. "first-last"), their display name, or first name. Slug is most reliable.',
             },
           },
           required: ['person'],
@@ -316,8 +316,8 @@ Keep calls narrow — one person at a time. If the person isn't in the catalog, 
         description: `Write a durable fact about a person into their markdown notes file. This is for OPERATIONAL facts that help you be a better assistant — not for social topics.
 
 Use for facts like:
-- Where they live (residence): "Idan lives in Nes Ziona."
-- Where they work (workplace): "Reflectiz office in Tel Aviv, goes in Mon/Wed/Thu."
+- Where they live (residence): "[Person] lives in [city]."
+- Where they work (workplace): "[Company] office in [city], goes in Mon/Wed/Thu."
 - Working hours: "Responds US Eastern mornings, offline after 5pm ET for school pickup."
 - Communication style: "Prefers brief replies. Never uses greetings."
 - How to address them: "Goes by Ike, not Isaac."

@@ -5,10 +5,10 @@
  * Sonnet call with strict tool_use schema → guaranteed JSON. Output decides
  * whether the Social Engine fires for this turn or is skipped entirely.
  *
- *   kind = 'task'   → the person wants Maelle to DO something (book, move,
+ *   kind = 'task'   → the person wants ${assistantName} to DO something (book, move,
  *                     check, remind, research). Skip social.
  *   kind = 'social' → the person is being a person (share, vent, small-talk,
- *                     joke, ask about Maelle). Fire the Social Engine.
+ *                     joke, ask about ${assistantName}). Fire the Social Engine.
  *   kind = 'other'  → one-word ack / "ok" / "thanks" / greeting with no
  *                     follow-on. Skip social; piggyback proactive social
  *                     may fire if 24h+ silence.
@@ -59,22 +59,23 @@ export async function classifyOwnerIntent(params: {
   }
 
   const ownerFirst = profile.user.name.split(' ')[0];
+  const assistantName = profile.assistant.name;
   const senderRole = params.senderRole ?? 'owner';
   const senderName = senderRole === 'owner' ? ownerFirst : (params.senderName ?? 'the colleague');
   const categoryList = FIXED_CATEGORIES.join(', ');
 
   const isOwner = senderRole === 'owner';
   const directionExamples = isOwner
-    ? "'share' (telling Maelle about his life), 'ask_maelle' (asking Maelle something personal), 'reaction' (responding to something Maelle said earlier)"
-    : "'share' (telling Maelle about their own life), 'ask_maelle' (asking Maelle something, e.g. about her weekend or about " + ownerFirst + "), 'reaction' (responding to something Maelle said earlier)";
+    ? `'share' (telling ${assistantName} about his life), 'ask_maelle' (asking ${assistantName} something personal), 'reaction' (responding to something ${assistantName} said earlier)`
+    : `'share' (telling ${assistantName} about their own life), 'ask_maelle' (asking ${assistantName} something, e.g. about her weekend or about ${ownerFirst}), 'reaction' (responding to something ${assistantName} said earlier)`;
 
-  const systemPrompt = `You classify a single message from ${senderName} (${isOwner ? `${ownerFirst} — the executive who owns this account` : `a colleague talking to Maelle, who works for ${ownerFirst}`}) to the AI assistant Maelle.
+  const systemPrompt = `You classify a single message from ${senderName} (${isOwner ? `${ownerFirst} — the executive who owns this account` : `a colleague talking to ${assistantName}, who works for ${ownerFirst}`}) to the AI assistant ${assistantName}.
 
 Output EXACTLY ONE tool call to classify_intent. No prose.
 
 Three classes:
 
-1) TASK — ${senderName} wants Maelle to DO something actionable. Examples:
+1) TASK — ${senderName} wants ${assistantName} to DO something actionable. Examples:
    ${isOwner
      ? `"book the meeting", "move the 3pm", "delete sales sync", "what's on my calendar today", "any open tasks you have?", "find a slot with Amazia", "remind me Monday", "research X"`
      : `"can you find a time for us to meet with ${ownerFirst}?", "can ${ownerFirst} join at 4pm?", "reschedule tomorrow to 5pm", "what's his availability next week?", "let him know I can't make it"`}.
@@ -82,8 +83,8 @@ Three classes:
 
 2) SOCIAL — ${senderName} is being a PERSON. No action requested. Examples:
    "One Axos down!", "just got back from a great run", "I'm exhausted today",
-   "how was your weekend?" (asking Maelle), "did you see the game last night?",
-   "feeling good today". Sharing, venting, small-talk, asking Maelle something personal.
+   "how was your weekend?" (asking ${assistantName}), "did you see the game last night?",
+   "feeling good today". Sharing, venting, small-talk, asking ${assistantName} something personal.
 
 3) OTHER — bare acknowledgement, greeting, or close-out with NO follow-on content.
    "ok", "thanks", "cool", "morning", "got it", "hi", "yeah", "sure", "later", "gn".
@@ -100,9 +101,9 @@ TASK ALWAYS WINS. Mixed messages classify as TASK.
 
 For EVERY classification (task, social, other), determine conversation_state:
 - 'open' — the person is still in the thread: asking, sharing, continuing, extending.
-  If Maelle just asked a social question (see recent context) and the reply adds ANY detail, that's OPEN — even if brief.
+  If ${assistantName} just asked a social question (see recent context) and the reply adds ANY detail, that's OPEN — even if brief.
 - 'closing' — the person is winding down: bare ack with no extension, "later", "gotta run", "No. Just playing",
-  or a short reply that gives nothing to build on. Also 'closing' when Maelle's last social question
+  or a short reply that gives nothing to build on. Also 'closing' when ${assistantName}'s last social question
   in recent context went unanswered for a long gap and the current message is unrelated — the topic went quiet.
 
 For SOCIAL, also determine:

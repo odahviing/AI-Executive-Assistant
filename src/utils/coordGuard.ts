@@ -169,3 +169,40 @@ export function shouldRequireSoftConfirm(opts: {
   if (opts.participantCount >= 3 && !opts.hasPriorInteractionsWithAllParticipants) return true;
   return false;
 }
+
+// ── (d) Conversation-scoped suspicion cache ─────────────────────────────────
+// When the LLM judge flags a coord request SUSPICIOUS, we want downstream
+// colleague-path tools in the SAME conversation to also refuse — otherwise
+// Sonnet pivots from `coordinate_meeting` (caught) to `create_approval`
+// (not caught), the suspicious ask lands in the owner's DM, and a reminder
+// fires hours later. Keyed on senderId+threadTs with a short TTL — long
+// enough to cover the typical "pivot in seconds" pattern, short enough
+// that legitimate later coord requests on the same DM thread aren't
+// poisoned for the rest of the day.
+
+const SUSPICIOUS_TTL_MS = 10 * 60 * 1000;
+const suspicionCache = new Map<string, { expiresAt: number; reason: string }>();
+
+function suspicionKey(senderId: string, threadTs?: string): string {
+  return `${senderId}:${threadTs ?? ''}`;
+}
+
+export function markConversationSuspicious(senderId: string, threadTs: string | undefined, reason: string): void {
+  suspicionCache.set(suspicionKey(senderId, threadTs), {
+    expiresAt: Date.now() + SUSPICIOUS_TTL_MS,
+    reason,
+  });
+}
+
+export function wasConversationFlaggedSuspicious(
+  senderId: string,
+  threadTs: string | undefined,
+): { flagged: boolean; reason?: string } {
+  const entry = suspicionCache.get(suspicionKey(senderId, threadTs));
+  if (!entry) return { flagged: false };
+  if (entry.expiresAt < Date.now()) {
+    suspicionCache.delete(suspicionKey(senderId, threadTs));
+    return { flagged: false };
+  }
+  return { flagged: true, reason: entry.reason };
+}

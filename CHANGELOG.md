@@ -2,6 +2,42 @@
 
 ---
 
+## 2.3.5 — Coord-judge bleed-through fix + third-party scheduler + cloneability cleanup
+
+Two new safety/correctness primitives plus a sweep that strips Idan/Reflectiz/Maelle literals out of code so a future profile (different name, different company, different agent) actually works without source edits. Triggered by an incident: Oran sent "TEST for XXX", the coord judge correctly flagged it SUSPICIOUS and blocked `coordinate_meeting` — but Sonnet pivoted to `create_approval` (no equivalent gate) and the flagged ask still landed in the owner's DM with a reminder hours later.
+
+### Added
+
+- **Conversation-scoped suspicion cache** ([`utils/coordGuard.ts`](src/utils/coordGuard.ts)) — `markConversationSuspicious(senderId, threadTs, reason)` + `wasConversationFlaggedSuspicious(senderId, threadTs)` with a 10-min TTL. Stamped at [`orchestrator/index.ts:818`](src/core/orchestrator/index.ts:818) when the LLM judge returns SUSPICIOUS. Checked at [`orchestrator/index.ts:677`](src/core/orchestrator/index.ts:677) before colleague-path `create_approval` runs — hit → refuse with the same shape as the coord-side refusal (generic colleague reply + shadow-DM owner). Closes the post-judge tool-pivot bypass.
+- **`coordinate_meeting.requester_is_attending: bool`** — new optional arg, default true. When false (HR/EA-style coordinator booking an interview between owner + candidate), [`meetings.ts:660`](src/skills/meetings.ts:660) drops the requester from `participants` AND `just_invite` so their availability is not factored in. Defense-in-depth: even if Sonnet wrongly added them in the args, the handler removes them when the flag is false.
+- **THIRD-PARTY SCHEDULER prompt rule** ([`meetings.ts:1700`](src/skills/meetings.ts:1700)) — explicit guidance for the "I'm coordinating, not attending" shape. Cue list ("between X and Y", "scheduling on behalf of...") + ASK ONCE when ambiguous. No existing rule covered this — the prior `participants` vs `just_invite` guidance assumed the requester was one of the people.
+
+### Changed (cloneability — code reads from `profile.*`, not literals)
+
+- **Colleague-facing strings** ([coord/reply.ts:339, 357](src/skills/meetings/coord/reply.ts:339), [calendarHealth.ts:680](src/skills/calendarHealth.ts:680)) — "I'll run that past Idan" / "I'll let Idan know" / "Idan's on vacation" now use `${profile.user.name.split(' ')[0]}`.
+- **`find_available_slots` schema** ([meetings.ts:322](src/skills/meetings.ts:322)) — `duration_minutes.enum` was hardcoded `[10, 25, 40, 55]`; now reads `profile.meetings.allowed_durations`.
+- **Hardcoded "Maelle" in code/prompts** — replaced with `profile.assistant.name` in social classifier ([classifyOwnerIntent.ts](src/core/social/classifyOwnerIntent.ts)), coda generator ([generateCoda.ts:72](src/core/social/generateCoda.ts:72)), social-context check-in line ([db/people.ts:729-732](src/db/people.ts:729)), transcript rendering ([orchestrator/index.ts:289](src/core/orchestrator/index.ts:289)), `message_colleague` tool description ([outreach.ts:77](src/skills/outreach.ts:77)), persona example ([persona.ts:127](src/skills/persona.ts:127)).
+- **Hardcoded "Reflectiz"** — calendar permission errors ([meetings/ops.ts:661, 801](src/skills/meetings/ops.ts:661)) use `profile.user.company`; summary attendee-shape JSON example ([summary.ts:215](src/skills/summary.ts:215)) uses owner's email domain; systemPrompt example ([systemPrompt.ts:443](src/core/orchestrator/systemPrompt.ts:443)) genericized.
+- **Colleague-name examples in prompts** — Yael/Brett/Simon/Amazia/Dina/Elinor/Ali tied to specific roles in [`core/assistant.ts`](src/core/assistant.ts) and [`systemPrompt.ts`](src/core/orchestrator/systemPrompt.ts) now use bracket placeholders (`[name]`, `[colleague]`, `[scope]`). Anonymous-name examples in tool routing prompts (B1, B4-B6) left as-is per owner direction.
+- **Floating-block matcher generalized** ([floatingBlocks.ts:73](src/utils/floatingBlocks.ts:73)) — auto-promoted regex was hardcoded to English+Hebrew lunch (`'\\blunch\\b|ארוחת\\s*צהריים'`). Now defaults to `\\b{name}\\b` and reads optional `match_subject_regex` / `match_category` from `schedule.lunch` ([userProfile.ts:142-153](src/config/userProfile.ts:142)). Idan's yaml updated to keep the Hebrew matcher. Other owners (dinner, coffee, prayer, siesta) configure their own.
+- **Reflectiz scrubbed from comments** in [formatting.ts](src/connections/slack/formatting.ts), [calendar.ts](src/connectors/graph/calendar.ts), [general.ts](src/skills/general.ts), [knowledge.ts](src/skills/knowledge.ts), [userProfile.ts](src/config/userProfile.ts) — repo is public on GitHub.
+
+### Standing rule added
+
+- **No personal info in code** — [`SESSION_STARTER.md`](.claude/SESSION_STARTER.md) now lists this as a non-negotiable rule. Owner names, company, domains, durations, focus-time, lunch hours, office locations live in YAML or are read from `profile.*` — code reads from profile, never literals. Comments may reference owner-specific facts as historical context, but anything reaching a runtime string, regex, prompt, tool description, or schema enum must be parameterized.
+
+### Migration
+
+None for code consumers. YAML for non-English-lunch profiles needs `schedule.lunch.match_subject_regex` to keep matching custom-language lunch events; English-only profiles are unaffected (default matcher matches `\\blunch\\b`).
+
+### Not changed
+
+- Auto-triage / auto-build CI — still gated `if: false &&` (deactivated in 2.3.1).
+- The 2.3.4 primitives (interaction-log filter, parseGraphFreeBusySlot chokepoint, delete_meeting seriesMaster guard, claim-checker retry regex) — unchanged.
+- The cloneability scrub did NOT remove "Idan" from comments — those stay as historical context per owner direction. Only "Reflectiz" was scrubbed (public repo concern).
+
+---
+
 ## 2.3.4 — Source-of-truth fixes: interaction-log filter + free/busy TZ chokepoint + claim-checker retry honesty + delete-series guard
 
 Four bugs from one evening of real chat use, all about stale snapshots overriding current state. Maelle was narrating an old `meeting_booked` log line as if it were tomorrow's calendar; reading a free/busy response in the wrong timezone because the strings carried no offset; and after a claim-checker false-positive, re-reading the calendar and narrating her own move as someone else's. Plus defense-in-depth: `delete_meeting` finally got the same seriesMaster preflight that `move_meeting` and `update_meeting` already had.
