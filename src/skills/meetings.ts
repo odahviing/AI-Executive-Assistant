@@ -313,6 +313,8 @@ Before calling this tool: ASK ${profile.user.name.split(' ')[0]} TWO HUMAN QUEST
   • "In person or online?"
   • If in-person and the venue isn't ${profile.user.name.split(' ')[0]}'s office: "Where?" + "Roughly how long is the trip each way?"
 
+SMART-SKIP THE ASK: when at least one attendee is in a different timezone than ${profile.user.name.split(' ')[0]} (people_memory has the data — Brett ET, Yael NYC, Jenna EST), the meeting is remote by default. The handler will infer this and treat missing meeting_mode as 'online' automatically. Don't ask "in person or online?" when the attendee is clearly remote — it reads obtuse. Only ask when all attendees are in the same TZ as ${profile.user.name.split(' ')[0]}.
+
 Then YOU pick the right meeting_mode based on what they said:
   • "online" / "Teams" / "Zoom" / "call" / "video" → meeting_mode='online'
   • "in person at the office" / "in person" with no other venue → meeting_mode='in_person'
@@ -357,11 +359,13 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
         name: 'create_meeting',
         description: `Create a new calendar event directly (no coord needed — use this when the owner already knows the time + attendees). Call coordinate_meeting instead when participants need to agree on a time. Follow the location / category / work-day rules in the prompt section.
 
-ONLINE vs IN-PERSON for EXTERNAL attendees (v2.3.2): when at least one attendee has an email outside ${profile.user.email.split('@')[1]}, you must determine the meeting mode before booking. CLARIFY UNLESS one of these signals already tells you:
-- Their people_memory entry shows a different timezone than the owner — they're remote → online (no need to ask)
-- The conversation explicitly mentions a TZ or remote location ("3pm ET", "from Boston", "we'll do it on Zoom") → online
-- The conversation explicitly mentions in-person ("at our office", "in person", "they'll come over") → physical
-- Otherwise: ASK whoever you're talking to right now. Owner-path → ask owner. Colleague-path (external in your DM) → ask the external. Don't reach across to bother the other party.
+ONLINE vs IN-PERSON for EXTERNAL attendees (v2.3.2 / v2.3.6): when at least one attendee has an email outside ${profile.user.email.split('@')[1]}, you must determine the meeting mode before booking. CHECK these signals — IF ANY MATCH, do NOT ask, just decide:
+- Their people_memory entry shows a different timezone than the owner — they're remote → is_online=true (the WORKSPACE CONTACTS block in your context shows each person's tz; if it differs from ${profile.user.timezone}, they're remote)
+- The conversation explicitly mentions a TZ or remote location ("3pm ET", "from Boston", "we'll do it on Zoom") → is_online=true
+- The conversation explicitly mentions in-person ("at our office", "in person", "they'll come over") → is_online=false
+- ONLY if none of the above signals match → ASK whoever you're talking to right now. Owner-path → ask owner. Colleague-path (external in your DM) → ask the external. Don't reach across to bother the other party.
+
+Asking when a clear remote signal exists is a friction bug — the data is there, use it. Owner has already told you "Boston" / "EST" / TZ once; reading it from people_memory next turn is your job, not his to repeat.
 
 Once mode is settled: online → is_online=true, location optional. Physical at owner's office → is_online=false, leave location blank (the system fills in office address from yaml). Physical elsewhere → is_online=false, location=that venue.
 
@@ -855,6 +859,23 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
           .map((p: any) => p.email)
           .filter((e: any) => e && typeof e === 'string' && e.endsWith(`@${ownerDomain}`));
 
+        // v2.3.6 (#70a) — auto-load attendee work-hour availability for the
+        // slot search. Pulls timezone + workdays + hoursStart/hoursEnd from
+        // people_memory for every participant we recognize (internal AND
+        // external). Pre-clips slots to the intersection of everyone's
+        // working window so Brett (Boston/EST) doesn't get proposed 10:15 IL
+        // (3:15 ET). Note: this is WORK-HOUR clipping only — busy/free is
+        // a separate concern handled by `attendeeBusyEmails` (existing,
+        // internal-only) and `annotateSlotsWithAttendeeStatus` (annotation
+        // overlay, not a hard filter).
+        const allParticipantEmails = (args.participants as any[])
+          .map((p: any) => p.email)
+          .filter((e: any) => e && typeof e === 'string' && e.includes('@'));
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { loadAttendeeAvailabilityForEmails } =
+          require('../utils/attendeeAvailability') as typeof import('../utils/attendeeAvailability');
+        const attendeeAvailability = loadAttendeeAvailabilityForEmails(allParticipantEmails, userEmail);
+
         // Search in expanding windows until we have 3 spread options
         let allCandidateSlots: Array<{ start: string; end: string }> = [];
         let searchEndDate = args.search_to
@@ -879,6 +900,9 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
                 // coords short-circuit through the fast-path below before
                 // reaching the coord state machine at all.
                 attendeeBusyEmails: participantEmails,
+                // v2.3.6 (#70a) — clip slots to attendee work-hour windows
+                // in their own TZ. Pure work-hour data, no busy/free involvement.
+                attendeeAvailability,
                 searchFrom: searchFromDate,
                 searchTo: searchEndDate,
                 preferMorning: true,
@@ -1646,6 +1670,15 @@ When find_available_slots returns nothing usable AND you can see a raw free gap 
   "Thursday 9:00 is open but it's before your office-day start (10:30) — want me to book it anyway as a one-off, or try a later slot?"
 Never propose an out-of-bounds time as if it were a normal option. Never call create_meeting / finalize_coord_meeting on an out-of-bounds time without explicit ${firstName} confirmation this turn. "Want me to book it?" and then they say yes → fine. Silent booking → never. (Floating-block out-of-window moves go through create_approval(kind=lunch_bump) — see FLOATING BLOCKS rule above.)
 
+OWNER-PICKED TIME REJECTED BY find_available_slots — use relaxed:true, NEVER bypass:
+When ${firstName} asks for a SPECIFIC time and find_available_slots doesn't return that time as a clean option, the right move is RE-CALL find_available_slots with relaxed: true (owner-only, narrow search window around the requested time). The relaxed call surfaces slots that were rejected by soft rules — focus protection, lunch window, work-hour strictness — WITH the broken rule visible in the narration block above. Steps:
+1. Re-call find_available_slots with searchFrom/searchTo narrowed to ±2h around ${firstName}'s requested time, relaxed: true.
+2. If the slot now comes back, narrate the broken rule honestly: "17:45 breaks your office-day focus protection — book anyway?"
+3. ${firstName} confirms → call create_meeting on the slot.
+4. ${firstName} declines → propose alternatives or extend the search.
+
+DO NOT call create_meeting directly on a time that find_available_slots just rejected. That's bypassing the rule layer — the rule violation never gets logged, ${firstName} doesn't see the trade-off, telemetry is invisible. The relaxed:true path is the legitimate override channel and exists precisely for this case. If the relaxed call ALSO returns nothing, then it's a hard collision (5-min buffer, hard work-hour cap when relaxed already applied, OOF, etc.) — narrate that and stop, don't bypass.
+
 DIRECT OPS (when time + attendees are already known):
 - create_meeting — book a new event immediately. Follow location/category/work-day rules (see detailed rules further down).
 - move_meeting / update_meeting / delete_meeting — always confirm with the owner first for destructive ops.
@@ -1754,6 +1787,13 @@ INTERNAL-ONLY FAST PATH (v2.3.2) — when ALL participants are internal (same em
 - When the requester picks (number, time, "the second one", "Tuesday works"), call create_meeting to book directly — attendees get a heads-up DM after the fact.
 - If they push back wanting only all-free slots and we showed mixed, re-call coordinate_meeting with a tighter / later search range. ONE retry, then escalate to ${firstName} via create_approval if still no fit.
 - For external or mixed coords, the regular DM-and-poll flow runs; do NOT call create_meeting yourself — wait for the coord state machine to confirm.
+
+CONCISION — bundle missing fields into ONE ask, not a ping-pong (v2.3.6 / #72b):
+When you need multiple inputs from ${firstName} before booking (topic, mode, duration, override confirmation, location, etc.), ASK ALL OF THEM IN ONE MESSAGE — not one per turn. Owner-facing example:
+- ❌ Wrong: "Want to override?" → owner says yes → "What's the topic?" → owner answers → "Online or in-person?" → owner answers → "How long?" → owner answers → 4 separate turns
+- ✅ Right: "Got it, override approved. Just need the topic, mode (online or in-person), and duration." → owner answers all three in one reply → done in 2 turns total
+
+The exception: when one answer materially changes the next question (e.g., "in-person at <somewhere else>" requires asking for travel time), it's fine to fold the follow-up into the next turn. But don't sequence questions that are independent of each other. ${firstName} can read three short questions in one message faster than he can answer four sequential turns.
 
 MEETINGS HONESTY RULES (these extend RULE 1/2/5 in the base honesty block):
 

@@ -699,6 +699,18 @@ export async function findAvailableSlots(params: {
     const PREFERRED_GAP_MS = 30 * 60 * 1000;
     const dayBuckets: Map<string, Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other' }>> = new Map();
 
+    // v2.3.6 (#71a) — diagnostic rejection counters. Helps debug "why was 17:45
+    // rejected?" by showing the per-rule breakdown at the end of the search.
+    // Each rejection point increments its bucket; we also track up to 5 example
+    // rejected slots per reason for grepping in logs.
+    const rejectedCounts: Record<string, number> = {};
+    const rejectedExamples: Record<string, string[]> = {};
+    const trackReject = (reason: string, slotIso: string) => {
+      rejectedCounts[reason] = (rejectedCounts[reason] ?? 0) + 1;
+      if (!rejectedExamples[reason]) rejectedExamples[reason] = [];
+      if (rejectedExamples[reason].length < 5) rejectedExamples[reason].push(slotIso);
+    };
+
     let cursor = DateTime.fromISO(params.searchFrom, { zone: params.timezone }).toJSDate();
     while (cursor.getTime() + durationMs <= searchEnd.getTime()) {
       const cursorDt = DateTime.fromJSDate(cursor).setZone(params.timezone);
@@ -716,6 +728,7 @@ export async function findAvailableSlots(params: {
       }
       const slotTotalMin = cursorDt.hour * 60 + cursorDt.minute;
       if (slotTotalMin < dayHours.startMin || slotTotalMin + params.durationMinutes > dayHours.endMin) {
+        trackReject('outside_owner_work_hours', cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
         continue;
       }
@@ -729,6 +742,7 @@ export async function findAvailableSlots(params: {
         slotEnd.getTime() > busy.start.getTime() - bufferMs
       );
       if (!isFree) {
+        trackReject('owner_busy_or_buffer_collision', cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
         continue;
       }
@@ -758,6 +772,7 @@ export async function findAvailableSlots(params: {
           }
         });
         if (slotOutsideAnyAttendee) {
+          trackReject('outside_attendee_work_hours', cursorDt.toISO()!);
           cursor = new Date(cursor.getTime() + step);
           continue;
         }
@@ -775,6 +790,7 @@ export async function findAvailableSlots(params: {
           const dayDate = cursorDt.toFormat('yyyy-MM-dd');
           const dayFreeMin = getDayQualityFree(dayDate, dayHours);
           if (dayFreeMin - params.durationMinutes < thresholdMin) {
+            trackReject(`focus_time_${dayType}`, cursorDt.toISO()!);
             cursor = new Date(cursor.getTime() + step);
             continue;
           }
@@ -837,6 +853,7 @@ export async function findAvailableSlots(params: {
           }
         }
         if (blockConflict) {
+          trackReject('floating_block_no_room', cursorDt.toISO()!);
           cursor = new Date(cursor.getTime() + step);
           continue;
         }
@@ -876,6 +893,23 @@ export async function findAvailableSlots(params: {
         picked.sort((a, b) => a.start.localeCompare(b.start));
       }
       candidates.push(...picked);
+    }
+
+    // v2.3.6 (#71a) — diagnostic log for rejection reasons. When a slot
+    // search returns fewer slots than expected (or zero), this log line
+    // tells WHICH RULE rejected what. Grep `findAvailableSlots — rejection
+    // breakdown` in maelle-YYYY-MM-DD.log to debug "why was 17:45 not
+    // proposed?".
+    if (Object.keys(rejectedCounts).length > 0) {
+      logger.info('findAvailableSlots — rejection breakdown', {
+        searchFrom: params.searchFrom,
+        searchTo: currentTo.toISO(),
+        durationMinutes: params.durationMinutes,
+        relaxed: params.relaxed === true,
+        candidatesAccepted: candidates.length,
+        rejectedCounts,
+        rejectedExamples,
+      });
     }
 
     // v1.6.4 — enough? If yes, stop. Otherwise extend the window (but not

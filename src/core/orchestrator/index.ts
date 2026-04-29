@@ -400,12 +400,26 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
     }
 
     for (const job of outreachJobs) {
+      // v2.3.6 (#69a) — surface colleague reply_text into the thread block.
+      // The reply was captured to the outreach_jobs row by the inbound
+      // pipeline, but the prompt-rendering only showed the OUTGOING message.
+      // That left Sonnet narrating "no reply yet" while the reply was
+      // already in the DB. Now: if reply_text is populated, status reads
+      // "replied" and the reply preview is included alongside the original
+      // message — Sonnet can see the back-and-forth in one block.
+      const hasReply = typeof job.reply_text === 'string' && job.reply_text.trim().length > 0;
       const status = job.status === 'pending_scheduled' && job.scheduled_at
         ? `scheduled — message goes out ${DateTime.fromISO(job.scheduled_at).setZone(profile.user.timezone).toFormat('EEEE d MMM')}`
+        : hasReply
+        ? `replied`
         : job.status === 'sent'
         ? `sent, waiting for reply`
         : job.status;
-      lines.push(`• Outreach to ${job.colleague_name} — ${status}${job.message ? `: "${job.message.slice(0, 80)}${job.message.length > 80 ? '…' : ''}"` : ''}`);
+      const sentPreview = job.message ? `: "${job.message.slice(0, 80)}${job.message.length > 80 ? '…' : ''}"` : '';
+      const replyPreview = hasReply
+        ? `\n   ↳ reply: "${job.reply_text!.slice(0, 200)}${job.reply_text!.length > 200 ? '…' : ''}"`
+        : '';
+      lines.push(`• Outreach to ${job.colleague_name} — ${status}${sentPreview}${replyPreview}`);
     }
 
     for (const task of tasks) {

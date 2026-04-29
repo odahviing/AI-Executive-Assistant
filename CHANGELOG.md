@@ -2,6 +2,45 @@
 
 ---
 
+## 2.3.6 — 13-bug daily wave: slot-finder reliability + concision + venue research + Slack TZ + outreach memory
+
+A full day's bug list cleared in one pass. Five clusters by code area: slot-finder reliability (6 bugs), conversational concision (3 bugs), Slack timestamp TZ honesty (1 bug), outreach-reply visibility across turns (1 bug), and a verify-only audit on style-saving gates (1 bug). All 13 bugs from issues #69-#73 closed by this version (#68 the 5-min-buffer ticket stays open by design — Low priority, future work).
+
+### Added
+
+- **Shared attendee-availability helper** ([`utils/attendeeAvailability.ts`](src/utils/attendeeAvailability.ts)) — `loadAttendeeAvailabilityForEmails(emails, ownerEmail)` extracts the v2.3.3 auto-load logic (timezone + workdays + work-hours from people_memory) into a single helper used by BOTH `find_available_slots` and `coordinate_meeting`. Brett (Boston/EST) was getting proposed 11:30 IL (4:30 AM ET) because v2.3.3 only wired the auto-load into `find_available_slots`; coord called `findAvailableSlots` internally without it. Now consistent. Helper handles WORK-HOUR clipping only — busy/free is a separate concern handled by `attendeeBusyEmails` and `annotateSlotsWithAttendeeStatus`.
+- **`inferDefaultMeetingMode` helper** ([`utils/attendeeMode.ts`](src/utils/attendeeMode.ts)) — code-level smart-skip for the "online or in-person?" question. Reads attendee state/timezone from people_memory. If any attendee is in a different timezone than the owner → meeting is remote, default 'online', no ask. Replaces the v2.3.3 regex-cue prompt rule that didn't catch conversational signals like "she is from boston". Persistence side already exists (v2.2.2 #46 update_person_profile) — this helper consumes the data.
+- **`resolveVenueLocation` helper** ([`utils/locationResolver.ts`](src/utils/locationResolver.ts)) — `resolveVenueLocation(input, targetLanguage, opts?)` calls Tavily web search + a Sonnet pass to extract `{ name, address, fullDisplay }` in target language. Wired into `create_meeting` handler at [`ops.ts:1018`](src/skills/meetings/ops.ts:1018) for any non-ASCII venue name with `is_online=false`. No cache by design — venue lookups are rare relative to scheduling traffic. Closes the "קפה לנדוור" leaking through to an English invite (#73).
+- **Diagnostic logging for slot rejection** ([`calendar.ts:702-710, 871-885`](src/connectors/graph/calendar.ts:702)) — `findAvailableSlots — rejection breakdown` log line emitted at end of every search. Per-rule counts (`outside_owner_work_hours` / `outside_attendee_work_hours` / `focus_time_office` / `focus_time_home` / `floating_block_no_room` / `owner_busy_or_buffer_collision`) plus 5 example rejected slots per reason. Grep `findAvailableSlots — rejection breakdown` in `maelle-YYYY-MM-DD.log` to debug "why was 17:45 not proposed?" (#71a).
+- **THIRD-PARTY SCHEDULER prompt addendum** — already shipped in v2.3.5; v2.3.6 builds on the same shape with new code paths.
+
+### Changed
+
+- **`coordinate_meeting` now auto-loads attendeeAvailability** ([`meetings.ts:858-873`](src/skills/meetings.ts:858)) — calls the shared helper before `findAvailableSlots`. Brett's ET window now clips proposals so 11:30 IL (4:30 AM ET) is filtered out at the slot-search layer, not after-the-fact via owner pushback.
+- **`find_available_slots` handler swapped to shared helper** ([`ops.ts:721-735`](src/skills/meetings/ops.ts:721)) — replaces the inline auto-load block with a single helper call. No behavior change, just code consolidation.
+- **`recall_interactions` returns owner-local time** ([`assistant.ts:398-435`](src/core/assistant.ts:398)) — `created_at` (UTC in SQLite) is now parsed and re-zoned to `profile.user.timezone` before returning to Sonnet. Without this, Sonnet narrated UTC times verbatim ("Oran's latest message today (08:03)" when actual was 11:03 IL). Same chokepoint pattern as v2.3.4 `parseGraphFreeBusySlot` — convert at the data boundary, not in the consumer's head. Closes #69b.
+- **ACTIVE IN THIS THREAD block surfaces outreach reply_text** ([`orchestrator/index.ts:402-422`](src/core/orchestrator/index.ts:402)) — when `outreach_jobs.reply_text` is populated, the rendered line now reads `Outreach to X — replied: "<reply preview>"` instead of `sent, waiting for reply`. The reply was always captured to the DB by the inbound pipeline, but the prompt-block rendering never showed it. Result: Sonnet narrated "Oran hasn't replied yet" while the reply was already on disk. Closes #69a.
+- **Smart-skip mode rule strengthened** ([`meetings.ts:362-368`](src/skills/meetings.ts:362)) — `create_meeting` ONLINE-vs-IN-PERSON rule reframed from "clarify unless..." to "check signals — IF ANY MATCH, do NOT ask, just decide". The closing line: "Asking when a clear remote signal exists is a friction bug — the data is there, use it." Closes #72a.
+- **CONCISION rule added to meetings prompt** ([`meetings.ts:1791-1796`](src/skills/meetings.ts:1791)) — when N independent fields are missing, ask all of them in ONE message instead of ping-pong. Closes #72b.
+- **Find-slots SMART-SKIP rule added** ([`meetings.ts:312-316`](src/skills/meetings.ts:312)) — same shape as the create_meeting rule, applied at the slot-search step.
+- **Owner-picked time rejected → use relaxed:true rule** ([`meetings.ts:1670-1681`](src/skills/meetings.ts:1670)) — explicit prompt rule for the rule-override path. When `find_available_slots` doesn't return an owner-requested specific time, RE-CALL with `relaxed: true` (narrow ±2h around the requested time) to surface the rejected slot WITH the broken rule visible, narrate the rule honestly, get owner confirmation, then book. Explicit ban on calling `create_meeting` directly to bypass a rejection. Closes #71b, #71c, #71d, #71e.
+
+### Verified (no code change)
+
+- **Owner-only style-saving guard** (#69c) — `learn_summary_style`, `update_summary_draft`, `classify_summary_feedback`, `learn_preference`, `note_about_person` are all OUTSIDE `COLLEAGUE_ALLOWED_TOOLS` ([`registry.ts:119-146`](src/skills/registry.ts:119)). Colleague-path Sonnet's tool list is filtered through `deduped.filter(t => COLLEAGUE_ALLOWED_TOOLS.has(t.name))` at [registry.ts:220](src/skills/registry.ts:220), so colleague-originated style suggestions can never reach a save-side tool. No leak path. Audit-only close.
+
+### Migration
+
+None.
+
+### Not changed
+
+- Auto-triage / auto-build CI — still gated `if: false &&` (deactivated in 2.3.1).
+- Existing `attendeeBusyEmails` busy-time pre-filter for mixed coords (v2.3.2) — left untouched per owner direction. Work-hours clip and busy filter are separate concerns; this wave only touches work-hours clip.
+- Slack `ts` raw value handling for non-narration paths (catch-up, dedup) — only the `recall_interactions` narration path was leaking UTC. Other paths use ts as an opaque string and don't render it as a time.
+
+---
+
 ## 2.3.5 — Coord-judge bleed-through fix + third-party scheduler + cloneability cleanup
 
 Two new safety/correctness primitives plus a sweep that strips Idan/Reflectiz/Maelle literals out of code so a future profile (different name, different company, different agent) actually works without source edits. Triggered by an incident: Oran sent "TEST for XXX", the coord judge correctly flagged it SUSPICIOUS and blocked `coordinate_meeting` — but Sonnet pivoted to `create_approval` (no equivalent gate) and the flagged ask still landed in the owner's DM with a reminder hours later.

@@ -406,15 +406,33 @@ First call for a person auto-creates their md file. Empty-until-real-fact — do
           };
         }
 
+        // v2.3.6 (#69b) — render `created_at` (UTC in DB) into the owner's
+        // local TZ before returning to Sonnet. Without this, Sonnet narrates
+        // a UTC time string verbatim (e.g. "08:03" for 11:03 IL), leaking
+        // a 3-hour drift into owner-facing replies. Same chokepoint pattern
+        // as v2.3.4 parseGraphFreeBusySlot — convert at the data boundary,
+        // not in the consumer's head.
+        const ownerTz = context.profile.user.timezone;
         return {
           found: true,
           count: events.length,
-          interactions: events.map(e => ({
-            date: e.created_at,
-            type: e.type,
-            summary: e.title,
-            detail: e.detail,
-          })),
+          interactions: events.map(e => {
+            // SQLite datetime() default format is 'YYYY-MM-DD HH:MM:SS' in UTC.
+            // Parse as UTC, render in owner-local with explicit TZ tag so
+            // Sonnet can't accidentally narrate the UTC wall-clock.
+            const utcDt = DateTime.fromSQL(e.created_at, { zone: 'utc' });
+            const localDt = utcDt.isValid ? utcDt.setZone(ownerTz) : null;
+            const displayDate = localDt && localDt.isValid
+              ? localDt.toFormat('yyyy-MM-dd HH:mm')
+              : e.created_at;
+            return {
+              date: displayDate,
+              date_iso: localDt && localDt.isValid ? localDt.toISO() : e.created_at,
+              type: e.type,
+              summary: e.title,
+              detail: e.detail,
+            };
+          }),
         };
       }
 

@@ -718,59 +718,22 @@ export class SchedulingSkill {
             }
           }
 
-          // v2.3.2 (5B/5C) — auto-load attendee availability from people_memory.
-          // For each attendee email we know in people_memory with a timezone,
-          // build an attendeeAvailability entry (working hours + workdays in
-          // their TZ). The slot finder pre-clips slots to the intersection of
-          // every attendee's window — so Brett (Boston/EST) won't get
-          // proposed 10:15 IL (3:15 ET). Owner can opt out via
+          // v2.3.2 (5B/5C) / v2.3.6 — auto-load attendee work-hour availability
+          // from people_memory via shared helper. Pre-clips slots to the
+          // intersection of every attendee's window so Brett (Boston/EST)
+          // never gets proposed 10:15 IL (3:15 ET). Helper covers both this
+          // path and coordinate_meeting consistently. Owner can opt out via
           // `ignore_attendee_availability: true` for "find times I'm free,
           // I'll handle the others" scenarios.
           const attendeeEmails = (args.attendee_emails as string[]) ?? [];
           const ignoreAvailability = args.ignore_attendee_availability === true;
-          let attendeeAvailability: Array<{
-            email: string;
-            timezone: string;
-            workdays: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
-            hoursStart: string;
-            hoursEnd: string;
-          }> | undefined;
+          let attendeeAvailability: import('../../utils/attendeeAvailability').AttendeeAvailabilityEntry[] | undefined;
 
-          if (!ignoreAvailability && attendeeEmails.length > 0) {
-            try {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { searchPeopleMemory } = require('../../db') as typeof import('../../db');
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { getEffectiveWorkingHours } = require('../../utils/workingHoursDefault') as
-                typeof import('../../utils/workingHoursDefault');
-              const built: typeof attendeeAvailability = [];
-              for (const email of attendeeEmails) {
-                const lower = email.toLowerCase();
-                if (lower === userEmail.toLowerCase()) continue;
-                const matches = searchPeopleMemory(email);
-                const person = matches.find(m => (m.email ?? '').toLowerCase() === lower);
-                if (!person?.timezone) continue;
-                const wh = getEffectiveWorkingHours(person);
-                if (!wh) continue;
-                built.push({
-                  email,
-                  timezone: person.timezone,
-                  workdays: wh.workdays,
-                  hoursStart: wh.hoursStart,
-                  hoursEnd: wh.hoursEnd,
-                });
-              }
-              if (built.length > 0) {
-                attendeeAvailability = built;
-                logger.info('find_available_slots — auto-loaded attendee availability', {
-                  attendees: built.map(b => `${b.email}(${b.timezone}, ${b.hoursStart}-${b.hoursEnd})`),
-                });
-              }
-            } catch (err) {
-              logger.warn('find_available_slots — attendee availability auto-load threw, proceeding without', {
-                err: String(err).slice(0, 200),
-              });
-            }
+          if (!ignoreAvailability) {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { loadAttendeeAvailabilityForEmails } = require('../../utils/attendeeAvailability') as
+              typeof import('../../utils/attendeeAvailability');
+            attendeeAvailability = loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail);
           }
 
           try {
@@ -1046,23 +1009,48 @@ export class SchedulingSkill {
             return scrubInternalLeakage(raw);
           })(),
           isOnline:   args.is_online as boolean,
-          // v2.3.2 (1C) — fill in real office address from yaml when this is
-          // a physical meeting at owner's office (is_online=false, no custom
-          // location given). Sonnet shouldn't have to remember the address;
-          // it lives in profile.meetings.office_location and we splice it in
-          // here so the calendar invite carries something externals can act
-          // on instead of a meaningless "Idan's Office" string.
-          location: ((): string | undefined => {
+          // v2.3.2 (1C) / v2.3.6 (#73) — fill in real address from yaml for
+          // owner-office meetings; resolve external venue names to official
+          // name + street address when the venue was named in a different
+          // language than the invite (subject is English per the prompt
+          // rule, so non-ASCII venue names get researched and replaced).
+          // Sonnet shouldn't have to remember addresses; the data lives in
+          // profile.meetings.office_location for the office, and the venue
+          // resolver fetches anything else.
+          location: await ((): Promise<string | undefined> => {
             const userLoc = args.location as string | undefined;
-            if (userLoc && userLoc.trim().length > 0) return userLoc;
-            if (args.is_online === true) return undefined;
-            const officeLoc = context.profile.meetings.office_location;
-            if (!officeLoc) return undefined;
-            const parts: string[] = [];
-            if (officeLoc.label) parts.push(officeLoc.label);
-            if (officeLoc.address) parts.push(officeLoc.address);
-            if (officeLoc.parking) parts.push(`Parking: ${officeLoc.parking}`);
-            return parts.length > 0 ? parts.join(' — ') : undefined;
+            if (args.is_online === true) return Promise.resolve(undefined);
+            if (!userLoc || userLoc.trim().length === 0) {
+              const officeLoc = context.profile.meetings.office_location;
+              if (!officeLoc) return Promise.resolve(undefined);
+              const parts: string[] = [];
+              if (officeLoc.label) parts.push(officeLoc.label);
+              if (officeLoc.address) parts.push(officeLoc.address);
+              if (officeLoc.parking) parts.push(`Parking: ${officeLoc.parking}`);
+              return Promise.resolve(parts.length > 0 ? parts.join(' — ') : undefined);
+            }
+            // External venue path. Trigger resolver when the venue contains
+            // non-ASCII characters (likely non-English language) and the
+            // invite subject is English (the create_meeting rule enforces
+            // English subjects). Skip if it already looks like a complete
+            // English address ("Cafe Foo, 123 Main St, City").
+            const hasNonAscii = /[^\x20-\x7e]/.test(userLoc);
+            if (!hasNonAscii) return Promise.resolve(userLoc);
+            return (async () => {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { resolveVenueLocation } = require('../../utils/locationResolver') as
+                  typeof import('../../utils/locationResolver');
+                const resolved = await resolveVenueLocation(userLoc, 'en');
+                if (resolved.resolved) return resolved.fullDisplay;
+                return userLoc;  // fall back to user-provided string when no clear match
+              } catch (err) {
+                logger.warn('venue resolution threw — using user-provided location', {
+                  err: String(err).slice(0, 200),
+                });
+                return userLoc;
+              }
+            })();
           })(),
           categories:  args.category ? [args.category as string] : ['Meeting'],  // default fallback
           sensitivity: args.category === 'Private' ? 'private' : undefined,
