@@ -11,6 +11,7 @@ import {
 } from '../connectors/graph/calendar';
 import { auditLog, upsertCalendarIssue, getActiveCalendarIssues, updateCalendarIssueStatus, getDismissedIssueKeys, buildIssueKey, type CalendarIssueStatus } from '../db';
 import logger from '../utils/logger';
+import type { PreferPosition, AnchorEvent } from '../utils/floatingBlocks';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -117,7 +118,13 @@ export class CalendarHealthSkill implements Skill {
   name = 'Calendar Health';
   description = 'Monitors calendar hygiene: lunch protection, double-booking detection, OOF conflicts, and event categories';
 
-  getTools(_profile: UserProfile): Anthropic.Tool[] {
+  getTools(profile: UserProfile): Anthropic.Tool[] {
+    // Floating-block names — read from yaml so the tool's enum stays in sync
+    // with whatever blocks the owner has configured (lunch + any custom).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
+    const floatingBlockNames = fb.getFloatingBlocks(profile).map(b => b.name);
+    const categoryNames = (profile.categories ?? []).map(c => c.name);
     return [
       {
         name: 'check_calendar_health',
@@ -129,7 +136,7 @@ export class CalendarHealthSkill implements Skill {
 - Busy day: a work day with free time below the profile threshold / 6+ meetings / no 30-min block for thinking time
 
 Returns a list of issues. Behavior depends on \`mode\`:
-- passive (default) → returns the issues for you to narrate. Owner asks for fixes; you execute them via book_lunch / set_event_category / etc. in follow-up calls.
+- passive (default) → returns the issues for you to narrate. Owner asks for fixes; you execute them via book_floating_block / set_event_category / etc. in follow-up calls.
 - active → executes safe fixes in-tool before returning: missing floating blocks get booked, missing categories get set when the classifier is high-confidence, busy-day threshold breaches fire a DM to the owner. Overlap auto-resolve is NOT in this release (protected by design; use the owner's direction). Each issue in the returned list is tagged \`fixed: true\` with \`fix_detail\` when Maelle acted on it.
 
 Use this proactively when the owner asks about their schedule, or when they ask you to check calendar health.`,
@@ -154,25 +161,60 @@ Use this proactively when the owner asks about their schedule, or when they ask 
         },
       },
       {
-        name: 'book_lunch',
-        description: `Book a lunch event on a specific day within the owner's preferred lunch window.
-Finds the best available slot in the lunch window (preferred_start to preferred_end) and creates a calendar event.
-Only book lunch when explicitly asked or when check_calendar_health reveals a missing lunch.
+        name: 'book_floating_block',
+        description: `Book a floating-block event (lunch / coffee break / gym / thinking time / etc) on a specific day, inside that block's preferred window.
 
-CATEGORIES: if the EVENT CATEGORIES block is present in your system prompt, pass the \`category\` arg with the name of the category that fits a lunch event (typically the one whose description mentions lunch / schedule admin / personal time). If no categories are defined, omit the arg and the event will be created uncategorized.`,
+Pick \`block_name\` from the FLOATING BLOCKS section of your system prompt — these are the blocks the owner has configured. The handler finds an aligned + buffered slot inside the block's preferred window and creates the event with the block's default subject.
+
+Use this when: the owner explicitly asks to book one (e.g. "block 30 min for lunch tomorrow", "add a coffee break Thursday"), OR check_calendar_health surfaces a missing block on a workday.
+
+POSITIONAL PREFERENCE — express the owner's intent semantically, don't compute the time yourself:
+- Default (no \`prefer_position\` arg) → earliest aligned slot in the window. Use this when the owner just says "book lunch" without a time preference.
+- \`prefer_position: 'latest_in_window'\` → latest aligned slot in the window. Use when the owner says "book lunch as late as possible" / "right before lunch ends".
+- \`prefer_position: 'abut_before'\` + \`anchor_event_id\` → slot ends right before the anchor meeting (with buffer). Use when the owner says "before [meeting]" / "right before [person]" / "just before X".
+- \`prefer_position: 'abut_after'\` + \`anchor_event_id\` → slot starts right after the anchor meeting (with buffer). Use when the owner says "after [meeting]" / "right after [person]".
+
+Pass anchor_event_id from get_calendar's event id field. NEVER hand-compute the start time and pass it through create_meeting — let this tool do the alignment + buffer math. Boundary times like the exact lunch_end are unbookable as lunch (the window's preferred_end is exclusive); the abut_after path will refuse honestly if math lands at/past the boundary.
+
+CATEGORIES: if the EVENT CATEGORIES block is in your system prompt, pass \`category\` with the name that fits this kind of block (typically the one whose description mentions personal time / schedule admin). Omit if no categories are defined or none fits.`,
         input_schema: {
           type: 'object',
           properties: {
             date: {
               type: 'string',
-              description: 'Date YYYY-MM-DD to book lunch on',
+              description: 'Date YYYY-MM-DD to book the block on.',
             },
-            category: {
+            block_name: floatingBlockNames.length > 0
+              ? {
+                  type: 'string',
+                  enum: floatingBlockNames,
+                  description: 'Which floating block to book. Must match a name in the FLOATING BLOCKS section of your system prompt.',
+                }
+              : {
+                  type: 'string',
+                  description: 'Which floating block to book.',
+                },
+            prefer_position: {
               type: 'string',
-              description: 'OPTIONAL. Name of the Outlook category to tag this lunch event with. Must match EXACTLY one of the owner\'s defined categories (see EVENT CATEGORIES in system prompt). Omit if no categories are defined or none fits.',
+              enum: ['earliest', 'latest_in_window', 'abut_before', 'abut_after'],
+              description: 'OPTIONAL. Where in the block window to place this booking. Default: earliest. Use abut_before / abut_after with anchor_event_id when the owner says "before X" / "after X".',
             },
+            anchor_event_id: {
+              type: 'string',
+              description: 'OPTIONAL. The event id (from get_calendar) to abut against. REQUIRED when prefer_position is abut_before or abut_after.',
+            },
+            category: categoryNames.length > 0
+              ? {
+                  type: 'string',
+                  enum: categoryNames,
+                  description: 'OPTIONAL. Name of the Outlook category to tag this event with. Must match EXACTLY one of the owner\'s defined categories. Omit if none fits.',
+                }
+              : {
+                  type: 'string',
+                  description: 'OPTIONAL. Outlook category. Omit if no categories are defined.',
+                },
           },
-          required: ['date'],
+          required: ['date', 'block_name'],
         },
       },
       {
@@ -533,17 +575,18 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
           for (const issue of issues) {
             try {
               if (issue.type === 'missing_floating_block') {
-                // Reuse the book_lunch handler path so alignment + buffer +
-                // day-scope rules apply consistently. Call through the same
-                // switch recursively — clean, shares code.
+                // Reuse book_floating_block so alignment + buffer + day-scope
+                // rules apply consistently. Pass the block_name from the
+                // issue (set by the detector loop above) — the handler now
+                // requires it explicitly, no implicit "lunch" fallback.
                 const result = await this.executeToolCall(
-                  'book_lunch',
-                  { date: issue.date },
+                  'book_floating_block',
+                  { date: issue.date, block_name: issue.block_name },
                   context,
                 ) as { ok?: boolean; created?: boolean; start?: string; end?: string; error?: string; message?: string } | null;
                 if (result?.ok && result.created) {
                   issue.fixed = true;
-                  issue.fix_detail = `Booked ${issue.block_name ?? 'lunch'} ${issue.date} ${result.start}–${result.end}.`;
+                  issue.fix_detail = `Booked ${issue.block_name ?? 'floating block'} ${issue.date} ${result.start}–${result.end}.`;
                   fixesApplied += 1;
                 } else if (result?.error) {
                   issue.fix_failed = true;
@@ -913,26 +956,29 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
         };
       }
 
-      case 'book_lunch': {
+      case 'book_floating_block': {
         const date = args.date as string;
-        // v2.1 — book_lunch generalized via floating_blocks. Still called
-        // "book_lunch" (back-compat) but now delegates to the floating-
-        // block helper. The "lunch" block is always present (auto-
-        // promoted from schedule.lunch). Day-scope check too: if the
-        // profile has declared lunch.days and the requested date isn't
-        // in them, refuse the booking honestly.
+        const blockName = (args.block_name as string | undefined)?.trim();
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
         const blocks = fb.getFloatingBlocks(profile);
-        const block = blocks.find(b => b.name === 'lunch') ?? blocks[0];
-        if (!block) {
-          return { error: 'no_lunch_block', message: 'No lunch / floating block configured in profile.' };
+        if (blocks.length === 0) {
+          return { error: 'no_floating_blocks', message: 'No floating blocks configured in profile.' };
         }
+        const block = blockName ? blocks.find(b => b.name === blockName) : undefined;
+        if (!block) {
+          return {
+            error: 'unknown_block',
+            message: `Unknown block_name "${blockName ?? ''}". Configured blocks: ${blocks.map(b => b.name).join(', ')}.`,
+          };
+        }
+
+        const blockLabel = block.default_subject ?? (block.name.charAt(0).toUpperCase() + block.name.slice(1).replace(/_/g, ' '));
         const dayName = DateTime.fromISO(date, { zone: timezone }).toFormat('EEEE');
         if (!fb.blockAppliesOnDay(block, dayName, profile)) {
           return {
             error: 'not_applicable_today',
-            message: `${block.name} isn't scheduled for ${dayName} in your profile (days: ${(block.days ?? ['every work day']).join(', ')}).`,
+            message: `${blockLabel} isn't scheduled for ${dayName} in your profile (days: ${(block.days ?? ['every work day']).join(', ')}).`,
           };
         }
 
@@ -941,7 +987,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
         try {
           events = await getCalendarEvents(userEmail, date, date, timezone);
         } catch (err) {
-          logger.error('book_lunch: failed to fetch events', { err });
+          logger.error('book_floating_block: failed to fetch events', { err, blockName });
           return { error: 'Failed to fetch calendar events.' };
         }
 
@@ -949,7 +995,11 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
         const windowEnd = DateTime.fromISO(`${date}T${block.preferred_end}`, { zone: timezone });
 
         // Idempotency: if the block's event already exists in the window,
-        // return created:false so the LLM narrates "already booked".
+        // return created:false. Bug-3 fix: the message now ATTRIBUTES the
+        // booking to Maelle herself instead of phrasing it as discovered
+        // calendar state. The previous wording ("Lunch is already on the
+        // calendar...") was being parroted verbatim by Sonnet, making her
+        // narrate her own bookings as if she'd just stumbled onto them.
         const existingEvent = events.find(e => {
           if (e.isAllDay || e.isCancelled || e.showAs === 'free') return false;
           const matches = fb.isFloatingBlockEvent(
@@ -973,7 +1023,13 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             start: eStart.toFormat('HH:mm'),
             end: eEnd.toFormat('HH:mm'),
             date,
-            message: `Lunch is already on the calendar on ${date} from ${eStart.toFormat('HH:mm')} to ${eEnd.toFormat('HH:mm')} — nothing to add.`,
+            block_name: block.name,
+            // Bug-3 fix: action-attributed phrasing. Read as "you (Maelle)
+            // already did this" rather than "the calendar happens to have
+            // this." Pairs with the action-tape closing line that asks
+            // Sonnet to lead with what she did.
+            message: `You already booked ${blockLabel} on ${date} at ${eStart.toFormat('HH:mm')}–${eEnd.toFormat('HH:mm')} — same slot, no change.`,
+            assistant_hint: `You (Maelle) booked this earlier in this conversation. Narrate as your action ("I booked it at ${eStart.toFormat('HH:mm')}"), not as discovered state ("it's on the calendar").`,
           };
         }
 
@@ -996,57 +1052,125 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
           }));
 
         const bufferMinutes = profile.meetings.buffer_minutes ?? 5;
-        const bestStart = fb.findAlignedSlotForBlock(
-          block, date, timezone, busyInWindow, bufferMinutes,
-        );
-        if (bestStart === null) {
-          return {
-            error: 'no_room',
-            message: `No room for a ${block.duration_minutes}-minute ${block.name} between ${block.preferred_start} and ${block.preferred_end} on ${date}. The window is fully booked once quarter-hour alignment and the ${bufferMinutes}-min buffer are applied.`,
+
+        // Positional intent — translate "before/after [meeting]" into a
+        // deterministic slot via findPositionalSlotForBlock. Defaults to
+        // 'earliest' (current behavior) when prefer_position isn't passed.
+        const preferPosition = ((args.prefer_position as string | undefined) ?? 'earliest') as PreferPosition;
+        const anchorEventId = (args.anchor_event_id as string | undefined)?.trim();
+        let anchor: AnchorEvent | undefined;
+        if (anchorEventId) {
+          const anchorEvent = events.find(e => e.id === anchorEventId);
+          if (!anchorEvent) {
+            return {
+              error: 'anchor_not_found',
+              message: `anchor_event_id ${anchorEventId} doesn't appear in the calendar for ${date}. Either pick a different anchor or call get_calendar to refresh ids.`,
+            };
+          }
+          anchor = {
+            start: parseGraphDt(anchorEvent.start.dateTime, anchorEvent.start.timeZone, timezone).toMillis(),
+            end: parseGraphDt(anchorEvent.end.dateTime, anchorEvent.end.timeZone, timezone).toMillis(),
           };
         }
 
-        const lunch = { duration_minutes: block.duration_minutes };  // preserve downstream naming
-        const lunchStart = DateTime.fromMillis(bestStart).setZone(timezone);
-        const lunchEnd = lunchStart.plus({ minutes: block.duration_minutes });
+        const slotResult = fb.findPositionalSlotForBlock(
+          block, date, timezone, busyInWindow, bufferMinutes, preferPosition, anchor,
+        );
 
-        // v1.7.8 — category is no longer hardcoded. Sonnet picks from
-        // profile.categories (the owner's real Outlook categories, injected
-        // into the system prompt) and passes the name here. Skip the field
-        // entirely when no category was supplied.
+        if ('error' in slotResult) {
+          // Diagnostic: list the busy blocks that fragmented the window.
+          // Without this, "no_room" is opaque — Sonnet narrates "tight" or
+          // "no clean window" with no specifics, and the owner has to guess
+          // why a slot he eyeballs as free was rejected.
+          const busyDetails = busyInWindow
+            .sort((a, b) => a.start - b.start)
+            .map(b => ({
+              start: DateTime.fromMillis(b.start).setZone(timezone).toFormat('HH:mm'),
+              end: DateTime.fromMillis(b.end).setZone(timezone).toFormat('HH:mm'),
+            }));
+          logger.info('book_floating_block: rejection — diagnostic', {
+            blockName: block.name,
+            date,
+            window: `${block.preferred_start}-${block.preferred_end}`,
+            duration_min: block.duration_minutes,
+            buffer_min: bufferMinutes,
+            prefer_position: preferPosition,
+            anchor_event_id: anchorEventId,
+            error: slotResult.error,
+            detail: slotResult.detail,
+            busyInWindow: busyDetails,
+          });
+
+          // Map error codes to human-friendly messages. The diagnostic detail
+          // string from the helper is already specific (e.g. "abut_before
+          // would land at 12:15-12:40, conflicting with a busy block at
+          // 12:25-12:30") so we surface it directly.
+          const messageByError: Record<string, string> = {
+            no_room: `No room for a ${block.duration_minutes}-minute ${blockLabel} between ${block.preferred_start} and ${block.preferred_end} on ${date} with quarter-hour alignment and ${bufferMinutes}-min buffer.`,
+            anchor_required: slotResult.detail,
+            anchor_outside_window: `${blockLabel} doesn't fit ${preferPosition === 'abut_before' ? 'before' : 'after'} the anchor inside the ${block.preferred_start}-${block.preferred_end} window: ${slotResult.detail}`,
+            anchor_conflicts_busy: `${blockLabel} can't abut the anchor without conflicting: ${slotResult.detail}`,
+            unknown_position: slotResult.detail,
+          };
+
+          return {
+            error: slotResult.error,
+            message: messageByError[slotResult.error] ?? slotResult.detail,
+            detail: slotResult.detail,
+            window: { start: block.preferred_start, end: block.preferred_end },
+            duration_minutes: block.duration_minutes,
+            buffer_minutes: bufferMinutes,
+            prefer_position: preferPosition,
+            busy_blocks_in_window: busyDetails,
+            assistant_hint: slotResult.error === 'no_room' && busyDetails.length > 0
+              ? `The window was fragmented by these busy blocks: ${busyDetails.map(b => `${b.start}-${b.end}`).join(', ')}. With ${bufferMinutes}-min buffers and quarter-hour alignment, no aligned ${block.duration_minutes}-min slot fit any gap. If the owner pushes back ("but I have time at HH:MM"), explain WHICH busy block conflicts — don't just say "tight".`
+              : slotResult.error === 'anchor_outside_window'
+              ? `Tell the owner honestly: the requested position lands outside the block's preferred window (${block.preferred_start}-${block.preferred_end}). Don't fall back to create_meeting at the boundary time — that's the lunch_bump approval path if the owner explicitly wants to override.`
+              : slotResult.error === 'anchor_conflicts_busy'
+              ? `Tell the owner the abut slot conflicts with another meeting (named in the detail above). Either pick a different anchor or fall back to earliest position.`
+              : undefined,
+          };
+        }
+
+        const bestStart = slotResult.ms;
+
+        const blockStart = DateTime.fromMillis(bestStart).setZone(timezone);
+        const blockEnd = blockStart.plus({ minutes: block.duration_minutes });
+
+        // Category: read from yaml's default_category if set, otherwise honor
+        // Sonnet's category arg. Fallback ladder: yaml default → arg → none.
         const categoryArg = (args.category as string | undefined)?.trim();
         const validCategoryNames = (profile.categories ?? []).map(c => c.name);
-        // Defense: if Sonnet picked a name not in the profile, log + drop it
-        // rather than silently inventing a category Outlook will create on-the-fly.
-        let lunchCategories: string[] | undefined = undefined;
-        if (categoryArg) {
+        let blockCategories: string[] | undefined = undefined;
+        if (block.default_category && validCategoryNames.includes(block.default_category)) {
+          blockCategories = [block.default_category];
+        } else if (categoryArg) {
           if (validCategoryNames.length === 0 || validCategoryNames.includes(categoryArg)) {
-            lunchCategories = [categoryArg];
+            blockCategories = [categoryArg];
           } else {
-            logger.warn('book_lunch: agent proposed category not in profile — dropping', {
+            logger.warn('book_floating_block: agent proposed category not in profile — dropping', {
               proposed: categoryArg,
               allowed: validCategoryNames,
+              blockName: block.name,
             });
           }
         }
 
         try {
           const eventId = await createMeeting({
-            subject: 'Lunch',
-            start: lunchStart.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
-            end: lunchEnd.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
+            subject: blockLabel,
+            start: blockStart.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
+            end: blockEnd.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
             attendees: [],
-            // v2.3.1 (B23) — invite-body attribution names this assistant + owner.
-            body: `<p>Lunch break — booked by ${profile.assistant.name}, ${profile.user.name.split(' ')[0]} Assistant.</p>`,
+            // Invite-body attribution names this assistant + owner.
+            body: `<p>${blockLabel} — booked by ${profile.assistant.name}, ${profile.user.name.split(' ')[0]} Assistant.</p>`,
             isOnline: false,
-            categories: lunchCategories,
-            // v2.1.7 — no sensitivity tag. Previous `sensitivity: 'personal'`
-            // made Maelle re-label her own lunches as "private block" /
-            // "personal event" in weekly reviews (her prompt rules skip or
-            // generic-label personal events). Owner's stance: if something
-            // is secret he marks it private; a lunch block doesn't need
-            // hiding. Floating-block detection is subject-regex-based, so
-            // this change doesn't affect isFloatingBlockEvent matching.
+            categories: blockCategories,
+            // No sensitivity tag — pre-v2.1.7 'personal' stamps caused the
+            // recurring "Private block" misdetection bug. Floating-block
+            // matching is subject-regex/category based via
+            // isFloatingBlockEvent, so leaving sensitivity at default
+            // ('normal') doesn't affect detection.
             userEmail,
             timezone,
           });
@@ -1056,17 +1180,17 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             created: true,
             already_existed: false,
             event_id: eventId,
-            subject: 'Lunch',
-            start: lunchStart.toFormat('HH:mm'),
-            end: lunchEnd.toFormat('HH:mm'),
+            subject: blockLabel,
+            start: blockStart.toFormat('HH:mm'),
+            end: blockEnd.toFormat('HH:mm'),
             date,
-            // Kept for back-compat with any caller reading `booked`.
+            block_name: block.name,
             booked: true,
-            message: `Lunch booked on ${date} from ${lunchStart.toFormat('HH:mm')} to ${lunchEnd.toFormat('HH:mm')}.`,
+            message: `I booked ${blockLabel} on ${date} from ${blockStart.toFormat('HH:mm')} to ${blockEnd.toFormat('HH:mm')}.`,
           };
         } catch (err) {
-          logger.error('Calendar health: failed to book lunch', { err });
-          return { error: `Failed to create lunch event: ${String(err)}` };
+          logger.error('book_floating_block: failed to create event', { err, blockName });
+          return { error: `Failed to create ${blockLabel} event: ${String(err)}` };
         }
       }
 
@@ -1184,7 +1308,8 @@ Available tools:
 - check_calendar_health: scan for issues. Mode = ${mode.toUpperCase()} (profile default; can be overridden with the \`mode\` arg)
   • passive: detects and returns the issue list — you narrate, owner asks for fixes, you execute
   • active: detects + EXECUTES the safe fixes in one pass (books missing floating blocks, tags uncategorized events with high-confidence category, DMs owner about busy days). Each issue comes back tagged \`fixed:true\` with a one-liner \`fix_detail\` describing what changed.
-- book_lunch / book_floating_block helpers: book a floating block in its preferred window (lunch: ${lunch.preferred_start}–${lunch.preferred_end}, ${lunch.duration_minutes} min — other custom blocks live under \`schedule.floating_blocks\`)
+- book_floating_block: book a floating block (lunch / coffee / gym / etc) in its preferred window. Pass \`block_name\`. Lunch window: ${lunch.preferred_start}–${lunch.preferred_end}, ${lunch.duration_minutes} min — other custom blocks live under \`schedule.floating_blocks\`.
+  POSITIONAL INTENT: when the owner says "before X" / "after X" for a floating block (X = a meeting on the same day), pass \`prefer_position: 'abut_before' | 'abut_after'\` + \`anchor_event_id\` (the event id from get_calendar). The handler computes \`anchor.start - buffer - duration\` (abut_before) or \`anchor.end + buffer\` (abut_after), snaps to a quarter-hour aligned slot, and verifies window + conflicts. Don't compute the time yourself and pass it through create_meeting — that bypasses the alignment + window-edge checks (the lunch window's preferred_end is exclusive, so e.g. starting AT 13:30 isn't a valid lunch slot). When the owner says "as late as possible" / "right before lunch ends", pass \`prefer_position: 'latest_in_window'\`.
 - set_event_category: add Outlook categories to events
 - get_calendar_issues: see all unresolved calendar issues (double bookings, OOF conflicts)
 - update_calendar_issue: change the status of a tracked issue
@@ -1202,7 +1327,7 @@ NARRATING ACTIVE-MODE RESULTS:
 When check_calendar_health is called in active mode, the response includes \`fixes_applied\` count and each auto-fixed issue carries \`fixed:true\` + \`fix_detail\`. Your reply MUST acknowledge what was done using those fix_detail strings. Example:
 - RIGHT: "Booked lunch Thursday 12:00–12:25 and tagged two uncategorized meetings as Meeting. Still open: Wednesday has a conflict between Fulcrum and FC Capri — which do you want to move?"
 - WRONG: "Calendar looks good" (erases the autonomous actions) or "I ran a check, no issues" (also wrong).
-Every fix fires a shadow DM automatically (via \`book_lunch\` / \`set_event_category\` wrappers + v1_shadow_mode) — you don't need to DM separately.
+Every fix fires a shadow DM automatically (via \`book_floating_block\` / \`set_event_category\` wrappers + v1_shadow_mode) — you don't need to DM separately.
 
 PROTECTION RULES (v2.1.1 — deterministic, in code):
 A meeting is PROTECTED from auto-reshuffle if ANY of:

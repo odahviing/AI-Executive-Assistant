@@ -157,7 +157,7 @@ Binding rules (critical):
 
   // v1.7.8 — Owner-defined Outlook categories. Rendered when defined so the
   // LLM knows which categories exist in the owner's real Outlook and what
-  // each means. Without this, tools that tag events (book_lunch, create_meeting,
+  // each means. Without this, tools that tag events (book_floating_block, create_meeting,
   // set_event_category) would either hardcode names that don't exist in the
   // owner's Outlook OR skip categorization entirely.
   const categoriesBlock = profile.categories && profile.categories.length > 0

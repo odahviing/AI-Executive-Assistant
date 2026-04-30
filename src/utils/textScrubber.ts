@@ -21,7 +21,7 @@
 // with `name: '...'` tool definitions across src/skills/ + src/core/assistant.ts
 // + src/tasks/*.
 const TOOL_NAMES = [
-  'analyze_calendar', 'book_lunch', 'cancel_coordination', 'cancel_task',
+  'analyze_calendar', 'book_floating_block', 'cancel_coordination', 'cancel_task',
   'check_calendar_health', 'check_join_availability', 'classify_summary_feedback',
   'confirm_gender', 'coordinate_meeting', 'create_approval', 'create_meeting',
   'create_routine', 'create_task', 'delete_meeting', 'delete_routine',

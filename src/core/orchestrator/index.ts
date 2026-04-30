@@ -119,7 +119,7 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
       case 'update_meeting':
       case 'delete_meeting':
       case 'finalize_coord_meeting':
-      case 'book_lunch': {
+      case 'book_floating_block': {
         const outcome = mutationOutcome(result);
         const subj = (input as any).subject ?? (input as any).meeting_id ?? (input as any).new_start ?? (input as any).date ?? '';
         const subjPart = subj ? ` ${String(subj).slice(0, 40)}` : '';
@@ -152,7 +152,7 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
 // confirmed successes belong on the tape. The closing line acknowledges the
 // tool-trust gap (Graph can return OK on a write that didn't actually land):
 // when the owner pushes back, Maelle re-checks instead of insisting.
-const MUTATION_OK_RE = /\[(?:create_meeting|move_meeting|update_meeting|delete_meeting|finalize_coord_meeting|book_lunch) OK[^\]]*\]/g;
+const MUTATION_OK_RE = /\[(?:create_meeting|move_meeting|update_meeting|delete_meeting|finalize_coord_meeting|book_floating_block) OK[^\]]*\]/g;
 
 function extractActionTape(history: Array<{ role: 'user' | 'assistant'; content: string }>): string[] {
   const out: string[] = [];
@@ -1143,7 +1143,7 @@ Rules:
           get_active_coordinations: 'checked active coordinations',
           // Calendar health
           check_calendar_health: 'reviewed calendar health',
-          book_lunch: 'blocked lunch',
+          book_floating_block: 'blocked the slot',
           set_event_category: 'categorized the event',
           get_calendar_issues: 'checked calendar issues',
           update_calendar_issue: 'updated the calendar issue',

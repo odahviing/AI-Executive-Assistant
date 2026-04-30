@@ -258,8 +258,8 @@ const UserProfileSchema = z.object({
   }),
 
   // v1.7.8 — Owner's Outlook categories. Optional. When defined, Maelle reads
-  // these and picks the right one per event (book_lunch, create_meeting,
-  // set_event_category). When absent, tools skip category tagging.
+  // these and picks the right one per event (book_floating_block,
+  // create_meeting, set_event_category). When absent, tools skip category tagging.
   //
   // IMPORTANT: names must match EXACTLY what's defined in the owner's Outlook
   // (case-sensitive on some Outlook installs). Descriptions guide the LLM —
@@ -291,7 +291,7 @@ const UserProfileSchema = z.object({
     //   passive (default) → detect issues + return report. Sonnet narrates
     //     to the owner, owner asks for fixes, Maelle executes per-tool.
     //   active → detect + execute safe fixes in one pass. Missing floating
-    //     blocks get booked (via book_lunch / floating-blocks helper),
+    //     blocks get booked (via book_floating_block + floating-blocks helper),
     //     missing categories get set (high-confidence classifier only),
     //     busy-day threshold breaches fire a DM to the owner. Internal-
     //     overlap auto-resolve ships in v2.2 (needs move-coord state).

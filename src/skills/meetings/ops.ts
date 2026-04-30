@@ -321,7 +321,7 @@ export function analyzeCalendar(
   const allWorkDays = new Set([...officeDays, ...homeDays]);
 
   // Floating blocks (lunch + any custom). Uses the same matcher every other
-  // code path (slot search, book_lunch, rebalance) uses.
+  // code path (slot search, book_floating_block, rebalance) uses.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const fb = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
   const floatingBlocks = fb.getFloatingBlocks(profile);

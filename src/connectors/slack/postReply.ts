@@ -266,7 +266,7 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
           // move as someone else's ("looks like it was moved at some point
           // during our conversation"). All five mutation tools should
           // satisfy a book-type claim.
-          ? /\[(create_meeting|finalize_coord_meeting|move_meeting|update_meeting|delete_meeting|book_lunch)/.test(toolSummariesText)
+          ? /\[(create_meeting|finalize_coord_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block)/.test(toolSummariesText)
           : verdict.action_type === 'task'
             ? /\[(create_task|create_approval)/.test(toolSummariesText)
             : false;
