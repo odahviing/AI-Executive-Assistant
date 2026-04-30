@@ -4,7 +4,7 @@ import type { UserProfile } from '../config/userProfile';
 import { runOrchestrator } from './orchestrator';
 import { getConversationHistory, appendToConversation } from '../db';
 import { runDueTasks } from '../tasks/runner';
-import { materializeRoutineTasks } from '../tasks/routineMaterializer';
+import { materializeRoutineTasks, backfillNullNextRunAt } from '../tasks/routineMaterializer';
 import { ensureBriefingCron, updateBriefingCronChannel } from '../tasks/crons';
 import { backfillOrphanApprovals } from './approvals/orphanBackfill';
 import { backfillOutreachOrphans } from './approvals/outreachOrphanBackfill';
@@ -72,6 +72,24 @@ export async function initProfile(
   // Ensure briefing cron exists and set its DM channel
   ensureBriefingCron(profile);
   updateBriefingCronChannel(profile.user.slack_user_id, dmChannel);
+
+  // #75 — repair any active routines stuck with next_run_at = NULL. Caused
+  // by the materializer's `WHERE next_run_at IS NOT NULL` filter being the
+  // only thing that updates next_run_at — once NULL, silently invisible
+  // forever. Backfill computes the first future firing from schedule_*.
+  // Idempotent; logs a warn per repair so we know if something is bypassing
+  // create_routine.
+  try {
+    const repaired = backfillNullNextRunAt(profile);
+    if (repaired > 0) {
+      logger.info('Routine null-next-run-at backfill complete', {
+        ownerUserId: profile.user.slack_user_id,
+        repaired,
+      });
+    }
+  } catch (err) {
+    logger.error('Routine null-next-run-at backfill threw — continuing', { err: String(err) });
+  }
 
   // v2.2 — Social Engine: seed the 30 fixed categories for this owner on
   // first startup. Idempotent via UNIQUE(owner_user_id, label) + count check.

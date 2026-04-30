@@ -17,6 +17,25 @@ When the owner says "wrap up" / "close the patch" / "cut a version" / "day close
 
 When the owner says "test scenario N" / "run scenario N" / "simulate scenario N" (or similar) → open `.claude/test-scenarios.md`, read that scenario in full, then code-trace it against the current files on disk (do not trust memory) and produce a report: what works, what doesn't, what shouldn't happen, plus concrete fix suggestions. **This is a paper exercise — never execute the scenario for real. No live DMs, no real calendar writes, no DB writes, no tool calls against the running system.** The only allowed side effect is reading source files. No auto-fixing — owner decides fix-now vs file-a-ticket.
 
+When the owner says "go over the issues" / "github bugs" / "let's do a github run" / "fix bugs from github" (or similar) → run a **GitHub bug pass**:
+
+1. `gh issue list --state open --label Bug --json number,title,labels,createdAt,body` — Bug-labeled only. Feature requests (Roadmap / Next / Idea) are out of scope for a bug run.
+2. For EACH issue, identify ATOMIC bugs — a single issue often contains multiple sub-bugs. Number them (e.g. `77a`, `77b`, `77c`). Carry severity from the issue label (High / Medium / Low) on each atomic bug so the owner can see it; do NOT group by severity.
+3. Code-trace each atomic bug against current files on disk — don't trust memory.
+4. **Reappearance check** is mandatory, not optional. Many atomic bugs are returns of previously-"solved" issues. For each one: search git log + memory + the existing code for prior fixes addressing the same pattern. If found, identify (a) what the prior fix tried, (b) why it didn't stick, (c) what code or prompt rule needs to be REMOVED or REPLACED — never stack a new layer on a rotting prior layer (that's how RULE 2e v2.1.0 → v2.1.3 → v2.2.6 happened).
+5. Group atomic bugs into BUNDLES by **code area / file / shared mechanism** — never by severity. The bundle exists so multiple atomic bugs touching the same place collapse into one fix run; that makes the work fast and the resulting commit coherent. One sentence per bundle saying what the shared subject is.
+6. Per atomic bug: short summary of what happened, root cause (file:line), severity, reappearance note + prior fix reference, proposed fix shape (code vs prompt, what gets removed or extended). No extra format beyond that.
+7. Order of bundles: doesn't matter — owner fixes area after area, and all bundles land in the SAME final commit + version bump at the END of the run. Don't bump per-bundle.
+
+**Anti-patterns**:
+- Auto-fixing during a bug run. Propose only.
+- Stacking a new fix on top of a rotten prior fix without removing the prior one.
+- Grouping bundles by severity instead of code area.
+- Skipping the reappearance check on bugs that look new — many aren't.
+- Bumping version per bundle. One bump at the end of the whole run.
+
+**Closing the run**: when every atomic bug has a resolution (fixed in tree, filed as a new issue, or explicitly deferred/not-fixed), print a summary table BEFORE asking about wrap-up. One row per atomic bug. Columns: `# | GitHub | Severity | Status | Summary`. Status values: `fixed` (in tree, awaiting wrap-up commit) / `filed #N` (opened a new issue) / `deferred` (owner skipped) / `not fixed` (explicit owner direction). The "Summary" column is one-to-two liners — owner reads this to remember what shipped before approving the wrap-up. After the table, wait for the owner's "wrap up" / "ship it" / "bump the version" — never wrap unilaterally.
+
 **Scenario report format (4 columns):** `# | What the scenario expects | What the code does today | Status` (✅ Works / ⚠️ Partial / ❌ Not working / 🚫 Shouldn't happen). One row per discrete checkpoint; each row self-contained with file:line citations so a reader doesn't need to re-read the scenario. After the table, a short **Fix suggestions** section covering ONLY the ❌ and ⚠️ rows. Skip the ✅ ones.
 
 All 10 scenarios were paper-run against v2.2.3 (sessions through 2026-04-26). Surfaced gaps either fixed inline or filed (#43 + descendants, #51, #52, #53). When re-running scenarios, treat any ❌/⚠️ row identically to the first run — owner may have changed the underlying spec since (scenarios 1 + 2 were reframed mid-session). Always re-read the scenario text fresh, never trust prior reports.

@@ -2,6 +2,42 @@
 
 ---
 
+## 2.3.8 — 8-bug GitHub run: routine self-healing, owner-side attendee busy filter, overlap detector hygiene, internals scrub
+
+Closes [#74](https://github.com/odahviing/AI-Executive-Assistant/issues/74), [#75](https://github.com/odahviing/AI-Executive-Assistant/issues/75), [#76](https://github.com/odahviing/AI-Executive-Assistant/issues/76), [#77](https://github.com/odahviing/AI-Executive-Assistant/issues/77) — 8 atomic bugs across 4 issues. Most were reappearances of patterns prior fixes had partially addressed; this round attacks the missing half each time rather than stacking another layer. Plus a new SESSION_STARTER protocol for GitHub bug runs (filter, atomic-bug enumeration, reappearance check, area-bundling, closing summary table).
+
+### Added
+
+- `backfillNullNextRunAt(profile)` helper in `tasks/routineMaterializer.ts` + wired into `core/background.ts` `initProfile`. Repairs any active routine whose `next_run_at` is NULL by recomputing from `schedule_*` fields. Idempotent. `logger.warn` per repair as alarm signal — if a routine appears here on every startup, something is creating routine rows outside `create_routine` (which always populates the field). Fixes the chicken-and-egg trap where the materializer's `WHERE next_run_at IS NOT NULL` filter and the materializer being the only updater of `next_run_at` together left NULL rows permanently invisible. Surfaced via #75 (calendar-health routine created Apr 23, never fired once).
+- `auto-pass attendeeBusyEmails` on owner-initiated `find_available_slots` calls when attendees are present. Works alongside the v2.3.6 `loadAttendeeAvailabilityForEmails` auto-load, which handles work-hours / timezone clipping. Now both halves of the attendee-availability check fire automatically on the owner path: TZ-window AND busy-time. Closes #77b — Maelle was narrating "Elan's free 09:00–11:00" with no actual free/busy data behind it, because `attendeeBusyEmails` was internal-only since v2.2.3 #43 and only `coordinate_meeting`'s mixed-coord pre-filter ever passed it. The colleague-initiated coord path (annotation via `annotateSlotsWithAttendeeStatus`, all options shown) is unchanged — that's the intended shape per owner direction.
+- New base-prompt rule "DON'T NARRATE SOMEONE ELSE'S AVAILABILITY RANGE" in `meetings.ts.getSystemPromptSection()`. Don't say "X is free 9-11" / "looking at X's calendar" — pass their email to find_available_slots and present the slots it returns. Tool already factored their busy.
+- New base-prompt rule "OVERLAP REPORTING — same principle as COMMIT TO YOUR OPTIONS" in `meetings.ts`. When `check_calendar_health` returns an overlap with `movable_event_id` set, narrate the recommendation directly ("Gilly is external — protected. I'd move Elan."). Don't ask "which to move?" — protection rules already answered. Only ask when both sides protected.
+- New SESSION_STARTER `## GitHub run` section. Defines: filter to `Bug` label only, enumerate atomic bugs (one issue often contains multiple), code-trace each, **mandatory reappearance check** (find prior fixes, identify why they didn't stick, REMOVE or REPLACE rotting prior layers — never stack), group by code area not severity, propose-don't-fix until owner approves, version bump only at the end of the run, closing summary table per atomic bug before wrap-up.
+
+### Changed
+
+- `INTERNALS STAY INSIDE YOUR HEAD` rule in `systemPrompt.ts` rewritten as a single tight principle. Previous version was a long anti-example list ("the analyzer", "my scheduler", "the calendar check", "flags from the system") — the same rule had shipped since v1.6.2-era and rotted under model swap. New shape: one short paragraph stating the principle, one line of common anti-shapes ("the X tool / the system / the check / _fieldName"), one positive reframe ("rewrite as 'I [verb]' or just state the outcome"). Owner direction: shorter rules stick better than long word-lists; #74a (paraphrased "the lunch tool only books inside…") and #77c (`_eventType: mine` JSON field name leak) both covered by the same principle now.
+- Active-mode `double_booking` gate in `calendarHealth.ts`: changed from `issue.internal_only !== true` (required BOTH sides internal) to a movable-side-only check (does the meeting we're moving have any external attendees?). The kept side's externals are exactly WHY it's kept — they don't prevent moving the OTHER side. Closes #76b — Elan (internal-only) overlapping Gilly (external) was silently skipped by active mode because `internal_only` was false; now the move-coord auto-fires on Elan with Elan as the participant. Stale "Overlap auto-move ... DEFERRED to v2.2" comment also removed — the feature shipped in v2.1.1 alongside that comment, comment never got cleaned up.
+- Overlap detector in `calendarHealth.ts:361-407` filters out events that aren't business meetings before pairing for overlap: matches `profile.schedule.night_shift.blocking_event` (e.g. "Home Time"), matches any configured floating block (lunch / coffee / gym / thinking time), or sits entirely outside the day's work-hours window (Boot Camp 20:00-21:30 on a 10:30-19:00 office day). Closes #76c — second active-mode pass had been dumping personal-block overlaps (Donnie Time / Home Time / Boot Camp) that the first pass's prose narration had judgment-filtered. The filtering now lives at the detector, not in Sonnet's head.
+- `find_available_slots` schema description for `ignore_attendee_availability` rewritten. Previous description said the flag bypassed the entire attendee-availability load (work-hours AND busy). Per owner direction (#77 discussion): the flag now ONLY suppresses the busy filter. Work-hours / timezone window is ALWAYS honored — "force them to move another meeting, not to wake up at 3 AM." `attendeeAvailability` (work-hours clip) is loaded unconditionally; `ignore_attendee_availability: true` only skips the busy filter.
+
+### Removed
+
+- The `if (!ignoreAvailability)` guard around `loadAttendeeAvailabilityForEmails` in `find_available_slots` handler. Work-hours / timezone window is now unconditional — no flag bypasses it.
+- The stale "Overlap auto-move (even internal-only) is DEFERRED to v2.2" comment block in `calendarHealth.ts`. The feature shipped in v2.1.1; comment was misleading reading.
+- The `internal_only !== true` gating logic on Path (b) of active-mode double_booking handler. Replaced with `protection.isProtected(movable, profile).reasons.includes('has external attendee')` check on the movable side only.
+
+### Migration
+
+- No SQLite schema migrations.
+- Existing routines with NULL `next_run_at` self-heal on next `npm run dev` startup. Restart picks up the calendar-health routine + any other affected rows.
+
+### Why a real human EA filter test passes here
+
+A human EA never asks her boss "which meeting do you want to move?" when the rules say one is protected and the other is movable. She says "I'd move Elan, want me to find a slot?" — and only escalates when her rules genuinely don't pick a winner. Same for everything else this version touches: when the data has the answer, narrate the answer.
+
+---
+
 ## 2.3.7 — Lunch generalized to floating-block, late-night day boundary, positional booking, narration honesty
 
 Two-session wave triggered by Idan's recurring lunch event being narrated as "Private block" with `analyzeCalendar` simultaneously declaring `no_lunch`. Root cause was multi-layered: pre-v2.1.7 `book_lunch` had stamped `sensitivity: 'personal'` on the recurring series master (Outlook UI is binary Private/Not-private and didn't expose the legacy "personal" tag, so the owner couldn't see it), AND the lunch-detection paths were duplicated across two systems with diverging signatures. The fix collapses the duplicates, generalizes lunch into one of N floating blocks, and lets the Outlook event live unchanged. Late-night day-boundary mismatch between prompt and verifier was a separate but adjacent finding. Plus positional booking (express "before/after Yossi" semantically), narration-honesty rules (no list-then-disqualify), and a sweep of cloneability cleanup so non-Idan profiles work without code edits.

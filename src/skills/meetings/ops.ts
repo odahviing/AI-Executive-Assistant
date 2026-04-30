@@ -744,15 +744,32 @@ export class SchedulingSkill {
           // `ignore_attendee_availability: true` for "find times I'm free,
           // I'll handle the others" scenarios.
           const attendeeEmails = (args.attendee_emails as string[]) ?? [];
-          const ignoreAvailability = args.ignore_attendee_availability === true;
-          let attendeeAvailability: import('../../utils/attendeeAvailability').AttendeeAvailabilityEntry[] | undefined;
+          // Owner can opt out of attendee BUSY filtering (their other meetings)
+          // when forcing a slot regardless of their existing calendar — but
+          // their TIMEZONE / work-hours window is ALWAYS honored, no flag
+          // bypasses it. Owner direction (#77): "I can force them to move
+          // another meeting, not to wake up at 3 AM." So
+          // `attendeeAvailability` (work-hours clip) is unconditional;
+          // `ignore_attendee_availability` only suppresses the busy filter.
+          const ignoreAttendeeBusy = args.ignore_attendee_availability === true;
 
-          if (!ignoreAvailability) {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { loadAttendeeAvailabilityForEmails } = require('../../utils/attendeeAvailability') as
-              typeof import('../../utils/attendeeAvailability');
-            attendeeAvailability = loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail);
-          }
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { loadAttendeeAvailabilityForEmails } = require('../../utils/attendeeAvailability') as
+            typeof import('../../utils/attendeeAvailability');
+          const attendeeAvailability = loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail);
+
+          // #77 — owner-initiated path with attendees: auto-pass
+          // attendeeBusyEmails so Graph free/busy filters the candidate
+          // pool, not just work-hour clipping. Prior fixes (v2.2.3 #43,
+          // v2.3.6 #71) wired the work-hours half but left the busy half
+          // requiring explicit per-call args nobody passed. The
+          // colleague-initiated path (coord state machine) deliberately
+          // does NOT auto-pass — coord uses annotateSlotsWithAttendeeStatus
+          // to TAG slots with status, showing all options per owner's rule.
+          const isOwnerInitiated = context.senderRole === 'owner' || context.isOwnerInGroup === true;
+          const attendeeBusyEmails = (isOwnerInitiated && !ignoreAttendeeBusy && attendeeEmails.length > 0)
+            ? attendeeEmails
+            : undefined;
 
           try {
             return await findAvailableSlots({
@@ -760,6 +777,7 @@ export class SchedulingSkill {
               timezone,
               durationMinutes: args.duration_minutes as number,
               attendeeEmails,
+              attendeeBusyEmails,
               searchFrom: effectiveSearchFrom,
               searchTo: args.search_to as string,
               preferMorning: args.prefer_morning as boolean | undefined,

@@ -358,9 +358,53 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
           }
 
           // ── Double bookings (v2.1.1 — tagged with internal_only + movable_event_id) ──
-          const nonAllDay = dayEvents.filter(e =>
-            !e.isAllDay && e.showAs !== 'free' && e.showAs !== 'workingElsewhere'
-          );
+          //
+          // Filter to events that COUNT as work meetings for overlap purposes.
+          // Anything outside that scope is the owner's life and shouldn't be
+          // surfaced as a calendar issue (#76 — first response judgment-filtered
+          // these, second response dumped them; bug was the analyzer relying on
+          // Sonnet to filter post-hoc). The four exclusions:
+          //   1. all-day / showAs free / showAs workingElsewhere — pre-existing
+          //   2. matches `profile.schedule.night_shift.blocking_event` (e.g.
+          //      "Home Time" — explicitly the night-shift marker, not a meeting)
+          //   3. matches a configured floating block (lunch / coffee / gym /
+          //      thinking-time / etc — elastic personal time, not work)
+          //   4. entirely outside the day's work-hours window (Boot Camp 20:00-
+          //      21:30 on a 10:30-19:00 office day, etc.)
+          const officeDays = profile.schedule.office_days;
+          const homeDays = profile.schedule.home_days;
+          const isOfficeDay = (officeDays.days as string[]).includes(dayName);
+          const dayHoursStart = isOfficeDay
+            ? officeDays.hours_start
+            : (homeDays.hours_start ?? '09:00');
+          const dayHoursEnd = isOfficeDay
+            ? officeDays.hours_end
+            : (homeDays.hours_end ?? '19:00');
+          const dayWorkStart = DateTime.fromISO(`${dayStr}T${dayHoursStart}`, { zone: timezone });
+          const dayWorkEnd = DateTime.fromISO(`${dayStr}T${dayHoursEnd}`, { zone: timezone });
+          const nightShiftMarker = profile.schedule.night_shift?.blocking_event?.toLowerCase() ?? null;
+
+          const nonAllDay = dayEvents.filter(e => {
+            if (e.isAllDay) return false;
+            if (e.showAs === 'free' || e.showAs === 'workingElsewhere') return false;
+            // Exclusion 2: night-shift blocking event (e.g. "Home Time")
+            if (nightShiftMarker && (e.subject ?? '').toLowerCase().includes(nightShiftMarker)) {
+              return false;
+            }
+            // Exclusion 3: any configured floating block
+            const matchesAnyBlock = floatingBlocks.some(b =>
+              fb.isFloatingBlockEvent(
+                { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+                b,
+              ),
+            );
+            if (matchesAnyBlock) return false;
+            // Exclusion 4: entirely outside work-hours (start >= workEnd OR end <= workStart)
+            const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
+            const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
+            if (eStart >= dayWorkEnd || eEnd <= dayWorkStart) return false;
+            return true;
+          });
           for (let i = 0; i < nonAllDay.length; i++) {
             const a = nonAllDay[i];
             const aStart = parseGraphDt(a.start.dateTime, a.start.timeZone, timezone);
@@ -557,16 +601,15 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
         // Include any active (unresolved) issues from previous checks
         const activeIssues = getActiveCalendarIssues(ownerUserId);
 
-        // v2.1.1 — active-mode fix loop. Runs ONLY when mode='active'. Each
-        // fix is deterministic or high-confidence; failures fail open (the
-        // issue stays flagged, fix_failed=true). Fixes are limited in this
-        // release to the safe set:
+        // Active-mode fix loop. Runs ONLY when mode='active'. Each fix is
+        // deterministic or high-confidence; failures fail open (the issue
+        // stays flagged, fix_failed=true). Fixes covered:
         //   - missing_floating_block → book the block
         //   - missing_category → set category when classifier is high-conf
+        //   - oof_conflict → move-coord for non-protected meetings
+        //   - double_booking → direct floating-block move (Path a) OR
+        //     move-coord on the movable side (Path b)
         //   - busy_day → DM the owner with candidates to move (no auto-move)
-        // Overlap auto-move (even internal-only) is DEFERRED to v2.2 where
-        // the coord state machine gains a "move" intent. Today it stays in
-        // the report for the owner to direct.
         let fixesApplied = 0;
         if (mode === 'active') {
           logger.info('Calendar health: active mode — running fix loop', {
@@ -806,10 +849,23 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                       // This overlap is handled; skip the coord path below.
                       continue;
                     }
-                    // ── Path (b): regular move-coord (internal only) ──
-                    if (issue.internal_only !== true) {
-                      // Non-block + has external attendee somewhere → leave
-                      // for owner. Protection rules already flagged this.
+                    // ── Path (b): regular move-coord ──
+                    // Gate on the MOVABLE side only — does the meeting we're
+                    // about to move have any external attendees? If not, we
+                    // can move-coord it (DM its internal attendees, propose
+                    // slots, updateMeeting on agreement). The KEPT side's
+                    // externals are exactly WHY it's kept; they don't block
+                    // moving the OTHER side. Prior gate `issue.internal_only`
+                    // (both-sides-internal) was too strict — for an
+                    // internal-vs-external overlap, internal_only=false but
+                    // the internal side is still freely movable. #76 surfaced
+                    // this: Elan (internal) overlapped Gilly (external) and
+                    // active mode silently skipped instead of moving Elan.
+                    const movableHasExternal = protection.isProtected(movable, profile)
+                      .reasons.includes('has external attendee');
+                    if (movableHasExternal) {
+                      // Movable side itself has externals — move-coord would
+                      // need their say-so, which is owner-decision territory.
                       continue;
                     }
                     const mStart = parseGraphDt(movable.start.dateTime, movable.start.timeZone, timezone);

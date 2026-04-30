@@ -352,7 +352,7 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
             },
             ignore_attendee_availability: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). By default, the tool auto-loads each attendee\'s working hours + timezone from people_memory and clips slots to their windows. Set true to skip that — e.g. owner explicitly says "find times when I\'m free, don\'t worry about the others, I\'ll check with them" or you only need owner-side availability. When true, slots are returned as if the attendee list were empty for window-clipping purposes.',
+              description: 'OPTIONAL (default false). By default on owner-initiated calls with attendees, the tool filters slots by both (a) each attendee\'s working hours / timezone (their day-window) and (b) their busy time from Graph free/busy. Set true ONLY when owner explicitly says "force them to move their meeting" / "ignore their calendar, I want this slot anyway" — that suppresses the BUSY filter. Their work-hours / timezone window is ALWAYS honored regardless of this flag — owner direction: "force them to move another meeting, not to wake up at 3 AM."',
             },
             relaxed: {
               type: 'boolean',
@@ -1669,6 +1669,17 @@ If NOTHING survives strict rules, say so honestly + offer override (specific rul
 - "No clean option Thursday — every gap breaks your focus-time / lunch window / day-type rule. Want me to override and book at 11:00 (cuts focus time to 1h) or 13:15 (inside lunch window)?"
 - "Nothing fits without bumping another meeting. Want me to move [specific meeting] so lunch lands cleanly?"
 The "no options unless we override" honesty is fine. The "here's option X, but X doesn't work" listing is not.
+
+DON'T NARRATE SOMEONE ELSE'S AVAILABILITY RANGE — pass and present:
+When proposing slots that involve a colleague (move-meeting search with attendees, or any "when can we meet with X?" query), DO NOT say "X is free 9-11" / "X is busy 11-12" / "looking at X's calendar". You aren't reading their calendar; the tool is. Your job is to pass their email to find_available_slots and present the slots it returns. The tool has already factored their busy time — slots that come back are slots where both ${firstName} AND the attendee can meet (in the attendee's timezone window). Just list the slots.
+
+OVERLAP REPORTING — same principle, applied to check_calendar_health results:
+When check_calendar_health returns a double_booking issue with a non-null movable_event_id (one side is movable, the other is protected by the deterministic rules — external attendees, ≥4 attendees, matched protected name/category), narrate the recommendation directly. ${firstName} doesn't need to be asked which to move — protection ALREADY answered that. Examples:
+- WRONG: "Elan's is yours; Gilly looks external. Which one do you want to shift?" (asking when the answer is in the data)
+- RIGHT: "Gilly Ron is external — protected. I'd move the Elan triweekly. Want me to find a clean slot and reach out?"
+Only ask which-to-move when BOTH sides are protected (the suggestion field reads "Both sides are protected — the owner needs to decide which to move"). In that case, list the protection reasons for each and ask.
+
+When proposing the move, run find_available_slots for the movable side BEFORE narrating, so the recommendation includes a concrete proposed time, not "I'd move it somewhere."
 
 RESCHEDULING ALTERNATIVES → same rule:
 If the owner or a colleague asks to move, shift, or reschedule an existing meeting and you need to propose alternative slots, call find_available_slots for the relevant day/window — do NOT narrate from raw calendar data. Trap to avoid: seeing "free from 9:00 before the meeting" and suggesting 9:00 — a 55-min meeting at 9:00 ends at 9:55, which OVERLAPS the original 9:15–10:10 block still on the calendar. find_available_slots handles this correctly: it fetches free/busy (which includes the original meeting as busy) and will never return a slot that overlaps it. Never propose a reschedule alternative that falls within or overlaps the original meeting's time window.

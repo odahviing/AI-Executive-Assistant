@@ -34,6 +34,75 @@ function getDueRoutines(): Routine[] {
 }
 
 /**
+ * One-shot startup repair for routines whose `next_run_at` is NULL.
+ *
+ * The chicken-and-egg failure: the materializer's `getDueRoutines` query
+ * filters `next_run_at IS NOT NULL`, and the materializer is the only
+ * code path that updates `next_run_at`. So a routine created (or migrated
+ * in) with NULL is silently invisible forever — it never fires, and the
+ * silence has no diagnostic. Surfaced 2026-04-30 (#75 — calendar health
+ * routine created Apr 23, never ran).
+ *
+ * Called from `initProfile` per profile. Idempotent — only touches rows
+ * still at NULL. Logs a `warn` per backfill so we know if something is
+ * still creating routines outside `create_routine` (the create path
+ * always populates next_run_at; a backfill hit means a non-tool path
+ * inserted a row).
+ */
+export function backfillNullNextRunAt(profile: UserProfile): number {
+  const db = getDb();
+  const ownerUserId = profile.user.slack_user_id;
+  const broken = db.prepare(`
+    SELECT id, schedule_type, schedule_time, schedule_day, title
+    FROM routines
+    WHERE owner_user_id = ? AND status = 'active' AND next_run_at IS NULL
+  `).all(ownerUserId) as Array<{
+    id: string;
+    schedule_type: string;
+    schedule_time: string;
+    schedule_day: string | null;
+    title: string;
+  }>;
+  if (broken.length === 0) return 0;
+
+  const workDays = getProfileWorkDays(profile);
+  const tz = profile.user.timezone;
+  let repaired = 0;
+  for (const row of broken) {
+    try {
+      const nextRunAt = computeNextRunAt(
+        row.schedule_type,
+        row.schedule_time,
+        row.schedule_day,
+        tz,
+        undefined,
+        workDays,
+      );
+      db.prepare(
+        `UPDATE routines SET next_run_at = @next, updated_at = datetime('now') WHERE id = @id`
+      ).run({ id: row.id, next: nextRunAt });
+      repaired++;
+      logger.warn('Routine had NULL next_run_at — backfilled at startup', {
+        ownerUserId,
+        routineId: row.id,
+        title: row.title,
+        scheduleType: row.schedule_type,
+        scheduleTime: row.schedule_time,
+        scheduleDay: row.schedule_day,
+        nextRunAt,
+      });
+    } catch (err) {
+      logger.error('Routine NULL backfill failed for one row — continuing', {
+        ownerUserId,
+        routineId: row.id,
+        err: String(err),
+      });
+    }
+  }
+  return repaired;
+}
+
+/**
  * Called on the 5-minute background tick. For every active routine whose
  * `next_run_at` is past, insert a task at that instant and advance the
  * routine's `next_run_at` to the next future occurrence.
