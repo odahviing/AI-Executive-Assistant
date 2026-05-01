@@ -1098,6 +1098,39 @@ Rules:
           return m ? m[1] : 'something';
         });
         const distinct = [...new Set(toolNames)];
+        // v2.3.9 (#78 Fix A) — observation/social tools are SIDE EFFECTS, not
+        // the response. When the only tools that fired are these, the right
+        // user-facing fallback is silence — narrating "I made a note about
+        // myself" is the v2.3.8 INTERNALS rule violation surfacing through the
+        // fallback path. The verbMap was added v1.7.3 for "I deleted X / I
+        // booked Y" turns where silence would be jarring; for "I noted what
+        // we just chatted about" turns, silence is honest. Sonnet went silent
+        // probably because it treated the note as the response (a separate
+        // bug at the prompt layer). Until that's also fixed, this prevents
+        // tool POV leaking to the user. List intentionally narrow — only
+        // tools whose user-facing impact is zero.
+        const SILENCE_ELIGIBLE = new Set([
+          'note_about_self',
+          'note_about_person',
+          'log_interaction',
+          'learn_preference',
+          'forget_preference',
+          'recall_preferences',
+          'recall_interactions',
+          'update_person_profile',
+          'update_person_memory',
+          'get_person_memory',
+          'confirm_gender',
+        ]);
+        if (distinct.every(t => SILENCE_ELIGIBLE.has(t))) {
+          // Leave finalReply empty — downstream gates (shadow-DM, send) all
+          // check non-empty. AuditLog + social engine logging still run.
+          logger.info('Orchestrator: only observation tools fired and no reply text — staying silent (Fix A #78)', {
+            threadTs,
+            iterations: iteration,
+            tools: distinct,
+          });
+        } else {
         // Map tool names to human verbs the owner will understand.
         // Any tool not listed falls through to the generic phrase below —
         // NEVER leak raw tool names to the user (that's an AI-ish tell, plus
@@ -1179,6 +1212,7 @@ Rules:
           tools: distinct,
           fallbackReply: finalReply,
         });
+        }
       } else {
         // v1.7.6 — never silence after the orchestrator runs. The user's rule:
         // if Maelle put the read-receipt emoji, she should respond — even if

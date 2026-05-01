@@ -56,22 +56,56 @@ export function deletePreference(userId: string, key: string): boolean {
 }
 
 /**
- * Format preferences as a compact block for injection into the system prompt.
- * Returns empty string if no preferences exist yet.
+ * Compact catalog of what the user has taught — category + key list per row,
+ * full text fetched on demand via recall_preferences(category|key). Mirrors
+ * the v2.2.1 people-memory pattern: cheap injection, on-demand loading. Closes
+ * the v2.3.8-era prompt bloat where 110 prefs (~7,600 tokens) shipped to every
+ * turn even though most weren't relevant.
+ *
+ * Returns empty string when no preferences exist (so the prompt block is
+ * skipped entirely on a fresh profile).
  */
-export function formatPreferencesForPrompt(userId: string): string {
+export function formatPreferencesCatalog(userId: string): string {
   const prefs = getPreferences(userId);
   if (prefs.length === 0) return '';
 
-  const byCategory = prefs.reduce((acc, p) => {
-    if (!acc[p.category]) acc[p.category] = [];
-    acc[p.category].push(`- ${p.value}`);
-    return acc;
-  }, {} as Record<string, string[]>);
+  const byCategory = new Map<string, string[]>();
+  for (const p of prefs) {
+    if (!byCategory.has(p.category)) byCategory.set(p.category, []);
+    byCategory.get(p.category)!.push(p.key);
+  }
+  // Stable ordering — categories alphabetical, keys alphabetical within each.
+  const categories = [...byCategory.keys()].sort();
+  const lines = categories.map(cat => {
+    const keys = byCategory.get(cat)!.sort();
+    return `${cat.toUpperCase()} (${keys.length}): ${keys.join(', ')}`;
+  });
 
-  const lines = Object.entries(byCategory)
-    .map(([cat, items]) => `${cat.toUpperCase()}:\n${items.join('\n')}`)
-    .join('\n\n');
+  return [
+    `PREFERENCES INDEX (${prefs.length} entries — call recall_preferences(category=...) or recall_preferences(key=...) to load full text):`,
+    ...lines,
+  ].join('\n');
+}
 
-  return `WHAT YOU KNOW ABOUT ${userId.toUpperCase()} (learned over time):\n${lines}`;
+/**
+ * Filtered fetch for the recall_preferences tool. Returns all prefs when both
+ * args omitted (back-compat with v1.x callers). category filter narrows by
+ * category; key filter returns at most one row by exact key match.
+ */
+export function getPreferencesFiltered(
+  userId: string,
+  filter: { category?: string; key?: string } = {},
+): UserPreference[] {
+  const db = getDb();
+  if (filter.key) {
+    return db.prepare(
+      `SELECT * FROM user_preferences WHERE user_id = ? AND key = ?`,
+    ).all(userId, filter.key) as UserPreference[];
+  }
+  if (filter.category) {
+    return db.prepare(
+      `SELECT * FROM user_preferences WHERE user_id = ? AND category = ? ORDER BY key`,
+    ).all(userId, filter.category) as UserPreference[];
+  }
+  return getPreferences(userId);
 }

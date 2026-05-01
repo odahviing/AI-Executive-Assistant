@@ -4,7 +4,11 @@ description: Four-layer model, skills system, orchestrator loop, task pipeline, 
 type: project
 originSessionId: fd199f43-f9ab-495a-9013-017e7e191338
 ---
-Architecture reference for Maelle **v2.0.0** (Connection interface milestone — issue #1 closed). Mission: agent that works as a human EA. Prompts vs code principle: determinism → code (booking, delete/create idempotency, date, slot rules, approval sync); judgment/tone → prompt.
+Architecture reference for Maelle **v2.4.0** (preferences catalog + observation-tool silence; v2.0.0 = Connection interface milestone). Mission: agent that works as a human EA. Prompts vs code principle: determinism → code (booking, delete/create idempotency, date, slot rules, approval sync); judgment/tone → prompt.
+
+**Prompt size pattern (v2.4):** owner-DM system prompt was 30K tokens — preferences shipping in full every turn (25%) + accumulated meetings rules (32%). Catalog pattern from v2.2.1 people-memory now applies to preferences too: `formatPreferencesCatalog(userId)` injects categories + key list (~150-300 chars/cat), Sonnet calls `recall_preferences(category|key)` to load full text on demand. `learn_preference.category` enum dropped `people` (person facts → `update_person_memory` / `update_person_profile`); tool description excludes business knowledge (→ KB markdown). One-shot migration scripts at `scripts/migrate-prefs-to-{kb,people-md}.cjs` (idempotent) moved 67 legacy rows out. Owner-DM prompt now 21K tokens (−29.5%).
+
+**Observation-tool silence (v2.4 Fix A for #78):** in `core/orchestrator/index.ts` recovery-fallback path, `SILENCE_ELIGIBLE` set defines tools whose user-facing impact is zero — `note_about_self`, `note_about_person`, `log_interaction`, `learn_preference`, `forget_preference`, `recall_preferences`, `recall_interactions`, `update_person_profile`, `update_person_memory`, `get_person_memory`, `confirm_gender`. When the only tools that fired are silence-eligible AND Sonnet went silent, the orchestrator stays silent (auditLog + social-engine logging still run). Without this, the v1.7.3 verbMap fallback fires and emits tool-POV text ("Done — made a note about myself") in the middle of a social chat — violation of the v2.3.8 INTERNALS rule.
 
 **Message flow:** Slack → `connectors/slack/app.ts` (inbound) → `runOrchestrator()` → Claude tool loop → skills execute (via `Connection` for any outbound messaging) → `postReply.ts` (normalize → claim-check → date-verify with deterministic correction → security gate → send) → reply.
 

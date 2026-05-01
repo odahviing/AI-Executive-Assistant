@@ -30,35 +30,39 @@ export class AssistantSkill implements Skill {
     return [
       {
         name: 'learn_preference',
-        description: `Save something you have learned — about the user, their preferences, or about specific people they work with.
+        description: `Save a durable fact about the OWNER — how they work, their habits, or their personal style. ONE topic per row, never bundle.
+
 Call this when:
-- The user tells you something about how they work or what they prefer
-- The user tells you something personal about a colleague (nickname, preferences, relationship context)
-- You notice a clear pattern worth remembering
-- Something funny or personal comes up in conversation that should be remembered
+- The owner teaches you something about how they prefer to work ("I always do focus blocks in the morning")
+- You notice a clear behavioural pattern worth remembering across conversations
+- Something personal/funny comes up that would make future interactions feel more human
 
 Examples:
 - "prefers calls before noon local time"
-- "[Person Name] goes by [Nickname] informally and prefers afternoon calls"
-- "[Person Name] handles all [scope] scheduling — treat their meeting requests as high priority"
-- "Person X and [owner name] have a running joke about always joining calls late"
+- "uses metric — Celsius, kilometers"
+- "linkedin posts always published tomorrow afternoon"
 
-Do NOT save one-off requests. Save things that should inform future interactions.`,
+DO NOT use this for:
+- Facts about other PEOPLE (their role, communication style, where they live, working hours, what they handle, slack id, hebrew name) → use update_person_memory(person, section, text) for free-text bio facts and update_person_profile(...) for structured fields (timezone, state, gender, working_hours_structured, name_he).
+- COMPANY / PRODUCT knowledge (positioning, ICP, customer quotes, competitive differentiation, product capabilities, market segments) → these belong in the knowledge base. The owner edits .md files directly under config/users/<owner>_kb/. You don't write KB files via this tool.
+- One-off task details ("today's lunch is at 1pm").
+
+If you're unsure whether something is owner-pref vs person-fact vs company-knowledge, lean toward person/company tools — over-saving prefs about other people or business knowledge is the failure pattern this tool description is here to prevent.`,
         input_schema: {
           type: 'object',
           properties: {
             category: {
               type: 'string',
-              enum: ['scheduling', 'communication', 'people', 'general'],
-              description: 'Category: scheduling=calendar habits, communication=how they like to communicate, people=info about contacts, general=anything else',
+              enum: ['scheduling', 'communication', 'general'],
+              description: 'scheduling=owner calendar habits, communication=how owner likes to communicate, general=anything else about the OWNER. (people/company knowledge → use update_person_memory or KB files instead.)',
             },
             key: {
               type: 'string',
-              description: 'Short unique identifier, lowercase with underscores. e.g. "prefers_morning_calls", "yael_handles_interviews"',
+              description: 'Short unique identifier, lowercase with underscores. e.g. "prefers_morning_calls", "uses_metric_system". Do NOT prefix with a person name (those facts belong in update_person_memory).',
             },
             value: {
               type: 'string',
-              description: "The fact in plain English. For people category, include the person name. Examples: '[Person] prefers afternoon calls and goes by [nickname] informally', '[Person] handles all interview coordination — treat their requests as high priority', '[Person] and [owner] have a running joke about always joining calls late'",
+              description: 'The fact in plain English, ONE topic. Don\'t pile multiple ideas into one value.',
             },
           },
           required: ['category', 'key', 'value'],
@@ -80,10 +84,32 @@ Do NOT save one-off requests. Save things that should inform future interactions
       },
       {
         name: 'recall_preferences',
-        description: 'Retrieve everything you have learned about the user. Call this at the start of a complex scheduling task to make sure you have full context.',
+        description: `Retrieve learned preferences about the user. The system prompt shows you a PREFERENCES INDEX (categories + key list) — call this tool to load the FULL TEXT for a category or a specific key when a turn needs it.
+
+Pass:
+- category=...  → load every preference in that category (one of "scheduling", "communication", "general").
+- key=...       → load one specific preference by exact key.
+- both omitted  → load EVERYTHING (use sparingly — costs tokens; prefer category or key).
+
+Examples:
+- About to propose meeting times → recall_preferences(category="scheduling")
+- Drafting a colleague-facing message → recall_preferences(category="communication")
+- Specific key from the index → recall_preferences(key="lunch_block_settings")
+
+Categories are scheduling / communication / general (all about the OWNER). Person facts live in get_person_memory; company knowledge lives in get_company_knowledge.`,
         input_schema: {
           type: 'object',
-          properties: {},
+          properties: {
+            category: {
+              type: 'string',
+              enum: ['scheduling', 'communication', 'general'],
+              description: 'Optional category filter — load every preference in this category.',
+            },
+            key: {
+              type: 'string',
+              description: 'Optional exact key — load one specific preference.',
+            },
+          },
           required: [],
         },
       },
@@ -460,8 +486,13 @@ First call for a person auto-creates their md file. Empty-until-real-fact — do
       }
 
       case 'recall_preferences': {
-        const prefs = getPreferences(userId);
-        return { preferences: prefs, count: prefs.length };
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getPreferencesFiltered } = require('../db') as typeof import('../db');
+        const category = (args.category as string | undefined) || undefined;
+        const key = (args.key as string | undefined) || undefined;
+        const prefs = getPreferencesFiltered(userId, { category, key });
+        logger.info('recall_preferences', { userId, category, key, count: prefs.length });
+        return { preferences: prefs, count: prefs.length, filter: { category, key } };
       }
 
 
