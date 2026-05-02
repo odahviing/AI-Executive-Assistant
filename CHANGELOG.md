@@ -34,6 +34,7 @@ A direct continuation of the 2.4.0 wave — the prompt-bloat surgery surfaced fo
 - `getFloatingBlocks(profile)` collapsed to one line — reads `profile.meetings.floating_blocks` only. The legacy auto-promotion of `schedule.lunch` is gone; same for the union logic that handled both paths.
 - `book_floating_block` rejection message for `not_applicable_today` now includes the override path ("If owner explicitly directs you to book it on this day anyway, retry with confirm_outside_window=true and start_time=HH:MM") so Sonnet knows there's an escape hatch.
 - The `schedule.lunch` field is removed from the schema. Profiles that still have it will fail validation. config/users.example/user.example.yaml updated to the new shape; existing private profiles need to migrate (see Migration below).
+- Persona prompt at `src/skills/persona.ts` rewritten one sentence: "react like a colleague would, **then** save via note_about_self" → "react in text AND save via note_about_self. The save is bookkeeping — it never replaces your reply." Closes the post-2.4.0 social-chat silence pattern where Sonnet called note_about_self and produced no text reply (Fix A from v2.4.0 prevented the bad fallback "Done — made a note about myself" leak, but Sonnet still went silent — owner got nothing back). Single sentence rewrite per owner's "minimum prompt to fix 90%" direction; same shape applies to note_about_person on colleague-side.
 
 ### Removed
 
