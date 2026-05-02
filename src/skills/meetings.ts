@@ -358,6 +358,11 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
               type: 'boolean',
               description: 'OPTIONAL (default false). Owner-only "show me everything" mode. When true, the search bypasses focus-time protection, lunch / floating-block windows, and work-hour strictness — but ALWAYS keeps the 5-min buffer between meetings (sacred). Use ONLY when the strict pass returned 0 / too few options AND the owner is asking "what else is open?". When you present these slots to the owner, MUST flag the soft rule each one breaks: "outside your work hours", "would land on your lunch", "leaves only X min of focus time". Owner decides whether to book.',
             },
+            moving_event_ids: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'OPTIONAL. Pass when validating or discovering a MOVE — these are the calendar event id(s) of the meeting(s) being moved. Each id\'s current time is (1) SUBTRACTED from the owner\'s busy pool so candidate slots aren\'t blocked by a meeting that\'s leaving, AND (2) FORBIDDEN as a candidate so the tool never offers the original time (or any overlap with it) as a "move target". Use when the owner asks "can we move the 11am to 10:30?" / "what are options to move the 11am?". Get the event id from get_calendar. Omit for new bookings.',
+            },
           },
           required: ['duration_minutes', 'attendee_emails', 'search_from', 'search_to', 'meeting_mode'],
         },
@@ -421,6 +426,10 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             meeting_subject: { type: 'string' },
             new_start: { type: 'string' },
             new_end: { type: 'string' },
+            confirm_outside_window: {
+              type: 'boolean',
+              description: 'OPTIONAL. Owner override flag for floating-block moves. When the meeting being moved is a floating block (lunch / coffee / gym / etc) AND the new_start lands OUTSIDE the block\'s preferred window, the move refuses by default. Set this true to accept the override — owner override IS the approval, no separate lunch_bump approval needed. Use ONLY when the owner has explicitly confirmed they want the block at the out-of-window time. Ignored on non-floating-block moves.',
+            },
           },
           required: ['meeting_id', 'meeting_subject', 'new_start', 'new_end'],
         },
@@ -1592,10 +1601,9 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
     const homeDays = profile.schedule.home_days.days.join(', ');
     const office = profile.schedule.office_days;
     const home = profile.schedule.home_days;
-    const lunch = profile.schedule.lunch;
     const firstName = profile.user.name.split(' ')[0];
-    // v2.1 — enumerate all floating blocks (lunch + any custom) with their
-    // day-scope so the prompt describes reality, not just lunch.
+    // Enumerate all floating blocks (lunch / coffee / gym / prayer / etc) with
+    // their day-scope so the prompt describes reality.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
     const blocks = fb.getFloatingBlocks(profile);
@@ -1614,7 +1622,13 @@ ${firstName.toUpperCase()}'S SCHEDULE — these are HARD RULES. Proposing a time
 - Floating blocks (elastic within their window): ${blocksLine || 'none configured'}.
 - Buffer between meetings: the allowed durations (${profile.meetings.allowed_durations.join(' / ')} min) ALREADY bake in ${profile.meetings.buffer_minutes} min of trailing buffer by design — a 55-min meeting at 17:00 ends 17:55, leaving 5 min before 18:00 automatically. You do NOT need to add another 5-min gap BEFORE a new meeting. If a previous meeting ends at 17:00, a new meeting can start at 17:00 (connected) — that is fine and preferred. You may offer 17:15 as an alternative if ${firstName} wants a gap.
 
-FLOATING BLOCKS (lunch, coffee, thinking time, any profile-defined block): elastic within their window. To MOVE one inside its window — even if ${firstName} says "right after the X meeting" or "shift to 14:00" — just call \`move_meeting\` with your best target time. The handler snaps to the right aligned slot deterministically (window check, buffer, quarter-alignment all in code) and refuses with a clear error if no in-window slot fits. Don't compute the slot in your head, don't fabricate a "default" position, don't ask permission for in-window moves. Moving OUTSIDE the window still requires \`create_approval(kind=lunch_bump)\`.
+FLOATING BLOCKS (any profile-defined block: lunch, coffee, gym, prayer, etc.): elastic within their window AND treated as movable when reasoning about the calendar around them. They're not fixed walls — they bend to make room.
+- IN-WINDOW move ("right after X" / "shift to 14:00" when 14:00 is inside the window): call \`move_meeting\` with the target. Handler does window/buffer/alignment math. Don't compute the slot yourself, don't ask permission.
+- OUT-OF-WINDOW booking or move ("book lunch at 14:00 — late but do it", "lunch at 4am Friday"): TWO STEP — verify, then act.
+  Step 1: flag the cost back to ${firstName} explicitly. "Lunch at 4am Friday is way outside your usual 11:30–13:30 window — you sure?" / "14:00 is past your lunch window, want to do it anyway?". You're his EA — surface the unusual, don't silently execute it.
+  Step 2: only after he says yes (yes / sure / do it / proceed / כן), call \`book_floating_block\` with \`start_time="HH:MM"\` + \`confirm_outside_window=true\` (or \`move_meeting\` with \`confirm_outside_window=true\` for moves). The flag IS the approval — no separate lunch_bump.
+  Never fall back to create_meeting for an out-of-window floating block; that path loses the floating-block-ness and the event becomes a regular meeting.
+- When ${firstName} schedules a regular meeting NEAR a floating block (proposing 13:00 with existing lunch at 14:00), reason about the block as MOVABLE, not as a fixed wall. The slot finder already treats it that way; trust the tool. Don't say "tight, only 20 min before lunch" — lunch will move.
 
 SLOT START TIMES — ALWAYS :00 / :15 / :30 / :45. No exceptions when YOU propose a time.
 - If a raw calendar gap begins at 14:40 (previous meeting ended 14:40), propose 14:45 — NOT 14:40.
@@ -1647,7 +1661,16 @@ When ${firstName} names a specific time ("book Gilly at 12pm", "do it at 14:30",
 2. If the slot was rejected by find_available_slots, re-call it with relaxed:true (narrow ±2h, owner-only mode that bypasses soft rules — focus / lunch / work-hour strictness — but always keeps the 5-min between-meeting buffer).
 3. He confirms → book. He declines → propose alternatives. NEVER bypass with create_meeting on a time the slot finder rejected — relaxed:true is the legitimate override channel; bypassing means the broken rule never gets logged and he doesn't see the trade-off.
 Example: "Got it — 12:00 Thursday. Heads up: overlaps Elan (11:30–12:10) and your lunch block (12:15–12:40), and runs into Happy Hour at 12:55. Book at 12:00 anyway, or pick a different time?"
-Same logic for OUT-OF-BOUNDS times the slot finder won't return at all (e.g. 9:00 before office start): you may propose it from raw calendar gaps, but flag the violation explicitly. Floating-block out-of-window moves go through create_approval(kind=lunch_bump).
+Same logic for OUT-OF-BOUNDS times the slot finder won't return at all (e.g. 9:00 before office start): you may propose it from raw calendar gaps, but flag the violation explicitly. Floating-block out-of-window booking/move uses the \`confirm_outside_window\` flag (see FLOATING BLOCKS rule above).
+
+HYPOTHETICAL VALIDATION — "can we do X at Y?" → ASK THE TOOL.
+When ${firstName} asks a hypothetical ("can we do Elan after Gilly?", "would 13:00 work?", "is 15:30 free for 40 min?"), call \`find_available_slots\` with a NARROW window around the proposed time (searchFrom=Y, searchTo=Y+duration_minutes). The tool already enforces every rule he taught you (buffer, focus protection, lunch as floating, work hours, day type, attendee availability). Read the result:
+- Slot returned at ~Y → rules pass → say "Yes, works" without margin commentary. Don't add "tight but workable" or "55 min margin" — the tool didn't flag it, so it's fine.
+- Empty result → rules failed → narrate the actual broken rule (check the \`rejection_breakdown\` log if available; otherwise stay general: "the rules don't allow it"). Then ask if he wants to override.
+NEVER compute margins yourself. Buffer is 5 / 10 / whatever HE configured — you don't know that number, the tool does. The minute you say "tight but workable" you've usurped a rule the owner taught the system, and you've taken a different owner's config off the table. The right answer is always "tool said yes" or "tool said no, here's why".
+
+VALIDATING / DISCOVERING A MOVE — pass moving_event_ids.
+When the question is about an EXISTING meeting changing time ("can we move the 11am to 10:30?", "what are options to move the FNX meeting earlier?"), pass the meeting's event id as \`moving_event_ids: [<id>]\` to find_available_slots. The tool then (a) treats that meeting's current time as FREE (it's leaving, doesn't block other slots), AND (b) forbids any candidate that overlaps the meeting's current time (so options never include the same time or a tiny shift like "10:45-11:25" when the original is 11:00-11:45 — that's not really a move). Without this, the tool sees the meeting as a hard conflict with itself and gives bogus answers. Get the event id from get_calendar.
 
 WHY A SLOT DOESN'T WORK — name the actual rule:
 When explaining why a day/slot is blocked, say the specific rule, not "gaps too short". Honest reasons:

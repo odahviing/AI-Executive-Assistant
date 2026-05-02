@@ -263,8 +263,8 @@ export function processCalendarEvents(
       // turns "Lunch" into "[Private]" for sensitivity=private/personal,
       // and we still need detection to fire. The boolean-shaped output
       // (just block name) doesn't leak private content. Matcher honors
-      // yaml's schedule.lunch.match_subject_regex + match_category, plus
-      // any entries in schedule.floating_blocks. First match wins.
+      // each block's match_subject_regex + match_category from
+      // meetings.floating_blocks. First match wins.
       is_floating_block: (() => {
         for (const block of floatingBlocks) {
           if (fb.isFloatingBlockEvent(
@@ -791,6 +791,13 @@ export class SchedulingSkill {
               // v2.3.2 (2A) — relaxed mode opt-in (owner-only). Bypasses
               // focus / lunch / work-hours; keeps the 5-min between-meeting buffer.
               relaxed: args.relaxed === true && context.senderRole === 'owner',
+              // v2.4.1 — when validating/discovering a MOVE, the meeting(s)
+              // being moved are subtracted from busy AND forbidden as
+              // candidates. See findAvailableSlots.excludeEventIds for the
+              // full semantics.
+              excludeEventIds: Array.isArray(args.moving_event_ids)
+                ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
+                : undefined,
             });
           } catch (err) {
             if (err instanceof GraphPermissionError) {
@@ -1467,23 +1474,29 @@ export class SchedulingSkill {
               if (isOwnerPath) {
                 const hintStartMs = newStartDt.toMillis();
                 const hintEndMs = hintStartMs + matchedBlock.duration_minutes * 60 * 1000;
-                if (hintStartMs >= wStart && hintEndMs <= wEnd) {
+                const inWindow = hintStartMs >= wStart && hintEndMs <= wEnd;
+                const overrideOk = args.confirm_outside_window === true;
+                if (inWindow || overrideOk) {
                   effectiveStart = newStartDt.toISO()!;
                   effectiveEnd = newStartDt
                     .plus({ minutes: matchedBlock.duration_minutes })
                     .toISO()!;
-                  logger.info('move_meeting (owner) — floating block in-window, using hint as-is', {
+                  logger.info(inWindow
+                    ? 'move_meeting (owner) — floating block in-window, using hint as-is'
+                    : 'move_meeting (owner) — floating block out-of-window override accepted', {
                     meetingId: args.meeting_id, block: matchedBlock.name, hint: args.new_start,
+                    window: `${matchedBlock.preferred_start}-${matchedBlock.preferred_end}`,
+                    override_used: !inWindow,
                   });
                 } else {
-                  logger.info('move_meeting refused — owner hint out of window for floating block', {
+                  logger.info('move_meeting refused — owner hint out of window without override', {
                     meetingId: args.meeting_id, block: matchedBlock.name, hint: args.new_start,
                     window: `${matchedBlock.preferred_start}-${matchedBlock.preferred_end}`,
                   });
                   return {
                     success: false,
                     error: 'out_of_window',
-                    message: `${args.new_start} is outside the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name}. To move it OUTSIDE the window, raise create_approval(kind='lunch_bump').`,
+                    message: `${args.new_start} is outside the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name}. To proceed anyway, retry with confirm_outside_window=true (owner override IS the approval — no separate lunch_bump needed).`,
                   };
                 }
                 // Skip the colleague-path findAlignedSlotForBlock branch below.

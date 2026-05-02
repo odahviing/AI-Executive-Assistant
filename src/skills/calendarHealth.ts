@@ -176,7 +176,10 @@ POSITIONAL PREFERENCE — express the owner's intent semantically, don't compute
 
 Pass anchor_event_id from get_calendar's event id field. NEVER hand-compute the start time and pass it through create_meeting — let this tool do the alignment + buffer math. Boundary times like the exact lunch_end are unbookable as lunch (the window's preferred_end is exclusive); the abut_after path will refuse honestly if math lands at/past the boundary.
 
-CATEGORIES: if the EVENT CATEGORIES block is in your system prompt, pass \`category\` with the name that fits this kind of block (typically the one whose description mentions personal time / schedule admin). Omit if no categories are defined or none fits.`,
+CATEGORIES: if the EVENT CATEGORIES block is in your system prompt, pass \`category\` with the name that fits this kind of block (typically the one whose description mentions personal time / schedule admin). Omit if no categories are defined or none fits.
+
+OWNER OVERRIDE — booking outside the preferred window:
+When the owner explicitly says to book a floating block at a time OUTSIDE its preferred window ("book lunch at 14:00 even though that's late", "yes I know it's after my lunch hours, do it anyway"), call this tool with start_time="HH:MM" + confirm_outside_window=true. The handler bypasses the window check (owner override IS the approval) AND bypasses the day-of-week check (owner is allowed to book a block on any day they ask). It still enforces the rules that DON'T bend: buffer, conflict detection, alignment. Resulting event is tagged as a first-class floating block (canonical subject + matching category) so downstream code recognizes it. Never fall back to create_meeting for this — that path would lose the floating-block-ness. Owner-only path: this flag is ignored on colleague calls (colleagues can't trigger this tool anyway — it's owner-restricted by registry).`,
         input_schema: {
           type: 'object',
           properties: {
@@ -202,6 +205,14 @@ CATEGORIES: if the EVENT CATEGORIES block is in your system prompt, pass \`categ
             anchor_event_id: {
               type: 'string',
               description: 'OPTIONAL. The event id (from get_calendar) to abut against. REQUIRED when prefer_position is abut_before or abut_after.',
+            },
+            start_time: {
+              type: 'string',
+              description: 'OPTIONAL. Explicit HH:MM start time (24h). Honored ONLY when confirm_outside_window=true and the owner has explicitly directed the time. Quarter-hour alignment is still enforced — if the owner names off-grid time, snap silently to the nearest valid quarter unless they pinned it (15:13 from get_calendar may be valid for booking onto an existing slot; 15:13 from a free-form ask should snap to 15:15).',
+            },
+            confirm_outside_window: {
+              type: 'boolean',
+              description: 'OPTIONAL. Owner override flag — when true, the handler accepts a start_time that is OUTSIDE the block\'s preferred window AND/OR on a day the block is not normally scheduled. Use ONLY when the owner has explicitly said to book it there ("yes book lunch at 14:00, late is fine"). The override IS the approval — no separate lunch_bump approval needed. Buffer + conflict checks still enforced. Pair with start_time.',
             },
             category: categoryNames.length > 0
               ? {
@@ -1031,10 +1042,19 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
 
         const blockLabel = block.default_subject ?? (block.name.charAt(0).toUpperCase() + block.name.slice(1).replace(/_/g, ' '));
         const dayName = DateTime.fromISO(date, { zone: timezone }).toFormat('EEEE');
-        if (!fb.blockAppliesOnDay(block, dayName, profile)) {
+
+        // Owner-override path — owner explicitly directs an out-of-window
+        // (or off-schedule-day) booking. The flag IS the approval; the same
+        // pattern as v2.3.3 find_available_slots.relaxed and v2.2.1
+        // colleague-path move_meeting auto-accept. Only the window/day-scope
+        // bend; buffer + conflict + alignment checks still hold below.
+        const confirmOutsideWindow = args.confirm_outside_window === true;
+        const explicitStartTime = (args.start_time as string | undefined)?.trim();
+
+        if (!confirmOutsideWindow && !fb.blockAppliesOnDay(block, dayName, profile)) {
           return {
             error: 'not_applicable_today',
-            message: `${blockLabel} isn't scheduled for ${dayName} in your profile (days: ${(block.days ?? ['every work day']).join(', ')}).`,
+            message: `${blockLabel} isn't scheduled for ${dayName} in your profile (days: ${(block.days ?? ['every work day']).join(', ')}). If owner explicitly directs you to book it on this day anyway, retry with confirm_outside_window=true and start_time="HH:MM".`,
           };
         }
 
@@ -1049,6 +1069,123 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
 
         const windowStart = DateTime.fromISO(`${date}T${block.preferred_start}`, { zone: timezone });
         const windowEnd = DateTime.fromISO(`${date}T${block.preferred_end}`, { zone: timezone });
+
+        // Owner-override branch — when confirm_outside_window=true AND a
+        // start_time was given, skip the positional/window logic entirely
+        // and book at the explicit time. Buffer + conflict checks still run.
+        if (confirmOutsideWindow && explicitStartTime) {
+          if (!/^\d{2}:\d{2}$/.test(explicitStartTime)) {
+            return {
+              error: 'invalid_start_time',
+              message: `start_time must be HH:MM (24h). Got "${explicitStartTime}".`,
+            };
+          }
+          const overrideStart = DateTime.fromISO(`${date}T${explicitStartTime}`, { zone: timezone });
+          if (!overrideStart.isValid) {
+            return { error: 'invalid_start_time', message: `Couldn't parse ${date}T${explicitStartTime} in ${timezone}.` };
+          }
+          const overrideEnd = overrideStart.plus({ minutes: block.duration_minutes });
+          const bufferMs = (profile.meetings.buffer_minutes ?? 5) * 60 * 1000;
+
+          // Idempotency — same-block on same day around explicit time → no-op
+          const existingNearby = events.find(e => {
+            if (e.isAllDay || e.isCancelled || e.showAs === 'free') return false;
+            if (!fb.isFloatingBlockEvent(
+              { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+              block,
+            )) return false;
+            const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis();
+            return Math.abs(eStart - overrideStart.toMillis()) <= 60 * 1000;
+          });
+          if (existingNearby) {
+            const eStart = parseGraphDt(existingNearby.start.dateTime, existingNearby.start.timeZone, timezone);
+            const eEnd = parseGraphDt(existingNearby.end.dateTime, existingNearby.end.timeZone, timezone);
+            return {
+              ok: true, created: false, already_existed: true,
+              event_id: existingNearby.id, subject: existingNearby.subject,
+              start: eStart.toFormat('HH:mm'), end: eEnd.toFormat('HH:mm'),
+              date, block_name: block.name, override_used: true,
+              message: `You already booked ${blockLabel} on ${date} at ${eStart.toFormat('HH:mm')}–${eEnd.toFormat('HH:mm')} — same slot, no change.`,
+            };
+          }
+
+          // Conflict + buffer check at the explicit time
+          const conflict = events.find(e => {
+            if (e.isAllDay || e.isCancelled || e.showAs === 'free') return false;
+            // Skip same-block events (about to book one; existing ones aren't conflicts)
+            if (fb.isFloatingBlockEvent(
+              { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+              block,
+            )) return false;
+            const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis();
+            const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis();
+            const newStart = overrideStart.toMillis();
+            const newEnd = overrideEnd.toMillis();
+            // Overlap with buffer
+            return (newStart - bufferMs) < eEnd && (newEnd + bufferMs) > eStart;
+          });
+          if (conflict) {
+            const cStart = parseGraphDt(conflict.start.dateTime, conflict.start.timeZone, timezone);
+            const cEnd = parseGraphDt(conflict.end.dateTime, conflict.end.timeZone, timezone);
+            return {
+              error: 'conflict',
+              message: `${blockLabel} at ${explicitStartTime} on ${date} conflicts with "${conflict.subject}" (${cStart.toFormat('HH:mm')}–${cEnd.toFormat('HH:mm')}). Buffer: ${profile.meetings.buffer_minutes ?? 5} min.`,
+              conflicting_event: { subject: conflict.subject, start: cStart.toFormat('HH:mm'), end: cEnd.toFormat('HH:mm') },
+            };
+          }
+
+          // Category resolution (same as the positional path below)
+          const categoryArg = (args.category as string | undefined)?.trim();
+          const validCategoryNames = (profile.categories ?? []).map(c => c.name);
+          let blockCategories: string[] | undefined = undefined;
+          if (block.default_category && validCategoryNames.includes(block.default_category)) {
+            blockCategories = [block.default_category];
+          } else if (categoryArg) {
+            if (validCategoryNames.length === 0 || validCategoryNames.includes(categoryArg)) {
+              blockCategories = [categoryArg];
+            }
+          }
+
+          try {
+            const eventId = await createMeeting({
+              subject: blockLabel,
+              start: overrideStart.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
+              end: overrideEnd.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
+              attendees: [],
+              body: `<p>${blockLabel} — booked by ${profile.assistant.name}, ${profile.user.name.split(' ')[0]} Assistant. (Owner-override: outside the ${block.preferred_start}-${block.preferred_end} window.)</p>`,
+              isOnline: false,
+              categories: blockCategories,
+              userEmail,
+              timezone,
+            });
+            logger.info('book_floating_block: owner-override booking', {
+              blockName: block.name, date, start_time: explicitStartTime,
+              window: `${block.preferred_start}-${block.preferred_end}`,
+              event_id: eventId,
+            });
+            return {
+              ok: true, created: true, already_existed: false,
+              event_id: eventId, subject: blockLabel,
+              start: overrideStart.toFormat('HH:mm'),
+              end: overrideEnd.toFormat('HH:mm'),
+              date, block_name: block.name, booked: true,
+              override_used: true,
+              window: { start: block.preferred_start, end: block.preferred_end },
+              message: `I booked ${blockLabel} on ${date} from ${overrideStart.toFormat('HH:mm')} to ${overrideEnd.toFormat('HH:mm')} — outside your usual ${block.preferred_start}-${block.preferred_end} window per your direction.`,
+              assistant_hint: `Acknowledge the override briefly when narrating ("booked at ${overrideStart.toFormat('HH:mm')} per your call, outside the usual window") so the owner sees the trade-off was logged. Don't apologize — they asked for it.`,
+            };
+          } catch (err) {
+            logger.error('book_floating_block: failed to create override event', { err, blockName });
+            return { error: `Failed to create ${blockLabel} event: ${String(err)}` };
+          }
+        }
+
+        if (confirmOutsideWindow && !explicitStartTime) {
+          return {
+            error: 'override_needs_start_time',
+            message: `confirm_outside_window=true requires start_time="HH:MM". The override path doesn't infer a time — owner must direct it explicitly.`,
+          };
+        }
 
         // Idempotency: if the block's event already exists in the window,
         // return created:false. Bug-3 fix: the message now ATTRIBUTES the
@@ -1354,7 +1491,12 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
   }
 
   getSystemPromptSection(profile: UserProfile): string {
-    const lunch = profile.schedule.lunch;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
+    const blocks = fb.getFloatingBlocks(profile);
+    const blocksLine = blocks.length > 0
+      ? blocks.map(b => `${b.name} ${b.preferred_start}–${b.preferred_end} ${b.duration_minutes}min`).join(' · ')
+      : 'none configured';
     const mode = profile.behavior.calendar_health_mode ?? 'passive';
     return `
 CALENDAR HEALTH SKILL
@@ -1364,7 +1506,7 @@ Available tools:
 - check_calendar_health: scan for issues. Mode = ${mode.toUpperCase()} (profile default; can be overridden with the \`mode\` arg)
   • passive: detects and returns the issue list — you narrate, owner asks for fixes, you execute
   • active: detects + EXECUTES the safe fixes in one pass (books missing floating blocks, tags uncategorized events with high-confidence category, DMs owner about busy days). Each issue comes back tagged \`fixed:true\` with a one-liner \`fix_detail\` describing what changed.
-- book_floating_block: book a floating block (lunch / coffee / gym / etc) in its preferred window. Pass \`block_name\`. Lunch window: ${lunch.preferred_start}–${lunch.preferred_end}, ${lunch.duration_minutes} min — other custom blocks live under \`schedule.floating_blocks\`.
+- book_floating_block: book a floating block in its preferred window. Pass \`block_name\` (one of: ${blocks.map(b => b.name).join(', ') || 'none configured'}). Configured blocks: ${blocksLine}. All floating blocks live under \`meetings.floating_blocks\`.
   POSITIONAL INTENT: when the owner says "before X" / "after X" for a floating block (X = a meeting on the same day), pass \`prefer_position: 'abut_before' | 'abut_after'\` + \`anchor_event_id\` (the event id from get_calendar). The handler computes \`anchor.start - buffer - duration\` (abut_before) or \`anchor.end + buffer\` (abut_after), snaps to a quarter-hour aligned slot, and verifies window + conflicts. Don't compute the time yourself and pass it through create_meeting — that bypasses the alignment + window-edge checks (the lunch window's preferred_end is exclusive, so e.g. starting AT 13:30 isn't a valid lunch slot). When the owner says "as late as possible" / "right before lunch ends", pass \`prefer_position: 'latest_in_window'\`.
 - set_event_category: add Outlook categories to events
 - get_calendar_issues: see all unresolved calendar issues (double bookings, OOF conflicts)

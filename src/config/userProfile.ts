@@ -139,57 +139,6 @@ const UserProfileSchema = z.object({
       hours_end: z.string().regex(/^\d{2}:\d{2}$/),
       notes: z.string().optional(),
     }),
-    lunch: z.object({
-      preferred_start: z.string().regex(/^\d{2}:\d{2}$/),
-      preferred_end: z.string().regex(/^\d{2}:\d{2}$/),
-      duration_minutes: z.number().min(15).max(120),
-      can_skip: z.boolean(),
-      // Optional event-detection hints — same shape as floating_blocks.
-      // `lunch` is just one example of a floating block. Other owners might
-      // care about dinner, a coffee break, a daily walk, prayer time, etc.
-      // The auto-promoted regex defaults to /\b{lunch}\b/i — set these
-      // fields when the events you actually want detected don't match
-      // the literal English word (Hebrew "ארוחת צהריים", Spanish
-      // "almuerzo", a custom Outlook category, etc.).
-      match_subject_regex: z.string().optional(),
-      match_category: z.string().optional(),
-    }),
-    // v2.1 — generalized floating blocks. A floating block is a protected
-    // N-minute period that can live anywhere inside a defined window
-    // (preferred_start..preferred_end). Elastic: Maelle may reshuffle it
-    // to a different quarter-hour inside the window to make room for a
-    // meeting, no approval needed. Moving it OUTSIDE the window requires
-    // an explicit approval (create_approval kind=lunch_bump — same
-    // mechanism, still named "lunch_bump" for back-compat but applies to
-    // any floating block).
-    //
-    // `schedule.lunch` above is auto-promoted to a floating_block named
-    // "lunch" when code reads blocks — so old profiles without this field
-    // keep working unchanged. Adding custom blocks here (e.g. "coffee
-    // break 16:00-17:00 15min", "thinking time 09:00-10:00 60min") is
-    // pure config — no code change needed.
-    floating_blocks: z.array(z.object({
-      name: z.string().min(1),                          // "lunch" | "coffee_break" | "thinking_time" | ...
-      preferred_start: z.string().regex(/^\d{2}:\d{2}$/),
-      preferred_end: z.string().regex(/^\d{2}:\d{2}$/),
-      duration_minutes: z.number().min(5).max(240),
-      can_skip: z.boolean().default(true),              // true = fine to leave un-booked when no room
-      // Day-of-week scope. Optional. Examples:
-      //   days: ["Thursday"]                              → only Thursday (e.g. a Thursday coffee break)
-      //   days: ["Sunday","Monday","Wednesday","Thursday"] → every work day except Tuesday (e.g. "lunch except Tue")
-      // When omitted, the block applies to every day listed in
-      // schedule.office_days + schedule.home_days (i.e. all work days).
-      days: z.array(z.enum([
-        'Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday',
-      ])).optional(),
-      // Optional event-detection hints. If absent, Maelle matches calendar
-      // events by subject/category containing the block's `name`.
-      match_subject_regex: z.string().optional(),
-      match_category: z.string().optional(),
-      // Optional defaults when BOOKING a new instance of this block
-      default_subject: z.string().optional(),
-      default_category: z.string().optional(),
-    })).optional(),
     timezone_preferences: z.object({
       local_participants: z.string(),
       remote_participants: z.string(),
@@ -248,6 +197,45 @@ const UserProfileSchema = z.object({
     }).refine(p => !!p.name || !!p.category, {
       message: 'protected entry must have either `name` or `category`',
     })),
+    // Floating blocks — protected N-minute periods that can live anywhere
+    // inside a defined window (preferred_start..preferred_end). Lunch is
+    // one example; coffee breaks, gym, prayer time, daily writing hour all
+    // use the same shape. Elastic within the window (Maelle reshuffles to
+    // make room for meetings, no approval needed). Out-of-window booking
+    // or move requires the owner-override flag on book_floating_block and
+    // move_meeting (confirm_outside_window=true) — owner direct request IS
+    // the approval.
+    //
+    // Lives under `meetings` (not `schedule`) because floating blocks are
+    // EVENTS that happen during the day — same conceptual bucket as the
+    // protected list above. `schedule` is the daily framework (work days,
+    // hours, timezone); `meetings` is the events that fill it.
+    //
+    // v2.4.1 — pre-v2.4.1 had a special-case `schedule.lunch` field that
+    // was auto-promoted into this list. That asymmetric path is gone; lunch
+    // (or whatever your day-anchor block is) lives here like any other.
+    floating_blocks: z.array(z.object({
+      name: z.string().min(1),                          // "lunch" | "coffee_break" | "thinking_time" | ...
+      preferred_start: z.string().regex(/^\d{2}:\d{2}$/),
+      preferred_end: z.string().regex(/^\d{2}:\d{2}$/),
+      duration_minutes: z.number().min(5).max(240),
+      can_skip: z.boolean().default(true),              // true = fine to leave un-booked when no room
+      // Day-of-week scope. Optional. Examples:
+      //   days: ["Thursday"]                              → only Thursday (e.g. a Thursday coffee break)
+      //   days: ["Sunday","Monday","Wednesday","Thursday"] → every work day except Tuesday
+      // When omitted, the block applies to every day listed in
+      // schedule.office_days + schedule.home_days (i.e. all work days).
+      days: z.array(z.enum([
+        'Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday',
+      ])).optional(),
+      // Optional event-detection hints. If absent, Maelle matches calendar
+      // events by subject/category containing the block's `name`.
+      match_subject_regex: z.string().optional(),
+      match_category: z.string().optional(),
+      // Optional defaults when BOOKING a new instance of this block
+      default_subject: z.string().optional(),
+      default_category: z.string().optional(),
+    })).optional(),
   }),
 
   priorities: z.object({

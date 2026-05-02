@@ -442,6 +442,19 @@ export async function findAvailableSlots(params: {
   // Caller is expected to narrate to the owner that these slots break their
   // soft rules ("outside your focus protection / lunch window / normal hours").
   relaxed?: boolean;
+  // v2.4.1 — events to treat as "the meeting(s) being moved." Each id is
+  // matched against the owner's calendar events for the search range and
+  // produces TWO behaviors:
+  //   1) The event's time range is SUBTRACTED from the owner's busy pool —
+  //      so other candidate slots aren't blocked by a meeting that's about
+  //      to move away. (Same pattern as floating-block subtraction.)
+  //   2) The event's time range is FORBIDDEN as a candidate — so the slot
+  //      finder never offers the original time (or any overlap with it) as
+  //      a "move target". 11:00 + 10:45 are both excluded when moving an
+  //      11:00-11:45 meeting because they're not really moves.
+  // Pass when validating ("can we move it to 10:30?") or discovering ("what
+  // are options to move it?") a move. Omit for new bookings.
+  excludeEventIds?: string[];
 }): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other' }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
@@ -536,7 +549,6 @@ export async function findAvailableSlots(params: {
     const freeTimeOfficeMin = (profile?.meetings.free_time_per_office_day_hours ?? 0) * 60;
     const freeTimeHomeMin = ((profile?.meetings.free_time_per_home_day_hours
       ?? profile?.meetings.free_time_per_office_day_hours ?? 0)) * 60;
-    const lunch = profile?.schedule.lunch;
 
     // v2.1 — floating-block feasibility. For every configured floating
     // block (lunch + any custom block, day-scoped via block.days), verify
@@ -644,6 +656,39 @@ export async function findAvailableSlots(params: {
       }
     }
 
+    // v2.4.1 — moving-event subtraction + forbidden-zone build. When the
+    // caller passes excludeEventIds (the meeting(s) being moved), each one
+    // is removed from the busy pool (so candidate slots aren't blocked by a
+    // meeting that's leaving its current time anyway) AND added to a
+    // forbidden-zones list (so the slot walker won't offer the original time
+    // as a "move target"). Closes the "move 11:00 to 10:30" / "options to
+    // move 11:00" cases that pre-v2.4.1 either over-rejected (treated the
+    // meeting as a hard conflict with itself) or would have offered 11:00
+    // back as a valid alternative.
+    const movingEventForbiddenZones: Array<{ start: number; end: number }> = [];
+    if (params.excludeEventIds && params.excludeEventIds.length > 0 && ownerEventsForFb.length > 0) {
+      const TOLERANCE_MS = 60 * 1000;
+      const idSet = new Set(params.excludeEventIds);
+      for (const evt of ownerEventsForFb) {
+        if (!idSet.has(evt.id)) continue;
+        if (evt.isCancelled || evt.showAs === 'free') continue;
+        const eStart = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' })
+          .setZone(params.timezone).toMillis();
+        const eEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
+          .setZone(params.timezone).toMillis();
+        movingEventForbiddenZones.push({ start: eStart, end: eEnd });
+        // Subtract from allBusy (mirror the floating-block in-place filter).
+        for (let i = allBusy.length - 1; i >= 0; i--) {
+          const b = allBusy[i];
+          const bs = b.start.getTime();
+          const be = b.end.getTime();
+          if (Math.abs(eStart - bs) <= TOLERANCE_MS && Math.abs(eEnd - be) <= TOLERANCE_MS) {
+            allBusy.splice(i, 1);
+          }
+        }
+      }
+    }
+
     // Per-day work hours + day-type classifier (office / home / other).
     const classifyDay = (dayName: string): 'office' | 'home' | 'other' => {
       if (officeDayNames.includes(dayName)) return 'office';
@@ -745,6 +790,22 @@ export async function findAvailableSlots(params: {
         trackReject('owner_busy_or_buffer_collision', cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
         continue;
+      }
+      // v2.4.1 — forbid candidates that overlap the meeting being moved.
+      // Without this, "options to move 11:00-11:45" would offer 11:00 (no
+      // move at all) and 10:45-11:25 (15-min shift, basically same slot).
+      // Owner direction: "the entire meeting time is block" for offered
+      // alternatives. Pure overlap check (no buffer pad — the moving event
+      // is leaving, no need to keep distance from itself).
+      if (movingEventForbiddenZones.length > 0) {
+        const overlapsMovingEvent = movingEventForbiddenZones.some(zone =>
+          cursor.getTime() < zone.end && slotEnd.getTime() > zone.start
+        );
+        if (overlapsMovingEvent) {
+          trackReject('overlaps_meeting_being_moved', cursorDt.toISO()!);
+          cursor = new Date(cursor.getTime() + step);
+          continue;
+        }
       }
       // v2.2.3 (#43) — per-attendee work-window clip. Drop slots that fall
       // outside ANY attendee's working window in their own TZ. No Graph cost

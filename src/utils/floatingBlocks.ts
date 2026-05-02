@@ -49,52 +49,14 @@ export interface FloatingBlock {
 /**
  * Returns every floating block configured for this profile.
  *
- * Back-compat: `schedule.lunch` is auto-promoted to a FloatingBlock named
- * "lunch" so profiles that predate v2.1 keep working unchanged. If the
- * profile additionally defines `schedule.floating_blocks`, those are
- * appended. A custom block that re-declares name="lunch" overrides the
- * auto-promoted one.
+ * v2.4.1 — single source. `schedule.lunch` legacy field was removed and
+ * floating_blocks moved from `schedule.` to `meetings.` (floating blocks are
+ * events that happen during the day, not part of the day-framework). All
+ * blocks (lunch / coffee / gym / prayer / etc) live under
+ * `meetings.floating_blocks` uniformly.
  */
 export function getFloatingBlocks(profile: UserProfile): FloatingBlock[] {
-  const out: FloatingBlock[] = [];
-  const byName = new Map<string, FloatingBlock>();
-
-  // Auto-promote legacy lunch config
-  if (profile.schedule.lunch) {
-    const l = profile.schedule.lunch;
-    const lunchBlock: FloatingBlock = {
-      name: 'lunch',
-      preferred_start: l.preferred_start,
-      preferred_end: l.preferred_end,
-      duration_minutes: l.duration_minutes,
-      can_skip: l.can_skip,
-      // Default matcher: literal block name with word boundaries (case-insensitive).
-      // Owner can override via schedule.lunch.match_subject_regex /
-      // schedule.lunch.match_category — e.g. to add Hebrew "ארוחת צהריים", or
-      // to recognize "Dinner" / "Coffee" / a custom Outlook category.
-      // `lunch` is only the back-compat name; the matching has always been
-      // overridable, this just stops baking English+Hebrew defaults that
-      // didn't generalize beyond the original profile.
-      match_subject_regex: (l as { match_subject_regex?: string }).match_subject_regex ?? '\\blunch\\b',
-      match_category: (l as { match_category?: string }).match_category ?? 'Lunch',
-    };
-    out.push(lunchBlock);
-    byName.set(lunchBlock.name, lunchBlock);
-  }
-
-  // Append explicit floating_blocks
-  const explicit = (profile.schedule as unknown as { floating_blocks?: FloatingBlock[] }).floating_blocks ?? [];
-  for (const block of explicit) {
-    if (byName.has(block.name)) {
-      // Custom entry overrides the auto-promoted one with the same name.
-      const idx = out.findIndex(b => b.name === block.name);
-      out[idx] = block;
-    } else {
-      out.push(block);
-    }
-    byName.set(block.name, block);
-  }
-  return out;
+  return (profile.meetings.floating_blocks ?? []) as FloatingBlock[];
 }
 
 /**
