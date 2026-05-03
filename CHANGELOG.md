@@ -62,6 +62,7 @@ The release also lands the v2.4.2 backlog accumulated through the same day: clos
 ### Operational notes
 
 - **First test for the queue**: type 2-3 messages quickly in a row to Maelle. Pre-v2.5 each spawned a parallel orchestrator turn. Post-v2.5 they collapse into one merged turn (visible in the log as `inboundQueue — running turn { batchSize: N, mergedPreview: ... }`). The 1.5-sec debounce window means single isolated messages have ~1.5 sec added latency before processing starts; rapid bursts collapse cleanly.
+- **Queue key for 1:1 DMs**: `channelId` only (not `channelId|threadTs`). First-deploy testing on 2026-05-03 surfaced that Slack assigns each top-level DM message its own `threadTs == ts`, so threadTs-scoping put each message into its own queue and merging never triggered. DMs are logically one ongoing conversation; coalesce by channel. MPIMs and channel mentions keep `channelId|threadTs` keying because they DO have parallel conversations to keep separate.
 - **Calendar memoization** is opt-in at `getCalendarEvents` only today. Other expensive reads (`getFreeBusy`, `searchPeopleMemory`, `getCalendarIssueById`) could be added later if traces show repeats.
 - **Owner-said-done scanner** logs `closeLoopOnOwnerHandled: cascade fired` when it closes items. If the log shows nothing for a few days, the scanner's working — RULE 2d failures simply weren't piling up.
 

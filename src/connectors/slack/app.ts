@@ -601,6 +601,13 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       enqueueMessage({
         channelId,
         threadTs,
+        // 1:1 DM = not a multi-person channel, not an MPIM. Slack DMs give
+        // each top-level message its own threadTs (threadTs == ts), so
+        // threadTs-scoping puts every message in its own queue and never
+        // merges. Logically a DM is one ongoing conversation — coalesce by
+        // channelId only. MPIMs / channels keep threadTs-scoping because
+        // they have genuine parallel conversations.
+        isOneOnOneDm: !isChannel && !isMpim,
         text: userMessage,
         senderName: colleagueName,
         meta: {},

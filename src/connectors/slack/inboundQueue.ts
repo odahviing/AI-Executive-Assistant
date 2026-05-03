@@ -103,8 +103,22 @@ interface ThreadState {
 
 const threadStates: Map<string, ThreadState> = new Map();
 
-/** Build the per-thread key. ChannelId + threadTs uniquely identifies a Slack conversation. */
-function keyFor(channelId: string, threadTs: string | undefined): string {
+/**
+ * Build the queue key.
+ *
+ * - 1:1 DM channels: key = channelId ONLY. In a DM each top-level message
+ *   gets its own threadTs from Slack (threadTs == ts), so threadTs-scoping
+ *   would put every message into its own queue and never merge — the exact
+ *   bug observed on the v2.5.0 first-deploy test ("3 fast messages, no
+ *   batching"). Logically a DM is one ongoing conversation; we coalesce
+ *   accordingly.
+ *
+ * - MPIM / channel: key = channelId|threadTs. These genuinely have parallel
+ *   conversations (different threads of replies, different topics) that
+ *   shouldn't collapse into each other.
+ */
+function keyFor(channelId: string, threadTs: string | undefined, isOneOnOneDm: boolean): string {
+  if (isOneOnOneDm) return channelId;
   return `${channelId}|${threadTs ?? '_none_'}`;
 }
 
@@ -152,12 +166,14 @@ export type TurnRunner = (params: {
 export function enqueueMessage(params: {
   channelId: string;
   threadTs: string | undefined;
+  /** True for 1:1 DMs (owner ↔ Maelle, colleague ↔ Maelle). False for MPIMs and channel mentions. */
+  isOneOnOneDm: boolean;
   text: string;
   senderName?: string;
   meta: Record<string, unknown>;
   runner: TurnRunner;
 }): void {
-  const key = keyFor(params.channelId, params.threadTs);
+  const key = keyFor(params.channelId, params.threadTs, params.isOneOnOneDm);
   const state = getOrCreate(key);
 
   const msg: PendingMessage = {
