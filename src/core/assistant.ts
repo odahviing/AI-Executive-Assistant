@@ -501,8 +501,22 @@ First call for a person auto-creates their md file. Empty-until-real-fact — do
       // skill is active; otherwise the tools aren't even in the tool list.
 
       case 'log_interaction': {
-        const slackId = args.colleague_slack_id as string;
-        const name    = args.colleague_name as string;
+        const name = args.colleague_name as string;
+        // v2.4.2 — boundary-validate slack_id; resolve via people_memory if
+        // Sonnet hallucinated a slug. Without this, log_interaction would
+        // silently create an orphan people_memory row keyed on the slug.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { resolveSlackId } = require('../utils/resolveSlackId') as typeof import('../utils/resolveSlackId');
+        const idRes = resolveSlackId(args.colleague_slack_id as string | undefined, name);
+        if (idRes.was_hallucinated) {
+          logger.warn('log_interaction — colleague_slack_id hallucinated', {
+            rejected: idRes.rejected_input, colleagueName: name, resolvedTo: idRes.slack_id ?? null,
+          });
+        }
+        if (!idRes.slack_id) {
+          return { error: 'unknown_colleague', message: `No slack_id resolved for "${name}". Call find_slack_user first.` };
+        }
+        const slackId = idRes.slack_id;
 
         upsertPersonMemory({ slackId, name });
         appendPersonInteraction(slackId, {
@@ -515,11 +529,23 @@ First call for a person auto-creates their md file. Empty-until-real-fact — do
       }
 
       case 'confirm_gender': {
-        const slackId = args.colleague_slack_id as string;
-        const name    = (args.colleague_name as string | undefined) ?? slackId;
+        const name = (args.colleague_name as string | undefined) ?? '';
+        // v2.4.2 — boundary-validate slack_id (see log_interaction comment).
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { resolveSlackId } = require('../utils/resolveSlackId') as typeof import('../utils/resolveSlackId');
+        const idRes = resolveSlackId(args.colleague_slack_id as string | undefined, name);
+        if (idRes.was_hallucinated) {
+          logger.warn('confirm_gender — colleague_slack_id hallucinated', {
+            rejected: idRes.rejected_input, colleagueName: name, resolvedTo: idRes.slack_id ?? null,
+          });
+        }
+        if (!idRes.slack_id) {
+          return { confirmed: false, reason: 'unknown_colleague', message: `No slack_id resolved for "${name}". Call find_slack_user first.` };
+        }
+        const slackId = idRes.slack_id;
         const gender  = args.gender as 'male' | 'female';
         // Make sure the row exists (cheap no-op if it does)
-        upsertPersonMemory({ slackId, name });
+        upsertPersonMemory({ slackId, name: name || slackId });
 
         // v2.2.2 (#46) — provenance: owner-path call → 'owner' (highest authority,
         // can overwrite person-set values, anti-spoofing). Colleague-path call
@@ -603,8 +629,22 @@ First call for a person auto-creates their md file. Empty-until-real-fact — do
       }
 
       case 'update_person_profile': {
-        const slackId = args.colleague_slack_id as string;
-        const name    = args.colleague_name as string;
+        const name = args.colleague_name as string;
+        // v2.4.2 — boundary-validate slack_id (see log_interaction comment).
+        // Without this, update_person_profile would silently create an orphan
+        // people_memory row keyed on a slug like "oran_frenkel".
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { resolveSlackId } = require('../utils/resolveSlackId') as typeof import('../utils/resolveSlackId');
+        const idRes = resolveSlackId(args.colleague_slack_id as string | undefined, name);
+        if (idRes.was_hallucinated) {
+          logger.warn('update_person_profile — colleague_slack_id hallucinated', {
+            rejected: idRes.rejected_input, colleagueName: name, resolvedTo: idRes.slack_id ?? null,
+          });
+        }
+        if (!idRes.slack_id) {
+          return { error: 'unknown_colleague', message: `No slack_id resolved for "${name}". Call find_slack_user first.` };
+        }
+        const slackId = idRes.slack_id;
         const timezone = args.timezone as string | undefined;
         const state   = args.state as string | undefined;
         const nameHe  = args.name_he as string | undefined;

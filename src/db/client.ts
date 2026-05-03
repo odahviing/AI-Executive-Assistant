@@ -510,6 +510,13 @@ function initSchema(db: Database.Database): void {
 
   // Migrate: add resolution_notes column if missing (existing DBs)
   try { db.exec(`ALTER TABLE calendar_dismissed_issues ADD COLUMN resolution_notes TEXT`); } catch (_) {}
+  // v2.4.2 — persist event_ids JSON so closeMeetingArtifacts can cascade
+  // when a meeting moves/updates/deletes. Pre-v2.4.2 the column didn't exist
+  // even though upsertCalendarIssue accepted an eventIds param — values were
+  // silently dropped, leaving every issue row orphaned from its source events.
+  // Result: stale rows accumulated for weeks and surfaced as "carry-over from
+  // last week" in active-mode health checks long after the meetings had moved.
+  try { db.exec(`ALTER TABLE calendar_dismissed_issues ADD COLUMN event_ids TEXT`); } catch (_) {}
   // Migrate: old 'dismissed' entries stay as-is — they map to 'approved' semantically
 
   // ── Approvals (v1.5) ────────────────────────────────────────────────────────

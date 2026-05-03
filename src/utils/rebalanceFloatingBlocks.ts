@@ -34,12 +34,28 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
   try {
     const tz = profile.user.timezone;
     const slotDt = DateTime.fromISO(affectedSlotIso, { zone: tz });
-    if (!slotDt.isValid) return result;
+    if (!slotDt.isValid) {
+      logger.info('rebalanceFloatingBlocks: skipped — invalid affectedSlotIso', { affectedSlotIso });
+      return result;
+    }
     const dateStr = slotDt.toFormat('yyyy-MM-dd');
     const dayName = slotDt.toFormat('EEEE');
 
     const blocks = fb.getFloatingBlocks(profile);
-    if (blocks.length === 0) return result;
+    if (blocks.length === 0) {
+      logger.info('rebalanceFloatingBlocks: skipped — no floating blocks configured', { date: dateStr });
+      return result;
+    }
+    // v2.4.2 — entry log so we can confirm the cascade fired at all. Pre-v2.4.2
+    // we had no way to tell whether the helper ran (and skipped silently for
+    // benign reasons) vs. never ran (e.g., stale build pre-v2.2.3). Each exit
+    // path now emits exactly one log line — entry, per-block decision, summary.
+    logger.info('rebalanceFloatingBlocks: starting', {
+      date: dateStr,
+      dayName,
+      affectedSlotIso,
+      blockNames: blocks.map(b => b.name),
+    });
 
     // Lazy imports to keep helper light + avoid circular dep risk
     const { getCalendarEvents, updateMeeting } = await import('../connectors/graph/calendar');
@@ -55,7 +71,12 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
     const bufferMin = profile.meetings.buffer_minutes ?? 15;
 
     for (const block of blocks) {
-      if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
+      if (!fb.blockAppliesOnDay(block, dayName, profile)) {
+        logger.info('rebalanceFloatingBlocks: block skipped — not applicable today', {
+          block: block.name, dayName,
+        });
+        continue;
+      }
 
       // Find the block event on this day (if any). If the block doesn't
       // currently exist on the calendar, no rebalance needed.
@@ -65,7 +86,12 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           block,
         ),
       );
-      if (!blockEvent) continue;
+      if (!blockEvent) {
+        logger.info('rebalanceFloatingBlocks: block skipped — no existing event on calendar', {
+          block: block.name, date: dateStr,
+        });
+        continue;
+      }
 
       const blockStartMs = DateTime.fromISO(blockEvent.start.dateTime, {
         zone: blockEvent.start.timeZone ?? 'utc',
@@ -83,7 +109,18 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           .setZone(tz).toMillis();
         return eStart < blockEndMs && eEnd > blockStartMs;
       });
-      if (!overlapping) continue;
+      if (!overlapping) {
+        logger.info('rebalanceFloatingBlocks: block skipped — no overlap, current placement still fine', {
+          block: block.name, date: dateStr,
+          currentPlacement: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm')}`,
+        });
+        continue;
+      }
+      logger.info('rebalanceFloatingBlocks: overlap detected — searching for in-window slot', {
+        block: block.name, date: dateStr,
+        currentPlacement: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm')}`,
+        overlappingEvent: { subject: overlapping.subject, id: overlapping.id },
+      });
 
       // Build busyInWindow for the block's preferred window (excluding the
       // block itself — Maelle is the one moving it).
@@ -143,8 +180,14 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
   } catch (err) {
     logger.warn('rebalanceFloatingBlocksAfterMutation threw — swallowed', {
       err: String(err).slice(0, 200),
+      affectedSlotIso,
     });
   }
 
+  logger.info('rebalanceFloatingBlocks: complete', {
+    affectedSlotIso,
+    moved: result.moved,
+    overlapping: result.overlapping,
+  });
   return result;
 }

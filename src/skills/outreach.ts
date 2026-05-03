@@ -166,6 +166,34 @@ Only send messages the user explicitly asks for — never reach out to people on
 
     switch (toolName) {
       case 'message_colleague': {
+        // v2.4.2 — boundary-validate colleague_slack_id (Sonnet sometimes
+        // hallucinates a slug like "oran_frenkel" instead of pulling the
+        // real Slack ID from WORKSPACE CONTACTS, which then explodes at
+        // sendDirect with user_not_found). resolveSlackId does format check
+        // + people_memory lookup by name. On miss we return a clean tool
+        // error so Sonnet falls back to find_slack_user.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { resolveSlackId } = require('../utils/resolveSlackId') as typeof import('../utils/resolveSlackId');
+        const idResolution = resolveSlackId(
+          args.colleague_slack_id as string | undefined,
+          args.colleague_name as string | undefined,
+        );
+        if (idResolution.was_hallucinated) {
+          logger.warn('message_colleague — colleague_slack_id hallucinated', {
+            rejected: idResolution.rejected_input,
+            colleagueName: args.colleague_name,
+            resolvedTo: idResolution.slack_id ?? null,
+          });
+        }
+        if (!idResolution.slack_id) {
+          return {
+            ok: false,
+            error: 'unknown_colleague',
+            message: `I don't have a Slack ID for "${args.colleague_name}" — call find_slack_user with their name first, then retry message_colleague with the returned slack_id.`,
+          };
+        }
+        const colleagueSlackId = idResolution.slack_id;
+
         const sendAt = args.send_at as string | undefined;
         const isFuture = sendAt ? new Date(sendAt) > new Date() : false;
 
@@ -195,7 +223,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           owner_user_id: userId,
           owner_channel: context.channelId,
           owner_thread_ts: context.threadTs,
-          colleague_slack_id: args.colleague_slack_id as string,
+          colleague_slack_id: colleagueSlackId,
           colleague_name: args.colleague_name as string,
           colleague_tz: args.colleague_tz as string | undefined,
           message: args.message as string,
@@ -246,7 +274,7 @@ Only send messages the user explicitly asks for — never reach out to people on
             skill_ref: jobId,
             context: JSON.stringify({ jobId, colleague: args.colleague_name }),
             who_requested: context.userId,
-            pending_on: JSON.stringify([args.colleague_slack_id]),
+            pending_on: JSON.stringify([colleagueSlackId]),
             created_context: context.isMpim ? `mpim:${context.channelId}` : 'dm',
             skill_origin: 'outreach',
           });
@@ -261,7 +289,7 @@ Only send messages the user explicitly asks for — never reach out to people on
 
         // Not scheduled — send path. Track the person, create tasks.
         upsertPersonMemory({
-          slackId:  args.colleague_slack_id as string,
+          slackId:  colleagueSlackId,
           name:     args.colleague_name as string,
           timezone: args.colleague_tz as string | undefined,
         });
@@ -287,7 +315,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           skill_ref: jobId,
           context: JSON.stringify({ jobId, colleague: args.colleague_name }),
           who_requested: context.userId,
-          pending_on: args.await_reply ? JSON.stringify([args.colleague_slack_id]) : undefined,
+          pending_on: args.await_reply ? JSON.stringify([colleagueSlackId]) : undefined,
           created_context: context.isMpim ? `mpim:${context.channelId}` : 'dm',
           skill_origin: 'outreach',
         });
@@ -322,7 +350,7 @@ Only send messages the user explicitly asks for — never reach out to people on
 
         // Channel post branch: prepend @mention so the colleague is pinged
         if (args.channel_id) {
-          const mention = `<@${args.colleague_slack_id as string}>`;
+          const mention = `<@${colleagueSlackId}>`;
           const fullText = `${mention} ${args.message as string}`;
           const outcome = await connection.postToChannel(args.channel_id as string, fullText);
           if (!outcome.ok) {
@@ -357,7 +385,7 @@ Only send messages the user explicitly asks for — never reach out to people on
             }))
           : undefined;
         const outcome = await connection.sendDirect(
-          args.colleague_slack_id as string,
+          colleagueSlackId,
           args.message as string,
           attachmentsArg ? { attachments: attachmentsArg } : undefined,
         );

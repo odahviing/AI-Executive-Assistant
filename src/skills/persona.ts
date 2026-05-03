@@ -166,8 +166,22 @@ Owner-only. Do NOT use this for colleagues (use note_about_person for them).`,
   ): Promise<unknown | null> {
     switch (toolName) {
       case 'note_about_person': {
-        const slackId     = args.colleague_slack_id as string;
         const name        = args.colleague_name as string;
+        // v2.4.2 — boundary-validate slack_id (see assistant.ts log_interaction
+        // comment). Without this, note_about_person silently creates an
+        // orphan people_memory + social_topics row keyed on a hallucinated slug.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { resolveSlackId } = require('../utils/resolveSlackId') as typeof import('../utils/resolveSlackId');
+        const idRes = resolveSlackId(args.colleague_slack_id as string | undefined, name);
+        if (idRes.was_hallucinated) {
+          logger.warn('note_about_person — colleague_slack_id hallucinated', {
+            rejected: idRes.rejected_input, colleagueName: name, resolvedTo: idRes.slack_id ?? null,
+          });
+        }
+        if (!idRes.slack_id) {
+          return { error: 'unknown_colleague', message: `No slack_id resolved for "${name}". Call find_slack_user first.` };
+        }
+        const slackId     = idRes.slack_id;
         const note        = args.note as string;
         const topic       = args.topic as string;
         const subject     = (args.subject as string | undefined)?.trim() || undefined;

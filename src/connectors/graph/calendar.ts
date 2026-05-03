@@ -216,6 +216,24 @@ export async function getCalendarEvents(
   endDate: string,
   timezone: string = 'UTC'
 ): Promise<CalendarEvent[]> {
+  // v2.4.3 (A3) — per-turn memoization. Trace from 2026-05-03 showed 5
+  // identical calendar queries for the same date range within 12 seconds
+  // (single booking flow). Pure waste — calendar doesn't change between
+  // Sonnet's tool iterations within a single turn. turnCache.memoize
+  // returns the same promise to concurrent callers within a turn; outside
+  // a turn (background tasks, dispatchers) it bypasses and fetches normally.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { memoize } = require('../../utils/turnCache') as typeof import('../../utils/turnCache');
+  const cacheKey = `getCalendarEvents|${userEmail}|${startDate}|${endDate}|${timezone}`;
+  return memoize(cacheKey, () => getCalendarEventsImpl(userEmail, startDate, endDate, timezone));
+}
+
+async function getCalendarEventsImpl(
+  userEmail: string,
+  startDate: string,
+  endDate: string,
+  timezone: string,
+): Promise<CalendarEvent[]> {
   const client = getClient();
 
   // Normalise dates: strip Z/ms suffix so Graph uses the mailbox timezone
@@ -921,9 +939,18 @@ export async function findAvailableSlots(params: {
       }
 
       if (!dayBuckets.has(dayKey)) dayBuckets.set(dayKey, []);
+      // v2.4.2 — emit local-zoned ISO with explicit offset (e.g.
+      // "2026-05-05T09:00:00.000+03:00") instead of UTC ("...Z"). Matches the
+      // convention established by the v2.3.4 parseGraphFreeBusySlot chokepoint.
+      // Pre-v2.4.2 used `cursor.toISOString()` which always emits UTC,
+      // forcing Sonnet to mentally convert and narrate "the slots are
+      // returning in UTC, converting to Israel time" — both an INTERNALS
+      // leak and a real risk of conversion errors.
+      const cursorLocal = DateTime.fromJSDate(cursor).setZone(params.timezone);
+      const slotEndLocal = DateTime.fromJSDate(slotEnd).setZone(params.timezone);
       dayBuckets.get(dayKey)!.push({
-        start: cursor.toISOString(),
-        end: slotEnd.toISOString(),
+        start: cursorLocal.toISO()!,
+        end: slotEndLocal.toISO()!,
         day_type: classifyDay(dayName),
       });
       cursor = new Date(cursor.getTime() + step);

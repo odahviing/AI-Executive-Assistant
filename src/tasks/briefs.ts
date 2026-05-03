@@ -57,6 +57,41 @@ function pronounFor(gender: string | null | undefined): 'he' | 'she' | 'they' {
   return 'they';
 }
 
+/**
+ * v2.4.2 — extract last N relational-only interaction log entries for a
+ * colleague, formatted as short context lines for the brief Sonnet pass.
+ *
+ * Why this exists: pre-v2.4.2 the brief's per-colleague item only carried
+ * task/outreach/coord row attributes — no conversation snippets. When Sonnet
+ * narrated "I'm reminding Oran about the LinkedIn session today" she had no
+ * back-context for what had been discussed previously. Owner's brief ended
+ * up reading like she should already know things from her conversations
+ * with the colleague. This helper threads that context through.
+ *
+ * Skips calendar-state types (meeting_booked, coordination) per the v2.3.4
+ * filter — those go stale and Sonnet narrated snapshots as current facts.
+ */
+interface InteractionLogEntry { date: string; type: string; summary: string }
+function recentColleagueContext(
+  slackId: string | null | undefined,
+  limit = 3,
+): InteractionLogEntry[] {
+  if (!slackId) return [];
+  try {
+    const db = getDb();
+    const row = db.prepare(`SELECT interaction_log FROM people_memory WHERE slack_id = ?`).get(slackId) as { interaction_log: string | null } | undefined;
+    if (!row?.interaction_log) return [];
+    const all = JSON.parse(row.interaction_log) as InteractionLogEntry[];
+    if (!Array.isArray(all)) return [];
+    return all
+      .filter(e => e.type !== 'meeting_booked' && e.type !== 'coordination')
+      .slice(-limit);
+  } catch (err) {
+    logger.warn('recentColleagueContext threw', { slackId, err: String(err).slice(0, 200) });
+    return [];
+  }
+}
+
 // ── Item builders (v2.2.4 — extracted from collectBriefingData) ──────────────
 //
 // Each builder takes a hydrated detail row (or task) and produces a RichItem
@@ -122,6 +157,11 @@ function buildOutreachItem(
     theyReplied: !!replyPreview,
     replyPreview: replyPreview ?? undefined,
     awaitsReply,
+    // v2.4.2 — last 3 relational interaction-log entries for this colleague
+    // so Sonnet has the back-context when narrating "reminding X about Y".
+    // Without this, the brief reads as if owner should already know what
+    // the prior conversation was about.
+    recent_context: recentColleagueContext(job.colleague_slack_id, 3),
   };
   if (verifiedOutcome && verifiedOutcome.status !== 'none' && verifiedOutcome.event) {
     const ev = verifiedOutcome.event;
@@ -156,10 +196,18 @@ function buildCoordItem(
     : undefined;
 
   let participantNames = 'participants';
+  let firstParticipantSlackId: string | null = null;
   try {
-    const parts = JSON.parse(job.participants || '[]') as Array<{ name?: string; just_invite?: boolean }>;
-    const keyNames = parts.filter(p => !p.just_invite).map(p => p.name).filter(Boolean);
+    const parts = JSON.parse(job.participants || '[]') as Array<{ name?: string; slack_id?: string; just_invite?: boolean }>;
+    const keyParts = parts.filter(p => !p.just_invite);
+    const keyNames = keyParts.map(p => p.name).filter(Boolean);
     if (keyNames.length > 0) participantNames = keyNames.join(', ');
+    // For 1:1 coords pull the colleague's slack_id so we can attach
+    // recent_context (v2.4.2). Multi-party coords skip — context per
+    // participant would bloat the brief data.
+    if (keyParts.length === 1 && typeof keyParts[0].slack_id === 'string') {
+      firstParticipantSlackId = keyParts[0].slack_id;
+    }
   } catch (_) {}
 
   let coordVerifiedOutcome: ScheduleOutcome | null = null;
@@ -189,6 +237,9 @@ function buildCoordItem(
     status: statusLabel,
     proposedSlot: slot,
     updatedWhen: relativeTime(job.updated_at, timezone),
+    // v2.4.2 — last 3 relational interactions for the (only) participant on
+    // 1:1 coords; multi-party coords skip to avoid bloating brief data.
+    recent_context: recentColleagueContext(firstParticipantSlackId, 3),
   };
   if (coordVerifiedOutcome && coordVerifiedOutcome.status !== 'none' && coordVerifiedOutcome.event) {
     const ev = coordVerifiedOutcome.event;
@@ -224,6 +275,11 @@ function buildTaskItem(task: Task, timezone: string): RichItem {
     status: task.status,
     dueAt: task.due_at ? relativeTime(task.due_at, timezone) : undefined,
     context: contextSummary,
+    // v2.4.2 — when the task targets a specific colleague (target_slack_id
+    // populated), thread their recent interaction-log context through so
+    // Sonnet has back-context when narrating the reminder/follow_up.
+    recent_context: recentColleagueContext((task as any).target_slack_id, 3),
+    target_name: (task as any).target_name ?? undefined,
   };
 }
 
@@ -400,7 +456,19 @@ STRUCTURE (in this order):
 2. TODAY'S CALENDAR — only if a calendar_today item is present. Apply the CALENDAR LISTING FORMAT block below. Skip the section entirely when no calendar_today item exists.
 3. TOMORROW (one short line) — only if calendar_tomorrow is present AND there's something notable: an external meeting, an overlap, a big-deal item. Skip if tomorrow is routine. Don't enumerate every meeting — this is a heads-up, not a second calendar.
 4. PER-PERSON paragraphs — one short paragraph per colleague who has open / recently-changed work. If Amazia has three things going on, they collapse into one Amazia paragraph. Skip people with nothing new.
-5. ACTION ITEMS section — only if there's something that needs ${firstName}'s decision or input. Skip the section entirely when there's nothing to decide.
+5. ACTION ITEMS section — only when something is BLOCKING and only ${firstName} can unblock it. Skip the section entirely when there's nothing to decide.
+
+ACTION ITEMS — strict definition. Things that count:
+- ${firstName}'s own scheduling rules being broken (conflict on his calendar, focus-time violation, lunch overlap, OOF clash he must resolve)
+- Approvals waiting on him (slot_pick, lunch_bump, policy_exception, calendar_conflict — anything I can't proceed on without his call)
+- Escalations from a colleague request that genuinely require HIS judgment (not just "do you want to engage?" — I'll proceed at my pace)
+
+Things that DO NOT count, even if they involve a decision:
+- Colleague casually proposed options during a chat ("Oran sent 4 LinkedIn topic ideas — which 2 do you want?", "Sarah suggested two dates — pick one"). These go in the per-person paragraph as conversation continuation, NOT as action items. ${firstName} can engage when he wants — nothing is blocked.
+- "What do you think?" / "Want to discuss X?" — discussion invitations, not work assigned to him.
+- A colleague's draft / suggestion / FYI — surface in their paragraph.
+
+Principle: nobody can assign ${firstName} work. Only HIS rules / HIS calendar / HIS approvals can produce action items. A colleague's chat suggestion is a conversation, not an action item — even when it ends in a question to him.
 
 ${calendarListingFormatRule(firstName)}
 

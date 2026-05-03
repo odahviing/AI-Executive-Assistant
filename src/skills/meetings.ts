@@ -63,13 +63,29 @@ export class MeetingsSkill implements Skill {
     return [
       {
         name: 'find_slack_user',
-        description: 'Find a person in the Slack workspace by name or display name. Returns their Slack user ID and timezone. SKIP this call if the user @mentioned someone — the slack_id is already in the message as "(slack_id: XXXXX)". Also skip if the person appears in WORKSPACE CONTACTS in your context.',
+        description: `Resolve a person to their Slack ID — used for sending Slack DMs.
+
+CRITICAL — when to call this:
+- You need to send a Slack DM (message_colleague, coord polling, heads-up).
+- You don't already know their Slack ID from @mention or WORKSPACE CONTACTS.
+
+DO NOT call this for booking meetings. Booking uses EMAIL, period.
+- create_meeting and coordinate_meeting take attendees as { name, email }. No Slack ID required for any attendee.
+- An external attendee (email outside the company domain) will NEVER have a Slack ID. That's normal. Outlook delivers calendar invites via email regardless.
+- An internal attendee may not have a Slack ID either (guests, deactivated, fresh hires) — still book via email; the heads-up Slack DM step skips silently.
+
+The result shape:
+- { matches: [...] } — person(s) found, slack_id usable for DMs.
+- { matches: [], external: true, email, message: ... } — query was an external email; proceed with that email for booking, no Slack DM possible.
+- { matches: [] } — name didn't match anyone in the workspace; try a different spelling, or if the user gave you an email, just book directly without this tool.
+
+If you already have an email for the person, you don't need this tool to book a meeting with them. Just call create_meeting or coordinate_meeting with the email.`,
         input_schema: {
           type: 'object',
           properties: {
             name: {
               type: 'string',
-              description: 'The person\'s name or partial name to search for',
+              description: 'The person\'s name, partial name, OR email address. When passed an email outside the owner\'s company domain, the tool returns { external: true } so you know to skip Slack and proceed directly with create_meeting / coordinate_meeting.',
             },
           },
           required: ['name'],
@@ -120,28 +136,28 @@ Override with custom_location if a specific external venue is needed.`,
           properties: {
             participants: {
               type: 'array',
-              description: 'Key attendees whose availability matters — will each be DM\'d to pick a slot.',
+              description: 'Key attendees whose availability matters. EMAIL is the primary identifier — every booking and invite uses it. SLACK ID is optional bonus: when present (internal colleague, found via find_slack_user or @mention), the coord state machine sends them a DM to pick a slot. When absent (external attendee, guest, anyone without Slack), they get auto-demoted by the handler into the calendar-invite-only path — still on the meeting, just no Slack DM. Don\'t skip externals; just include them with email.',
               items: {
                 type: 'object',
                 properties: {
-                  slack_id: { type: 'string', description: 'Slack user ID (from find_slack_user or @mention)' },
                   name: { type: 'string' },
-                  tz: { type: 'string', description: 'Timezone (from find_slack_user)' },
-                  email: { type: 'string', description: 'Work email — include if available' },
+                  email: { type: 'string', description: 'Work or external email — REQUIRED. This is what the calendar invite uses.' },
+                  slack_id: { type: 'string', description: 'OPTIONAL. Internal colleagues who should be DM\'d to pick a slot. Omit for externals or anyone without a Slack account — handler routes them to calendar-invite-only.' },
+                  tz: { type: 'string', description: 'OPTIONAL. Timezone (from find_slack_user) — used for "morning their time" framing in DMs. Omit for externals.' },
                 },
-                required: ['slack_id', 'name', 'tz'],
+                required: ['name', 'email'],
               },
             },
             just_invite: {
               type: 'array',
-              description: 'People to add to the calendar invite without coordinating.',
+              description: 'People to add to the calendar invite without coordinating. Internal or external — EMAIL required, no DM happens for these.',
               items: {
                 type: 'object',
                 properties: {
                   name: { type: 'string' },
-                  email: { type: 'string' },
+                  email: { type: 'string', description: 'REQUIRED. Calendar invite goes to this address.' },
                 },
-                required: ['name'],
+                required: ['name', 'email'],
               },
             },
             subject: { type: 'string', description: 'Meeting title' },
@@ -562,6 +578,32 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
           }
 
           const cleanMatches = matches.map(({ _raw: _, ...m }) => m);
+
+          // v2.4.3 (C1) — explicit external-email signal. When a query was an
+          // email AND no Slack match found AND the email is outside the owner's
+          // company domain, return external:true so Sonnet doesn't read the
+          // empty result as "blocked, can't book". External attendees never
+          // need Slack — Outlook delivers the calendar invite directly.
+          // Pre-v2.4.3 Sonnet was sometimes asking colleagues to "forward
+          // the invite or share the email" even when she already had the
+          // email and the person was external — pure mental-model bug
+          // because find_slack_user returned a bare empty list.
+          const queryRaw = (args.name as string).trim();
+          const isEmail = /@/.test(queryRaw);
+          const ownerEmail = (profile.user.email ?? '').toLowerCase();
+          const ownerDomain = ownerEmail.includes('@') ? ownerEmail.split('@')[1] : '';
+          const isExternalEmail = isEmail && ownerDomain &&
+            !queryRaw.toLowerCase().endsWith('@' + ownerDomain);
+          if (cleanMatches.length === 0 && isExternalEmail) {
+            return {
+              matches: [],
+              count: 0,
+              external: true,
+              email: queryRaw.toLowerCase(),
+              message: `${queryRaw} is an external email (outside ${ownerDomain}) — they don't need a Slack ID. Proceed with create_meeting / coordinate_meeting using the email; Outlook will deliver the calendar invite. Don't ask anyone to "forward the invite" — that's automatic.`,
+            };
+          }
+
           return { matches: cleanMatches, count: cleanMatches.length };
         } catch (err) {
           return { error: String(err) };
@@ -621,13 +663,53 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
           return {
             error: 'missing_participant_emails',
             missing: missingEmails,
-            message: `I can't coordinate this yet — I don't have email addresses for: ${missingEmails.join(', ')}. Call find_slack_user for them first (which returns email), or tell the owner you need the email address to send an invite.`,
+            message: `I can't coordinate this yet — I don't have email addresses for: ${missingEmails.join(', ')}. Email is REQUIRED for booking (Slack ID is optional). Get the email from the owner or via find_slack_user, then re-call.`,
           };
         }
 
+        // v2.4.3 (C1) — auto-demote external participants (no slack_id, can't
+        // be DM'd) to just_invite. Pre-v2.4.3 the schema REQUIRED slack_id on
+        // every participant, which forced Sonnet to either hallucinate a slug
+        // (recurring user_not_found bug) or skip externals entirely. Now email
+        // is the only required field on participants; if a participant lacks
+        // a Slack ID, they obviously can't be polled via DM — so we move them
+        // into just_invite (calendar-invite-only) where they belong. Sonnet's
+        // intent is preserved (the person is on the meeting), just the
+        // mechanism shifts to email-only.
+        const demotedExternals: Array<{ name: string; email: string }> = [];
+        const trueParticipants: any[] = [];
+        for (const p of participantsIn) {
+          if (p.slack_id && typeof p.slack_id === 'string' && p.slack_id.length > 0) {
+            trueParticipants.push(p);
+          } else {
+            demotedExternals.push({ name: p.name ?? p.email, email: p.email });
+          }
+        }
+        if (demotedExternals.length > 0) {
+          logger.info('coordinate_meeting — auto-demoted externals from participants to just_invite', {
+            demoted: demotedExternals.map(d => d.email),
+            subject: args.subject,
+          });
+          // Mutate args.participants + args.just_invite so all downstream
+          // logic (slot finder, coord state machine, calendar booking)
+          // sees the corrected lists.
+          (args as any).participants = trueParticipants;
+          const existingJustInvite = (args.just_invite as any[]) ?? [];
+          // Skip dupes — if owner already listed an external in both fields
+          // by mistake, we don't want them in twice.
+          const existingEmails = new Set(existingJustInvite.map(j => (j.email ?? '').toLowerCase()));
+          for (const ext of demotedExternals) {
+            if (!existingEmails.has(ext.email.toLowerCase())) {
+              existingJustInvite.push(ext);
+            }
+          }
+          (args as any).just_invite = existingJustInvite;
+        }
+
         logger.info('coordinate_meeting — emails filled', {
-          participantCount: participantsIn.length,
-          justInviteCount: justInviteIn.length,
+          participantCount: ((args as any).participants as any[]).length,
+          justInviteCount: ((args as any).just_invite as any[] | undefined)?.length ?? 0,
+          demotedExternalCount: demotedExternals.length,
           subject: args.subject,
         });
 
@@ -1670,7 +1752,21 @@ When ${firstName} asks a hypothetical ("can we do Elan after Gilly?", "would 13:
 NEVER compute margins yourself. Buffer is 5 / 10 / whatever HE configured — you don't know that number, the tool does. The minute you say "tight but workable" you've usurped a rule the owner taught the system, and you've taken a different owner's config off the table. The right answer is always "tool said yes" or "tool said no, here's why".
 
 VALIDATING / DISCOVERING A MOVE — pass moving_event_ids.
-When the question is about an EXISTING meeting changing time ("can we move the 11am to 10:30?", "what are options to move the FNX meeting earlier?"), pass the meeting's event id as \`moving_event_ids: [<id>]\` to find_available_slots. The tool then (a) treats that meeting's current time as FREE (it's leaving, doesn't block other slots), AND (b) forbids any candidate that overlaps the meeting's current time (so options never include the same time or a tiny shift like "10:45-11:25" when the original is 11:00-11:45 — that's not really a move). Without this, the tool sees the meeting as a hard conflict with itself and gives bogus answers. Get the event id from get_calendar.
+When the question is about an EXISTING meeting changing time, pass the meeting's event id as \`moving_event_ids: [<id>]\` to find_available_slots. The tool then (a) treats that meeting's current time as FREE (it's leaving, doesn't block other slots), AND (b) forbids any candidate that overlaps the meeting's current time. Without this, the tool sees the meeting as a hard conflict with itself and gives bogus answers. Get the event id from get_calendar.
+
+The shape signals are STRONGER than they look. If ${firstName} just discussed/booked a meeting in this thread and now asks "any earlier opening?" / "any other time?" / "what about a different day?" / "an opening before X?" — those are MOVE questions about THAT meeting, not new-booking questions. Default to MOVE, not ADD. The clue: the recently-mentioned meeting + an open-ended scheduling question = move-discovery.
+
+JOINT-ATTENDEE QUERIES — one call, not three.
+When ${firstName} asks "when are WE free?" / "when can I meet with X?" / "is X free?" / "any opening for the meeting with X?", call find_available_slots ONCE with attendee_emails=[X's email]. The tool fetches both calendars and returns slots where everyone is free. NEVER do this as three sequential turns — read his calendar, then read X's calendar, then compute the overlap in your head. That's three turns of work and three Sonnet rounds when one tool call does it. (Externals without people_memory entries: still pass their email; if the tool can't fetch their busy from Graph, slots come back filtered against ${firstName}'s side only and you narrate honestly.)
+
+USER-NAMED DAYS — narrow the search, don't post-hoc apologize.
+When the user names specific days/dates ("Monday or Thursday", "tomorrow", "next Tuesday or Wednesday"), narrow find_available_slots' search_from / search_to to ONLY those days. Don't widen the search and then narrate around days the user didn't ask about. If the search comes back empty for the named days, say so honestly ("Nothing free on Mon or Thu — want me to widen?"); don't silently surface a Wednesday slot as a fallback because Wednesday had availability. The user's day choice is a constraint, not a suggestion.
+
+DATE CONTEXT BIAS — "that Monday" means the recently-discussed Monday.
+When ${firstName} or a colleague uses ambiguous date phrasing ("that Monday", "that day", "the meeting", "the same week") in context of a meeting just discussed/booked/mentioned in the same thread, the date refers to THAT meeting's date. Don't default to the nearest-matching weekday from today. Example: just-booked Eli meeting is on Monday May 11; ${firstName} replies "any opening that Monday before 3pm?" → "that Monday" = May 11, NOT this coming Monday. The recently-mentioned meeting wins the date-bind.
+
+LEAD WITH THE GAP, NOT THE CALENDAR.
+When asked "any opening?" / "when is free?" / "any gap?", lead with the GAP, not a meeting-by-meeting listing. "Only gap before 3pm is 13:10-14:00 (50 min) — book at 13:15?" beats listing five meetings before getting to the answer. List meetings only when ${firstName} explicitly asks for the calendar, not when he asks for openings.
 
 WHY A SLOT DOESN'T WORK — name the actual rule:
 When explaining why a day/slot is blocked, say the specific rule, not "gaps too short". Honest reasons:

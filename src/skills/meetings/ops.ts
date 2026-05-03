@@ -772,7 +772,7 @@ export class SchedulingSkill {
             : undefined;
 
           try {
-            return await findAvailableSlots({
+            const rawSlots = await findAvailableSlots({
               userEmail,
               timezone,
               durationMinutes: args.duration_minutes as number,
@@ -799,6 +799,24 @@ export class SchedulingSkill {
                 ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
                 : undefined,
             });
+            // v2.4.2 — narrow to 3 spread options before returning to Sonnet.
+            // Owner spec: "spread 3 options as I want" — one per day where
+            // possible, then ≥2h apart same-day, then ≥30min last-resort.
+            // pickSpreadSlots was already used by the coord path
+            // (`pickSpreadSlots(slots, ownerTz, 3)`) but the owner-direct path
+            // had been returning up to 30 raw candidates since v2.0.9 — Sonnet
+            // had to pick which to surface (often over-listed). Single source
+            // of truth now: tool returns spread, Sonnet narrates.
+            // Edge case: narrow validation searches (HYPOTHETICAL VALIDATION
+            // rule, "can we do X at Y?") naturally return ≤1 candidate from
+            // findAvailableSlots, and pickSpreadSlots' Pass 1 (one-per-day)
+            // returns it unchanged. No regression on the validation path.
+            if (rawSlots.length === 0) return rawSlots;
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { pickSpreadSlots } = require('../../connectors/graph/calendar') as
+              typeof import('../../connectors/graph/calendar');
+            const chosenStarts = new Set(pickSpreadSlots(rawSlots, timezone, 3));
+            return rawSlots.filter(s => chosenStarts.has(s.start));
           } catch (err) {
             if (err instanceof GraphPermissionError) {
               return {
@@ -1033,67 +1051,94 @@ export class SchedulingSkill {
           logger.warn('create_meeting idempotency pre-check failed — proceeding with create', { err: String(err) });
         }
 
+        // v2.4.3 (E1) — compute the location parts ONCE so both the
+        // location field and the body block can read from the same source.
+        // Non-online meetings only; online meetings skip both. Each part is
+        // a single line (label, address, parking, etc.) — joined cleanly
+        // downstream (commas in the location field, bullet list in body).
+        const resolvedLocationParts: string[] = await (async (): Promise<string[]> => {
+          if (args.is_online === true) return [];
+          const userLoc = args.location as string | undefined;
+          if (!userLoc || userLoc.trim().length === 0) {
+            const officeLoc = context.profile.meetings.office_location;
+            if (!officeLoc) return [];
+            const parts: string[] = [];
+            if (officeLoc.label) parts.push(officeLoc.label);
+            if (officeLoc.address) parts.push(officeLoc.address);
+            if (officeLoc.parking) parts.push(`Parking: ${officeLoc.parking}`);
+            return parts;
+          }
+          // External venue — resolve non-ASCII names to English. Pre-v2.4.3
+          // this happened inline in the location field; now extracted so
+          // the body can also use the resolved string.
+          const hasNonAscii = /[^\x20-\x7e]/.test(userLoc);
+          if (!hasNonAscii) return [userLoc];
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { resolveVenueLocation } = require('../../utils/locationResolver') as
+              typeof import('../../utils/locationResolver');
+            const resolved = await resolveVenueLocation(userLoc, 'en');
+            return [resolved.resolved ? resolved.fullDisplay : userLoc];
+          } catch (err) {
+            logger.warn('venue resolution threw — using user-provided location', {
+              err: String(err).slice(0, 200),
+            });
+            return [userLoc];
+          }
+        })();
+
         return createMeeting({
           userEmail,
           timezone,
+          // v2.4.3 (E1) — subject NOT scrubbed (per owner direction: " - "
+          // separator is fine in subjects, "Welcome Meeting - X & Y" reads
+          // naturally). The em-dash + " - " pattern is the chat-side issue;
+          // calendar subjects can keep them.
           subject:    args.subject  as string,
           start:      args.start    as string,
           end:        args.end      as string,
           attendees,
-          // v2.3.2 (1E) — invite body scrubbed for tool-name leaks, em-dash
-          // separator, IANA tz strings, etc. Slack-side replies route through
-          // formatForSlack which calls scrubInternalLeakage; invites bypass
-          // that path and were leaking the same patterns.
+          // v2.4.3 (E1) — body scrubbed AND auto-enriched with location.
+          // Pre-v2.4.3 the location often rendered cluttered ("Reflectiz HQ
+          // — Shoham 5 — Parking: ...") in the Outlook location field where
+          // many clients truncate it; Sonnet's body sometimes lacked the
+          // address entirely. Now the body always carries a readable
+          // location line at the top so attendees can find the meeting
+          // regardless of how their client renders the location field.
           body: (() => {
-            const raw = args.body as string | undefined;
-            if (!raw) return undefined;
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { scrubInternalLeakage } = require('../../utils/textScrubber') as typeof import('../../utils/textScrubber');
-            return scrubInternalLeakage(raw);
+            const raw = args.body as string | undefined;
+            const cleanedRaw = raw ? scrubInternalLeakage(raw) : '';
+            if (args.is_online === true) {
+              // Online — no physical location to surface. Return body as-is.
+              return cleanedRaw || undefined;
+            }
+            if (!resolvedLocationParts || resolvedLocationParts.length === 0) {
+              return cleanedRaw || undefined;
+            }
+            // Build a clean location block — one line per part, no em-dash
+            // separators. Reads cleanly in any client.
+            const locBlock =
+              `<p><strong>Location:</strong></p>\n` +
+              `<ul>${resolvedLocationParts.map(p => `<li>${p}</li>`).join('')}</ul>`;
+            const composed = cleanedRaw
+              ? `${locBlock}\n<hr/>\n${cleanedRaw}`
+              : locBlock;
+            return composed;
           })(),
           isOnline:   args.is_online as boolean,
-          // v2.3.2 (1C) / v2.3.6 (#73) — fill in real address from yaml for
-          // owner-office meetings; resolve external venue names to official
-          // name + street address when the venue was named in a different
-          // language than the invite (subject is English per the prompt
-          // rule, so non-ASCII venue names get researched and replaced).
-          // Sonnet shouldn't have to remember addresses; the data lives in
-          // profile.meetings.office_location for the office, and the venue
-          // resolver fetches anything else.
-          location: await ((): Promise<string | undefined> => {
-            const userLoc = args.location as string | undefined;
-            if (args.is_online === true) return Promise.resolve(undefined);
-            if (!userLoc || userLoc.trim().length === 0) {
-              const officeLoc = context.profile.meetings.office_location;
-              if (!officeLoc) return Promise.resolve(undefined);
-              const parts: string[] = [];
-              if (officeLoc.label) parts.push(officeLoc.label);
-              if (officeLoc.address) parts.push(officeLoc.address);
-              if (officeLoc.parking) parts.push(`Parking: ${officeLoc.parking}`);
-              return Promise.resolve(parts.length > 0 ? parts.join(' — ') : undefined);
-            }
-            // External venue path. Trigger resolver when the venue contains
-            // non-ASCII characters (likely non-English language) and the
-            // invite subject is English (the create_meeting rule enforces
-            // English subjects). Skip if it already looks like a complete
-            // English address ("Cafe Foo, 123 Main St, City").
-            const hasNonAscii = /[^\x20-\x7e]/.test(userLoc);
-            if (!hasNonAscii) return Promise.resolve(userLoc);
-            return (async () => {
-              try {
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { resolveVenueLocation } = require('../../utils/locationResolver') as
-                  typeof import('../../utils/locationResolver');
-                const resolved = await resolveVenueLocation(userLoc, 'en');
-                if (resolved.resolved) return resolved.fullDisplay;
-                return userLoc;  // fall back to user-provided string when no clear match
-              } catch (err) {
-                logger.warn('venue resolution threw — using user-provided location', {
-                  err: String(err).slice(0, 200),
-                });
-                return userLoc;
-              }
-            })();
+          // v2.3.2 (1C) / v2.3.6 (#73) / v2.4.3 (E1) — clean comma-joined
+          // location with no em-dash separators. Pre-v2.4.3 used " — " as
+          // the joiner which made the Outlook location field hard to read.
+          // Same parts, comma-separated, then routed through scrubInternalLeakage
+          // for safety against any owner-yaml accidental dashes.
+          location: ((): string | undefined => {
+            if (args.is_online === true) return undefined;
+            if (!resolvedLocationParts || resolvedLocationParts.length === 0) return undefined;
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { scrubInternalLeakage } = require('../../utils/textScrubber') as typeof import('../../utils/textScrubber');
+            return scrubInternalLeakage(resolvedLocationParts.join(', '));
           })(),
           categories:  args.category ? [args.category as string] : ['Meeting'],  // default fallback
           // Stamp sensitivity=private on the Graph event when the chosen
@@ -1288,7 +1333,7 @@ export class SchedulingSkill {
           userEmail,
           timezone,
           meetingId:  args.meeting_id  as string,
-          subject:    args.new_subject as string | undefined,
+          subject:    args.new_subject as string | undefined,  // subjects allow " - " (E1, owner direction)
           categories: args.category ? [args.category as string] : undefined,
         });
         closeMeetingArtifacts({

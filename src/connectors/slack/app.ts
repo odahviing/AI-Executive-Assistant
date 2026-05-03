@@ -588,25 +588,44 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         }
       }
 
-      logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name });
-      const result = await runOrchestrator({
-        userMessage,
-        conversationHistory: history,
-        threadTs,
+      // v2.4.3 (A1) — route through inbound queue for debounce + mutex +
+      // abort-if-safe. Rapid-fire messages from the same thread collapse
+      // into one merged turn instead of stacking parallel orchestrator
+      // runs (which was the root cause of 13+ tool calls per booking
+      // observed 2026-05-03). The runner closure carries everything that
+      // used to follow runOrchestrator inline; queue invokes it once per
+      // batch, possibly aborting if a fresh message arrives mid-turn
+      // before any write tool fires.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { enqueueMessage } = require('./inboundQueue') as typeof import('./inboundQueue');
+      enqueueMessage({
         channelId,
-        userId: senderId,
-        senderRole: role,
+        threadTs,
+        text: userMessage,
         senderName: colleagueName,
-        channel: 'slack' as ChannelId,
-        profile,
-        app,
-        isMpim,
-        isOwnerInGroup,
-        mpimMemberIds,
-        images,
-        forceToolOnFirstTurn,
-      });
-      logger.info('Orchestrator completed', { senderId, threadTs, hasApproval: result.requiresApproval, actionCount: result.slackActions?.length ?? 0 });
+        meta: {},
+        runner: async ({ mergedText, signal, markWrite }) => {
+          logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== userMessage });
+          const result = await runOrchestrator({
+            userMessage: mergedText,
+            conversationHistory: history,
+            threadTs,
+            channelId,
+            userId: senderId,
+            senderRole: role,
+            senderName: colleagueName,
+            channel: 'slack' as ChannelId,
+            profile,
+            app,
+            isMpim,
+            isOwnerInGroup,
+            mpimMemberIds,
+            images,
+            forceToolOnFirstTurn,
+            signal,
+            onWriteExecuted: () => markWrite(),
+          });
+          logger.info('Orchestrator completed', { senderId, threadTs, hasApproval: result.requiresApproval, actionCount: result.slackActions?.length ?? 0 });
 
       // ── Reply pipeline (v1.6.2) ──────────────────────────────────────────────
       // normalize → owner claim-check (+ retry) → colleague security gate →
@@ -727,6 +746,8 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           })();
         }
       }
+        },  // ← close runner async function (v2.4.3 A1)
+      });  // ← close enqueueMessage call
 
     } catch (err) {
       logger.error('Failed to process message', { err, assistant: assistant.name, channelId });

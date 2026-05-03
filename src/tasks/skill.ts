@@ -619,40 +619,36 @@ Binding — how to pick the right approval_id:
         const payload = (args.payload as Record<string, unknown>) ?? {};
         const askText = args.ask_text as string;
 
-        // Boundary-validate requester_slack_id. Real Slack IDs match
+        // v2.4.2 — boundary-validate requester_slack_id via the centralized
+        // resolveSlackId helper (was inline since v2.x). Real Slack IDs match
         // /^[UW][A-Z0-9]{6,}$/ — anything else (e.g. the literal placeholder
-        // string `oran_frenkel_slack_id`) is a Sonnet hallucination and will
-        // explode at resolver-time when `conn.sendDirect` returns
-        // user_not_found and Oran never hears back about his rejection.
-        // Two-step fallback: (1) lookup by requester_name in people_memory;
-        // (2) drop the field — resolver.ts:486 has a clean no-op path when
-        // requester_slack_id is missing.
+        // `oran_frenkel_slack_id`) is a Sonnet hallucination that would
+        // explode at resolver-time when conn.sendDirect returns user_not_found.
+        // resolveSlackId does the format check + people_memory lookup. When
+        // resolution fails entirely we drop the field — resolver.ts has a
+        // clean no-op path when requester_slack_id is missing.
         {
-          const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
           const rawId = typeof payload.requester_slack_id === 'string' ? payload.requester_slack_id : undefined;
           const rawName = typeof payload.requester_name === 'string' ? payload.requester_name : undefined;
-          if (rawId && !SLACK_ID_RE.test(rawId)) {
+          if (rawId !== undefined) {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { searchPeopleMemory } = require('../db/people') as typeof import('../db/people');
-            let resolvedId: string | undefined;
-            if (rawName) {
-              const matches = searchPeopleMemory(rawName);
-              const hit = matches.find(p => SLACK_ID_RE.test(p.slack_id));
-              if (hit) resolvedId = hit.slack_id;
-            }
-            if (resolvedId) {
-              logger.warn('create_approval — requester_slack_id was a hallucinated placeholder, resolved via people_memory', {
-                rejected: rawId,
-                requesterName: rawName,
-                resolvedTo: resolvedId,
-              });
-              payload.requester_slack_id = resolvedId;
-            } else {
-              logger.warn('create_approval — requester_slack_id was a hallucinated placeholder and no people_memory match — dropping field', {
-                rejected: rawId,
-                requesterName: rawName,
-              });
-              delete payload.requester_slack_id;
+            const { resolveSlackId } = require('../utils/resolveSlackId') as typeof import('../utils/resolveSlackId');
+            const resolution = resolveSlackId(rawId, rawName);
+            if (resolution.was_hallucinated) {
+              if (resolution.slack_id) {
+                logger.warn('create_approval — requester_slack_id hallucinated, resolved via people_memory', {
+                  rejected: resolution.rejected_input,
+                  requesterName: rawName,
+                  resolvedTo: resolution.slack_id,
+                });
+                payload.requester_slack_id = resolution.slack_id;
+              } else {
+                logger.warn('create_approval — requester_slack_id hallucinated and no people_memory match — dropping field', {
+                  rejected: resolution.rejected_input,
+                  requesterName: rawName,
+                });
+                delete payload.requester_slack_id;
+              }
             }
           }
         }

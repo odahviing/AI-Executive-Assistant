@@ -70,12 +70,49 @@ export function upsertCalendarIssue(
   }
 
   const id = `ci_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  // v2.4.2 — eventIds now persisted into the event_ids column (was a silent
+  // drop pre-v2.4.2 — column didn't exist). Enables closeMeetingArtifacts to
+  // cascade-resolve issue rows when their source meetings move/update/delete.
   db.prepare(`
     INSERT INTO calendar_dismissed_issues
-    (id, owner_user_id, event_date, issue_type, issue_key, detail, resolution, resolution_notes)
-    VALUES (?, ?, ?, ?, ?, ?, 'new', ?)
-  `).run(id, ownerUserId, eventDate, issueType, issueKey, detail, eventIds ? JSON.stringify(eventIds) : null);
+    (id, owner_user_id, event_date, issue_type, issue_key, detail, resolution, resolution_notes, event_ids)
+    VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?)
+  `).run(
+    id, ownerUserId, eventDate, issueType, issueKey, detail,
+    null,                                              // resolution_notes
+    eventIds && eventIds.length > 0 ? JSON.stringify(eventIds) : null,
+  );
   return true;
+}
+
+/**
+ * v2.4.2 — Find active calendar_issue rows whose persisted event_ids JSON
+ * references this meeting and mark them resolved. Called from
+ * closeMeetingArtifacts on every meeting state change. Idempotent: rows
+ * already in a terminal state are not re-touched.
+ *
+ * Match is exact — we search the JSON column for the meeting_id substring
+ * (cheap, indexed by owner_user_id). We're matching event ids which are
+ * opaque Graph strings like "AAMkAG...=", so substring matching has no
+ * collision risk in practice.
+ */
+export function resolveCalendarIssuesForMeeting(
+  ownerUserId: string,
+  meetingId: string,
+): number {
+  if (!ownerUserId || !meetingId) return 0;
+  const db = getDb();
+  // SQLite LIKE on the JSON string. We also bound on owner_user_id so the
+  // LIKE only walks rows for this owner (cheap).
+  const result = db.prepare(`
+    UPDATE calendar_dismissed_issues
+    SET resolution = 'resolved'
+    WHERE owner_user_id = ?
+      AND resolution IN ('new', 'to_resolve')
+      AND event_ids IS NOT NULL
+      AND event_ids LIKE ?
+  `).run(ownerUserId, `%${meetingId}%`);
+  return result.changes;
 }
 
 /**

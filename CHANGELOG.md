@@ -2,6 +2,75 @@
 
 ---
 
+## 2.5.0 — Per-thread orchestrator queue, externals-first-class booking, calendar memoization, owner-said-done scanner, 12-bug coord-trace pass
+
+Triggered by a 2026-05-03 trace of one Yael→Maelle Welcome-Meeting booking that took 13+ tool calls when ~3 should have done it, plus a follow-up Idan↔Maelle conversation with 5 sequential calendar reads to compute one overlap. Both threads exposed the same architectural pattern: rapid-fire user messages spawning parallel orchestrator runs that re-issued the same tools, and Sonnet treating constraints in chat as suggestions she didn't translate to tool args. Two architectural fixes anchor the release (per-thread inbound queue with debounce/mutex/abort-if-safe; per-turn calendar memoization via AsyncLocalStorage), one schema change makes external attendees first-class (email is the booking primitive; slack_id is bonus DM enrichment), one new behavioral pattern (deterministic owner-said-done scanner running after every owner turn), plus 8 prompt rules / code paths that fold the conversational-context bugs at their roots.
+
+The release also lands the v2.4.2 backlog accumulated through the same day: closeMeetingArtifacts cascade now covers calendar_dismissed_issues (closes the "carry-over from last week" stale-row pattern), the tasks-table column-mismatch in closeMeetingArtifacts is fixed (silent failure since v2.1.6), find_available_slots returns local-zoned ISO instead of UTC, owner-direct find_available_slots applies the v1.x 3-spread filter (was returning 30 raw candidates), brief data threads colleague back-context per item, brief ACTION ITEMS prompt tightened to exclude colleague-suggested options, persona prompt rewritten one-sentence so observation tools don't replace text replies, resolveSlackId centralized across 5 tools, floating-block rebalance now logs every branch for next-time pinning. One-shot DB cleanup scripts ship alongside.
+
+### Added
+
+- **Per-thread inbound message queue** at `src/connectors/slack/inboundQueue.ts` (A1). Three layered mechanisms: (a) **debounce** (1.5 sec) — rapid messages collapse into one merged turn; (b) **mutex** — only one orchestrator turn runs per thread at a time; (c) **abort-if-safe** — when a fresh message arrives mid-turn AND no write tool has fired yet, abort the in-flight turn and restart with the merged context. Once a write fires (`create_meeting`, `message_colleague`, `coordinate_meeting`, `create_approval`, etc. — full set in `WRITE_TOOLS`), abort is no longer safe and new messages buffer for a follow-up turn. Per-thread isolation: different threads run in parallel as before.
+- **Per-turn calendar memoization** at `src/utils/turnCache.ts` (A3). `withTurnCache` wraps every orchestrator turn in an AsyncLocalStorage scope; `getCalendarEvents` opts in via `memoize(key, fetch)`. Same-turn duplicate calendar reads return the same promise. Background tasks bypass safely. Cache lives only for the turn — GC'd when the wrapped function returns. Pre-v2.5 the trace showed 5 identical calendar queries within 12 seconds for one booking; this collapses them to 1.
+- **`resolveSlackId` helper** at `src/utils/resolveSlackId.ts`. Format check (`/^[UW][A-Z0-9]{6,}$/`) + people_memory lookup by name. Returns `{ slack_id, was_hallucinated, rejected_input }`. Centralizes the v2.x guard pattern (was inline in `create_approval` only); now applied at `message_colleague`, `update_person_profile`, `note_about_person`, `confirm_gender`, `log_interaction`, plus the refactored `create_approval`.
+- **Owner-said-done scanner** at `src/utils/closeLoopOnOwnerHandled.ts`. Runs fire-and-forget after every owner orchestrator turn. Cheap keyword pre-filter (English + Hebrew closure verbs) → if signals present + open items exist → single Sonnet pass classifies which items the owner just said are done → cascades `cancel_task` / `cancel_coordination` / `outreach.done`. Deterministic version of RULE 2d (which Sonnet drops half the time). ~30% of owner turns trigger the LLM; ~$0.001/turn average.
+- **`closeMeetingArtifacts` cascade extended to `calendar_dismissed_issues`** (v2.4.2 carry). New `event_ids TEXT` column on the table (idempotent ALTER); `upsertCalendarIssue` persists event ids; new `resolveCalendarIssuesForMeeting` helper. Every `move_meeting` / `update_meeting` / `delete_meeting` / `create_meeting` now resolves the related issue rows automatically. Closes the "carry-over from last week" pattern surfacing in active-mode health checks for weeks past their useful life.
+- **`book_floating_block.confirm_outside_window` + `start_time` args** (v2.4.1 carry, in tree from earlier today).
+- **`move_meeting.confirm_outside_window` arg** (v2.4.1 carry).
+- **`find_available_slots.moving_event_ids` arg** (v2.4.1 carry).
+- **`find_available_slots.preferences index` (catalog model for prefs)** (v2.4.0 carry — refers to the broader v2.4 catalog work, this entry is for follow-up `recall_preferences(category|key)` filter).
+- **`OrchestratorInput.signal` + `OrchestratorInput.onWriteExecuted`**. Wired into the inbound queue's abort-if-safe protocol. Background callers (dispatchers, brief generation) omit both and the orchestrator runs as before.
+- **Code-side fast-path in `interpretReplyWithAI`** (B3) — when colleague reply contains a day-of-week (or day+time, EN+HE) matching exactly ONE proposed slot, accept deterministically. Skips the LLM. Closes "Yael said 'Monday' for a proposed Mon-12:00 + 2× Wed slots, Maelle re-asked 'what time?'" pattern.
+- **Auto-demote externals from `participants` to `just_invite`** in `coordinate_meeting` handler (C1). Pre-v2.5 the participants schema REQUIRED `slack_id`, forcing Sonnet to either hallucinate a slug or skip externals. Now externals (no slack_id) auto-route to calendar-invite-only path; intent preserved.
+- **`find_slack_user` returns `{ external: true, email }`** when query is an email outside owner's company domain (C1). Sonnet sees explicit signal to proceed with email instead of treating empty-Slack-result as a blocker.
+- **One-shot cleanup scripts**: `scripts/cleanup-stale-calendar-issues.cjs`, `scripts/cleanup-stale-tasks-coords.cjs`. Both idempotent, dry-run / `--commit` pattern.
+- **`scripts/measure-prompt.ts`** (carry). Diagnostic for prompt sizing.
+
+### Changed
+
+- **`coordinate_meeting.participants` schema**: `email` is REQUIRED (was implicit), `slack_id` is OPTIONAL (was required). Email is the booking primitive; Slack ID is bonus DM enrichment for internals only. `just_invite` schema also requires `email` (was just `name`).
+- **`find_slack_user` tool description rewritten** to state it's for DM resolution only — NOT required before booking. Booking uses email; this tool is needed only when sending a Slack DM. Eliminates the "no Slack found → can't book" mental-model bug.
+- **Brief data per-item enriched with `recent_context`** (last 3 relational interaction-log entries for the colleague). Sonnet now has back-context when narrating "reminding X about Y" in the morning brief.
+- **Brief ACTION ITEMS prompt tightened**: explicit definition of what counts (rule violations, approvals, escalations) vs. what doesn't (colleague-suggested options during a chat — go in the per-person paragraph, not action items). "Nobody can assign him work — only HIS rules / HIS calendar / HIS approvals can produce action items."
+- **Persona prompt one-sentence rewrite** (v2.4.1 carry): "react in text AND save via note_about_X. The save is bookkeeping — it never replaces your reply." Closes the post-v2.4.0 social-chat silence pattern.
+- **LANGUAGE rule extended** (v2.4.1 carry) to ignore tool-result languages — fixes Hebrew-pref-primes-Hebrew-reply drift.
+- **HYPOTHETICAL VALIDATION rule strengthened**: `moving_event_ids` trigger from recently-discussed meeting context. "When ${firstName} just discussed/booked a meeting in this thread and now asks 'any earlier opening?' / 'any other time?' — those are MOVE questions about THAT meeting, not new-booking. Default to MOVE."
+- **JOINT-ATTENDEE QUERIES prompt rule** (A4): "When ${firstName} asks 'when are WE free?' / 'when is X free?' / 'I'm free?', call find_available_slots ONCE with attendee_emails=[X's email]. NEVER read calendars sequentially across turns."
+- **USER-NAMED DAYS prompt rule** (B1): when user names specific days, narrow search_from/search_to to ONLY those days; don't surface fallback days the user didn't ask about.
+- **DATE CONTEXT BIAS prompt rule** (D1): "that Monday" / "that day" in context of a recently-discussed meeting refers to THAT meeting's date, not nearest-matching weekday from today.
+- **LEAD WITH GAP prompt rule** (E2): "any opening?" / "when is free?" → lead with the gap, not a meeting-by-meeting calendar listing.
+- **`closeMeetingArtifacts` task-query column fix** (v2.4.2 carry): was querying `payload_json` on tasks table which has `context`. Silent SqliteError on every meeting mutation since v2.1.6 — caught by try/catch and logged as warn. The third cascade target (cancel stale follow_up/reminder tasks referencing moved meetings) **now actually fires** for the first time since the helper shipped.
+- **`find_available_slots` returns local-zoned ISO** (v2.4.2 carry). Was emitting UTC `...Z` strings via `Date.prototype.toISOString()`; now emits `2026-05-05T09:00:00.000+03:00` via Luxon. Removes Sonnet's "converting to Israel time" INTERNALS leak at the source.
+- **Owner-direct `find_available_slots` applies `pickSpreadSlots(rawSlots, tz, 3)`** before returning (v2.4.2 carry). Pre-v2.4.2 returned up to 30 raw candidates and Sonnet picked which to surface (often over-listed). Coord path already used spread; this brings owner-direct in line.
+- **Meeting invite location**: pre-computed parts joined with comma (was em-dash — hard to read in Outlook), routed through scrubInternalLeakage. Body auto-enriched with a clean `<strong>Location:</strong>` block at the top (E1, owner direction). Subject NOT scrubbed — owner's call: " - " separator is fine in subjects.
+- **Floating-block rebalance** now emits a log line at every branch (skipped/no-block-event/overlap-detected/moved/complete) — for next-time debugging silent rebalance failures (v2.4.2 carry).
+- **`schedule.lunch` legacy field removed** (v2.4.1 carry). All floating blocks live under `meetings.floating_blocks` uniformly.
+
+### Removed
+
+- The legacy "if Sonnet went silent on observation tools, fire verbMap fallback" path now skips silence-eligible tools (v2.4.0 carry — Fix A for #78).
+- Pre-v2.5 inline `SLACK_ID_RE` validation in `create_approval` — replaced by centralized `resolveSlackId` helper (DRY).
+
+### Migration
+
+- **YAML migration** required for profiles still using `schedule.lunch`: move to `meetings.floating_blocks: [{ name: "lunch", ... }]`. Schema validation fails at startup until done. config/users.example/user.example.yaml updated.
+- **DB schema migrations** (idempotent ALTERs, applied automatically at boot): `calendar_dismissed_issues` gains `event_ids TEXT`. No data loss.
+- **One-shot DB cleanups** owner can run after deploy:
+  - `node scripts/cleanup-stale-calendar-issues.cjs --commit` — clears the historical backlog of issue rows whose source meetings already moved.
+  - `node scripts/cleanup-stale-tasks-coords.cjs --commit` — clears stale tasks/coords/outreach (default --days 14, configurable).
+
+### Operational notes
+
+- **First test for the queue**: type 2-3 messages quickly in a row to Maelle. Pre-v2.5 each spawned a parallel orchestrator turn. Post-v2.5 they collapse into one merged turn (visible in the log as `inboundQueue — running turn { batchSize: N, mergedPreview: ... }`). The 1.5-sec debounce window means single isolated messages have ~1.5 sec added latency before processing starts; rapid bursts collapse cleanly.
+- **Calendar memoization** is opt-in at `getCalendarEvents` only today. Other expensive reads (`getFreeBusy`, `searchPeopleMemory`, `getCalendarIssueById`) could be added later if traces show repeats.
+- **Owner-said-done scanner** logs `closeLoopOnOwnerHandled: cascade fired` when it closes items. If the log shows nothing for a few days, the scanner's working — RULE 2d failures simply weren't piling up.
+
+### Why a real human EA filter test passes here
+
+A real EA doesn't run two parallel "let me check on that" workflows when her boss types three messages back-to-back — she waits for him to finish, reads everything, and acts on the latest state. She doesn't re-read his calendar five times to schedule one meeting — she opens it once and remembers what she saw. She doesn't tell him "I can't book Eli because he's not in Slack" — she books with the email like a human EA would, no further question. She doesn't keep flagging the same overlap for three weeks because she "moved it" but didn't "close the issue" — closing the issue is part of moving the meeting, full stop.
+
+---
+
 ## 2.4.1 — Floating-block model cleanup, owner-override-as-approval extended, move-aware slot finder, post-v2.4.0 regressions
 
 A direct continuation of the 2.4.0 wave — the prompt-bloat surgery surfaced four downstream issues the day after deploy, and a long-standing schema asymmetry the owner had been flagging for months. All five land here.

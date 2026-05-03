@@ -209,6 +209,23 @@ export interface OrchestratorInput {
    * own id when those connectors land.
    */
   inboundConnectionId?: import('../../connections/types').ConnectionId;
+  /**
+   * v2.4.3 (A1) — abort signal honored by the tool loop. When triggered,
+   * the orchestrator finishes any in-flight tool call but stops before
+   * dispatching the next one, throws an AbortError. Used by the per-thread
+   * inbound queue to merge a freshly-arrived message into the current turn
+   * (only safe when no write tools have fired yet — see onWriteExecuted).
+   * Background callers (dispatchers, brief generation) omit this and the
+   * orchestrator runs to completion as before.
+   */
+  signal?: AbortSignal;
+  /**
+   * v2.4.3 (A1) — called the moment a write tool starts executing. The
+   * inbound queue uses this to flip its "abort no longer safe" flag —
+   * once a write fires, mid-turn abort would orphan irreversible state
+   * (sent messages, created events, raised approvals).
+   */
+  onWriteExecuted?: (toolName: string) => void;
 }
 
 export interface SlackAction {
@@ -234,6 +251,18 @@ export interface OrchestratorOutput {
  * Zero hardcoded business logic here.
  */
 export async function runOrchestrator(input: OrchestratorInput): Promise<OrchestratorOutput> {
+  // v2.4.3 (A3) — wrap the entire turn in a per-turn cache scope so any
+  // downstream code (calendar fetches, etc.) can opt into memoization. The
+  // cache lives only for the duration of this turn — created fresh, GC'd
+  // when this function returns. AsyncLocalStorage handles the propagation
+  // transparently; no other code change required to enable memoization at
+  // the call site.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { withTurnCache } = require('../../utils/turnCache') as typeof import('../../utils/turnCache');
+  return withTurnCache(() => runOrchestratorImpl(input));
+}
+
+async function runOrchestratorImpl(input: OrchestratorInput): Promise<OrchestratorOutput> {
   const { userMessage, conversationHistory, threadTs, profile } = input;
 
   logger.info('Orchestrator invoked', {
@@ -526,6 +555,18 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
   const MAX_ITERATIONS = 10;
 
   while (iteration < MAX_ITERATIONS) {
+    // v2.4.3 (A1) — check abort signal at the iteration boundary. The
+    // inbound queue triggers abort when a freshly-arrived message in the
+    // same thread should merge into a new turn, BUT only when no write
+    // tool has fired yet (queue checks that flag synchronously before
+    // calling abort). So if we see signal.aborted here, it's safe to
+    // throw — no in-flight tool, no irreversible state to leave behind.
+    if (input.signal?.aborted) {
+      logger.info('Orchestrator turn aborted at iteration boundary (A1 merge)', { threadTs, iteration });
+      const e: Error & { name?: string } = new Error('aborted_for_merge');
+      e.name = 'AbortError';
+      throw e;
+    }
     iteration++;
 
     // v1.6.2 — claim-checker retry path: on the very first iteration of a
@@ -924,6 +965,19 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
         }
       }
 
+      // v2.4.3 (A1) — flag write tools BEFORE execution. The inbound queue
+      // checks this flag synchronously when a new message arrives mid-turn:
+      // if no writes yet → safe to abort + merge; if writes fired → can't
+      // abort, buffer for follow-up turn. Calling onWriteExecuted from
+      // INSIDE executeSkillTool would race the queue's read; flagging here
+      // (just before dispatch) is the safe ordering.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { WRITE_TOOLS } = require('../../connectors/slack/inboundQueue') as
+        typeof import('../../connectors/slack/inboundQueue');
+      if (input.onWriteExecuted && WRITE_TOOLS.has(toolUse.name)) {
+        try { input.onWriteExecuted(toolUse.name); } catch (_) { /* never fail the turn over the callback */ }
+      }
+
       const result = await executeSkillTool(
         toolUse.name,
         toolUse.input as Record<string, unknown>,
@@ -1281,6 +1335,32 @@ Rules:
     } catch (err) {
       logger.warn('Inbound-colleague shadow notify threw — continuing', { err: String(err) });
     }
+  }
+
+  // v2.4.2 — owner-said-done scanner (deterministic version of RULE 2d).
+  // Fire-and-forget after every owner turn — keyword pre-filter is cheap,
+  // LLM only runs when closure-signal words appear AND there are open
+  // items. Closes the long-standing pattern where owner says "Amazia is
+  // done, drop it" in chat, Sonnet acknowledges verbally but doesn't call
+  // cancel_task / cancel_coordination, and the row keeps surfacing in
+  // tomorrow's brief. Idempotent — re-running on already-closed items
+  // hits the active-status filter and finds nothing.
+  if (input.senderRole === 'owner' && userMessage && userMessage.trim().length > 0) {
+    void (async () => {
+      try {
+        const { closeLoopOnOwnerHandled } = await import('../../utils/closeLoopOnOwnerHandled');
+        const r = await closeLoopOnOwnerHandled({ profile, ownerMessage: userMessage });
+        if (r.scanned && r.closedItems.length > 0) {
+          logger.info('closeLoopOnOwnerHandled: cascade fired', {
+            threadTs, count: r.closedItems.length, items: r.closedItems,
+          });
+        }
+      } catch (err) {
+        logger.warn('closeLoopOnOwnerHandled top-level threw — non-fatal', {
+          err: String(err).slice(0, 200),
+        });
+      }
+    })();
   }
 
   // v2.2.1 — Social Engine post-turn logging. Fires on owner OR colleague

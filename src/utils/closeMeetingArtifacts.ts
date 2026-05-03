@@ -1,9 +1,10 @@
 /**
- * Centralized cleanup for any meeting state change (v2.1.6).
+ * Centralized cleanup for any meeting state change (v2.1.6, extended v2.4.2).
  *
  * Every meeting mutation — create / move / update / delete — can leave stale
  * artifacts in the DB: pending approvals the owner was asked about, reminder
- * tasks tracking the outcome, outreach rows tracking a colleague's reply.
+ * tasks tracking the outcome, outreach rows tracking a colleague's reply,
+ * and calendar-health issue rows tracking known overlaps / OOF conflicts.
  * Each mutation site had to remember to close them, and they didn't.
  *
  * This helper is the single choke point. Call it after a successful meeting
@@ -22,14 +23,24 @@
  *      this meeting_id. These are Sonnet-created "remind me to update Yael"
  *      style tasks; the cascade fires when meeting_id is in the payload.
  *
+ *   4. (v2.4.2) Resolve open calendar_dismissed_issues rows whose persisted
+ *      event_ids JSON references this meeting_id. Closes the long-standing
+ *      gap where issue rows accumulated for weeks ("carry-over from last
+ *      week" surfacing in active-mode health checks) because the source
+ *      meeting moved/recategorized but the issue row stayed at status='new'.
+ *      Pre-v2.4.2 the event_ids column didn't exist (column-less ALTER
+ *      shipped same release) so older rows can't be cascaded — they need a
+ *      one-shot DB cleanup. Forward-going rows cascade cleanly.
+ *
  * The cascade is additive to the coord-terminal cascade in updateCoordJob.
- * Double-cascading is idempotent — an already-resolved approval won't match
- * the `status = 'pending'` filter.
+ * Double-cascading is idempotent — an already-resolved approval / issue won't
+ * match the active-status filter.
  *
  * Never throws. A DB error here must never undo a successful calendar
  * mutation — the calendar is source of truth; DB cleanup is best-effort.
  */
 import { getDb } from '../db';
+import { resolveCalendarIssuesForMeeting } from '../db/calendarIssues';
 import logger from './logger';
 
 export type MeetingArtifactReason = 'created' | 'moved' | 'updated' | 'deleted';
@@ -38,6 +49,7 @@ export interface CloseMeetingArtifactsResult {
   approvalsResolved: number;
   tasksCancelled: number;
   outreachClosed: number;
+  calendarIssuesResolved: number;
 }
 
 export function closeMeetingArtifacts(params: {
@@ -49,6 +61,7 @@ export function closeMeetingArtifacts(params: {
     approvalsResolved: 0,
     tasksCancelled: 0,
     outreachClosed: 0,
+    calendarIssuesResolved: 0,
   };
 
   if (!params.meetingId) return result;
@@ -133,17 +146,23 @@ export function closeMeetingArtifacts(params: {
       }
     }
 
-    // 3. Open follow_up / reminder tasks whose payload references this meeting
+    // 3. Open follow_up / reminder tasks whose context references this meeting.
+    // v2.4.2 — was querying payload_json which doesn't exist on `tasks` (it
+    // exists on `approvals`). The query threw `SqliteError: no such column`
+    // on every meeting mutation since v2.1.6, caught by the outer try/catch
+    // and logged as warn. Functional impact: the third cascade target never
+    // fired — stale follow_up/reminder tasks referencing moved/deleted
+    // meetings stayed open indefinitely. Tasks table column is `context`.
     const openTasks = db.prepare(`
-      SELECT id, payload_json FROM tasks
+      SELECT id, context FROM tasks
       WHERE owner_user_id = ?
         AND type IN ('follow_up', 'reminder')
         AND status IN ('new','scheduled','in_progress','pending_owner','pending_colleague')
-    `).all(params.ownerUserId) as Array<{ id: string; payload_json: string }>;
+    `).all(params.ownerUserId) as Array<{ id: string; context: string }>;
 
     const matchingTaskIds: string[] = [];
     for (const row of openTasks) {
-      if (payloadReferencesMeeting(row.payload_json, params.meetingId)) {
+      if (payloadReferencesMeeting(row.context, params.meetingId)) {
         matchingTaskIds.push(row.id);
       }
     }
@@ -160,7 +179,13 @@ export function closeMeetingArtifacts(params: {
       }
     }
 
-    if (result.approvalsResolved > 0 || result.tasksCancelled > 0 || result.outreachClosed > 0) {
+    // 4. (v2.4.2) Resolve calendar_dismissed_issues rows referencing this meeting
+    result.calendarIssuesResolved = resolveCalendarIssuesForMeeting(
+      params.ownerUserId,
+      params.meetingId,
+    );
+
+    if (result.approvalsResolved > 0 || result.tasksCancelled > 0 || result.outreachClosed > 0 || result.calendarIssuesResolved > 0) {
       logger.info('closeMeetingArtifacts — cascade fired', {
         meetingId: params.meetingId,
         reason: params.reason,
