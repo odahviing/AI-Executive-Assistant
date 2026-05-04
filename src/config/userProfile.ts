@@ -260,6 +260,12 @@ const UserProfileSchema = z.object({
     // category as "personal/sensitive" without code knowing the literal
     // name. Default false.
     sets_sensitivity_private: z.boolean().optional(),
+    // When true, create_meeting under this category skips the office-address
+    // auto-fill. For categories that represent personal time-on-calendar
+    // (focus blocks, buffer / think time, errands) where stamping the
+    // office address would be wrong — the event isn't a meeting at a place,
+    // it's a hold on the owner's own time. Default false.
+    no_default_location: z.boolean().optional(),
   })).optional(),
 
   vip_contacts: z.array(VipContactSchema).default([]),

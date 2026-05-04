@@ -175,9 +175,11 @@ categories:
   - name: "Meeting"
     description: "Standard work meetings with internal or external participants."
   - name: "Logistic"
-    description: "Schedule admin: lunch, breaks, commute, personal time, errands. Not a work meeting."
+    description: "Personal time-on-calendar: lunch, breaks, commute, personal time, errands. A hold on my own time, not a meeting with another person."
+    no_default_location: true
   - name: "Focus Time"
     description: "Protected deep work, no meetings allowed."
+    no_default_location: true
   - name: "Interview"
     description: "Candidate interviews only. Short, discreet titles."
   - name: "Private"

@@ -64,7 +64,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log(`\n${runningApps.length} assistant(s) running in Socket Mode — no open ports\n`);
+  logger.info('All assistants running in Socket Mode — no open ports', { count: runningApps.length });
 
   // Startup notification — delayed 180s so rapid dev restarts don't spam the owner.
   // ONLY fires when package.json version differs from the last-announced version

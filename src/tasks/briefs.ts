@@ -339,7 +339,12 @@ async function collectBriefingData(
           duration_min: e._durationMin,
           all_day: e.isAllDay,
           attendees: e.attendees,
+          // is_online=true means "has a Teams link" — NOT "purely virtual".
+          // When location is also set, it's a hybrid meeting (physical room +
+          // Teams link for remote attendees). Narrate the physical venue,
+          // not the virtual fallback.
           is_online: e.isOnlineMeeting,
+          location: e.location,
           categories: e.categories,
           is_floating_block: e.is_floating_block,
         }));

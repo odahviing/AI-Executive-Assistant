@@ -132,7 +132,10 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     const conn = getConnection(profile.user.slack_user_id, 'slack');
     if (!isSilent) {
       if (conn) {
-        await conn.postToChannel(routine.owner_channel, `*${routine.title}*\n${cleaned}`);
+        // v2.5.1 — no title prepend. The bot-style "*Routine title*\n..."
+        // header read as machine framing. Routines that legitimately want
+        // a header have Sonnet write one in the body. Most don't.
+        await conn.postToChannel(routine.owner_channel, cleaned);
       } else {
         logger.warn('dispatchRoutine — no Slack connection registered, routine output dropped', { routineId: routine.id });
       }

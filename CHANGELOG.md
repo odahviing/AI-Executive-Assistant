@@ -2,6 +2,43 @@
 
 ---
 
+## 2.5.1 — Move-validation prompt rule, self-block category cleanup, routine management widened, claim-checker truncation recovery, hybrid-meeting location passthrough, small-bug pass
+
+Seven small fixes across one day's interactive session.
+
+### Added
+
+- **`no_default_location` flag on category schema** (`src/config/userProfile.ts`). When true, `create_meeting` skips the office-address auto-fill for events under that category. Mirrors the `sets_sensitivity_private` pattern — yaml-driven, no code knows the literal category name. Logistic in `idan.yaml` (and Logistic + Focus Time in the example yaml) now carry the flag. Closes the "focus block stamped with office address" leak.
+- **VALIDATE A MOVE BEFORE PROPOSING IT prompt rule** in `src/skills/meetings.ts` (sibling to the existing VALIDATING / DISCOVERING A MOVE rule). Tells Sonnet that any "I'll move X to make room for Y" narration must be backed by a `find_available_slots` call with `moving_event_ids: [X.id]` and a window matching the requested duration. Closes the staircase pattern (offer Simon move → owner says yes → "actually moving Simon only opens 1h, you'd also need to move Dina") by forcing the math up front.
+
+### Changed
+
+- **`update_routine` widened — schedule_time / status / notify_on_skip mutable on EVERY routine including system** (`src/tasks/crons.ts`). Pre-v2.5.1 only `notify_on_skip` worked on system routines, so the morning briefing time was stuck whatever startup decided. Now owner can shift the briefing's time the same way they'd shift any user routine. Title + prompt remain locked on system routines (changing the prompt would break the `__system_briefing__` sentinel path the dispatcher pivots on). When the briefing's `schedule_time` changes, `update_routine` also writes the `briefing_time` preference so the value survives restarts (in sync with `ensureBriefingCron`'s startup read).
+- **`delete_routine` accepts system routines** (`src/tasks/crons.ts`). Soft-delete (status='deleted') keeps the row; `ensureBriefingCron` skips recreate because it sees an existing row regardless of status. Owner stop-this intent persists.
+- **System-routine update errors are short machine codes**, not human-tone text (`{error: 'system_routine_identity_locked', field: 'title'|'prompt'}`). Sonnet phrases to owner in human EA tone via the standard prompt rules; tool result no longer carries pre-baked phrasing that leaked as bot framing.
+- **Routine dispatcher drops the `*Title*\n` prepend** (`src/tasks/dispatchers/routine.ts`). Routine output posts as plain prose. Calendar-health-style routines no longer get a forced bot header. Routines that genuinely want a header have Sonnet write one in the body.
+- **Logistic category description tightened** (`config/users/idan.yaml` + `config/users.example/user.example.yaml`). Now reads "Personal time-on-calendar: focus blocks, deep-work / thinking time, buffer between meetings, lunch, commute, breaks, errands. Anything that's a hold on my own time, not a meeting with another person." Removes the "Not a work meeting" line that was steering Sonnet away from Logistic for focus-time blocks (and into Private, which then triggered `sets_sensitivity_private`).
+- **Claim-checker `max_tokens` 200 → 400** (`src/utils/claimChecker.ts`). 200 was too tight; truncated `action_summary` mid-string fail-opened a true positive. 400 gives margin without costing meaningfully more.
+- **Claim-checker prompt caps `action_summary` ≤120 chars** (action + coda modes). Keeps Sonnet honest about length even with the wider token budget.
+- **Startup banner moved through logger** (`src/index.ts`). Replaces `console.log` with `logger.info` so the "All assistants running in Socket Mode" line uses the same JSON format as everything else.
+
+### Fixed
+
+- **Claim-checker truncation now recovers `claimed_action` + `action_type` before fail-open** (`src/utils/claimChecker.ts`). When `JSON.parse` throws on truncated output, narrow regexes extract the load-bearing fields from the partial JSON. Only fail-opens when even those aren't recoverable. Logged as `JSON truncated — recovered top fields`. Closes the silent leak where a true-positive verdict was masked by a parse failure.
+- **Hybrid meetings no longer narrate as "Online" in the brief** ([#79](https://github.com/odahviing/AI-Executive-Assistant/issues/79), `src/connectors/graph/calendar.ts` + `src/tasks/briefs.ts`). Graph's `isOnlineMeeting=true` only means "has a Teams link," not "purely virtual" — physical meetings with a Teams link added are hybrid. `CalendarEvent` now carries `location.displayName` from Graph (added to `$select`), and `collectBriefingData` passes it through so the brief narrates the physical venue when set instead of falling back to "Online".
+
+### Migration
+
+- Restart `npm run dev` to pick up code changes.
+- The morning briefing time was directly set to 08:30 (pref + cron row both updated). On restart, `ensureBriefingCron` recomputes `next_run_at` from the new schedule.
+
+### Not changed
+
+- `__system_briefing__` sentinel path in routine dispatcher (still required — title + prompt locked on system routines protects this).
+- `briefing_time` preference contract (still `general` category, still `HH:mm` value shape).
+
+---
+
 ## 2.5.0 — Per-thread orchestrator queue, externals-first-class booking, calendar memoization, owner-said-done scanner, 12-bug coord-trace pass
 
 Triggered by a 2026-05-03 trace of one Yael→Maelle Welcome-Meeting booking that took 13+ tool calls when ~3 should have done it, plus a follow-up Idan↔Maelle conversation with 5 sequential calendar reads to compute one overlap. Both threads exposed the same architectural pattern: rapid-fire user messages spawning parallel orchestrator runs that re-issued the same tools, and Sonnet treating constraints in chat as suggestions she didn't translate to tool args. Two architectural fixes anchor the release (per-thread inbound queue with debounce/mutex/abort-if-safe; per-turn calendar memoization via AsyncLocalStorage), one schema change makes external attendees first-class (email is the booking primitive; slack_id is bonus DM enrichment), one new behavioral pattern (deterministic owner-said-done scanner running after every owner turn), plus 8 prompt rules / code paths that fold the conversational-context bugs at their roots.

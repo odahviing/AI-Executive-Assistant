@@ -139,11 +139,11 @@ Output schema (REUSE the action-checker shape so callers don't branch):
   "claimed_action": boolean,    // true = drop the coda
   "action_type": "invented_fact" | "gossipy" | null,
   "target_name": string | null,  // for gossipy: the third party named; for invented_fact: the recipient
-  "action_summary": string | null  // one-line reason
+  "action_summary": string | null  // one-line reason, ≤120 chars
 }
 
 If the coda passes both checks (no invented facts, no gossipy commentary), set claimed_action=false and other fields null.
-Reminder: JSON only. Start with { end with }. No prose.`
+Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to one short line.`
     : null;
 
   const prompt = codaPrompt ?? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
@@ -189,17 +189,17 @@ Schema:
   "claimed_action": boolean,
   "action_type": "message" | "book" | "task" | "other" | null,
   "target_name": string | null,
-  "action_summary": string | null
+  "action_summary": string | null   // one-line reason, ≤120 chars
 }
 
 If claimed_action is false, all other fields may be null.
 If claimed_action is true, fill action_type and — when action_type is "message" — fill target_name with the person the draft claims to have messaged.
-Reminder: JSON only. Start with { end with }. No prose.`;
+Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to one short line.`;
 
   try {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 200,
+      max_tokens: 400,
       messages: [{ role: 'user', content: prompt }],
     });
     const raw = ((response.content[0] as Anthropic.TextBlock).text ?? '').trim();
@@ -220,11 +220,34 @@ Reminder: JSON only. Start with { end with }. No prose.`;
     let parsed: any;
     try { parsed = JSON.parse(cleaned); }
     catch (err) {
-      logger.warn('Claim-checker: could not parse JSON — failing open', {
-        rawPreview: raw.slice(0, 200),
-        elapsedMs,
-      });
-      return { claimed_action: false, elapsedMs, failed_open: true };
+      // Recovery: when output is truncated mid-action_summary (e.g. max_tokens
+      // hit), the load-bearing fields claimed_action + action_type are already
+      // present at the top of the JSON. Extract via narrow regex so a true
+      // positive isn't silently fail-opened just because the explanation got
+      // cut off mid-string.
+      const claimedMatch = cleaned.match(/"claimed_action"\s*:\s*(true|false)/);
+      const typeMatch = cleaned.match(/"action_type"\s*:\s*"([a-z_]+)"/);
+      const targetMatch = cleaned.match(/"target_name"\s*:\s*(?:"([^"]*)"|null)/);
+      if (claimedMatch) {
+        parsed = {
+          claimed_action: claimedMatch[1] === 'true',
+          action_type: typeMatch ? typeMatch[1] : null,
+          target_name: targetMatch && targetMatch[1] !== undefined ? targetMatch[1] : null,
+          action_summary: '<truncated>',
+        };
+        logger.warn('Claim-checker: JSON truncated — recovered top fields', {
+          rawPreview: raw.slice(0, 200),
+          elapsedMs,
+          recovered_claimed_action: parsed.claimed_action,
+          recovered_action_type: parsed.action_type,
+        });
+      } else {
+        logger.warn('Claim-checker: could not parse JSON — failing open', {
+          rawPreview: raw.slice(0, 200),
+          elapsedMs,
+        });
+        return { claimed_action: false, elapsedMs, failed_open: true };
+      }
     }
 
     if (typeof parsed !== 'object' || parsed === null || typeof parsed.claimed_action !== 'boolean') {

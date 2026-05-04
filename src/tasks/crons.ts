@@ -409,28 +409,24 @@ IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if
       }
 
       case 'update_routine': {
-        // v2.3.1 (B19 / #59 follow-up) — system-routine carve-out for
-        // notify_on_skip ONLY. The morning brief is the primary use case for
-        // notify_on_skip, but the original guard rejected any update on
-        // is_system=1 routines, so the owner couldn't toggle the flag on it.
-        // Now: fetch without the is_system filter; if it's a system routine,
-        // only notify_on_skip is mutable. All other fields stay locked.
+        // v2.5.1 — routine management is a normal assistant capability.
+        // Owner asks to change a routine's time / pause it / un-pause it
+        // / delete it the same way they'd ask a human EA. Schedule + status
+        // + notify_on_skip are mutable on EVERY routine, including system.
+        // Title + prompt stay locked on system routines because the
+        // dispatcher pivots on `prompt === '__system_briefing__'` — changing
+        // those would break the special briefing rendering path. When the
+        // briefing's schedule_time changes, we ALSO write the briefing_time
+        // preference so the value persists across restarts (ensureBriefingCron
+        // reads it at startup).
         const routine = db.prepare(
           'SELECT * FROM routines WHERE id = ? AND owner_user_id = ?'
         ).get(args.routine_id as string, ownerUserId) as Routine | null;
 
         if (!routine) return { error: 'Routine not found' };
 
-        if (routine.is_system === 1) {
-          if (args.notify_on_skip == null) {
-            return { error: 'Built-in routines cannot be modified — only their skip-notification setting can be changed.' };
-          }
-          const newVal = args.notify_on_skip ? 1 : 0;
-          db.prepare(
-            `UPDATE routines SET notify_on_skip = ?, updated_at = datetime('now') WHERE id = ?`
-          ).run(newVal, args.routine_id as string);
-          logger.info('System routine notify_on_skip toggled', { id: args.routine_id, value: newVal });
-          return { updated: true, routine_id: args.routine_id };
+        if (routine.is_system === 1 && (args.title != null || args.prompt != null)) {
+          return { error: 'system_routine_identity_locked', field: args.title != null ? 'title' : 'prompt' };
         }
 
         const updates: Record<string, unknown> = {};
@@ -461,13 +457,35 @@ IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if
           `UPDATE routines SET ${fields}, updated_at = datetime('now') WHERE id = @routine_id`
         ).run({ ...updates, routine_id: args.routine_id as string });
 
-        logger.info('Routine updated', { id: args.routine_id, updates: Object.keys(updates) });
+        // v2.5.1 — persist briefing time across restarts. ensureBriefingCron
+        // reads `briefing_time` pref at startup; without this write, a live
+        // schedule_time edit on the system briefing would reset on next
+        // restart back to whatever the pref / profile default holds.
+        if (routine.is_system === 1 && routine.id.startsWith('system_briefing_') && args.schedule_time != null) {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { savePreference } = require('../db/preferences') as typeof import('../db/preferences');
+          savePreference({
+            userId: ownerUserId,
+            category: 'general',
+            key: 'briefing_time',
+            value: args.schedule_time as string,
+            source: 'user_taught',
+          });
+          logger.info('Briefing schedule_time persisted to preference', {
+            ownerUserId, value: args.schedule_time,
+          });
+        }
+
+        logger.info('Routine updated', { id: args.routine_id, updates: Object.keys(updates), is_system: routine.is_system });
         return { updated: true, routine_id: args.routine_id };
       }
 
       case 'delete_routine': {
+        // v2.5.1 — system routines deletable too. Soft-delete (status='deleted')
+        // means ensureBriefingCron at next startup sees the row and won't
+        // recreate it — owner's stop-this intent persists.
         const routine = db.prepare(
-          'SELECT * FROM routines WHERE id = ? AND owner_user_id = ? AND is_system = 0'
+          'SELECT * FROM routines WHERE id = ? AND owner_user_id = ?'
         ).get(args.routine_id as string, ownerUserId) as Routine | null;
 
         if (!routine) return { error: 'Routine not found' };
@@ -476,7 +494,7 @@ IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if
           `UPDATE routines SET status = 'deleted', updated_at = datetime('now') WHERE id = ?`
         ).run(args.routine_id as string);
 
-        logger.info('Routine deleted', { id: args.routine_id, title: routine.title });
+        logger.info('Routine deleted', { id: args.routine_id, title: routine.title, is_system: routine.is_system });
         return { deleted: true, title: routine.title };
       }
 

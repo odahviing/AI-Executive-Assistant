@@ -178,6 +178,10 @@ interface ProcessedEvent {
   isCancelled: boolean;
   isOnlineMeeting: boolean;
   onlineMeetingUrl?: string;
+  // Physical location displayName from Graph. Present when the meeting has
+  // a real venue stamped (office, meeting room, address). Co-exists with
+  // isOnlineMeeting=true on hybrid meetings (physical room + Teams link).
+  location?: string;
   attendees?: string[];
   // Floating-block marker. When this event matches one of the profile's
   // configured floating blocks (lunch, coffee break, gym, thinking time,
@@ -257,6 +261,7 @@ export function processCalendarEvents(
       isCancelled: ev.isCancelled,
       isOnlineMeeting: ev.isOnlineMeeting,
       onlineMeetingUrl: ev.onlineMeetingUrl,
+      location: ev.location?.displayName?.trim() || undefined,
       attendees: attendeeNames.length > 0 ? attendeeNames : undefined,
       // Floating-block marker. Match goes against the RAW `ev.subject` —
       // NOT the masked `subject` computed above — because privacy masking
@@ -1058,6 +1063,17 @@ export class SchedulingSkill {
         // downstream (commas in the location field, bullet list in body).
         const resolvedLocationParts: string[] = await (async (): Promise<string[]> => {
           if (args.is_online === true) return [];
+          // v2.5.1 — yaml-driven skip. Categories flagged
+          // `no_default_location: true` are personal time-on-calendar
+          // (focus blocks, buffer/think time) where the office address
+          // would be a wrong stamp. Reads from profile so a future
+          // category in any profile that wants the same behavior just
+          // sets the flag — no code knows which category name does this.
+          const cat = (args.category as string | undefined) ?? null;
+          if (cat) {
+            const match = (context.profile.categories ?? []).find(c => c.name === cat);
+            if (match?.no_default_location) return [];
+          }
           const userLoc = args.location as string | undefined;
           if (!userLoc || userLoc.trim().length === 0) {
             const officeLoc = context.profile.meetings.office_location;

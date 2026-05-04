@@ -44,6 +44,12 @@ export interface CalendarEvent {
   isCancelled: boolean;
   isOnlineMeeting: boolean;
   onlineMeetingUrl?: string;
+  // Graph's location object. displayName is the user-facing string (e.g.
+  // "Idan Office", "Meeting Room", "Reflectiz HQ — Shoham 5"). When
+  // isOnlineMeeting=true AND location.displayName is set, the meeting is
+  // hybrid (physical room + Teams link). Brief/render code reads this to
+  // narrate the physical location instead of defaulting to "Online".
+  location?: { displayName?: string };
   bodyPreview?: string;
   // v1.8.8 — recurring-event metadata. type='seriesMaster' = the series root
   // (mutations affect every occurrence — don't touch). 'occurrence' = one
@@ -260,7 +266,7 @@ async function getCalendarEventsImpl(
       .query({
         startDateTime: cleanStart,
         endDateTime: cleanEnd,
-        $select: 'id,subject,start,end,isAllDay,importance,showAs,sensitivity,categories,organizer,attendees,isCancelled,isOnlineMeeting,onlineMeetingUrl,bodyPreview,type,seriesMasterId',
+        $select: 'id,subject,start,end,isAllDay,importance,showAs,sensitivity,categories,organizer,attendees,isCancelled,isOnlineMeeting,onlineMeetingUrl,location,bodyPreview,type,seriesMasterId',
         $orderby: 'start/dateTime',
         $top: 100,
       });
