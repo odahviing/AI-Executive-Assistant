@@ -821,7 +821,23 @@ export class SchedulingSkill {
             const { pickSpreadSlots } = require('../../connectors/graph/calendar') as
               typeof import('../../connectors/graph/calendar');
             const chosenStarts = new Set(pickSpreadSlots(rawSlots, timezone, 3));
-            return rawSlots.filter(s => chosenStarts.has(s.start));
+            const slots = rawSlots.filter(s => chosenStarts.has(s.start));
+            // v2.5.2 — surface travelers so Sonnet renders dual-TZ on slot
+            // lines. Travelers list only present when at least one attendee
+            // had an active travel record at availability-load time.
+            const travelers = (attendeeAvailability ?? [])
+              .filter(a => a.travel)
+              .map(a => ({
+                email: a.email,
+                location: a.travel!.location,
+                until: a.travel!.until,
+                travelTimezone: a.timezone,
+                homeTimezone: a.travel!.homeTimezone,
+              }));
+            if (travelers.length > 0) {
+              return { slots, travelers };
+            }
+            return slots;
           } catch (err) {
             if (err instanceof GraphPermissionError) {
               return {
@@ -1056,13 +1072,76 @@ export class SchedulingSkill {
           logger.warn('create_meeting idempotency pre-check failed — proceeding with create', { err: String(err) });
         }
 
+        // v2.5.2 (Oran-bug fix #3) — day-aware mode default. Pre-v2.5.2 the
+        // `create_meeting` direct path defaulted to office whenever Sonnet
+        // didn't explicitly pass `is_online` or `location`. That stamps the
+        // office address on home-day internal meetings (Tuesday is a home
+        // day → meeting should be Huddle/online, not "Idan's Office"). The
+        // day-aware helper `determineSlotLocation` already encodes the right
+        // logic; it was only used in the `coordinate_meeting` flow. Now also
+        // consulted on direct `create_meeting` when Sonnet leaves the mode
+        // unspecified. Sonnet's explicit `is_online: true` or `location: ...`
+        // still wins — this is just the smart default for the unset case.
+        const sonnetSpecifiedMode = args.is_online === true
+          || (typeof args.location === 'string' && args.location.trim().length > 0);
+        let derivedIsOnline: boolean | undefined;
+        let derivedLocationFromHelper: string | undefined;
+        if (!sonnetSpecifiedMode) {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { determineSlotLocation } = require('./coord/utils') as typeof import('./coord/utils');
+            const ownerDomain = ownerEmail.includes('@') ? ownerEmail.split('@')[1].toLowerCase() : '';
+            const isInternal = attendees.every(a => {
+              const e = (a.email ?? '').toLowerCase();
+              if (!e) return true;
+              if (e === ownerEmail.toLowerCase()) return true;
+              if (assistantEmail && e === assistantEmail.toLowerCase()) return true;
+              return ownerDomain ? e.endsWith('@' + ownerDomain) : true;
+            });
+            const totalPeople = attendees.length + 1;  // +1 for owner
+            // anyTraveling — quick check for any attendee with active travel.
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { getCurrentTravel, searchPeopleMemory } = require('../../db') as typeof import('../../db');
+            let anyTraveling = false;
+            for (const a of attendees) {
+              const lower = (a.email ?? '').toLowerCase();
+              if (!lower || lower === ownerEmail.toLowerCase()) continue;
+              const matches = searchPeopleMemory(a.email);
+              const person = matches.find(m => (m.email ?? '').toLowerCase() === lower);
+              if (person?.slack_id && getCurrentTravel(person.slack_id)) {
+                anyTraveling = true;
+                break;
+              }
+            }
+            const helperResult = determineSlotLocation(
+              args.start as string,
+              context.profile,
+              totalPeople,
+              isInternal,
+              undefined,
+              anyTraveling,
+            );
+            derivedIsOnline = helperResult.isOnline;
+            derivedLocationFromHelper = helperResult.location;
+            logger.info('create_meeting — day-aware mode default applied', {
+              start: args.start, isInternal, anyTraveling,
+              helperLocation: helperResult.location, helperIsOnline: helperResult.isOnline,
+            });
+          } catch (err) {
+            logger.warn('create_meeting — determineSlotLocation threw, falling back to legacy default', {
+              err: String(err).slice(0, 200),
+            });
+          }
+        }
+
         // v2.4.3 (E1) — compute the location parts ONCE so both the
         // location field and the body block can read from the same source.
         // Non-online meetings only; online meetings skip both. Each part is
         // a single line (label, address, parking, etc.) — joined cleanly
         // downstream (commas in the location field, bullet list in body).
+        const effectiveIsOnline = args.is_online === true || derivedIsOnline === true;
         const resolvedLocationParts: string[] = await (async (): Promise<string[]> => {
-          if (args.is_online === true) return [];
+          if (effectiveIsOnline) return [];
           // v2.5.1 — yaml-driven skip. Categories flagged
           // `no_default_location: true` are personal time-on-calendar
           // (focus blocks, buffer/think time) where the office address
@@ -1074,7 +1153,7 @@ export class SchedulingSkill {
             const match = (context.profile.categories ?? []).find(c => c.name === cat);
             if (match?.no_default_location) return [];
           }
-          const userLoc = args.location as string | undefined;
+          const userLoc = (args.location as string | undefined) ?? derivedLocationFromHelper;
           if (!userLoc || userLoc.trim().length === 0) {
             const officeLoc = context.profile.meetings.office_location;
             if (!officeLoc) return [];
@@ -1126,7 +1205,7 @@ export class SchedulingSkill {
             const { scrubInternalLeakage } = require('../../utils/textScrubber') as typeof import('../../utils/textScrubber');
             const raw = args.body as string | undefined;
             const cleanedRaw = raw ? scrubInternalLeakage(raw) : '';
-            if (args.is_online === true) {
+            if (effectiveIsOnline) {
               // Online — no physical location to surface. Return body as-is.
               return cleanedRaw || undefined;
             }
@@ -1143,7 +1222,10 @@ export class SchedulingSkill {
               : locBlock;
             return composed;
           })(),
-          isOnline:   args.is_online as boolean,
+          // v2.5.2 — effective isOnline pulls from Sonnet's explicit arg first,
+          // falls back to determineSlotLocation's day-aware decision when both
+          // is_online and location were left blank.
+          isOnline:   effectiveIsOnline,
           // v2.3.2 (1C) / v2.3.6 (#73) / v2.4.3 (E1) — clean comma-joined
           // location with no em-dash separators. Pre-v2.4.3 used " — " as
           // the joiner which made the Outlook location field hard to read.

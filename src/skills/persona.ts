@@ -88,7 +88,7 @@ Do NOT call this for purely work-related facts (those go in learn_preference). T
         input_schema: {
           type: 'object' as const,
           properties: {
-            colleague_slack_id: { type: 'string', description: 'Slack user ID of the person' },
+            colleague_slack_id: { type: 'string', description: 'Slack user ID — opaque string like "U09P4HJ317W" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write a name-shaped invention like "U_ORAN_FRENKEL". Omit if you don\'t have the real ID — pass colleague_name only and the system resolves it.' },
             colleague_name:     { type: 'string', description: 'Display name of the person' },
             note:               { type: 'string', description: 'What you learned, in plain English. Be specific — vague notes are useless later.' },
             topic: {
@@ -202,24 +202,47 @@ Owner-only. Do NOT use this for colleagues (use note_about_person for them).`,
       }
 
       case 'note_about_self': {
-        if (context.senderRole !== 'owner') {
-          logger.warn('Colleague tried to call note_about_self — blocked', { userId: context.userId });
-          return { error: 'not_permitted', reason: 'Only the owner can note things about themselves.' };
+        // v2.5.2 — note_about_self is implicitly self-only: it writes to the
+        // CALLER's row (owner's row when senderRole==='owner'; the colleague's
+        // own row when senderRole==='colleague'). The prior owner-only reject
+        // blocked colleagues from saving anything they volunteered about
+        // themselves — exactly what the people-memory + social-engagement
+        // systems exist for. Letting Yael save "skiing in Italy" about herself
+        // is the whole point. No cross-write surface here, since slackId is
+        // resolved from context, never an arg.
+        let slackId: string;
+        let name: string;
+        if (context.senderRole === 'owner') {
+          slackId = context.profile.user.slack_user_id;
+          name    = context.profile.user.name;
+        } else {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getPersonMemory } = require('../db') as typeof import('../db');
+          slackId = context.userId;
+          const row = getPersonMemory(slackId);
+          name = row?.name ?? slackId;  // fall back to slack id if no row yet
         }
-        const slackId     = context.profile.user.slack_user_id;
-        const name        = context.profile.user.name;
         const note        = args.note as string;
         const topic       = args.topic as string;
         const subject     = (args.subject as string | undefined)?.trim() || undefined;
         const quality     = (args.topic_quality as SocialTopicQuality | undefined) ?? 'neutral';
         const initiatedBy = (args.initiated_by as 'maelle' | 'person' | undefined) ?? 'person';
 
-        upsertPersonMemory({
-          slackId,
-          name,
-          email:    context.profile.user.email,
-          timezone: context.profile.user.timezone,
-        });
+        // v2.5.2 — only seed email/timezone from profile when this is the
+        // owner's row. Colleague-self path doesn't have those values from
+        // context (they live on the colleague's people_memory row already
+        // via earlier inbound enrichment); passing the owner's values would
+        // clobber the colleague's row.
+        if (context.senderRole === 'owner') {
+          upsertPersonMemory({
+            slackId,
+            name,
+            email:    context.profile.user.email,
+            timezone: context.profile.user.timezone,
+          });
+        } else {
+          upsertPersonMemory({ slackId, name });
+        }
         appendPersonNote(slackId, note);
         const timelineTag = subject ? `[${topic}:${subject}]` : `[${topic}]`;
         appendPersonInteraction(slackId, {
@@ -228,8 +251,8 @@ Owner-only. Do NOT use this for colleagues (use note_about_person for them).`,
         });
         recordSocialMoment(slackId, topic, quality, initiatedBy, subject);
 
-        logger.info('Owner self-note saved', { slackId, topic, subject, quality, initiatedBy });
-        return { saved: true, scope: 'owner', topic, subject, quality };
+        logger.info('Self-note saved', { slackId, scope: context.senderRole, topic, subject, quality, initiatedBy });
+        return { saved: true, scope: context.senderRole, topic, subject, quality };
       }
     }
 

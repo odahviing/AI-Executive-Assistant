@@ -704,8 +704,18 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                         .map(a => a.emailAddress.address)
                         .filter(Boolean);
 
-                      const searchFrom = DateTime.fromISO(issue.date, { zone: timezone }).plus({ days: 1 }).startOf('day').toUTC().toISO()!;
-                      let searchTo = DateTime.fromISO(issue.date, { zone: timezone }).plus({ days: 7 }).endOf('day').toUTC().toISO()!;
+                      // v2.5.2 — bidirectional search. Forward-only (the
+                      // pre-v2.5.2 default) misses the natural "one day early"
+                      // option when vacation starts the next morning: a
+                      // Thursday OOF auto-move would never even consider
+                      // Wednesday. Owner direction: search [-3d, +7d] around
+                      // the OOF day, but never propose a date already in the
+                      // past — clamp the lower bound at today.
+                      const issueDt   = DateTime.fromISO(issue.date, { zone: timezone });
+                      const earliest  = DateTime.now().setZone(timezone).startOf('day');
+                      const lowerBound = DateTime.max(issueDt.minus({ days: 3 }).startOf('day'), earliest);
+                      const searchFrom = lowerBound.toUTC().toISO()!;
+                      let searchTo = issueDt.plus({ days: 7 }).endOf('day').toUTC().toISO()!;
                       // v2.1.4 — cadence-aware cap for recurring meetings
                       // displaced by a surprise OOF. Can't push a weekly
                       // forward into a week that already has its next
@@ -1534,6 +1544,9 @@ A meeting is PROTECTED from auto-reshuffle if ANY of:
   3. Subject matches an entry in \`meetings.protected[].name\`
   4. Any category matches an entry in \`meetings.protected[].category\`
 When the analyzer flags an overlap, it tells you which side is protected (\`kept_event_id\`) and which is movable (\`movable_event_id\`), plus \`protection_reasons\`. Use those fields when narrating. Active-mode DOES NOT auto-move overlaps in this release — that's v2.2 (needs the move-coord state machine). For now, report the overlap + the movable candidate + the protection reasons, and ask the owner to direct.
+
+OOF_CONFLICT WITH PROTECTION REASONS — frame as a question, not a status line.
+When an \`oof_conflict\` issue carries \`protection_reasons\` (the meeting can't be auto-moved because it has externals, ≥4 attendees, etc.), present it to the owner as a QUESTION: "External meeting on Thursday during your vacation — want me to handle, or you'll fix it yourself?". Include the meeting subject + date + the protection reasons in plain words, and the issue_id. If the owner says "I'll fix it" / "no, leave it" / "I'll handle", call \`dismiss_calendar_issue\` with that issue_id so tomorrow's check doesn't re-surface the same row. Don't dismiss without explicit owner intent — only on a clear "I'll handle / leave it / no" reply.
 
 Rules:
 - In passive mode: only book floating blocks when explicitly asked or after check_calendar_health reveals a gap

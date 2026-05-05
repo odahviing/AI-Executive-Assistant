@@ -417,6 +417,39 @@ async function collectBriefingData(
   // had already informed about it. The tasks.informed two-step (v2.2.4)
   // already does "show once, then drop" correctly for items that matter.
 
+  // v2.5.2 (S4.3) — just-tombstoned colleagues. When someone hits engagement_
+  // rank=0 via 'no_reply_to_ping' (two ignored proactive pings drift rank from
+  // 2 to 0), the rank-0 gate in classifyRow already prevents future pings —
+  // Maelle has silently stopped initiating. Surface this once in the brief as
+  // a passive past-tense line ("Amazia went quiet, closed it out") so the
+  // owner knows. 24h window: if the rank-0 transition happened in the last
+  // day, mention it; afterward it's stale news.
+  try {
+    const tombstoneRows = db.prepare(`
+      SELECT erl.slack_id, erl.created_at, pm.name
+      FROM engagement_rank_log erl
+      LEFT JOIN people_memory pm ON pm.slack_id = erl.slack_id
+      WHERE erl.new_rank = 0
+        AND erl.delta < 0
+        AND erl.reason IN ('no_reply_to_ping', 'no_social_response_to_coda')
+        AND datetime(erl.created_at) >= datetime('now', '-24 hours')
+      ORDER BY erl.created_at DESC
+    `).all() as Array<{ slack_id: string; created_at: string; name: string | null }>;
+    // Collapse duplicates per slack_id — only the most recent transition matters
+    const seen = new Set<string>();
+    for (const row of tombstoneRows) {
+      if (seen.has(row.slack_id)) continue;
+      seen.add(row.slack_id);
+      items.push({
+        kind: 'tombstoned_colleague',
+        name: row.name ?? row.slack_id,
+        tombstoned_at: row.created_at,
+      });
+    }
+  } catch (err) {
+    logger.warn('brief — tombstone collection threw, skipping', { err: String(err).slice(0, 200) });
+  }
+
   // v2.0.3 — collect gender for every person referenced by name anywhere in
   // the briefing items. Keyed on name (first-name collisions are rare inside
   // one owner's circle; Sonnet resolves from context).
@@ -510,6 +543,7 @@ TASK OWNERSHIP — critical distinction:
 - NO SELF-CONTRADICTION — if you closed an item in a colleague paragraph ("nothing to do", "handled", "booked", "you're set"), that SAME item MUST NOT appear in ACTION ITEMS. Pick one. Saying "Yael's BiWeekly is booked, nothing to do there" and then listing the same booking under ACTION ITEMS as something to verify makes you look lost. If you're flagging something for ${firstName}, don't also tell him there's nothing to do.
 - MULTI-CONFLICT AGGREGATION — when several meetings need ${firstName}'s decision on the same day (e.g. several conflicts on his OOF day, several overlaps in one block), DO NOT enumerate each one with its own bullet + per-item question. Bundle them. List the meeting names inline and ask ONE question. EXAMPLE: "Wednesday has 3 meetings on your OOF (Sales Sync, Vision, Product Weekly) — which do you want me to move or cancel?" not "1. Sales Sync — cancel or reschedule? 2. Vision — keep or move? 3. Product Weekly — cancel or reschedule?". Treat ${firstName} as a human reader, not someone clicking through a checklist.
 - outreach at "no_response" with no decision yet → surface it, but frame as "X hasn't replied — want me to try again or drop it?" Don't dramatize.
+- kind="tombstoned_colleague" items → ONE passive past-tense line, not a question. The colleague drifted to engagement_rank=0 from two ignored pings; future proactive pings are off until they re-engage. Example: "Amazia went quiet — closed it out, won't bring it up unless you tell me to." DO NOT ask "should I keep trying?" The decision was already made by the rank decay; the brief just informs.
 - If an outreach is effectively done (coord booked, owner handled it directly) don't resurface it just because it's in the data. Roll it into the colleague's paragraph as past-tense closure.
 
 AWAIT-REPLY AWARENESS:

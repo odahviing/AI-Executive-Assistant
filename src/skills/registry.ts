@@ -143,6 +143,33 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   // (themselves), rule-compliant slot, English subject. Auto shadow-DMs owner.
   // Same trust pattern as v2.2.1 move_meeting — rule-compliance is the gate.
   'create_meeting',
+  // v2.5.2 — self-write reopening. Personal-knowledge tools were over-tightened
+  // pre-v2.4 as a side-effect of broader colleague-path defense. The product
+  // model is: people memory + travel + social engagement are FOR colleagues —
+  // they exist so Maelle is smarter with them. Each tool below is allowed on
+  // the colleague path with a SELF-ONLY constraint enforced in its handler:
+  // a colleague can write only about themselves, never about another person
+  // (including the owner). The handler-side checks live in core/assistant.ts
+  // (note_about_person, log_interaction, confirm_gender, update_person_profile)
+  // and skills/persona.ts (note_about_self is implicitly self-only — it writes
+  // to context.userId by definition).
+  //
+  // What stays owner-only (still in the hard-block list at assistant.ts):
+  //   learn_preference, forget_preference, recall_preferences,
+  //   update_person_memory, get_person_memory, finalize_coord_meeting
+  // — these touch owner's catalog or other people's memory and have no
+  // self-only equivalent on the colleague side.
+  //
+  // update_person_profile colleague path also filters args to a self-writable
+  // subset (timezone, state, working_hours, currently_traveling, language,
+  // name_he) — colleagues can update operational fields about themselves but
+  // not relationship fields (engagement_rank, role_summary, etc.) which the
+  // owner curates.
+  'update_person_profile',
+  'note_about_person',
+  'note_about_self',
+  'confirm_gender',
+  'log_interaction',
 ]);
 
 /**

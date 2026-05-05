@@ -92,19 +92,11 @@ function isWorkday(weekday: number, skipWeekends: boolean): boolean {
   return weekday >= 1 && weekday <= 4;
 }
 
-function maelleAlreadyPingedToday(ownerUserId: string): boolean {
-  const db = getDb();
-  const start = new Date();
-  start.setUTCHours(0, 0, 0, 0);
-  const row = db.prepare(`
-    SELECT id FROM outreach_jobs
-    WHERE owner_user_id = ?
-      AND intent = 'proactive_social'
-      AND created_at >= ?
-    LIMIT 1
-  `).get(ownerUserId, start.toISOString()) as { id?: string } | undefined;
-  return !!row;
-}
+// v2.5.2 — per-(owner, colleague) daily cap moved into pickCandidate via the
+// `pinged_today` reject reason. The prior helper that returned a single
+// boolean for "did the owner ping ANYONE today" no longer fits the model —
+// each candidate is checked individually so siblings stay eligible. See the
+// pingedTodaySet build inside pickCandidate.
 
 // v2.2.2 — recency gate. Proactive social only for people interacted with
 // in the last 72 hours. Owner direction: don't try to start a social topic
@@ -123,7 +115,8 @@ type RejectReason =
   | 'outside_window'
   | 'weekend'
   | 'cooldown'
-  | 'active_conversation';
+  | 'active_conversation'
+  | 'pinged_today';
 
 // "Late" reasons are the ones where the person was otherwise eligible and
 // only lost on a downstream gate — those names are useful in the log
@@ -160,11 +153,16 @@ function classifyRow(
   ownerSlackId: string,
   nowUtc: DateTime,
   activeSet: Set<string>,
+  pingedTodaySet: Set<string>,
 ): RejectReason | null {
   if (r.slack_id === ownerSlackId) return 'is_owner';
   if (!r.timezone) return 'no_timezone';
   if ((r.engagement_rank ?? 2) <= 0) return 'rank_zero';
   if (r.proactive_pending === 1) return 'pending_lock';
+  // v2.5.2 — per-(owner, colleague) daily cap. Maelle won't START a second
+  // proactive ping with the SAME person same day, but other colleagues stay
+  // eligible. Reactive replies to volunteered social aren't gated here.
+  if (pingedTodaySet.has(r.slack_id)) return 'pinged_today';
 
   // v2.3.1 (B18) — real INBOUND history required. Owner direction: "only
   // when they are speaking, the counter starts." Maelle-initiated outbound
@@ -206,12 +204,25 @@ function pickCandidate(
   `).all(ownerSlackId) as Array<{ colleague_slack_id: string }>;
   const activeSet = new Set(activeRows.map(r => r.colleague_slack_id));
 
+  // v2.5.2 — per-(owner, colleague) daily cap. Single query gathers everyone
+  // already proactively pinged today; classifyRow filters them out individually
+  // so other colleagues remain eligible.
+  const startOfDayUtc = new Date();
+  startOfDayUtc.setUTCHours(0, 0, 0, 0);
+  const pingedTodayRows = db.prepare(`
+    SELECT DISTINCT colleague_slack_id FROM outreach_jobs
+    WHERE owner_user_id = ?
+      AND intent = 'proactive_social'
+      AND created_at >= ?
+  `).all(ownerSlackId, startOfDayUtc.toISOString()) as Array<{ colleague_slack_id: string }>;
+  const pingedTodaySet = new Set(pingedTodayRows.map(r => r.colleague_slack_id));
+
   const survivors: CandidateRow[] = [];
   const dropped: Partial<Record<RejectReason, number>> = {};
   const lateDrops: Array<{ name: string; reason: RejectReason }> = [];
 
   for (const r of rows) {
-    const reason = classifyRow(r, config, ownerSlackId, nowUtc, activeSet);
+    const reason = classifyRow(r, config, ownerSlackId, nowUtc, activeSet, pingedTodaySet);
     if (reason === null) {
       survivors.push(r);
       continue;
@@ -386,14 +397,13 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
   }
 
   try {
-    // Daily cap: at most one proactive ping per owner per day
-    if (maelleAlreadyPingedToday(profile.user.slack_user_id)) {
-      logger.debug('social_outreach_tick skipped — already pinged today', {
-        ownerUserId: profile.user.slack_user_id,
-      });
-      return;
-    }
-
+    // v2.5.2 — daily cap moved into pickCandidate as per-(owner, colleague)
+    // filter (`pinged_today` reject reason). The prior early-return at this
+    // point gated the WHOLE owner from any further pings once one fired today,
+    // so Maya was blocked because Amazia had been pinged. Filtering at the
+    // candidate level keeps other people eligible while still preventing
+    // Maelle from starting two proactive social threads with the same person
+    // in the same day.
     const db = getDb();
     const rows = db.prepare(`
       SELECT slack_id, name, timezone, engagement_rank, last_initiated_at, last_social_at,

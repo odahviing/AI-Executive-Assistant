@@ -507,7 +507,7 @@ async function sendCoordDM(
     const conflictClause = params.moveContext.conflictReason
       ? ` — ${params.moveContext.conflictReason}`
       : '';
-    body = `small scheduling conflict on ${params.ownerName}'s side for our "${params.subject}"${othersLine}${conflictClause}. Any chance we shift it from ${curLabel}? Here are a few options that work for him:\n${slotLines}${optInLine}\n\nWhich of these works for you? (Happy to suggest other times if none fit.)`;
+    body = `small scheduling conflict for our "${params.subject}"${othersLine}${conflictClause}. Any chance we shift it from ${curLabel}? Here are a few options that work for ${params.ownerName}:\n${slotLines}${optInLine}\n\nWhich of these works for you? (Happy to suggest other times if none fit.)`;
   } else {
     body = `${params.ownerName} asked me to find a time for a ${params.durationMin}-min meeting with you${othersLine}.${topicLine}\n\nHere are a few options — which works best for you?\n${slotLines}${optInLine}\n\nLet me know which one you prefer, or if none of these work I'll find something else.`;
   }

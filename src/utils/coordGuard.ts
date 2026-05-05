@@ -66,18 +66,64 @@ export interface JudgeResult {
   elapsedMs: number;
 }
 
+// v2.5.2 — verdict cache. Pre-cache, the judge ran ~3× per Oran-style coord
+// (every new colleague message in the same thread re-judged the same subject +
+// participants). Three full Sonnet calls = ~5s of latency for nothing. Cache
+// the verdict per (senderId, threadTs, subject, participants) for 10 min;
+// natural conversation flow (clarifying, picking a time) keys identically and
+// reuses the prior verdict. New subject or new participant in the request
+// invalidates and re-judges.
+const JUDGE_CACHE_TTL_MS = 10 * 60 * 1000;
+interface CachedJudgeEntry { expiresAt: number; result: JudgeResult; }
+const judgeCache = new Map<string, CachedJudgeEntry>();
+
+function judgeCacheKey(opts: {
+  senderId?: string;
+  threadTs?: string;
+  subject: string;
+  participantNames: string[];
+}): string {
+  const sid = opts.senderId ?? '';
+  const tts = opts.threadTs ?? '';
+  const subj = (opts.subject ?? '').trim().toLowerCase();
+  const parts = [...opts.participantNames].sort().join(',').toLowerCase();
+  return `${sid}|${tts}|${subj}|${parts}`;
+}
+
 /**
  * Ask Haiku: given the conversation + the coord request, is this legitimate
  * or suspicious? Cheap (~$0.0002 per call, ~500ms latency).
+ *
+ * v2.5.2 — verdict cached per (senderId, threadTs, subject, participants) for
+ * 10 min. Same coord re-asked in the same thread (e.g. colleague clarifying
+ * the time) returns the prior verdict instead of re-running Sonnet.
  */
 export async function judgeCoordRequest(opts: {
   senderName: string;
+  senderId?: string;
+  threadTs?: string;
   senderRecentMessages: string[]; // last ~5 messages from the colleague
   ownerFirstName: string;
   subject: string;
   participantNames: string[];
   durationMin: number;
 }): Promise<JudgeResult> {
+  // Cache lookup
+  const cacheKey = judgeCacheKey(opts);
+  const cached = judgeCache.get(cacheKey);
+  if (cached) {
+    if (cached.expiresAt > Date.now()) {
+      logger.info('Coord judge — cache hit', {
+        senderName: opts.senderName,
+        subject: opts.subject,
+        verdict: cached.result.verdict,
+        cachedReason: cached.result.reason,
+      });
+      return { ...cached.result, elapsedMs: 0 };
+    }
+    judgeCache.delete(cacheKey);
+  }
+
   const start = Date.now();
 
   const convoSnippet = opts.senderRecentMessages
@@ -139,6 +185,17 @@ VERDICT: SUSPICIOUS | short reason`;
       reason,
       elapsedMs,
     });
+    // Cache LEGIT verdicts; SUSPICIOUS already gets the dedicated suspicion
+    // cache via markConversationSuspicious (which has different semantics —
+    // blocks downstream tools, keyed on senderId+threadTs only). Caching
+    // SUSPICIOUS here would be redundant and could mask a re-judge of a
+    // different subject from the same sender.
+    if (verdict === 'LEGIT') {
+      judgeCache.set(cacheKey, {
+        expiresAt: Date.now() + JUDGE_CACHE_TTL_MS,
+        result: { verdict, reason, elapsedMs },
+      });
+    }
     return { verdict, reason, elapsedMs };
   } catch (err) {
     const elapsedMs = Date.now() - start;

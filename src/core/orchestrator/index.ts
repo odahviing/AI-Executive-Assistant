@@ -907,6 +907,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
 
           const judgeResult = await judgeCoordRequest({
             senderName: input.senderName ?? 'colleague',
+            senderId: input.userId,
+            threadTs,
             senderRecentMessages: colleagueMsgs,
             ownerFirstName: profile.user.name.split(' ')[0],
             subject,
@@ -922,6 +924,31 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             // in the owner's DM. 10-min TTL.
             const { markConversationSuspicious } = await import('../../utils/coordGuard');
             markConversationSuspicious(input.userId, threadTs, judgeResult.reason);
+            // v2.5.2 — system-driven impersonation note. The judge fired on a
+            // colleague: append a system-attributed entry to their people-
+            // memory note so a future judge / future owner / future flag has
+            // history. Not Sonnet-driven — Sonnet on this turn is about to be
+            // told to refuse, the note must land regardless. Idempotent: a
+            // freshly-suspicious conversation in the same 10-min TTL just adds
+            // a second log line, which is fine — pattern over single events.
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { appendPersonNote, upsertPersonMemory } = require('../../db') as typeof import('../../db');
+              const isoDate = new Date().toISOString().slice(0, 10);
+              const noteText = `[security ${isoDate}] Coord judge flagged SUSPICIOUS. Reason: ${judgeResult.reason.slice(0, 240)}. Subject probed: "${subject.slice(0, 80)}". Auto-recorded; flag if pattern repeats.`;
+              upsertPersonMemory({
+                slackId: input.userId,
+                name: input.senderName ?? input.userId,
+              });
+              appendPersonNote(input.userId, noteText);
+              logger.info('Security — system-driven impersonation note saved', {
+                colleagueId: input.userId, reason: judgeResult.reason.slice(0, 120),
+              });
+            } catch (noteErr) {
+              logger.warn('Security — system note write threw, non-fatal', {
+                err: String(noteErr).slice(0, 200),
+              });
+            }
             logger.warn('⚠ SECURITY — coord judge flagged SUSPICIOUS — REFUSED', {
               senderUserId: input.userId,
               senderName: input.senderName,
@@ -1438,11 +1465,20 @@ Rules:
     && finalReply
     && finalReply.trim().length > 0
     && toolCallSummaries.length > 0
-    // v2.2.4 (bug 1B) — coda only on OWNER-path turns. Piggybacking proactive
-    // social on a colleague's task reply (e.g. Yael asking to reschedule) is
-    // intrusive — they're there for help, not a chat. Owner-path turns are
-    // where Maelle has earned the moment to weave a human line in.
-    && turnSenderRole === 'owner'
+    // v2.5.2 — fire on BOTH owner-path AND colleague-path turns. The v2.2.4
+    // restriction to owner-only over-corrected: people memory + social
+    // engagement EXIST so Maelle is socially smarter with colleagues, not so
+    // she's social with the owner. The original v2.2.0 design model is right:
+    // first resolve the task (the parking tool fires below — that's the gate),
+    // THEN piggyback ONE warm line on the way out. Engagement_rank +
+    // proactive_pending + the daily-cap (proactive tick) prevent over-firing.
+    // The v2.2.4 anti-intrusive intuition still has merit for ONE specific
+    // case: a reschedule ask isn't the moment to chat. The parkingToolPattern
+    // below excludes that case implicitly — message_colleague + outreach_send
+    // + create_approval are owner-driven outbound, only colleague-path matches
+    // tend to be coordinate_meeting (booking, not reschedule). For the future
+    // reschedule-specific case we'd add an intent gate; for now the pattern is
+    // tight enough that the false-positive rate is acceptable.
   ) {
     const parkingToolPattern = /^\[(coordinate_meeting|message_colleague|create_approval|outreach_send)/;
     const hadParkingCall = toolCallSummaries.some(s => parkingToolPattern.test(s));

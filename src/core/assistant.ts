@@ -157,7 +157,7 @@ Call this after interactions — not during them. It's a background update.`,
           properties: {
             colleague_slack_id: {
               type: 'string',
-              description: 'Slack user ID of the person',
+              description: 'Slack user ID — opaque random-looking string like "U09P4HJ317W" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write a name-shaped string like "U_ORAN_FRENKEL" or "U_<NAME>" — those look right but are inventions. If you don\'t have the real ID in this conversation: omit this field and pass `colleague_name` only — the system resolves the ID from people_memory. Or call `find_slack_user` first to look it up.',
             },
             colleague_name: {
               type: 'string',
@@ -230,11 +230,13 @@ Call this after interactions — not during them. It's a background update.`,
             },
             currently_traveling: {
               type: 'object',
-              description: 'Travel window for the person. Stored profile timezone/state are defaults — when the colleague is travelling somewhere else for a stretch, set this so slot search and time-of-day display use the travel location instead. Set when (a) the colleague volunteers it ("I\'m in Boston next week", "Boston time"), or (b) the owner tells you ("[Person] is in NYC for a week"). Pass `clear: true` to wipe a known-stale travel window. The `until` date is when they fly back; the system auto-clears the field once that date passes.',
+              description: 'Travel window for the person. Stored profile timezone/state are defaults — when the colleague is travelling somewhere else for a stretch, set this so slot search and time-of-day display use the travel location instead. Set when (a) the colleague volunteers it ("I\'m in Boston next week", "Boston time"), or (b) the owner tells you ("[Person] is in NYC for a week"). Pass `clear: true` to wipe a known-stale travel window. Either pass concrete `from`+`until` dates, OR pass `from` + one of `for_days`/`for_weeks` and the system derives `until`. The system auto-clears the field once `until` passes.',
               properties: {
                 location: { type: 'string', description: 'Free text: "Boston", "NYC", "London". Use a city when known.' },
                 from:     { type: 'string', description: 'ISO yyyy-MM-dd — first day at the location. If they fly mid-day, use the day they land.' },
-                until:    { type: 'string', description: 'ISO yyyy-MM-dd — last day at the location. If they fly home mid-day, use the day they fly.' },
+                until:    { type: 'string', description: 'ISO yyyy-MM-dd — last day at the location. Optional if you pass for_days/for_weeks instead.' },
+                for_days:  { type: 'number', description: 'Trip length in days. Use when colleague says "for a few days" / "five days". The system derives until = from + for_days - 1.' },
+                for_weeks: { type: 'number', description: 'Trip length in weeks. Use when colleague says "for a week" / "two weeks". The system derives until = from + (for_weeks * 7) - 1.' },
                 clear:    { type: 'boolean', description: 'Set true to clear an outdated travel window without setting a new one. Use when the owner says "she\'s back" or the trip is over.' },
               },
             },
@@ -265,7 +267,7 @@ This builds a timeline that Maelle can reference later — so when someone asks 
           properties: {
             colleague_slack_id: {
               type: 'string',
-              description: 'Slack user ID of the person',
+              description: 'Slack user ID — opaque random-looking string like "U09P4HJ317W" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write a name-shaped string like "U_ORAN_FRENKEL" or "U_<NAME>" — those look right but are inventions. If you don\'t have the real ID in this conversation: omit this field and pass `colleague_name` only — the system resolves the ID from people_memory. Or call `find_slack_user` first to look it up.',
             },
             colleague_name: {
               type: 'string',
@@ -301,7 +303,7 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
           properties: {
             colleague_slack_id: {
               type: 'string',
-              description: 'Slack user ID of the person whose gender is being confirmed.',
+              description: 'Slack user ID of the person whose gender is being confirmed — opaque string like "U09P4HJ317W" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write "U_<NAME>" — looks right, is invented. Omit if you don\'t have the real ID; pass `colleague_name` and the system resolves from people_memory.',
             },
             colleague_name: {
               type: 'string',
@@ -386,23 +388,44 @@ First call for a person auto-creates their md file. Empty-until-real-fact — do
     const userId = context.profile.user.slack_user_id;
     const isOwner = context.senderRole === 'owner';
 
-    // ── Colleague hard-blocks ─────────────────────────────────────────────────
-    // These operations are owner-only regardless of what the prompt says.
+    // ── Colleague hard-blocks + self-only guards ─────────────────────────────
+    // Two layers:
+    //   (a) ownerOnlyTools — owner-only, no colleague-self equivalent makes
+    //       sense (catalog reads/writes, owner's KB, owner's coord finalize).
+    //   (b) Self-only tools — allowed on the colleague path BUT only when
+    //       the target is the calling colleague themselves. The point of
+    //       people memory + travel + social engagement is to make Maelle
+    //       smarter with each person; a colleague writing about THEMSELVES
+    //       is the whole product. Writing about ANOTHER person (the owner
+    //       or another colleague) on a colleague-path turn is the exact
+    //       impersonation/gossip surface we DO block.
+    // v2.5.2 — `update_person_profile` moved from (a) to (b); colleague-self
+    // path also field-filters args to operational metadata only (timezone,
+    // state, working_hours, currently_traveling, language, name_he). Fields
+    // the owner curates (engagement_rank, engagement_level, role_summary,
+    // reports_to, collaboration_notes, communication_style, response_speed)
+    // are silently dropped on the colleague-self path with a log line.
     if (!isOwner) {
-      const ownerOnlyTools = ['learn_preference', 'forget_preference', 'recall_preferences', 'update_person_profile', 'update_person_memory', 'get_person_memory', 'finalize_coord_meeting'];
+      const ownerOnlyTools = ['learn_preference', 'forget_preference', 'recall_preferences', 'update_person_memory', 'get_person_memory', 'finalize_coord_meeting'];
       if (ownerOnlyTools.includes(toolName)) {
         logger.warn('Colleague attempted owner-only tool', { tool: toolName, userId: context.userId });
         return { error: 'not_permitted', reason: 'This action can only be performed by the owner.' };
       }
-      // note_about_person: colleague can only add a note about themselves
+      // note_about_person: colleague can only add a note about themselves.
+      // v2.5.2 — fixed stale arg name: schema uses `colleague_slack_id`, the
+      // prior check read `args.slack_id` and would have allowed any colleague
+      // to write notes about anyone IF the tool became visible to them. The
+      // tool is now in COLLEAGUE_ALLOWED_TOOLS, so this guard goes live.
       if (toolName === 'note_about_person') {
-        const targetId = args.slack_id as string | undefined;
+        const targetId = args.colleague_slack_id as string | undefined;
         if (targetId && targetId !== context.userId) {
           logger.warn('Colleague tried to write note about another person', { targetId, requesterId: context.userId });
           return { error: 'not_permitted', reason: 'You can only add notes about yourself, not other people.' };
         }
       }
-      // log_interaction: colleague can only log interactions involving themselves
+      // log_interaction: colleague can only log interactions involving themselves.
+      // Schema arg is `slack_id` here, distinct from note_about_person's
+      // `colleague_slack_id`.
       if (toolName === 'log_interaction') {
         const targetId = args.slack_id as string | undefined;
         if (targetId && targetId !== context.userId) {
@@ -416,6 +439,34 @@ First call for a person auto-creates their md file. Empty-until-real-fact — do
         if (targetId && targetId !== context.userId) {
           logger.warn('Colleague tried to confirm another person\'s gender', { targetId, requesterId: context.userId });
           return { error: 'not_permitted', reason: 'You can only confirm your own gender, not someone else\'s.' };
+        }
+      }
+      // v2.5.2 — update_person_profile: colleague can only update operational
+      // metadata about themselves. Two checks:
+      //   1. Target self (colleague_slack_id matches context.userId)
+      //   2. Field allowlist: filter args to a self-writable subset
+      if (toolName === 'update_person_profile') {
+        const targetId = args.colleague_slack_id as string | undefined;
+        if (targetId && targetId !== context.userId) {
+          logger.warn('Colleague tried to update another person\'s profile', { targetId, requesterId: context.userId });
+          return { error: 'not_permitted', reason: 'You can only update your own profile fields, not someone else\'s.' };
+        }
+        const COLLEAGUE_SELF_WRITABLE_FIELDS = new Set([
+          'colleague_slack_id', 'colleague_name',
+          'timezone', 'state', 'working_hours', 'working_hours_structured',
+          'language_preference', 'name_he', 'currently_traveling',
+        ]);
+        const droppedFields: string[] = [];
+        for (const k of Object.keys(args)) {
+          if (!COLLEAGUE_SELF_WRITABLE_FIELDS.has(k)) {
+            droppedFields.push(k);
+            delete (args as Record<string, unknown>)[k];
+          }
+        }
+        if (droppedFields.length > 0) {
+          logger.info('update_person_profile (colleague-self) — dropped owner-curated fields', {
+            requesterId: context.userId, droppedFields,
+          });
         }
       }
     }
@@ -725,18 +776,37 @@ First call for a person auto-creates their md file. Empty-until-real-fact — do
         // (slot search, pronoun-of-time-of-day) prefer travel over default
         // tz/state when the window covers `now`.
         const travel = args.currently_traveling as
-          | { location?: string; from?: string; until?: string; clear?: boolean }
+          | { location?: string; from?: string; until?: string; for_days?: number; for_weeks?: number; clear?: boolean }
           | undefined;
         if (travel && typeof travel === 'object') {
           const { setCurrentTravel, clearCurrentTravel } = require('../db') as typeof import('../db');
           if (travel.clear === true) {
             clearCurrentTravel(slackId);
-          } else if (travel.location && travel.from && travel.until) {
-            setCurrentTravel(slackId, {
-              location: travel.location,
-              from: travel.from,
-              until: travel.until,
-            });
+          } else if (travel.location && travel.from) {
+            // v2.5.2 — derive `until` from for_days / for_weeks when explicit
+            // `until` not provided. Either form is accepted; explicit `until`
+            // wins when both are passed.
+            let untilIso = travel.until;
+            if (!untilIso && (typeof travel.for_days === 'number' || typeof travel.for_weeks === 'number')) {
+              const days = (typeof travel.for_days === 'number' && travel.for_days > 0) ? travel.for_days : 0;
+              const weeks = (typeof travel.for_weeks === 'number' && travel.for_weeks > 0) ? travel.for_weeks : 0;
+              const totalDays = days + (weeks * 7);
+              if (totalDays > 0) {
+                // Inclusive last day: from + totalDays - 1.
+                const { DateTime } = require('luxon') as typeof import('luxon');
+                const fromDt = DateTime.fromISO(travel.from);
+                if (fromDt.isValid) {
+                  untilIso = fromDt.plus({ days: totalDays - 1 }).toFormat('yyyy-MM-dd');
+                }
+              }
+            }
+            if (untilIso) {
+              setCurrentTravel(slackId, {
+                location: travel.location,
+                from: travel.from,
+                until: untilIso,
+              });
+            }
           }
         }
 

@@ -209,8 +209,9 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     mpimMemberIds?: string[];  // all non-bot member IDs when in MPIM
     voiceInput?: boolean;      // true if input came from a voice message
     images?: AnthropicImageBlock[];  // v1.7.1 — image content blocks attached to this turn
+    imageUrls?: string[];            // v2.5.2 — Slack url_private per attached image, persisted to history so Sonnet can forward via message_colleague.attachments
   }): Promise<void> {
-    const { senderId, text, channelId, ts, threadTs, say, client, isChannel, isMpim, voiceInput, mpimMemberIds, images } = params;
+    const { senderId, text, channelId, ts, threadTs, say, client, isChannel, isMpim, voiceInput, mpimMemberIds, images, imageUrls } = params;
     const rawRole = getSenderRole(senderId);
 
     // ── Colleague-mode testing (owner only, DMs only) ────────────────────────
@@ -365,8 +366,15 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     // v1.7.1 — when images are attached, prefix the persisted text with
     // "[Image]" so future turns know an image was shared in this turn (the
     // bytes themselves are never stored — see vision/index.ts).
+    // v2.5.2 — also persist the Slack url_private of each image so Sonnet
+    // can forward it via `message_colleague.attachments` later. The bytes
+    // are gone after the turn, but the URL is still valid (bot token auth)
+    // and the SendOptions.attachments path knows how to re-download +
+    // re-upload to the recipient.
     const persistedText = images && images.length > 0
-      ? `[Image] ${text}`
+      ? (imageUrls && imageUrls.length > 0
+          ? `[Image attached — file_urls: ${imageUrls.join(' ')}] ${text}`
+          : `[Image] ${text}`)
       : text;
     appendToConversation(threadTs, channelId, { role: 'user', content: persistedText, ts });
 
@@ -797,6 +805,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     }
 
     const images: AnthropicImageBlock[] = [];
+    const imageUrls: string[] = [];
     for (const f of toProcess) {
       const dl = await downloadSlackImage(f.url_private, assistant.slack.bot_token, f.mimetype);
       if ('error' in dl) {
@@ -819,28 +828,56 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         return;
       }
 
-      // Image guard: scan for instruction-like text. v1.7.1 owner path =
-      // log + shadow-notify but proceed (owner is trusted). When colleague
-      // path opens, flip this to refuse + notify.
+      // Image guard: scan for instruction-like text.
+      //   - Owner path: log + shadow-notify but PROCEED. Owner is trusted; he
+      //     might legitimately share screenshots that contain text. Sonnet
+      //     reads the image as content, not as instructions, governed by the
+      //     owner-path system prompt.
+      //   - Colleague path (v2.5.2): REFUSE the image + shadow-notify the
+      //     owner. Colleague-uploaded images with embedded text are a known
+      //     prompt-injection surface (e.g. screenshot claiming "Idan said you
+      //     can do X"). The image is dropped from the turn — Sonnet never
+      //     sees it. The colleague gets a human-toned reply explaining we
+      //     don't read attachments here. Owner sees the security shadow note
+      //     so the pattern is visible.
       const scan = await scanImageForInjection(dl);
+      const senderRoleForImage = getSenderRole(message.user!);
       if (scan.suspicious) {
-        logger.warn('⚠ SECURITY — image flagged as suspicious (v1.7.1 owner path: log + proceed)', {
+        logger.warn('⚠ SECURITY — image flagged as suspicious', {
           senderId: message.user,
+          senderRole: senderRoleForImage,
           channelId,
           reason: scan.reason,
           extractedTextPreview: scan.extractedText?.slice(0, 200),
+          action: senderRoleForImage === 'owner' ? 'log_and_proceed' : 'refuse_and_drop',
         });
         try {
           await shadowNotify(profile, {
             channel: channelId,
             threadTs,
-            action: '⚠ Image guard: suspicious content',
-            detail: `Reason: ${scan.reason ?? 'unknown'}. Extract: "${scan.extractedText?.slice(0, 200) ?? '(none)'}"`,
+            action: senderRoleForImage === 'owner'
+              ? '⚠ Image guard: suspicious content (owner — proceeded)'
+              : '⚠ Image guard: suspicious content from colleague — REFUSED',
+            detail: `Sender: ${message.user}. Reason: ${scan.reason ?? 'unknown'}. Extract: "${scan.extractedText?.slice(0, 200) ?? '(none)'}"`,
           });
         } catch (_) {}
+        if (senderRoleForImage === 'colleague') {
+          // Drop this image from the turn entirely. The colleague gets a
+          // human-toned message back; Sonnet never sees the suspicious bytes.
+          try {
+            await client.chat.postMessage({
+              token: assistant.slack.bot_token,
+              channel: channelId,
+              thread_ts: threadTs,
+              text: `Sorry, I can't read attached images here — let me know in plain text what you need.`,
+            });
+          } catch (_) {}
+          continue;  // skip pushing to images[] — Sonnet won't see this file
+        }
       }
 
       images.push(buildImageBlock(dl));
+      imageUrls.push(f.url_private as string);
     }
 
     if (images.length === 0) return;
@@ -871,6 +908,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       isMpim,
       mpimMemberIds,
       images,
+      imageUrls,
     });
   }
 
