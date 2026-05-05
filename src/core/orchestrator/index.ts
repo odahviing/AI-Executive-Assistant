@@ -265,6 +265,30 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
 async function runOrchestratorImpl(input: OrchestratorInput): Promise<OrchestratorOutput> {
   const { userMessage, conversationHistory, threadTs, profile } = input;
 
+  // v2.5.4 Bug 3 — MPIM with non-owner members forces colleague-context.
+  // Pre-v2.5.4 the prompt unlocked owner-level rules whenever isOwnerInGroup
+  // was true. That leaked subjects / attendees / project names into
+  // colleague-readable threads when owner asked things like "am I free?".
+  // Owner direction (Calendly / Julia thread, 2026-05-05): in any MPIM with
+  // non-owner members, treat the conversation as colleague-shaped — tools
+  // restricted, narration sanitized, even when owner is the typer. Owner
+  // retains AUTH (his typed asks still execute via the colleague-allowed
+  // tools that have rule-compliance gates). For owner-only data (memory,
+  // preferences, full calendar narration) he asks in his private DM.
+  // isOwnerInGroup stays true so social classification + people-memory
+  // path still recognizes "owner is typing"; the override here only
+  // affects tool gating + prompt framing + handler senderRole.
+  const mpimWithOthers = !!(input.isMpim && input.mpimMemberIds &&
+    input.mpimMemberIds.some(id => id !== profile.user.slack_user_id));
+  if (mpimWithOthers && input.senderRole === 'owner') {
+    logger.info('orchestrator — MPIM with non-owner: forcing colleague-context', {
+      actualTyper: input.userId,
+      mpimMembers: input.mpimMemberIds,
+      threadTs: input.threadTs,
+    });
+    input.senderRole = 'colleague';
+  }
+
   logger.info('Orchestrator invoked', {
     user: profile.user.name,
     channel: input.channel,

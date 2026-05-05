@@ -490,7 +490,22 @@ export async function findAvailableSlots(params: {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
   const maxSearchDays = params.maxSearchDays ?? 21;
-  const travelBufferMs = (params.travelBufferMinutes ?? 0) * 60 * 1000;
+  // v2.5.4 — category-driven travel buffer. When the requested category has
+  // `requires_travel_buffer: true` (e.g. "Outside meeting") AND the caller
+  // didn't pass an explicit travel_buffer_minutes, default to 30 min on each
+  // side. Owner direction: the buffer fact belongs to the category ("if it's
+  // Outside, we need buffer"), the buffer LENGTH is independent of the
+  // category and stays fixed at a sensible default for now.
+  let effectiveTravelBufferMinutes = params.travelBufferMinutes ?? 0;
+  if (params.category && params.profile && effectiveTravelBufferMinutes === 0) {
+    const matchedCat = (params.profile.categories ?? []).find(
+      c => c.name.toLowerCase() === params.category!.toLowerCase(),
+    );
+    if (matchedCat?.requires_travel_buffer) {
+      effectiveTravelBufferMinutes = 30;
+    }
+  }
+  const travelBufferMs = effectiveTravelBufferMinutes * 60 * 1000;
   // v2.2.3 (#43) — owner-only by default for the busy filter. Don't assume
   // we can / should move attendee meetings. Their work-window clips below.
   // Opt-in deeper search: caller passes attendeeBusyEmails after recipient
@@ -571,8 +586,11 @@ export async function findAvailableSlots(params: {
     // before 18:00). Applying the profile buffer AGAIN in the isFree
     // check produced artefacts like "17:05" when the previous meeting
     // ended at 17:00 — wrong by design. Connected slots are fine.
-    // The only additional padding we keep is travel buffer for custom mode.
-    const bufferMs = (meetingMode === 'custom' ? travelBufferMs : 0);
+    // The only additional padding we keep is travel buffer for custom mode
+    // OR for categories with `requires_travel_buffer: true` (v2.5.4).
+    const bufferMs = (meetingMode === 'custom' || effectiveTravelBufferMinutes > 0)
+      ? travelBufferMs
+      : 0;
     const thinkingTimeMinChunk = profile?.meetings.thinking_time_min_chunk_minutes ?? 30;
     // v1.6.11 — per-day-type thinking-time threshold. Office days usually need
     // more protected focus time than home days; profile can set each

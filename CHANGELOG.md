@@ -2,6 +2,34 @@
 
 ---
 
+## 2.5.4 — Calendly bug fixes (organizer trust, MPIM colleague-context, MPIM private-ask via approval, MPIM single-message), category-driven travel buffer
+
+Real Slack thread on 2026-05-05 surfaced four MPIM bugs. Maelle (a) hallucinated "Calendly events can't be moved" without trying the tool, (b) @-tagged owner inside the MPIM for confirmation when she should have asked privately, (c) leaked unrelated meeting subjects when narrating "is he free?" in front of a colleague, (d) posted two redundant messages (group announcement + tagged colleague) instead of one. All four fixed below. Plus the `requires_travel_buffer` flag from v2.5.3's category schema actually wires through to slot search now.
+
+### Added
+
+- **TRUST THE ORGANIZER prompt rule** in `src/skills/meetings.ts` next to ATTENDEE-ONLY EVENTS. Tells Sonnet to read `event.organizer.emailAddress.address` — if it equals owner's email, he can move/cancel/update regardless of the booking source (Calendly, Comeet, Outlook, plugins). Don't pre-refuse on "this was booked through Calendly" — the tool's organizer guard already handles the genuine not-organizer case. Closes the Bug 1 hallucination pattern from the Calendly/Julia thread.
+- **MPIM colleague-context override** at `src/core/orchestrator/index.ts:265`. When a turn arrives with `isMpim=true` AND `mpimMemberIds` includes any non-owner member, the orchestrator forces `senderRole='colleague'` for the rest of the turn — even when the typer was the owner. Tools restrict to `COLLEAGUE_ALLOWED_TOOLS` (no `recall_preferences`, no `learn_preference`, no full memory dumps); narration follows colleague-level privacy rules; `isOwnerInGroup` stays true so social-classification + people-memory still recognize "owner is typing." Owner authorization still works because the colleague-allowed tools include rule-compliance gates that accept owner-explicit asks. Closes Bug 3 — fixes the leak where Idan asking "am I free?" surfaced unrelated meeting subjects to a colleague reading the same thread.
+- **MPIM PRIVATE OWNER QUESTIONS prompt rule** in `src/core/orchestrator/systemPrompt.ts:172`. Tells Sonnet that when she needs owner's input in MPIM-with-others (sensitive cancel, ambiguous reschedule, override of a rule), she does NOT @-tag him in the MPIM — she calls `create_approval(kind=freeform)` which DMs him in his private channel away from the colleagues. In the MPIM she replies with one short line ("Let me check with Idan and come back to you"). When the approval resolves, the resolution comes back into the MPIM thread automatically (see resolver change below). Closes Bug 2.
+- **Approval origin captured in payload** at `src/tasks/skill.ts` create_approval handler. Records `origin_channel`, `origin_thread_ts`, `origin_is_mpim` from the calling context. Pre-v2.5.4 the resolver always 1:1-DMed the requester via `sendDirect`; in MPIM-originated approvals the resolution belongs in the MPIM thread, not in a separate DM. Approval payloads from non-MPIM contexts (regular colleague DMs) keep the existing `sendDirect` path.
+- **Resolver posts back to MPIM origin** at `src/core/approvals/resolver.ts:472`. When `payload.origin_is_mpim === true` AND `origin_channel` is set, the loop-close message goes via `conn.postToChannel(originChannel, body, { threadTs: originThreadTs })` instead of `conn.sendDirect(requesterSlackId, body)`. Falls back to the direct DM when origin info is missing OR posting to MPIM fails. Closes the Bug 2 round-trip.
+- **Strengthened MPIM ONE-MESSAGE rule with explicit examples** in `src/core/orchestrator/systemPrompt.ts:172`. The pre-v2.5.4 rule said "ONE message to the group" but Sonnet still posted "Done!" + "@<colleague> All sorted, ..." as two paragraphs. Now the rule has explicit ❌/✅ examples drawn from the Calendly/Julia thread so the pattern is concrete. Same block also tightens narration: explicitly forbids leaking surrounding meeting subjects/attendees ("Wednesday is clear, nothing between 14:40 and 18:30 (when dinner with Lori starts)" cited as wrong even when owner asked). Tool guidance: prefer `find_available_slots` for "is he free?" type questions over raw `get_calendar` narration. Closes Bug 4.
+- **`requires_travel_buffer` actually applies buffer** in `src/connectors/graph/calendar.ts findAvailableSlots`. v2.5.3 stored the flag on category schema but didn't act on it. Now: when `params.category` has `requires_travel_buffer: true` AND caller didn't pass `travelBufferMinutes`, defaults to 30 minutes per side. Buffer applies to slot padding regardless of `meetingMode` (pre-v2.5.4 only applied for `meeting_mode='custom'`). For Outside-category meetings this auto-pads slots so two outside meetings can't land back-to-back without travel time.
+
+### Migration
+
+- Restart `npm run dev` to pick up code changes.
+- No DB migrations.
+- Existing approvals created BEFORE v2.5.4 don't have origin info in their payloads. Their resolution still works via the legacy `sendDirect` path. New approvals capture origin going forward.
+
+### Verified during build
+
+- `note_about_self` continues to write to the right row even with the MPIM colleague-context override — it uses `context.userId` (which is the actual Slack user id, owner's when owner types) regardless of `senderRole`. Already validated in v2.5.2.
+- `coordinate_meeting` MPIM behavior preserved — when an MPIM coord is initiated, the colleague-context override means the existing colleague-path coord state machine handles it cleanly. No double-fire on shadow notifications because the flow goes through the colleague-path which already suppresses owner shadows in MPIM (per v2.3.2).
+- `manual_only` flag dropped per owner direction during the design pass — Cadence enforcement happens outside the category system. Schema unchanged from v2.5.3.
+
+---
+
 ## 2.5.3 — Category scheduling rules (per-day / per-week limits + day-type constraints + default location), brief auto-categorize, list-month script
 
 Categories were labels-only since v1.7.8 — they tagged events for visibility but carried no scheduling rules. This patch turns them into rule-bearing primitives. Each category in `profile.categories[]` can now define `limits.per_day`, `limits.per_week`, `day_type` (office_days / home_days / any), `default_location` (office / online / custom_required / none), `default_is_online`, `requires_travel_buffer`. The booking surfaces (find_available_slots / create_meeting / move_meeting / coordinate_meeting) read these and gate slots accordingly. Yaml ORDER is the priority — first match wins when an event fits multiple categories. Code is generic over yaml; categories themselves stay owner-curated. The owner provides the actual category list separately.

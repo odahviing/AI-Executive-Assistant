@@ -514,7 +514,31 @@ async function notifyRequesterOfDecision(
     body = `${hi} — ${ownerFirst} suggested a different approach${counterSummary ? ': ' + counterSummary : ''}. Does that work for you?`;
   }
 
+  // v2.5.4 Bug 2 — when the approval originated in an MPIM (colleague + owner
+  // together in a group DM), post the resolution BACK in that MPIM thread
+  // instead of 1:1 DMing the requester. The colleagues asked there; the
+  // outcome belongs there. Falls back to sendDirect when origin info is
+  // missing or origin wasn't an MPIM.
+  const originChannel = typeof payload.origin_channel === 'string' ? payload.origin_channel : undefined;
+  const originThreadTs = typeof payload.origin_thread_ts === 'string' ? payload.origin_thread_ts : undefined;
+  const originIsMpim = payload.origin_is_mpim === true;
+
   try {
+    if (originIsMpim && originChannel) {
+      // Post in the MPIM thread where the question was asked.
+      const res = await conn.postToChannel(originChannel, body, { threadTs: originThreadTs });
+      if (!res.ok) {
+        logger.warn('approval loop-close MPIM post failed — falling back to direct DM', {
+          approvalId: approval.id, originChannel, reason: res.reason,
+        });
+        // Fall through to direct DM as backup.
+      } else {
+        logger.info('approval loop-close posted in MPIM origin', {
+          approvalId: approval.id, originChannel, verdict,
+        });
+        return;
+      }
+    }
     const res = await conn.sendDirect(requesterSlackId, body);
     if (!res.ok) {
       logger.warn('requester loop-close DM failed', {

@@ -653,6 +653,22 @@ Binding — how to pick the right approval_id:
           }
         }
 
+        // v2.5.4 Bug 2 — capture origin channel + thread + MPIM flag so the
+        // resolver can post the resolution back to where the request started.
+        // Without this, MPIM-originated approvals (colleague + owner together
+        // in a group DM) fall through to the requester sendDirect path, which
+        // 1:1-DMs the requester instead of posting back to the MPIM. The
+        // outcome belongs in the MPIM where the question was asked.
+        if (typeof payload.origin_channel !== 'string' && context.channelId) {
+          payload.origin_channel = context.channelId;
+        }
+        if (typeof payload.origin_thread_ts !== 'string' && context.threadTs) {
+          payload.origin_thread_ts = context.threadTs;
+        }
+        if (payload.origin_is_mpim === undefined && context.isMpim !== undefined) {
+          payload.origin_is_mpim = context.isMpim;
+        }
+
         // v2.0.7 — expiry in owner-workdays by default. Fri/Sat don't count
         // so an approval asked Thursday 16:00 expires Monday 16:00, not
         // Saturday; one asked Saturday 10:00 expires Tuesday 10:00 (counter
