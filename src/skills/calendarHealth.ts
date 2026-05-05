@@ -94,11 +94,17 @@ interface HealthIssue {
     | 'double_booking'
     | 'oof_conflict'
     | 'missing_category'
+    | 'category_limit_exceeded'  // v2.6 — per_day or per_week limit on a category violated
     | 'busy_day';                 // v2.1.1 — day exceeds busy thresholds (free-time / count / longest-free-block)
   date: string;
   description: string;
   eventIds?: string[];
   suggestion?: string;
+  // v2.6 — for category_limit_exceeded
+  category_name?: string;
+  rule_broken?: 'per_day' | 'per_week';
+  rule_value?: number;
+  current_count?: number;
   // v2.1.1 — structured fields used by active-mode fix loop. Optional so
   // older callers / narration paths keep working unchanged.
   block_name?: string;            // for missing_floating_block: which block ('lunch', 'coffee_break', ...)
@@ -557,6 +563,42 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
           }
 
           cursor = cursor.plus({ days: 1 });
+        }
+
+        // v2.6 — category limit detection. Walk all configured categories with
+        // limits.per_day / limits.per_week and flag windows that exceed.
+        // Report-only; active mode doesn't auto-resolve (which interview gets
+        // bumped is a judgment call only the owner can make).
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { findCategoryViolations } = require('../utils/categoryRules') as
+            typeof import('../utils/categoryRules');
+          const allEvents = events;  // already in scope, full range fetch
+          const rangeStart = DateTime.fromISO(startDate, { zone: timezone }).startOf('day');
+          const rangeEnd = DateTime.fromISO(endDate, { zone: timezone }).endOf('day');
+          const violations = findCategoryViolations({
+            events: allEvents,
+            profile,
+            rangeStart,
+            rangeEnd,
+          });
+          for (const v of violations) {
+            const window = v.rule_broken === 'per_day' ? 'on' : 'in the';
+            issues.push({
+              type: 'category_limit_exceeded',
+              date: v.window_start,
+              description: `${v.category_name} ${v.rule_broken.replace('_', '-')} limit exceeded — ${v.current_count}/${v.rule_value} ${window} ${v.window_label}`,
+              eventIds: v.event_ids,
+              category_name: v.category_name,
+              rule_broken: v.rule_broken,
+              rule_value: v.rule_value,
+              current_count: v.current_count,
+            });
+          }
+        } catch (err) {
+          logger.warn('analyze_calendar — category violation pass threw, skipping', {
+            err: String(err).slice(0, 200),
+          });
         }
 
         // Dedup: one entry per (type, sorted event-pair). Belt-and-suspenders
@@ -1508,6 +1550,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
       ? blocks.map(b => `${b.name} ${b.preferred_start}–${b.preferred_end} ${b.duration_minutes}min`).join(' · ')
       : 'none configured';
     const mode = profile.behavior.calendar_health_mode ?? 'passive';
+    const firstName = profile.user.name.split(' ')[0];
     return `
 CALENDAR HEALTH SKILL
 You can monitor and improve the owner's calendar hygiene.
@@ -1544,6 +1587,9 @@ A meeting is PROTECTED from auto-reshuffle if ANY of:
   3. Subject matches an entry in \`meetings.protected[].name\`
   4. Any category matches an entry in \`meetings.protected[].category\`
 When the analyzer flags an overlap, it tells you which side is protected (\`kept_event_id\`) and which is movable (\`movable_event_id\`), plus \`protection_reasons\`. Use those fields when narrating. Active-mode DOES NOT auto-move overlaps in this release — that's v2.2 (needs the move-coord state machine). For now, report the overlap + the movable candidate + the protection reasons, and ask the owner to direct.
+
+CATEGORY_LIMIT_EXCEEDED — surface as informational, ask for direction:
+When the analyzer flags a \`category_limit_exceeded\` issue, narrate it briefly with the named category, the rule (per_day or per_week), the count vs limit, and the day/week label. Active mode does NOT auto-resolve these — picking which interview / outside-meeting to bump is judgment-heavy and only ${firstName} can decide. Frame as a question: "Tuesday has 3 interviews, your limit is 2 — want me to move one, or keep all 3?". Include the affected event subjects (look them up via \`get_calendar\` if not already in context) so ${firstName} can pick. On owner decline ("keep them all" / "leave it"), call \`dismiss_calendar_issue\` with the issue_id so tomorrow's check doesn't re-surface the same row.
 
 OOF_CONFLICT WITH PROTECTION REASONS — frame as a question, not a status line.
 When an \`oof_conflict\` issue carries \`protection_reasons\` (the meeting can't be auto-moved because it has externals, ≥4 attendees, etc.), present it to the owner as a QUESTION: "External meeting on Thursday during your vacation — want me to handle, or you'll fix it yourself?". Include the meeting subject + date + the protection reasons in plain words, and the issue_id. If the owner says "I'll fix it" / "no, leave it" / "I'll handle", call \`dismiss_calendar_issue\` with that issue_id so tomorrow's check doesn't re-surface the same row. Don't dismiss without explicit owner intent — only on a clear "I'll handle / leave it / no" reply.

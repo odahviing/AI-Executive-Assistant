@@ -479,6 +479,13 @@ export async function findAvailableSlots(params: {
   // Pass when validating ("can we move it to 10:30?") or discovering ("what
   // are options to move it?") a move. Omit for new bookings.
   excludeEventIds?: string[];
+  // v2.6 — category scheduling rules. When set, the slot loop applies the
+  // category's rules (day_type, per_day, per_week limits) and filters out
+  // slots that would violate them. When omitted, no category enforcement
+  // (today's behavior). The arg is the category NAME (must match a
+  // profile.categories[].name); resolution + rule lookup happens via
+  // utils/categoryRules.ts.
+  category?: string;
 }): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other' }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
@@ -598,10 +605,27 @@ export async function findAvailableSlots(params: {
     let ownerEventsForFb: CalendarEvent[] = [];
     if (profile) {
       try {
+        // v2.6 — when a category is set, the rule-check needs to count
+        // category occurrences across the FULL day (per_day) and FULL week
+        // (per_week) containing each candidate slot. Narrow ±1min checks
+        // (create_meeting / move_meeting rule-compliance) would otherwise
+        // see 0 events and pass through any limit. Widen the fetch range
+        // to cover at least the ISO week containing searchFrom..searchTo.
+        // No-op when category is unset — preserves the cheap narrow fetch.
+        let fetchFrom = params.searchFrom;
+        let fetchTo = params.searchTo;
+        if (params.category) {
+          const sfDt = DateTime.fromISO(params.searchFrom, { zone: params.timezone });
+          const stDt = DateTime.fromISO(params.searchTo, { zone: params.timezone });
+          if (sfDt.isValid && stDt.isValid) {
+            fetchFrom = sfDt.startOf('week').toISO()!;
+            fetchTo = stDt.endOf('week').toISO()!;
+          }
+        }
         ownerEventsForFb = await getCalendarEvents(
           params.userEmail,
-          params.searchFrom,
-          params.searchTo,
+          fetchFrom,
+          fetchTo,
           params.timezone,
         );
       } catch (err) {
@@ -939,6 +963,32 @@ export async function findAvailableSlots(params: {
         }
         if (blockConflict) {
           trackReject('floating_block_no_room', cursorDt.toISO()!);
+          cursor = new Date(cursor.getTime() + step);
+          continue;
+        }
+      }
+
+      // v2.6 — category scheduling rules. When the caller passed a category,
+      // check this slot against the category's day_type / per_day / per_week
+      // limits. Reject if any rule fires; otherwise let the slot through.
+      // Skipped in relaxed mode (owner override) to mirror floating-block
+      // feasibility behavior — relaxed already implies "show me everything,
+      // I'll narrate the costs."
+      if (params.category && !params.relaxed && params.profile) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const cr = require('../../utils/categoryRules') as typeof import('../../utils/categoryRules');
+        const result = cr.checkCategorySlot({
+          slotStart: cursorDt,
+          slotEnd: DateTime.fromJSDate(slotEnd).setZone(params.timezone),
+          categoryName: params.category,
+          events: ownerEventsForFb,
+          profile: params.profile,
+        });
+        if (!result.allowed) {
+          const reason = result.rule_broken === 'day_type' ? 'category_day_type'
+                       : result.rule_broken === 'per_day' ? 'category_per_day'
+                       : 'category_per_week';
+          trackReject(reason, cursorDt.toISO()!);
           cursor = new Date(cursor.getTime() + step);
           continue;
         }

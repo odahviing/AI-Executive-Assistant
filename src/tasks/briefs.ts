@@ -373,6 +373,54 @@ async function collectBriefingData(
     }
   }
 
+  // v2.6 — brief auto-categorize. Walk the next ~7 days of events and tag
+  // any that arrived without a known category (pre-v2.6 events, or events
+  // booked via Outlook by external/colleague). Sonnet picks the category
+  // from yaml descriptions; updateMeeting applies via Graph; result lands
+  // in the brief as a kind:'auto_categorized' item so the owner sees what
+  // changed. Owner direction (2026-05-05): "she can do auto, brief tells
+  // me what changed; if she makes mistakes I'll improve descriptions."
+  if (ownerCalendarEvents.length > 0 && (profile.categories ?? []).length > 0) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const ac = require('../utils/autoCategorize') as typeof import('../utils/autoCategorize');
+      const todayStart = DateTime.now().setZone(timezone).startOf('day').toMillis();
+      const sevenDaysOut = todayStart + 7 * 24 * 60 * 60 * 1000;
+      const upcoming = ownerCalendarEvents.filter(ev => {
+        const t = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
+        return t >= todayStart && t < sevenDaysOut;
+      });
+      const candidates = ac.pickUncategorizedEvents(upcoming, profile);
+      if (candidates.length > 0) {
+        // Cap per brief to avoid runaway Sonnet/Graph fan-out. Most days
+        // there will be 0–5; cap protects against a sync-storm or
+        // first-run on a stale calendar.
+        const BATCH_CAP = 20;
+        const batch = candidates.slice(0, BATCH_CAP);
+        const acResult = await ac.autoCategorizeEvents({ events: batch, profile });
+        if (acResult.applied.length > 0 || acResult.skipped_unmatched.length > 0) {
+          items.push({
+            kind: 'auto_categorized',
+            applied: acResult.applied,
+            skipped_unmatched: acResult.skipped_unmatched,
+            attempted: acResult.attempted,
+            had_more_uncategorized: candidates.length > BATCH_CAP,
+          });
+          logger.info('brief — auto-categorize ran', {
+            attempted: acResult.attempted,
+            applied: acResult.applied.length,
+            skipped: acResult.skipped_unmatched.length,
+            queued_for_next_brief: Math.max(0, candidates.length - BATCH_CAP),
+          });
+        }
+      }
+    } catch (err) {
+      logger.warn('brief — auto-categorize threw, continuing without', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
   // ── Tasks-first walk (v2.2.4) ─────────────────────────────────────────────
   // Tasks is the spine. Outreach + coord rows are detail tables that hang off
   // tasks via skill_ref. We query tasks once, then hydrate outreach- and
@@ -544,6 +592,7 @@ TASK OWNERSHIP — critical distinction:
 - MULTI-CONFLICT AGGREGATION — when several meetings need ${firstName}'s decision on the same day (e.g. several conflicts on his OOF day, several overlaps in one block), DO NOT enumerate each one with its own bullet + per-item question. Bundle them. List the meeting names inline and ask ONE question. EXAMPLE: "Wednesday has 3 meetings on your OOF (Sales Sync, Vision, Product Weekly) — which do you want me to move or cancel?" not "1. Sales Sync — cancel or reschedule? 2. Vision — keep or move? 3. Product Weekly — cancel or reschedule?". Treat ${firstName} as a human reader, not someone clicking through a checklist.
 - outreach at "no_response" with no decision yet → surface it, but frame as "X hasn't replied — want me to try again or drop it?" Don't dramatize.
 - kind="tombstoned_colleague" items → ONE passive past-tense line, not a question. The colleague drifted to engagement_rank=0 from two ignored pings; future proactive pings are off until they re-engage. Example: "Amazia went quiet — closed it out, won't bring it up unless you tell me to." DO NOT ask "should I keep trying?" The decision was already made by the rank decay; the brief just informs.
+- kind="auto_categorized" items → ONE informational paragraph, NOT a question. List what was tagged and the assigned categories so \${firstName} sees what changed. Example: "Tagged 3 new meetings overnight: Lori intro → Interview, Customer demo Wed → Outside meeting, Tomer 1:1 → Meeting." If skipped_unmatched is non-empty, mention them briefly so \${firstName} knows which ones still need a human call: "I couldn't place 1: 'Quick chat' on Thu — let me know what to tag it." If had_more_uncategorized=true, add: "There were more I'll get to in tomorrow's brief." DO NOT prompt for confirmation — the change is already applied; he can override anytime via chat ("no, that's Outside meeting").
 - If an outreach is effectively done (coord booked, owner handled it directly) don't resurface it just because it's in the data. Roll it into the colleague's paragraph as past-tense closure.
 
 AWAIT-REPLY AWARENESS:

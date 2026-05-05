@@ -803,6 +803,10 @@ export class SchedulingSkill {
               excludeEventIds: Array.isArray(args.moving_event_ids)
                 ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
                 : undefined,
+              // v2.6 — category scheduling rules. When set, slot loop filters
+              // out slots that would violate the category's day_type / per_day
+              // / per_week limits.
+              category: args.category as string | undefined,
             });
             // v2.4.2 — narrow to 3 spread options before returning to Sonnet.
             // Owner spec: "spread 3 options as I want" — one per day where
@@ -934,6 +938,13 @@ export class SchedulingSkill {
                   searchFrom: fromIso,
                   searchTo: toIso,
                   profile: context.profile,
+                  // v2.6 — pass category so colleague-path rule-check also
+                  // enforces day_type / per_day / per_week limits. When a
+                  // colleague tries to book a slot that would push the
+                  // owner over a category limit, the slot is filtered out
+                  // here; outer matches() returns false; Sonnet escalates
+                  // to create_approval with the rule name (RULE-NAMING).
+                  category: args.category as string | undefined,
                 });
               }
               const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
@@ -1491,6 +1502,13 @@ export class SchedulingSkill {
                     searchFrom: fromIso,
                     searchTo: toIso,
                     profile: context.profile,
+                    // v2.6 — pass category so move_meeting colleague-path
+                    // also enforces day_type / per_day / per_week limits at
+                    // the destination. The destination day's count excludes
+                    // the event being moved (it's leaving its current day);
+                    // findAvailableSlots widens its event fetch when
+                    // category is set so day/week counts are accurate.
+                    category: args.category as string | undefined,
                   });
                 }
                 const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);

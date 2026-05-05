@@ -187,6 +187,10 @@ Override with custom_location if a specific external venue is needed.`,
               type: 'boolean',
               description: 'Default true. Set FALSE when the colleague talking to you is the SCHEDULER, not an attendee — e.g. an HR/EA-style coordinator booking an interview between the owner and a candidate, or anyone arranging a meeting they themselves are not joining. When false, the requester is NOT added to participants, their availability is NOT factored in, and they go to just_invite if they want a calendar copy. The cue: "I want to set up a meeting between X and Y", "I\'m scheduling on behalf of...", or any clear signal that the requester is not in the room.',
             },
+            category: {
+              type: 'string',
+              description: 'OPTIONAL. The category this coord will book under. When set, slot search applies the category rules (per_day / per_week limits, day_type constraints), so slots that would violate are filtered before participants see them. ALWAYS pass when you have a category context (interview, outside meeting, physical, etc.) — otherwise the slots returned ignore category rules and you may propose a time that breaks them. Must match a name from the CATEGORIES list in the prompt.',
+            },
           },
           required: ['participants', 'subject', 'duration_min'],
         },
@@ -379,6 +383,10 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
               items: { type: 'string' },
               description: 'OPTIONAL. Pass when validating or discovering a MOVE — these are the calendar event id(s) of the meeting(s) being moved. Each id\'s current time is (1) SUBTRACTED from the owner\'s busy pool so candidate slots aren\'t blocked by a meeting that\'s leaving, AND (2) FORBIDDEN as a candidate so the tool never offers the original time (or any overlap with it) as a "move target". Use when the owner asks "can we move the 11am to 10:30?" / "what are options to move the 11am?". Get the event id from get_calendar. Omit for new bookings.',
             },
+            category: {
+              type: 'string',
+              description: 'OPTIONAL. The category this meeting will be booked under. When set, slot-finder applies the category rules — daily / weekly limits and day-type constraints (office-only, home-only). Slots that would violate the category get filtered out before returning. Omit ONLY when there is no category context (e.g. owner is asking "when am I free?" with no specific meeting in mind). When you have a category context, ALWAYS pass it — otherwise the slots returned ignore category rules and you may propose a time that breaks them. The value must match one of the names from the CATEGORIES list in the prompt.',
+            },
           },
           required: ['duration_minutes', 'attendee_emails', 'search_from', 'search_to', 'meeting_mode'],
         },
@@ -445,6 +453,10 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             confirm_outside_window: {
               type: 'boolean',
               description: 'OPTIONAL. Owner override flag for floating-block moves. When the meeting being moved is a floating block (lunch / coffee / gym / etc) AND the new_start lands OUTSIDE the block\'s preferred window, the move refuses by default. Set this true to accept the override — owner override IS the approval, no separate lunch_bump approval needed. Use ONLY when the owner has explicitly confirmed they want the block at the out-of-window time. Ignored on non-floating-block moves.',
+            },
+            category: {
+              type: 'string',
+              description: 'OPTIONAL. The category the meeting is tagged with — used by the colleague-path rule check at the destination day to enforce category limits (per_day / per_week) and day_type constraints. Pass the meeting\'s existing category from get_calendar so the destination day count is validated correctly. Omit when the meeting has no category or when the move is purely owner-driven.',
             },
           },
           required: ['meeting_id', 'meeting_subject', 'new_start', 'new_end'],
@@ -1014,6 +1026,8 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
                 // types are searched and returned tagged.
                 meetingMode: 'either',
                 autoExpand: false,  // coord has its own expansion loop below
+                // v2.6 — coord category passes through to slot search.
+                category: args.category as string | undefined,
               });
             } catch (permErr) {
               if (permErr instanceof GraphPermissionError) {
@@ -1032,6 +1046,9 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
                   profile: context.profile,
                   meetingMode: 'either',
                   autoExpand: false,
+                  // v2.6 — same category passthrough on the permission-denied
+                  // fallback path (owner-only search, no attendee freebusy).
+                  category: args.category as string | undefined,
                 });
               } else {
                 throw permErr;
@@ -1693,6 +1710,54 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
       const dayScope = b.days && b.days.length > 0 ? b.days.join('/') : 'every work day';
       return `${b.name} (${b.preferred_start}–${b.preferred_end}, ${b.duration_minutes} min, ${dayScope}${b.can_skip ? ', can skip' : ', must fit'})`;
     }).join(' · ');
+
+    // v2.6 — categories with rules. Yaml ORDER is priority — first match wins.
+    // Render each with its rules (if any) so Sonnet can pick the right one
+    // and pass it through to find_available_slots / create_meeting / etc.
+    // Pure data render — agnostic to category names. When a profile has no
+    // categories the block disappears entirely (no awkward empty section).
+    const categoriesBlock = (() => {
+      const cats = profile.categories ?? [];
+      if (cats.length === 0) return '';
+      const lines = cats.map((c, idx) => {
+        const parts: string[] = [];
+        if (c.limits?.per_day !== undefined) parts.push(`max ${c.limits.per_day}/day`);
+        if (c.limits?.per_week !== undefined) parts.push(`max ${c.limits.per_week}/week`);
+        if (c.day_type === 'office_days') parts.push('office days only');
+        if (c.day_type === 'home_days') parts.push('home days only');
+        if (c.default_location === 'office') parts.push('default location: office');
+        if (c.default_location === 'online') parts.push('default location: online');
+        if (c.default_location === 'custom_required') parts.push('default location: ASK for venue');
+        if (c.requires_travel_buffer) parts.push('auto travel buffer');
+        const rules = parts.length > 0 ? ` [${parts.join(', ')}]` : '';
+        return `  ${idx + 1}. ${c.name} — ${c.description.replace(/\n/g, ' ').trim()}${rules}`;
+      }).join('\n');
+      return `
+
+CATEGORIES (ordered by priority — first match wins; list reflects yaml order, owner-curated):
+${lines}
+
+CATEGORY DETECTION + PRIORITY:
+- When booking or proposing a slot, pick the category by walking this list TOP-DOWN and taking the FIRST match. Earlier in the list = higher priority. If a meeting fits both "Outside meeting" and "Interview", and "Outside meeting" appears first, "Outside meeting" wins because it's the more restrictive/specific rule the owner ordered first.
+- Use the description text to decide what fits. Cues in the colleague/owner message (venue, attendee role, "interview", "candidate", "coffee at X", external attendee, etc.) drive the match.
+- A meeting with no clear category fits the generic fallback (typically "Meeting" — the last one).
+
+ALWAYS PASS CATEGORY to slot tools:
+- When you have any category context (interview, customer visit, focus block, etc.), pass \`category\` to \`find_available_slots\`, \`coordinate_meeting\`, \`create_meeting\`, and \`move_meeting\`. Otherwise the slot finder ignores the category's per_day / per_week / day_type rules and you may propose a time that violates them.
+- Owner asking "when am I free?" with no specific meeting — fine to omit \`category\` (today's behavior, no enforcement).
+- Once the category is decided, it stays the same across find_available_slots → create_meeting in the same turn. Don't switch mid-flow.
+
+DEFAULT LOCATION precedence (when you don't pass \`location\` or \`is_online\` to create_meeting):
+1. Category's \`default_location\` (if set on the chosen category) wins first.
+2. Day-type constraint already filtered slots that don't fit (handled at slot search).
+3. v2.5.2 day-aware default (office day → office; home day + internal → Huddle; home day + external → online).
+4. Profile \`office_location\` final fallback.
+- Categories WITH \`default_location\` override the day-aware default. Categories WITHOUT it fall through.
+
+CATEGORY LIMIT VIOLATIONS — colleague-path: refuse + escalate:
+- Colleague-path \`create_meeting\` / \`move_meeting\` runs a server-side category check. If the slot would push owner over a per_day or per_week cap, or violate day_type, the tool refuses with a structured error naming the broken rule. Fall back to \`create_approval(kind=policy_exception)\` with the rule named in \`ask_text\` (RULE-NAMING).
+- Owner-path: brief and calendar-health surface violations after the fact — no booking-time block. Owner is trusted at booking time; he'll see "you have 3 interviews today, 1 over your limit" in the next brief / calendar-health pass.`;
+    })();
     return `
 MEETINGS SKILL
 Everything about booking meetings — direct calendar operations AND multi-party Slack coordination — lives here. This is the only skill that touches the calendar.
@@ -1702,7 +1767,7 @@ ${firstName.toUpperCase()}'S SCHEDULE — these are HARD RULES. Proposing a time
 - Home days: ${homeDays} · ${home.hours_start}–${home.hours_end}
 - Days not listed above are days OFF. Never propose work meetings on those days.
 - Floating blocks (elastic within their window): ${blocksLine || 'none configured'}.
-- Buffer between meetings: the allowed durations (${profile.meetings.allowed_durations.join(' / ')} min) ALREADY bake in ${profile.meetings.buffer_minutes} min of trailing buffer by design — a 55-min meeting at 17:00 ends 17:55, leaving 5 min before 18:00 automatically. You do NOT need to add another 5-min gap BEFORE a new meeting. If a previous meeting ends at 17:00, a new meeting can start at 17:00 (connected) — that is fine and preferred. You may offer 17:15 as an alternative if ${firstName} wants a gap.
+- Buffer between meetings: the allowed durations (${profile.meetings.allowed_durations.join(' / ')} min) ALREADY bake in ${profile.meetings.buffer_minutes} min of trailing buffer by design — a 55-min meeting at 17:00 ends 17:55, leaving 5 min before 18:00 automatically. You do NOT need to add another 5-min gap BEFORE a new meeting. If a previous meeting ends at 17:00, a new meeting can start at 17:00 (connected) — that is fine and preferred. You may offer 17:15 as an alternative if ${firstName} wants a gap.${categoriesBlock}
 
 FLOATING BLOCKS (any profile-defined block: lunch, coffee, gym, prayer, etc.): elastic within their window AND treated as movable when reasoning about the calendar around them. They're not fixed walls — they bend to make room.
 - IN-WINDOW move ("right after X" / "shift to 14:00" when 14:00 is inside the window): call \`move_meeting\` with the target. Handler does window/buffer/alignment math. Don't compute the slot yourself, don't ask permission.

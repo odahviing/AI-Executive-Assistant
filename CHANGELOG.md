@@ -2,6 +2,46 @@
 
 ---
 
+## 2.5.3 — Category scheduling rules (per-day / per-week limits + day-type constraints + default location), brief auto-categorize, list-month script
+
+Categories were labels-only since v1.7.8 — they tagged events for visibility but carried no scheduling rules. This patch turns them into rule-bearing primitives. Each category in `profile.categories[]` can now define `limits.per_day`, `limits.per_week`, `day_type` (office_days / home_days / any), `default_location` (office / online / custom_required / none), `default_is_online`, `requires_travel_buffer`. The booking surfaces (find_available_slots / create_meeting / move_meeting / coordinate_meeting) read these and gate slots accordingly. Yaml ORDER is the priority — first match wins when an event fits multiple categories. Code is generic over yaml; categories themselves stay owner-curated. The owner provides the actual category list separately.
+
+### Added
+
+- **`src/utils/categoryRules.ts`** — single source of truth for category checks. Five exports: `resolveCategoryByPriority` (walks profile.categories top-down, first match wins — yaml order IS the priority), `getProfileCategoryByName`, `countCategoryOccurrences` (per_day / per_week count over a window), `checkCategorySlot` (slot-vs-rules → allowed/blocked + rule_broken + human_explanation), `findCategoryViolations` (diagnostic helper for analyze_calendar reporting).
+- **Schema extension on `profile.categories[]`** at `src/config/userProfile.ts:255`. New optional fields: `limits.per_day`, `limits.per_week`, `day_type`, `default_location`, `default_is_online`, `requires_travel_buffer`. All optional — back-compat: categories without rules behave like v2.5.2 labels.
+- **`category` arg on `find_available_slots`** schema. Slot loop at `src/connectors/graph/calendar.ts:954` calls `checkCategorySlot` before accepting; rejected slots show in `rejection_breakdown` log as `category_day_type` / `category_per_day` / `category_per_week`. Event fetch widened to ISO-week boundaries when category is set so day/week counts are accurate even on narrow ±1min check ranges (move_meeting / create_meeting rule-compliance pass).
+- **`category` arg on `create_meeting`, `move_meeting`, `coordinate_meeting`** schemas. Colleague-path narrow rule-check passes the category through `findAvailableSlots` so day_type / per_day / per_week limits enforce alongside work-hours / buffer / lunch. On violation: structured refuse → Sonnet escalates to `create_approval(kind=policy_exception)` with the broken rule named (RULE-NAMING from v2.5.2). Owner-path stays trusted at booking time; brief and calendar-health surface violations post-hoc.
+- **`category_limit_exceeded` issue type** on `analyze_calendar` / `check_calendar_health`. New `findCategoryViolations` runs over the analysis window; surfaces per-day and per-week overages with `category_name`, `rule_broken`, `rule_value`, `current_count`, `event_ids` for owner reference. Active mode does NOT auto-resolve — picking which event to bump is judgment-heavy. Reports + asks owner via the new CATEGORY_LIMIT_EXCEEDED prompt rule.
+- **CATEGORIES section in MEETINGS prompt** (`src/skills/meetings.ts:1722`). Dynamic from yaml — renders each category with its rules in priority order. Four prompt rules attached: CATEGORY DETECTION + PRIORITY (walk top-down, first match wins), ALWAYS PASS CATEGORY (when there's any category context, pass it to find_available_slots / create_meeting / move_meeting / coordinate_meeting), DEFAULT LOCATION precedence (category default_location wins, then v2.5.2 day-aware default, then office_location), CATEGORY LIMIT VIOLATIONS (colleague-path refuse + escalate; owner-path post-hoc).
+- **Brief auto-categorize** (`src/utils/autoCategorize.ts` + brief data-collector pass at `src/tasks/briefs.ts:374`). Each morning the brief data-collector walks the next 7 days, finds events without a known category, sends a single batch to Sonnet with the yaml category descriptions, applies via `updateMeeting`. Result lands in the brief as a `kind: 'auto_categorized'` item with the per-event detail (subject, start, assigned category, reason). Owner sees what changed; can override via chat ("no, that's Outside meeting"). Capped at 20 events per brief to bound runaway fan-out; remainder rolls to the next brief.
+- **Brief prompt rule for `auto_categorized` items** — informational paragraph, not a question. Lists what was tagged + flags any unmatched (so owner knows which still need a human call) + flags `had_more_uncategorized` so owner knows the queue isn't fully drained.
+- **`scripts/list-month-categories.cjs`** — read-only listing of events for a given month with their current categories + uncategorized count + distribution. Owner reviews offline, then asks Maelle in chat to recategorize misclassified events via `update_meeting`. No script-driven Graph writes — owner stays in the loop.
+
+### Changed
+
+- **`findAvailableSlots` widens `ownerEventsForFb` fetch when `category` is set** to cover the ISO-week containing searchFrom..searchTo. Pre-v2.5.3 a narrow ±1min check (move_meeting / create_meeting rule-compliance) only fetched events for those 2 minutes — category counts would always be 0 and limits would never fire on narrow checks. The widened fetch keeps day/week counts accurate without changing search-output semantics.
+- **CATEGORIES list in MEETINGS prompt** is now dynamic from yaml (was just `categoryEnum` for tool args). The prompt block disappears entirely on profiles with no categories, so unconfigured profiles don't carry an empty section.
+
+### Migration
+
+- Restart `npm run dev` to pick up code changes.
+- No DB migrations.
+- Existing profiles work unchanged — all new yaml fields are optional. To enable rules, add `limits` / `day_type` / `default_location` to category entries. Order categories most-restrictive-first (yaml ORDER is priority).
+
+### Filed (related, deferred)
+
+- [#80](https://github.com/odahviing/AI-Executive-Assistant/issues/80), [#81](https://github.com/odahviing/AI-Executive-Assistant/issues/81), [#82](https://github.com/odahviing/AI-Executive-Assistant/issues/82), [#83](https://github.com/odahviing/AI-Executive-Assistant/issues/83) — already filed in v2.5.2 wave; no movement here.
+
+### Out of scope
+
+- Auto-resolve of `category_limit_exceeded` violations (judgment-heavy; owner decides which event to bump).
+- Cross-category aggregate limits (`max 5 meetings/day total`). Future feature.
+- Hourly limits or category-pair gap rules (e.g. "no two interviews back-to-back"). Future feature.
+- May rebook walkthrough — owner-driven via chat after running `list-month-categories.cjs`.
+
+---
+
 ## 2.5.2 — Self-write reopening on the colleague path, travel-aware slot search, day-aware location for direct create_meeting, coda gate flip + per-person social cap, bidirectional OOF auto-move, tombstoned-colleague brief line, system-driven impersonation note, image guard refuse on colleague suspicious, refusal-phrasing rule, coord judge cache, scenario paper-run wave
 
 Day after v2.5.1, paper-ran all nine `.claude/test-scenarios.md` against the tree. ~30 surfaced gaps; half collapsed into three roots (colleague-tool starvation, travel record never read by slot search, day-of-week awareness missing on direct create_meeting), the rest were small. Highlights below; full per-row analysis in session log 2026-05-05.

@@ -266,6 +266,41 @@ const UserProfileSchema = z.object({
     // office address would be wrong — the event isn't a meeting at a place,
     // it's a hold on the owner's own time. Default false.
     no_default_location: z.boolean().optional(),
+    // ── v2.6 — category scheduling rules ───────────────────────────────────
+    // The yaml ORDER of categories IS the priority. When a meeting could
+    // fit multiple categories, the FIRST match in this array wins. List
+    // most-restrictive first. No code computes "restrictiveness" — owner
+    // controls priority by reordering.
+    //
+    // limits — caps per calendar window. Each is a max-count.
+    limits: z.object({
+      // Maximum instances of this category per calendar day (owner TZ).
+      // Recurring meetings count per occurrence.
+      per_day: z.number().int().positive().optional(),
+      // Maximum instances per ISO week (owner TZ).
+      per_week: z.number().int().positive().optional(),
+    }).optional(),
+    // day_type — restrict bookings to specific day types.
+    //   'office_days' → only on profile.schedule.office_days.days
+    //   'home_days'   → only on profile.schedule.home_days.days
+    //   'any'         → no day-type restriction (default)
+    day_type: z.enum(['office_days', 'home_days', 'any']).optional(),
+    // default_location — what create_meeting stamps when Sonnet leaves
+    // both is_online and location unspecified. Overrides the v2.5.2
+    // day-aware default for THIS category.
+    //   'office'           → stamp profile.meetings.office_location, isOnline=default_is_online
+    //   'online'           → no physical location, isOnline=true
+    //   'custom_required'  → Sonnet MUST ask the owner / colleague for the venue
+    //   'none'             → fall through to v2.5.2 day-aware default
+    default_location: z.enum(['office', 'online', 'custom_required', 'none']).optional(),
+    // When default_location='office', whether the meeting is hybrid
+    // (in-person + Teams link) or strictly in-person. Default true (hybrid).
+    default_is_online: z.boolean().optional(),
+    // When true, create_meeting / find_available_slots auto-pad slots with
+    // profile.meetings.travel_buffer_minutes on both sides. The flag is
+    // about the meeting category ("this requires travel"), not the buffer
+    // length itself — that lives in profile.meetings.travel_buffer_minutes.
+    requires_travel_buffer: z.boolean().optional(),
   })).optional(),
 
   vip_contacts: z.array(VipContactSchema).default([]),
