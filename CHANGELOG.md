@@ -2,6 +2,40 @@
 
 ---
 
+## 2.5.5 — Category-rule narration polish + auto-categorize sees recurrence/attendee-count + dead `interviews:` block removed
+
+Small follow-up patch after a real-world Interview-booking test surfaced three Sonnet narration patterns that didn't match the new category-rule reality. Plus a schema cleanup: the legacy `interviews:` profile field is gone — no code consumed it; its limit + HR-routing guidance now lives in the priority-ordered category description.
+
+### Added
+
+- **Three prompt rules under CATEGORY LIMIT VIOLATIONS** in `src/skills/meetings.ts`:
+  - **RULE-CONFLATION GUARD** — when `find_available_slots(category=X)` returns empty AND the rejection_breakdown shows `category_per_day` / `category_per_week` / `category_day_type` rejections, that's the cause. Don't pile "no clean gaps" / "calendar is packed" on top — those are different rejection reasons. ❌/✅ examples drawn from a real test thread where Maelle said "Nothing fits, you're at the 2-interview-per-day limit and there are no clean gaps left" — the gaps existed; only the rule blocked.
+  - **OWNER-PATH CATEGORY-LIMIT OVERRIDE OFFER** — when owner explicitly asks to book a meeting that would violate a category limit, OFFER the `create_approval(kind=policy_exception)` override path in the same reply alongside next-available alternatives. Owner is the owner — he can override his own rule. Don't default to "here are 3 future dates" without first surfacing the override.
+  - **NO WORKING-HOURS PREAMBLE** — when asking "what time?" for a booking, just ask. Don't preface with "(Office hours Wednesday are 10:30–19:00.)". Owner knows his own schedule. Working-hours mentions belong in REJECTION explanations, not in clarifying questions before any slot search.
+- **Recurrence + attendee-count surfaced in auto-categorize prompt** at `src/utils/autoCategorize.ts:130`. Each event now shows `Recurring: YES (part of a recurring series)` / `NO (one-time event)` + `Attendee count: N`. Closes the Cadence misclassification pattern (a one-time client meeting titled "Monthly Checkin" was being tagged Cadence because Sonnet inferred recurring from the subject; now she sees the actual `event.type` flag from Graph). Also helps the Physical 5+ rule — Sonnet reads attendee count directly instead of counting an attendee list.
+
+### Changed
+
+- **Cadence category description** in profile yaml now states the strict qualification rule: "ONLY when the calendar event is part of a recurring series (event.type='occurrence' or 'seriesMaster'); subject text alone does not qualify — a one-time event with 'Weekly' / 'Monthly' / 'Quarterly' / 'Checkin' in the subject is just Meeting." Pairs with the autoCategorize.ts recurrence-flag surfacing above. (Profile yaml change is owner-local, gitignored.)
+- **Physical category** description and threshold tightened in profile yaml — strict 5-or-more-people rule for the "internal gathering at office" pattern; explicit 1:1/2/3/4-person carveout. Includes Logistic-now-first reorder so a cafe-lunch event correctly tags Logistic instead of Outside.
+
+### Removed
+
+- **`interviews:` profile schema field** at `src/config/userProfile.ts:349`. No `src/` code consumed it (verified pre-removal via grep). The 2/day limit + HR-routing guidance (candidate email vs HR contact, role-in-body-not-title, "Interview with [Candidate First Name]" title format) now live in the Interview category description (priority-ordered category system v2.6 from v2.5.3+v2.5.4).
+
+### Migration
+
+- Restart `npm run dev` to pick up code changes.
+- No DB migrations.
+- Profile yamls that still carry an `interviews:` block parse fine — Zod ignores unknown fields by default (or warns, depending on schema strictness). Owner-local cleanup recommended but not required.
+
+### Not changed (verified during build)
+
+- Auto-categorize all-day filter remains in place — Vacation events stay uncategorized (owner direction from v2.5.3 design pass).
+- `manual_only` flag still NOT in the schema — owner handles Cadence enforcement outside the category system.
+
+---
+
 ## 2.5.4 — Calendly bug fixes (organizer trust, MPIM colleague-context, MPIM private-ask via approval, MPIM single-message), category-driven travel buffer
 
 Real Slack thread on 2026-05-05 surfaced four MPIM bugs. Maelle (a) hallucinated "Calendly events can't be moved" without trying the tool, (b) @-tagged owner inside the MPIM for confirmation when she should have asked privately, (c) leaked unrelated meeting subjects when narrating "is he free?" in front of a colleague, (d) posted two redundant messages (group announcement + tagged colleague) instead of one. All four fixed below. Plus the `requires_travel_buffer` flag from v2.5.3's category schema actually wires through to slot search now.

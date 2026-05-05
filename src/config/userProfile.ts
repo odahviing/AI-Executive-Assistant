@@ -346,11 +346,10 @@ const UserProfileSchema = z.object({
   // Each key is a meeting category name
   rescheduling: z.record(ReschedulingRuleSchema),
 
-  interviews: z.object({
-    max_per_day: z.number().min(1).max(10),
-    title_prefix: z.string(),   // used to detect interview events on the calendar
-    note: z.string().optional(),
-  }).optional(),
+  // v2.5.4 — `interviews` block removed. The per-day limit + interview
+  // guidance now lives in the priority-ordered category system
+  // (`categories[].limits.per_day` + the Interview category description).
+  // Verified pre-removal: no `src/` code consumed `profile.interviews`.
 
   skills: z.object({
     // v1.7.6 — single-word skill names. Each identifies a capability the agent

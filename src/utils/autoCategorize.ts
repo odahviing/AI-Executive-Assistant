@@ -127,10 +127,20 @@ export async function autoCategorizeEvents(opts: {
       .join(', ');
     const location = ev.location?.displayName?.trim() ?? '';
     const bodyPreview = (ev.bodyPreview ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    // v2.5.4 — recurrence flag surfaced. Cadence (and any future "is this
+    // recurring?" rule) needs Sonnet to read calendar truth, not infer from
+    // subject text. event.type values: 'singleInstance' | 'occurrence' |
+    // 'seriesMaster' | 'exception'. Anything other than singleInstance is
+    // part of a recurring series.
+    const evType = (ev as unknown as { type?: string }).type ?? 'singleInstance';
+    const isRecurring = evType !== 'singleInstance';
+    const attendeeCount = (ev.attendees ?? []).length;
     return `[${idx + 1}] ID: ${ev.id}
 Subject: ${subject}
 Start: ${start}
+Recurring: ${isRecurring ? 'YES (part of a recurring series)' : 'NO (one-time event)'}
 ${attendees ? `Attendees: ${attendees}` : 'Attendees: (none / owner only)'}
+Attendee count: ${attendeeCount}
 ${location ? `Location: ${location}` : ''}
 ${bodyPreview ? `Body: ${bodyPreview}` : ''}`;
   }).join('\n---\n');
