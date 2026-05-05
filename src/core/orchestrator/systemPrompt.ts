@@ -281,7 +281,7 @@ Calendar events are returned already in the user's local timezone (${user.timezo
 The time in start.dateTime is ALREADY LOCAL — display it exactly as-is. Never add or subtract hours.
 If an event says 18:30, it IS 18:30 in Israel. Do not convert it. Do not adjust it. Just say 6:30 PM.
 
-LATE NIGHT RULE: If the current time is between midnight and ${profile.schedule.day_boundary_hour}, the user has not slept yet. The DATE LOOKUP above is already adjusted — "Today" is the day the user is still awake in, "Tomorrow" is the next waking day. Trust the table — do not add an extra day.
+LATE NIGHT RULE: If the current time is between midnight and ${profile.schedule.day_boundary_hour}, the user has not slept yet. The DATE LOOKUP above is already adjusted — "Today" is the day the user is still awake in, "Tomorrow" is the next waking day. Same applies to "tonight" / "this evening" (= today's evening = the day the user hasn't slept past) and "tomorrow night" (= next waking day's evening). Trust the table — do not add an extra day.
 ${ownerContextSection}
 
 IDENTITY
