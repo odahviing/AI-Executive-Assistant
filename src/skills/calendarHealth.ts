@@ -105,6 +105,11 @@ interface HealthIssue {
   rule_broken?: 'per_day' | 'per_week';
   rule_value?: number;
   current_count?: number;
+  // v2.5.6 — for busy_day (re-enabled)
+  free_minutes?: number;
+  longest_gap_minutes?: number;
+  threshold_minutes?: number;
+  is_office_day?: boolean;
   // v2.1.1 — structured fields used by active-mode fix loop. Optional so
   // older callers / narration paths keep working unchanged.
   block_name?: string;            // for missing_floating_block: which block ('lunch', 'coffee_break', ...)
@@ -553,13 +558,32 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             }
             longestGap = Math.max(longestGap, workEndMin - prev);
 
-            // v2.3.1 (B12 / #67) — busy_day issue type removed per owner.
-            // He never asked for it; the alerts came from a heuristic he
-            // didn't request. Calendar health now only flags conflict, OOF,
-            // and buffer issues. Variables above (freeMin, longestGap,
-            // nonAllDay) intentionally left in place — they're cheap to
-            // compute and other detectors might want them later.
-            void freeMin; void longestGap; void nonAllDay;
+            // v2.5.6 (re-enabled) — busy_day flagging restored. Was removed
+            // in v2.3.1 (#67) per prior owner direction; reversed in 2026-05
+            // after a real-world test where almost every office day was under
+            // the 2h focus target and the owner never heard about it. Fires
+            // on a single signal: total free time during work hours falls
+            // below profile.meetings.free_time_per_office_day_hours (or
+            // _per_home_day_hours) for that day type. Pure report-only — no
+            // auto-fix; owner decides which meeting to move. The longestGap
+            // value rides along in the issue payload so Sonnet can narrate
+            // honest detail without recomputing ("only 80 min of focus, your
+            // 2h target needs more").
+            if (freeMin < freeTimeThresholdMin) {
+              const dayLabel = cursor.toFormat('EEEE d MMMM');
+              const freeHrs = (freeMin / 60).toFixed(1);
+              const targetHrs = (freeTimeThresholdMin / 60).toFixed(0);
+              issues.push({
+                type: 'busy_day',
+                date: cursor.toISODate() ?? '',
+                description: `${dayLabel} has only ${freeMin} min of free time during work hours (under your ${targetHrs}h ${isOffice ? 'office' : 'home'}-day target). Longest single block: ${longestGap} min.`,
+                free_minutes: freeMin,
+                longest_gap_minutes: longestGap,
+                threshold_minutes: freeTimeThresholdMin,
+                is_office_day: isOffice,
+              });
+            }
+            void nonAllDay;
           }
 
           cursor = cursor.plus({ days: 1 });
@@ -1587,6 +1611,9 @@ A meeting is PROTECTED from auto-reshuffle if ANY of:
   3. Subject matches an entry in \`meetings.protected[].name\`
   4. Any category matches an entry in \`meetings.protected[].category\`
 When the analyzer flags an overlap, it tells you which side is protected (\`kept_event_id\`) and which is movable (\`movable_event_id\`), plus \`protection_reasons\`. Use those fields when narrating. Active-mode DOES NOT auto-move overlaps in this release — that's v2.2 (needs the move-coord state machine). For now, report the overlap + the movable candidate + the protection reasons, and ask the owner to direct.
+
+BUSY_DAY — narrate from the structured numbers, briefly:
+When the analyzer flags a \`busy_day\` issue, it carries \`free_minutes\` (total free during work hours), \`longest_gap_minutes\` (the longest single uninterrupted block), and \`threshold_minutes\` (the owner's target). Surface ONE short line per day: "Wed 14 May has only 80 min free, your 2h office-day target needs more — longest block 80 min." Don't enumerate the meetings on that day — owner can ask for detail if he wants it. If multiple days flag, bundle: "Wed 14, Thu 7, and Wed 13 are all under your 2h office-day target." Offer to look at moveable items only when owner asks. Active mode does NOT auto-resolve these — picking what to move is judgment-heavy.
 
 CATEGORY_LIMIT_EXCEEDED — surface as informational, ask for direction:
 When the analyzer flags a \`category_limit_exceeded\` issue, narrate it briefly with the named category, the rule (per_day or per_week), the count vs limit, and the day/week label. Active mode does NOT auto-resolve these — picking which interview / outside-meeting to bump is judgment-heavy and only ${firstName} can decide. Frame as a question: "Tuesday has 3 interviews, your limit is 2 — want me to move one, or keep all 3?". Include the affected event subjects (look them up via \`get_calendar\` if not already in context) so ${firstName} can pick. On owner decline ("keep them all" / "leave it"), call \`dismiss_calendar_issue\` with the issue_id so tomorrow's check doesn't re-surface the same row.
