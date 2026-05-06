@@ -439,6 +439,22 @@ async function resolveGenericApprove(
     status: 'approved',
     decision: { approved: true, data },
   });
+  // Close the parent task. The approval IS the unit of owner-decision; the
+  // ASK is now resolved. Downstream work (the actual booking / message) is
+  // tracked separately. Pre-this fix, only reject + amend updated the
+  // parent task, so 'approve' silently orphaned the task at status='new'
+  // and the brief surfaced it every morning until the owner manually
+  // cancelled it. Mark completed (not cancelled) — the work WAS done, the
+  // owner decided. The brief's existing taskIdsToInform path surfaces
+  // completed tasks once with closure language, then markTaskInformed
+  // flips them to 'informed' and they drop. Same pattern as resolved coord
+  // meetings.
+  getDb().prepare(
+    `UPDATE tasks SET status = 'completed',
+                      completed_at = datetime('now'),
+                      updated_at = datetime('now')
+     WHERE id = ?`
+  ).run(approval.task_id);
   // v2.0.7 — loop-close DM to the colleague who originated the ask (if any).
   // Matches the amend/reject branches above. The owner's subsequent action
   // (actually booking / executing the override) is still the orchestrator's
