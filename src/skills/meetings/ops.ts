@@ -879,6 +879,60 @@ export class SchedulingSkill {
         //     DMs to non-self internal attendees ("Oran asked, I checked
         //     your calendar, booked Tue 14:00")
         if (context.senderRole === 'colleague') {
+          // v2.6 Bug 4 — early idempotency probe BEFORE Guards A and B.
+          // Background: when a colleague's continuing chat causes Sonnet to
+          // re-attempt create_meeting after the first attempt already
+          // succeeded, Guard B's rule-compliance check can throw (Graph
+          // free/busy interval errors, transient API failures) and
+          // defensively escalate to create_approval(kind=policy_exception).
+          // That stale approval lands in the owner's DM and re-surfaces in
+          // every brief until manually rejected (the actual incident:
+          // 2026-05-05 Oran chatbot ask — first attempt 06:13:11 booked at
+          // 13:30 successfully; second attempt 06:15:31 threw Graph error
+          // and created appr_1777961736240_i064x which sat pending until
+          // 2026-05-06 morning when the owner manually rejected it).
+          //
+          // Fix: probe Graph for an existing meeting at this same
+          // subject+start (±2-min tolerance) BEFORE Guards A/B fire. If
+          // found → return success with idempotent=true. The downstream
+          // late-idempotency check at line ~1049 stays as defense-in-depth.
+          // Subject+start match is the same heuristic the late check uses;
+          // attendee-list matching is a future tightening (the rare collision
+          // case is owner manually booked an unrelated event with the same
+          // subject; trade-off favors avoiding stale approvals).
+          try {
+            const startDt = DateTime.fromISO(args.start as string, { zone: timezone });
+            if (startDt.isValid) {
+              const requestedSubject = (args.subject as string).trim();
+              const probeDate = startDt.toFormat('yyyy-MM-dd');
+              const startMs = startDt.toMillis();
+              const existingEvents = await getCalendarEvents(userEmail, probeDate, probeDate, timezone);
+              const duplicate = existingEvents.find(ev => {
+                if (ev.isCancelled) return false;
+                if ((ev.subject ?? '').trim().toLowerCase() !== requestedSubject.toLowerCase()) return false;
+                const evStartMs = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
+                return Math.abs(evStartMs - startMs) <= 2 * 60 * 1000;
+              });
+              if (duplicate) {
+                const ownerFirst = context.profile.user.name.split(' ')[0];
+                logger.info('create_meeting colleague-path idempotent short-circuit (early) — already booked', {
+                  subject: requestedSubject, existingEventId: duplicate.id, requester: context.userId,
+                });
+                return {
+                  success: true,
+                  meetingId: duplicate.id,
+                  idempotent: true,
+                  action_summary: `'${requestedSubject}' is already on ${ownerFirst}'s calendar for ${formatIsoTime(args.start as string)}. Already booked, no action needed.`,
+                  _note: 'A meeting with this exact subject and start was already booked earlier in this thread. Do NOT call create_meeting again. Do NOT escalate to create_approval. Tell the colleague briefly that it is booked and move on.',
+                };
+              }
+            }
+          } catch (probeErr) {
+            logger.warn('create_meeting colleague-path early idempotency probe failed — proceeding with guards', {
+              err: String(probeErr).slice(0, 200),
+            });
+          }
+
           // Guard A — attendees must be: requester themselves OR internal
           // (same domain). Anything else (external, missing email) requires
           // coord. Resolve requester's email from people_memory.

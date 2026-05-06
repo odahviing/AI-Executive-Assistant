@@ -2,6 +2,79 @@
 
 ---
 
+## 2.6.0 — Category scheduling rules end-to-end + Calendly/MPIM correctness wave + brief auto-categorize + approve-path orphan fix + all-day events + duplicate-create idempotency
+
+First minor in three weeks. The v2.5.x patches kept landing because real-world use kept surfacing tight, isolated bugs we could fix in tree without architectural pivot. The bump to 2.6 reflects the cumulative shape: categories are now rule-bearing first-class primitives (not just labels), MPIM behavior matches owner intent (colleague-context override + private-ask via approval), the brief auto-categorizes new events overnight, approvals close their parent tasks correctly, and a half-dozen real Slack threads from May 5–6 surfaced and closed bugs in the same patches.
+
+This release rolls together v2.5.3 (categories), v2.5.4 (Calendly/MPIM bug wave), v2.5.5 (category-rule narration polish + dead `interviews:` removed), the post-2.5.5 in-tree work, and ends with the duplicate-create idempotency fix (Bug 4) that closes the recurring stale-approval pattern owner spent the morning manually clearing.
+
+### Added — category scheduling rules system (v2.5.3 wave, lifted to minor)
+
+- **`profile.categories[]` carries scheduling rules.** Each entry can specify `limits.per_day`, `limits.per_week`, `day_type` (`office_days` / `home_days` / `any`), `default_location` (`office` / `online` / `custom_required` / `none`), `default_is_online`, `requires_travel_buffer`. Yaml ORDER is the priority — first match wins when a meeting fits multiple. Code is generic over yaml; categories stay owner-curated. The Cadence/Weekly/Outside/Physical/Interview/Logistic/Vacation/Private/Not Me/Meeting list with rules lives in `idan.yaml` (gitignored).
+- **`src/utils/categoryRules.ts`** — single source of truth: `resolveCategoryByPriority`, `getProfileCategoryByName`, `countCategoryOccurrences` (per_day / per_week count over a window), `checkCategorySlot` (slot-vs-rules → allowed/blocked + rule_broken + human_explanation), `findCategoryViolations` (diagnostic helper).
+- **Slot-finder integration** — `find_available_slots` accepts optional `category` arg; slot-loop calls `checkCategorySlot` before accepting; rejected slots show in `rejection_breakdown` log as `category_day_type` / `category_per_day` / `category_per_week`. Event fetch widens to ISO-week boundaries when category is set so day/week counts are accurate even on narrow ±1min checks.
+- **Mutation tools accept `category`** (`create_meeting`, `move_meeting`, `coordinate_meeting`). Colleague-path narrow rule-check passes category through; on violation, structured refuse → Sonnet escalates to `create_approval(kind=policy_exception)` with the rule named (RULE-NAMING from v2.5.2). Owner-path stays trusted.
+- **`category_limit_exceeded` issue type** in `analyze_calendar`. `findCategoryViolations` runs over the analysis window. Active mode does NOT auto-resolve — picking what to bump is judgment-heavy.
+- **CATEGORIES section in MEETINGS prompt** — dynamic from yaml. Disappears on profiles with no categories. Four prompt rules attached: CATEGORY DETECTION + PRIORITY, ALWAYS PASS CATEGORY, DEFAULT LOCATION precedence, CATEGORY LIMIT VIOLATIONS.
+- **Brief auto-categorize** in `src/utils/autoCategorize.ts` + brief data-collector pass. Each morning the collector walks the next 7 days, finds events without a known category, sends one batch to Sonnet with the yaml descriptions, applies via `updateMeeting`. Result lands as `kind:'auto_categorized'` brief item. Capped 20/brief. Surfaces `Recurring: YES/NO` + `Attendee count: N` per event so Cadence (recurring-only) and Physical (5+ people) rules have data — closes the "one-time event titled 'Monthly Checkin' tagged as Cadence" misclassification.
+- **`scripts/list-month-categories.cjs`** — read-only diagnostic to list events for a month with current categories + uncategorized count + distribution.
+
+### Added — Calendly / MPIM correctness wave (v2.5.4 wave, lifted to minor)
+
+- **TRUST-THE-ORGANIZER prompt rule.** Tells Sonnet to read `event.organizer.emailAddress.address` and try the tool — if owner is the organizer he can move/cancel regardless of how the event was originally booked (Calendly, Comeet, Outlook, plugins). Don't pre-refuse on the booking source.
+- **MPIM colleague-context override** at orchestrator entry. When `isMpim` + `mpimMemberIds` includes any non-owner member, the orchestrator forces `senderRole='colleague'` for tools/prompt/narration even when the owner is the typer. Tools restrict to colleague allowlist; narration follows colleague-level privacy. Owner authorization still works via the colleague-allowed tools' rule-compliance gates. Closes the leak pattern where Idan asking "am I free?" in mixed company surfaced unrelated meeting subjects.
+- **MPIM private-ask via `create_approval(kind=freeform)`.** New prompt rule: in MPIM with non-owner members, never @-tag owner — call `create_approval` which DMs him privately. Reply in MPIM with one short line. Resolver posts the resolution back to MPIM origin via `payload.origin_channel` / `origin_thread_ts` / `origin_is_mpim` (newly captured at create_approval time) — falls back to `sendDirect` for non-MPIM origins.
+- **Strengthened MPIM ONE-MESSAGE rule** with explicit ❌/✅ examples drawn from a real Calendly thread. Plus tool-choice nudge: `find_available_slots` over `get_calendar` for "is he free?" type questions.
+- **`requires_travel_buffer` actually applies buffer** in `find_available_slots`. v2.5.3 stored the flag; v2.5.4 wires it through. When category has the flag AND caller didn't pass `travelBufferMinutes`, defaults to 30 min per side. Applies regardless of `meeting_mode`. For Outside-category meetings, slots auto-pad on both sides.
+
+### Added — narration polish + auto-categorize signals (v2.5.5)
+
+- **Three CATEGORY LIMIT VIOLATIONS prompt rules**: RULE-CONFLATION GUARD (when `category_per_day`/`per_week`/`day_type` rejection fires, name THAT rule, don't pile "no clean gaps" on top); OWNER-PATH OVERRIDE OFFER (surface `create_approval(kind=policy_exception)` for category-violating owner asks); NO WORKING-HOURS PREAMBLE (just ask "what time?", don't recite owner's hours back).
+- **Auto-categorize prompt** at `src/utils/autoCategorize.ts:130` surfaces `Recurring: YES/NO` (`event.type !== 'singleInstance'`) + `Attendee count: N` per event. Closes the "Monthly Checkin one-time client event tagged as Cadence" misclassification.
+
+### Added — post-2.5.5 in-tree work
+
+- **TONE/CONCISION consolidation** in `systemPrompt.ts`. Replaced ALWAYS PREFER SHORTER paragraph with a tighter merged CONCISION block that also covers DON'T REPEAT YOURSELF in a live thread (your previous message is RIGHT ABOVE the user's reply; if they addressed ONE point of a multi-point message, answer THAT and stay quiet on the rest; if you asked a question and they didn't answer it, it's still pending — don't re-ask).
+- **LATE NIGHT RULE extended for `tonight` / `this evening` colloquials**. Same day_boundary_hour mapping that "today/tomorrow" already used.
+- **`use analyze_calendar` prompt rule** in `meetings.ts`. For free-time / "do I have my 2h buffer?" / weekly-load questions, call `analyze_calendar` and read the structured `freeMin` / `longestGap` output — don't sum gaps from `get_calendar` events list (drifts because of buffer math).
+- **`busy_day` issue type re-enabled** in `calendarHealth.ts`. Was removed in v2.3.1 (#67); reversed after a real test where almost every office day was under the 2h focus target with no surfacing. Fires when `freeMin < freeTimeThresholdMin`. Carries `free_minutes` / `longest_gap_minutes` / `threshold_minutes` / `is_office_day` so Sonnet narrates honestly. New BUSY_DAY narration prompt rule keeps output to one bundled line per cluster.
+- **Approve-path orphan fix** at `src/core/approvals/resolver.ts:429`. `resolveGenericApprove` now closes the parent task on approve (`status='completed'`) — same pattern reject + amend already used. Pre-fix, every approved policy_exception / lunch_bump / freeform / duration_override / unknown_person silently orphaned its parent task at status='new', so the brief surfaced it every morning until manually cancelled. Plus `scripts/cleanup-approved-orphan-tasks.cjs` for the historical backlog.
+- **All-day event support** on `create_meeting`. New `is_all_day: boolean` arg (default false). When true, handler clamps start/end to midnight-of-day → midnight-of-next-day per Graph's all-day requirement. `showAs` intentionally NOT exposed — every Maelle-booked event is busy by default per owner direction.
+- **Duplicate-create idempotency in colleague-path `create_meeting`** (Bug 4). When a colleague's continuing chat causes Sonnet to re-attempt create_meeting after the first attempt already succeeded, the early idempotency probe in the colleague-path block detects the existing meeting (subject + start ±2min match) BEFORE Guards A and B fire. Returns success with `idempotent: true` and explicit `_note` instructing Sonnet not to escalate. Closes the stale-approval pattern (defensive escalation when Guard B's rule-check threw a Graph error and the meeting was already booked from the first attempt).
+
+### Changed
+
+- **Coda gate fires on BOTH owner-path and colleague-path turns** (v2.5.2 carry-over to minor narrative). v2.2.4's owner-only gate over-corrected; the v2.2.0 design model — first resolve the task, then piggyback ONE warm line — works on either path.
+- **Per-(owner, colleague) daily cap on proactive social** instead of per-owner-total. Amazia and Maya can both get pinged the same day on different topics; only a SECOND ping to the same person same day is blocked.
+- **Bidirectional OOF auto-move search** `[max(issue.date - 3, today), issue.date + 7]` instead of forward-only.
+- **Logistic category** no longer marks events as private (per owner direction; was set in v2.5.x's earlier draft).
+- **Reschedule DM template** drops "on `${ownerName}`'s side" attribution; reads neutral "small scheduling conflict for our '<subject>'".
+- **Tool-description tightening** for `colleague_slack_id` across `update_person_profile`, `log_interaction`, `confirm_gender`, `note_about_person`. Explicitly steers Sonnet away from `U_<NAME>` slug-shaped hallucinations.
+- **Coord judge verdict cache** — 10min TTL keyed on `(senderId, threadTs, subject, participants)`. LEGIT verdicts cache; SUSPICIOUS does NOT (separate cache via `markConversationSuspicious`).
+- **Self-write reopening on the colleague path** — `note_about_person`, `note_about_self`, `confirm_gender`, `log_interaction`, `update_person_profile` all in `COLLEAGUE_ALLOWED_TOOLS` with self-only target gates and field-allowlist filtering on `update_person_profile`. People memory + travel + social engagement work for colleagues, not just owner.
+- **System-driven impersonation note** when coord judge fires SUSPICIOUS — auto-appends a security-tagged line to the colleague's people-memory note.
+
+### Removed
+
+- **Dead `interviews:` profile schema field**. No `src/` code consumed it; the 2/day limit + HR-routing guidance moved into the Interview category description (priority-ordered category system).
+- **Stale `manual_only` flag plan** — owner direction during the design pass: Cadence enforcement happens outside the category system; manual_only never landed.
+
+### Migration
+
+- Restart `npm run dev` to pick up code changes.
+- No DB migrations required. Existing approvals from before the resolver fix can be cleaned via `scripts/cleanup-approved-orphan-tasks.cjs --commit`.
+- Profile yamls without `categories` rules continue to work — all new schema fields are optional.
+
+### Filed (related, deferred to future patches)
+
+- [#80](https://github.com/odahviing/AI-Executive-Assistant/issues/80) — Proactive MPIM for cross-attendee coordination
+- [#81](https://github.com/odahviing/AI-Executive-Assistant/issues/81) — Batched proposal flow for multi-meeting agendas
+- [#82](https://github.com/odahviing/AI-Executive-Assistant/issues/82) — Reflectiz LinkedIn fetch short-circuit + last-seen cache
+- [#83](https://github.com/odahviing/AI-Executive-Assistant/issues/83) — Build out the research skill into a real capability
+- New transport-layer GitHub labels: `Slack`, `Email`, `WhatsApp`. Applied to existing transport-specific issues.
+
+---
+
 ## 2.5.5 — Category-rule narration polish + auto-categorize sees recurrence/attendee-count + dead `interviews:` block removed
 
 Small follow-up patch after a real-world Interview-booking test surfaced three Sonnet narration patterns that didn't match the new category-rule reality. Plus a schema cleanup: the legacy `interviews:` profile field is gone — no code consumed it; its limit + HR-routing guidance now lives in the priority-ordered category description.
