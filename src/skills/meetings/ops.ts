@@ -1237,6 +1237,11 @@ export class SchedulingSkill {
           // falls back to determineSlotLocation's day-aware decision when both
           // is_online and location were left blank.
           isOnline:   effectiveIsOnline,
+          // All-day events. Sonnet sets is_all_day=true ONLY when owner
+          // explicitly asks for a full-day event. createMeeting() clamps
+          // start/end to midnight-of-day → midnight-of-next-day per Graph's
+          // requirement; we just pass the flag through here.
+          isAllDay:   args.is_all_day === true,
           // v2.3.2 (1C) / v2.3.6 (#73) / v2.4.3 (E1) — clean comma-joined
           // location with no em-dash separators. Pre-v2.4.3 used " — " as
           // the joiner which made the Outlook location field hard to read.

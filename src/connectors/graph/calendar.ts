@@ -104,6 +104,14 @@ export interface CreateMeetingParams {
   onlineMeetingProvider?: 'teamsForBusiness' | 'skypeForBusiness';
   categories?:  string[];     // Outlook category names, e.g. ["Meeting"] or ["Physical"]
   sensitivity?: 'normal' | 'personal' | 'private' | 'confidential';
+  // All-day events. Graph requires isAllDay=true with start/end anchored to
+  // midnight of consecutive days in the user's timezone (00:00 both ends;
+  // end is the day AFTER). Pre-this change callers had no way to set this
+  // and any "all day" attempt landed as a 0-min event at midnight. Default
+  // false — only set true when owner explicitly asks for a full-day event.
+  // showAs is intentionally not exposed: every meeting Maelle books is busy
+  // by default (owner direction).
+  isAllDay?: boolean;
   userEmail: string;
   timezone: string;
   // v2.3.1 (B23) — when `body` is not provided, the default attribution line
@@ -1412,14 +1420,32 @@ export async function createMeeting(params: CreateMeetingParams): Promise<string
   const defaultBody = params.defaultBodyAuthor
     ? `<p>Meeting booked by ${params.defaultBodyAuthor}.</p>`
     : `<p>Meeting scheduled by your executive assistant.</p>`;
+
+  // All-day normalization. Graph requires isAllDay events to start at 00:00
+  // of the day and end at 00:00 of the NEXT day (both in user TZ). Any other
+  // shape Graph rejects or silently degrades to a non-all-day 0-min event
+  // (the bug owner saw before this fix). Normalize here regardless of what
+  // the caller passed — a "Sunday all-day" becomes Sun 00:00 → Mon 00:00.
+  let startIso = params.start;
+  let endIso = params.end;
+  if (params.isAllDay) {
+    const startDt = DateTime.fromISO(params.start, { zone: params.timezone });
+    if (startDt.isValid) {
+      const dayStart = startDt.startOf('day');
+      const dayEnd = dayStart.plus({ days: 1 });
+      startIso = dayStart.toISO()!;
+      endIso = dayEnd.toISO()!;
+    }
+  }
+
   const event: Record<string, unknown> = {
     subject: params.subject,
     body: {
       contentType: 'HTML',
       content: params.body || defaultBody,
     },
-    start: { dateTime: normalizeForGraph(params.start, params.timezone), timeZone: params.timezone },
-    end:   { dateTime: normalizeForGraph(params.end,   params.timezone), timeZone: params.timezone },
+    start: { dateTime: normalizeForGraph(startIso, params.timezone), timeZone: params.timezone },
+    end:   { dateTime: normalizeForGraph(endIso,   params.timezone), timeZone: params.timezone },
     attendees: params.attendees.map(a => ({
       emailAddress: { address: a.email, name: a.name },
       type: 'required',
@@ -1431,6 +1457,7 @@ export async function createMeeting(params: CreateMeetingParams): Promise<string
     ...(effectiveLocation && { location:    { displayName: effectiveLocation } }),
     ...(params.categories  && { categories:  params.categories }),
     ...(params.sensitivity && { sensitivity: params.sensitivity }),
+    ...(params.isAllDay    && { isAllDay:    true }),
   };
 
   try {

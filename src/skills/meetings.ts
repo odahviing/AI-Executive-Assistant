@@ -432,6 +432,10 @@ LANGUAGE: subject and body MUST be in English regardless of the language you're 
               type: 'string',
               description: 'OPTIONAL. When set, the booking refuses if the proposed start is BEFORE the end of the referenced event. Use when this meeting is part of an ordered series ("M2 must come after M1") to make the order constraint enforceable at booking time. Pass the event id from get_calendar (or from the previous create_meeting return) of the predecessor. Omit when there is no predecessor.',
             },
+            is_all_day: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). Set TRUE only when the user explicitly asks for a full-day / all-day event ("block the whole day", "full day", "all day", "vacation marker"). When true: the system clamps start/end to midnight of the day → midnight of the next day in the user TZ; you can pass start as the day at any time and the handler normalizes. Owner-only personal blocks (no attendees, focus / prep / vacation marker) → also pass category=Logistic to skip the location stamp.',
+            },
           },
           required: ['subject', 'start', 'end', 'attendees', 'is_online', 'category'],
         },
