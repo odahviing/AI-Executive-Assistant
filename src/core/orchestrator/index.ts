@@ -195,6 +195,21 @@ export interface OrchestratorInput {
    */
   extraInstruction?: string;
   /**
+   * v2.6.1 (D4) — recent-outbound context block for inbound colleague DMs.
+   * Populated by the Slack connector when a colleague's inbound DM lands
+   * within 24h of a Maelle-originated message_colleague to that colleague,
+   * AND either (a) the inbound is within 10min of the outbound (deterministic
+   * match), (b) Sonnet classified it as a response to the outbound (10min-24h
+   * window), or (c) the inbound is a thread reply on the outbound's ts.
+   *
+   * Rendered into the system prompt as a "RECENT OUTBOUND TO THIS COLLEAGUE"
+   * block. Soft-framed: Sonnet treats it as the strong default but can pivot
+   * if the inbound clearly switches topic. Closes the D4 amnesia where a
+   * colleague's "Ok" reply 2 minutes after Maelle's heads-up DM produced
+   * "Hey, what can I help you with?" because conversation history was empty.
+   */
+  priorOutboundContext?: string;
+  /**
    * Image content blocks attached to the current user message (v1.7.1).
    * When present, the current turn is sent as a content array
    * `[image, ..., text]` instead of a plain string. Sonnet sees the actual
@@ -524,7 +539,15 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // When mode === 'none' this is empty and has no effect on the prompt.
   const socialDirectiveBlock = formatDirectiveForPromptBlock(socialDirective);
 
+  // v2.6.1 (D4) — recent-outbound context block. Populated by the Slack
+  // connector at inbound-DM time when a colleague's reply lands within a
+  // recent outbound's window (≤10min deterministic, 10min-24h LLM-classified,
+  // or thread-reply on the outbound's ts). Pinned NEAR THE TOP of the
+  // dynamic prompt so Sonnet sees it before drafting any reply.
+  const priorOutboundBlock = input.priorOutboundContext ?? '';
+
   const systemBlocksDynamic = [
+    priorOutboundBlock,
     promptParts.dynamic,
     threadContextBlock,
     actionTapeBlock,
@@ -1360,6 +1383,15 @@ Rules:
       const { shadowNotify } = await import('../../utils/shadowNotify');
       const who = input.senderName ?? input.userId;
       const replyPreview = finalReply.slice(0, 200).replace(/\s+/g, ' ').trim();
+      // v2.6.1 — render the colleague's INBOUND message before Maelle's reply
+      // so the owner can follow the conversation both directions. Previously
+      // shadow only carried Maelle's reply ("I said: ...") which forced the
+      // owner to mentally reconstruct what was asked. Both shadows thread
+      // under the same conversationKey so they collapse into one owner-DM
+      // thread per colleague conversation. Inbound shadow is skipped only
+      // when the inbound text is empty (defensive; shouldn't happen for a
+      // turn that produced a reply).
+      const inboundPreview = (input.userMessage ?? '').slice(0, 200).replace(/\s+/g, ' ').trim();
       // v2.3.2 — guard on the distinct/non-empty tool list, NOT the raw array.
       // Previously the guard used `toolCallSummaries.length > 0` which still
       // emitted ` (${join(', ')})` when every summary failed the regex —
@@ -1375,11 +1407,21 @@ Rules:
       // threads (new top-level message → new threadTs) get fresh shadow
       // threads. No timeout — the threadTs itself is the conversation
       // boundary.
+      if (inboundPreview.length > 0) {
+        await shadowNotify(profile, {
+          channel: input.channelId,
+          threadTs,
+          action: `${who} said`,
+          detail: `"${inboundPreview}"`,
+          conversationKey: threadTs,
+          conversationHeader: `Conversation with ${who}`,
+        });
+      }
       await shadowNotify(profile, {
         channel: input.channelId,
         threadTs,
-        action: `${who} → me`,
-        detail: `I said: "${replyPreview}"${toolHint}`,
+        action: `I → ${who}`,
+        detail: `"${replyPreview}"${toolHint}`,
         conversationKey: threadTs,
         conversationHeader: `Conversation with ${who}`,
       });

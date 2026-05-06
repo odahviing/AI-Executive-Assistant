@@ -66,6 +66,18 @@ export interface ClaimCheckResult {
   target_name?: string | null;
   target_slack_id?: string | null;   // never reliably populated by the LLM; kept for future
   action_summary?: string | null;
+  /**
+   * v2.6.1 — distinguishes "did the action happen at all" overclaims (false →
+   * the safety-net shield in postReply.ts can correctly suppress when a
+   * matching tool ran) from "the SPECIFIC change claimed wasn't actually
+   * performed by the tool that ran" overclaims (true → shield should NOT
+   * suppress, the LLM has named a real specifics mismatch). Example of the
+   * latter: draft says "updated to 25 min" but only `move_meeting` ran —
+   * start changed, duration didn't. Without this bit, the shield treated any
+   * calendar mutation as covering any book-class claim and the false
+   * specifics claim shipped (warn observed 2026-05-06).
+   */
+  claim_specifics_mismatch?: boolean;
   elapsedMs: number;
   failed_open?: boolean;             // true if we couldn't reach a verdict and defaulted to "accurate"
 }
@@ -169,6 +181,18 @@ The whole point of these tools is to queue an action; the model is allowed to na
 CRITICAL — mutation outcome (v2.2.5):
 Mutation tool summaries carry their outcome explicitly: \`[create_meeting OK event_id=...]\`, \`[move_meeting OK ...]\`, \`[delete_meeting OK ...]\` mean the tool returned success. \`[move_meeting FAILED: <reason>]\` / \`[create_meeting FAILED: <reason>]\` mean it ran BUT did NOT succeed. A success claim ("booked", "moved", "done", "all done", "locked in", "all four moved", "calendar updated") is HONEST only when the matching tool summary contains \`OK\`. If the matching summary contains \`FAILED\`, the success claim is FALSE — flag it. Aggregate claims ("all four locked in") require EVERY relevant mutation this turn to be \`OK\`; even one \`FAILED\` makes the aggregate claim false. Tools that didn't run AT ALL also fail the check (the existing rule above covers that).
 
+CRITICAL — specifics mismatch vs occurrence mismatch (v2.6.1):
+Calendar mutation tools each cover DIFFERENT fields:
+- \`create_meeting\` — creates a new event with subject / time / duration / attendees.
+- \`move_meeting\` — changes START TIME ONLY. Duration stays the same. Subject, location, attendees stay the same.
+- \`update_meeting\` — changes any field (subject, duration, location, attendees, body) WITHOUT changing the start time.
+- \`delete_meeting\` — cancels the event.
+- \`finalize_coord_meeting\` — books a coord-resolved slot (new event).
+- \`book_floating_block\` — books a lunch / coffee / focus block.
+
+If the draft claims a SPECIFIC change that the tool that ran does NOT cover — e.g. "updated to 25 min" / "duration changed" when only \`move_meeting\` ran (which doesn't touch duration), or "moved to a different room" when only \`update_meeting\` ran without a location change, or "renamed it to X" when only \`move_meeting\` ran — flag claimed_action=true AND set claim_specifics_mismatch=true. The action partially happened, but the specific field claimed didn't.
+
+Set claim_specifics_mismatch=false when the overclaim is about whether the action happened AT ALL (e.g. "I sent X" but no \`message_colleague\` ran; "I booked it" but no booking tool ran). The default for honest drafts (claimed_action=false) is also false.
 
 NOT a false claim:
 - Any send/book/task claim where the matching tool appears in TOOL ACTIVITY THIS TURN above.
@@ -188,12 +212,13 @@ Schema:
 {
   "claimed_action": boolean,
   "action_type": "message" | "book" | "task" | "other" | null,
+  "claim_specifics_mismatch": boolean,    // see CRITICAL — specifics mismatch above. False unless the claim names a specific change the tool that ran doesn't cover.
   "target_name": string | null,
   "action_summary": string | null   // one-line reason, ≤120 chars
 }
 
-If claimed_action is false, all other fields may be null.
-If claimed_action is true, fill action_type and — when action_type is "message" — fill target_name with the person the draft claims to have messaged.
+If claimed_action is false, set claim_specifics_mismatch=false and other fields may be null.
+If claimed_action is true, fill action_type and — when action_type is "message" — fill target_name with the person the draft claims to have messaged. Set claim_specifics_mismatch per the rules above.
 Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to one short line.`;
 
   try {
@@ -228,11 +253,13 @@ Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to o
       const claimedMatch = cleaned.match(/"claimed_action"\s*:\s*(true|false)/);
       const typeMatch = cleaned.match(/"action_type"\s*:\s*"([a-z_]+)"/);
       const targetMatch = cleaned.match(/"target_name"\s*:\s*(?:"([^"]*)"|null)/);
+      const specificsMatch = cleaned.match(/"claim_specifics_mismatch"\s*:\s*(true|false)/);
       if (claimedMatch) {
         parsed = {
           claimed_action: claimedMatch[1] === 'true',
           action_type: typeMatch ? typeMatch[1] : null,
           target_name: targetMatch && targetMatch[1] !== undefined ? targetMatch[1] : null,
+          claim_specifics_mismatch: specificsMatch ? specificsMatch[1] === 'true' : false,
           action_summary: '<truncated>',
         };
         logger.warn('Claim-checker: JSON truncated — recovered top fields', {
@@ -259,11 +286,13 @@ Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to o
     }
 
     if (parsed.claimed_action) {
+      const specificsMismatch = parsed.claim_specifics_mismatch === true;
       logger.warn('Claim-checker: draft claims an action with no matching tool call', {
         elapsedMs,
         action_type: parsed.action_type,
         target_name: parsed.target_name,
         action_summary: parsed.action_summary,
+        claim_specifics_mismatch: specificsMismatch,
         toolSummaries: input.toolSummaries,
         replyPreview: input.reply.slice(0, 200),
       });
@@ -273,6 +302,7 @@ Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to o
         target_name: parsed.target_name ?? null,
         target_slack_id: null,
         action_summary: parsed.action_summary ?? null,
+        claim_specifics_mismatch: specificsMismatch,
         elapsedMs,
       };
     }

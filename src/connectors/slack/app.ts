@@ -620,7 +620,57 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         senderName: colleagueName,
         meta: {},
         runner: async ({ mergedText, signal, markWrite }) => {
-          logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== userMessage });
+          // v2.6.1 (D4) — recent-outbound context lookup for colleague 1:1 DMs.
+          // When a colleague replies to Maelle in their DM (top-level OR thread
+          // reply on a Maelle-sent message), check for an open outbound from
+          // her to them within 24h. Attach as priorOutboundContext so the
+          // orchestrator sees "RECENT OUTBOUND TO THIS COLLEAGUE" before
+          // drafting. Closes the D4 amnesia (Isaac's "Ok" 2 min after Maelle's
+          // heads-up landing as "Hey, what can I help you with?"). Skipped
+          // for owner DMs, MPIMs, channels, and owner-in-group contexts —
+          // those have their own continuity surfaces.
+          let priorOutboundContext: string | undefined;
+          if (role === 'colleague' && !isMpim && !isChannel && !isOwnerInGroup) {
+            try {
+              const { getRecentOutboundContext, closeFollowupForMessageTs, buildThreadReplyContextBlock } =
+                await import('./recentOutboundContext');
+              // Path A — thread reply on a Maelle-sent DM. threadTs !== ts means
+              // this is a reply inside a thread, parent ts === threadTs. If
+              // that parent matches an outreach_jobs.dm_message_ts, it's an
+              // explicit reply (no LLM needed).
+              if (threadTs && threadTs !== ts) {
+                const job = closeFollowupForMessageTs({ messageTs: threadTs, reason: 'thread_reply' });
+                if (job) {
+                  priorOutboundContext = buildThreadReplyContextBlock(job);
+                  logger.info('priorOutboundContext set via thread_reply', {
+                    jobId: job.id, colleague: colleagueName, threadTs,
+                  });
+                }
+              }
+              // Path B — top-level DM reply. Run the time-window logic
+              // (deterministic <10min / LLM 10min-24h / auto-expire >24h).
+              if (!priorOutboundContext) {
+                const ctx = await getRecentOutboundContext({
+                  ownerUserId: profile.user.slack_user_id,
+                  colleagueSlackId: senderId,
+                  colleagueName: colleagueName ?? senderId,
+                  ownerFirstName: profile.user.name.split(' ')[0],
+                  inboundText: mergedText,
+                });
+                if (ctx.matched && ctx.contextBlock) {
+                  priorOutboundContext = ctx.contextBlock;
+                  logger.info('priorOutboundContext set via lookup', {
+                    matchedVia: ctx.matchedVia, jobId: ctx.matchedJobId, colleague: colleagueName,
+                  });
+                }
+              }
+            } catch (err) {
+              logger.warn('priorOutboundContext lookup threw — proceeding without context', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          }
+          logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== userMessage, hasPriorOutboundContext: !!priorOutboundContext });
           const result = await runOrchestrator({
             userMessage: mergedText,
             conversationHistory: history,
@@ -639,6 +689,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
             forceToolOnFirstTurn,
             signal,
             onWriteExecuted: () => markWrite(),
+            priorOutboundContext,
           });
           logger.info('Orchestrator completed', { senderId, threadTs, hasApproval: result.requiresApproval, actionCount: result.slackActions?.length ?? 0 });
 
@@ -1359,15 +1410,36 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       }
     }
 
-    logger.info('MPIM message received', { senderId: event.user, channelId: event.channel, channelType: event.channel_type, preview: (event.text as string).slice(0, 80) });
+    // v2.6.1 — log event.ts + thread_ts + bot-mention presence so we can
+    // correlate this handler with the parallel `app_mention` handler when
+    // both fire for the same user message (D2 investigation, 2026-05-06).
+    // If both handlers log the SAME ts, markProcessed dedup should catch
+    // the second; if they log DIFFERENT ts values for the same user input,
+    // the dedup key needs to widen.
+    logger.info('MPIM message received', {
+      senderId: event.user,
+      channelId: event.channel,
+      channelType: event.channel_type,
+      ts: event.ts,
+      threadTs: ('thread_ts' in event ? event.thread_ts : undefined) ?? null,
+      hasSelfMention: typeof event.text === 'string' && botUserId ? (event.text as string).includes(`<@${botUserId}>`) : null,
+      botUserIdSet: !!botUserId,
+      preview: (event.text as string).slice(0, 80),
+    });
 
-    // Skip messages with @mentions — app_mention handles those to avoid double-firing
-    if (containsSelfMention(event.text as string)) return;
-
+    // Pre-v2.6.1 we bailed here on self-mention, expecting app_mention to take
+    // over. Slack doesn't reliably fire app_mention for MPIMs (workspace and
+    // event-subscription dependent), so @-mentions in group DMs were silenced
+    // — observed 2026-05-06: two consecutive `@Maelle ...` messages in an MPIM
+    // got no response, then a bare-name message ("I wonder if Maelle is down")
+    // woke her up. Now: process self-mentions here too. The markProcessed dedup
+    // a few lines down already handles the rare case where both `message` and
+    // `app_mention` fire for the same ts — first to mark wins, the other no-ops.
     const ts       = event.ts;
     const threadTs = ('thread_ts' in event && event.thread_ts) ? event.thread_ts as string : ts;
 
-    // Dedup — same ts = Slack retry, skip it
+    // Dedup — same ts = Slack retry OR concurrent app_mention firing. First
+    // call marks ts; any second handler (this one or app_mention) skips.
     if (!markProcessed(ts)) { logger.debug('MPIM dedup — skipping retry', { ts }); return; }
 
     setImmediate(async () => {
@@ -1483,12 +1555,49 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     });
   });
 
+  // ── Handler 2.5: emoji reactions on outbound DMs (v2.6.1, D4) ─────────────
+  // When a colleague reacts to a Maelle-sent DM with an emoji, treat it as
+  // an explicit acknowledgment ("I saw it"). Closes the D4 followup tracker
+  // for the matching outreach_jobs row so subsequent inbound DMs from this
+  // colleague aren't falsely matched against an already-acked outbound.
+  // Idempotent — closeFollowupForMessageTs is a no-op when no open row exists.
+  app.event('reaction_added', async ({ event }) => {
+    try {
+      // Only react to reactions on Maelle's OWN messages (item.user is the
+      // author of the reacted-to message; should be the bot for our case).
+      if (!('item' in event) || !event.item) return;
+      const item = event.item as { type?: string; channel?: string; ts?: string };
+      if (item.type !== 'message' || !item.ts) return;
+      // The user who reacted shouldn't be the bot itself.
+      if ('user' in event && event.user === botUserId) return;
+      const { closeFollowupForMessageTs } = await import('./recentOutboundContext');
+      const closed = closeFollowupForMessageTs({ messageTs: item.ts, reason: 'emoji_ack' });
+      if (closed) {
+        logger.info('reaction_added closed outreach followup', {
+          jobId: closed.id,
+          colleague: closed.colleague_name,
+          reaction: 'reaction' in event ? (event.reaction as string) : undefined,
+          reactor: 'user' in event ? event.user : undefined,
+        });
+      }
+    } catch (err) {
+      logger.warn('reaction_added handler threw — ignoring', { err: String(err).slice(0, 200) });
+    }
+  });
+
   // ── Handler 3: @mentions in channels and private channels ─────────────────
   // Fires ONLY when @Maelle is explicitly mentioned — she is silent otherwise
   app.event('app_mention', async ({ event, say, client }) => {
     if (!('user' in event) || !event.user) return;
 
-    logger.info('Channel @mention received', { senderId: event.user, channelId: event.channel, threadTs: event.thread_ts ?? event.ts });
+    // v2.6.1 — log event.ts so we can correlate against the MPIM `message`
+    // handler when both fire for the same user @-mention in an MPIM (D2).
+    logger.info('Channel @mention received', {
+      senderId: event.user,
+      channelId: event.channel,
+      ts: event.ts,
+      threadTs: event.thread_ts ?? event.ts,
+    });
 
     // Strip ONLY this bot's own @mention — keep and resolve other user @mentions
     // so Claude knows who was referenced (e.g. "say hi to @Amazia Keidar")

@@ -177,6 +177,18 @@ function initSchema(db: Database.Database): void {
     // into the same DM conversation instead of creating fresh top-level DMs.
     `ALTER TABLE outreach_jobs ADD COLUMN dm_message_ts TEXT`,
     `ALTER TABLE outreach_jobs ADD COLUMN dm_channel_id TEXT`,
+    // v2.6.1 (D4) — independent follow-up tracking, separate from `status`.
+    // The existing `status` field churns on a 5-min auto-close path
+    // (closeFireAndForgetOutreach) for await_reply=false rows, which left
+    // colleague replies arriving 2+ min later with no recoverable
+    // "what did Maelle say?" context. These two columns track the
+    // CONVERSATIONAL closure of the DM independent of task lifecycle:
+    // followup_closed_at NULL = open (still expecting/accepting acknowledgment);
+    // populated when the colleague reacted with emoji, threaded a reply,
+    // sent a follow-up DM that matched (deterministic <10min, or LLM-
+    // classified-as-response 10min-24h), or 24h elapsed.
+    `ALTER TABLE outreach_jobs ADD COLUMN followup_closed_at TEXT`,
+    `ALTER TABLE outreach_jobs ADD COLUMN followup_close_reason TEXT`,
     // Defensive: older coord_jobs may be missing subject (was hit by injection-driven writes)
     `ALTER TABLE coord_jobs ADD COLUMN subject TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE coord_jobs ADD COLUMN topic TEXT`,

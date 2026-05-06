@@ -60,6 +60,21 @@ export interface OutreachJob {
   // fresh top-level DM.
   dm_message_ts?: string;
   dm_channel_id?: string;
+  // v2.6.1 (D4) — DM follow-up tracking, independent of `status`. Populated
+  // when the conversation around this outbound DM has closed: emoji reaction
+  // on the message, thread reply, deterministic <10min match, LLM-classified
+  // 10min-24h response, 24h auto-expiry, or any existing pipeline transition
+  // (status → replied/done/cancelled/expired/failed via handleOutreachReply
+  // / meetingReschedule / coordinator paths). The latter is auto-set inside
+  // updateOutreachJob below so existing call sites don't need to be touched.
+  followup_closed_at?: string;
+  followup_close_reason?:
+    | 'deterministic_match'
+    | 'llm_response_match'
+    | 'thread_reply'
+    | 'emoji_ack'
+    | 'auto_expired_24h'
+    | 'pipeline_consumed';
 }
 
 export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' | 'updated_at'>): string {
@@ -109,6 +124,35 @@ export function updateOutreachJob(id: string, updates: Partial<OutreachJob>): vo
   const params: Record<string, unknown> = { id };
   for (const [k, v] of Object.entries(updates)) params[k] = v ?? null;
   db.prepare(`UPDATE outreach_jobs SET ${fields}, updated_at = datetime('now') WHERE id = @id`).run(params);
+
+  // v2.6.1 (D4) — when status transitions to terminal via the existing
+  // pipelines (handleOutreachReply, meetingReschedule, outreachExpiry,
+  // outreachDecision, etc.) ALSO close followup_closed_at if not already
+  // set. Without this, the existing reply pipeline consumes the outreach
+  // (status → replied) but the D4 followup tracker stays open, and a
+  // SECOND inbound DM from the same colleague would falsely match the
+  // already-consumed row. Idempotent — preserves existing
+  // followup_close_reason if D4's own paths already closed it.
+  const terminalForFollowup = (() => {
+    switch (updates.status) {
+      case 'replied':
+      case 'done':
+      case 'cancelled':
+      case 'expired':
+      case 'failed':
+        return true;
+      default:
+        return false;
+    }
+  })();
+  if (terminalForFollowup) {
+    db.prepare(`
+      UPDATE outreach_jobs
+      SET followup_closed_at = COALESCE(followup_closed_at, datetime('now')),
+          followup_close_reason = COALESCE(followup_close_reason, 'pipeline_consumed')
+      WHERE id = ?
+    `).run(id);
+  }
 
   // v2.2.4 — defensive linked-task closure. Every outreach has a parent task
   // created by message_colleague (skill_origin='outreach', skill_ref=jobId).

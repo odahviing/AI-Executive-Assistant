@@ -494,6 +494,18 @@ export async function findAvailableSlots(params: {
   // profile.categories[].name); resolution + rule lookup happens via
   // utils/categoryRules.ts.
   category?: string;
+  // v2.6.1 — optional diagnostics output. When passed, the function
+  // populates this object by reference with the same per-rule rejection
+  // counts + examples it logs at the end of the search. Lets a CALLER
+  // (notably the colleague-path Guard B narrow check) read WHY a specific
+  // slot was rejected without parsing log lines. Owner direction:
+  // findAvailableSlots stays the single source of truth for rule logic;
+  // diagnostics ride on the same call. No return-shape change so existing
+  // callers are unaffected.
+  diagnosticsOut?: {
+    rejectedCounts?: Record<string, number>;
+    rejectedExamples?: Record<string, string[]>;
+  };
 }): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other' }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
@@ -1080,6 +1092,16 @@ export async function findAvailableSlots(params: {
         rejectedCounts,
         rejectedExamples,
       });
+      // v2.6.1 — also surface to the caller via diagnosticsOut, if passed.
+      // Used by colleague-path create_meeting Guard B to extract the
+      // SPECIFIC rule that rejected a narrow-window slot, so the refusal
+      // returned to Sonnet can name it (broken_rule_label) instead of
+      // forcing Sonnet to guess. Last call wins on auto-expand reruns —
+      // that's the loop's final verdict, which is what callers care about.
+      if (params.diagnosticsOut) {
+        params.diagnosticsOut.rejectedCounts = rejectedCounts;
+        params.diagnosticsOut.rejectedExamples = rejectedExamples;
+      }
     }
 
     // v1.6.4 — enough? If yes, stop. Otherwise extend the window (but not

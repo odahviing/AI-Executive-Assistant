@@ -980,9 +980,24 @@ export class SchedulingSkill {
               const durationMin = Math.max(5, Math.round((endDt.toMillis() - startDt.toMillis()) / 60_000));
               const { findAvailableSlots } = await import('../../connectors/graph/calendar');
               const startMs = startDt.toMillis();
-              const fromIso = DateTime.fromMillis(startMs - 60_000).toUTC().toISO();
-              const toIso = DateTime.fromMillis(endDt.toMillis() + 60_000).toUTC().toISO();
+              // v2.6.1 — pass the EXACT requested window. Pre-v2.6.1 widened
+              // by ±60s on each side, but findAvailableSlots strides 15-min
+              // from searchFrom — so cursor landed at start-1min and the
+              // requested slot was never tested. Worst-case bug: a 10:30
+              // request on an office day with hours_start: '10:30' got
+              // rejected as outside_owner_work_hours because cursor was at
+              // 10:29 (one minute outside the boundary). Confirmed in log
+              // 2026-05-06T18:39:45.015Z. The widening defended against
+              // nothing concrete (work-hours / busy / focus checks read
+              // integer-minute fields, sub-second drift doesn't matter).
+              const fromIso = startDt.toUTC().toISO();
+              const toIso = endDt.toUTC().toISO();
               let validSlots: Array<{ start: string }> = [];
+              // v2.6.1 — collect rejection diagnostics from findAvailableSlots
+              // by reference so we can name THIS slot's broken rule in the
+              // refusal returned to Sonnet (instead of forcing her to guess
+              // which led to "rule-non-compliant" + fabricated reasons).
+              const diagnostics: { rejectedCounts?: Record<string, number>; rejectedExamples?: Record<string, string[]> } = {};
               if (fromIso && toIso) {
                 validSlots = await findAvailableSlots({
                   userEmail,
@@ -999,18 +1014,57 @@ export class SchedulingSkill {
                   // here; outer matches() returns false; Sonnet escalates
                   // to create_approval with the rule name (RULE-NAMING).
                   category: args.category as string | undefined,
+                  diagnosticsOut: diagnostics,
                 });
               }
               const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
               if (!matches) {
                 const ownerFirst = context.profile.user.name.split(' ')[0];
+                // v2.6.1 — derive a one-phrase human label for the rule
+                // that rejected this slot. Sonnet pastes this verbatim
+                // into create_approval(kind=policy_exception).ask_text so
+                // the owner sees "in your lunch window" / "outside your
+                // work hours" / etc. instead of "rule-non-compliant" or a
+                // fabricated reason. broken_rule_label === 'unknown' means
+                // the diagnostics didn't fire (rare — defensive); Sonnet
+                // says so honestly rather than guessing.
+                const labelFor = (reason: string | undefined): string => {
+                  switch (reason) {
+                    case 'outside_owner_work_hours': return `outside ${ownerFirst}'s work hours`;
+                    case 'outside_attendee_work_hours': return `outside the attendee's working hours`;
+                    case 'owner_busy_or_buffer_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
+                    case 'overlaps_meeting_being_moved': return `overlaps the meeting being moved`;
+                    case 'focus_time_office': return `breaks ${ownerFirst}'s focus-time protection (office day)`;
+                    case 'focus_time_home': return `breaks ${ownerFirst}'s focus-time protection (home day)`;
+                    case 'floating_block_no_room': return `would leave no room for one of ${ownerFirst}'s daily blocks (lunch / break / etc.)`;
+                    case 'category_day_type': return `wrong day type for this category (e.g. office-only category on a home day)`;
+                    case 'category_per_day': return `over ${ownerFirst}'s per-day limit for this category`;
+                    case 'category_per_week': return `over ${ownerFirst}'s per-week limit for this category`;
+                    default: return 'unknown';
+                  }
+                };
+                const counts = diagnostics.rejectedCounts ?? {};
+                const fired = Object.keys(counts);
+                // Pick the first reason that fired. Narrow window means
+                // typically only one rule rejects (one slot tested). When
+                // multiple appear (rare: e.g. both work-hours AND category),
+                // pick whichever shows up first — caller gets a real fact
+                // either way.
+                const brokenRule = fired[0];
+                const brokenRuleLabel = labelFor(brokenRule);
                 logger.info('create_meeting colleague-path refused — slot breaks owner rules', {
                   start: args.start, end: args.end, requester: context.userId,
+                  broken_rule: brokenRule ?? 'unknown',
+                  broken_rule_label: brokenRuleLabel,
                 });
                 return {
                   success: false,
                   error: 'not_rule_compliant',
-                  message: `That time breaks one of ${ownerFirst}'s scheduling rules (work hours, work days, lunch window, or a conflict). I can't book it on my own — call create_approval(kind=policy_exception) so he can decide.`,
+                  broken_rule: brokenRule ?? 'unknown',
+                  broken_rule_label: brokenRuleLabel,
+                  message: brokenRuleLabel === 'unknown'
+                    ? `That time doesn't pass ${ownerFirst}'s scheduling rules and I can't tell exactly which one flagged it. Call create_approval(kind=policy_exception) — describe the slot honestly and let him decide.`
+                    : `That time is ${brokenRuleLabel} for ${ownerFirst}. I can't book it on my own — call create_approval(kind=policy_exception) and pass the same phrase ("${brokenRuleLabel}") in ask_text so he knows what he's overriding.`,
                 };
               }
             }
@@ -1549,9 +1603,14 @@ export class SchedulingSkill {
                 const durationMin = Math.max(5, Math.round((endDt.toMillis() - startDt.toMillis()) / 60_000));
                 const { findAvailableSlots } = await import('../../connectors/graph/calendar');
                 const startMs = startDt.toMillis();
-                const fromIso = DateTime.fromMillis(startMs - 60_000).toUTC().toISO();
-                const toIso = DateTime.fromMillis(endDt.toMillis() + 60_000).toUTC().toISO();
+                // v2.6.1 — pass exact requested window. See parallel comment
+                // in create_meeting Guard B for the full reasoning (±60s
+                // padding caused cursor to land outside work-hours boundaries
+                // by one minute, slot never tested).
+                const fromIso = startDt.toUTC().toISO();
+                const toIso = endDt.toUTC().toISO();
                 let validSlots: Array<{ start: string }> = [];
+                const diagnostics: { rejectedCounts?: Record<string, number>; rejectedExamples?: Record<string, string[]> } = {};
                 if (fromIso && toIso) {
                   validSlots = await findAvailableSlots({
                     userEmail,
@@ -1568,21 +1627,48 @@ export class SchedulingSkill {
                     // findAvailableSlots widens its event fetch when
                     // category is set so day/week counts are accurate.
                     category: args.category as string | undefined,
+                    diagnosticsOut: diagnostics,
                   });
                 }
                 const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
                 if (!matches) {
                   const ownerFirst = context.profile.user.name.split(' ')[0];
+                  // v2.6.1 — same rule-name surfacing as create_meeting Guard B.
+                  const labelFor = (reason: string | undefined): string => {
+                    switch (reason) {
+                      case 'outside_owner_work_hours': return `outside ${ownerFirst}'s work hours`;
+                      case 'outside_attendee_work_hours': return `outside the attendee's working hours`;
+                      case 'owner_busy_or_buffer_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
+                      case 'overlaps_meeting_being_moved': return `overlaps the meeting being moved`;
+                      case 'focus_time_office': return `breaks ${ownerFirst}'s focus-time protection (office day)`;
+                      case 'focus_time_home': return `breaks ${ownerFirst}'s focus-time protection (home day)`;
+                      case 'floating_block_no_room': return `would leave no room for one of ${ownerFirst}'s daily blocks (lunch / break / etc.)`;
+                      case 'category_day_type': return `wrong day type for this category (e.g. office-only category on a home day)`;
+                      case 'category_per_day': return `over ${ownerFirst}'s per-day limit for this category`;
+                      case 'category_per_week': return `over ${ownerFirst}'s per-week limit for this category`;
+                      default: return 'unknown';
+                    }
+                  };
+                  const counts = diagnostics.rejectedCounts ?? {};
+                  const fired = Object.keys(counts);
+                  const brokenRule = fired[0];
+                  const brokenRuleLabel = labelFor(brokenRule);
                   logger.info('move_meeting colleague-path refused — new slot breaks owner rules', {
                     meetingId: args.meeting_id, newStart, newEnd, requester: context.userId,
+                    broken_rule: brokenRule ?? 'unknown',
+                    broken_rule_label: brokenRuleLabel,
                   });
                   return {
                     needs_owner_approval: true,
                     reason: 'not_rule_compliant',
+                    broken_rule: brokenRule ?? 'unknown',
+                    broken_rule_label: brokenRuleLabel,
                     meeting_subject: args.meeting_subject,
                     requested_start: newStart,
                     requested_end: newEnd,
-                    message: `That time breaks one of ${ownerFirst}'s scheduling rules (work hours, work days, lunch window, or a conflict). I can't move it on my own — I'll check with ${ownerFirst} and come back to you. Call create_approval(kind=meeting_reschedule) with the requested slot so he can decide.`,
+                    message: brokenRuleLabel === 'unknown'
+                      ? `That time doesn't pass ${ownerFirst}'s scheduling rules and I can't tell exactly which one flagged it. Call create_approval(kind=meeting_reschedule) — describe the slot honestly and let him decide.`
+                      : `That time is ${brokenRuleLabel} for ${ownerFirst}. I can't move it on my own — call create_approval(kind=meeting_reschedule) and pass the same phrase ("${brokenRuleLabel}") in ask_text so he knows what he's overriding.`,
                   };
                 }
               }

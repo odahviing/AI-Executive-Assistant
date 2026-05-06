@@ -271,7 +271,16 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
             ? /\[(create_task|create_approval)/.test(toolSummariesText)
             : false;
 
-    if (matchingToolAlreadyRan) {
+    // v2.6.1 — when the claim-checker LLM has named a SPECIFIC change the
+    // tool that ran doesn't cover (e.g. "updated to 25 min" claim while only
+    // `move_meeting` ran — start changed, duration didn't), bypass the
+    // false-positive shield. The shield's coarse "any matching tool ran =
+    // honest" was masking real specifics-mismatch claims (warn observed
+    // 2026-05-06, draft said "updated to 25 min" with only [move_meeting OK]
+    // in tool activity). When the LLM has explicitly identified the field
+    // mismatch, trust the verdict — let the retry fire. Retry already carries
+    // this turn's tool summaries (v2.3.4) so no duplicate-mutation risk.
+    if (matchingToolAlreadyRan && !verdict.claim_specifics_mismatch) {
       logger.warn('Claim-checker flagged but matching tool already ran this turn — skipping retry (false positive)', {
         senderId: ctx.senderId,
         threadTs: ctx.threadTs,
@@ -280,6 +289,16 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
         toolSummaries: result.toolSummaries,
       });
       return cleanReply;
+    }
+    if (matchingToolAlreadyRan && verdict.claim_specifics_mismatch) {
+      logger.warn('Claim-checker shield bypassed — specifics mismatch identified, retry will fire', {
+        senderId: ctx.senderId,
+        threadTs: ctx.threadTs,
+        action_type: verdict.action_type,
+        target_name: verdict.target_name,
+        action_summary: verdict.action_summary,
+        toolSummaries: result.toolSummaries,
+      });
     }
 
     logger.warn('Claim-checker: retrying turn with corrective nudge', {

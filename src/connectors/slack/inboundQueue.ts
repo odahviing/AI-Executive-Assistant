@@ -176,6 +176,27 @@ export function enqueueMessage(params: {
   const key = keyFor(params.channelId, params.threadTs, params.isOneOnOneDm);
   const state = getOrCreate(key);
 
+  // v2.6.1 — diagnostic to investigate D2 (duplicate orchestrator turns
+  // from same Slack event). Logs the queue state at every enqueue so we
+  // can correlate "two scheduleRun calls with batchSize:1" against what
+  // each enqueue saw. Triggered by the 2026-05-06 21:39 incident where
+  // both MPIM `message` and `app_mention` events ran independently. If
+  // the second enqueue logs `inFlight=null pending=0 timer=null` despite
+  // the first having just enqueued, the keys differed; if it shows the
+  // first's state, then the timer was already firing — points at a
+  // specific race we can address.
+  logger.info('inboundQueue — enqueue', {
+    key,
+    channelId: params.channelId,
+    threadTs: params.threadTs ?? '_none_',
+    isOneOnOneDm: params.isOneOnOneDm,
+    inFlight: state.inFlight !== null,
+    hasWriteFired: state.hasWriteFired,
+    pendingCount: state.pending.length,
+    timerSet: state.debounceTimer !== null,
+    textPreview: params.text.slice(0, 60),
+  });
+
   const msg: PendingMessage = {
     text: params.text,
     arrivedAt: Date.now(),
