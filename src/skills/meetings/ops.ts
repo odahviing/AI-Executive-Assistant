@@ -1258,9 +1258,28 @@ export class SchedulingSkill {
         // Non-online meetings only; online meetings skip both. Each part is
         // a single line (label, address, parking, etc.) — joined cleanly
         // downstream (commas in the location field, bullet list in body).
+        //
+        // v2.6.2 (D5) — the original `effectiveIsOnline` variable conflated
+        // two distinct concepts:
+        //   1. "Should the meeting include a Teams link?" — true for office-
+        //      day in-person meetings (hybrid) AND fully-online meetings.
+        //   2. "Should the location field be empty?" — true ONLY for fully-
+        //      online meetings.
+        // determineSlotLocation returns `{ location: 'Idan\'s Office, ...',
+        // isOnline: true }` for office-day internal — meaning "physically at
+        // the office WITH a Teams link," not "no location." Pre-fix, the
+        // shared variable made office-day internal meetings drop their
+        // location field even though the helper had a real address ready
+        // to use. Now: `effectiveIsOnline` still drives the Teams-link
+        // decision (passed as `isOnline:` to createMeeting); a separate
+        // `skipLocationField` drives the location-field path.
         const effectiveIsOnline = args.is_online === true || derivedIsOnline === true;
+        const skipLocationField =
+          args.is_online === true
+          || (derivedIsOnline === true
+              && (!derivedLocationFromHelper || derivedLocationFromHelper.trim().length === 0));
         const resolvedLocationParts: string[] = await (async (): Promise<string[]> => {
-          if (effectiveIsOnline) return [];
+          if (skipLocationField) return [];
           // v2.5.1 — yaml-driven skip. Categories flagged
           // `no_default_location: true` are personal time-on-calendar
           // (focus blocks, buffer/think time) where the office address
@@ -1324,8 +1343,12 @@ export class SchedulingSkill {
             const { scrubInternalLeakage } = require('../../utils/textScrubber') as typeof import('../../utils/textScrubber');
             const raw = args.body as string | undefined;
             const cleanedRaw = raw ? scrubInternalLeakage(raw) : '';
-            if (effectiveIsOnline) {
-              // Online — no physical location to surface. Return body as-is.
+            // v2.6.2 (D5) — same fix as resolvedLocationParts above. Use
+            // skipLocationField (not effectiveIsOnline) so office-day internal
+            // hybrid meetings DO get a location block in the body even when a
+            // Teams link is also being added.
+            if (skipLocationField) {
+              // Fully online — no physical location to surface. Return body as-is.
               return cleanedRaw || undefined;
             }
             if (!resolvedLocationParts || resolvedLocationParts.length === 0) {
