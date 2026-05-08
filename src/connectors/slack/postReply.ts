@@ -43,6 +43,12 @@ export interface PostReplyInput {
   senderId: string;
   channelId: string;
   threadTs: string;
+  // v2.6.2 — the user's actual message ts (NOT the parent thread anchor when
+  // it's a thread reply). Used for ack-class emoji replacement: when Maelle's
+  // reply is a pure short ack ("Got it" / "On it" / "Done"), suppress the
+  // text and react 👍 on the user's message instead. Optional for back-compat;
+  // when omitted, ack-replacement is skipped and the reply posts as text.
+  userMessageTs?: string;
   // Inputs the claim-checker retry path needs to re-invoke the orchestrator
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
   userMessage: string;
@@ -50,6 +56,53 @@ export interface PostReplyInput {
   isOwnerInGroup?: boolean;
   mpimMemberIds?: string[];
   voiceInput?: boolean;
+}
+
+/**
+ * v2.6.2 — pure-ack reply detector for the emoji-replacement path.
+ *
+ * A reply qualifies as a pure ack when it's short AND matches one of a small
+ * set of single-phrase acknowledgments — "Got it", "On it", "Done", "Noted",
+ * "Sure", "Okay", "Will do", and minor variants (case-insensitive, with
+ * trailing . / !). When the reply has any actual content (a name, a time, a
+ * follow-up question, a clarification), it does NOT qualify and posts as
+ * text.
+ *
+ * Conservative by design — false negatives (a real ack posts as text) are
+ * fine; false positives (a content reply gets swallowed into a reaction) are
+ * the failure mode to avoid. Owner direction: "no free spirit for now."
+ */
+function isPureAckReply(reply: string): boolean {
+  const trimmed = reply.trim();
+  if (trimmed.length === 0 || trimmed.length > 30) return false;
+  // Strip a single trailing emoji or punctuation cluster if present.
+  const normalized = trimmed
+    .replace(/[!.…]+$/, '')
+    .replace(/^[!.…]+/, '')
+    .trim()
+    .toLowerCase();
+  // Allowed single-phrase acks. Conservative — extend only when a real case
+  // surfaces; over-eager additions risk swallowing content.
+  const ACK_PHRASES = new Set([
+    'got it',
+    'got it!',
+    'on it',
+    'done',
+    'noted',
+    'sure',
+    'sure thing',
+    'will do',
+    'okay',
+    'ok',
+    'thanks',
+    'thank you',
+    'all set',
+    'sounds good',
+    'no problem',
+    'np',
+    'cool',
+  ]);
+  return ACK_PHRASES.has(normalized);
 }
 
 export async function postOrchestratorReply(input: PostReplyInput): Promise<void> {
@@ -178,6 +231,35 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       assistantName: assistant.name,
       ownerFirstName: profile.user.name.split(' ')[0],
     });
+  }
+
+  // Step 4.5 (v2.6.2) — ack-class emoji replacement. When the cleaned reply
+  // is a pure short ack ("Got it" / "On it" / "Done" / "Noted" / "Sure"),
+  // suppress the text reply and react 👍 on the user's message instead.
+  // Owner direction: "if nothing smart to say, we can say 👍 = positive ack."
+  // Conservative match — single-phrase, ≤30 chars, no punctuation other
+  // than . / !. Reply with actual content always posts as text.
+  // Skipped when: voice input (audio path expects text), no userMessageTs
+  // (can't react), already an emoji-only reply.
+  const userMsgTs = (input as PostReplyInput).userMessageTs;
+  if (!voiceInput && userMsgTs && isPureAckReply(cleanReply)) {
+    try {
+      await app.client.reactions.add({
+        token: assistant.slack.bot_token,
+        channel: channelId,
+        timestamp: userMsgTs,
+        name: '+1',
+      });
+      logger.debug('Ack-class reply replaced with 👍 reaction', {
+        senderId, threadTs, replyPreview: cleanReply.slice(0, 40),
+      });
+      return;  // No text post; the reaction IS the reply.
+    } catch (err) {
+      logger.warn('Ack-replacement reaction failed — falling back to text', {
+        err: String(err).slice(0, 200),
+      });
+      // Fall through to send text.
+    }
   }
 
   // Step 5 — audio vs text.
@@ -426,7 +508,23 @@ async function sendReply(opts: {
       // Fall through to text.
     }
   }
-  await opts.say({ text: opts.cleanReply, thread_ts: opts.threadTs });
+  // v2.6.2 — capture the posted message ts so we can react ✅ on Maelle's
+  // own reply, marking "thread complete" while keeping the original 🧵 / 👀
+  // marker on the user's message untouched. Owner direction: "Don't replace,
+  // when the thread over, ✅ should be for the last message on the thread.
+  // don't replace the original emoji of thread."
+  // Bolt's `say` returns ChatPostMessageResponse at runtime even though the
+  // surface type is Promise<unknown> (postReply abstracts from app-direct).
+  const sayRes = await opts.say({ text: opts.cleanReply, thread_ts: opts.threadTs }) as
+    | { ts?: string; ok?: boolean } | undefined;
+  if (sayRes?.ts) {
+    opts.app.client.reactions.add({
+      token: opts.botToken,
+      channel: opts.channelId,
+      timestamp: sayRes.ts,
+      name: 'white_check_mark',
+    }).catch(() => {});
+  }
 }
 
 // ── Date verifier + retry (v1.6.6) ─────────────────────────────────────────

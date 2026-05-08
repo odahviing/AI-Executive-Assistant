@@ -99,11 +99,12 @@ Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EE
         `themselves, their habits, or the people they work with.`)
     : null;
 
-  // v2.2.3 (#3) — slim contact rendering when persona skill is off (no social
-  // fields, no notes, harder cap on interaction log). Read fresh per call.
-  const personaActiveForPrompt = (profile.skills as any)?.persona === true;
+  // v2.6.2 (renamed from persona) — slim contact rendering when social skill
+  // is off (no social fields, no notes, harder cap on interaction log).
+  // Read fresh per call.
+  const socialActiveForPrompt = (profile.skills as any)?.social === true;
   const peopleSection = isOwner
-    ? formatPeopleMemoryForPrompt(user.slack_user_id, focusSlackIds, personaActiveForPrompt)
+    ? formatPeopleMemoryForPrompt(user.slack_user_id, focusSlackIds, socialActiveForPrompt)
     : null;
 
   // v2.2.1 — per-person markdown memory catalog (operational facts: residence,

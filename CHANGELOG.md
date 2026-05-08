@@ -2,6 +2,55 @@
 
 ---
 
+## 2.6.2 — Channel thread-continuation, social engine rename + loosening, emoji feedback loop
+
+Patch wave wrapping a focused optimization session. Three groups of work landed together: (1) extend Maelle into Slack channels with the same MPIM thread-continuation behavior — once she's @-mentioned in a thread, she keeps the thread active until topic / activity ends; (2) rename the `persona` skill to `social` everywhere with a single master toggle (no more separate `behavior.proactive_colleague_social.enabled`), plus loosen the proactive cold-ping recency gate so it actually picks candidates again; (3) emoji feedback loop — owner can resolve approvals with a reaction, colleagues' emoji acks on Maelle's outreach generate a shadow line so the owner knows they saw it, ack-class replies ("Got it" / "Done") replace text with a 👍 reaction, and Maelle marks her own reply with ✅ when an activity completes.
+
+The social subsystem was producing zero proactive output for 11 days running because the v2.3.1 72h-recency gate filtered out almost every candidate — most colleagues never DM Maelle directly. v2.6.2 swaps that for a TZ-aware local-week boundary AND accepts a recent topic-touch as a recency signal, so people Maelle has logged topics on (in-conversation engagement) qualify even without inbound DMs. Combined with the rename + single toggle, the social layer is now both clearly-named and actually firing.
+
+### Added — channel thread-continuation
+
+- **Real-channel `message` event handler** (`src/connectors/slack/app.ts`) now lets through thread replies WHEN Maelle has at least one assistant turn in that thread's conversation history. Top-level channel chatter still drops, threads she's never spoken in still drop. Once she's @-mentioned and replied once, follow-up messages in that thread flow through the same MPIM relevance + addressee gates downstream — no need for repeated `@Maelle` on every reply.
+- **Skipped for channel continuations**: the `<<GROUP DM>>` participant preamble (wrong framing for channels) and the full-channel members fetch (could be hundreds of people). Thread participants come through processMessage's existing `conversations.replies` merge.
+- **Bot-as-people invariant verified** — the trigger model is mention-based and agnostic to whether the sender is human or bot. Other agents in your workspace can `@Maelle` her in a channel and she'll respond like she would to a human.
+
+### Added — emoji feedback loop
+
+- **Approvals over emoji**. The Slack `reaction_added` handler at `app.ts` now also detects reactions on owner-DM approval messages (`approvals.slack_msg_ts`). ✅ / 👍 / 🙏 → `resolveApproval` with verdict `approve`; ❌ / 👎 → verdict `reject`; other emojis ignored. New helper `getPendingApprovalByMsgTs` in `db/approvals.ts`. Saves the typed-reply round trip for short approvals.
+- **Colleague ack shadow loop (closes [#56](https://github.com/odahviing/AI-Executive-Assistant/issues/56))**. When a colleague reacts to a Maelle-sent outreach DM (heads-up / relay / FYI), the existing D4 emoji_ack closure now also fires a shadow DM to the owner: *"Isaac reacted :+1: to: \"Hey Isaac, heads up — you're being added to Idan's meeting…\""*. Threads under the same `conversationKey` so it nests with the original outbound's shadow line. Without this the owner had no way to know a colleague saw an FYI.
+- **`✅` on Maelle's reply at activity completion**. After every `sendReply` in `connectors/slack/postReply.ts`, Maelle reacts ✅ on her own just-posted message — marks "I'm done with this turn" without disrupting the user's original 🧵 / 👀 marker on the inbound.
+- **Ack-class emoji replacement**. Pure short-ack replies ("Got it", "On it", "Done", "Noted", "Sure", "Thanks", "Will do", and minor variants — case-insensitive, ≤30 chars) replace text with a 👍 reaction on the user's message. Conservative match — content replies (a name, a time, a follow-up) always post as text. Keeps the DM thread visually clean and reads more like a real EA.
+
+### Added — proactive social loosening (option a + b combined)
+
+- **`socialOutreachTick.ts`** swaps the fixed 72h recency gate for a TZ-aware local-week boundary. New `computeLocalWeekStartMs(zone, nowUtc)` helper: Israel (`Asia/Jerusalem`) → Sunday 00:00 local, everywhere else → Monday 00:00 local (ISO).
+- **Recency signal is now `max(last_inbound, last_topic_touch)`** — a colleague Maelle has been logging topics on (engage-mode in conversation) qualifies as "active" even without sending Maelle a direct DM. New helper `lastTopicTouchMs` queries `social_topics_v2.last_touched_at`.
+- **Reject reasons updated**: `silent_>72h` → `silent_this_week`, `never_inbound` → `no_signal_ever`. Accurate names for the new gate.
+- Pre-fix the proactive tick fired 327 times in the last 14 days and picked zero candidates. Post-fix, IL-TZ colleagues with topic activity this week (Maayan, Isaac, etc.) qualify and get pinged within their local 13:00-15:00 mid-day window.
+
+### Changed — `persona` skill renamed to `social`
+
+- **`PersonaSkill` → `SocialSkill`** in `src/skills/social.ts` (file renamed from `src/skills/persona.ts`). Skill id `'persona'` → `'social'`. Registry updated.
+- **Profile YAML key** `skills.persona` → `skills.social`. Old yamls auto-migrate at parse time (`loadUserProfile` projects `persona: true` → `social: true`) AND at registry load time (defense-in-depth). Legacy `persona` field kept optional in the schema so old yamls boot without edits.
+- **Variable rename** `personaActive` → `socialActive` at all 5 gate sites (orchestrator, systemPrompt, socialOutreachTick, socialDecay).
+- **`SkillId` union** updated: `'social'` is canonical, `'persona'` moved to legacy aliases (alongside `scheduling`, `coordination`, `meeting_summaries`, etc.).
+
+### Removed
+
+- **`behavior.proactive_colleague_social.enabled` field** — redundant with `skills.social`. The dispatcher already gated on `personaActive`; the second flag was doing nothing extra. Field kept optional in schema for old-yaml boot, but value is ignored. Window / cooldown / weekend-skip sub-options under `behavior.proactive_colleague_social` are unchanged.
+
+### Migration
+
+- **Schema**: no DB migration. The userProfile schema changes are zero-downtime — the `persona` legacy alias keeps old yamls parsing.
+- **Owner action**: rename `skills.persona` → `skills.social` in your yaml when convenient. Old key still works via auto-migration.
+
+### Not changed
+
+- `core/social/*` (engine internals — stateMachine, generateCoda, classifyOwnerIntent, categories) stays in core/ for this patch. Phase 2 (relocate to `skills/social/*`) deferred — pure organization, no behavior change, can ride a future minor.
+- The `:thread:` / `:eyes:` read-receipt path was checked end-to-end — v1.7.6 fix is intact, both reactions only fire after the addressee gate passes. No leak found in code.
+
+---
+
 ## 2.6.1 — Multi-bug session: shadow DM both directions, exact-slot rule check + broken_rule_label, claim-checker specifics-mismatch, MPIM @-mention silence, organizer-field truth, MPIM private-ask polish, recent-outbound context for colleague DMs
 
 Patch wave from a long bug-tracing session. Five real Slack threads from 2026-05-06 surfaced ten atomic bugs across approvals narration, MPIM responsiveness, claim-check honesty, shadow-DM rendering, Calendly handling, and outreach context loss. All ten fixed in tree; one (D2 — duplicate orchestrator turns from same Slack event) instrumented only, the diagnostic logs will pin the queue race the next time it fires.

@@ -21,7 +21,10 @@
  *   - Shadow-DM the owner with a line summary
  *
  * Self-reschedules every hour on completion. Guarded behind
- * `profile.behavior.proactive_colleague_social.enabled` (default false).
+ * `profile.skills.social` (v2.6.2 master toggle; was `skills.persona`
+ * pre-v2.6.2). The retired `behavior.proactive_colleague_social.enabled`
+ * binary field is no longer consulted; window/cooldown/weekend sub-options
+ * still come from `behavior.proactive_colleague_social.*`.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -62,7 +65,8 @@ interface CandidateRow {
 }
 
 interface ProactiveConfig {
-  enabled: boolean;
+  // v2.6.2 — `enabled` field retired; master is skills.social. This struct
+  // now only carries fine-tuning sub-options.
   daily_window_hours: [number, number];
   cooldown_days: number;
   skip_weekends: boolean;
@@ -76,7 +80,6 @@ function readConfig(profile: UserProfile): ProactiveConfig {
     ? [cfg.daily_window_hours[0] as number, cfg.daily_window_hours[1] as number]
     : [MID_DAY_START_HOUR_DEFAULT, MID_DAY_END_HOUR_DEFAULT];
   return {
-    enabled: cfg.enabled === true,
     daily_window_hours: window,
     cooldown_days: typeof cfg.cooldown_days === 'number' ? cfg.cooldown_days : COOLDOWN_DAYS_DEFAULT,
     skip_weekends: cfg.skip_weekends !== false && SKIP_WEEKENDS_DEFAULT,
@@ -98,19 +101,25 @@ function isWorkday(weekday: number, skipWeekends: boolean): boolean {
 // each candidate is checked individually so siblings stay eligible. See the
 // pingedTodaySet build inside pickCandidate.
 
-// v2.2.2 — recency gate. Proactive social only for people interacted with
-// in the last 72 hours. Owner direction: don't try to start a social topic
-// with someone you haven't actually talked to recently — week+ old contacts
-// get pinged cold, which reads transactional, not human.
-const RECENT_CONTACT_MS = 72 * 60 * 60 * 1000;
+// v2.6.2 — recency gate widened from a fixed 72h window to "within the
+// colleague's local work week." Owner direction: 72h was filtering out almost
+// every candidate because most colleagues don't directly DM Maelle even
+// weekly; switch to a TZ-aware week boundary (Sun-start for Israel,
+// Mon-start elsewhere) so a reasonable conversational footprint qualifies.
+// PLUS: the recency signal is now max(last_inbound, last_topic_touch) — a
+// person Maelle has been logging topics on (in-conversation engagement)
+// counts as "active" even without a direct DM. Owner direction (option b):
+// "allow either recent inbound or recent topic touch."
+//
+// Pre-v2.6.2 constant `RECENT_CONTACT_MS = 72h` retired.
 
 type RejectReason =
   | 'is_owner'
   | 'no_timezone'
   | 'rank_zero'
   | 'pending_lock'
-  | 'never_inbound'
-  | 'silent_>72h'
+  | 'no_signal_ever'
+  | 'silent_this_week'
   | 'invalid_tz'
   | 'outside_window'
   | 'weekend'
@@ -121,7 +130,7 @@ type RejectReason =
 // "Late" reasons are the ones where the person was otherwise eligible and
 // only lost on a downstream gate — those names are useful in the log
 // ("Lori would have been pinged but she's in cooldown until tomorrow").
-// The early reasons (outside_window, never_inbound) are routine bulk drops;
+// The early reasons (outside_window, no_signal_ever) are routine bulk drops;
 // counting them is enough.
 const LATE_DROP_REASONS = new Set<RejectReason>(['cooldown', 'active_conversation']);
 
@@ -147,6 +156,51 @@ function lastInboundMs(interactionLog: string): number {
   } catch { return 0; }
 }
 
+// v2.6.2 — most-recent topic touch for this colleague, regardless of who
+// raised it (owner-mention or colleague-raised). Lets the eligibility gate
+// treat in-conversation topic logging as a valid recency signal even when
+// the colleague hasn't sent Maelle a direct DM. Returns 0 when no topic
+// row exists for the person.
+function lastTopicTouchMs(personSlackId: string, ownerUserId: string): number {
+  try {
+    const db = getDb();
+    const row = db.prepare(`
+      SELECT MAX(last_touched_at) AS most_recent
+      FROM social_topics_v2
+      WHERE owner_user_id = ?
+        AND person_slack_id = ?
+    `).get(ownerUserId, personSlackId) as { most_recent: string | null } | undefined;
+    if (!row?.most_recent) return 0;
+    const t = new Date(row.most_recent).getTime();
+    return Number.isFinite(t) ? t : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// v2.6.2 — week-start boundary in the colleague's local timezone. Israel
+// (Asia/Jerusalem) uses Sunday-start work week; everywhere else defaults to
+// Monday-start (ISO). Returns the local Sun/Mon 00:00 as UTC ms — the
+// recency signal must be ≥ this for the person to qualify.
+function computeLocalWeekStartMs(zone: string, nowUtc: DateTime): number {
+  const local = nowUtc.setZone(zone);
+  if (!local.isValid) return 0;
+  // Luxon's weekday: 1=Mon..7=Sun.
+  const weekday = local.weekday;
+  // Sunday-start regions. Currently Asia/Jerusalem; other Sun-start TZs
+  // (Saudi Arabia, etc.) can be added if real candidates show up.
+  const isSundayStart = zone === 'Asia/Jerusalem';
+  let daysSinceWeekStart: number;
+  if (isSundayStart) {
+    // Sun=7 in Luxon → 0 days back; Mon=1 → 1 day back; ...; Sat=6 → 6 days back.
+    daysSinceWeekStart = weekday === 7 ? 0 : weekday;
+  } else {
+    // Mon=1 → 0 days back; Tue=2 → 1; ...; Sun=7 → 6 days back.
+    daysSinceWeekStart = weekday - 1;
+  }
+  return local.minus({ days: daysSinceWeekStart }).startOf('day').toMillis();
+}
+
 function classifyRow(
   r: CandidateRow,
   config: ProactiveConfig,
@@ -164,15 +218,27 @@ function classifyRow(
   // eligible. Reactive replies to volunteered social aren't gated here.
   if (pingedTodaySet.has(r.slack_id)) return 'pinged_today';
 
-  // v2.3.1 (B18) — real INBOUND history required. Owner direction: "only
-  // when they are speaking, the counter starts." Maelle-initiated outbound
-  // doesn't qualify a person for proactive outreach.
+  // v2.6.2 — recency signal is max(last_inbound, last_topic_touch). A topic
+  // logged in conversation (engage directive, gaming-thread continuation,
+  // etc.) qualifies the person even when they haven't directly DMed Maelle.
+  // Owner direction: "allow either recent inbound or recent topic touch."
+  // Was v2.3.1 (B18) "real INBOUND history required" — too strict in
+  // practice; most colleagues never DM Maelle directly so the gate killed
+  // proactive outreach (last fired 2026-04-27).
   const lastInbound = lastInboundMs(r.interaction_log);
-  if (!lastInbound) return 'never_inbound';
-  if (nowUtc.toMillis() - lastInbound > RECENT_CONTACT_MS) return 'silent_>72h';
+  const lastTopicTouch = lastTopicTouchMs(r.slack_id, ownerSlackId);
+  const lastSignal = Math.max(lastInbound, lastTopicTouch);
+  if (!lastSignal) return 'no_signal_ever';
 
   const colleagueLocal = nowUtc.setZone(r.timezone);
   if (!colleagueLocal.isValid) return 'invalid_tz';
+
+  // v2.6.2 — week-boundary gate (replaces fixed 72h window). The signal
+  // must fall within the colleague's local current work week — Sun-onward
+  // for Israel TZ, Mon-onward elsewhere. A Tuesday tick will accept signals
+  // back to Sunday/Monday; a Wednesday tick reaches back two/three days.
+  const weekStartMs = computeLocalWeekStartMs(r.timezone, nowUtc);
+  if (weekStartMs > 0 && lastSignal < weekStartMs) return 'silent_this_week';
   const [startHour, endHour] = config.daily_window_hours;
   if (colleagueLocal.hour < startHour || colleagueLocal.hour >= endHour) return 'outside_window';
   if (!isWorkday(colleagueLocal.weekday, config.skip_weekends)) return 'weekend';
@@ -374,22 +440,17 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
     }
   };
 
-  // v2.3.1 (B10 / #66) — persona-off + disabled checks moved OUT of the
-  // try-finally block. The finally re-schedules unconditionally; before
-  // this fix, returning early from the try still ran the finally, so
-  // disabling proactive social didn't actually stop the tick — the loop
-  // re-spawned itself every hour. Now: kill the loop cleanly, complete
-  // the task so it doesn't sit in the queue.
-  const personaActive = (profile.skills as any)?.persona === true;
-  if (!personaActive) {
-    logger.debug('social_outreach_tick skipped — persona skill off (loop terminates)', {
-      ownerUserId: profile.user.slack_user_id,
-    });
-    completeTask(task.id);
-    return;
-  }
-  if (!cfg.enabled) {
-    logger.debug('social_outreach_tick skipped — disabled in profile (loop terminates)', {
+  // v2.3.1 (B10 / #66) — social-off check moved OUT of the try-finally block.
+  // The finally re-schedules unconditionally; before this fix, returning early
+  // from the try still ran the finally, so disabling proactive social didn't
+  // actually stop the tick — the loop re-spawned itself every hour. Now: kill
+  // the loop cleanly, complete the task so it doesn't sit in the queue.
+  // v2.6.2 — single master toggle (skills.social). The retired
+  // behavior.proactive_colleague_social.enabled field is no longer consulted —
+  // social skill on = proactive on; off = proactive off.
+  const socialActive = (profile.skills as any)?.social === true;
+  if (!socialActive) {
+    logger.debug('social_outreach_tick skipped — social skill off (loop terminates)', {
       ownerUserId: profile.user.slack_user_id,
     });
     completeTask(task.id);

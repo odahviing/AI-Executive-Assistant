@@ -151,7 +151,8 @@ export async function initProfile(
 
   // v2.2 — Proactive colleague outreach: hourly tick. System activity,
   // owner-time-agnostic. Dispatcher short-circuits when
-  // profile.behavior.proactive_colleague_social.enabled is falsy.
+  // profile.skills.social is falsy (v2.6.2 master toggle; was a separate
+  // proactive_colleague_social.enabled field pre-v2.6.2).
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getDb } = require('../db') as typeof import('../db');

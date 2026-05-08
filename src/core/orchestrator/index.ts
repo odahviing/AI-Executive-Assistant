@@ -345,8 +345,12 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // person-of-the-turn: owner id on owner turns, colleague id on colleague turns
   const turnPersonSlackId = isOwnerTurn ? profile.user.slack_user_id : input.userId;
   const turnSenderRole: 'owner' | 'colleague' = isOwnerTurn ? 'owner' : 'colleague';
-  const personaActive = (profile.skills as any)?.persona === true;
-  if (personaActive && userMessage && userMessage.trim().length > 1) {
+  // v2.6.2 — renamed from socialActive. Master toggle for codas, engage,
+  // proactive ticks, social topic logging, social context blocks.
+  // Legacy `skills.persona` already auto-migrated to `skills.social` in
+  // registry.ts; reading `skills.social` here is the canonical path.
+  const socialActive = (profile.skills as any)?.social === true;
+  if (socialActive && userMessage && userMessage.trim().length > 1) {
     try {
       // Give the classifier the last few turns so it can detect "Maelle just
       // asked a social question and they answered" (→ conversation_state=open)
@@ -531,7 +535,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // Engine directive below instead.
   // v2.2.3 (#3) — also gated on persona skill being on. With persona off,
   // colleague turns get no social context block (Maelle stays task-only).
-  const socialBlock = (isOwnerTurn || !personaActive)
+  const socialBlock = (isOwnerTurn || !socialActive)
     ? ''
     : buildSocialContextBlock(input.userId, input.profile.user.timezone, input.profile.assistant.name);
 
@@ -1526,7 +1530,7 @@ Rules:
   // socialClassification will be null when persona is off, but belt-and-
   // suspenders the explicit check too.
   if (
-    personaActive
+    socialActive
     && socialClassification?.kind === 'task'
     && finalReply
     && finalReply.trim().length > 0

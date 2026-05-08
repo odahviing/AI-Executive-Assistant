@@ -1,12 +1,16 @@
 /**
- * PersonaSkill (v2.2.3, #3) — togglable social / off-topic chat layer.
+ * SocialSkill (v2.6.2, was PersonaSkill v2.2.3) — togglable social engine.
+ *
+ * Master on/off for everything social Maelle does — engage replies, codas,
+ * proactive cold-pings, topic memory, engagement-rank ladder, social
+ * context blocks. When off, Maelle is task-only.
  *
  * What's in this skill:
  *   - Tools: `note_about_person`, `note_about_self`
  *   - System prompt section nudging Maelle to engage as a teammate, not just
  *     a task router (gaming chat, weekend small talk, etc.)
  *
- * What's NOT here (still in CORE — runs whether persona is on or off):
+ * What's NOT here (still in CORE — runs whether social is on or off):
  *   - Owner preferences (learn_preference / recall_preferences)
  *   - Core attendee fields (gender / timezone / state via update_person_profile)
  *   - confirm_gender, log_interaction, recall_interactions
@@ -14,14 +18,16 @@
  *   - Slack auto-pull of timezone / pronouns / image
  *   - The owner / colleague identity blocks in the system prompt
  *
- * Other social machinery gated on `skills.persona` from outside this file:
- *   - Social Engine pre-pass (`src/core/social/*`) — orchestrator skips when off
+ * Other social machinery gated on `skills.social` from outside this file:
+ *   - Social engine pre-pass (`src/core/social/*`) — orchestrator skips when off
  *   - Outreach tick / decay / rank-check tasks — dispatchers no-op when off
+ *   - Codas (task-tail warm lines) — orchestrator skips when off
  *   - WORKSPACE CONTACTS social fields (last_social_at, topics, engagement_rank)
  *   - buildSocialContextBlock per-sender SOCIAL CONTEXT block in prompt
  *
- * Profile YAML key: `skills.persona: true | false`. Default false (Maelle is
+ * Profile YAML key: `skills.social: true | false`. Default false (Maelle is
  * task-only out of the box; opt in to the friend-of-the-team behavior).
+ * Legacy `skills.persona` still parses and auto-migrates in registry.ts.
  */
 
 import type Anthropic from '@anthropic-ai/sdk';
@@ -56,10 +62,10 @@ const SOCIAL_TOPIC_ENUM = [
   'other',        // anything that doesn't fit the above
 ] as const;
 
-export class PersonaSkill implements Skill {
-  id = 'persona' as const;
-  name = 'Persona';
-  description = 'Off-topic chat, social topic tracking, proactive colleague outreach — the friend-of-the-team layer. Optional.';
+export class SocialSkill implements Skill {
+  id = 'social' as const;
+  name = 'Social';
+  description = 'Social engine — proactive outreach, codas, engage replies, topic memory, engagement-rank ladder. The friend-of-the-team layer. Optional.';
 
   getTools(profile: UserProfile): Anthropic.Tool[] {
     return [

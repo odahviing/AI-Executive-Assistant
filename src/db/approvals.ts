@@ -242,6 +242,23 @@ export function getApproval(id: string): Approval | null {
   return (db.prepare(`SELECT * FROM approvals WHERE id = ?`).get(id) as Approval | null) ?? null;
 }
 
+/**
+ * v2.6.2 — find the (one) pending approval whose owner-DM message ts matches.
+ * Used by the Slack `reaction_added` handler to route an emoji reaction on
+ * an approval DM to resolveApproval. NULL when no pending row matches (the
+ * message wasn't an approval DM, or it's already resolved).
+ */
+export function getPendingApprovalByMsgTs(msgTs: string): Approval | null {
+  const db = getDb();
+  return (db.prepare(`
+    SELECT * FROM approvals
+    WHERE slack_msg_ts = ?
+      AND status = 'pending'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(msgTs) as Approval | null) ?? null;
+}
+
 export function getPendingApprovalsForOwner(ownerUserId: string): Approval[] {
   const db = getDb();
   return db.prepare(

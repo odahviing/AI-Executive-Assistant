@@ -80,11 +80,11 @@ function buildSkillMap(): Map<SkillId, Skill> {
       },
     },
     {
-      id: 'persona',
+      id: 'social',
       loader: () => {
-        // v2.2.3 (#3) — togglable social / off-topic chat layer.
-        const { PersonaSkill } = require('./persona');
-        return new PersonaSkill();
+        // v2.6.2 (was 'persona' v2.2.3) — togglable social engine.
+        const { SocialSkill } = require('./social');
+        return new SocialSkill();
       },
     },
   ];
@@ -151,7 +151,7 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   // a colleague can write only about themselves, never about another person
   // (including the owner). The handler-side checks live in core/assistant.ts
   // (note_about_person, log_interaction, confirm_gender, update_person_profile)
-  // and skills/persona.ts (note_about_self is implicitly self-only — it writes
+  // and skills/social.ts (note_about_self is implicitly self-only — it writes
   // to context.userId by definition).
   //
   // What stays owner-only (still in the hard-block list at assistant.ts):
@@ -190,6 +190,8 @@ export function getActiveSkills(profile: UserProfile): Skill[] {
   if (toggles.meeting_summaries) toggles.summary = true;
   if (toggles.knowledge_base) toggles.knowledge = true;
   if (toggles.calendar_health) toggles.calendar = true;
+  // v2.6.2 — `persona` skill was renamed to `social`. Old yamls auto-migrate.
+  if (toggles.persona) toggles.social = true;
 
   for (const [id, enabled] of Object.entries(toggles)) {
     if (!enabled) continue;

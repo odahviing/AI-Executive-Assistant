@@ -708,6 +708,10 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         senderId,
         channelId,
         threadTs,
+        // v2.6.2 — pass the user's message ts so postReply can react 👍
+        // on it for ack-class replies (replacing "Got it" text with a
+        // reaction).
+        userMessageTs: ts,
         history,
         userMessage,
         isMpim,
@@ -1397,16 +1401,56 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     if (!('text' in event) || !event.text) return;
     if ('subtype' in event && event.subtype && event.subtype !== 'file_share') return;
 
+    // v2.6.2 — channel routing.
+    // Real channel (not MPIM) messages need to pass two gates before this handler
+    // continues:
+    //   (1) The message must be a thread reply — top-level channel chatter is
+    //       intentionally dropped (an EA doesn't read every word in #general).
+    //   (2) Maelle must have spoken in this thread before — i.e. someone already
+    //       @-mentioned her in this thread and she replied. Without that, even
+    //       thread replies are dropped (she's not a member of every thread).
+    // Both gates pass → fall through to the same MPIM relevance + addressee
+    // gates downstream so she only responds when actually addressed.
+    // MPIM messages (channel_type='mpim' OR 'channel'+is_mpim) skip both gates
+    // and use the existing relevance check below.
+    let isRealChannelContinuation = false;
     if (event.channel_type === 'channel') {
+      let isMpimChannel = false;
       try {
         const ch = (await client.conversations.info({
           token: assistant.slack.bot_token,
           channel: event.channel as string,
         })).channel as any;
-        if (ch?.is_mpim !== true) return; // real channel — only app_mention should respond
+        isMpimChannel = ch?.is_mpim === true;
       } catch (err) {
         logger.warn('conversations.info failed — cannot confirm MPIM, skipping', { err: String(err), channelId: event.channel });
         return;
+      }
+      if (!isMpimChannel) {
+        // Real channel. Apply the two gates.
+        const isThreadReply = 'thread_ts' in event
+          && typeof event.thread_ts === 'string'
+          && event.thread_ts.length > 0
+          && event.thread_ts !== event.ts;
+        if (!isThreadReply) {
+          // Top-level channel message — drop. Maelle isn't passively reading channels.
+          return;
+        }
+        const priorThreadTs = (event as { thread_ts: string }).thread_ts;
+        const priorHistory = getConversationHistory(priorThreadTs);
+        const maelleSpokeHere = priorHistory.some(m => m.role === 'assistant');
+        if (!maelleSpokeHere) {
+          // Thread Maelle never engaged in. Drop — she joins threads only when
+          // someone @-mentions her (handled by app_mention). Once she's spoken,
+          // continuation flows through this branch.
+          return;
+        }
+        isRealChannelContinuation = true;
+        logger.info('Real-channel thread continuation eligible — running relevance + addressee gates', {
+          channelId: event.channel, threadTs: priorThreadTs,
+          historySize: priorHistory.length,
+          preview: (event.text as string).slice(0, 80),
+        });
       }
     }
 
@@ -1451,7 +1495,16 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       let groupContext = '';
       const mpimMemberNames: string[] = [];
       const mpimMemberIds: string[] = [];
+      // v2.6.2 — skip the full-channel members fetch for real-channel
+      // continuations. Real channels can have hundreds of members, the
+      // groupContext "all participants see everything" framing is wrong
+      // for a channel thread, and the coord-routing flows that use
+      // mpimMemberIds don't apply here. Thread participants are loaded
+      // separately via processMessage's conversations.replies merge.
       try {
+        if (isRealChannelContinuation) {
+          // No-op — leave groupContext empty + mpimMember* arrays empty.
+        } else {
         const membersRes = await client.conversations.members({
           token: assistant.slack.bot_token,
           channel: event.channel as string,
@@ -1491,6 +1544,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
             `All participants can see everything you write. ` +
             `Respond to ALL relevant people in the DM — when addressing a specific person, START your reply with <@their_slack_id> so they get a push notification. ` +
             `Do NOT say "tell her" or "let him know" when they are right here in this conversation.>>\n\n`;
+        }
         }
       } catch (err) {
         logger.warn('Could not fetch MPIM members — proceeding without group context', { err: String(err) });
@@ -1548,37 +1602,121 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         threadTs,
         say,
         client,
-        isChannel: false,
-        isMpim: true,
-        mpimMemberIds,
+        // v2.6.2 — real-channel thread continuation flips these. The
+        // addressee gate at processMessage:460 reads either flag (`isMpim ||
+        // isChannel`) to gate the relevance check, so behavior stays correct;
+        // mpimMemberIds is intentionally undefined for channels (no DM-each-
+        // member coord routing applies).
+        isChannel: isRealChannelContinuation,
+        isMpim: !isRealChannelContinuation,
+        mpimMemberIds: isRealChannelContinuation ? undefined : mpimMemberIds,
       }).catch(err => logger.error('processMessage error', { err }));
     });
   });
 
-  // ── Handler 2.5: emoji reactions on outbound DMs (v2.6.1, D4) ─────────────
-  // When a colleague reacts to a Maelle-sent DM with an emoji, treat it as
-  // an explicit acknowledgment ("I saw it"). Closes the D4 followup tracker
-  // for the matching outreach_jobs row so subsequent inbound DMs from this
-  // colleague aren't falsely matched against an already-acked outbound.
-  // Idempotent — closeFollowupForMessageTs is a no-op when no open row exists.
-  app.event('reaction_added', async ({ event }) => {
+  // ── Handler 2.5: emoji reactions on outbound DMs (v2.6.1 D4 + v2.6.2 emoji)
+  //
+  // Three things this handler does, in order:
+  //   1. Close D4 followup tracker for the matched outreach_jobs row (so
+  //      subsequent inbound DMs from this colleague aren't falsely matched
+  //      against an already-acked outbound).
+  //   2. v2.6.2 — Shadow-DM the owner with the colleague's emoji ack so he
+  //      knows they saw it. Only fires when the matched row IS an outreach
+  //      DM (i.e. closed > 0); silent reactions outside outreach context
+  //      generate no shadow.
+  //   3. v2.6.2 — Approval-via-emoji. If the message ts matches a pending
+  //      approval's slack_msg_ts, route ✅/👍/🙏 → resolveApproval('approve')
+  //      and ❌/👎 → resolveApproval('reject'). Other emoji ignored.
+  //
+  // Each path is isolated in try/catch so a failure in one doesn't block the others.
+  app.event('reaction_added', async ({ event, client }) => {
     try {
-      // Only react to reactions on Maelle's OWN messages (item.user is the
-      // author of the reacted-to message; should be the bot for our case).
+      // Only react to reactions on Maelle's OWN messages.
       if (!('item' in event) || !event.item) return;
       const item = event.item as { type?: string; channel?: string; ts?: string };
       if (item.type !== 'message' || !item.ts) return;
       // The user who reacted shouldn't be the bot itself.
-      if ('user' in event && event.user === botUserId) return;
-      const { closeFollowupForMessageTs } = await import('./recentOutboundContext');
-      const closed = closeFollowupForMessageTs({ messageTs: item.ts, reason: 'emoji_ack' });
-      if (closed) {
-        logger.info('reaction_added closed outreach followup', {
-          jobId: closed.id,
-          colleague: closed.colleague_name,
-          reaction: 'reaction' in event ? (event.reaction as string) : undefined,
-          reactor: 'user' in event ? event.user : undefined,
+      const reactor = ('user' in event ? (event.user as string) : undefined);
+      if (reactor === botUserId) return;
+      const reaction = ('reaction' in event ? (event.reaction as string) : '') || '';
+
+      // ── Path 1 + 2: outreach followup close + shadow ────────────────────
+      try {
+        const { closeFollowupForMessageTs } = await import('./recentOutboundContext');
+        const closed = closeFollowupForMessageTs({ messageTs: item.ts, reason: 'emoji_ack' });
+        if (closed) {
+          logger.info('reaction_added closed outreach followup', {
+            jobId: closed.id,
+            colleague: closed.colleague_name,
+            reaction,
+            reactor,
+          });
+          // v2.6.2 — shadow-DM the owner so he knows the colleague saw it.
+          // Owner direction: "i do need shadow DM for colleague feedback
+          // reply, otherwise i don't know they saw it." Posts a single line
+          // into the owner-DM thread keyed on the same conversationKey so
+          // it nests under the original outbound's shadow thread.
+          try {
+            const { shadowNotify } = await import('../../utils/shadowNotify');
+            const messagePreview = closed.message.slice(0, 120).replace(/\s+/g, ' ').trim();
+            await shadowNotify(profile, {
+              channel: closed.dm_channel_id ?? '',
+              threadTs: closed.dm_message_ts,
+              action: `${closed.colleague_name} reacted :${reaction}:`,
+              detail: `to: "${messagePreview}${closed.message.length > messagePreview.length ? '…' : ''}"`,
+              conversationKey: closed.dm_message_ts,
+              conversationHeader: `Conversation with ${closed.colleague_name}`,
+            });
+          } catch (shadowErr) {
+            logger.warn('reaction_added shadow notify failed — followup still closed', {
+              err: String(shadowErr).slice(0, 200), jobId: closed.id,
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn('reaction_added followup-close path threw', { err: String(err).slice(0, 200) });
+      }
+
+      // ── Path 3: approval-via-emoji ──────────────────────────────────────
+      try {
+        const { getPendingApprovalByMsgTs } = await import('../../db/approvals');
+        const approval = getPendingApprovalByMsgTs(item.ts);
+        if (!approval) return;
+        // Map the reaction to a verdict. Conservative set per owner direction.
+        // Approve: white_check_mark, +1, pray, thumbsup, heavy_check_mark.
+        // Reject: x, -1, thumbsdown.
+        // Anything else (clap, eyes, fire, ...) — ignore. Owner can still
+        // resolve via typed reply.
+        const APPROVE_REACTIONS = new Set(['white_check_mark', 'heavy_check_mark', '+1', 'thumbsup', 'pray']);
+        const REJECT_REACTIONS = new Set(['x', 'negative_squared_cross_mark', '-1', 'thumbsdown']);
+        let verdict: 'approve' | 'reject' | null = null;
+        if (APPROVE_REACTIONS.has(reaction)) verdict = 'approve';
+        else if (REJECT_REACTIONS.has(reaction)) verdict = 'reject';
+        if (!verdict) {
+          logger.debug('reaction_added on approval — non-decisive emoji, ignoring', {
+            approvalId: approval.id, reaction, reactor,
+          });
+          return;
+        }
+        // Only the owner can resolve — defense in depth (approval DMs go to
+        // owner's private channel, but a workspace admin could in theory
+        // react too; ignore those).
+        if (reactor && reactor !== approval.owner_user_id) {
+          logger.info('reaction_added on approval from non-owner — ignoring', {
+            approvalId: approval.id, reactor, ownerUserId: approval.owner_user_id,
+          });
+          return;
+        }
+        const { resolveApproval } = await import('../../core/approvals/resolver');
+        const decision = verdict === 'approve'
+          ? { verdict: 'approve' as const, data: {} }
+          : { verdict: 'reject' as const, reason: `Owner reacted :${reaction}:` };
+        const result = await resolveApproval(approval.id, decision, { app, profile });
+        logger.info('reaction_added resolved approval via emoji', {
+          approvalId: approval.id, verdict, reaction, ok: result.ok,
         });
+      } catch (err) {
+        logger.warn('reaction_added approval path threw', { err: String(err).slice(0, 200) });
       }
     } catch (err) {
       logger.warn('reaction_added handler threw — ignoring', { err: String(err).slice(0, 200) });

@@ -61,13 +61,14 @@ export type SkillId =
   | 'whatsapp'
   | 'search'
   | 'research'
-  | 'persona'             // v2.2.3 (#3) — social engine, off-topic chat, proactive outreach
+  | 'social'              // v2.6.2 (renamed from persona) — social engine, codas, proactive outreach
   // legacy aliases — auto-migrated at load time, kept so old YAMLs still boot
   | 'scheduling'          // → meetings
   | 'coordination'        // → meetings
   | 'meeting_summaries'   // → summary
   | 'knowledge_base'      // → knowledge
-  | 'calendar_health';    // → calendar
+  | 'calendar_health'     // → calendar
+  | 'persona';            // → social (v2.6.2)
 
 /** Runtime context passed to tool execution */
 export interface SkillContext {

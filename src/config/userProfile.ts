@@ -325,17 +325,18 @@ const UserProfileSchema = z.object({
     //     busy-day threshold breaches fire a DM to the owner. Internal-
     //     overlap auto-resolve ships in v2.2 (needs move-coord state).
     calendar_health_mode: z.enum(['passive', 'active']).default('passive'),
-    // v2.2 — proactive colleague social. When enabled, a system-level
-    // hourly tick picks one colleague per day whose LOCAL time is in the
-    // mid-day window and sends a short warm check-in. Rank-aware
-    // (engagement_rank 0 = opt-out) + cooldown + no weekend.
+    // v2.2 — proactive colleague social knobs. Master on/off has moved to
+    // `skills.social` (v2.6.2 rename + consolidation); this block keeps the
+    // fine-tuning sub-config (window hours, cooldown, weekend skip).
+    // The `enabled` field was retired — `skills.social: true` turns the
+    // hourly tick on; `false` no-ops every dispatcher. Old yamls with
+    // `enabled` still parse (kept optional below) but the value is ignored.
     proactive_colleague_social: z.object({
-      enabled: z.boolean().default(false),
+      enabled: z.boolean().optional(),  // legacy — value ignored, master is skills.social
       daily_window_hours: z.tuple([z.number(), z.number()]).default([13, 15]),
       cooldown_days: z.number().default(5),
       skip_weekends: z.boolean().default(true),
     }).default({
-      enabled: false,
       daily_window_hours: [13, 15],
       cooldown_days: 5,
       skip_weekends: true,
@@ -364,14 +365,17 @@ const UserProfileSchema = z.object({
     whatsapp: z.boolean().default(false),
     search: z.boolean().default(true),
     research: z.boolean().default(false),
-    // v2.2.3 (#3) — persona / social layer. Toggable bonus capability:
-    // off-topic chat, gaming/NBA/family conversation tracking, the 30-category
-    // social engine, proactive colleague pings, hourly outreach tick. Default
-    // false — Maelle is task-only out of the box; opt in to the friend-of-the-
-    // team behavior. The CORE memory layer (gender, name, timezone, state,
-    // preferences, per-person md operational facts) is always on regardless.
-    persona: z.boolean().default(false),
+    // v2.6.2 (renamed from `persona` v2.2.3) — social engine. Master on/off
+    // for everything social Maelle does: engage replies, codas (task-tail
+    // warm lines), proactive cold-pings via the hourly outreach tick, topic
+    // memory, engagement-rank ladder, social context blocks, social decay.
+    // Default false — Maelle is task-only out of the box; opt in to the
+    // friend-of-the-team behavior. The CORE memory layer (gender, name,
+    // timezone, state, preferences, per-person md operational facts) is
+    // always on regardless.
+    social: z.boolean().default(false),
     // Legacy aliases — auto-migrated at runtime; kept optional so old YAMLs boot.
+    persona: z.boolean().optional(),             // → social (v2.6.2)
     scheduling: z.boolean().optional(),          // → meetings
     coordination: z.boolean().optional(),        // → meetings
     meeting_summaries: z.boolean().optional(),   // → summary
@@ -447,6 +451,16 @@ export function loadUserProfile(profileName: string): UserProfile {
       .map(i => `  [${i.path.join('.')}] ${i.message}`)
       .join('\n');
     throw new Error(`Invalid user profile (${profileName}.yaml):\n${issues}`);
+  }
+
+  // v2.6.2 — legacy `skills.persona` → canonical `skills.social`. Code paths
+  // outside the skills registry read `profile.skills.social` directly
+  // (orchestrator gates, dispatchers, prompt-builder), so the migration has
+  // to happen at PARSE time, not just at registry load. Idempotent — when
+  // both are set, `social: true` wins (already canonical).
+  const skillsAny = parsed.data.skills as { persona?: boolean; social: boolean };
+  if (skillsAny.persona === true) {
+    skillsAny.social = true;
   }
 
   profileCache.set(profileName, parsed.data);

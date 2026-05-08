@@ -132,9 +132,10 @@ Always call this before saying you haven't interacted with someone.`,
           required: ['name'],
         },
       },
-      // v2.2.3 (#3) — note_about_person and note_about_self moved to PersonaSkill
-      // (`src/skills/persona.ts`). Loaded only when `skills.persona: true` in
-      // the profile. AssistantSkill keeps the always-on operational tools.
+      // v2.6.2 (renamed from PersonaSkill v2.2.3) — note_about_person and
+      // note_about_self live in SocialSkill (`src/skills/social.ts`). Loaded
+      // only when `skills.social: true` in the profile. AssistantSkill keeps
+      // the always-on operational tools.
       {
         name: 'update_person_profile',
         description: `Update the structured profile for a person — call this when you've observed enough to reliably assess a dimension.
@@ -547,9 +548,10 @@ First call for a person auto-creates their md file. Empty-until-real-fact — do
       }
 
 
-      // v2.2.3 (#3) — note_about_person / note_about_self handlers moved to
-      // PersonaSkill (src/skills/persona.ts). Routed there when the persona
-      // skill is active; otherwise the tools aren't even in the tool list.
+      // v2.6.2 (renamed from PersonaSkill v2.2.3) — note_about_person /
+      // note_about_self handlers live in SocialSkill (src/skills/social.ts).
+      // Routed there when the social skill is active; otherwise the tools
+      // aren't in the tool list.
 
       case 'log_interaction': {
         const name = args.colleague_name as string;
