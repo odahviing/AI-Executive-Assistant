@@ -677,6 +677,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
             profile,
             app,
             isMpim,
+            isChannel,
             isOwnerInGroup,
             mpimMemberIds,
             images,

@@ -176,6 +176,7 @@ export interface OrchestratorInput {
   profile: UserProfile;
   app?: import('@slack/bolt').App;
   isMpim?: boolean;                   // true if this is a group DM (MPIM)
+  isChannel?: boolean;                // v2.6.6 — true if this is a public/private channel (vs DM/MPIM)
   isOwnerInGroup?: boolean;           // true when the owner sent this message in an MPIM
   mpimMemberIds?: string[];           // all non-bot member IDs when in MPIM
   /**
@@ -442,7 +443,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   const focusSlackIds = input.isMpim && input.mpimMemberIds
     ? new Set(input.mpimMemberIds.filter(id => id !== profile.user.slack_user_id))
     : undefined;
-  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds);
+  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs);
 
   // Inject active jobs for this thread so Maelle knows what she already committed to.
   // This prevents her from treating follow-up messages as new requests.

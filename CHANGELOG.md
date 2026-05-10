@@ -2,6 +2,74 @@
 
 ---
 
+## 2.6.6 — Two real-chat bug-test waves: Yael / Idan Wagner duplicate approval + Shayan MPIM 5-bug bundle
+
+Pure-owner patch. Two consecutive real-chat incidents (2026-05-10) surfaced overlapping failure modes — colleague-path Sonnet had no structured awareness of pending work in the thread, the v2.6.5 fast-path Case B told her to call create_meeting after a requester picks but Guard A still refused externals, MPIM-only rules were polluting DM/channel prompts, and the v2.6.4 city-vs-IANA-tz fix only patched the owner-path renderer (not the find_slack_user tool result). Six fixes in one bundle, organized below.
+
+### Fixed — colleague-path Sonnet now sees thread-scoped pending approvals (1.2)
+
+The Yael / Idan Wagner incident: Yael picked Sun 17 May 12:00 → Sonnet raised create_approval(slot_pick); Yael followed up "תודה - ממתינה לעדכון ממך" (thanks, waiting for update); Sonnet **re-ran the entire coord+approval cycle** and created a duplicate approval. Root cause: `pendingApprovals` block in the system prompt was gated on `isOwner` — colleague-path Sonnet got `[]`, with no structured signal that an approval was already pending for this thread. Her own prior reply ("I sent it to Idan for approval") wasn't strong enough to suppress re-firing on a follow-up ack.
+
+Lifted the `isOwner` gate but **scoped to thread**: colleague-path now sees only approvals raised IN this thread (matched via `task.owner_thread_ts === current threadTs`). Privacy preserved — no other-thread approvals leak to colleagues. New helper `getPendingApprovalsForThread` in `src/db/approvals.ts`. New `WORK ALREADY IN FLIGHT IN THIS THREAD` block in the colleague-path prompt: *"Do NOT re-raise these. If the colleague's current message is just acknowledging ('thanks', 'waiting', 'ok'), don't run new tool calls — answer briefly that you're waiting on \[owner\], or stay silent."* Sonnet on Yael's "thanks waiting" turn would now see the pending approval, recognize the ack, and not re-fire.
+
+### Fixed — colleague-path create_meeting books with external attendees (1.4 — completes Bug 4(b))
+
+The same Yael / Idan Wagner thread surfaced the v2.6.5 fast-path Case B contradiction. Case B's note told Sonnet: *"When the requester picks, call create_meeting to book — externals get the calendar invite via Outlook."* But Guard A in `src/skills/meetings/ops.ts` refused **any** external attendee with `error: 'external_requires_coord'`, telling Sonnet to call coordinate_meeting — which she had just come from. Stuck loop → Sonnet fell back to create_approval(kind=slot_pick) with no coord_job to drive the resolver, leaving Yael with no loop-close after owner approved.
+
+Loosened Guard A: every attendee must have an email (so the calendar invite reaches them); externals with email pass through. Missing-email still refuses with new clearer error `attendee_missing_email`. The downstream colleague-path post-booking heads-up DM loop already filters internal-only via `e.endsWith('@' + ownerDomain)` — externals naturally get only the Outlook invite, no Slack DM (correct). Net effect: when no rule is broken, the meeting books on colleague-path, Sonnet's reply ("Booked Sun 17 May at 12:00") IS the loop-close to the requester, no approval to the owner at all. The `external_requires_coord` error code retired (no other consumers — confirmed via grep).
+
+Tool description (`src/skills/meetings.ts`) updated to reflect the three colleague-path shapes: 1:1, multi-internal, owner-only-pollable. Externals explicitly noted as fine.
+
+### Changed — channel-aware system prompt; MPIM-only rules ship only in MPIM (2.1 + audit)
+
+Pre-fix: `buildSystemPrompt` had `senderRole` and `isOwnerInGroup` flags but no surface awareness — the same large prompt shipped to DM, MPIM, and channel turns alike. The v2.5.4 MPIM private-ask + speak-to-the-group + don't-@-mention-owner rules were buried inside the `isOwnerInGroup` branch (firing only when the owner typed in MPIM, not the more common case of a colleague typing in MPIM), and concurrently leaking to DM/channel turns where they're irrelevant.
+
+Audit of `systemPrompt.ts` identified five blocks that should be MPIM-only: PRIVATE OWNER QUESTIONS (private-ask via approval), SPEAK TO THE GROUP, WRITE ONE MESSAGE PER TURN, GROUP DM greeting, and the new REQUESTER NOT ATTENDING rule (the 2.1 fix itself). All five consolidated into a single `mpimRulesBlock` gated on `isMpim` — fires regardless of who's typing in MPIM, doesn't ship to DM or channel.
+
+Plumbing: added `isMpim` and `isChannel` parameters to `buildSystemPromptParts` + `buildSystemPrompt`, threaded `isChannel` through `OrchestratorInput` from `connectors/slack/app.ts`. Owner-in-MPIM PRIVACY FILTER kept inline in the `isOwnerInGroup` branch (because that branch only fires for owner-in-MPIM turns, where colleague-branch privacy doesn't apply).
+
+The 2.1 fix specifically — REQUESTER NOT ATTENDING — addresses the Shayan MPIM case: Yael said "set up a 25 min for you and Idan to meet" (delegating, not attending), but Maelle's reply asked her to confirm the slot anyway. New rule with ❌/✅ examples: when someone framed the ask as "set up between others", they're the requester, their availability isn't a constraint, their confirmation isn't needed.
+
+### Fixed — find_slack_user reads people_memory first; Slack-fallback drops bare `timezone` field (2.2a)
+
+Shayan MPIM, first turn: Maelle wrote *"Since you're in Brisbane, a few questions before I search..."* — but the bot only knew his IANA timezone (`Australia/Brisbane`), not his city. The v2.6.4 fix #3 added a cautionary `(timezone only, city unknown)` suffix to `formatPeopleMemoryForPrompt`, but that block ships only on owner-path (`isOwner ? ...`). On colleague-path, Sonnet had no people_memory block — she called `find_slack_user`, which returned bare `timezone: "Australia/Brisbane"`, and inferred Brisbane.
+
+Two fixes in `src/connections/slack/index.ts`:
+
+1. **People_memory pull-through** — find_slack_user now looks in people_memory FIRST. If the person is known, returns `{ slack_id, name, tz_iana, tz_note, state, email }` with the same cautionary framing the system prompt block uses on owner-path. Single source of truth: `people.ts`. Slack workspace lookup stays as the fallback for net-new names.
+2. **Slack-fallback rename** — when the workspace lookup runs (net-new name), the response also drops bare `timezone` in favor of `tz_iana` + `tz_note: "IANA timezone — NOT a city. Don't infer where they live."` Same shape as the people_memory pull-through. The cautionary marker is in the field name itself, not just buried in a suffix.
+
+Privacy: same fields the caller would have learned via Slack (slack_id, name, tz, email). No notes / preferences / topics — those stay owner-only via `formatPeopleMemoryForPrompt`. Owner direction explicitly chose Shape A (pull-through) over Shape B (surface people_memory on colleague-path) to avoid risk of disclosing private operational notes.
+
+### Fixed — find_available_slots auto-recovers attendee_emails from thread context (2.3)
+
+Shayan MPIM, after Yael's "I'm not a factor :)" message: Sonnet re-ran `find_available_slots` but **dropped `attendee_emails`** entirely. The slot finder skipped Shayan's TZ work-hours filter — proposed Wed 13 12:30pm Israel = 7:30pm Sydney, way outside Shayan's stated 4-6pm window. Compare rejection breakdowns: 1st call had `outside_attendee_work_hours: 90` (Shayan's filter ran); 2nd call had ZERO of that reason (filter didn't run, because no attendees were passed).
+
+New process-global registry `src/utils/threadAttendees.ts`. Symmetric pattern to `threadActivity.ts`. `recordThreadAttendees(threadTs, emails)` called from `find_available_slots` (when emails are passed) and `coordinate_meeting` (after email auto-fill). `getThreadAttendees(threadTs)` returns the union. When Sonnet calls `find_available_slots` WITHOUT `attendee_emails` but the thread has prior records, the handler auto-fills — the attendee constraint can't be silently dropped mid-conversation.
+
+### Fixed — create_meeting auto-fills missing attendee emails from people_memory (2.4)
+
+Shayan MPIM final turn: Maelle had Shayan's email in people_memory (saved at 06:30 via `find_slack_user` upsert), used it at 12:01 in `find_available_slots`, but at 12:04 called `create_meeting` with attendees=[{name: "Shayan Memari"}] — no email — and Guard A refused. Maelle had to ask the colleague for the email Yael (also in the chat) had to provide manually.
+
+The v2.0.6 commit added the same email auto-fill pattern in `coordinate_meeting`'s handler (slack_id lookup → fuzzy name fallback). It just never got ported to `create_meeting`. Ported now — runs at the top of the `create_meeting` case in `src/skills/meetings/ops.ts`, before Guard A. Mutates the attendees array in place; pre-existing emails pass through untouched. Pairs with the Bug 4(b) Guard A loosening: missing email is auto-filled from people_memory, then Guard A passes (or refuses with `attendee_missing_email` if truly unresolvable). Same lookup pattern as coord — `getPersonMemory(slack_id)` primary + `searchPeopleMemory(name)` fuzzy fallback.
+
+### Changed — Sonnet must disclose when narrowing slot options (2.5)
+
+Shayan MPIM proposal: `find_available_slots` returned 3 spread slots; Sonnet only presented Tue 19 May 4pm Sydney and framed it as *"fits your 4-6pm Sydney window perfectly as a clean 25-min slot."* The other 2 spread slots had been silently filtered (probably outside Shayan's 4-6pm window). The colleague had no idea she was seeing a curated pick rather than the menu.
+
+New prompt rule in `src/skills/meetings.ts` — NARROWING TO ONE — disclose, don't fake "perfect": when Sonnet presents fewer than the slot finder returned, name why. ❌ *"Tue 19 May at 4pm fits perfectly"* (presents 1 of 3 silently). ✅ *"Tuesday 19 May at 4pm Sydney is the only one in your 4-6pm window — Wed/Thu/Fri this week Idan is booked during your evening hours."* Threshold: if presenting fewer than what the tool returned, NAME why. Owner direction: *"i'm ok with just one option if its make sense. as long as its NOT just one option she pick out of many."*
+
+### Not changed
+
+- Bug 1.1 (Hebrew name "ידן" instead of "עידן") — owner deferred ("don't fix now"), Sonnet's Hebrew character output occasionally drops the soft `ע`. Cosmetic, prompt-rule territory if it recurs.
+- Bug 1.3 (booking exists, owner couldn't find it) — owner ignored. The meeting WAS created (verified via log); it was on next Sunday and may have been outside owner's calendar viewport at the time.
+- Bug 2.2b (did Maelle update memory after Shayan's correction) — verified she did (log: `update_person_profile fields=["state","timezone"]`). Not a bug.
+- Auto-triage + auto-build still gated `if: false &&`.
+- PM2 + deploy watcher still OFF.
+- 2.5 ships as prompt-only — if Sonnet drift surfaces, fall back to code (tighter search via attendee_pref_hours field).
+
+---
+
 ## 2.6.5 — Coord fast-path generalized + humanGate covers colleague-path + claim-checker corrects move_meeting knowledge
 
 Follow-up patch right after v2.6.4 — three fixes triggered by the Yael / Sapir CISO booking incident, all addressing tail of v2.6.4's bug-test wave that didn't make the v2.6.4 cut.

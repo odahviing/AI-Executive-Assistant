@@ -403,7 +403,7 @@ DON'T ASK WHEN A CLEAR SIGNAL ALREADY EXISTS (people_memory shows different TZ, 
 
 Once mode is settled: online → \`is_online: true\`, location optional. Physical at owner's office → \`is_online: false\`, leave location blank (handler fills office address from yaml). Physical elsewhere → \`is_online: false\`, location=venue.
 
-Colleague-path (v2.3.2): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book the 1:1. The handler enforces server-side: single colleague-attendee (the requester themselves — multi-party still goes through coordinate_meeting), rule-compliant slot (work hours, work days, buffers, floating blocks, no conflicts via findAvailableSlots), then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
+Colleague-path (v2.3.2 + v2.6.5 + v2.6.6): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book — the requester (1:1), multi-internal (everyone in the same workspace), or owner-only-pollable (requester + externals). Externals are fine; they get the calendar invite via Outlook. The handler enforces server-side: every attendee must have an email; rule-compliant slot (work hours, work days, buffers, floating blocks, no conflicts via findAvailableSlots); then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). If an attendee has no email, the tool returns { success: false, error: 'attendee_missing_email' } — call coordinate_meeting instead (it DMs and collects email). DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
 
 LANGUAGE: subject and body MUST be in English regardless of the language you're conversing in. Calendar invites are shared artifacts other people read — their language must be predictable. If the owner instructs in Hebrew, translate to English for the artifact.`,
         input_schema: {
@@ -608,6 +608,22 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
           demotedExternalCount: demotedExternals.length,
           subject: args.subject,
         });
+
+        // v2.6.6 — record attendees in thread context so a subsequent
+        // find_available_slots call (Sonnet may forget attendee_emails) can
+        // recover them. Symmetric to the find_available_slots record path.
+        if (context.threadTs) {
+          try {
+            const { recordThreadAttendees } = await import('../../utils/threadAttendees');
+            const allEmails: string[] = [];
+            for (const p of [...((args as any).participants as any[]), ...((args as any).just_invite as any[] ?? [])]) {
+              if (p.email && typeof p.email === 'string' && p.email.includes('@')) {
+                allEmails.push(p.email);
+              }
+            }
+            recordThreadAttendees(context.threadTs, allEmails);
+          } catch (_) { /* best-effort */ }
+        }
 
         const keyParticipantCount = (args.participants as any[]).length;
         if (keyParticipantCount > 4) {
@@ -1827,6 +1843,13 @@ When you list slots, candidates, or options, list ONLY the ones you'd actually p
 - "13:30, except that's the edge of your lunch window..." — drop 13:30 entirely.
 - "12:15, but Standup at 12:30 cuts it short..." — if it doesn't fit, don't name it.
 The reasoning that disqualifies a slot belongs in your head, not in the reply. Reply ONLY with the surviving options.
+
+NARROWING TO ONE — disclose, don't fake "perfect" (v2.6.6):
+Find_available_slots returns up to 3 spread slots. When the slot finder gave you 3 but you're going to present only 1 because you filtered the others by something you read in the conversation (a colleague's stated time-window preference like "4-6pm my time", an explicit day exclusion, etc.), DISCLOSE the narrowing — don't frame the surviving slot as "fits perfectly" as if it was the obvious / only fit. The colleague needs to know whether she's seeing the menu or a curated pick.
+- ❌ "Good news, Tuesday 19 May at 4pm fits your 4-6pm Sydney window perfectly as a clean 25-min slot." (presents 1 of 3 spread slots as if it was the only one — colleague has no idea two other days were technically free for ${firstName} but outside Shayan's 4-6pm)
+- ✅ "Tuesday 19 May at 4pm Sydney is the only one in your 4-6pm window — Wed/Thu/Fri this week ${firstName} is booked during your evening hours. Want me to lock Tuesday in?"
+- ✅ Or — surface alternatives outside their stated window when the inside-window count is thin: "Only Tuesday 19 May at 4pm fits your 4-6pm window. ${firstName} is also free at 7am Sydney Wed/Thu if mornings work."
+The threshold: if you're presenting fewer than what the tool returned, NAME why. Don't fake "perfect."
 
 If NOTHING survives strict rules, say so honestly + offer override (specific rule named):
 - "No clean option Thursday — every gap breaks your focus-time / lunch window / day-type rule. Want me to override and book at 11:00 (cuts focus time to 1h) or 13:15 (inside lunch window)?"

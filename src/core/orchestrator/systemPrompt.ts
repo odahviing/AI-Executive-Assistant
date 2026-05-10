@@ -2,7 +2,7 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
 import { buildSkillsPromptSection, getActiveSkills } from '../../skills/registry';
 import { formatPreferencesCatalog, formatPeopleMemoryForPrompt } from '../../db';
-import { getPendingApprovalsForOwner } from '../../db/approvals';
+import { getPendingApprovalsForOwner, getPendingApprovalsForThread } from '../../db/approvals';
 import { formatAssistantSelfForPrompt } from '../assistantSelf';
 import { formatPeopleCatalogSync } from '../../memory/peopleMemory';
 import { getEffectiveToday } from '../../utils/effectiveToday';
@@ -18,8 +18,16 @@ export function buildSystemPromptParts(
   senderName?: string,
   isOwnerInGroup?: boolean,
   focusSlackIds?: Set<string>,
+  // v2.6.6 — surface flags so MPIM-only / channel-only rules ship only where
+  // they apply. Pre-fix the same large prompt went to DM, MPIM, and channel
+  // turns alike, with MPIM-private-ask + speak-to-the-group rules irrelevantly
+  // shipped in 1:1 DMs and channel-thread reminders polluting MPIM. Defaults
+  // to false (treat as DM) for back-compat with non-Slack callers.
+  isMpim?: boolean,
+  isChannel?: boolean,
+  threadTs?: string,
 ): { static: string; dynamic: string } {
-  const full = buildSystemPrompt(profile, senderRole, senderName, isOwnerInGroup, focusSlackIds);
+  const full = buildSystemPrompt(profile, senderRole, senderName, isOwnerInGroup, focusSlackIds, isMpim, isChannel, threadTs);
   const skills = buildSkillsPromptSection(profile);
   // Skills section sits at the end of the full prompt — extract it as the cacheable block
   const dynamic = skills ? full.replace(skills, '').trimEnd() : full;
@@ -32,6 +40,9 @@ export function buildSystemPrompt(
   senderName?: string,
   isOwnerInGroup?: boolean,
   focusSlackIds?: Set<string>,
+  isMpim?: boolean,
+  isChannel?: boolean,
+  threadTs?: string,
 ): string {
   const { user, assistant } = profile;
   const firstName = user.name.split(' ')[0];
@@ -113,11 +124,20 @@ Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EE
   // Owner is just another file in the catalog (no special path).
   const peopleCatalog = isOwner ? formatPeopleCatalogSync(profile) : '';
 
-  // ── Pending approvals (v1.5) ─────────────────────────────────────────────
-  // Shown only to the owner. When the owner replies freely (no button), Sonnet
-  // uses this list to bind the reply to the correct approval and call
-  // resolve_approval with the right id.
-  const pendingApprovals = isOwner ? getPendingApprovalsForOwner(user.slack_user_id) : [];
+  // ── Pending approvals (v1.5, scoped on colleague-path v2.6.6) ────────────
+  // Owner-path: full list of pending approvals (Sonnet binds free-text owner
+  // replies to the right approval_id and calls resolve_approval).
+  // Colleague-path: scoped to approvals raised in THIS thread (so Sonnet
+  // knows "I already escalated this — don't re-fire create_approval"). The
+  // 2026-05-10 Yael / Idan Wagner duplicate-approval bug came from the
+  // colleague-path having no structured "work in flight" signal — Sonnet's
+  // prior reply ("I sent it for approval") wasn't strong enough; she fired
+  // the same flow again on Yael's "thanks waiting" ack. Privacy: scoped on
+  // task.owner_thread_ts so colleague only sees approvals from THEIR thread,
+  // not the owner's other in-flight work.
+  const pendingApprovals = isOwner
+    ? getPendingApprovalsForOwner(user.slack_user_id)
+    : (threadTs ? getPendingApprovalsForThread(user.slack_user_id, threadTs) : []);
   const pendingApprovalsSection = isOwner && pendingApprovals.length > 0
     ? (() => {
         const lines = pendingApprovals.slice(0, 10).map(a => {
@@ -151,6 +171,29 @@ Binding rules (critical):
       })()
     : '';
 
+  // v2.6.6 — colleague-path "work already in flight in this thread" block.
+  // Scoped to approvals raised IN this thread (privacy preserved). Tells
+  // Sonnet "you already escalated this — don't re-fire create_approval on
+  // an ack message." Closes the duplicate-approval pattern.
+  const colleagueThreadApprovalsSection = !isOwner && pendingApprovals.length > 0
+    ? (() => {
+        const lines = pendingApprovals.slice(0, 5).map(a => {
+          let payload: any = {};
+          try { payload = JSON.parse(a.payload_json); } catch (_) {}
+          const subject = payload.subject ? `"${payload.subject}"` : `(${a.kind})`;
+          const slotsPreview = Array.isArray(payload.slots) && payload.slots.length > 0
+            ? ` · slot: ${payload.slots[0].label || payload.slots[0].iso || payload.slots[0]}`
+            : '';
+          return `  - ${subject} · kind=${a.kind}${slotsPreview} · pending ${firstName}'s decision`;
+        });
+        return `
+WORK ALREADY IN FLIGHT IN THIS THREAD (${pendingApprovals.length}):
+${lines.join('\n')}
+
+Do NOT re-raise these. If the colleague's current message is just acknowledging ("thanks", "waiting", "ok"), don't run new tool calls — answer briefly that you're waiting on ${firstName}, or stay silent. Only re-fire if the colleague is changing the underlying ask (different time, different attendee, withdrawal). Once ${firstName} resolves, the resolver posts the outcome back here automatically.`;
+      })()
+    : '';
+
   const activeSkills = getActiveSkills(profile);
   const skillNames = activeSkills.map(s => s.name).join(', ') || 'none';
   const skillsSection = buildSkillsPromptSection(profile);
@@ -170,6 +213,9 @@ Binding rules (critical):
     : '';
 
   // ── Authorization + privacy rules ─────────────────────────────────────────
+  // v2.6.6 — opening identity line (3-way split). MPIM-specific privacy /
+  // group-speech / private-ask rules now live in `mpimRulesBlock` below,
+  // gated on isMpim so they only ship when actually relevant.
   const authLine = isOwnerInGroup
     ? `Speaking with: ${user.name} (your principal) IN A GROUP CONVERSATION with one or more colleagues.
 
@@ -178,31 +224,13 @@ This conversation is COLLEAGUE-CONTEXT. The colleagues read every message here. 
 AUTHORITY — ${user.name}'s direct request still authorizes the action.
 When he says "do it" / "move it" / "book it" in this thread, execute via the colleague-allowed tools (which include the rule-compliance gates). His presence lets HIM authorize; it does NOT unlock owner-private data for the colleagues to read.
 
-PRIVATE OWNER QUESTIONS — never @-tag him here, and don't narrate the escalation.
-When you need ${user.name}'s input (sensitive cancel, ambiguous reschedule, override of a rule, anything to verify privately) — DO NOT post "@${user.name.split(' ')[0]} can you confirm?" in this MPIM. Instead: call \`create_approval(kind=freeform)\` with a clear ask_text — that DMs him privately. The colleague-facing reply MUST be ONE short line that reveals NOTHING about what's being checked: not the rule that fired, not the schedule constraint, not "I've already sent him a note" process narration. Colleagues don't need to see the admin layer.
-- ❌ "Tuesday 20:30 is outside ${user.name.split(' ')[0]}'s home-day schedule, so I need his quick sign-off." (leaks his schedule + rule)
-- ❌ "I've sent ${user.name.split(' ')[0]} a private note to confirm. Will come back when he does." (leaks process)
-- ❌ "@${user.name.split(' ')[0]} OK to override your work hours and book this?" (leaks + tags)
-- ✅ "Let me check with ${user.name.split(' ')[0]}, back in a sec."
-- ✅ "Hold on, checking with ${user.name.split(' ')[0]}."
-- ✅ Stay silent in the MPIM and just create_approval — the resolver posts back here when resolved.
-The owner-DM ask_text carries ALL the detail (rule that fired, slot, requester, override question). The MPIM gets only the loop-close after he resolves.
-
-PRIVACY FILTER — what you REVEAL is colleague-level:
+PRIVACY FILTER — what you REVEAL is colleague-level even though he's the one typing:
 - ✅ "You have a gap from 2pm onwards." — fine
 - ❌ "You have a 1:1 with [colleague] about [project] at 11, then Product Review at 2..." — topic leak
 - ❌ "Wednesday is clear, nothing on the calendar between 14:40 and 18:30 (when dinner with Lori starts)" — leaks subject + person + time of an unrelated meeting. Wrong even when ${user.name} asked.
 - NEVER narrate: preferences, tasks, people memory, learned prefs, personal notes, other colleagues' personal details.
-- Sensitive meetings (interviews, HR): say "He's busy at that time" — never "He has an interview."
-- Confirm actions minimally: "Moved it to 11:45." Not "Moved it — the 12:30 was about Q2 KPIs."
-- Tool choice: prefer \`find_available_slots\` for "is he free?" / "any opening?" — it returns a yes/no on rule-compliant slots without leaking surrounding events. AVOID narrating raw \`get_calendar\` output.
-
-SPEAK TO THE GROUP — both ${user.name} and the colleagues are HERE reading your messages.
-- Address the group, not ${user.name} in third person: "Tomorrow's packed" not "${user.name.split(' ')[0]}'s calendar is packed."
-- WRITE ONE MESSAGE PER TURN. Everyone in this thread reads the same message. Do NOT post a generic "Done!" announcement and then a separate "@<colleague>, here's the update" — those are redundant and read as bot-shaped. ONE message addresses everyone at once.
-  - ❌ Wrong: "Done! Moved the meeting to Wed 17:15." \\n "@Julia All sorted, the meeting is now Wed 17:15."
-  - ✅ Right: "Moved to Wed 17:15 — Rob will get the updated invite, Julia."
-- ${user.name}'s presence lets HIM act; it does NOT grant the colleagues owner-level access.`
+- Sensitive meetings (interviews, HR): say "busy at that time" — never "He has an interview."
+- Tool choice: prefer \`find_available_slots\` for "is he free?" — yes/no on rule-compliant slots without leaking surrounding events.`
     : isOwner
     ? `Speaking with: ${user.name} (your principal) — follow their instructions.`
     : `Speaking with: ${senderName ? senderName : 'a colleague'} of ${user.name}. ${senderName ? `Their name is ${senderName} — use it, never ask.` : 'You already know their name from Slack — never ask.'}
@@ -248,6 +276,40 @@ Wrong: editing the draft inline and sending it back to the colleague immediately
 Right: acknowledge → create_approval → wait → send the approved version after.
 
 DEFAULT: when in doubt, don't share. "I can't help with that" beats a leak.`;
+
+  // ── MPIM-only rules (v2.6.6) ─────────────────────────────────────────────
+  // Ships only when isMpim=true. Pre-2.6.6 these rules were buried inside the
+  // isOwnerInGroup branch of authLine, so they fired only when the owner
+  // typed in MPIM — not when a colleague typed in MPIM (which is the more
+  // common case). They also redundantly shipped to 1:1 DMs and channels (in
+  // earlier iterations) where they're irrelevant. Now: MPIM only, regardless
+  // of who typed.
+  const mpimRulesBlock = isMpim ? `
+GROUP CHAT — multiple people read every message in this thread.
+
+PRIVATE OWNER QUESTIONS — never @-tag ${firstName} here, and don't narrate the escalation.
+When you need ${firstName}'s input (sensitive cancel, ambiguous reschedule, override of a rule, anything to verify privately) — DO NOT post "@${firstName} can you confirm?" in this group. Instead: call \`create_approval(kind=freeform)\` with a clear ask_text — that DMs him privately. The group-facing reply MUST be ONE short line that reveals NOTHING about what's being checked: not the rule that fired, not the schedule constraint, not "I've already sent him a note" process narration. Group members don't need to see the admin layer.
+- ❌ "Tuesday 20:30 is outside ${firstName}'s home-day schedule, so I need his quick sign-off." (leaks his schedule + rule)
+- ❌ "I've sent ${firstName} a private note to confirm. Will come back when he does." (leaks process)
+- ❌ "@${firstName} OK to override your work hours and book this?" (leaks + tags)
+- ✅ "Let me check with ${firstName}, back in a sec."
+- ✅ Stay silent in the group and just create_approval — the resolver posts back here when resolved.
+The owner-DM ask_text carries ALL the detail (rule that fired, slot, requester, override question). The group gets only the loop-close after he resolves.
+
+REQUESTER NOT ATTENDING (v2.6.6) — when one person here is delegating a meeting between OTHERS, don't ask them to confirm slots.
+If someone in this group framed the ask as "set up a meeting between you and X" / "find time for ${firstName} and X to meet" / "I'd love for you to set this up for them" — they're the REQUESTER, not an attendee. Their availability isn't a constraint, their confirmation isn't needed. Confirm with the actual attendees only. Treating the requester as an attendee creates needless back-and-forth and reads as bot-shaped.
+- ❌ "Tuesday 19 May at 4pm fits. @Yael does Tuesday 19 May work from your side too?"  (Yael said "set up between you and Idan" — she's not attending)
+- ✅ "Tuesday 19 May at 4pm works for ${firstName} and fits Shayan's window. @Shayan, sound good?"
+
+SPEAK TO THE GROUP — everyone in the thread reads your messages.
+- Address the group, not ${firstName} in third person: "Tomorrow's packed" not "${firstName}'s calendar is packed."
+- WRITE ONE MESSAGE PER TURN. Do NOT post a generic "Done!" announcement and then a separate "@<colleague>, here's the update" — those are redundant and read as bot-shaped. ONE message addresses everyone at once.
+  - ❌ Wrong: "Done! Moved the meeting to Wed 17:15." \\n "@Julia All sorted, the meeting is now Wed 17:15."
+  - ✅ Right: "Moved to Wed 17:15 — Rob will get the updated invite, Julia."
+- ${firstName}'s presence (if he's typing) lets HIM act; it does NOT grant the others owner-level access.
+
+GROUP DMs: greet whoever ${firstName} introduces, not him. Don't leak private data.
+` : '';
 
   // ── Owner-only prompt sections ──────────────────────────────────────────────
   const ownerContextSection = isOwner ? `
@@ -378,9 +440,8 @@ ${categoriesBlock}
 AUTHORIZATION
 ${authLine}
 Approval commands (approve/reject) accepted only from ${user.name}.
-
-GROUP DMs: greet whoever ${firstName} introduces, not him. Don't leak private data.
-
+${colleagueThreadApprovalsSection}
+${mpimRulesBlock}
 TONE: short, direct, plain text, answers the actual question. Check current time before describing when something happens. Never list meetings out of order.
 "what's my next meeting?" → "EMEA Forecast started 10 minutes ago, runs until 10:00."
 "book 30 min with X next week" → "On it — I'll reach out and let you know when it's set."

@@ -748,7 +748,39 @@ export class SchedulingSkill {
           // path and coordinate_meeting consistently. Owner can opt out via
           // `ignore_attendee_availability: true` for "find times I'm free,
           // I'll handle the others" scenarios.
-          const attendeeEmails = (args.attendee_emails as string[]) ?? [];
+          let attendeeEmails = (args.attendee_emails as string[]) ?? [];
+
+          // v2.6.6 — auto-fill from this thread's prior attendee context.
+          // When Sonnet calls find_available_slots WITHOUT attendee_emails
+          // but a previous call in this thread already established who the
+          // meeting is for, recover that list so the work-hours / availability
+          // constraint isn't silently dropped. Closes the 2026-05-10 Shayan
+          // bug where Sonnet's 2nd call (after Yael said "I'm not a factor")
+          // dropped Shayan's email and the slot finder proposed times outside
+          // his TZ work hours.
+          if (attendeeEmails.length === 0 && context.threadTs) {
+            try {
+              const { getThreadAttendees } = await import('../../utils/threadAttendees');
+              const recovered = getThreadAttendees(context.threadTs);
+              if (recovered.length > 0) {
+                logger.info('find_available_slots — auto-filled attendee_emails from thread context', {
+                  threadTs: context.threadTs,
+                  recovered,
+                });
+                attendeeEmails = recovered;
+              }
+            } catch (err) {
+              logger.warn('find_available_slots — thread attendees recovery threw', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          } else if (attendeeEmails.length > 0 && context.threadTs) {
+            // Record for future calls in this thread.
+            try {
+              const { recordThreadAttendees } = await import('../../utils/threadAttendees');
+              recordThreadAttendees(context.threadTs, attendeeEmails);
+            } catch (_) { /* best-effort */ }
+          }
           // Owner can opt out of attendee BUSY filtering (their other meetings)
           // when forcing a slot regardless of their existing calendar — but
           // their TIMEZONE / work-hours window is ALWAYS honored, no flag
@@ -857,9 +889,40 @@ export class SchedulingSkill {
         }
 
       case 'create_meeting': {
-        const attendees = args.attendees as Array<{ name: string; email: string }>;
+        const attendees = args.attendees as Array<{ name?: string; email?: string; slack_id?: string }>;
         const assistantEmail = context.profile.assistant.email;
         const ownerEmail = context.profile.user.email;
+
+        // v2.6.6 — port of v2.0.6 coord email auto-fill to create_meeting.
+        // Sonnet sometimes drops the email field even though we have it in
+        // people_memory (the 2026-05-10 Shayan MPIM incident: email was in
+        // people_memory by 12:01 via find_slack_user upsert; at 12:04
+        // Sonnet called create_meeting with attendees=[{name:"Shayan
+        // Memari"}] — no email — and Guard A refused). Symmetric to the
+        // existing coord fill. Primary lookup: by slack_id; fallback: by
+        // fuzzy name. Only fills missing entries; pre-existing emails
+        // pass through untouched. If still missing after lookup, the
+        // downstream Guard A returns error: 'attendee_missing_email' so
+        // Sonnet asks for the email instead of papering over the gap.
+        try {
+          const { getPersonMemory, searchPeopleMemory } = await import('../../db');
+          for (const a of attendees) {
+            if (a.email && typeof a.email === 'string' && a.email.includes('@')) continue;
+            if (a.slack_id) {
+              const mem = getPersonMemory(a.slack_id);
+              if (mem?.email) { a.email = mem.email; continue; }
+            }
+            if (a.name) {
+              const matches = searchPeopleMemory(a.name);
+              const hit = matches.find(m => m.email && m.email.includes('@'));
+              if (hit) { a.email = hit.email; continue; }
+            }
+          }
+        } catch (err) {
+          logger.warn('create_meeting email auto-fill threw — proceeding with raw attendees', {
+            err: String(err).slice(0, 200),
+          });
+        }
 
         // v2.3.2 — colleague-path booking gate. When a colleague has
         // confirmed slot + duration + subject in this DM (1:1 or fast-path
@@ -1004,41 +1067,39 @@ export class SchedulingSkill {
             });
           }
 
-          // Guard A — attendees must be: requester themselves OR internal
-          // (same domain). Anything else (external, missing email) requires
-          // coord. Resolve requester's email from people_memory.
+          // Guard A — every attendee must have an email so the calendar
+          // invite can actually reach them. Internal attendees and the
+          // requester themselves pass trivially; externals are also allowed
+          // (they get the calendar invite via Outlook — same delivery path
+          // as v2.6.5 fast-path Case B already designs for). Only refuse
+          // when an attendee has no email — that's the unclassifiable case
+          // (could be an internal Maelle should DM, could be an external
+          // Sonnet hasn't fully resolved). Pre-v2.6.6 this guard refused
+          // ANY external, which contradicted the v2.6.5 fast-path Case B
+          // note that tells Sonnet "call create_meeting after the requester
+          // picks — externals get the invite via Outlook." That contradiction
+          // was the real Bug 4 in the 2026-05-10 Yael / Idan Wagner incident:
+          // fast-path Case B told Sonnet to book; Guard A refused; Sonnet
+          // fell back to create_approval(kind=slot_pick) which has no
+          // coord_job to drive the resolver, so booking succeeded only
+          // when the owner manually approved AND no requester loop-close
+          // ever fired to Yael.
           try {
-            const { getPersonMemory } = await import('../../db');
-            const requesterRow = getPersonMemory(context.userId);
-            const requesterEmail = (requesterRow?.email ?? '').toLowerCase();
-            const requesterName = requesterRow?.name ?? '';
-            const ownerDomain = ownerEmail.includes('@') ? ownerEmail.split('@')[1].toLowerCase() : '';
-            const disallowed = attendees.filter(a => {
-              const e = (a.email ?? '').toLowerCase();
-              if (!e) return true;  // missing email → can't classify, refuse
-              if (e === ownerEmail.toLowerCase()) return false;
-              if (assistantEmail && e === assistantEmail.toLowerCase()) return false;
-              if (requesterEmail && e === requesterEmail) return false;
-              // Name-match fallback for the requester when emails don't line up
-              if (requesterName && a.name && a.name.toLowerCase() === requesterName.toLowerCase()) return false;
-              // v2.3.2 — internal attendees allowed (multi-internal fast-path).
-              if (ownerDomain && e.endsWith('@' + ownerDomain)) return false;
-              return true;  // external or unclassifiable → refuse
-            });
-            if (disallowed.length > 0) {
+            const unclassifiable = attendees.filter(a => !(a.email ?? '').trim());
+            if (unclassifiable.length > 0) {
               const ownerFirst = context.profile.user.name.split(' ')[0];
-              logger.info('create_meeting colleague-path refused — external/unclassifiable attendees', {
+              logger.info('create_meeting colleague-path refused — attendees missing email', {
                 requester: context.userId,
-                disallowed: disallowed.map(a => a.email || a.name),
+                unclassifiable: unclassifiable.map(a => a.name),
               });
               return {
                 success: false,
-                error: 'external_requires_coord',
-                message: `Some of those attendees are external (or I don't have their email). Externals need to go through coordinate_meeting so they get DM'd with slot options — I can't book directly on ${ownerFirst}'s calendar without checking their availability. Call coordinate_meeting with the full participant list instead.`,
+                error: 'attendee_missing_email',
+                message: `I don't have an email for ${unclassifiable.map(a => a.name).join(', ')}. Without an email I can't add them to the calendar invite. Either call coordinate_meeting (which DMs them for slot pick + collects email), or come back with their email.`,
               };
             }
           } catch (err) {
-            logger.warn('create_meeting colleague-path attendee resolve threw — proceeding to rule check', {
+            logger.warn('create_meeting colleague-path attendee guard threw — proceeding to rule check', {
               err: String(err).slice(0, 200),
             });
           }

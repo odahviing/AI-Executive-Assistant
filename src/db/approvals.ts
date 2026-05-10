@@ -281,6 +281,29 @@ export function getPendingApprovalsBySkillRef(skillRef: string): Approval[] {
 }
 
 /**
+ * v2.6.6 — pending approvals scoped to the originating thread. Used to surface
+ * "work already in flight" to colleague-path Sonnet so she doesn't re-fire
+ * coordinate_meeting + create_approval on a follow-up ack message in the same
+ * thread (the 2026-05-10 Yael / Idan Wagner duplicate-approval incident).
+ *
+ * Privacy: scoped on the parent task's owner_thread_ts so a colleague-path
+ * turn only sees approvals that originated FROM their conversation with
+ * Maelle. No other-thread approvals leak. Same query as the owner-path block
+ * but JOINed to tasks for the thread filter.
+ */
+export function getPendingApprovalsForThread(ownerUserId: string, threadTs: string): Approval[] {
+  const db = getDb();
+  return db.prepare(
+    `SELECT a.* FROM approvals a
+       JOIN tasks t ON t.id = a.task_id
+      WHERE a.owner_user_id = ?
+        AND a.status = 'pending'
+        AND t.owner_thread_ts = ?
+      ORDER BY a.created_at ASC`
+  ).all(ownerUserId, threadTs) as Approval[];
+}
+
+/**
  * Mark an approval with a final status + decision. Does NOT run downstream
  * effects — the resolver layer handles that after calling this.
  */

@@ -190,6 +190,44 @@ If you already have an email for the person, you don't need this tool to book a 
       if (toolName === 'find_slack_user') {
         try {
           const query = (args.name as string).toLowerCase();
+
+          // v2.6.6 — people_memory pull-through. Before hitting Slack
+          // workspace, look in people_memory: if we know this person, return
+          // them with the same cautionary "(timezone only, city unknown)"
+          // suffix that formatPeopleMemoryForPrompt uses on owner-path. This
+          // closes the duplication where colleague-path Sonnet got bare
+          // `timezone: "Australia/Brisbane"` (and inferred Brisbane) while
+          // owner-path Sonnet got the cautionary suffix. Single source of
+          // truth: people_memory's renderer. Slack workspace lookup stays
+          // as the fallback for net-new names.
+          //
+          // Privacy: same fields the caller would have learned via Slack
+          // (slack_id, name, tz, email). No notes / preferences / topics —
+          // those stay owner-only via formatPeopleMemoryForPrompt.
+          try {
+            const memoryHits = searchPeopleMemory(args.name as string);
+            const cleanFromMemory = memoryHits
+              .filter(p => p.slack_id && /^[UW][A-Z0-9]{6,}$/.test(p.slack_id))
+              .map(p => ({
+                slack_id: p.slack_id,
+                name: p.name,
+                tz_iana: p.timezone || 'UTC',
+                tz_note: p.timezone && !p.state ? 'IANA timezone — NOT a city. Don\'t infer where they live.' : undefined,
+                state: p.state || undefined,
+                email: p.email || undefined,
+              }));
+            if (cleanFromMemory.length > 0) {
+              logger.info('find_slack_user — people_memory hit', {
+                query: args.name, matches: cleanFromMemory.length,
+              });
+              return { matches: cleanFromMemory, count: cleanFromMemory.length, source: 'people_memory' };
+            }
+          } catch (err) {
+            logger.warn('find_slack_user — people_memory lookup threw, falling through to Slack', {
+              err: String(err).slice(0, 200),
+            });
+          }
+
           // Store full raw member alongside match so we can read pronouns/image later
           const matches: Array<{ slack_id: string; name: string; timezone: string; email?: string; _raw: any }> = [];
           let cursor: string | undefined;
@@ -272,7 +310,20 @@ If you already have an email for the person, you don't need this tool to book a 
             }
           }
 
-          const cleanMatches = matches.map(({ _raw: _, ...m }) => m);
+          // v2.6.6 — rename `timezone` → `tz_iana` + add `tz_note` so Sonnet
+          // doesn't read the IANA tz string as a city. Same shape as the
+          // people_memory pull-through above; one source of truth for the
+          // cautionary framing. Pre-fix, `timezone: "Australia/Brisbane"`
+          // had Sonnet writing "Since you're in Brisbane..." (Shayan, May 10).
+          const cleanMatches = matches.map(({ _raw: _raw, timezone, ...m }) => {
+            void _raw;
+            return {
+              ...m,
+              tz_iana: timezone || 'UTC',
+              tz_note: timezone ? 'IANA timezone — NOT a city. Don\'t infer where they live.' : undefined,
+              state: undefined,
+            };
+          });
 
           // External-email signal — when query was an email AND no Slack match
           // AND email is outside owner's company domain, return external:true
