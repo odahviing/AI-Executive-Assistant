@@ -1388,7 +1388,7 @@ export class SchedulingSkill {
           for (const a of attendees) {
             const lower = (a.email ?? '').toLowerCase();
             if (!lower || lower === ownerEmail.toLowerCase()) continue;
-            const matches = searchPeopleMemory(a.email);
+            const matches = searchPeopleMemory(a.email ?? '');
             const person = matches.find(m => (m.email ?? '').toLowerCase() === lower);
             if (person?.slack_id && getCurrentTravel(person.slack_id)) {
               anyTraveling = true;
@@ -1514,7 +1514,9 @@ export class SchedulingSkill {
           subject:    args.subject  as string,
           start:      args.start    as string,
           end:        args.end      as string,
-          attendees,
+          // By this point Guard A has refused any attendee missing email and
+          // the auto-fill has populated names. Coerce to the strict shape.
+          attendees:  attendees.map(a => ({ name: a.name ?? '', email: a.email ?? '' })),
           // v2.4.3 (E1) — body scrubbed AND auto-enriched with location.
           // Pre-v2.4.3 the location often rendered cluttered ("Reflectiz HQ
           // — Shoham 5 — Parking: ...") in the Outlook location field where
@@ -1685,7 +1687,7 @@ export class SchedulingSkill {
                     logger.debug('post-booking heads-up DM skipped — no slack_id for attendee', { email: e });
                     continue;
                   }
-                  const heuristicFirstName = att.name.split(' ')[0];
+                  const heuristicFirstName = (att.name ?? '').split(' ')[0];
                   const text = `Hi ${heuristicFirstName} — ${requesterName} asked for a meeting with you and ${ownerFirst}. I checked your calendar and booked "${args.subject}" for ${whenLabel}. See you then.`;
                   void conn.sendDirect(targetSlackId, text).catch(err => {
                     logger.warn('post-booking heads-up DM failed', { email: e, err: String(err).slice(0, 200) });

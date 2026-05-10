@@ -614,7 +614,7 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
         // recover them. Symmetric to the find_available_slots record path.
         if (context.threadTs) {
           try {
-            const { recordThreadAttendees } = await import('../../utils/threadAttendees');
+            const { recordThreadAttendees } = await import('../utils/threadAttendees');
             const allEmails: string[] = [];
             for (const p of [...((args as any).participants as any[]), ...((args as any).just_invite as any[] ?? [])]) {
               if (p.email && typeof p.email === 'string' && p.email.includes('@')) {

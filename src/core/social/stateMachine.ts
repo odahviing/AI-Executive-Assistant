@@ -39,6 +39,10 @@ export type SocialMode =
   | 'raise_new'
   | 'none';
 
+// v2.6.7 — single directive shape. New `subjectId` / `subjectLabel` /
+// `subject` fields are the canonical names; legacy `topicId` / `topicLabel`
+// / `topic` are mirrored for back-compat with call sites that haven't been
+// renamed yet. Both always populated to the same value.
 export interface SocialDirective {
   mode: SocialMode;
   subjectId: string | null;
@@ -47,19 +51,16 @@ export interface SocialDirective {
   toneCue: string;
   subject: SocialSubject | null;
   firstMention: boolean;
-}
-
-// Back-compat: many callers still reference topicId / topicLabel / topic.
-// We expose the same fields under those names so the existing prompt-rendering
-// + logging code keeps working without churn. (Subjects ARE the unit; "topic"
-// in the legacy field name now points to the same thing.)
-export interface LegacySocialDirectiveShape extends SocialDirective {
+  // Legacy field aliases — same values as subject*.
   topicId: string | null;
   topicLabel: string | null;
   topic: SocialSubject | null;
 }
 
-function withLegacyShape(d: SocialDirective): LegacySocialDirectiveShape {
+// Back-compat name kept so other modules can import it; same shape as SocialDirective.
+export type LegacySocialDirectiveShape = SocialDirective;
+
+function withLegacyShape(d: Omit<SocialDirective, 'topicId' | 'topicLabel' | 'topic'>): SocialDirective {
   return {
     ...d,
     topicId: d.subjectId,
@@ -210,7 +211,7 @@ export function directiveForProactiveSlot(params: {
   });
 }
 
-function noDirectiveRaw(): SocialDirective {
+function noDirectiveRaw(): Omit<SocialDirective, 'topicId' | 'topicLabel' | 'topic'> {
   return {
     mode: 'none',
     subjectId: null,
@@ -222,7 +223,7 @@ function noDirectiveRaw(): SocialDirective {
   };
 }
 
-export function noDirective(): LegacySocialDirectiveShape {
+export function noDirective(): SocialDirective {
   return withLegacyShape(noDirectiveRaw());
 }
 

@@ -2,6 +2,20 @@
 
 ---
 
+## 2.6.8 — Build hotfix: tsc errors after v2.6.7 redesign
+
+`npm run typecheck` had been running against a stale worktree path during the v2.6.7 build, missing five errors that surfaced when owner ran `npm run build` against the actual checkout. Fixed:
+
+- `SocialDirective` vs `LegacySocialDirectiveShape` type mismatch — collapsed into a single `SocialDirective` interface that carries both `subjectId/subjectLabel/subject` (canonical) and `topicId/topicLabel/topic` (legacy aliases). One shape, no split.
+- `src/skills/meetings.ts:617` had `import('../../utils/threadAttendees')` (wrong path — meetings.ts is in `src/skills/`, so the correct relative path is `../utils/threadAttendees`). Fixed to one level up.
+- `searchPeopleMemory(a.email)` in create_meeting helper failing because the v2.6.6 attendees type became `email?: string` (loosened for missing-email cases) — coerced with `?? ''` at the call site.
+- `createMeeting({ attendees })` failing the strict `{ name: string; email: string }[]` contract — coerced via `attendees.map(a => ({ name: a.name ?? '', email: a.email ?? '' }))` at the boundary (Guard A + auto-fill have already validated by this point; the cast is safe).
+- `att.name.split(' ')[0]` in post-booking heads-up DM loop — guarded with `(att.name ?? '').split(' ')`.
+
+Root cause for the missed errors: the agent's `npm run typecheck` was executing in `E:/Code/Maelle/.claude/worktrees/busy-antonelli-da0d00/` which was NOT receiving the file edits (those went to `E:/Code/Maelle/`). Owner's `npm run build` ran against the real path and caught what the worktree-typecheck missed.
+
+---
+
 ## 2.6.7 — Social Engine redesign: subjects + topic-beats, semantic merge, engagement signal
 
 Closes [#93](https://github.com/odahviing/AI-Executive-Assistant/issues/93) — social topic fragmentation. The 2026-05-10 Clair Obscur incident (9 active rows for one game) surfaced a structural bug in the social engine: the classifier produced fresh topic labels per beat ("act 2 progress", "ending choice", "finished") and a downstream Jaccard ≥ 0.5 surface-string matcher couldn't merge them with the original "Clair Obscur Expedition 33" — because beat vocabulary doesn't share enough surface tokens with anchor labels. Same-game beats spawned parallel rows. The coda picker had 9 overlapping rows to round-robin across; finished games stayed at score 7 forever; engagement quality didn't show through.
