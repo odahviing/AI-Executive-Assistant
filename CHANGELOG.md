@@ -2,6 +2,90 @@
 
 ---
 
+## 2.6.7 — Social Engine redesign: subjects + topic-beats, semantic merge, engagement signal
+
+Closes [#93](https://github.com/odahviing/AI-Executive-Assistant/issues/93) — social topic fragmentation. The 2026-05-10 Clair Obscur incident (9 active rows for one game) surfaced a structural bug in the social engine: the classifier produced fresh topic labels per beat ("act 2 progress", "ending choice", "finished") and a downstream Jaccard ≥ 0.5 surface-string matcher couldn't merge them with the original "Clair Obscur Expedition 33" — because beat vocabulary doesn't share enough surface tokens with anchor labels. Same-game beats spawned parallel rows. The coda picker had 9 overlapping rows to round-robin across; finished games stayed at score 7 forever; engagement quality didn't show through.
+
+This release rebuilds the social engine around three layers — Categories → Subjects (scored) → Topic-beats (LRU). The subject merge decision moves into the LLM classifier (it sees existing active subjects per category in the prompt and decides match_existing vs create_new with full semantic context). Negative-feedback signal replaces explicit closure detection: when the assistant raises a subject and the person doesn't engage on their next message, the score drops. Cold subjects degrade naturally without any "moved on" / "finished" keyword scanner.
+
+Owner spec for this release (locked across Sat/Sun design conversation):
+- 3 layers: Category (high-level proactive scope) → Subject (carries the score, the meaningful unit) → Topic-beat (lightweight under-subject hooks, no score).
+- Cap = 5 (was 10) — faster turnover, less polarization.
+- Person-init creation = 3, assistant-init = 2.
+- 5 active subjects per (person, category) hard cap with lowest-score eviction.
+- 10 topic-beats per subject hard cap with LRU eviction.
+- Soft target of 3 active categories per person, picker behavior pushes toward equilibrium.
+- Negative feedback: any pivot on next-after-raise = −1; matched + non-neg = +1; matched + neg = −1.
+- No `maelle_*` prefixes in column or function names — assistant-name-agnostic.
+
+### Changed — three-layer schema (drop social_topics_v2 + social_engagements; add social_subjects + social_topics)
+
+`social_topics_v2` and `social_engagements` dropped on next boot — owner accepted full data reset (the existing rows were the spam #93 was about). Two new tables under the existing global `social_categories`:
+
+- `social_subjects` — meaningful unit. Per-(owner, person, category). Carries `engagement_score` (0..5), `status` (active/dormant), `last_touched_at`, `last_assistant_initiated_at` (when assistant last raised — used for the engagement signal), `created_by`. Cap 5 active per (person, category) with lowest-score eviction (tiebreaker: oldest last_touched_at).
+- `social_topics` — beats. Per-subject. No score. Just `label`, `sentiment`, `last_used_at`. Cap 10 per subject with LRU eviction. Powers coda variety so the same beat ("ending choice") doesn't get spammed.
+
+Per-(person, category) engagement = `AVG(engagement_score)` over active subjects, computed on-the-fly via the new `getActiveCategoryEngagementForPerson` helper. No materialized aggregate row; the average is the temperature reading.
+
+### Changed — single-LLM-call classifier (Shape C); Jaccard reconciler retired
+
+`classifyOwnerIntent` now does intent + subject reconciliation in one Sonnet call. New output schema:
+
+```
+social.subject_match: { action: 'match_existing' | 'create_new', label, existing_subject_id? }
+social.topic_label: '<this turn's beat>'
+```
+
+The prompt sees the active subjects for this person grouped by category (slim, label-only, no person name or scores) and is instructed to use existing labels EXACTLY when matching, only create_new for genuinely different game / project / event / person. Comparison messages get one dominant subject (or a meta-subject like "comparing games"); not two parallel rows.
+
+Validation: when classifier returns `match_existing`, the reconciler verifies the label exists in the active set; if not (Sonnet hallucinated), demotes to `create_new`. Old Jaccard logic deleted entirely.
+
+### Changed — engagement signal replaces append-only log
+
+The `social_engagements` log table is gone. Score deltas now apply directly to `social_subjects.engagement_score`:
+
+- Person spontaneously matches existing subject (no recent assistant raise): +1
+- Assistant raised + person's NEXT message:
+  - matches subject + non-negative sentiment: +1
+  - matches subject + negative sentiment: −1
+  - doesn't match (any pivot — task / bare ack / different subject): −1
+
+The "raised marker" is `last_assistant_initiated_at` on the subject. When the assistant emits a coda, the orchestrator calls `markSubjectRaised(subjectId)`. On the next inbound from this person, `applyRaiseFeedbackSignal` reads the marker, applies the delta, clears the marker. No append-only log.
+
+Floor 0 → status='dormant'. Cap 5. Faster turnover than the prior 0..10 model.
+
+### Changed — picker logic targets 3 active categories per person
+
+Proactive coda picker (when assistant has nothing else to do):
+1. Count active categories for this person.
+2. If ≥3: random pick across them.
+3. If <3: probability of `raise_new` (= introduce a new category) per count: 0→1.0, 1→0.5, 2→0.3. Otherwise random over existing actives.
+4. Within picked category: subject by `engagement_score DESC, last_assistant_initiated_at ASC`.
+5. Within picked subject: least-recently-used topic-beat as the coda hook.
+
+### Removed — `maelle_*` prefixes
+
+Column / function rename pass:
+- `last_maelle_initiated_at` → `last_assistant_initiated_at`
+- `countMaelleInitiationsTodayForPerson` → `countAssistantInitiationsTodayForPerson`
+- `lastMaelleInitiatedAt` → `lastAssistantInitiatedAt`
+- `direction='maelle_initiated'` engagement-log enum → tracked via the `last_assistant_initiated_at` column directly
+
+The assistant's display name is just one instance value (`profile.assistant.name`); the schema shouldn't bake it in.
+
+### Migration
+
+Pure data reset. Old `social_topics_v2` + `social_engagements` rows are gone. Categories survive (re-seeded on boot). The 9 fragmented Clair Obscur rows that motivated this work are wiped — clean slate.
+
+### Not changed
+
+- The 30 fixed global categories + their `social_categories` table.
+- Engagement rank (people_memory.engagement_rank, separate concern from subject scoring).
+- `socialOutreachTick`'s eligibility gates (rank>0, mid-day window, weekend skip, etc.) — only the underlying queries renamed to point at `social_subjects`.
+- `recentOutboundContext` (v2.6.1 colleague-DM context — orthogonal to social engine).
+
+---
+
 ## 2.6.6 — Two real-chat bug-test waves: Yael / Idan Wagner duplicate approval + Shayan MPIM 5-bug bundle
 
 Pure-owner patch. Two consecutive real-chat incidents (2026-05-10) surfaced overlapping failure modes — colleague-path Sonnet had no structured awareness of pending work in the thread, the v2.6.5 fast-path Case B told her to call create_meeting after a requester picks but Guard A still refused externals, MPIM-only rules were polluting DM/channel prompts, and the v2.6.4 city-vs-IANA-tz fix only patched the owner-path renderer (not the find_slack_user tool result). Six fixes in one bundle, organized below.

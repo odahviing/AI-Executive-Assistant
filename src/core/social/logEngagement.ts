@@ -1,178 +1,136 @@
 /**
- * Post-turn engagement logger (v2.2.1).
+ * Engagement signal applier (v2.6.7 redesign).
  *
- * Called by the orchestrator AFTER a reply is produced, when the social
- * pre-pass fired a non-'none' directive. Writes one row to social_engagements,
- * applies score delta to the topic (if any), and nudges category signal
- * counters.
+ * Pre-redesign: append-only `social_engagements` log with score deltas decided
+ * here (positive=+3, neutral=-1, negative=-3 etc). Mismatch with the live
+ * Sonnet-driven flow led to subjects camping at top scores while real
+ * engagement quality didn't show through.
  *
- * Works for owner turns (person_slack_id = owner) and colleague turns
- * (person_slack_id = colleague.slack_id).
+ * Redesign rules (per the 2026-05-10 design conversation, EC4):
+ *   - Person spontaneously matches existing subject (no recent assistant raise) → +1
+ *   - Assistant raised + person's NEXT message:
+ *       · matches subject + non-negative sentiment → +1
+ *       · matches subject + negative sentiment    → −1
+ *       · doesn't match (any pivot, including task, bare ack, different subject) → −1
+ *   - Floor 0 → status='dormant'. Cap 5.
+ *
+ * The signal applier reads `last_assistant_initiated_at` on the most-recently-
+ * raised subject for this person, then compares against the classifier's verdict
+ * for the current inbound. Always clears the raise marker after processing
+ * so we don't double-apply on subsequent turns.
+ *
+ * Single source of truth: subjects.engagement_score. No append-only log.
  */
 
 import {
   applyScoreDelta,
+  clearSubjectRaisedMarker,
+  getMostRecentRaisedSubject,
   incrementCategorySignals,
-  logEngagementRow,
-  lastMaelleInitiatedAt,
-  type EngagementDirection,
-  type EngagementSignal,
-  type SocialTopic,
-  type TopicToucher,
-} from '../../db/socialTopics';
+  type SocialSubject,
+} from '../../db/socialSubjects';
 import { adjustEngagementRank } from '../../db/engagementRank';
-import type { SocialDirective } from './stateMachine';
 import type { OwnerIntentClassification } from './classifyOwnerIntent';
 import logger from '../../utils/logger';
 
 const RANK_RESPONSE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const BRIEF_REPLY_CHAR_LIMIT = 30;
 
-export function scoreDeltaFor(params: {
-  direction: EngagementDirection;
-  signal: EngagementSignal;
-  newTopic: boolean;
-}): number {
-  const { direction, signal, newTopic } = params;
-
-  if (direction === 'owner_initiated' || direction === 'colleague_initiated') {
-    return newTopic ? 5 : 3;
-  }
-
-  if (direction === 'maelle_initiated') {
-    if (signal === 'positive') return 3;
-    if (signal === 'neutral') return -1;
-    if (signal === 'negative') return -3;
-    return 0;
-  }
-
-  if (direction === 'maelle_response') {
-    return 0;
-  }
-
-  if (direction === 'owner_response' || direction === 'colleague_response') {
-    if (signal === 'positive') return 3;
-    if (signal === 'neutral') return -1;
-    if (signal === 'negative') return -3;
-    return 0;
-  }
-
-  return 0;
-}
-
-export function logPersonInitiated(params: {
+/**
+ * Apply the engagement signal for an inbound message that arrived AFTER the
+ * assistant raised a subject. Reads the most-recently-raised subject for this
+ * person and decides +1 / −1 / no-op based on whether the inbound matched.
+ *
+ * Returns the subject that was judged + the delta applied (for logging).
+ */
+export function applyRaiseFeedbackSignal(params: {
   ownerUserId: string;
   personSlackId: string;
-  senderRole: 'owner' | 'colleague';
-  directive: SocialDirective;
-  classification: OwnerIntentClassification | null;
-  turnRef?: string | null;
-}): void {
-  const { ownerUserId, personSlackId, senderRole, directive, classification, turnRef } = params;
+  classification: OwnerIntentClassification;
+}): { subject: SocialSubject | null; delta: number; reason: string } {
+  const { ownerUserId, personSlackId, classification } = params;
 
-  const categoryIdFromTopic = directive.topic?.category_id;
-  const fallbackCategoryId = directive.categoryLabel
-    ? `cat_global_${directive.categoryLabel}`
-    : null;
-  const categoryId = categoryIdFromTopic ?? fallbackCategoryId;
-  if (!categoryId) return;
+  const raised = getMostRecentRaisedSubject(ownerUserId, personSlackId);
+  if (!raised) return { subject: null, delta: 0, reason: 'no_raised_subject' };
 
-  const topicId = directive.topic?.id ?? null;
-  const signal: EngagementSignal = classification?.social?.sentiment === 'positive'
-    ? 'positive'
-    : classification?.social?.sentiment === 'negative'
-    ? 'negative'
-    : 'neutral';
+  const matchedSubjectId = classification.social?.subject_match?.existing_subject_id ?? null;
+  const sentiment = classification.social?.sentiment ?? 'neutral';
 
-  const direction: EngagementDirection = senderRole === 'owner' ? 'owner_initiated' : 'colleague_initiated';
-  const initiator: TopicToucher = senderRole;
+  let delta = 0;
+  let reason = '';
 
-  const firstMention = directive.firstMention;
-  const delta = scoreDeltaFor({ direction, signal, newTopic: firstMention });
-
-  try {
-    if (topicId && delta !== 0 && !firstMention) {
-      applyScoreDelta(topicId, delta, initiator);
+  if (matchedSubjectId === raised.id) {
+    if (sentiment === 'negative') {
+      delta = -1;
+      reason = 'raised_match_negative';
+    } else {
+      delta = +1;
+      reason = 'raised_match_engaged';
     }
-
-    logEngagementRow({
-      ownerUserId,
-      personSlackId,
-      topicId,
-      categoryId,
-      direction,
-      signal,
-      scoreDelta: delta,
-      turnRef: turnRef ?? null,
-    });
-
-    if (signal === 'positive') incrementCategorySignals(categoryId, 'positive');
-    else if (signal === 'negative') incrementCategorySignals(categoryId, 'negative');
-  } catch (err) {
-    logger.warn('logPersonInitiated threw — non-fatal', { err: String(err).slice(0, 300) });
+  } else {
+    // Any pivot (task / different subject / bare ack / no social signal at all) = -1.
+    delta = -1;
+    reason = `raised_pivot_${classification.kind}`;
   }
-}
 
-/**
- * Logs a Maelle-initiated social moment (proactive or continuation). Used by
- * the piggyback path. Signal defaults to 'none' at the moment of initiation;
- * the in-conversation rank-check pass updates the row (or writes a response
- * row) once the person replies.
- */
-export function logMaelleInitiated(params: {
-  ownerUserId: string;
-  topic: SocialTopic;
-  signal: EngagementSignal;
-  turnRef?: string | null;
-}): void {
-  const { ownerUserId, topic, signal, turnRef } = params;
-  const delta = scoreDeltaFor({
-    direction: 'maelle_initiated',
-    signal,
-    newTopic: false,
+  let updated: SocialSubject | null = null;
+  if (delta !== 0) {
+    updated = applyScoreDelta(raised.id, delta, 'assistant');
+    if (sentiment === 'positive') incrementCategorySignals(raised.category_id, 'positive');
+    if (sentiment === 'negative') incrementCategorySignals(raised.category_id, 'negative');
+  }
+  // Clear the raise marker — signal has been processed for this person.
+  clearSubjectRaisedMarker(raised.id);
+
+  logger.info('Engagement signal applied (raised)', {
+    raisedId: raised.id, raisedLabel: raised.label, delta, reason,
+    newScore: updated?.engagement_score, status: updated?.status,
   });
-  try {
-    if (delta !== 0) applyScoreDelta(topic.id, delta, 'maelle');
-    logEngagementRow({
-      ownerUserId,
-      personSlackId: topic.person_slack_id,
-      topicId: topic.id,
-      categoryId: topic.category_id,
-      direction: 'maelle_initiated',
-      signal,
-      scoreDelta: delta,
-      turnRef: turnRef ?? null,
-    });
-    if (signal === 'positive') incrementCategorySignals(topic.category_id, 'positive');
-    else if (signal === 'negative') incrementCategorySignals(topic.category_id, 'negative');
-  } catch (err) {
-    logger.warn('logMaelleInitiated threw — non-fatal', { err: String(err).slice(0, 300) });
-  }
+  return { subject: updated ?? raised, delta, reason };
 }
 
 /**
- * In-conversation rank adjustment (v2.2.1).
+ * Apply the organic-match signal: person spontaneously matched an existing
+ * subject (no pending assistant raise). +1, capped at 5.
+ *
+ * Called when classification.social.subject_match.action === 'match_existing'
+ * AND there was no pending assistant raise (or the raise applied to a
+ * different subject — handled separately).
+ */
+export function applyOrganicMatchSignal(params: {
+  ownerUserId: string;
+  personSlackId: string;
+  matchedSubjectId: string;
+  initiator: 'owner' | 'colleague';
+  sentiment: 'positive' | 'negative' | 'neutral';
+}): SocialSubject | null {
+  const { matchedSubjectId, initiator, sentiment } = params;
+  // Negative organic mention also -1 (person is venting about it).
+  const delta = sentiment === 'negative' ? -1 : +1;
+  const updated = applyScoreDelta(matchedSubjectId, delta, initiator);
+  logger.info('Engagement signal applied (organic)', {
+    subjectId: matchedSubjectId, delta, sentiment, newScore: updated?.engagement_score,
+  });
+  return updated;
+}
+
+/**
+ * In-conversation rank adjustment (v2.2.1 carryover).
  *
  * When a colleague replies inside an active conversation, check whether
- * the reply is a response to a recent Maelle-initiated social moment
- * (piggyback ping or continuation). If so, nudge the colleague's
- * engagement_rank:
- *   - positive + reply length > 30 chars → +1
- *   - negative                           → -1
- *   - neutral / brief                    → 0 (no change)
- *
- * Fires only when the last Maelle initiation for this person was within
- * the last 24h. Older than that, we assume any current reply is a fresh
- * conversation, not a response. The proactive-ping path
- * (`social_ping_rank_check`) still handles its 48h window separately for
- * out-of-conversation DMs.
+ * the reply followed a recent assistant-initiated social moment. If so,
+ * nudge the colleague's engagement_rank +/− based on quality.
  */
 export function adjustRankFromColleagueResponse(params: {
   colleagueSlackId: string;
   replyText: string;
-  sentiment: EngagementSignal;
+  sentiment: 'positive' | 'negative' | 'neutral';
 }): void {
-  const lastInit = lastMaelleInitiatedAt(params.colleagueSlackId);
+  // Note: lastAssistantInitiatedAt was renamed from lastMaelleInitiatedAt.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { lastAssistantInitiatedAt } = require('../../db/socialSubjects') as
+    typeof import('../../db/socialSubjects');
+  const lastInit = lastAssistantInitiatedAt(params.colleagueSlackId);
   if (!lastInit) return;
   const sinceMs = Date.now() - new Date(lastInit).getTime();
   if (sinceMs > RANK_RESPONSE_WINDOW_MS) return;
@@ -183,8 +141,21 @@ export function adjustRankFromColleagueResponse(params: {
   } else if (params.sentiment === 'positive' && len > BRIEF_REPLY_CHAR_LIMIT) {
     adjustEngagementRank(params.colleagueSlackId, 1, 'reply_engaged');
   }
-  // neutral/short → no change (still engagement, just not boosting)
 }
 
-// Back-compat alias (v2.2.0 called this logOwnerInitiated)
+// ── Back-compat shims (orchestrator imports these names) ─────────────────────
+
+/** @deprecated v2.6.7 — use applyRaiseFeedbackSignal / applyOrganicMatchSignal. */
+export function logPersonInitiated(_params: any): void {
+  // No-op: in v2.6.7 the score deltas happen via the signal appliers above,
+  // called explicitly by the orchestrator. Kept as a name shim so existing
+  // call sites don't break during the orchestrator refactor.
+}
+
+/** @deprecated v2.6.7 — assistant raises are tracked via markSubjectRaised(). */
+export function logMaelleInitiated(_params: any): void {
+  // No-op for the same reason. The orchestrator now calls markSubjectRaised
+  // when emitting a coda, which writes last_assistant_initiated_at directly.
+}
+
 export const logOwnerInitiated = logPersonInitiated;

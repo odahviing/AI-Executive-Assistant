@@ -166,7 +166,7 @@ function lastTopicTouchMs(personSlackId: string, ownerUserId: string): number {
     const db = getDb();
     const row = db.prepare(`
       SELECT MAX(last_touched_at) AS most_recent
-      FROM social_topics_v2
+      FROM social_subjects
       WHERE owner_user_id = ?
         AND person_slack_id = ?
     `).get(ownerUserId, personSlackId) as { most_recent: string | null } | undefined;
@@ -347,8 +347,9 @@ async function generatePing(params: {
   let activeTopics: Array<{ category: string; topic: string; engagement_score: number; last_touched: string | null }> = [];
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getAllTopicsForPerson } = require('../../db/socialTopics') as typeof import('../../db/socialTopics');
-    const rows = getAllTopicsForPerson(params.colleagueSlackId);
+    const { getActiveSubjectsForPerson } = require('../../db/socialSubjects') as
+      typeof import('../../db/socialSubjects');
+    const rows = getActiveSubjectsForPerson(params.colleagueSlackId);
     activeTopics = rows.map(r => ({
       category: r.category_id,
       topic: r.label,
@@ -356,7 +357,7 @@ async function generatePing(params: {
       last_touched: r.last_touched_at,
     }));
   } catch (err) {
-    logger.warn('generatePing — getAllTopicsForPerson threw, proceeding without topics', {
+    logger.warn('generatePing — getActiveSubjectsForPerson threw, proceeding without topics', {
       err: String(err).slice(0, 120),
     });
   }

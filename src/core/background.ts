@@ -97,7 +97,7 @@ export async function initProfile(
   // brings them up (or as Maelle raises new ones).
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const social = require('../db/socialTopics') as typeof import('../db/socialTopics');
+    const social = require('../db/socialSubjects') as typeof import('../db/socialSubjects');
     social.ensureCategoriesSeeded(profile.user.slack_user_id);
   } catch (err) {
     logger.warn('Social categories seeding threw — continuing', { err: String(err) });

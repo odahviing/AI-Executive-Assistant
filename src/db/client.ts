@@ -353,10 +353,27 @@ function initSchema(db: Database.Database): void {
   // AND Yael's gaming interests as separate rows under the same global
   // `gaming` category row. The person_slack_id column ("owner" or a
   // colleague's Slack id) is the identity axis for all topic tracking.
+  // v2.6.7 — Social Engine redesign. Old `social_topics_v2` + `social_engagements`
+  // dropped (they fragmented heavily — one game produced 5+ rows because the
+  // surface-string reconciler couldn't merge sub-beats). Owner accepted full
+  // data reset. New schema is two tables under the existing global categories:
+  //
+  //   social_subjects — meaningful unit (renamed from social_topics_v2 conceptually).
+  //                     Carries engagement_score (0..5), status, last_touched_at,
+  //                     last_assistant_initiated_at. One subject = one durable thing
+  //                     ("Clair Obscur Expedition 33").
+  //
+  //   social_topics   — beats under a subject. No score; just labels Sonnet uses
+  //                     as hooks for codas. Cap of 10 per subject; LRU eviction.
+  //
+  //   social_engagements — DROPPED. The append-only log was unused by the new
+  //                        feedback signal; scoring is direct on subjects.
+  try { db.exec(`DROP TABLE IF EXISTS social_topics_v2`); } catch (_) {}
+  try { db.exec(`DROP TABLE IF EXISTS social_engagements`); } catch (_) {}
+
   db.exec(`
     -- Global fixed list of 30 top-level interest categories. Seeded once on
-    -- startup, no new categories ever created at runtime. Shared across
-    -- everyone Maelle tracks (owner + colleagues).
+    -- startup; no runtime creation. Shared across owner + colleagues.
     CREATE TABLE IF NOT EXISTS social_categories (
       id                TEXT PRIMARY KEY,
       owner_user_id     TEXT NOT NULL DEFAULT 'global',
@@ -370,64 +387,48 @@ function initSchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_social_categories_owner ON social_categories(owner_user_id);
 
-    -- Topics live UNDER a (global) category AND are scoped per-person.
-    -- Created on first mention (by the person or by Maelle). engagement_score
-    -- drives lifecycle: starts at 3-5, moves with engagements, weekly -1 decay
-    -- on untouched actives, floor at 0 flips status to 'dormant'.
-    CREATE TABLE IF NOT EXISTS social_topics_v2 (
+    -- Subjects: meaningful unit, scored. Per-(owner, person, category).
+    -- Created on first mention by either side; LLM classifier merges sub-beats
+    -- of the same subject (no Jaccard hack). Cap 5 active per (person, category)
+    -- with lowest-score eviction.
+    CREATE TABLE IF NOT EXISTS social_subjects (
       id                TEXT PRIMARY KEY,
-      owner_user_id     TEXT NOT NULL,    -- the owner whose world this topic lives in
-      person_slack_id   TEXT NOT NULL DEFAULT '',   -- whom this topic is about (owner id or colleague id)
+      owner_user_id     TEXT NOT NULL,
+      person_slack_id   TEXT NOT NULL,
       category_id       TEXT NOT NULL,
       label             TEXT NOT NULL,
       engagement_score  INTEGER NOT NULL DEFAULT 3,
-      status            TEXT NOT NULL DEFAULT 'active',   -- active | dormant
+      status            TEXT NOT NULL DEFAULT 'active',         -- active | dormant
       last_touched_at   TEXT NOT NULL DEFAULT (datetime('now')),
-      last_touched_by   TEXT NOT NULL DEFAULT 'owner',    -- 'owner' | 'maelle' | 'colleague'
-      raised_count      INTEGER NOT NULL DEFAULT 1,
+      last_touched_by   TEXT NOT NULL DEFAULT 'owner',          -- owner | colleague | assistant
+      last_assistant_initiated_at TEXT,                         -- when assistant last raised this (NULL = never raised since last cleared)
+      created_by        TEXT NOT NULL DEFAULT 'owner',
       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
     );
-    CREATE INDEX IF NOT EXISTS idx_social_topics_v2_owner ON social_topics_v2(owner_user_id, status);
-    CREATE INDEX IF NOT EXISTS idx_social_topics_v2_cat ON social_topics_v2(category_id);
-    CREATE INDEX IF NOT EXISTS idx_social_topics_v2_person ON social_topics_v2(person_slack_id, status);
+    CREATE INDEX IF NOT EXISTS idx_social_subjects_person ON social_subjects(person_slack_id, status);
+    CREATE INDEX IF NOT EXISTS idx_social_subjects_owner_person ON social_subjects(owner_user_id, person_slack_id);
+    CREATE INDEX IF NOT EXISTS idx_social_subjects_cat ON social_subjects(category_id);
+    CREATE INDEX IF NOT EXISTS idx_social_subjects_raised ON social_subjects(person_slack_id, last_assistant_initiated_at DESC);
 
-    -- Append-only engagement log. One row per social exchange, scoped per-person.
-    CREATE TABLE IF NOT EXISTS social_engagements (
-      id              TEXT PRIMARY KEY,
-      owner_user_id   TEXT NOT NULL,
-      person_slack_id TEXT NOT NULL DEFAULT '',
-      topic_id        TEXT,
-      category_id     TEXT NOT NULL,
-      direction       TEXT NOT NULL,
-      -- owner_initiated | colleague_initiated | maelle_initiated |
-      -- owner_response | colleague_response | maelle_response
-      signal          TEXT NOT NULL DEFAULT 'none',
-      -- positive | neutral | negative | none
-      score_delta     INTEGER NOT NULL DEFAULT 0,
-      turn_ref        TEXT,
-      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    -- Topic-beats: lightweight under-subject hooks. No score. Cap 10/subject
+    -- with LRU eviction (last_used_at ASC). Sonnet uses these as concrete
+    -- things to talk about when crafting a coda for the chosen subject.
+    CREATE TABLE IF NOT EXISTS social_topics (
+      id            TEXT PRIMARY KEY,
+      subject_id    TEXT NOT NULL,
+      label         TEXT NOT NULL,
+      sentiment     TEXT NOT NULL DEFAULT 'neutral',   -- positive | negative | neutral
+      created_by    TEXT NOT NULL DEFAULT 'owner',
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      last_used_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
-    CREATE INDEX IF NOT EXISTS idx_social_engagements_owner ON social_engagements(owner_user_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_social_engagements_topic ON social_engagements(topic_id);
-    CREATE INDEX IF NOT EXISTS idx_social_engagements_person ON social_engagements(person_slack_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_social_topics_subject ON social_topics(subject_id);
+    CREATE INDEX IF NOT EXISTS idx_social_topics_lru ON social_topics(subject_id, last_used_at);
   `);
 
-  // v2.2.1 — migrate existing per-owner category rows to the new GLOBAL
-  // scope. Idempotent: if we've already migrated, the DELETE matches 0 rows.
-  // Owner OK'd a social-data reset, so we wipe category rows + stale topic
-  // rows that lack person_slack_id (migration stamp) and the startup seed
-  // re-creates the global 30.
-  try { db.exec(`ALTER TABLE social_topics_v2 ADD COLUMN person_slack_id TEXT NOT NULL DEFAULT ''`); } catch (_) {}
-  try { db.exec(`ALTER TABLE social_engagements ADD COLUMN person_slack_id TEXT NOT NULL DEFAULT ''`); } catch (_) {}
-  // Any pre-2.2.1 topic row has empty person_slack_id. Set it to owner_user_id
-  // so it stays attached to the owner (the only scope in 2.2.0).
-  try {
-    db.prepare(`UPDATE social_topics_v2 SET person_slack_id = owner_user_id WHERE person_slack_id = ''`).run();
-    db.prepare(`UPDATE social_engagements SET person_slack_id = owner_user_id WHERE person_slack_id = ''`).run();
-  } catch (_) {}
-  // Wipe old per-owner category rows so the global-scope seed is clean.
-  // Safe — the global seed immediately re-creates the 30 labels.
+  // Wipe per-owner category rows so the global-scope seed is canonical.
+  // Safe — the global seed re-creates the 30 labels immediately.
   try {
     db.prepare(`DELETE FROM social_categories WHERE owner_user_id != 'global'`).run();
   } catch (_) {}

@@ -14,7 +14,7 @@
 
 import { DateTime } from 'luxon';
 import { completeTask, createTask } from '../index';
-import { runWeeklyDecay } from '../../db/socialTopics';
+import { runWeeklyDecay } from '../../db/socialSubjects';
 import logger from '../../utils/logger';
 import type { TaskDispatcher } from './types';
 

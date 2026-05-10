@@ -19,9 +19,14 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import type { UserProfile } from '../../config/userProfile';
-import type { SocialDirective } from './stateMachine';
+import type { LegacySocialDirectiveShape as SocialDirective } from './stateMachine';
 import { config } from '../../config';
 import logger from '../../utils/logger';
+import {
+  getRecentTopicBeats,
+  pickLeastRecentlyUsedTopicBeat,
+  markTopicBeatUsed,
+} from '../../db/socialSubjects';
 
 export async function generateSocialCoda(params: {
   profile: UserProfile;
@@ -44,9 +49,35 @@ export async function generateSocialCoda(params: {
   const isOwner = senderRole === 'owner';
   const ownerFirst = profile.user.name.split(' ')[0];
 
+  // v2.6.7 — for continue mode on an existing subject, pull a least-recently-
+  // used topic-beat as a concrete hook (avoids spamming the same beat). Mark
+  // it used so next time a different beat is preferred. Variety baked in.
+  let topicBeatHook: string | null = null;
+  if (directive.mode === 'continue' && directive.subjectId) {
+    try {
+      const lru = pickLeastRecentlyUsedTopicBeat(directive.subjectId);
+      if (lru) {
+        topicBeatHook = lru.label;
+        markTopicBeatUsed(lru.id);
+      } else {
+        // No beats yet — fall back to a recent-beats list (likely also empty
+        // but safe). Coda generator handles missing hook gracefully.
+        const recent = getRecentTopicBeats(directive.subjectId, 3);
+        if (recent.length > 0) topicBeatHook = recent[0].label;
+      }
+    } catch (err) {
+      logger.warn('coda topic-beat picker threw — proceeding without hook', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
   let intent: string;
   if (directive.mode === 'continue' && directive.topicLabel) {
-    intent = `Follow up briefly on "${directive.topicLabel}". One short natural line — don't interrogate, don't recap what was said before.`;
+    const hookLine = topicBeatHook
+      ? ` Recent beat to lean on: "${topicBeatHook}" — only use it if it actually fits the moment, otherwise just ask in your own way.`
+      : '';
+    intent = `Follow up briefly on "${directive.topicLabel}". One short natural line — don't interrogate, don't recap what was said before.${hookLine}`;
   } else if (directive.mode === 'raise_new') {
     // v2.2.4 (bug 1B) — discovery mode. Without an existing topic to continue,
     // a "raise_new" coda was free to fabricate ("Are you joining the offsite

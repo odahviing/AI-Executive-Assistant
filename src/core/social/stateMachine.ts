@@ -1,24 +1,34 @@
 /**
- * Social state machine (v2.2.1).
+ * Social state machine (v2.6.7 redesign).
  *
  * Pure TypeScript. No LLM, no DB writes. Takes the classifier output + the
- * reconciled topic + rate-limit state and decides ONE directive for the
+ * reconciled subject + rate-limit state and decides ONE directive for the
  * current turn. The directive is what the orchestrator injects into the
- * system prompt for Sonnet to phrase. Mode selection is deterministic;
- * tone is judgment, so we pass a short cue for Sonnet to run with.
+ * system prompt for Sonnet to phrase.
  *
- * Works for both owner turns and colleague turns — the caller passes the
- * relevant person_slack_id and the classifier output.
+ * Picker (proactive slot, EC6):
+ *   - Count active categories for this person.
+ *   - If ≥3 active: random pick across them; pick subject inside (highest
+ *     score, then least-recently-assistant-initiated).
+ *   - If <3 active: random over existing PLUS one "raise_new" slot to push
+ *     toward 3 actives. Probability schedule:
+ *       count=0 → 1.0 (always raise_new)
+ *       count=1 → 0.5
+ *       count=2 → 0.3
+ *   - Within chosen subject, the coda generator picks the least-recently-used
+ *     topic-beat (separate concern, in generateCoda).
  */
 
 import type { OwnerIntentClassification } from './classifyOwnerIntent';
 import type { ReconcileResult } from './reconcileTopic';
-import type { SocialTopic } from '../../db/socialTopics';
 import {
-  countMaelleInitiationsTodayForPerson,
-  getAllTopicsForPerson,
-  lastMaelleInitiatedAt,
-} from '../../db/socialTopics';
+  countAssistantInitiationsTodayForPerson,
+  getActiveSubjectsForPerson,
+  getActiveSubjectsForPersonCategory,
+  getActiveCategoryEngagementForPerson,
+  lastAssistantInitiatedAt,
+  type SocialSubject,
+} from '../../db/socialSubjects';
 import logger from '../../utils/logger';
 
 export type SocialMode =
@@ -31,12 +41,31 @@ export type SocialMode =
 
 export interface SocialDirective {
   mode: SocialMode;
-  topicId: string | null;
-  topicLabel: string | null;
+  subjectId: string | null;
+  subjectLabel: string | null;
   categoryLabel: string | null;
   toneCue: string;
-  topic: SocialTopic | null;
+  subject: SocialSubject | null;
   firstMention: boolean;
+}
+
+// Back-compat: many callers still reference topicId / topicLabel / topic.
+// We expose the same fields under those names so the existing prompt-rendering
+// + logging code keeps working without churn. (Subjects ARE the unit; "topic"
+// in the legacy field name now points to the same thing.)
+export interface LegacySocialDirectiveShape extends SocialDirective {
+  topicId: string | null;
+  topicLabel: string | null;
+  topic: SocialSubject | null;
+}
+
+function withLegacyShape(d: SocialDirective): LegacySocialDirectiveShape {
+  return {
+    ...d,
+    topicId: d.subjectId,
+    topicLabel: d.subjectLabel,
+    topic: d.subject,
+  };
 }
 
 // ── Person-initiated social turn ─────────────────────────────────────────────
@@ -44,204 +73,191 @@ export interface SocialDirective {
 export function directiveForPersonSocial(params: {
   classification: OwnerIntentClassification;
   reconciled: ReconcileResult;
-}): SocialDirective {
+}): LegacySocialDirectiveShape {
   const { classification, reconciled } = params;
   const social = classification.social;
-  if (!social) return noDirective();
+  if (!social) return withLegacyShape(noDirectiveRaw());
 
-  // Closing signal — person is winding down this topic. Let Maelle sign off
-  // naturally rather than forcing a follow-up that would feel clingy.
   if (classification.conversation_state === 'closing') {
-    return noDirective();
+    return withLegacyShape(noDirectiveRaw());
   }
 
-  const topic = reconciled.topic;
+  const subject = reconciled.subject;
   const firstMention = reconciled.action === 'created_under_category';
 
   if (reconciled.action === 'revived_dormant') {
-    return {
+    return withLegacyShape({
       mode: 'revive_ack',
-      topicId: topic?.id ?? null,
-      topicLabel: topic?.label ?? null,
+      subjectId: subject?.id ?? null,
+      subjectLabel: subject?.label ?? null,
       categoryLabel: reconciled.category?.label ?? null,
       toneCue: 'acknowledge the return; pick up where it left off',
-      topic,
+      subject,
       firstMention: false,
-    };
+    });
   }
 
   if (social.direction === 'share' && social.sentiment === 'positive') {
-    return {
+    return withLegacyShape({
       mode: 'celebrate',
-      topicId: topic?.id ?? null,
-      topicLabel: topic?.label ?? reconciled.category?.label ?? null,
+      subjectId: subject?.id ?? null,
+      subjectLabel: subject?.label ?? reconciled.category?.label ?? null,
       categoryLabel: reconciled.category?.label ?? null,
       toneCue: 'match the energy; a real congrats, not a pivot to tasks',
-      topic,
+      subject,
       firstMention,
-    };
+    });
   }
 
   let toneCue: string;
   if (social.sentiment === 'negative') {
     toneCue = 'commiserate, light empathy; no solutions unless asked';
-  } else if (social.direction === 'ask_maelle') {
+  } else if (social.direction === 'ask_assistant') {
     toneCue = 'answer warmly, like a colleague who\'s been around';
   } else {
     toneCue = 'follow the thread naturally; one short follow-up is fine';
   }
 
-  return {
+  return withLegacyShape({
     mode: 'engage',
-    topicId: topic?.id ?? null,
-    topicLabel: topic?.label ?? reconciled.category?.label ?? null,
+    subjectId: subject?.id ?? null,
+    subjectLabel: subject?.label ?? reconciled.category?.label ?? null,
     categoryLabel: reconciled.category?.label ?? null,
     toneCue,
-    topic,
+    subject,
     firstMention,
-  };
+  });
 }
 
-// ── Proactive slot (Maelle piggybacks social on 'other'-kind turns) ──────────
+// ── Proactive slot picker (EC6: 3-active-categories target) ──────────────────
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+const TARGET_CATEGORIES = 3;
 
-/**
- * Called on 'other'-kind turns (and optionally on idle sweeps). Evaluates
- * whether Maelle should piggyback a proactive social moment onto the reply.
- * Rules:
- *   - Maelle must not have initiated with this person in the last 24h
- *   - If there are active topics with score >= 3, pick the longest-since-
- *     Maelle-touched (round-robin); return mode='continue'
- *   - If no continuable topics, return mode='raise_new' (Sonnet picks a
- *     category/topic from the global pool at prompt time)
- */
+// Probability of raise_new given current active-category count.
+function raiseNewProbabilityForCount(count: number): number {
+  if (count === 0) return 1.0;
+  if (count === 1) return 0.5;
+  if (count === 2) return 0.3;
+  return 0.0;
+}
+
 export function directiveForProactiveSlot(params: {
   personSlackId: string;
-}): SocialDirective {
+}): LegacySocialDirectiveShape {
   const { personSlackId } = params;
 
   // One-per-day-per-person gate
-  if (countMaelleInitiationsTodayForPerson(personSlackId) >= 1) {
-    return noDirective();
+  if (countAssistantInitiationsTodayForPerson(personSlackId) >= 1) {
+    return withLegacyShape(noDirectiveRaw());
   }
-  const lastInit = lastMaelleInitiatedAt(personSlackId);
+  const lastInit = lastAssistantInitiatedAt(personSlackId);
   if (lastInit) {
     const sinceMs = Date.now() - new Date(lastInit).getTime();
-    if (sinceMs < ONE_DAY_MS) return noDirective();
+    if (sinceMs < ONE_DAY_MS) return withLegacyShape(noDirectiveRaw());
   }
 
-  const activeTopics = getAllTopicsForPerson(personSlackId);
+  // EC6: random over active categories; if <3 active, mix in a raise_new chance.
+  const activeCategories = getActiveCategoryEngagementForPerson(personSlackId);
+  const activeCount = activeCategories.length;
 
-  // Same-day freshness: skip topics Maelle already touched today
-  const startOfDayMs = (() => {
-    const d = new Date();
-    d.setUTCHours(0, 0, 0, 0);
-    return d.getTime();
-  })();
-  const freshActive = activeTopics.filter(t => {
-    const lastMs = new Date(t.last_touched_at).getTime();
-    return lastMs < startOfDayMs || t.last_touched_by !== 'maelle';
-  });
+  // Decide whether to raise_new based on growth probability.
+  const raiseNewProb = raiseNewProbabilityForCount(activeCount);
+  const wantsRaiseNew = activeCount < TARGET_CATEGORIES && Math.random() < raiseNewProb;
 
-  const continuable = freshActive.filter(t => t.engagement_score >= 3);
-  if (continuable.length > 0) {
-    const threeDaysAgoMs = Date.now() - THREE_DAYS_MS;
-    const maelleTouchedRecently = (t: typeof continuable[number]) =>
-      t.last_touched_by === 'maelle' && new Date(t.last_touched_at).getTime() >= threeDaysAgoMs;
-
-    const preferred = continuable.filter(t => !maelleTouchedRecently(t));
-    const pool = preferred.length > 0 ? preferred : continuable;
-
-    const choice = pool.slice().sort((a, b) => {
-      const aMaelle = a.last_touched_by === 'maelle' ? new Date(a.last_touched_at).getTime() : 0;
-      const bMaelle = b.last_touched_by === 'maelle' ? new Date(b.last_touched_at).getTime() : 0;
-      if (aMaelle !== bMaelle) return aMaelle - bMaelle;
-      return b.engagement_score - a.engagement_score;
-    })[0];
-
-    return {
-      mode: 'continue',
-      topicId: choice.id,
-      topicLabel: choice.label,
+  if (wantsRaiseNew || activeCount === 0) {
+    return withLegacyShape({
+      mode: 'raise_new',
+      subjectId: null,
+      subjectLabel: null,
       categoryLabel: null,
-      toneCue: 'one short, natural follow-up on this topic',
-      topic: choice,
+      toneCue: 'one plain human question that invites a real fact about the person; no preamble',
+      subject: null,
       firstMention: false,
-    };
+    });
   }
 
-  return {
-    mode: 'raise_new',
-    topicId: null,
-    topicLabel: null,
-    categoryLabel: null,
-    toneCue: 'one plain human question from a fresh category; no preamble',
-    topic: null,
+  // Pick a random active category.
+  const pickedCategory = activeCategories[Math.floor(Math.random() * activeCategories.length)];
+  // Within category: highest engagement_score, then least-recently-assistant-initiated.
+  const subjects = getActiveSubjectsForPersonCategory(personSlackId, pickedCategory.category_id);
+  if (subjects.length === 0) {
+    return withLegacyShape({
+      mode: 'raise_new',
+      subjectId: null,
+      subjectLabel: null,
+      categoryLabel: null,
+      toneCue: 'one plain human question; no preamble',
+      subject: null,
+      firstMention: false,
+    });
+  }
+  const choice = subjects.slice().sort((a, b) => {
+    if (b.engagement_score !== a.engagement_score) return b.engagement_score - a.engagement_score;
+    const aTs = a.last_assistant_initiated_at ? new Date(a.last_assistant_initiated_at).getTime() : 0;
+    const bTs = b.last_assistant_initiated_at ? new Date(b.last_assistant_initiated_at).getTime() : 0;
+    return aTs - bTs;
+  })[0];
+
+  return withLegacyShape({
+    mode: 'continue',
+    subjectId: choice.id,
+    subjectLabel: choice.label,
+    categoryLabel: pickedCategory.category_label,
+    toneCue: 'one short, natural follow-up on this subject; lean on the recent topic-beats Maelle has logged',
+    subject: choice,
     firstMention: false,
-  };
+  });
 }
 
-export function noDirective(): SocialDirective {
+function noDirectiveRaw(): SocialDirective {
   return {
     mode: 'none',
-    topicId: null,
-    topicLabel: null,
+    subjectId: null,
+    subjectLabel: null,
     categoryLabel: null,
     toneCue: '',
-    topic: null,
+    subject: null,
     firstMention: false,
   };
 }
 
-/**
- * Single entry the orchestrator calls. Picks the right branch:
- *   kind='task'   → NEVER social (task always wins)
- *   kind='social' → directiveForPersonSocial (person initiated)
- *   kind='other'  → directiveForProactiveSlot (Maelle piggybacks if conditions)
- */
+export function noDirective(): LegacySocialDirectiveShape {
+  return withLegacyShape(noDirectiveRaw());
+}
+
 export function chooseSocialDirective(params: {
   personSlackId: string;
   classification: OwnerIntentClassification;
   reconciled: ReconcileResult;
-}): SocialDirective {
+}): LegacySocialDirectiveShape {
   const { classification, personSlackId } = params;
 
-  if (classification.kind === 'task') {
-    return noDirective();
-  }
-  if (classification.kind === 'social') {
-    return directiveForPersonSocial(params);
-  }
-  // 'other' — Maelle may proactively piggyback, UNLESS the turn is closing
-  // (bare ack, "later", "No. Just playing"). Forcing a social raise-new onto a
-  // close-out turn reads clingy and often kills the thread.
-  if (classification.conversation_state === 'closing') {
-    return noDirective();
-  }
+  if (classification.kind === 'task') return noDirective();
+  if (classification.kind === 'social') return directiveForPersonSocial(params);
+  if (classification.conversation_state === 'closing') return noDirective();
   return directiveForProactiveSlot({ personSlackId });
 }
 
-export function formatDirectiveForPromptBlock(directive: SocialDirective): string {
+export function formatDirectiveForPromptBlock(directive: LegacySocialDirectiveShape): string {
   if (directive.mode === 'none') return '';
   const lines: string[] = [];
   lines.push('## SOCIAL DIRECTIVE (this turn)');
   lines.push(`Mode: ${directive.mode}`);
   if (directive.categoryLabel) lines.push(`Category: ${directive.categoryLabel}`);
-  if (directive.topicLabel) lines.push(`Topic: ${directive.topicLabel}`);
+  if (directive.subjectLabel) lines.push(`Subject: ${directive.subjectLabel}`);
   lines.push(`Tone: ${directive.toneCue}`);
   lines.push('');
   lines.push('Mode rules:');
   lines.push('- celebrate: acknowledge the win first. No "what do you need" pivot. A real congrats, specific to what was shared.');
-  lines.push('- engage: follow the thread naturally. Your reply must PROGRESS the topic — react with something specific, share back, or ask a follow-up that gives the person somewhere to go. A reply that only says "wow cool" is not progress. If YOU just asked a social question and they answered with any substance, stay on that topic — never pivot to "anything work-related" or "let me know if you need anything." The topic stays open until THEY close it (the classifier flags that as conversation_state=closing).');
-  lines.push('- revive_ack: note you remember this topic from before. Pick up where it left off.');
-  lines.push('- continue: one short follow-up on a topic from a prior day. Don\'t overdo it. Same rule as engage — progress the topic, never pivot to work.');
-  lines.push('- raise_new: one plain human question from a fresh category. No preamble ("speaking of...", "by the way..."). Just ask.');
+  lines.push('- engage: follow the thread naturally. Your reply must PROGRESS the subject — react with something specific, share back, or ask a follow-up that gives the person somewhere to go. A reply that only says "wow cool" is not progress. If YOU just asked a social question and they answered with any substance, stay on that subject — never pivot to "anything work-related" or "let me know if you need anything." The subject stays open until THEY close it.');
+  lines.push('- revive_ack: note you remember this subject from before. Pick up where it left off.');
+  lines.push('- continue: one short follow-up on a subject from a prior day. Don\'t overdo it. Same rule as engage — progress the subject, never pivot to work.');
+  lines.push('- raise_new: one plain human question from a fresh angle. No preamble ("speaking of...", "by the way..."). Just ask.');
   lines.push('');
   lines.push('ABOVE ALL: speak like a person, not a service desk. Celebration, empathy, or genuine curiosity IS the response. Don\'t tack "let me know if you need anything" onto social turns.');
   logger.info('Social directive produced', {
-    mode: directive.mode, topic: directive.topicLabel, category: directive.categoryLabel,
+    mode: directive.mode, subject: directive.subjectLabel, category: directive.categoryLabel,
   });
   return lines.join('\n');
 }

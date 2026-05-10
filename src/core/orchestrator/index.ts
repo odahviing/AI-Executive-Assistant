@@ -368,13 +368,52 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         senderRole: turnSenderRole,
         senderName: input.senderName,
         recentContext: recentContext || undefined,
+        // v2.6.7 — classifier scopes its subject-merge decision to this person.
+        personSlackId: turnPersonSlackId,
       });
+
+      // v2.6.7 — apply engagement signal BEFORE reconciling, so the
+      // raise-feedback path reads the still-pending `last_assistant_initiated_at`
+      // marker. Reconcile/persist comes after; signal is about the PRIOR turn's
+      // raised subject vs THIS message.
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { applyRaiseFeedbackSignal, applyOrganicMatchSignal } = require('../social/logEngagement') as
+          typeof import('../social/logEngagement');
+        const raiseResult = applyRaiseFeedbackSignal({
+          ownerUserId: profile.user.slack_user_id,
+          personSlackId: turnPersonSlackId,
+          classification: socialClassification,
+        });
+        // Organic-match path: person matched an existing subject AND it wasn't
+        // the raised one (raised path already handled). +1 organic engagement.
+        const matchedSubjectId = socialClassification.social?.subject_match?.existing_subject_id;
+        if (
+          matchedSubjectId
+          && socialClassification.social?.subject_match?.action === 'match_existing'
+          && (turnSenderRole === 'owner' || turnSenderRole === 'colleague')
+          && (raiseResult.subject?.id !== matchedSubjectId || raiseResult.delta === 0)
+        ) {
+          applyOrganicMatchSignal({
+            ownerUserId: profile.user.slack_user_id,
+            personSlackId: turnPersonSlackId,
+            matchedSubjectId,
+            initiator: turnSenderRole,
+            sentiment: socialClassification.social.sentiment ?? 'neutral',
+          });
+        }
+      } catch (err) {
+        logger.warn('Engagement signal apply threw — non-fatal', { err: String(err).slice(0, 200) });
+      }
+
       const reconciled = reconcileTopic({
         ownerUserId: profile.user.slack_user_id,
         personSlackId: turnPersonSlackId,
         categoryHint: socialClassification.social?.category_hint,
-        topicLabelHint: socialClassification.social?.topic_label_hint,
+        subjectMatch: socialClassification.social?.subject_match,
+        topicLabel: socialClassification.social?.topic_label,
         initiator: turnSenderRole,
+        sentiment: socialClassification.social?.sentiment,
       });
       socialDirective = chooseSocialDirective({
         personSlackId: turnPersonSlackId,
@@ -1713,6 +1752,23 @@ Rules:
 
           if (coda && coda.trim().length > 0 && codaPassed) {
             finalReply = `${finalReply.trim()}\n\n${coda.trim()}`;
+            // v2.6.7 — mark the subject as raised so the next inbound from
+            // this person triggers the +1/−1 engagement signal. Subject id
+            // comes from codaDirective.subjectId (legacy alias topicId
+            // preserved on LegacySocialDirectiveShape). raise_new mode
+            // doesn't have a subject yet — the signal applies once the
+            // person responds and a subject gets created/matched.
+            if (codaDirective.subjectId) {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { markSubjectRaised } = require('../../db/socialSubjects') as
+                  typeof import('../../db/socialSubjects');
+                markSubjectRaised(codaDirective.subjectId);
+              } catch (err) {
+                logger.warn('markSubjectRaised threw — continuing', { err: String(err).slice(0, 200) });
+              }
+            }
+            // Legacy log shim — function is a no-op in v2.6.7 but call sites stay.
             if (codaDirective.topic) {
               logMaelleInitiated({
                 ownerUserId: profile.user.slack_user_id,
