@@ -1,6 +1,6 @@
 {
   "name": "maelle",
-  "version": "2.6.8",
+  "version": "2.6.7",
   "description": "Executive Assistant Platform",
   "main": "dist/index.js",
   "scripts": {
