@@ -2,6 +2,57 @@
 
 ---
 
+## 2.6.5 — Coord fast-path generalized + humanGate covers colleague-path + claim-checker corrects move_meeting knowledge
+
+Follow-up patch right after v2.6.4 — three fixes triggered by the Yael / Sapir CISO booking incident, all addressing tail of v2.6.4's bug-test wave that didn't make the v2.6.4 cut.
+
+### Fixed — coord state machine no longer stuck when only owner is real participant
+
+The Yael+Sapir scenario (colleague sets up meeting between owner and external; colleague doesn't add herself as attendee) hit a state machine that had nothing to do — `participants` empty after auto-add (only owner), `just_invite` carried Yael + Sapir. Pre-fix, the multi-party state machine sat at `status='collecting'` waiting for responses that would never come. Coord retried 6+ times in 5 min without booking; Maelle's narrations to Yael ("Sapir will receive the invite") were forecasts of action that the broken state machine would never complete. Maelle eventually abdicated to Yael with bot-shaped framing ("I have a technical issue, you do it yourself").
+
+The v2.3.2 internal-only fast-path (`isAllInternalParticipants` gate → `present_slots_to_requester`) was the right shape but too narrow — it failed the moment Sapir (external) was present, even when she was just-invite-only and the only "polling" needed was the owner's calendar.
+
+Generalized the fast-path gate in `src/skills/meetings.ts`. Two cases now bypass the multi-party state machine:
+
+- **Case A (existing v2.3.2)** — every attendee is internal, slots come back annotated per attendee with free/busy.
+- **Case B (new v2.6.5)** — no internal pollable non-owner participant exists. Computed via `hasInternalPollableNonOwner = args.participants.some(p => p.slack_id && email is non-owner internal)`. When false, fast-path fires; slots come back without per-attendee annotations (`attendeeStatus` empty, `allFree=true` since `[].every(...)` returns true).
+
+Either case returns `_internal_fast_path: true` + `action: 'present_slots_to_requester'`. The `_note` field updated to teach Sonnet both sub-cases (with-annotations vs without). Mixed coords with at least one internal pollable non-owner attendee STILL go through the state machine — that path is correct (DM internal attendees for slot picks).
+
+System prompt section (FAST PATH block in meetings.ts) updated to describe both cases with a Sapir-shaped example: *"Idan's free Wednesday at 12:00 or Thursday at 10:00 — which works for Sapir?"* — concise, no apology for missing annotations, just present owner-free slots and ask the requester to pick.
+
+### Changed — humanGate now runs on colleague-facing replies (not just owner-facing)
+
+The Sapir cascade also produced a colleague-facing AI-tell that none of the existing gates caught: *"בעיה טכנית שמונעת ממני לשלוח לספיר את הזימון"* (I have a technical issue preventing me from sending Sapir the invite). securityGate's regex covers explicit AI/bot/Claude/Anthropic leaks but doesn't catch machine-state framing dressed in human syntax. humanGate (introduced in v2.6.4 for owner-path) is the right gate for this — its Sonnet pass judges *"is Maelle attributing infrastructure to herself"* without enumerating phrases.
+
+Two changes:
+
+- **Audience-neutral prompt rewrite** (`src/utils/humanGate.ts`). Dropped *"her boss Idan"* framing. The judgment ("Maelle frames herself as having infrastructure") applies regardless of who's reading. Owner direction (2026-05-10): *"it's ok if Maelle gives up and comes to me. I rather that than nonsense. just don't write it as bot."* Added explicit ESCALATION-IS-FINE section with ❌/✅ examples — *"sorry, you'll need to grab Idan on this directly — I can't move without his sign-off"* is allowed (legit human-voice escalation); *"I have a technical issue preventing me"* gets rewritten.
+- **Wired into colleague-path** in `src/connectors/slack/postReply.ts` Step 4a, after securityGate, before send. Same fail-open contract. Both gates now run on colleague-facing replies — securityGate catches the explicit AI-tell leaks, humanGate catches the broader machine-framing patterns.
+
+### Fixed — claim-checker no longer false-positives on move_meeting time-window narrations
+
+Yael Wednesday morning: Maelle's draft *"Done. Lunch moved to 12:30–12:55"* triggered claim-checker `claim_specifics_mismatch=true`, retry fired, the second draft was clumsier — even though the original was correct. Root cause: claim-checker's per-tool coverage prompt (`src/utils/claimChecker.ts:187`) had **stale knowledge** asserting *"`move_meeting` — changes START TIME ONLY. Duration stays the same."* — but the tool's actual definition at `meetings.ts:464` requires both `new_start` AND `new_end`. move_meeting always sets both; duration is whatever the caller's args produce. Maelle's *"12:30–12:55"* was honest narration; claim-checker's wrong rule made it look like a specifics mismatch.
+
+One-line prompt update. New rule:
+
+```
+- move_meeting — changes START AND END time (caller passes new_start AND
+  new_end as required args). Subject, location, attendees stay the same.
+  Whether the duration changes depends on the caller's args; describing
+  the new time window (e.g. "12:30–12:55") is NOT a specifics mismatch
+  — that's just narrating the move's outcome.
+```
+
+Specifics-mismatch examples list also tightened — removed *"updated to 25 min"* / *"duration changed"* from the would-flag list (those are in scope for move_meeting). Kept the legit examples (renamed, added attendees, moved to different room).
+
+### Not changed
+
+- securityGate stays narrow on explicit AI-tell regex (correct scope per owner direction — abdication / "technical issue" patterns are humanGate's job, not securityGate's).
+- All other v2.6.4 work untouched.
+
+---
+
 ## 2.6.4 — Skills/tools organization pass
 
 Cleanup + reorganization wave. No functionality change — Maelle does exactly what she did before. The motivation: a skills/tools audit surfaced layers of vestigial scaffolding plus a deeper architectural confusion — Slack-specific tools were bundled into "universal" skills, conflating the activity (outreach, meetings) with the transport (Slack). Resolved here:

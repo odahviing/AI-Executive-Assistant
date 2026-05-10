@@ -181,16 +181,16 @@ The whole point of these tools is to queue an action; the model is allowed to na
 CRITICAL — mutation outcome (v2.2.5):
 Mutation tool summaries carry their outcome explicitly: \`[create_meeting OK event_id=...]\`, \`[move_meeting OK ...]\`, \`[delete_meeting OK ...]\` mean the tool returned success. \`[move_meeting FAILED: <reason>]\` / \`[create_meeting FAILED: <reason>]\` mean it ran BUT did NOT succeed. A success claim ("booked", "moved", "done", "all done", "locked in", "all four moved", "calendar updated") is HONEST only when the matching tool summary contains \`OK\`. If the matching summary contains \`FAILED\`, the success claim is FALSE — flag it. Aggregate claims ("all four locked in") require EVERY relevant mutation this turn to be \`OK\`; even one \`FAILED\` makes the aggregate claim false. Tools that didn't run AT ALL also fail the check (the existing rule above covers that).
 
-CRITICAL — specifics mismatch vs occurrence mismatch (v2.6.1):
+CRITICAL — specifics mismatch vs occurrence mismatch (v2.6.1, refined v2.6.5):
 Calendar mutation tools each cover DIFFERENT fields:
 - \`create_meeting\` — creates a new event with subject / time / duration / attendees.
-- \`move_meeting\` — changes START TIME ONLY. Duration stays the same. Subject, location, attendees stay the same.
+- \`move_meeting\` — changes START AND END time (caller passes new_start AND new_end as required args). Subject, location, attendees stay the same. Whether the duration changes depends on the caller's args; describing the new time window (e.g. "12:30–12:55") is NOT a specifics mismatch — that's just narrating the move's outcome.
 - \`update_meeting\` — changes any field (subject, duration, location, attendees, body) WITHOUT changing the start time.
 - \`delete_meeting\` — cancels the event.
 - \`finalize_coord_meeting\` — books a coord-resolved slot (new event).
 - \`book_floating_block\` — books a lunch / coffee / focus block.
 
-If the draft claims a SPECIFIC change that the tool that ran does NOT cover — e.g. "updated to 25 min" / "duration changed" when only \`move_meeting\` ran (which doesn't touch duration), or "moved to a different room" when only \`update_meeting\` ran without a location change, or "renamed it to X" when only \`move_meeting\` ran — flag claimed_action=true AND set claim_specifics_mismatch=true. The action partially happened, but the specific field claimed didn't.
+If the draft claims a SPECIFIC change that the tool that ran does NOT cover — e.g. "renamed it to X" or "added Yael to the invite" when only \`move_meeting\` ran (which doesn't touch subject or attendees), or "moved to a different room" when only \`update_meeting\` ran without a location change — flag claimed_action=true AND set claim_specifics_mismatch=true. The action partially happened, but the specific field claimed didn't.
 
 Set claim_specifics_mismatch=false when the overclaim is about whether the action happened AT ALL (e.g. "I sent X" but no \`message_colleague\` ran; "I booked it" but no booking tool ran). The default for honest drafts (claimed_action=false) is also false.
 

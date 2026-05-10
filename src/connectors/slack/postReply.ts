@@ -248,6 +248,25 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       assistantName: assistant.name,
       ownerFirstName: profile.user.name.split(' ')[0],
     });
+
+    // Step 4a (v2.6.5) — colleague-facing humanness gate. Same Sonnet-pass
+    // gate that runs on owner-path (Step 3a above), now also on colleague-
+    // path. Catches Maelle framing herself as having technical infrastructure
+    // ("I have a technical issue preventing me", "my system can't process this"),
+    // including the abdication shape ("you can send the invite directly")
+    // worded as machine-state. Owner direction (2026-05-10): "it's ok if
+    // Maelle gives up and comes to me — I rather that than nonsense — just
+    // don't write it as bot." Honest escalation in human voice is fine; the
+    // gate's prompt explicitly allows it. Fails open.
+    try {
+      const { runHumanGate } = await import('../../utils/humanGate');
+      const verdict = await runHumanGate(cleanReply, profile);
+      if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
+        cleanReply = formatForSlack(verdict.rewrite);
+      }
+    } catch (err) {
+      logger.warn('humanGate (colleague-path) threw — leaving draft unchanged', { err: String(err).slice(0, 200) });
+    }
   }
 
   // Step 4.5 (v2.6.2) — ack-class emoji replacement. When the cleaned reply
