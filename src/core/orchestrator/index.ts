@@ -550,8 +550,38 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // dynamic prompt so Sonnet sees it before drafting any reply.
   const priorOutboundBlock = input.priorOutboundContext ?? '';
 
+  // v2.6.5 — availability pre-check. Before the main Sonnet loop, detect
+  // specific (date, time) availability questions in the inbound message
+  // and run find_available_slots deterministically for each. Closes the
+  // get_calendar-eyeball-vs-rule-aware mismatch (Yael CISO incident:
+  // first turn said "12:30 free", second turn said "doesn't work" — same
+  // calendar data, different verdicts because different tools were used).
+  // Pinned to the top of dynamic block so Sonnet's first answer matches
+  // what the booking flow will accept later. Fails open: regex doesn't
+  // match → block empty → normal flow.
+  let availabilityPrecheckBlock = '';
+  if (input.senderRole === 'colleague' && userMessage && userMessage.trim().length > 0) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { precheckAvailability } = require('../../utils/availabilityPreCheck') as
+        typeof import('../../utils/availabilityPreCheck');
+      const result = await precheckAvailability({
+        message: userMessage,
+        profile,
+      });
+      if (result.ran && result.promptBlock) {
+        availabilityPrecheckBlock = result.promptBlock;
+      }
+    } catch (err) {
+      logger.warn('availabilityPreCheck threw — proceeding without pre-check', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
   const systemBlocksDynamic = [
     priorOutboundBlock,
+    availabilityPrecheckBlock,
     promptParts.dynamic,
     threadContextBlock,
     actionTapeBlock,
@@ -1126,6 +1156,22 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
 
       // Build compact summary for conversation history persistence
       toolCallSummaries.push(summarizeToolCall(toolUse.name, toolUse.input as Record<string, unknown>, result));
+
+      // v2.6.5 — when an active-mode tool surfaces internal mutations via an
+      // `internal_actions` array on its result, push entries into the summary
+      // so the claim-checker sees them. Without this, Sonnet's draft "I auto-
+      // fixed lunch" was flagged as hallucination because only the top-level
+      // `check_calendar_health` was visible. Generic across tools — any
+      // future skill that does internal mutations and emits the same shape
+      // gets the same coverage.
+      if (result && typeof result === 'object' && Array.isArray((result as { internal_actions?: unknown }).internal_actions)) {
+        const internalActions = (result as { internal_actions: Array<{ tool?: string; detail?: string }> }).internal_actions;
+        for (const a of internalActions) {
+          if (typeof a?.tool === 'string') {
+            toolCallSummaries.push(`[${a.tool} (via ${toolUse.name}): ${a.detail ?? ''}]`);
+          }
+        }
+      }
     }
 
     messages.push({ role: 'user', content: toolResults });
@@ -1334,8 +1380,16 @@ Rules:
         const mapped = distinct.map(n => verbMap[n]).filter((v): v is string => !!v);
         // If every tool maps cleanly, list what happened. Otherwise use a
         // generic human phrase so raw tool names never reach the user.
+        // v2.6.5 — proper Oxford-comma joining for 3+ items. Pre-fix,
+        // mapped.join(' and ') produced "X and Y and Z and W" for 4 items,
+        // which read robotically. Now: 1 item → bare; 2 → "X and Y";
+        // 3+ → "X, Y, Z, and W".
         const verbsText = mapped.length === distinct.length && mapped.length > 0
-          ? mapped.join(' and ')
+          ? (mapped.length === 1
+              ? mapped[0]
+              : mapped.length === 2
+                ? mapped.join(' and ')
+                : mapped.slice(0, -1).join(', ') + ', and ' + mapped[mapped.length - 1])
           : 'handled a few things';
         finalReply = `Done — ${verbsText}. Let me know if anything's off.`;
         logger.warn('Orchestrator: tool work happened but no reply text — posted grounded fallback', {
@@ -1550,9 +1604,35 @@ Rules:
     // reschedule-specific case we'd add an intent gate; for now the pattern is
     // tight enough that the false-positive rate is acceptable.
   ) {
-    const parkingToolPattern = /^\[(coordinate_meeting|message_colleague|create_approval|outreach_send)/;
-    const hadParkingCall = toolCallSummaries.some(s => parkingToolPattern.test(s));
-    if (hadParkingCall) {
+    // v2.6.5 — coda eligibility moved from a single tool-name regex to
+    // state-aware boolean signals. The intent is: fire codas in QUIET
+    // moments — task parked (waiting on someone else) OR task settled
+    // (approval just resolved). The regex form lumped all the parking-shape
+    // tools into one match which made it hard to extend; the boolean form
+    // names each state Maelle is actually in after the turn.
+    //
+    // Existing gates still apply: conversation_state classifier suppresses
+    // 'closing'; 24h cadence still rate-limits; coda validator drops
+    // invented facts. These flags just open the door to MORE quiet moments
+    // (resolve_approval is the new addition — confirmation of a booking is
+    // a settled moment, was previously excluded).
+    //
+    // Phase 2 (later, when the v2.6.5 task-completion hook is fully wired):
+    // swap the tool-name detection for "task transitioned to completed
+    // this turn" — strictly better signal. For now, derive intent from the
+    // tool summary names produced this turn.
+    const turnCreatedOutboundToColleague = toolCallSummaries.some(s =>
+      s.startsWith('[message_colleague') || s.startsWith('[outreach_send'),
+    );
+    const turnRaisedApproval = toolCallSummaries.some(s => s.startsWith('[create_approval'));
+    const turnResolvedApproval = toolCallSummaries.some(s => s.startsWith('[resolve_approval'));
+    const turnStartedCoord = toolCallSummaries.some(s => s.startsWith('[coordinate_meeting'));
+    const codaEligible =
+      turnCreatedOutboundToColleague ||
+      turnRaisedApproval ||
+      turnResolvedApproval ||
+      turnStartedCoord;
+    if (codaEligible) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { directiveForProactiveSlot } = require('../social/stateMachine') as typeof import('../social/stateMachine');

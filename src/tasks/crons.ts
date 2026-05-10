@@ -523,6 +523,8 @@ SCHEDULE RULES:
 - Before creating a routine, ALWAYS call get_routines first to check for duplicates. If a similar one exists, update it instead.
 - Add \`notify_on_skip: true\` to flag a routine as important — I'll DM you if a firing is skipped.
 
+META QUESTIONS — when the owner asks ABOUT a routine ("when does the calendar check run?", "what time is my morning brief?", "how often does X fire?"), use \`get_routines\` to look up the schedule and answer from there. DO NOT call the routine's underlying tool (\`check_calendar_health\`, \`send_briefing_now\`, etc.) just to "see what it would say" — that runs the actual side-effects (auto-fixes, brief sent) and answers the wrong question. The owner asked about the schedule, not for output.
+
 When creating a routine, write the prompt as a complete, self-contained instruction.
 
 Schedules: daily | weekdays (${workDaysStr}) | weekly (specify day) | monthly (specify day-of-month)

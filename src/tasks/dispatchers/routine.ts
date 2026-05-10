@@ -94,9 +94,12 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       ).run(routine.id);
     } catch (err) {
       logger.error('System briefing from routine task failed', { err, routineId: routine.id });
+      // v2.6.5 — same error-detail capture as the user-routine branch below.
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const lastResult = `Failed: ${errMsg.slice(0, 200).replace(/\s+/g, ' ').trim()}`;
       getDb().prepare(
-        `UPDATE routines SET last_result = 'Failed', updated_at = datetime('now') WHERE id = ?`
-      ).run(routine.id);
+        `UPDATE routines SET last_result = ?, updated_at = datetime('now') WHERE id = ?`
+      ).run(lastResult, routine.id);
       updateTask(task.id, { status: 'failed' });
       return;
     }
@@ -159,9 +162,16 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     if (!isSilent) markTaskInformed(task.id);
   } catch (err) {
     logger.error('Routine orchestrator run failed', { err, routineId: routine.id });
+    // v2.6.5 — capture the actual error message in last_result instead of the
+    // bare string 'Failed'. Pre-fix, when the owner asked "what went wrong
+    // with the routine?", Maelle could only say "the last result shows
+    // 'Failed'" — no diagnostic detail. Now last_result carries up to 200
+    // chars of the error so she has something concrete to share.
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const lastResult = `Failed: ${errMsg.slice(0, 200).replace(/\s+/g, ' ').trim()}`;
     getDb().prepare(
-      `UPDATE routines SET last_result = 'Failed', updated_at = datetime('now') WHERE id = ?`
-    ).run(routine.id);
+      `UPDATE routines SET last_result = ?, updated_at = datetime('now') WHERE id = ?`
+    ).run(lastResult, routine.id);
     updateTask(task.id, { status: 'failed' });
   }
 };

@@ -1,5 +1,5 @@
 /**
- * Deterministic owner-says-done scanner (v2.4.2).
+ * Owner-says-done scanner — LLM-only.
  *
  * Background: RULE 2d ("Close the loop when the owner handles something
  * himself") asks Sonnet to call cancel_task / cancel_coordination /
@@ -11,17 +11,26 @@
  * for an item the owner closed weeks ago.
  *
  * This helper runs as a fire-and-forget post-turn pass after every owner
- * orchestrator turn. It does a cheap keyword pre-filter on the owner's
- * message; if any closure-signal word appears AND there are open items, it
- * runs a single LLM pass against (owner_message, open_items) to identify
- * which items the owner just said are done. Each match is then closed via
- * the existing helpers (updateTask cancelled / cancelCoordJob /
- * updateOutreachJob done). Idempotent: an already-closed item won't match
- * the active-status filter on next pass.
+ * orchestrator turn. When open tracked items exist, it runs a single LLM
+ * pass against (owner_message, open_items) to identify which items the
+ * owner just said are done. Each match is closed via the existing helpers
+ * (updateTask cancelled / cancelCoordJob / updateOutreachJob done).
+ * Idempotent: an already-closed item won't match the active-status filter
+ * on next pass.
  *
- * Cost: one Sonnet call per owner turn that passes the keyword pre-filter.
- * Most turns won't (no closure words). Estimated ~30% of owner turns trigger
- * the LLM, ~300 tokens each → ~$0.001/turn average.
+ * v2.6.5 — keyword pre-filter REMOVED. Pre-fix, a list of CLOSURE_KEYWORDS
+ * gated the LLM call; misses on declination phrasings ("I'm not going to
+ * do it", "passing", "won't do") left items stuck open across all subsequent
+ * turns. Owner direction: *"I hate the entire closing words. it's not
+ * scalable. we have LLM to read answer and get reasoning... kill the entire
+ * closure keywords."* The existing Sonnet pass below is conservative by
+ * design (returns EMPTY when in doubt; ignores acks, questions, future-tense
+ * plans) — it handles every owner turn correctly without a regex pre-filter.
+ *
+ * Cost: one Sonnet call per owner turn that has open items. ~$0.001 each.
+ * Cheap enough to run on every owner turn; saves the keyword-list
+ * maintenance burden and the language-coverage problem (Hebrew, French,
+ * slang, etc. all handled by the LLM).
  *
  * Cascade order matches closeMeetingArtifacts: tasks first (broadest), then
  * coord_jobs, then outreach_jobs. Same idempotent + non-fatal contract.
@@ -32,25 +41,6 @@ import type { UserProfile } from '../config/userProfile';
 import { getDb, updateOutreachJob } from '../db';
 import { updateTask, type Task } from '../tasks';
 import logger from './logger';
-
-// Closure-signal words. Cheap regex check before any LLM cost. English first;
-// Hebrew added because the owner switches mid-conversation. Owner direction:
-// "if it sounds like he closed it, close it." Generous match — false positives
-// get filtered by the LLM pass below; false negatives leave the item open.
-const CLOSURE_KEYWORDS = [
-  // English action verbs
-  'done', 'drop', 'cancel', 'handled', 'kill', 'killed', 'closed', 'close it',
-  'mark it', 'mark as', 'never mind', 'no need', 'dismissed', 'dismiss',
-  'solved', 'sorted', 'taken care', 'forget about', 'skip it',
-  'already done', 'not needed', 'no longer', "i'll handle", 'ill handle',
-  // Hebrew
-  'בוטל', 'סגור', 'סגרתי', 'סודר', 'טיפלתי', 'נפתר', 'בוצע', 'הסתדר', 'אני אטפל',
-];
-
-const CLOSURE_KEYWORD_REGEX = new RegExp(
-  CLOSURE_KEYWORDS.map(kw => kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
-  'i',
-);
 
 interface OpenItem {
   id: string;            // task id, coord id, or outreach id
@@ -92,10 +82,10 @@ export async function closeLoopOnOwnerHandled(params: {
   const result: ScannerResult = { scanned: false, closedItems: [] };
   if (!params.ownerMessage || params.ownerMessage.length < 3) return result;
 
-  // Cheap keyword pre-filter — most owner turns don't contain closure signals,
-  // and the LLM call is wasted on pure conversation / scheduling / questions.
-  if (!CLOSURE_KEYWORD_REGEX.test(params.ownerMessage)) return result;
-
+  // v2.6.5 — keyword pre-filter REMOVED (see file header). The LLM pass
+  // below is the gate. Cheap enough to run on every owner turn that has
+  // open items; the conservative SYSTEM_PROMPT keeps false positives near
+  // zero. Open-items check stays as the cost-bound (no items → no LLM call).
   const openItems = collectOpenItems(params.profile.user.slack_user_id);
   if (openItems.length === 0) return result;
   result.scanned = true;

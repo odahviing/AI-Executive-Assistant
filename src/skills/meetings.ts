@@ -6,7 +6,6 @@ import {
   getActiveCoordJobs,
   getDb,
   auditLog,
-  upsertPersonMemory,
   searchPeopleMemory,
   getPersonMemory,
   getDismissedIssueKeys,
@@ -14,7 +13,6 @@ import {
   dismissCalendarIssue,
   type CoordParticipant,
 } from '../db';
-import { detectAndSaveGender } from '../utils/genderDetect';
 import {
   findAvailableSlots,
   pickSpreadSlots,
@@ -61,36 +59,9 @@ export class MeetingsSkill implements Skill {
     const categoryNames = (profile.categories ?? []).map(c => c.name);
     const categoryEnum = categoryNames.length > 0 ? categoryNames : undefined;
     return [
-      {
-        name: 'find_slack_user',
-        description: `Resolve a person to their Slack ID — used for sending Slack DMs.
-
-CRITICAL — when to call this:
-- You need to send a Slack DM (message_colleague, coord polling, heads-up).
-- You don't already know their Slack ID from @mention or WORKSPACE CONTACTS.
-
-DO NOT call this for booking meetings. Booking uses EMAIL, period.
-- create_meeting and coordinate_meeting take attendees as { name, email }. No Slack ID required for any attendee.
-- An external attendee (email outside the company domain) will NEVER have a Slack ID. That's normal. Outlook delivers calendar invites via email regardless.
-- An internal attendee may not have a Slack ID either (guests, deactivated, fresh hires) — still book via email; the heads-up Slack DM step skips silently.
-
-The result shape:
-- { matches: [...] } — person(s) found, slack_id usable for DMs.
-- { matches: [], external: true, email, message: ... } — query was an external email; proceed with that email for booking, no Slack DM possible.
-- { matches: [] } — name didn't match anyone in the workspace; try a different spelling, or if the user gave you an email, just book directly without this tool.
-
-If you already have an email for the person, you don't need this tool to book a meeting with them. Just call create_meeting or coordinate_meeting with the email.`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            name: {
-              type: 'string',
-              description: 'The person\'s name, partial name, OR email address. When passed an email outside the owner\'s company domain, the tool returns { external: true } so you know to skip Slack and proceed directly with create_meeting / coordinate_meeting.',
-            },
-          },
-          required: ['name'],
-        },
-      },
+      // v2.6.4 — find_slack_user moved to SlackConnection.getTools(). It's a
+      // transport directory lookup with people_memory side effects, not a
+      // meetings concern. Auto-registered when SlackConnection is registered.
       {
         name: 'coordinate_meeting',
         description: `Set up a NEW meeting from scratch. Finds slots, then either presents annotated options to the REQUESTER (internal-only fast path) or DMs each participant for a vote (external/mixed coord state machine). Books once a slot is confirmed.
@@ -183,9 +154,33 @@ Override with custom_location if a specific external venue is needed.`,
               type: 'boolean',
               description: 'Set to true if the colleague explicitly says "urgent" or needs a time before all offered options. Allows relaxed buffer rules with owner approval.',
             },
+            requester: {
+              type: 'object',
+              description: `WHO IS ASKING — the person making this coord request.
+
+PLACEMENT MATTERS — same person can land in three different ways, you choose:
+
+1. Setting up a meeting they're attending themselves ("Maya and I want a 25-min slot with Idan") → put them in BOTH \`requester\` AND \`participants\`. They get DM-polled like any other attendee.
+
+2. Setting up a meeting between OTHERS, NOT joining themselves (HR booking an interview between owner + candidate; EA scheduling on behalf of someone else; "set this up between X and Y") → put them in \`requester\` ONLY. Don't add to participants or just_invite. Their availability is NOT factored in; they don't get a DM poll; they don't appear on the calendar invite. Maelle still treats them as the contact for the coord (replies to their thread, etc.).
+
+3. Setting up for someone else but want a calendar copy themselves ("can you set up a meeting between Idan and Mark? Add me to the invite") → put them in \`requester\` AND \`just_invite\`. They get the calendar event but no DM poll.
+
+AUTO-FILL: on colleague-path (a colleague is the one DMing Maelle), the handler auto-fills this field from context if you omit. You can pass it explicitly for clarity, especially case 1 (also-attending) where the participants list might miss the slack_id.
+
+OWNER-PATH: when the owner asks you to coord, the owner is the requester — fill with owner's details (name, email).
+
+Replaces the older \`requester_is_attending\` boolean. Both still work for back-compat; \`requester\` placement is preferred.`,
+              properties: {
+                name: { type: 'string' },
+                email: { type: 'string', description: 'REQUIRED. Used to match against the participants/just_invite lists.' },
+                slack_id: { type: 'string', description: 'OPTIONAL. Filled from context on colleague-path. Required only if you want them DM-polled (case 1 above).' },
+              },
+              required: ['name', 'email'],
+            },
             requester_is_attending: {
               type: 'boolean',
-              description: 'Default true. Set FALSE when the colleague talking to you is the SCHEDULER, not an attendee — e.g. an HR/EA-style coordinator booking an interview between the owner and a candidate, or anyone arranging a meeting they themselves are not joining. When false, the requester is NOT added to participants, their availability is NOT factored in, and they go to just_invite if they want a calendar copy. The cue: "I want to set up a meeting between X and Y", "I\'m scheduling on behalf of...", or any clear signal that the requester is not in the room.',
+              description: 'DEPRECATED — use the `requester` field placement instead. Kept for back-compat: when set FALSE, drops the requester from participants AND just_invite (same as omitting them from both in the new model). The new `requester` field handles this naturally — leaving the requester OUT of participants and just_invite indicates they\'re not attending.',
             },
             category: {
               type: 'string',
@@ -395,15 +390,18 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
         name: 'create_meeting',
         description: `Create a new calendar event directly (no coord needed — use this when the owner already knows the time + attendees). Call coordinate_meeting instead when participants need to agree on a time. Follow the location / category / work-day rules in the prompt section.
 
-ONLINE vs IN-PERSON for EXTERNAL attendees (v2.3.2 / v2.3.6): when at least one attendee has an email outside ${profile.user.email.split('@')[1]}, you must determine the meeting mode before booking. CHECK these signals — IF ANY MATCH, do NOT ask, just decide:
-- Their people_memory entry shows a different timezone than the owner — they're remote → is_online=true (the WORKSPACE CONTACTS block in your context shows each person's tz; if it differs from ${profile.user.timezone}, they're remote)
-- The conversation explicitly mentions a TZ or remote location ("3pm ET", "from Boston", "we'll do it on Zoom") → is_online=true
-- The conversation explicitly mentions in-person ("at our office", "in person", "they'll come over") → is_online=false
-- ONLY if none of the above signals match → ASK whoever you're talking to right now. Owner-path → ask owner. Colleague-path (external in your DM) → ask the external. Don't reach across to bother the other party.
+ONLINE vs IN-PERSON for EXTERNAL attendees (v2.6.5): the handler enforces "must be remote" cases AUTOMATICALLY — you don't have to get this right yourself, and you can't downgrade it:
+- External attendee + ${profile.user.name.split(' ')[0]}'s home day → ALWAYS booked online (Teams). The handler overrides any \`is_online: false\` you might pass.
+- Any participant currently traveling → ALWAYS booked online.
 
-Asking when a clear remote signal exists is a friction bug — the data is there, use it. Owner has already told you "Boston" / "EST" / TZ once; reading it from people_memory next turn is your job, not his to repeat.
+For the cases where the handler doesn't force online, the rule for what to PASS:
+- Conversation explicitly says online ("Zoom", "Teams", "video", "remote") → \`is_online: true\`
+- Conversation explicitly says in-person ("at our office", "in person", "they'll come over") → \`is_online: false\` (+ \`location\` if a specific venue)
+- Conversation didn't say either way → on owner-path with EXTERNAL attendee, ASK ${profile.user.name.split(' ')[0]} once: "online or in person?" Don't assume in-person — by default in-person should ONLY be used when someone said it. (Internal-only meetings can default to the day-aware behavior without asking.)
 
-Once mode is settled: online → is_online=true, location optional. Physical at owner's office → is_online=false, leave location blank (the system fills in office address from yaml). Physical elsewhere → is_online=false, location=that venue.
+DON'T ASK WHEN A CLEAR SIGNAL ALREADY EXISTS (people_memory shows different TZ, prior conversation mentioned video, etc.) — reading the data is your job, not the owner's to repeat.
+
+Once mode is settled: online → \`is_online: true\`, location optional. Physical at owner's office → \`is_online: false\`, leave location blank (handler fills office address from yaml). Physical elsewhere → \`is_online: false\`, location=venue.
 
 Colleague-path (v2.3.2): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book the 1:1. The handler enforces server-side: single colleague-attendee (the requester themselves — multi-party still goes through coordinate_meeting), rule-compliant slot (work hours, work days, buffers, floating blocks, no conflicts via findAvailableSlots), then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
 
@@ -504,127 +502,9 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
 
     switch (toolName) {
 
-      case 'find_slack_user': {
-        // Execute directly using the app client from context
-        if (!context.app) return { error: 'App not available' };
-        try {
-          const token = profile.assistant.slack.bot_token;
-          const query = (args.name as string).toLowerCase();
-          // Store full raw member alongside match so we can read pronouns/image later
-          const matches: Array<{ slack_id: string; name: string; timezone: string; email?: string; _raw: any }> = [];
-          let cursor: string | undefined;
-
-          // Paginate through all workspace members — avoids missing people in large workspaces
-          do {
-            const result = await context.app.client.users.list({
-              token,
-              limit: 200,
-              ...(cursor ? { cursor } : {}),
-            });
-            const members = (result.members as any[]) ?? [];
-
-            for (const m of members) {
-              if (
-                !m.deleted && !m.is_bot &&
-                (m.real_name?.toLowerCase().includes(query) ||
-                 m.name?.toLowerCase().includes(query) ||
-                 m.profile?.display_name?.toLowerCase().includes(query))
-              ) {
-                matches.push({
-                  slack_id: m.id,
-                  name:     m.real_name || m.profile?.display_name || m.name,
-                  timezone: m.tz || 'UTC',
-                  email:    m.profile?.email,
-                  _raw:     m,
-                });
-              }
-            }
-
-            cursor = (result.response_metadata as any)?.next_cursor || undefined;
-          } while (cursor && matches.length < 20);  // stop once we have 20 matches or exhausted
-
-          // Persist all matches into people_memory and kick off gender detection
-          const botToken = profile.assistant.slack.bot_token;
-          for (const match of matches) {
-            upsertPersonMemory({
-              slackId:  match.slack_id,
-              name:     match.name,
-              email:    match.email,
-              timezone: match.timezone,
-            });
-            detectAndSaveGender({
-              slackId:  match.slack_id,
-              name:     match.name,
-              pronouns: match._raw?.profile?.pronouns || undefined,
-              imageUrl: match._raw?.profile?.image_192 || match._raw?.profile?.image_72 || undefined,
-              botToken,
-            }).catch(() => {});
-          }
-
-          // Fallback for guest users: users.list() may not return single/multi-channel guests.
-          // If no matches found, check people_memory for a known slack_id and validate via users.info().
-          if (matches.length === 0) {
-            const memoryMatches = searchPeopleMemory(args.name as string);
-            for (const pm of memoryMatches) {
-              if (!pm.slack_id || !/^U[A-Z0-9]{7,11}$/.test(pm.slack_id)) continue;
-              try {
-                const info = await context.app.client.users.info({ token, user: pm.slack_id });
-                const u = info.user as any;
-                if (u && !u.deleted) {
-                  matches.push({
-                    slack_id: u.id,
-                    name: u.real_name || u.profile?.display_name || u.name,
-                    timezone: u.tz || 'UTC',
-                    email: u.profile?.email,
-                    _raw: u,
-                  });
-                  // Persist updated info
-                  upsertPersonMemory({
-                    slackId: u.id,
-                    name: u.real_name || u.profile?.display_name || u.name,
-                    email: u.profile?.email,
-                    timezone: u.tz || 'UTC',
-                  });
-                  logger.info('Found guest user via users.info fallback', { slackId: u.id, name: u.real_name });
-                }
-              } catch {
-                // users.info failed — ID might be invalid, skip
-              }
-            }
-          }
-
-          const cleanMatches = matches.map(({ _raw: _, ...m }) => m);
-
-          // v2.4.3 (C1) — explicit external-email signal. When a query was an
-          // email AND no Slack match found AND the email is outside the owner's
-          // company domain, return external:true so Sonnet doesn't read the
-          // empty result as "blocked, can't book". External attendees never
-          // need Slack — Outlook delivers the calendar invite directly.
-          // Pre-v2.4.3 Sonnet was sometimes asking colleagues to "forward
-          // the invite or share the email" even when she already had the
-          // email and the person was external — pure mental-model bug
-          // because find_slack_user returned a bare empty list.
-          const queryRaw = (args.name as string).trim();
-          const isEmail = /@/.test(queryRaw);
-          const ownerEmail = (profile.user.email ?? '').toLowerCase();
-          const ownerDomain = ownerEmail.includes('@') ? ownerEmail.split('@')[1] : '';
-          const isExternalEmail = isEmail && ownerDomain &&
-            !queryRaw.toLowerCase().endsWith('@' + ownerDomain);
-          if (cleanMatches.length === 0 && isExternalEmail) {
-            return {
-              matches: [],
-              count: 0,
-              external: true,
-              email: queryRaw.toLowerCase(),
-              message: `${queryRaw} is an external email (outside ${ownerDomain}) — they don't need a Slack ID. Proceed with create_meeting / coordinate_meeting using the email; Outlook will deliver the calendar invite. Don't ask anyone to "forward the invite" — that's automatic.`,
-            };
-          }
-
-          return { matches: cleanMatches, count: cleanMatches.length };
-        } catch (err) {
-          return { error: String(err) };
-        }
-      }
+      // v2.6.4 — find_slack_user case removed. The tool now lives on
+      // SlackConnection (src/connections/slack/index.ts). Sonnet still calls
+      // it the same way; the registry routes it to the Connection automatically.
 
       case 'coordinate_meeting': {
         const { email: userEmail, timezone, slack_user_id: ownerUserId, name: ownerName } = profile.user;
@@ -774,33 +654,87 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
           }
         }
 
-        // ── Third-party-scheduler signal (v2.3.5) ──────────────────────────────
-        // When the colleague tells Sonnet "I'm coordinating a meeting between X
-        // and Y, I'm not joining" (HR booking interviews, EA scheduling on
-        // behalf of someone else), Sonnet sets requester_is_attending=false.
-        // Defense-in-depth: drop the requester from `participants` AND
-        // `just_invite` if they slipped in — their availability must NOT be
-        // factored in, and they shouldn't show up on the invite by default.
-        // Sonnet can re-add them to just_invite explicitly if they want a
-        // calendar copy.
-        if (
+        // ── Requester field — explicit "who's asking" (v2.6.5) ──────────────────
+        // Replaces the older `requester_is_attending` boolean with explicit
+        // placement. The `requester` object captures who initiated the coord;
+        // Sonnet decides whether they ALSO appear in participants (attending +
+        // DM-polled), in just_invite (calendar-only FYI), or neither (third-
+        // party scheduler — HR booking interview, EA on behalf, etc.).
+        //
+        // Auto-fill on colleague-path: when Sonnet omits the field (or omits
+        // slack_id), fill from context.userId + people_memory. This closes the
+        // gap that demoted Yael to just_invite when she SHOULD have stayed as
+        // a participant — Sonnet didn't pass her slack_id, the auto-demote
+        // logic moved her, the coord became all-just-invite with no DM polling.
+        const requesterRow = context.senderRole === 'colleague' && context.userId
+          ? await (async () => { try { return await getPersonMemory(context.userId); } catch { return null; } })()
+          : null;
+        if (context.senderRole === 'colleague') {
+          const sonnetRequester = (args as any).requester ?? {};
+          (args as any).requester = {
+            name: sonnetRequester.name ?? requesterRow?.name ?? 'colleague',
+            email: sonnetRequester.email ?? requesterRow?.email ?? '',
+            slack_id: sonnetRequester.slack_id ?? context.userId,
+          };
+        }
+        const explicitRequester = (args as any).requester as { name?: string; email?: string; slack_id?: string } | undefined;
+        const requesterEmail = (explicitRequester?.email ?? '').toLowerCase();
+        const requesterSlackId = explicitRequester?.slack_id;
+
+        // Auto-fill slack_id on a participant matching the requester (by
+        // email). Without this, Sonnet passing Yael in participants without
+        // slack_id triggers the auto-demote-to-just_invite path below — which
+        // breaks the entire coord (no real participants → no DM polling).
+        if (requesterEmail && requesterSlackId && Array.isArray(args.participants)) {
+          args.participants = (args.participants as any[]).map((p: any) => {
+            if (
+              p && (p.email ?? '').toLowerCase() === requesterEmail && !p.slack_id
+            ) {
+              return {
+                ...p,
+                slack_id: requesterSlackId,
+                tz: p.tz ?? requesterRow?.timezone,
+              };
+            }
+            return p;
+          });
+        }
+
+        // Third-party scheduler detection — derived from where the requester
+        // appears (NEW MODEL). When the requester is in NEITHER participants
+        // NOR just_invite, Sonnet meant "I'm setting this up between others;
+        // I'm not joining." Old `requester_is_attending: false` still works
+        // for back-compat — treated as the same signal.
+        const requesterInParticipants = requesterEmail
+          ? (args.participants as any[] ?? []).some((p: any) => (p.email ?? '').toLowerCase() === requesterEmail)
+          : false;
+        const requesterInJustInvite = requesterEmail
+          ? (args.just_invite as any[] ?? []).some((p: any) => (p.email ?? '').toLowerCase() === requesterEmail)
+          : false;
+        const isThirdPartyScheduler =
           context.senderRole === 'colleague' &&
-          args.requester_is_attending === false &&
-          context.userId
-        ) {
+          requesterEmail &&
+          (
+            args.requester_is_attending === false ||
+            (!requesterInParticipants && !requesterInJustInvite)
+          );
+
+        if (isThirdPartyScheduler && context.userId) {
+          // Defense-in-depth: drop the requester from both lists if Sonnet
+          // wrongly added them. Their availability must NOT be factored in;
+          // they're the SCHEDULER, not an attendee.
           const requesterId = context.userId;
           const beforePartCount = ((args.participants as any[] | undefined) ?? []).length;
           const beforeInviteCount = ((args.just_invite as any[] | undefined) ?? []).length;
           args.participants = ((args.participants as any[] | undefined) ?? [])
-            .filter((p: any) => p.slack_id !== requesterId);
+            .filter((p: any) => p.slack_id !== requesterId && (p.email ?? '').toLowerCase() !== requesterEmail);
           args.just_invite = ((args.just_invite as any[] | undefined) ?? [])
-            .filter((p: any) => p.slack_id !== requesterId);
+            .filter((p: any) => p.slack_id !== requesterId && (p.email ?? '').toLowerCase() !== requesterEmail);
           const afterPartCount = (args.participants as any[]).length;
           const afterInviteCount = (args.just_invite as any[]).length;
           if (beforePartCount !== afterPartCount || beforeInviteCount !== afterInviteCount) {
             logger.info('Third-party-scheduler — requester removed from attendees', {
               requesterId,
-              senderName: context.senderRole,
               participantsRemoved: beforePartCount - afterPartCount,
               justInviteRemoved: beforeInviteCount - afterInviteCount,
               subject: args.subject,

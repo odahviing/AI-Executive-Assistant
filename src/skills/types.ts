@@ -53,14 +53,10 @@ export type CoreModuleId = 'assistant' | 'outreach' | 'tasks' | 'routines';
  *  profile YAMLs are auto-migrated in registry.getActiveSkills. */
 export type SkillId =
   | 'meetings'
-  | 'email_drafting'
   | 'summary'             // v1.7.6 (renamed from meeting_summaries)
   | 'knowledge'           // v1.7.6 (renamed from knowledge_base)
   | 'calendar'            // v1.7.6 (renamed from calendar_health)
-  | 'proactive_alerts'
-  | 'whatsapp'
   | 'search'
-  | 'research'
   | 'social'              // v2.6.2 (renamed from persona) — social engine, codas, proactive outreach
   // legacy aliases — auto-migrated at load time, kept so old YAMLs still boot
   | 'scheduling'          // → meetings

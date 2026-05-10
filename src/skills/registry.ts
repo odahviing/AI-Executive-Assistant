@@ -6,6 +6,7 @@ import { AssistantSkill } from '../core/assistant';
 import { OutreachCoreSkill } from './outreach';
 import { TasksSkill } from '../tasks/skill';
 import { CronsSkill } from '../tasks/crons';
+import { listConnections, getConnection } from '../connections/registry';
 
 // Core modules — always active, not toggled in user profile.
 // v1.6.0: MeetingsSkill (née CoordinationSkill) is now togglable.
@@ -49,13 +50,6 @@ function buildSkillMap(): Map<SkillId, Skill> {
       loader: () => {
         const { SearchSkill } = require('./general');
         return new SearchSkill();
-      },
-    },
-    {
-      id: 'research',
-      loader: () => {
-        const { ResearchSkill } = require('./research');
-        return new ResearchSkill();
       },
     },
     {
@@ -235,8 +229,24 @@ export function getSkillTools(profile: UserProfile, senderRole: 'owner' | 'colle
     }
   });
 
+  // v2.6.4 — Connection-bound tools (e.g. Slack's find_slack_channel) live
+  // on the Connection itself, not as a separate skill. Merge them in here so
+  // Sonnet sees one unified tool list. Same dedupe + colleague filter applies.
+  const profileId = profile.user.slack_user_id;
+  const connectionTools: Anthropic.Tool[] = [];
+  for (const connId of listConnections(profileId)) {
+    const conn = getConnection(profileId, connId);
+    if (conn?.getTools) {
+      try {
+        connectionTools.push(...conn.getTools(profile));
+      } catch (err) {
+        logger.warn(`Connection "${connId}" getTools() failed`, { err: String(err) });
+      }
+    }
+  }
+
   // Deduplicate by tool name
-  const allTools = [...assistantTools, ...skillTools];
+  const allTools = [...assistantTools, ...skillTools, ...connectionTools];
   const seen = new Set<string>();
   const deduped = allTools.filter(t => {
     if (seen.has(t.name)) return false;
@@ -287,6 +297,24 @@ export async function executeSkillTool(
     } catch (err) {
       logger.error(`Skill "${skill.name}" threw during tool "${toolName}"`, { err: String(err) });
       return { error: `Tool "${toolName}" failed: ${String(err)}` };
+    }
+  }
+
+  // v2.6.4 — fall through to registered Connections (find_slack_channel etc.).
+  const profileId = context.profile.user.slack_user_id;
+  for (const connId of listConnections(profileId)) {
+    const conn = getConnection(profileId, connId);
+    if (conn?.executeToolCall) {
+      try {
+        const result = await conn.executeToolCall(toolName, args);
+        if (result !== null) {
+          logger.info('Tool executed', { tool: toolName, connection: connId });
+          return result;
+        }
+      } catch (err) {
+        logger.error(`Connection "${connId}" threw during tool "${toolName}"`, { err: String(err) });
+        return { error: `Tool "${toolName}" failed: ${String(err)}` };
+      }
     }
   }
 

@@ -301,16 +301,26 @@ const UserProfileSchema = z.object({
     // about the meeting category ("this requires travel"), not the buffer
     // length itself — that lives in profile.meetings.travel_buffer_minutes.
     requires_travel_buffer: z.boolean().optional(),
+    // v2.6.5 — when true, colleague-path create_meeting checks the owner's
+    // calendar for an existing same-attendee occurrence in the same week
+    // BEFORE creating a new event. If found, the handler refuses with
+    // existing_event_id + a message telling Sonnet to call move_meeting on
+    // the existing one instead. Prevents duplicate-occurrence pattern (e.g.
+    // colleague says "reinstate the BiWeekly" → Maelle creates a new one
+    // while the original-day occurrence still sits on the calendar).
+    // Owner curates which categories this applies to. Typical: Weekly,
+    // Cadence — categories where the meeting series exists already.
+    is_recurring: z.boolean().optional(),
   })).optional(),
 
   vip_contacts: z.array(VipContactSchema).default([]),
 
   behavior: z.object({
-    rescheduling_style: z.enum(['conservative', 'balanced', 'proactive']),
-    adaptive_learning: z.boolean(),
-    escalate_after_days: z.number().min(0).max(14),
-    can_contact_others_via_slack: z.boolean(),
-    autonomous_meeting_creation: z.boolean(),
+    // v2.6.3 — five vestigial fields removed: rescheduling_style,
+    // adaptive_learning, escalate_after_days, can_contact_others_via_slack,
+    // autonomous_meeting_creation. They were declared in the schema since
+    // v1 but never read anywhere in src/. Old yamls with these fields still
+    // boot — Zod strips unknown keys silently.
     // v1 safety net: post a shadow receipt in the owner's thread for every
     // autonomous action (DMs sent, meetings booked, etc.) even if no approval needed.
     // Lets the owner catch bugs in real time. Set to false once v1 is stable.
@@ -357,14 +367,17 @@ const UserProfileSchema = z.object({
     // can DO (search, summary, knowledge). Legacy multi-word keys still parse
     // and auto-migrate at runtime in skills/registry.ts.
     meetings: z.boolean().default(true),
-    email_drafting: z.boolean().default(false),
     summary: z.boolean().default(false),         // was meeting_summaries
     knowledge: z.boolean().default(false),       // was knowledge_base
     calendar: z.boolean().default(true),         // was calendar_health
-    proactive_alerts: z.boolean().default(false),
-    whatsapp: z.boolean().default(false),
     search: z.boolean().default(true),
-    research: z.boolean().default(false),
+    // v2.6.3 — three vestigial toggles removed: email_drafting, proactive_alerts,
+    // whatsapp. None had a matching skill in registry.ts; setting them to true
+    // produced a one-time debug warn and otherwise no-op'd. Old yamls with
+    // these fields still boot — Zod strips unknown keys silently.
+    // v2.6.4 — research skill removed (placeholder that returned no tools).
+    // Stronger search skill covers the same ground; old yamls with
+    // `research: true|false` still boot — Zod strips it.
     // v2.6.2 (renamed from `persona` v2.2.3) — social engine. Master on/off
     // for everything social Maelle does: engage replies, codas (task-tail
     // warm lines), proactive cold-pings via the hourly outreach tick, topic

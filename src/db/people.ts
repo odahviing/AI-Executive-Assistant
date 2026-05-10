@@ -604,8 +604,19 @@ export function formatPeopleMemoryForPrompt(
       : '';
     const socialPart = includeSocial ? `, ${socialLine}${topicStr ? `, topics: ${topicStr}` : ''}` : '';
 
+    // v2.6.5 — when state is missing but timezone is set, mark the tz line
+    // explicitly so Sonnet doesn't infer a city from the IANA string.
+    // Pre-fix, `tz: Australia/Brisbane` (with no state) led Sonnet to write
+    // "you're in Brisbane" — but Brisbane is just the IANA tz tag; the
+    // person could be anywhere in AEST. Adding "(timezone only, city
+    // unknown)" inline in the prompt data keeps the constraint visible
+    // without needing a separate prompt rule.
+    const tzPart = p.timezone
+      ? `, tz: ${p.timezone}${!p.state ? ' (timezone only, city unknown)' : ''}`
+      : '';
+
     const parts: string[] = [
-      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${travelTag}${p.timezone ? `, tz: ${p.timezone}` : ''}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}${socialPart})`,
+      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${travelTag}${tzPart}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}${socialPart})`,
     ];
 
     // Profile dimensions moved to per-person markdown files (v2.2.1). Fields

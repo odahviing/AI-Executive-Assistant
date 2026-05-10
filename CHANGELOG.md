@@ -2,6 +2,270 @@
 
 ---
 
+## 2.6.4 — Skills/tools organization pass
+
+Cleanup + reorganization wave. No functionality change — Maelle does exactly what she did before. The motivation: a skills/tools audit surfaced layers of vestigial scaffolding plus a deeper architectural confusion — Slack-specific tools were bundled into "universal" skills, conflating the activity (outreach, meetings) with the transport (Slack). Resolved here:
+
+### The principle
+
+A clean separation, applied consistently:
+- **Skills are activities.** Outreach (talk to someone), meetings (book / move / coord), summary, knowledge, calendar health, social. None of them know what transport they're on.
+- **Connections are transports.** Slack, email (future), WhatsApp (future). Each Connection owns: the outbound primitives (`sendDirect`, `postToChannel`, etc.) AND the tools whose name or semantics are transport-bound (Slack's `find_slack_channel`, `find_slack_user`; future email's `find_email_thread`).
+- **Same skill, different agents, different transports.** An agent on email-only books meetings via email. An agent on Slack-only books meetings via Slack. The meetings skill stays identical — only the registered Connection changes.
+
+### Removed — dead schema fields and stub modules
+
+- `src/core/socialEngagement.ts` — empty stub left over from the v2.2 retirement of the per-turn engagement upgrader. Zero imports, two stale comments referencing it (in `core/assistant.ts` and `connectors/slack/app.ts`) cleaned up alongside.
+- Five `behavior.*` schema fields in `src/config/userProfile.ts` that were declared since v1 but never read in `src/`: `rescheduling_style`, `adaptive_learning`, `escalate_after_days`, `can_contact_others_via_slack`, `autonomous_meeting_creation`. Zod silently strips unknown keys, so any old yaml that still has these boots fine — but they're gone from the schema. Also removed from `config/users/idan.yaml`.
+- Three skill toggle fields with no matching skill in `registry.ts`: `email_drafting`, `proactive_alerts`, `whatsapp`. Setting them to `true` produced a one-time debug warn and otherwise did nothing. Removed from the schema (`userProfile.ts`), the `SkillId` union (`skills/types.ts`), and idan.yaml.
+
+### Removed — research skill
+
+- `src/skills/research.ts` deleted. The skill was a v1 placeholder — `getTools()` returned `[]`, only contributed a system-prompt section that overlapped with what `web_search` already does. Owner had it flagged off in yaml since v2.5.2; v2.6.4 leans on a stronger search skill instead.
+- Removed from `registry.ts` candidates list, `SkillId` union, `userProfile.ts` schema, and idan.yaml.
+
+### Changed — Slack-specific tools moved off skills onto the SlackConnection
+
+Slack-named tools (`find_slack_channel`, `find_slack_user`) were declared in skills (`outreach`, `meetings`) — wrong layer. On a future email-only or WhatsApp-only profile, those tools would be dead weight in the prompt. The fix is structural:
+
+- `Connection` interface (`src/connections/types.ts`) gained two optional methods: `getTools(profile)` and `executeToolCall(toolName, args)`. Transports can own their own tools directly — no fake "transport skill" required.
+- `find_slack_channel` moved from `OutreachCoreSkill` to `SlackConnection` (`src/connections/slack/index.ts`).
+- `find_slack_user` moved from `MeetingsSkill` to `SlackConnection`. The handler had been duplicated (live one in `meetings.ts`, dead one in `meetings/ops.ts`); both removed. The Slack-directory + `people_memory` write + gender-detection kickoff side effects all preserved — they're now the natural side-effect of "found someone on Slack." The dead duplicate in `ops.ts` is gone.
+- `OutreachCoreSkill` description updated: outreach is the universal "talk to someone" activity, transport-agnostic; the actual send goes through whichever Connection is registered.
+- `MeetingsSkill` no longer declares `find_slack_user` — the tool registers automatically via SlackConnection when the agent has Slack configured.
+- `createSlackConnection` now takes the profile alongside app + bot token, so connection-owned tools can read profile-level facts (e.g. owner-domain detection in `find_slack_user`).
+- Skills registry merges connection tools alongside skill tools (after assistant + active skills, before dedupe + colleague allowlist). `executeSkillTool` falls through to connections if no skill claims a tool.
+- Pattern: future `EmailConnection.getTools()` returns `find_email_thread`, `list_unread`, etc.; `WhatsAppConnection.getTools()` returns whatever WhatsApp-specific primitives matter. Activities (skills) stay clean.
+
+### Known gap — sends still hardcode Slack
+
+This patch resolves the architectural framing for Slack-specific TOOLS but does not yet fix every Slack-specific SEND. Multiple skill / core sites still call `getConnection(profileId, 'slack')` directly instead of going through the router (`src/connections/router.ts`) — so an email-only or WhatsApp-only profile would not actually be able to route outreach today. Filed as a follow-up so the router-adoption work has its own scope:
+
+- `OutreachCoreSkill.message_colleague` → router by recipient
+- Coord state machine (`skills/meetings/coord/*`) → router for participant DMs
+- Summary distribution (`skills/summary.ts`) → router
+- Approvals resolver loop-close DMs (`core/approvals/resolver.ts`) → router
+- Each call site replaces `getConnection(_, 'slack')` with `resolveOutgoing({ recipient, skill, profilePolicy, … })`.
+
+Once that lands, an email-only profile actually works end-to-end — the architecture set up here in v2.6.4 makes that next step pure plumbing.
+
+### Not changed
+
+- `whatsapp.ts` connector (253 LOC) stays — `startWhatsApp()` is currently never called, but it's closer to a future feature than dead code. Worth a separate decision later.
+- All active skills + tools untouched. The audit confirmed every registered tool has a handler and callers — no orphan tools to remove.
+
+### Fixed — recurring meeting duplicates blocked via category flag
+
+Bug pattern: colleague says *"reinstate our BiWeekly to Wed 17.6 16:15"*, Maelle creates a new event on Wed while the original-day occurrence (post-revert Sun) still sits on the calendar — owner ends up with two events for the same week.
+
+- New optional category flag `is_recurring: boolean` in `profile.categories[]` (`config/userProfile.ts`). Owner-curated yaml. Idan's `idan.yaml` now sets it on `Weekly` and `Cadence`.
+- Colleague-path `create_meeting` (`skills/meetings/ops.ts`) gains a check between the existing v2.6 idempotency probe and Guard A: when the resolved category has `is_recurring=true`, the handler queries the same week for events sharing at least one internal attendee. If found, refuses with `error: 'recurring_match_exists'` + `existing_event_id` and a message telling Sonnet to `move_meeting` on the existing event instead of stacking a duplicate.
+- No new prompt rule. Sonnet learns from the tool result message directly — same teaching pattern as v2.6.0 `not_rule_compliant`.
+
+### Fixed — claim-checker now sees active-mode internal mutations
+
+Bug pattern: `check_calendar_health` (active mode) auto-fixed lunch by internally calling `book_floating_block`. Sonnet's draft truthfully claimed *"lunch was missing on Tuesday so I booked it"* — but the claim-checker, only seeing the top-level tool, flagged it as a hallucination and forced a retry. Owner saw a less truthful reply.
+
+- `skills/calendarHealth.ts` active-mode fix loop now collects an `internal_actions: Array<{tool, detail}>` and returns it on the tool result (empty when nothing was auto-fixed).
+- `core/orchestrator/index.ts` summary builder pushes each `internal_actions` entry into `toolCallSummaries` as `[<tool> (via <parent>): <detail>]` so the claim-checker's regex match passes for legitimate auto-fix claims.
+- Generic across tools — any future skill that emits `internal_actions` in the same shape gets the same coverage. No claim-checker change needed.
+
+### Fixed — buffer-only collisions no longer escalate to approval
+
+Bug pattern: 5-min buffer between meetings is a healthy-calendar HELPER, not a hard rule. Pre-fix, the slot finder lumped actual overlap and within-buffer collisions under one rejection label. Colleague-path treated both as hard rules → escalated to `policy_exception` approval for tight back-to-backs (e.g. Yael's BiWeekly starting 0min after the 16:00 standup ends).
+
+- `connectors/graph/calendar.ts:870-895` splits the rejection into two distinct labels: `owner_busy_collision` (actual overlap, hard rule) and `owner_buffer_collision` (within buffer but not overlapping, soft preference). Same code, two outcomes.
+- `skills/meetings/ops.ts` colleague-path `create_meeting` rule check: when the only rejection reason is `owner_buffer_collision`, falls through to the booking path instead of returning `not_rule_compliant`. Actual overlap (`owner_busy_collision`), focus time, work hours, category limits — all still escalate as before.
+- `labelFor()` updated with both new labels (legacy `owner_busy_or_buffer_collision` aliased to the busy label for any older diagnostics path that still emits it).
+
+Result: when an external colleague proposes a tight slot, Maelle books it. The buffer rule still applies when MAELLE is searching for a slot herself — that's the right behavior (she'll find a non-tight slot when she has options); just no longer a blocker when an external party named a specific time.
+
+### Changed — ✅ reaction now fires on task completion, not every reply
+
+Bug pattern: v2.6.2 added a `✅` react on every successful Maelle reply, intended as an "activity complete" marker. In practice it fired mid-flow on every sync message (asking for confirmation, reporting in progress, etc.) and read as noise.
+
+- Removed the unconditional react block in `connectors/slack/postReply.ts:518-527`.
+- New tracker `src/utils/threadActivity.ts` — process-global Map of `threadTs → { channelId, messageTs }`. Updated on every successful `say()` from postReply.
+- New optional method `Connection.reactToMessage(channelRef, messageTs, emojiName)` (`connections/types.ts`). `SlackConnection` implements via `app.client.reactions.add`; transports without reactions just don't implement.
+- `tasks/index.ts:completeTask` reads the task before updating, then after marking it completed fires a `setImmediate` that looks up the most recent Maelle message in the task's thread and reacts ✅ via the Slack Connection. Fire-and-forget; reaction failure is non-fatal.
+- Result: ✅ appears only when an actual task transitions to completed in that thread. No react on questions, sync replies, or turns where no task closed. Owner direction: *"do (1) and do (2) — using tasks and its ok to not get emoji of a question without task."*
+
+### Fixed — verbMap fallback now uses Oxford-comma grammar for 3+ items
+
+Pre-fix, when Sonnet went silent on a multi-tool turn and the v1.7.3 verbMap fallback fired, `mapped.join(' and ')` produced *"X and Y and Z and W"* for 4+ items — read robotically. Now: 1 item = bare; 2 = "X and Y"; 3+ = "X, Y, Z, and W". One-line grammar fix in `core/orchestrator/index.ts:1334-1340`. (The deeper "why was Sonnet silent on this turn" investigation is deferred — owner direction: *"don't file a ticket for the big problem, we will sort it in the future."*)
+
+### Fixed — approval requester loop-close when Sonnet swaps name into slack_id slot
+
+Bug pattern: colleague-initiated approvals (Yael asks Maelle to reinstate a meeting → Maelle creates `policy_exception` approval → owner resolves) were supposed to fire a "your ask was approved/declined" DM back to the colleague (v2.0.7 resolver loop-close). For Yael's case it didn't — she had to be DM'd separately, after the owner explicitly asked *"did you tell Yael?"*.
+
+Root cause: Sonnet sometimes packs the colleague's name into the `requester_slack_id` slot (e.g. `requester_slack_id: "Yael Aharon"`) AND omits `requester_name`. `resolveSlackId` correctly recognized the name-shape as invalid format, then attempted a `people_memory` fallback search — but the search uses the `name` arg, which was missing. The search branch was skipped entirely, the field was dropped, and the resolver had no slack_id to DM.
+
+Fix in `src/utils/resolveSlackId.ts`: when `name` is missing but `rawId` is a non-empty non-slack-format string, treat `rawId` as the search query. 3-line addition. Yael (who IS in `people_memory`) now resolves correctly when her name lands in the slack_id slot. The loop-close DM fires.
+
+The v2.0.7 mechanism itself was untouched — only the resolver helper's fallback widened. Owner direction confirmed via re-trace before approving: *"if its ok its ok"* — mechanism is fine, only the resolver's input handling needed the small extension.
+
+### Changed — coda eligibility from regex to state-based booleans
+
+Bug pattern: the social coda fired only when one of `coordinate_meeting | message_colleague | create_approval | outreach_send` ran this turn. The booking-confirmation moment (`resolve_approval` + `create_meeting`) was excluded — exactly the kind of "settled, quiet" moment where a coda fits.
+
+- Replaced the single regex match in `core/orchestrator/index.ts:1577-1578` with four explicit state-aware boolean signals derived from `toolCallSummaries`: `turnCreatedOutboundToColleague`, `turnRaisedApproval`, `turnResolvedApproval` (new — covers the booking-confirmation moment), `turnStartedCoord`. `codaEligible` is the OR.
+- Existing gates unchanged: `conversation_state: closing` still suppresses, 24h cadence still rate-limits, coda validator still drops invented facts.
+- Phase 2 (deferred): swap the tool-summary parsing for "task transitioned to completed this turn" once the v2.6.5 task-completion hook is fully observable. Strictly better signal; this patch lays the groundwork.
+
+### Fixed — brief surfaces approval context with the action item
+
+Bug pattern: brief action item read *"Julia raised a policy exception that needs your call, can you share the details or let me know how to proceed?"* — owner had no context, couldn't decide. Pre-fix, `buildTaskItem` only carried `title` + `status` + `dueAt` + a generic context blob; the linked `approvals.ask_text` and `payload` (subject, requester_name, proposed_start, etc.) were never read.
+
+- `tasks/briefs.ts:collectBriefingData` — pre-fetches all pending approvals linked to the surfaced tasks via one bulk `JOIN approvals ON task_id` query before the per-task loop.
+- After each item is built (outreach / coord / task variants), if a pending approval links to that task, an `approval` block is attached: `{ kind, ask_text, subject, requester_name, proposed_start, proposed_end }`.
+- New prompt rule in the brief system prompt: ACTION-ITEM CONTEXT RULE — when an item has an `approval` block, USE those facts to describe what the request actually is. NEVER ask the owner what the item is about; the data is right there. If the block is missing or empty, surface the gap honestly instead of asking him for info you should have.
+
+Result: action items become *"Julia wants to override your Monday focus block to fit a customer call — your call"* instead of *"can you share the details?"*.
+
+### Changed — owner-says-done scanner uses the LLM, not keywords
+
+Bug pattern: `closeLoopOnOwnerHandled` (v2.4.2) used a `CLOSURE_KEYWORDS` regex pre-filter to decide whether to spend tokens on the closure-detection LLM pass. The keyword list was tuned for completion phrasings ("I handled it", "drop it", "no longer needed") and missed declinations ("I'm not going to do it", "passing", "won't"). When owner declined an item, the regex didn't match → scanner skipped → item stayed open across every subsequent brief.
+
+- Removed `CLOSURE_KEYWORDS` array + `CLOSURE_KEYWORD_REGEX` + the pre-filter check in `src/utils/closeLoopOnOwnerHandled.ts`.
+- The Sonnet pass already there is conservative by design (per its SYSTEM_PROMPT: ignore acks, questions, future-tense plans, vague affirmations; return EMPTY when in doubt) — it handles every owner turn correctly without a regex gate.
+- Open-items DB check stays as the cost bound (no items → no LLM call). Estimated ~$0.001/turn × ~30-50 owner turns/day = ~$0.05/day, trivial.
+- Side benefit: language-agnostic. The regex only covered English + Hebrew explicitly; the LLM handles French, Spanish, slang, idiom, mixed-language messages. No keyword-list maintenance.
+
+Owner direction: *"I hate the entire closing words. it's not scalable... we have LLM to read answer and get reasoning... kill the entire closure keywords and find me a better solution within our current framework."* The framework was already there — just gated unnecessarily.
+
+### Added — `humanGate` (owner-facing voice/persona consistency)
+
+New `src/utils/humanGate.ts`. Sibling to `securityGate` but a different concern, deliberately separate file. Owner direction: *"create a new gate to the human gate as it's NOT part of the security at all."*
+
+- Single Sonnet pass with strict JSON output. Fails open on any error (never blocks legitimate replies).
+- Catches Maelle framing **herself** as having technical infrastructure: *"the routine fired but hit an error"* / *"I'd flag it to whoever manages the backend"* / *"my system processed your request"*.
+- Tech words about the world (backend interview, customer API, code review feedback, server outage) stay untouched — those are normal workplace speech at a tech company. Owner direction: *"my company is tech people... but not to talk about her backend."*
+- Wired in `connectors/slack/postReply.ts` after the claim-checker, before the date verifier. Owner-facing only — colleague-facing replies still go through the stricter `securityGate`.
+- Language-agnostic by design — the LLM judges humanness in any language (Hebrew, French, mixed-language).
+
+Gate audit (six pre-existing gates: `addresseeGate`, `coordGuard`, `imageGuard`, `securityGate`, `claimChecker`, `dateVerifier`) confirmed no duplication — each gate is a single narrow concern at a single stage. `humanGate` joins as a 7th, conceptually distinct from the rest.
+
+### Fixed — routine meta-questions no longer trigger the routine itself
+
+Bug pattern: owner asks *"WHEN does the calendar health check run?"* — Maelle interpreted as "run the check" and actually fired `check_calendar_health`, which in active mode also auto-fixed lunch (a real side effect). Should have answered from `get_routines` (the schedule lookup).
+
+Single prompt rule added to the routines system prompt section in `src/tasks/crons.ts` — META QUESTIONS rule:
+
+> When the owner asks ABOUT a routine ("when does the calendar check run?", "what time is my morning brief?", "how often does X fire?"), use `get_routines` to look up the schedule and answer from there. DO NOT call the routine's underlying tool just to "see what it would say" — that runs the actual side-effects and answers the wrong question.
+
+Small, prompt-only.
+
+### Fixed — routine failures now carry the actual error message
+
+Pre-fix, when a routine failed (orchestrator threw, system briefing failed), `routines.last_result` was overwritten with the literal string `'Failed'`. When the owner asked *"why did it fail?"*, Maelle could only say *"the last result shows 'Failed'"* — no diagnostic detail.
+
+Two-line change in `src/tasks/dispatchers/routine.ts` — both failure branches (system briefing + user routine) now capture up to 200 chars of the error message into `last_result` as `Failed: <error>`. The actual error was already going to `logger.error`; this just brings it into the DB so Maelle can answer questions about it without grepping logs.
+
+### Fixed — IANA timezone strings no longer mistaken for cities
+
+Bug pattern: Maelle wrote *"Since you're in Brisbane..."* to a candidate whose only known location data was `timezone: Australia/Brisbane` (city/state unknown). She inferred the city from the IANA tz string.
+
+Single-place rendering fix in `db/people.ts:formatPeopleMemoryForPrompt` (line ~608). When `state` is missing but `timezone` is set, the line now reads `tz: Australia/Brisbane (timezone only, city unknown)` instead of just `tz: Australia/Brisbane`. The constraint is visible inline; Sonnet sees "city unknown" right next to the tz string and won't extract a city from it.
+
+Code-only change, no prompt rule. Per the bugs skill principle "use existing systems over new prompt rules" — when the data path can carry the constraint explicitly, that's stronger than a rule asking the model to remember.
+
+### Fixed — humanGate JSON parse tolerates prose prefix
+
+Bug pattern: humanGate's first day in production logged `humanGate — failed to evaluate draft: SyntaxError: Unexpected token 'T', "This messa"... is not valid JSON`. Sonnet ignored the "no prose, no markdown" instruction in some cases and wrote *"This message is fine. {ok: true, ...}"* — strict `JSON.parse` on the whole string threw.
+
+One-line fix in `src/utils/humanGate.ts` — extract the first balanced-looking `{...}` block via regex before parsing, same pattern already used in `skills/meetingReschedule.ts` and `closeLoopOnOwnerHandled.ts`. Sonnet's prose prefix gets ignored; the JSON inside parses cleanly.
+
+The gate fails open by design, so this didn't surface as visible misbehavior — drafts just passed through unrewritten. Now the gate actually evaluates them.
+
+### Changed — `coordinate_meeting` requester field replaces `requester_is_attending` boolean
+
+Bug pattern (the Yael / Maya CISO incident, 2026-05-10): colleague-path coord booking fell apart because the requester (Yael, internal, has slack_id in people_memory) wasn't auto-added to participants when Sonnet didn't pass her slack_id explicitly. Handler demoted her to just_invite, the resulting coord_job had ZERO real participants (only owner via auto-add), no DMs went out to anyone, the coord sat at `status='collecting'` forever, and Maelle's narrations ("waiting for Maya's approval", "Idan agrees") were fabricated because nothing was actually waiting on anyone.
+
+The old `requester_is_attending: bool` flag was post-hoc filtering — Sonnet always set true (default), so the requester ended up in attendees regardless of whether they were the SCHEDULER (HR booking interview) vs an ATTENDEE. Replaced with explicit `requester` field placement:
+
+- New required-on-colleague-path `requester: { name, email, slack_id }` field on `coordinate_meeting`. Auto-filled from `context.userId` + `people_memory` lookup if Sonnet omits.
+- Three explicit cases driven by where the requester appears:
+  - **In `requester` AND `participants`** → attending; gets DM-polled like any other attendee. Handler also fills any missing slack_id on the matching participant from `requester.slack_id` (closes the Yael demotion bug — she's matched by email, gets her slack_id from context).
+  - **In `requester` ONLY** → third-party scheduler. Not on calendar invite, not DM-polled, availability not factored in. Replaces the `requester_is_attending: false` semantics.
+  - **In `requester` AND `just_invite`** → wants the calendar event but no DM poll.
+- Old `requester_is_attending: false` still honored for back-compat — treated as the same signal as "requester not in participants/just_invite."
+- Tool description teaches Sonnet the three cases with examples.
+
+Cascade fix — once the requester is correctly threaded, the rest of Bug 7's symptoms resolve at the source: no fabricated "waiting for Maya/Idan" narrations, no duplicate coord_jobs, real DMs go out to real participants. State machine works as designed.
+
+### Added — availability pre-check (rule-aware verdicts injected into prompt)
+
+Bug pattern (same Yael incident, 9:30 turn vs 10:21 turn): Sonnet eyeballed `get_calendar` events and said *"12:30 11.5 free"*. An hour later, the booking flow ran `find_available_slots` (rule-aware: applies buffer, focus blocks, work hours, category limits) and got 0 candidates. Same calendar data, different verdicts — because `get_calendar` returns raw events for Sonnet to eyeball, while `find_available_slots` applies all the booking rules. The discrepancy made Maelle whipsaw between "free" and "doesn't work" within minutes.
+
+New helper `src/utils/availabilityPreCheck.ts`. On colleague-path turns:
+
+- Cheap regex pre-filter detects (date, time) patterns + question markers. English + Hebrew + Israeli/EU date formats. If no match → fail open, normal flow.
+- For each detected pair (capped at 6/turn), run `find_available_slots` with a narrow window (start, start + duration). Capture the rule-aware verdict + rejection reason.
+- Render a prompt block: *"AVAILABILITY CHECK (rule-aware, deterministic) — 11 May 12:30: NOT BOOKABLE (rule: owner_busy_collision); 12 May 10:00: BOOKABLE per Idan's rules; ..."*
+- Inject at the top of the dynamic system prompt for that turn. Sonnet sees the canonical verdict before drafting her reply, regardless of which tool she chooses afterward.
+
+Result: Sonnet's "is X free?" answer matches what `find_available_slots` (and the actual booking flow) will return. No more eyeball-vs-rule-aware whipsaw. Code-side fix per owner direction; no new prompt rules required.
+
+Fails open across the board — regex miss, time parse error, or `findAvailableSlots` exception all return empty block, normal Sonnet flow continues.
+
+### Fixed — `is_online` regression on home-day-external bookings
+
+Bug pattern: owner asked Maelle to book a meeting with an external attendee on a home day. Maelle confirmed *"(Teams)"* in her reply but the actual Outlook event had Teams toggle OFF, location empty, body containing only an Outlook-default Teams link template (not a real Teams meeting). Recipients clicking the link wouldn't get a proper Teams join.
+
+**Root cause traced via log + code review.** `skills/meetings/ops.ts:1305` had a gate:
+```ts
+const sonnetSpecifiedMode = args.is_online === true || (typeof args.location === 'string' && args.location.trim().length > 0);
+if (!sonnetSpecifiedMode) {
+  // run determineSlotLocation helper
+}
+```
+
+The moment Sonnet passed any non-empty `location` string, the helper was skipped. With helper skipped, `derivedIsOnline = undefined`, and `effectiveIsOnline = args.is_online === true` — so when Sonnet didn't explicitly pass `true`, the meeting booked with `isOnline: false`. The home-day-external must-be-online rule (helper's branch returning `{location: '', isOnline: true}`) never fired.
+
+**Fix in `skills/meetings/ops.ts`:**
+
+- Removed the `!sonnetSpecifiedMode` gate. `determineSlotLocation` now ALWAYS runs.
+- New `helperForcesOnline` flag: helper says `isOnline: true` AND no location → "must be remote" case (home-day external, anyone traveling). In those cases, `effectiveIsOnline = true` regardless of what Sonnet passed. Owner direction: *"if external + home day, it has to be remote."*
+- For non-forced cases: Sonnet's explicit `is_online` value wins when she passed a boolean. When she didn't, the helper's verdict fills in.
+- `skipLocationField` rewritten to gate on either Sonnet's explicit fully-online OR `helperForcesOnline` without a Sonnet-supplied location.
+
+**Tool description tightened.** `create_meeting` description now leads with "the handler enforces 'must be remote' cases AUTOMATICALLY — you can't downgrade them" and the explicit rule: *"by default in-person should ONLY be used when someone said it. If neither side mentions mode, ASK once on owner-path."* Sonnet stops assuming in-person on ambiguous external bookings.
+
+Verified with the morning's log — pre-fix `day-aware mode default applied` log entries were absent (helper skipped). Post-fix the helper runs every time, the verdict goes into the audit trail.
+
+### Added — content-feedback rule (don't edit owner's drafts on her own)
+
+Bug pattern (the panel post incident, 2026-05-10): Oran sent feedback on Idan's LinkedIn post draft (*"add Mark Barry as a participating member"*). Maelle responded inline with an EDITED version of the post — no `create_approval`, no heads-up to Idan, just sent the updated content directly to Oran. Idan never saw the edited draft. Log confirmed `actionCount: 0` for that turn — pure text reply with Sonnet-generated content.
+
+New prompt rule in colleague-path system prompt section (`core/orchestrator/systemPrompt.ts`): when a colleague gives feedback on owner's authored content (LinkedIn post, email, memo, talking points, anything where owner is the author), Maelle:
+
+1. Acknowledges briefly: *"Got it, I'll get the updated version to ${ownerFirst}, will get back to you when he weighs in."*
+2. Calls `create_approval(kind=freeform)` with the colleague's feedback in the payload + a short description of the proposed change. Does NOT write the full updated draft — owner authors his own content.
+3. Doesn't ALSO call `create_task` separately — `create_approval` auto-creates a parent task for the freeform path. One activity = one tracking row. Per owner direction: *"do you need a NEW create approval, or its already part of the previous process? continue with that tasks."*
+4. Waits for owner's decision before sending updated content back to the colleague.
+
+Cue phrases: "a few things to add", "can we change", "small edits", "what if we said", "let's tweak", "update to mention" — all trigger this rule.
+
+### Fixed — ✅ react now fires on `createTask(status='completed')` paths
+
+Pre-fix the v2.6.5 react hook in `tasks/index.ts:completeTask()` only fired when `completeTask()` was explicitly called. The outreach skill creates fire-and-forget tasks for non-await sends with `status: 'completed'` directly via `createTask()` — bypassing the hook. Owner saw "Done!" booking confirmations after direct create_meeting + outreach turns with no ✅.
+
+Refactored: extracted the react logic into `fireCompletionReact(ownerUserId, threadTs, taskId)`. Now both `completeTask()` AND `createTask({status: 'completed', ...})` fire it. Same fire-and-forget shape, same fail-open contract.
+
+### Standing rules — clarified shadow DM scope
+
+Updated `.claude/SESSION_STARTER.md` and the `bugs` skill to make explicit what the owner has been correcting in chat repeatedly:
+
+- **Shadow DM is a passive visible log, not a notification or approval channel.** Owner reads it like a feed; doesn't act on it. NEVER design a flow that requires the owner to read or act on a shadow DM. Owner-facing approvals, status updates, and follow-up asks belong in real DMs / threads / approvals — not in shadow notify.
+
+The `bugs` skill also gained:
+
+- **"Look at existing systems before proposing new state."** When tempted to add a new flag / new field / new tracking layer, FIRST scan for existing systems that already cover the case (tasks have lifecycle, approvals have payloads, categories have flags, outreach has status). When the owner says *"don't add new X — use what we have"*, the first reflex should already have been to scan for what's there. Inventing parallel tracking systems is the v2.x pattern that creates drift bugs later.
+
+These two principles caught proposals during this patch that would have introduced unnecessary complexity (a new `markComplete` flag, a "shadow-DM the owner about X" pattern). Codifying them in the skill prevents the same rabbit-holes next session.
+
+---
+
 ## 2.6.2 — Channel thread-continuation, social engine rename + loosening, emoji feedback loop
 
 Patch wave wrapping a focused optimization session. Three groups of work landed together: (1) extend Maelle into Slack channels with the same MPIM thread-continuation behavior — once she's @-mentioned in a thread, she keeps the thread active until topic / activity ends; (2) rename the `persona` skill to `social` everywhere with a single master toggle (no more separate `behavior.proactive_colleague_social.enabled`), plus loosen the proactive cold-ping recency gate so it actually picks candidates again; (3) emoji feedback loop — owner can resolve approvals with a reaction, colleagues' emoji acks on Maelle's outreach generate a shadow line so the owner knows they saw it, ack-class replies ("Got it" / "Done") replace text with a 👍 reaction, and Maelle marks her own reply with ✅ when an activity completes.

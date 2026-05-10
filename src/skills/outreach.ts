@@ -1,23 +1,20 @@
 /**
- * Outreach skill (v1.8.11 — moved from src/core to src/skills).
+ * Outreach skill — core, transport-agnostic.
  *
- * Owns the "how Maelle speaks to people on behalf of the owner" primitives:
- *   - message_colleague — send a DM or a channel post
- *   - find_slack_channel — resolve channel name → channel id
+ * The universal "how Maelle speaks to people on behalf of the owner" skill.
+ * Every transport (Slack today; email, WhatsApp, Teams later) supports
+ * messaging someone, so this skill stays in CORE_MODULES. Per-transport
+ * extras (Slack channel lookup, email thread search, etc.) live in their
+ * own transport-bound skills (see src/skills/slackTransport.ts).
  *
- * Still registered as a core module in the registry (always active when a
- * Connection is available) but the implementation is now fully transport-
- * agnostic. Sends go through the Connection interface resolved via registry.
- * When email / WhatsApp Connections land, externals route through them
- * automatically via the router (sub-phase F+).
+ * Tools owned here:
+ *   - message_colleague — send a DM (or a channel post when channel_id is
+ *     provided) on behalf of the owner. Routes via the Connection interface.
  *
- * Changed in sub-phase C (v1.8.11):
- *   - File moved from core/outreach.ts → skills/outreach.ts
- *   - _requires_slack_client return pattern removed — sends happen
- *     synchronously inside the tool handler via Connection
- *   - find_slack_channel uses Connection.findChannelByName
- *   - Channel-post branch prepends `<@slack_id>` mention before calling
- *     Connection.postToChannel (@mention was previously done by coordinator.ts)
+ * History:
+ *   v2.6.4 — find_slack_channel split out into SlackTransportSkill so this
+ *            skill is genuinely universal (not Slack-flavored).
+ *   v1.8.11 — moved from src/core to src/skills; Connection-based sends.
  */
 
 import type Anthropic from '@anthropic-ai/sdk';
@@ -37,7 +34,7 @@ import logger from '../utils/logger';
 export class OutreachCoreSkill implements Skill {
   id = 'outreach' as const;
   name = 'Outreach';
-  description = 'Sends messages to colleagues on behalf of the owner — DMs and channel posts. Always core on any Slack profile.';
+  description = 'Universal outreach — the activity of "talking to someone on behalf of the owner." Transport-agnostic; the actual send goes through whichever Connection (Slack, email, WhatsApp) is registered for the agent. Always core.';
 
   getTools(profile: UserProfile): Anthropic.Tool[] {
     return [
@@ -53,7 +50,7 @@ Use when the user asks you to:
 - "Share this research in #marketing, tag Yael"
 
 DM (default): sends privately to the colleague.
-Channel post: when the user specifies a channel (e.g. "post on #product"), post there and mention the colleague. Call find_slack_channel first if you don't have the channel ID. await_reply is ignored for channel posts.
+Channel post (Slack only): when the user specifies a channel (e.g. "post on #product"), post there and mention the colleague. Call find_slack_channel first if you don't have the channel ID. await_reply is ignored for channel posts.
 
 You write the message in Maelle's voice — warm, natural, professional.
 Only send messages the user explicitly asks for — never reach out to people on your own.`,
@@ -138,20 +135,6 @@ Only send messages the user explicitly asks for — never reach out to people on
             },
           },
           required: ['colleague_slack_id', 'colleague_name', 'message', 'await_reply'],
-        },
-      },
-      {
-        name: 'find_slack_channel',
-        description: 'Find a Slack channel ID by name. Use before message_colleague when the user specifies a channel (e.g. "post in #product") and you need the channel ID.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            name: {
-              type: 'string',
-              description: 'Channel name to search for, with or without # (e.g. "product" or "#product")',
-            },
-          },
-          required: ['name'],
         },
       },
     ];
@@ -422,13 +405,6 @@ Only send messages the user explicitly asks for — never reach out to people on
         };
       }
 
-      case 'find_slack_channel': {
-        const connection = getConnection(userId, 'slack');
-        if (!connection) return { error: 'slack_connection_not_registered' };
-        const channels = await connection.findChannelByName(args.name as string);
-        return { channels, count: channels.length };
-      }
-
       default:
         return null;
     }
@@ -437,7 +413,7 @@ Only send messages the user explicitly asks for — never reach out to people on
   getSystemPromptSection(_profile: UserProfile): string {
     return `## OUTREACH
 
-When the owner asks you to send someone a message, use message_colleague. Default is a DM; pass a channel_id for a channel post (use find_slack_channel first). Pass send_at for scheduled future sends — those are driven by the task runner, not sent immediately.
+When the owner asks you to send someone a message, use message_colleague. Default is a DM; pass a channel_id for a Slack channel post (use find_slack_channel first to resolve the channel name). Pass send_at for scheduled future sends — those are driven by the task runner, not sent immediately.
 
 Never reach out to people on your own. Only on explicit owner request. If the colleague might reply, set await_reply=true so we'll track the response.
 

@@ -868,12 +868,28 @@ export async function findAvailableSlots(params: {
         continue;
       }
       const slotEnd = new Date(cursor.getTime() + durationMs);
-      const isFree = !allBusy.some(busy =>
+      // v2.6.5 — split rejection labels. Pre-split the check lumped actual
+      // overlap with within-buffer collisions under one label
+      // (`owner_busy_or_buffer_collision`). The colleague-path treated both
+      // the same and escalated to policy_exception approval — owner's
+      // 5-min buffer is a HELPER (a preference for healthy back-to-backs),
+      // not a hard rule. With the split, colleague-path can proceed on
+      // buffer-only collisions and reserve approval for genuine overlap.
+      const overlapsBusy = allBusy.find(busy =>
+        cursor.getTime() < busy.end.getTime() &&
+        slotEnd.getTime() > busy.start.getTime()
+      );
+      if (overlapsBusy) {
+        trackReject('owner_busy_collision', cursorDt.toISO()!);
+        cursor = new Date(cursor.getTime() + step);
+        continue;
+      }
+      const withinBuffer = bufferMs > 0 && allBusy.find(busy =>
         cursor.getTime() < busy.end.getTime() + bufferMs &&
         slotEnd.getTime() > busy.start.getTime() - bufferMs
       );
-      if (!isFree) {
-        trackReject('owner_busy_or_buffer_collision', cursorDt.toISO()!);
+      if (withinBuffer) {
+        trackReject('owner_buffer_collision', cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
         continue;
       }

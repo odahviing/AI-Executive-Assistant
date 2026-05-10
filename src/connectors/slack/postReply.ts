@@ -156,6 +156,23 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       senderId, channelId, threadTs,
       role, colleagueName, isMpim, isOwnerInGroup, mpimMemberIds,
     });
+
+    // Step 3a (v2.6.5) — owner-facing humanness gate. Catches Maelle framing
+    // herself as having technical infrastructure ("the routine fired but
+    // hit an error", "I'd flag it to whoever manages the backend"). Tech
+    // words about the world (backend interview, customer API, code review)
+    // are FINE — the gate only fires when she attributes infrastructure to
+    // HERSELF. Sibling to claimChecker but a different concern (voice, not
+    // false claims). Fails open — never blocks a draft.
+    try {
+      const { runHumanGate } = await import('../../utils/humanGate');
+      const verdict = await runHumanGate(cleanReply, profile);
+      if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
+        cleanReply = formatForSlack(verdict.rewrite);
+      }
+    } catch (err) {
+      logger.warn('humanGate threw — leaving draft unchanged', { err: String(err).slice(0, 200) });
+    }
   }
 
   // Step 3b — date-verifier (v1.6.6). Catches "Sunday 20 Apr" when Sunday
@@ -508,22 +525,20 @@ async function sendReply(opts: {
       // Fall through to text.
     }
   }
-  // v2.6.2 — capture the posted message ts so we can react ✅ on Maelle's
-  // own reply, marking "thread complete" while keeping the original 🧵 / 👀
-  // marker on the user's message untouched. Owner direction: "Don't replace,
-  // when the thread over, ✅ should be for the last message on the thread.
-  // don't replace the original emoji of thread."
+  // v2.6.5 — capture the posted message ts and record it on threadActivity.
+  // The unconditional ✅ react that lived here in v2.6.2 was annoying mid-flow
+  // — it fired on every Maelle reply regardless of whether the activity was
+  // complete. Replacement: tasks/index.ts:completeTask now reacts ✅ on the
+  // most recent Maelle message in the thread when an actual task transitions
+  // to completed. The recordMaelleMessage call below is what gives that hook
+  // a target to react on. No reaction here.
   // Bolt's `say` returns ChatPostMessageResponse at runtime even though the
   // surface type is Promise<unknown> (postReply abstracts from app-direct).
   const sayRes = await opts.say({ text: opts.cleanReply, thread_ts: opts.threadTs }) as
     | { ts?: string; ok?: boolean } | undefined;
   if (sayRes?.ts) {
-    opts.app.client.reactions.add({
-      token: opts.botToken,
-      channel: opts.channelId,
-      timestamp: sayRes.ts,
-      name: 'white_check_mark',
-    }).catch(() => {});
+    const { recordMaelleMessage } = await import('../../utils/threadActivity');
+    recordMaelleMessage(opts.threadTs, opts.channelId, sayRes.ts);
   }
 }
 

@@ -933,6 +933,77 @@ export class SchedulingSkill {
             });
           }
 
+          // v2.6.5 — recurring-category check. When the meeting falls under an
+          // is_recurring category (Weekly, Cadence — set in profile.categories
+          // yaml), look for an existing occurrence with the same internal
+          // attendees in the SAME WEEK before creating a new event. Closes the
+          // duplicate-booking pattern: colleague says "reinstate the BiWeekly"
+          // → Maelle creates a new event on Wed while the original-day
+          // occurrence (post-revert Sun) still sits on the calendar.
+          //
+          // The check is owner-curated (yaml flag) — code stays generic over
+          // category names. Match heuristic: at least one shared internal
+          // attendee + same week + not the same start (the early idempotency
+          // probe above catches subject+start collisions). When a match
+          // exists, refuse with existing_event_id pointing Sonnet to
+          // move_meeting on the existing event instead of stacking a duplicate.
+          try {
+            const { getProfileCategoryByName } = await import('../../utils/categoryRules');
+            const catName = typeof args.category === 'string' ? args.category : null;
+            const cat = getProfileCategoryByName(context.profile, catName);
+            if (cat?.is_recurring) {
+              const startDt = DateTime.fromISO(args.start as string, { zone: timezone });
+              if (startDt.isValid) {
+                const weekStart = startDt.startOf('week').toFormat('yyyy-MM-dd');
+                const weekEnd = startDt.endOf('week').toFormat('yyyy-MM-dd');
+                const requestedStartMs = startDt.toMillis();
+                const ownerEmailLower = ownerEmail.toLowerCase();
+                const requestedAttendees = new Set(
+                  attendees
+                    .map(a => (a.email ?? '').toLowerCase())
+                    .filter(e => e && e !== ownerEmailLower),
+                );
+                if (requestedAttendees.size > 0) {
+                  const weekEvents = await getCalendarEvents(userEmail, weekStart, weekEnd, timezone);
+                  const match = weekEvents.find(ev => {
+                    if (ev.isCancelled) return false;
+                    // Skip the exact same start — covered by the early idempotency probe above.
+                    const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
+                    if (Math.abs(evStart.toMillis() - requestedStartMs) <= 2 * 60 * 1000) return false;
+                    const evAttendees = (ev.attendees ?? [])
+                      .map(a => (a.emailAddress?.address ?? '').toLowerCase())
+                      .filter(e => e && e !== ownerEmailLower);
+                    return evAttendees.some(e => requestedAttendees.has(e));
+                  });
+                  if (match) {
+                    const ownerFirst = context.profile.user.name.split(' ')[0];
+                    const matchStart = DateTime.fromISO(match.start.dateTime, {
+                      zone: match.start.timeZone ?? 'utc',
+                    }).setZone(timezone).toFormat("EEEE d MMM 'at' HH:mm");
+                    logger.info('create_meeting colleague-path refused — existing recurring occurrence in same week', {
+                      requester: context.userId,
+                      category: cat.name,
+                      existing_event_id: match.id,
+                      existing_subject: match.subject,
+                    });
+                    return {
+                      success: false,
+                      error: 'recurring_match_exists',
+                      existing_event_id: match.id,
+                      existing_subject: match.subject,
+                      existing_start: match.start.dateTime,
+                      message: `An existing ${cat.name} occurrence with the same attendee is already on ${ownerFirst}'s calendar this week ("${match.subject}" on ${matchStart}). Don't create a duplicate — call move_meeting on the existing event (id: ${match.id}) to shift it to the requested time instead, or confirm with the colleague before doing anything else.`,
+                    };
+                  }
+                }
+              }
+            }
+          } catch (recurErr) {
+            logger.warn('create_meeting colleague-path recurring check threw — proceeding', {
+              err: String(recurErr).slice(0, 200),
+            });
+          }
+
           // Guard A — attendees must be: requester themselves OR internal
           // (same domain). Anything else (external, missing email) requires
           // coord. Resolve requester's email from people_memory.
@@ -1028,10 +1099,16 @@ export class SchedulingSkill {
                 // fabricated reason. broken_rule_label === 'unknown' means
                 // the diagnostics didn't fire (rare — defensive); Sonnet
                 // says so honestly rather than guessing.
+                // v2.6.5 — owner_busy_or_buffer_collision split into
+                // owner_busy_collision (hard — actual overlap) and
+                // owner_buffer_collision (soft — within buffer only).
                 const labelFor = (reason: string | undefined): string => {
                   switch (reason) {
                     case 'outside_owner_work_hours': return `outside ${ownerFirst}'s work hours`;
                     case 'outside_attendee_work_hours': return `outside the attendee's working hours`;
+                    case 'owner_busy_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
+                    case 'owner_buffer_collision': return `back-to-back with another meeting on ${ownerFirst}'s calendar (no buffer between them)`;
+                    // legacy label name kept as alias in case any older diagnostics path still emits it
                     case 'owner_busy_or_buffer_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
                     case 'overlaps_meeting_being_moved': return `overlaps the meeting being moved`;
                     case 'focus_time_office': return `breaks ${ownerFirst}'s focus-time protection (office day)`;
@@ -1051,6 +1128,25 @@ export class SchedulingSkill {
                 // pick whichever shows up first — caller gets a real fact
                 // either way.
                 const brokenRule = fired[0];
+
+                // v2.6.5 — buffer-only collision is a SOFT preference, not
+                // a rule. When the only reason a slot was rejected is buffer
+                // collision (no actual overlap, no work-hours / focus / etc.
+                // breach), don't escalate to approval — proceed with the
+                // booking and skip the rule check below. The buffer is a
+                // helper for healthy back-to-backs that Maelle honors when
+                // searching for slots herself; an external party (e.g. Yael
+                // asking to reinstate a meeting at a specific time) shouldn't
+                // be blocked by it. The flow falls through to the normal
+                // booking path; a shadow line will surface in the post-book
+                // shadowNotify ("booked back-to-back, no buffer").
+                const isBufferOnly = fired.length === 1 && fired[0] === 'owner_buffer_collision';
+                if (isBufferOnly) {
+                  logger.info('create_meeting colleague-path proceeding despite buffer-only collision', {
+                    start: args.start, end: args.end, requester: context.userId,
+                  });
+                  // do not return — fall through to booking
+                } else {
                 const brokenRuleLabel = labelFor(brokenRule);
                 logger.info('create_meeting colleague-path refused — slot breaks owner rules', {
                   start: args.start, end: args.end, requester: context.userId,
@@ -1066,6 +1162,7 @@ export class SchedulingSkill {
                     ? `That time doesn't pass ${ownerFirst}'s scheduling rules and I can't tell exactly which one flagged it. Call create_approval(kind=policy_exception) — describe the slot honestly and let him decide.`
                     : `That time is ${brokenRuleLabel} for ${ownerFirst}. I can't book it on my own — call create_approval(kind=policy_exception) and pass the same phrase ("${brokenRuleLabel}") in ask_text so he knows what he's overriding.`,
                 };
+                }
               }
             }
           } catch (err) {
@@ -1191,66 +1288,71 @@ export class SchedulingSkill {
           logger.warn('create_meeting idempotency pre-check failed — proceeding with create', { err: String(err) });
         }
 
-        // v2.5.2 (Oran-bug fix #3) — day-aware mode default. Pre-v2.5.2 the
-        // `create_meeting` direct path defaulted to office whenever Sonnet
-        // didn't explicitly pass `is_online` or `location`. That stamps the
-        // office address on home-day internal meetings (Tuesday is a home
-        // day → meeting should be Huddle/online, not "Idan's Office"). The
-        // day-aware helper `determineSlotLocation` already encodes the right
-        // logic; it was only used in the `coordinate_meeting` flow. Now also
-        // consulted on direct `create_meeting` when Sonnet leaves the mode
-        // unspecified. Sonnet's explicit `is_online: true` or `location: ...`
-        // still wins — this is just the smart default for the unset case.
-        const sonnetSpecifiedMode = args.is_online === true
-          || (typeof args.location === 'string' && args.location.trim().length > 0);
+        // v2.5.2 (Oran-bug fix #3) — day-aware mode default via
+        // `determineSlotLocation`. The helper encodes:
+        //   - Office day, ≤3 internal → Idan's Office + Teams (hybrid)
+        //   - Office day, >3 internal → Meeting Room + Teams (hybrid)
+        //   - Home day, internal → Huddle (no Teams)
+        //   - Home day, external → Teams ONLY, no location (forced online)
+        //   - Any participant traveling → Teams ONLY (forced online)
+        //
+        // v2.6.5 — REMOVED the `!sonnetSpecifiedMode` gate that skipped the
+        // helper whenever Sonnet passed a location string. Pre-fix, Sonnet
+        // passing a non-empty `location` arg made the helper skip entirely,
+        // so the home-day-external must-be-online rule never fired (the Yael
+        // CISO incident booked with Teams toggle OFF because Sonnet provided
+        // a location and helper was bypassed). Now the helper ALWAYS runs;
+        // its day-aware verdict drives `effectiveIsOnline` below. Sonnet's
+        // `is_online` arg can still upgrade (false→true) or override
+        // (false→false) for non-forced cases, but cannot downgrade the
+        // forced-online cases (external + home day, anyone traveling).
         let derivedIsOnline: boolean | undefined;
         let derivedLocationFromHelper: string | undefined;
-        if (!sonnetSpecifiedMode) {
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { determineSlotLocation } = require('./coord/utils') as typeof import('./coord/utils');
-            const ownerDomain = ownerEmail.includes('@') ? ownerEmail.split('@')[1].toLowerCase() : '';
-            const isInternal = attendees.every(a => {
-              const e = (a.email ?? '').toLowerCase();
-              if (!e) return true;
-              if (e === ownerEmail.toLowerCase()) return true;
-              if (assistantEmail && e === assistantEmail.toLowerCase()) return true;
-              return ownerDomain ? e.endsWith('@' + ownerDomain) : true;
-            });
-            const totalPeople = attendees.length + 1;  // +1 for owner
-            // anyTraveling — quick check for any attendee with active travel.
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { getCurrentTravel, searchPeopleMemory } = require('../../db') as typeof import('../../db');
-            let anyTraveling = false;
-            for (const a of attendees) {
-              const lower = (a.email ?? '').toLowerCase();
-              if (!lower || lower === ownerEmail.toLowerCase()) continue;
-              const matches = searchPeopleMemory(a.email);
-              const person = matches.find(m => (m.email ?? '').toLowerCase() === lower);
-              if (person?.slack_id && getCurrentTravel(person.slack_id)) {
-                anyTraveling = true;
-                break;
-              }
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { determineSlotLocation } = require('./coord/utils') as typeof import('./coord/utils');
+          const ownerDomain = ownerEmail.includes('@') ? ownerEmail.split('@')[1].toLowerCase() : '';
+          const isInternal = attendees.every(a => {
+            const e = (a.email ?? '').toLowerCase();
+            if (!e) return true;
+            if (e === ownerEmail.toLowerCase()) return true;
+            if (assistantEmail && e === assistantEmail.toLowerCase()) return true;
+            return ownerDomain ? e.endsWith('@' + ownerDomain) : true;
+          });
+          const totalPeople = attendees.length + 1;  // +1 for owner
+          // anyTraveling — quick check for any attendee with active travel.
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getCurrentTravel, searchPeopleMemory } = require('../../db') as typeof import('../../db');
+          let anyTraveling = false;
+          for (const a of attendees) {
+            const lower = (a.email ?? '').toLowerCase();
+            if (!lower || lower === ownerEmail.toLowerCase()) continue;
+            const matches = searchPeopleMemory(a.email);
+            const person = matches.find(m => (m.email ?? '').toLowerCase() === lower);
+            if (person?.slack_id && getCurrentTravel(person.slack_id)) {
+              anyTraveling = true;
+              break;
             }
-            const helperResult = determineSlotLocation(
-              args.start as string,
-              context.profile,
-              totalPeople,
-              isInternal,
-              undefined,
-              anyTraveling,
-            );
-            derivedIsOnline = helperResult.isOnline;
-            derivedLocationFromHelper = helperResult.location;
-            logger.info('create_meeting — day-aware mode default applied', {
-              start: args.start, isInternal, anyTraveling,
-              helperLocation: helperResult.location, helperIsOnline: helperResult.isOnline,
-            });
-          } catch (err) {
-            logger.warn('create_meeting — determineSlotLocation threw, falling back to legacy default', {
-              err: String(err).slice(0, 200),
-            });
           }
+          const helperResult = determineSlotLocation(
+            args.start as string,
+            context.profile,
+            totalPeople,
+            isInternal,
+            undefined,
+            anyTraveling,
+          );
+          derivedIsOnline = helperResult.isOnline;
+          derivedLocationFromHelper = helperResult.location;
+          logger.info('create_meeting — day-aware mode default applied', {
+            start: args.start, isInternal, anyTraveling,
+            helperLocation: helperResult.location, helperIsOnline: helperResult.isOnline,
+            sonnetIsOnline: args.is_online, sonnetLocation: args.location,
+          });
+        } catch (err) {
+          logger.warn('create_meeting — determineSlotLocation threw, falling back to legacy default', {
+            err: String(err).slice(0, 200),
+          });
         }
 
         // v2.4.3 (E1) — compute the location parts ONCE so both the
@@ -1273,11 +1375,32 @@ export class SchedulingSkill {
         // to use. Now: `effectiveIsOnline` still drives the Teams-link
         // decision (passed as `isOnline:` to createMeeting); a separate
         // `skipLocationField` drives the location-field path.
-        const effectiveIsOnline = args.is_online === true || derivedIsOnline === true;
+        // v2.6.5 — `helperForcesOnline` captures the cases where the helper
+        // says "this MUST be a Teams meeting" (no location possible):
+        //   - Home day + external attendee → home day means Idan's not at the
+        //     office, external can't show up at his home → remote is the only
+        //     answer. Owner direction: "if external + home day, it has to be
+        //     remote."
+        //   - Anyone traveling → can't physically attend.
+        // In those cases, Sonnet's explicit `is_online: false` does NOT
+        // downgrade — the day/state-aware verdict wins.
+        //
+        // For non-forced cases (office-day hybrid, home-day-internal Huddle),
+        // Sonnet's explicit `is_online` value wins when she passed a boolean,
+        // and the helper's verdict fills in when she didn't.
+        const helperForcesOnline = derivedIsOnline === true
+          && (!derivedLocationFromHelper || derivedLocationFromHelper.trim().length === 0);
+        let effectiveIsOnline: boolean;
+        if (helperForcesOnline) {
+          effectiveIsOnline = true;
+        } else if (typeof args.is_online === 'boolean') {
+          effectiveIsOnline = args.is_online;
+        } else {
+          effectiveIsOnline = derivedIsOnline === true;
+        }
         const skipLocationField =
-          args.is_online === true
-          || (derivedIsOnline === true
-              && (!derivedLocationFromHelper || derivedLocationFromHelper.trim().length === 0));
+          (args.is_online === true && (!args.location || (typeof args.location === 'string' && args.location.trim().length === 0)))
+          || (helperForcesOnline && !args.location);
         const resolvedLocationParts: string[] = await (async (): Promise<string[]> => {
           if (skipLocationField) return [];
           // v2.5.1 — yaml-driven skip. Categories flagged
@@ -2060,32 +2183,9 @@ export class SchedulingSkill {
 
       // v2.0.7 — legacy escalate_to_user / store_request / get_pending_requests /
       // resolve_request cases retired. See tool-declaration comment above.
-
-      case 'find_slack_user': {
-        if (!context.app) return { error: 'App not available in context' };
-        try {
-          const token = context.profile.assistant.slack.bot_token;
-          const result = await context.app.client.users.list({ token, limit: 200 });
-          const members = (result.members as any[]) ?? [];
-          const query = (args.name as string).toLowerCase();
-          const matches = members.filter(m =>
-            !m.deleted && !m.is_bot &&
-            (m.real_name?.toLowerCase().includes(query) ||
-             m.name?.toLowerCase().includes(query) ||
-             m.profile?.display_name?.toLowerCase().includes(query))
-          ).map(m => ({
-            slack_id: m.id,
-            name: m.real_name || m.profile?.display_name || m.name,
-            timezone: m.tz || 'UTC',
-            email: m.profile?.email,
-          }));
-          logger.info('find_slack_user', { query: args.name, matches: matches.length });
-          return { matches, count: matches.length };
-        } catch (err) {
-          logger.error('find_slack_user failed', { err: String(err) });
-          return { error: String(err) };
-        }
-      }
+      // v2.6.4 — dead duplicate find_slack_user case removed. Live handler had
+      // moved to skills/meetings.ts long ago; that one in turn moved to
+      // SlackConnection (src/connections/slack/index.ts) in v2.6.4.
 
       case 'coordinate_meeting': {
         if (!context.app) return { error: 'App not available in context' };

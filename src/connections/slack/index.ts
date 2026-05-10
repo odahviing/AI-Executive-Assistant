@@ -11,6 +11,7 @@
 
 import type { App } from '@slack/bolt';
 import type { Connection, ConnectionChannel, ConnectionUser, SendOptions, SendResult } from '../types';
+import type { UserProfile } from '../../config/userProfile';
 import {
   sendDM,
   sendMpim,
@@ -20,6 +21,9 @@ import {
   type SendOutcome,
 } from './messaging';
 import { formatForSlack } from './formatting';
+import { upsertPersonMemory, searchPeopleMemory } from '../../db';
+import { detectAndSaveGender } from '../../utils/genderDetect';
+import logger from '../../utils/logger';
 
 function toSendResult(outcome: SendOutcome): SendResult {
   if (outcome.ok) return { ok: true, ref: outcome.channel_id, ts: outcome.ts };
@@ -27,10 +31,13 @@ function toSendResult(outcome: SendOutcome): SendResult {
 }
 
 /**
- * Build a SlackConnection bound to a specific Bolt app + token pair.
+ * Build a SlackConnection bound to a specific Bolt app + token + profile.
  * Called once per profile on startup and registered in the Connection registry.
+ *
+ * v2.6.4 — profile threaded through so Slack-owned tools (find_slack_user)
+ * can read owner-domain for external-email detection without needing context.
  */
-export function createSlackConnection(app: App, botToken: string): Connection {
+export function createSlackConnection(app: App, botToken: string, profile: UserProfile): Connection {
   return {
     id: 'slack',
 
@@ -101,6 +108,200 @@ export function createSlackConnection(app: App, botToken: string): Connection {
       } catch {
         return null;
       }
+    },
+
+    // v2.6.4 — Slack-specific tools owned by the Connection itself, not by a
+    // skill. Skills are activities (meetings, outreach, summary); Connections
+    // are transports (Slack, email, future). Tools whose NAME or SEMANTICS
+    // are transport-bound live here. Today: find_slack_channel + find_slack_user.
+    // When EmailConnection lands, its getTools() will return find_email_thread,
+    // list_unread, etc. — same pattern.
+    getTools(_profile) {
+      return [
+        {
+          name: 'find_slack_channel',
+          description: 'Find a Slack channel ID by name. Use before message_colleague when the user specifies a channel (e.g. "post in #product") and you need the channel ID.',
+          input_schema: {
+            type: 'object',
+            properties: {
+              name: {
+                type: 'string',
+                description: 'Channel name to search for, with or without # (e.g. "product" or "#product")',
+              },
+            },
+            required: ['name'],
+          },
+        },
+        {
+          name: 'find_slack_user',
+          description: `Resolve a person to their Slack ID — used for sending Slack DMs.
+
+CRITICAL — when to call this:
+- You need to send a Slack DM (message_colleague, coord polling, heads-up).
+- You don't already know their Slack ID from @mention or WORKSPACE CONTACTS.
+
+DO NOT call this for booking meetings. Booking uses EMAIL, period.
+- create_meeting and coordinate_meeting take attendees as { name, email }. No Slack ID required for any attendee.
+- An external attendee (email outside the company domain) will NEVER have a Slack ID. That's normal. Outlook delivers calendar invites via email regardless.
+- An internal attendee may not have a Slack ID either (guests, deactivated, fresh hires) — still book via email; the heads-up Slack DM step skips silently.
+
+The result shape:
+- { matches: [...] } — person(s) found, slack_id usable for DMs.
+- { matches: [], external: true, email, message: ... } — query was an external email; proceed with that email for booking, no Slack DM possible.
+- { matches: [] } — name didn't match anyone in the workspace; try a different spelling, or if the user gave you an email, just book directly without this tool.
+
+If you already have an email for the person, you don't need this tool to book a meeting with them. Just call create_meeting or coordinate_meeting with the email.`,
+          input_schema: {
+            type: 'object',
+            properties: {
+              name: {
+                type: 'string',
+                description: 'The person\'s name, partial name, OR email address. When passed an email outside the owner\'s company domain, the tool returns { external: true } so you know to skip Slack and proceed directly with create_meeting / coordinate_meeting.',
+              },
+            },
+            required: ['name'],
+          },
+        },
+      ];
+    },
+
+    async reactToMessage(channelRef, messageTs, emojiName) {
+      try {
+        await app.client.reactions.add({
+          token: botToken,
+          channel: channelRef,
+          timestamp: messageTs,
+          name: emojiName,
+        });
+      } catch {
+        // fire-and-forget; reactions failing is not a contract violation
+      }
+    },
+
+    async executeToolCall(toolName, args) {
+      if (toolName === 'find_slack_channel') {
+        const results = await slackFindChannelByName(app, botToken, args.name as string);
+        return {
+          channels: results.map(c => ({ id: c.id, name: c.name })),
+          count: results.length,
+        };
+      }
+
+      if (toolName === 'find_slack_user') {
+        try {
+          const query = (args.name as string).toLowerCase();
+          // Store full raw member alongside match so we can read pronouns/image later
+          const matches: Array<{ slack_id: string; name: string; timezone: string; email?: string; _raw: any }> = [];
+          let cursor: string | undefined;
+
+          // Paginate through all workspace members — avoids missing people in large workspaces
+          do {
+            const result = await app.client.users.list({
+              token: botToken,
+              limit: 200,
+              ...(cursor ? { cursor } : {}),
+            });
+            const members = (result.members as any[]) ?? [];
+
+            for (const m of members) {
+              if (
+                !m.deleted && !m.is_bot &&
+                (m.real_name?.toLowerCase().includes(query) ||
+                 m.name?.toLowerCase().includes(query) ||
+                 m.profile?.display_name?.toLowerCase().includes(query))
+              ) {
+                matches.push({
+                  slack_id: m.id,
+                  name:     m.real_name || m.profile?.display_name || m.name,
+                  timezone: m.tz || 'UTC',
+                  email:    m.profile?.email,
+                  _raw:     m,
+                });
+              }
+            }
+
+            cursor = (result.response_metadata as any)?.next_cursor || undefined;
+          } while (cursor && matches.length < 20);
+
+          // Persist all matches into people_memory and kick off gender detection.
+          // Side-effect of finding someone on this transport: cache directory data.
+          for (const match of matches) {
+            upsertPersonMemory({
+              slackId:  match.slack_id,
+              name:     match.name,
+              email:    match.email,
+              timezone: match.timezone,
+            });
+            detectAndSaveGender({
+              slackId:  match.slack_id,
+              name:     match.name,
+              pronouns: match._raw?.profile?.pronouns || undefined,
+              imageUrl: match._raw?.profile?.image_192 || match._raw?.profile?.image_72 || undefined,
+              botToken,
+            }).catch(() => {});
+          }
+
+          // Fallback for guest users: users.list() may not return single/multi-channel guests.
+          // If no matches found, check people_memory for a known slack_id and validate via users.info().
+          if (matches.length === 0) {
+            const memoryMatches = searchPeopleMemory(args.name as string);
+            for (const pm of memoryMatches) {
+              if (!pm.slack_id || !/^U[A-Z0-9]{7,11}$/.test(pm.slack_id)) continue;
+              try {
+                const info = await app.client.users.info({ token: botToken, user: pm.slack_id });
+                const u = info.user as any;
+                if (u && !u.deleted) {
+                  matches.push({
+                    slack_id: u.id,
+                    name: u.real_name || u.profile?.display_name || u.name,
+                    timezone: u.tz || 'UTC',
+                    email: u.profile?.email,
+                    _raw: u,
+                  });
+                  upsertPersonMemory({
+                    slackId: u.id,
+                    name: u.real_name || u.profile?.display_name || u.name,
+                    email: u.profile?.email,
+                    timezone: u.tz || 'UTC',
+                  });
+                  logger.info('Found guest user via users.info fallback', { slackId: u.id, name: u.real_name });
+                }
+              } catch {
+                // users.info failed — ID might be invalid, skip
+              }
+            }
+          }
+
+          const cleanMatches = matches.map(({ _raw: _, ...m }) => m);
+
+          // External-email signal — when query was an email AND no Slack match
+          // AND email is outside owner's company domain, return external:true
+          // so Sonnet doesn't read the empty result as "blocked, can't book".
+          const queryRaw = (args.name as string).trim();
+          const isEmail = /@/.test(queryRaw);
+          const ownerEmail = (profile.user.email ?? '').toLowerCase();
+          const ownerDomain = ownerEmail.includes('@') ? ownerEmail.split('@')[1] : '';
+          const isExternalEmail = isEmail && ownerDomain &&
+            !queryRaw.toLowerCase().endsWith('@' + ownerDomain);
+          if (cleanMatches.length === 0 && isExternalEmail) {
+            return {
+              matches: [],
+              count: 0,
+              external: true,
+              email: queryRaw.toLowerCase(),
+              message: `${queryRaw} is an external email (outside ${ownerDomain}) — they don't need a Slack ID. Proceed with create_meeting / coordinate_meeting using the email; Outlook will deliver the calendar invite. Don't ask anyone to "forward the invite" — that's automatic.`,
+            };
+          }
+
+          logger.info('find_slack_user', { query: args.name, matches: cleanMatches.length });
+          return { matches: cleanMatches, count: cleanMatches.length };
+        } catch (err) {
+          logger.error('find_slack_user failed', { err: String(err) });
+          return { error: String(err) };
+        }
+      }
+
+      return null;
     },
   };
 }

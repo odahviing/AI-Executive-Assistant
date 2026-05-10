@@ -433,26 +433,78 @@ async function collectBriefingData(
   // in the brief for 7 days regardless of what 'informed' was doing.
   const tasks = getBriefableTasks(ownerUserId, sevenDaysAgo);
 
+  // v2.6.5 — pre-fetch pending approvals linked to surfaced tasks. Pre-fix,
+  // a `policy_exception` task surfaced via getBriefableTasks but the brief
+  // item only carried task.title (e.g. "Julia: policy exception needs your
+  // input"). The actual ASK details live on the approval row (ask_text +
+  // payload). Without this hydration, the brief Sonnet had no facts and
+  // hallucinated "can you share the details or let me know how to proceed?"
+  // — owner had to dig manually. JOIN once here, attach to the relevant
+  // task item below.
+  const approvalsByTask = new Map<string, { kind: string; ask_text: string | null; payload: any }>();
+  if (tasks.length > 0) {
+    const taskIds = tasks.map(t => t.id);
+    const placeholders = taskIds.map(() => '?').join(',');
+    try {
+      const rows = db.prepare(
+        `SELECT task_id, kind, ask_text, payload_json FROM approvals
+         WHERE task_id IN (${placeholders}) AND status = 'pending'`,
+      ).all(...taskIds) as Array<{ task_id: string; kind: string; ask_text: string | null; payload_json: string | null }>;
+      for (const r of rows) {
+        let payload: any = null;
+        if (r.payload_json) {
+          try { payload = JSON.parse(r.payload_json); } catch { /* keep null */ }
+        }
+        approvalsByTask.set(r.task_id, {
+          kind: r.kind,
+          ask_text: r.ask_text,
+          payload,
+        });
+      }
+    } catch (err) {
+      logger.warn('brief — approvals hydration query threw, falling back to task-only items', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
   for (const task of tasks) {
+    let item: RichItem;
     if (task.skill_origin === 'outreach' && task.skill_ref) {
       const job = db.prepare(`SELECT * FROM outreach_jobs WHERE id = ?`).get(task.skill_ref) as any;
       if (job) {
-        const item = buildOutreachItem(job, ownerCalendarEvents, profile, timezone);
-        if (item.verified_outcome) outreachToClose.push(job.id);
-        items.push(item);
+        item = buildOutreachItem(job, ownerCalendarEvents, profile, timezone);
+        if ((item as any).verified_outcome) outreachToClose.push(job.id);
       } else {
-        items.push(buildTaskItem(task, timezone));
+        item = buildTaskItem(task, timezone);
       }
     } else if (task.skill_origin === 'meetings' && task.type === 'coordination' && task.skill_ref) {
       const job = db.prepare(`SELECT * FROM coord_jobs WHERE id = ?`).get(task.skill_ref) as any;
       if (job) {
-        items.push(buildCoordItem(job, ownerCalendarEvents, profile, timezone));
+        item = buildCoordItem(job, ownerCalendarEvents, profile, timezone);
       } else {
-        items.push(buildTaskItem(task, timezone));
+        item = buildTaskItem(task, timezone);
       }
     } else {
-      items.push(buildTaskItem(task, timezone));
+      item = buildTaskItem(task, timezone);
     }
+
+    // v2.6.5 — attach pending approval context to the item when present.
+    // Surfaces ask_text + key payload fields so the brief Sonnet has actual
+    // facts and doesn't ask the owner what the ask is about.
+    const approval = approvalsByTask.get(task.id);
+    if (approval) {
+      (item as any).approval = {
+        kind: approval.kind,
+        ask_text: approval.ask_text,
+        subject: approval.payload?.subject ?? null,
+        requester_name: approval.payload?.requester_name ?? null,
+        proposed_start: approval.payload?.proposed_start ?? approval.payload?.start ?? null,
+        proposed_end: approval.payload?.proposed_end ?? approval.payload?.end ?? null,
+      };
+    }
+
+    items.push(item);
     if (task.status === 'completed') taskIdsToInform.push(task.id);
   }
 
@@ -555,6 +607,8 @@ Things that DO NOT count, even if they involve a decision:
 - A colleague's draft / suggestion / FYI — surface in their paragraph.
 
 Principle: nobody can assign ${firstName} work. Only HIS rules / HIS calendar / HIS approvals can produce action items. A colleague's chat suggestion is a conversation, not an action item — even when it ends in a question to him.
+
+ACTION-ITEM CONTEXT RULE: when an item has an \`approval\` block (kind, ask_text, subject, requester_name, proposed_start), USE those facts. The action item should describe what the request actually is — *"Julia wants to override your Monday focus block to fit a customer call — your call"*, not *"Julia raised a policy exception that needs your call, can you share the details?"*. NEVER ask ${firstName} what the item is about — he filed it through you, the data is right there in the \`approval\` block. If the approval block is missing or empty, surface the gap honestly (*"I have a pending Julia approval but the context didn't make it through — let me dig"*) rather than asking him for information you should have.
 
 ${calendarListingFormatRule(firstName)}
 

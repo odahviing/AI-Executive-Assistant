@@ -9,9 +9,6 @@ import {
   slugifyName,
   listPersonFiles,
 } from '../memory/peopleMemory';
-// v2.2 — socialEngagement module retired. Owner social signals are now
-// tracked by the Social Engine on the orchestrator's post-turn pass; the
-// per-turn "engagement upgrader" is no longer needed.
 import { DateTime } from 'luxon';
 import logger from '../utils/logger';
 

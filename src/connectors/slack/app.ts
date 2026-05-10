@@ -75,7 +75,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     // which imports from this module via messaging.ts.
     const { createSlackConnection } = require('../../connections/slack') as typeof import('../../connections/slack');
     const { registerConnection } = require('../../connections/registry') as typeof import('../../connections/registry');
-    registerConnection(user.slack_user_id, createSlackConnection(app, assistant.slack.bot_token));
+    registerConnection(user.slack_user_id, createSlackConnection(app, assistant.slack.bot_token, profile));
   }
 
   // ── Channel type helpers ──────────────────────────────────────────────────
@@ -567,12 +567,6 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // v1.7.6 — gate cleared, we're going to respond. Add the read receipt NOW
       // so the user sees the eye emoji exactly when Maelle is committing to a reply.
       addReadReceipt();
-
-      // v2.2 — the legacy socialEngagement upgrader is retired. Owner-side
-      // social signals are now tracked by the new Social Engine
-      // (src/core/social/) on the orchestrator's post-turn pass. Colleague
-      // rapport no longer tracks topic quality upgrades; only
-      // notes/interactions remain as memory primitives.
 
       // v2.3.2 — deterministic brief-request short-circuit (owner DM only).
       // When the owner asks "didn't get my morning update" / "send the brief"

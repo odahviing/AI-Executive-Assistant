@@ -7,7 +7,15 @@
  *
  * Inbound routing stays in each transport's own app.ts / webhook handler —
  * the Connection interface is intentionally outbound-only for v1.
+ *
+ * v2.6.4 — Connections may also OWN tools (`getTools` / `executeToolCall`)
+ * for transport-specific primitives (Slack's find_slack_channel, future
+ * email's find_email_thread, etc.). Skills registry merges these alongside
+ * skill tools so Sonnet sees one unified tool list.
  */
+
+import type Anthropic from '@anthropic-ai/sdk';
+import type { UserProfile } from '../config/userProfile';
 
 /**
  * Transport identifier. String type (not enum) so new transports can register
@@ -145,6 +153,36 @@ export interface Connection {
    * override them later.
    */
   collectCoreInfo?(ref: string): Promise<CoreInfoFromTransport | null>;
+
+  /**
+   * v2.6.4 — Tools that ONLY make sense for this transport. Slack today:
+   * find_slack_channel. Future email: find_email_thread, list_unread, etc.
+   *
+   * Optional — connections that don't own any tools (or transports that
+   * piggyback entirely on the universal outreach skill) just don't implement.
+   *
+   * Tools returned here get merged with skill-tools by `getSkillTools` in
+   * src/skills/registry.ts. Same colleague-allowlist filter applies.
+   */
+  getTools?(profile: UserProfile): Anthropic.Tool[];
+
+  /**
+   * v2.6.4 — Handle a tool call for a tool this Connection owns. Return null
+   * if this Connection doesn't recognize the tool name (registry falls
+   * through to next handler). Return a result object on success.
+   */
+  executeToolCall?(toolName: string, args: Record<string, unknown>): Promise<unknown | null>;
+
+  /**
+   * v2.6.5 — react to a previously-sent message. Used for activity-completion
+   * markers (✅ when a task completes). Optional — transports without
+   * reactions (email, SMS) simply don't implement; callers no-op when absent.
+   *
+   * Intentionally fire-and-forget shape (returns void). The caller doesn't
+   * branch on success/failure for these — the reaction is a nice-to-have UI
+   * touch, not part of any contract.
+   */
+  reactToMessage?(channelRef: string, messageTs: string, emojiName: string): Promise<void>;
 }
 
 /**

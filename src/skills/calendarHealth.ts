@@ -688,6 +688,14 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
         //     move-coord on the movable side (Path b)
         //   - busy_day → DM the owner with candidates to move (no auto-move)
         let fixesApplied = 0;
+        // v2.6.5 — internal_actions surfaces active-mode auto-fixes back up
+        // through the tool result so the claim-checker can see them. Without
+        // this, Sonnet's draft "I auto-fixed lunch on Tuesday" would be
+        // flagged as a hallucination because the claim-checker only sees the
+        // top-level tool (`check_calendar_health`), not the internal
+        // book_floating_block / updateMeeting calls. The orchestrator's
+        // summary-builder pushes each entry into toolCallSummaries.
+        const internalActions: Array<{ tool: string; detail: string }> = [];
         if (mode === 'active') {
           logger.info('Calendar health: active mode — running fix loop', {
             ownerUserId, startDate, endDate, issueCount: issues.length,
@@ -708,6 +716,10 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                   issue.fixed = true;
                   issue.fix_detail = `Booked ${issue.block_name ?? 'floating block'} ${issue.date} ${result.start}–${result.end}.`;
                   fixesApplied += 1;
+                  internalActions.push({
+                    tool: 'book_floating_block',
+                    detail: `${issue.block_name ?? 'floating block'} ${issue.date} ${result.start}–${result.end}`,
+                  });
                 } else if (result?.error) {
                   issue.fix_failed = true;
                   issue.fix_error = result.message ?? result.error;
@@ -728,6 +740,10 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                     issue.fixed = true;
                     issue.fix_detail = `Tagged "${event.subject}" as ${picked}.`;
                     fixesApplied += 1;
+                    internalActions.push({
+                      tool: 'set_event_category',
+                      detail: `Tagged "${event.subject}" as ${picked}`,
+                    });
                   }
                 }
               }
@@ -1090,6 +1106,10 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
           count: issues.length,
           mode,
           fixes_applied: fixesApplied,
+          // v2.6.5 — surface internal mutations so the claim-checker doesn't
+          // false-positive on legitimate auto-fix claims. Empty array stays
+          // empty — only populated when active mode actually mutated something.
+          internal_actions: internalActions.length > 0 ? internalActions : undefined,
           activeTrackedIssues: activeIssues.length > 0 ? activeIssues : undefined,
           summary: issues.length === 0
             ? 'Calendar looks healthy — no issues found.'
