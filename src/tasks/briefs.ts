@@ -445,10 +445,22 @@ async function collectBriefingData(
   if (tasks.length > 0) {
     const taskIds = tasks.map(t => t.id);
     const placeholders = taskIds.map(() => '?').join(',');
+    // v2.6.7-fix — the original SELECT included `ask_text` as a column on
+    // `approvals`, but no such column exists (the value lives on the parent
+    // task's `description` field — that's what `create_approval` stores it
+    // as at tasks/skill.ts:718). The query threw silently in the catch
+    // below every brief generation since v2.6.4 shipped — so the
+    // approval-hydration fix has never actually run. JOIN tasks instead so
+    // ask_text comes from tasks.description where it actually lives.
     try {
       const rows = db.prepare(
-        `SELECT task_id, kind, ask_text, payload_json FROM approvals
-         WHERE task_id IN (${placeholders}) AND status = 'pending'`,
+        `SELECT a.task_id AS task_id,
+                a.kind AS kind,
+                t.description AS ask_text,
+                a.payload_json AS payload_json
+         FROM approvals a
+         JOIN tasks t ON t.id = a.task_id
+         WHERE a.task_id IN (${placeholders}) AND a.status = 'pending'`,
       ).all(...taskIds) as Array<{ task_id: string; kind: string; ask_text: string | null; payload_json: string | null }>;
       for (const r of rows) {
         let payload: any = null;

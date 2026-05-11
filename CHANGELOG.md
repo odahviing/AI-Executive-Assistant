@@ -2,6 +2,40 @@
 
 ---
 
+## 2.6.8 — Brief approval-hydration finally works + coda piggyback disabled
+
+Two surgical fixes triggered by 2026-05-11 morning brief inspection.
+
+### Fixed — brief approval-hydration SQL error (load-bearing)
+
+The v2.6.4 #3 fix that was supposed to JOIN approval payload onto brief items hasn't been running. The query at `briefs.ts:450` selected `ask_text` from `approvals` — but no such column exists. The value lives on the parent task's `description` field (set by `create_approval` at `tasks/skill.ts:718`). The SELECT threw `no such column: ask_text` every brief generation since v2.6.4 shipped, fell into the surrounding try/catch silently, and brief Sonnet got an empty approvalsByTask map every time. Outcome: brief items had no approval block attached, Sonnet wrote "didn't come through cleanly, can you share the details?" for every pending approval — exactly the failure mode v2.6.4 #3's prompt rule was supposed to prevent.
+
+Fixed by switching to `JOIN tasks ON tasks.id = approvals.task_id` and selecting `tasks.description AS ask_text`. The downstream prompt-rule + approval-block-render code was correct all along — just never ran with real data.
+
+This was the upstream root cause of the recurring "she flagged this... I don't have the specifics" pattern across Julia's policy_exception and Yael's Investor Call surface-mentions in today's brief.
+
+### Removed — coda piggyback on task turns
+
+Pre-fix, codas fired on any owner-DM turn that called `coordinate_meeting`, `create_approval`, `resolve_approval`, or `message_colleague` ([orchestrator/index.ts:1664-1674](src/core/orchestrator/index.ts:1664)). The picker is context-blind: it grabs the highest-engaged social subject from any category, regardless of what the current conversation is about. Result: mid-meeting-booking, owner got a non-sequitur "btw that Samuel L. Jackson movie..." attempt (2026-05-11 21:58 — the coda validator at `mode='coda'` caught it as `invented_fact` and dropped, but the misfire pattern is the actual bug, not the dropped output).
+
+The original v2.2.1 design intent (human EA weaves social during parked-work lulls) doesn't survive contact with reality — the picker can't know which active subject is contextually appropriate, and Sonnet can't either. Owner direction (2026-05-11): drop the piggyback entirely. Codas only fire through the social state machine's existing paths:
+
+- kind=social turns (genuine social conversation initiated by the person)
+- kind=other + conversation_state=open turns (in-conversation proactive during chat lulls)
+- the hourly `socialOutreachTick` cron (cold-DM outreach, owner-time-agnostic)
+
+All three preserved. Only the task-turn piggyback gate killed. Set `codaEligible = false` unconditionally with comment explaining the historical context.
+
+### Not changed
+
+- Bug 1.1 (Julia orphan tasks from May 6) — pre-v2.6.0 artifacts. Run `scripts/cleanup-approved-orphan-tasks.cjs` manually for one-off cleanup.
+- Bug 1.2 (Investor Call orphan slot_pick approvals from May 10) — root cause was v2.6.6 Guard A refusing externals, already fixed at root. Two existing approvals on disk need manual cancellation; no recurrence path.
+- Bug 1.4 (phantom CISO coord_jobs) — root cause v2.6.5 fast-path Case B not yet running at time of incident, already fixed at root. Three existing coord_job rows need manual cleanup.
+- Bug 1.6 (duplicate reminder spam) — downstream of 1.2 orphans; will stop once those approvals are manually closed.
+- Bug 1.9 (Maya hallucinated capability — Maelle promised to reach external) — separate concern, raised but not in this bundle.
+
+---
+
 ## 2.6.7 — Social Engine redesign: subjects + topic-beats, semantic merge, engagement signal
 
 Closes [#93](https://github.com/odahviing/AI-Executive-Assistant/issues/93) — social topic fragmentation. The 2026-05-10 Clair Obscur incident (9 active rows for one game) surfaced a structural bug in the social engine: the classifier produced fresh topic labels per beat ("act 2 progress", "ending choice", "finished") and a downstream Jaccard ≥ 0.5 surface-string matcher couldn't merge them with the original "Clair Obscur Expedition 33" — because beat vocabulary doesn't share enough surface tokens with anchor labels. Same-game beats spawned parallel rows. The coda picker had 9 overlapping rows to round-robin across; finished games stayed at score 7 forever; engagement quality didn't show through.

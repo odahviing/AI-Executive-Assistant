@@ -1644,34 +1644,26 @@ Rules:
     // reschedule-specific case we'd add an intent gate; for now the pattern is
     // tight enough that the false-positive rate is acceptable.
   ) {
-    // v2.6.5 — coda eligibility moved from a single tool-name regex to
-    // state-aware boolean signals. The intent is: fire codas in QUIET
-    // moments — task parked (waiting on someone else) OR task settled
-    // (approval just resolved). The regex form lumped all the parking-shape
-    // tools into one match which made it hard to extend; the boolean form
-    // names each state Maelle is actually in after the turn.
+    // v2.6.5 / v2.6.7-fix — piggyback-coda-on-task-turns DISABLED.
     //
-    // Existing gates still apply: conversation_state classifier suppresses
-    // 'closing'; 24h cadence still rate-limits; coda validator drops
-    // invented facts. These flags just open the door to MORE quiet moments
-    // (resolve_approval is the new addition — confirmation of a booking is
-    // a settled moment, was previously excluded).
+    // The original design (v2.2.1, kept through v2.6.5) fired social codas
+    // on task turns where Maelle parked the work waiting on someone else —
+    // intent: a human EA would naturally weave in social during the lull.
+    // In practice the picker is context-blind: it grabs the highest-engaged
+    // active subject from any category, regardless of what the current
+    // conversation is about. Result: mid-meeting-booking, owner gets a
+    // non-sequitur "btw that Samuel L. Jackson movie..." (2026-05-11
+    // 21:58 incident — coda validator caught it as invented_fact and
+    // dropped, but the misfire pattern itself was the bug).
     //
-    // Phase 2 (later, when the v2.6.5 task-completion hook is fully wired):
-    // swap the tool-name detection for "task transitioned to completed
-    // this turn" — strictly better signal. For now, derive intent from the
-    // tool summary names produced this turn.
-    const turnCreatedOutboundToColleague = toolCallSummaries.some(s =>
-      s.startsWith('[message_colleague') || s.startsWith('[outreach_send'),
-    );
-    const turnRaisedApproval = toolCallSummaries.some(s => s.startsWith('[create_approval'));
-    const turnResolvedApproval = toolCallSummaries.some(s => s.startsWith('[resolve_approval'));
-    const turnStartedCoord = toolCallSummaries.some(s => s.startsWith('[coordinate_meeting'));
-    const codaEligible =
-      turnCreatedOutboundToColleague ||
-      turnRaisedApproval ||
-      turnResolvedApproval ||
-      turnStartedCoord;
+    // Owner direction (2026-05-11): drop the piggyback entirely. Codas only
+    // fire through the social state machine's existing paths — kind=social
+    // (genuine social conversation), kind=other + conversation_state=open
+    // (in-conversation proactive), and the hourly socialOutreachTick
+    // cold-DM cron (owner-time-agnostic outreach). All three remain in
+    // place; only this task-turn piggyback is killed.
+    const codaEligible = false;
+    void toolCallSummaries; // intentionally unused now; gate above is hard false
     if (codaEligible) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
