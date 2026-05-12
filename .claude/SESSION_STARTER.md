@@ -56,9 +56,49 @@ NOT:
 
 ---
 
-## Where we are — v2.6.9 just shipped
+## Where we are — v2.7.0 just shipped (2026-05-12)
 
-**Operational state (v2.6.9):**
+**Phase right now: bug bash for stability — NOT new features.**
+The next two days are dedicated to shaking out anything that broke in the 1-2-3 trilogy rewrite. The goal is to make v2.7 the first version that owner trusts as **stable enough to leave alone for a week**. Every regression caught and squashed during this window is worth more than any new capability.
+
+After v2.7 is verifiably stable, the roadmap unlocks:
+- **WhatsApp Connection** — new transport behind the existing Connection interface (Email connector skeleton already in tree; WhatsApp follows the same shape).
+- Other roadmap items: see `## Open improvement tickets (GitHub)` block below + the Roadmap section of README.md. Don't propose them until owner says "stable, moving forward."
+
+**The bug-fix workflow** (DO NOT skip a step — every step has been chewed on):
+1. **Understand.** Read the screenshot / issue. Code-trace against current files on disk. Don't guess.
+2. **Propose.** Write up: what's broken, where (file:line), and the proposed fix. Code vs prompt — prefer code for determinism, prompt for judgment (per CLAUDE.md).
+3. **Discuss.** Wait for owner to revise / push back / approve. He often re-frames or rejects the agent's first read — that iteration IS the value.
+4. **Build.** Only after explicit approval. Typecheck. Stop.
+Never auto-fix. Never bundle multiple fixes without owner saying so. **Default version bump is PATCH** unless owner explicitly says minor.
+
+---
+
+**Operational state (v2.7.0):**
+
+The 1-2-3 trilogy is the headline:
+
+- **Requests spine is THE work-item layer (v2.7.0 / bug 1).** Every async user-facing work item — approvals, outreach, reminders, follow-ups, research, coord — is one row in `requests` with single closure API `closeRequest`. Lifecycle timers live on the row (`next_check_at` + `next_check_handler`). Legacy tables (`tasks`, `approvals`, `coord_jobs`, `outreach_jobs`) retained as internal state machines, bridged via `request_id` columns. Brief reads from requests. System prompt PENDING APPROVALS reads awaiting_owner. Emoji ✅ matches `terminal_dm_msg_ts` (only the terminal-question DM stamps it; reminder DMs deliberately don't). `surfaced_count >= 3` on awaiting_owner → auto-park as cancelled with closure narration in the next brief, then drop. LLM-judged dedup in `create_approval` closes the Julia 5x / Yael 4x pattern at the source. `closeLoopOnOwnerHandled` scanner reads requests.
+  - **Cutover script** (`scripts/cutover-to-requests.cjs`) wipes legacy in-flight rows. Owner ran this at v2.7.0 deploy. Don't re-run unless intentional.
+  - **Files**: `src/db/requests.ts`, `src/db/cronSchedules.ts`, `src/core/requests/{types,closeRequest,resolver,runner}.ts`, `src/utils/requestDedup.ts`.
+
+- **Meeting decision engine `planMeeting` (v2.7.0 / bug 2).** Every scheduling intent (find / book / move / cancel) flows through one decision function with 6 actions: `book`, `find_slots`, `confirm_override`, `escalate_approval`, `decline_and_relay`, `refuse_not_owners`. All 5 tools route through it. `resolveLocation` is single location decision (priority: owner explicit > category default > day-type defaults). `findMeetingOwner` reads requests-first / Graph-organizer-fallback with people_memory enrichment so the asker-vs-organizer check works for the common case (most of owner's calendar is NOT booked through Maelle — weeklies, customer invites, Calendly). `scheduleRules.checkSlot` is single rule engine.
+  - **Not-organizer cancel** → decline owner side + auto-DM organizer with relay_status honesty (`sent` / `skipped_no_slack_id` / `not_attempted`). Tool result `_note` warns Sonnet when DM was skipped so she doesn't over-claim "I notified them."
+  - **Not-organizer move** → pure refusal, NO auto-DM (per owner direction D4 — different from cancel).
+  - **Move office↔home flip** → planMeeting re-resolves location + category; `updateMeeting` accepts new optional `location` + `isOnline` params.
+  - **Files**: `src/skills/meetings/{planMeeting,findMeetingOwner,detectCategory}.ts`, `src/utils/{resolveLocation,scheduleRules}.ts`.
+
+- **Slot finder reform (v2.7.0 / bug 3).** `pickSpreadSlots` tightened: ≤3 total, ≤2/day, ≥1h gap, ≥2 unique days when 3, graceful 1-2 returns. Floating-block movability check — lunch 11:30-13:30 / 25min no longer falsely blocks a 12:00-12:25 meeting (the rule passes when contiguous free segment ≥ block.duration_minutes remains in the window after accommodating the proposed slot). Colleague-path `find_available_slots` now annotates each slot with per-attendee status (internal getFreeBusy + external `unknown`). Owner-path retains busy-drop. `profile.schedule.timezone_preferences` + `night_shift` rendered dynamically in prompt as SOFT preferences with Sonnet judgment for UK/AU/EU adaptation. Preferences are deliberately NOT code-level filtering — owner direction: code reads valid slots, prompt guides Sonnet on which to surface.
+
+- **Deleted in v2.7.0**: `src/core/approvals/orphanBackfill.ts` + `outreachOrphanBackfill.ts` (correct-by-construction now), `determineSlotLocation`, `helperForcesOnline`/`skipLocationField` flag mess, `markTaskInformed`/`completed→informed` two-step.
+
+**Carry-over operational state from prior versions (still LIVE):**
+- **Auto-triage + auto-build are OFF.** Both workflows in tree but gated `if: false &&`. Owner files GitHub issues / shows screenshots; we fix interactively. **GitHub remains the bug data source** — keep using `gh issue list/view`.
+- **PM2 + deploy watcher are OFF.** Owner runs `npm run dev` directly; restart needed to pick up changes. Note: 2026-05-07 we discovered a stale PM2 process from May 5 (v2.5.4) was running ALONGSIDE `npm run dev`, intercepting Slack events with old code — owner killed it. Worth re-verifying `pm2 list` shows nothing if anything weird ever surfaces.
+- **processedDedup TTL is 10 minutes** (bumped from 60s in v2.7.0). Slack socket-mode is at-least-once: when the bot disconnects (e.g. `npm run dev` restart) Slack queues events and re-delivers on reconnect. The retry window can run several minutes. 10min covers realistic socket-reconnect retry windows.
+- **Catch-up icon** uses U+FE0F variation selector (`↩️`) so Slack desktop renders it as a colored emoji not text-style arrow.
+
+**Operational state (carried from v2.6.x) — unchanged:**
 - **Auto-triage + auto-build are OFF.** Both workflows in tree but gated `if: false &&`. Owner files GitHub issues / shows screenshots; we fix interactively. **GitHub remains the bug data source** — keep using `gh issue list/view`.
 - **PM2 + deploy watcher are OFF.** Owner runs `npm run dev` directly; restart needed to pick up changes. Note: 2026-05-07 we discovered a stale PM2 process from May 5 (v2.5.4) was running ALONGSIDE `npm run dev`, intercepting Slack events with old code — owner killed it. Worth re-verifying `pm2 list` shows nothing if anything weird ever surfaces.
 - **Channel thread-continuation is LIVE (v2.6.2).** Real-channel `message` event handler at `connectors/slack/app.ts` lets thread replies through when Maelle has at least one assistant turn in that thread's history. Once she's @-mentioned and replied once, follow-up messages flow without repeated `@mention`. Top-level channel chatter still drops; threads she's never engaged with still drop. Bots-as-people invariant verified — agents in your workspace can `@Maelle` her in a channel and she responds like to humans.
@@ -77,16 +117,7 @@ NOT:
 - **Per-turn calendar memoization is LIVE (v2.5.0 A3).** `withTurnCache` wraps every orchestrator turn via AsyncLocalStorage. `getCalendarEvents` opts in via `memoize(key, fetch)`.
 - **`coordinate_meeting.participants` schema (v2.5.0 C1):** `email` is REQUIRED, `slack_id` is OPTIONAL. Externals auto-demote to `just_invite` at handler level.
 
-**Default workflow when owner files / shows a bug:**
-1. **Understand.** Read the issue body + screenshot. Code-trace against current files on disk. Don't guess.
-2. **Propose.** Write up: what's broken, where (file:line), and the proposed fix. Code vs prompt — prefer code for determinism, prompt for judgment (per CLAUDE.md).
-3. **Discuss.** Wait for owner to revise / push back / approve. He often re-frames or rejects the agent's first read — that iteration IS the value.
-4. **Build.** Only after explicit approval. Typecheck. Stop.
-Never auto-fix. Never bundle multiple fixes without owner saying so.
-
-**Default version bump: PATCH** unless owner explicitly says minor. He has corrected this multiple times.
-
-**v2.6.9 wave** (most recent — three patches Sun→Mon, 2026-05-11/12):
+**v2.6.9 wave** (prior — three patches Sun→Mon, 2026-05-11/12, all rolled into v2.7.0 context above):
 
 - **v2.6.9 (channels reach criteria + cannot-reach rule)** — closes the 2026-05-11 Maya/Yael hallucinated-capability bug. Pre-fix the `CHANNELS YOU CAN REACH PEOPLE THROUGH` block listed transports without saying who each could reach; Sonnet conflated "Slack active" with "everyone reachable on Slack" and promised to "reach out directly" to an external attendee with no slack_id. Fix: each transport now declares its reach criteria (Slack → internal workspace, Email → anyone with email, WhatsApp → anyone with phone). Plus a new CANNOT-REACH RULE with ❌/✅ examples saying when no transport can reach someone, acknowledge honestly + offer alternative (Outlook invite for booking, forward via internal contact). Prompt-only fix, no code changes beyond the systemPrompt.ts rewrite of that block.
 
