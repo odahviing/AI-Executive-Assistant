@@ -2,6 +2,41 @@
 
 ---
 
+## 2.6.9 — Channels declare reach criteria; can't-reach rule added
+
+Closes bug 1.9 (Maelle hallucinated capability — promised to "reach out directly" to an external attendee with no transport that could reach them, 2026-05-11 Maya/Yael thread).
+
+### Changed — CHANNELS block now names per-transport reach criteria
+
+Pre-fix, the `CHANNELS YOU CAN REACH PEOPLE THROUGH` block listed available transports without saying WHO each could reach ("Slack — your primary channel"). Sonnet conflated "Slack is active" with "everyone reachable via Slack," then promised to contact externals that have no Slack presence.
+
+The fix is structural and simple: each transport in the block now declares its reach criteria:
+
+- Slack — internal workspace members only (need slack_id in people_memory). External attendees (different email domain) are NOT on Slack.
+- Email — anyone with an email address.
+- WhatsApp — anyone with a phone number on record.
+
+So Sonnet maps person → channel directly: if the person has a slack_id, Slack works; if not, only the email/whatsapp transports could reach them — and those require their respective connectors to be active.
+
+### Added — CANNOT-REACH RULE
+
+New explicit prompt rule below the CHANNELS block:
+
+> When no transport above can reach someone, say so honestly. Don't promise.
+> - The person must have a property matching one of the active transports (slack_id for Slack, email for Email, phone for WhatsApp).
+> - If NONE match, you have NO way to ping them directly. Outlook calendar invites still work for booking, but that's it — you can't "check in advance" or "let them know" before the invite.
+> - ❌ "I'll reach out to Maya directly to check her availability" (external, no Slack)
+> - ✅ "Maya's external, I can't ping her ahead. I can send her the Outlook invite for Wednesday and she'll see it from there."
+
+This makes the gap between "booking with externals" (Outlook invite — works since v2.6.6) and "coordinating with externals before booking" (impossible without email/whatsapp transports) structurally visible to Sonnet.
+
+### Not changed
+
+- No code-level validator added (option C from the design conversation skipped). The CHANNELS block + CANNOT-REACH RULE put the constraint in the right place — if Sonnet drifts in practice we can add the deterministic validator later.
+- Bugs from morning batch still need manual cleanup: 2 pending Investor Call approvals, 2 Julia policy_exception orphan tasks, 3 stuck coord_jobs.
+
+---
+
 ## 2.6.8 — Brief approval-hydration finally works + coda piggyback disabled
 
 Two surgical fixes triggered by 2026-05-11 morning brief inspection.
