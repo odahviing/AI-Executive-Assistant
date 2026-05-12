@@ -2,6 +2,27 @@
 
 ---
 
+## 2.6.10 — Doc wrap: SESSION_STARTER version-bump rule loud, memory caught up
+
+Documentation-only patch. Owner caught the agent shipping 4 patches across Sun/Mon (v2.6.6 → v2.6.9) with 2 of them committed on build-only words ("go" / "go for all") that look like approval but are NOT bundle signals per `feedback_bundle_signals.md`. Memory was correct; agent didn't honor it.
+
+### Added
+
+- Loud DO-NOT-BUMP-VERSION block at the top of `.claude/SESSION_STARTER.md`, above the "Where we are" section. Lists the actual bundle signals ("wrap up" / "ship it" / "commit" / etc.) and explicitly names the build-only false-positives ("go" / "go for all" / "yes" / "ok" / "land it"). With a concrete close-template example so the agent knows what to write after a code change vs after a wrap.
+
+### Changed
+
+- SESSION_STARTER `Where we are` bumped to v2.6.9. Wave block updated with the v2.6.7/v2.6.8/v2.6.9 entries.
+- Memory file (`project_overview.md`) head-paragraph updated to v2.6.9 with v2.6.7-9 changes folded in.
+
+### Not changed
+
+- No code touched. No behavior change.
+- Cleanup-list items from morning batch still pending owner cleanup: 2 Investor Call pending approvals, 2 Julia policy_exception orphan tasks, 3 stuck coord_jobs.
+- Open bugs raised but not actioned this session: 1.3 (Lori paragraph — owner skipped), 1.7 (task-shaped topic-beats — mostly mooted by 1.8).
+
+---
+
 ## 2.6.9 — Channels declare reach criteria; can't-reach rule added
 
 Closes bug 1.9 (Maelle hallucinated capability — promised to "reach out directly" to an external attendee with no transport that could reach them, 2026-05-11 Maya/Yael thread).

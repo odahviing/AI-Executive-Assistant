@@ -26,9 +26,39 @@ State context worth keeping in head:
 
 ---
 
-## Where we are — v2.6.7 just shipped
+## ⚠️ DO NOT BUMP THE VERSION WITHOUT EXPLICIT OWNER APPROVAL
 
-**Operational state (v2.6.7):**
+This is the rule that gets broken the most. Re-stating it loud:
+
+**NEVER edit `package.json` version, NEVER write a CHANGELOG entry, NEVER commit, NEVER push** unless the owner has said one of: **"wrap up" / "wrap it" / "ship it" / "commit" / "push" / "close the patch" / "cut a version" / "bundle" / "let's finish for today"**.
+
+Build-only words that LOOK like approval but are **NOT** bundle signals — write code, run typecheck, stop, then summarize the uncommitted tree and wait:
+- "go"
+- "go for all"
+- "go ahead"
+- "yes"
+- "ok"
+- "do this"
+- "land it"
+- "fix it"
+- "build it"
+- "start building"
+
+**If you find yourself drafting a CHANGELOG entry unprompted → stop. You're about to commit something the owner didn't ask you to ship.**
+
+The 2026-05-12 session shipped 4 patches in two days; 2 of them ("go" / "go for all") were build-only signals that the agent mis-read as commit-OK. Owner caught one and reverted; the others went out unbidden. Don't do this again.
+
+After implementing a fix, the close should look like:
+> *"Built and typecheck clean. Tree shows: \[file list\]. Your call when to bundle."*
+
+NOT:
+> *"Shipped 2.6.X (commit \[hash\]). Restart npm run dev..."*
+
+---
+
+## Where we are — v2.6.9 just shipped
+
+**Operational state (v2.6.9):**
 - **Auto-triage + auto-build are OFF.** Both workflows in tree but gated `if: false &&`. Owner files GitHub issues / shows screenshots; we fix interactively. **GitHub remains the bug data source** — keep using `gh issue list/view`.
 - **PM2 + deploy watcher are OFF.** Owner runs `npm run dev` directly; restart needed to pick up changes. Note: 2026-05-07 we discovered a stale PM2 process from May 5 (v2.5.4) was running ALONGSIDE `npm run dev`, intercepting Slack events with old code — owner killed it. Worth re-verifying `pm2 list` shows nothing if anything weird ever surfaces.
 - **Channel thread-continuation is LIVE (v2.6.2).** Real-channel `message` event handler at `connectors/slack/app.ts` lets thread replies through when Maelle has at least one assistant turn in that thread's history. Once she's @-mentioned and replied once, follow-up messages flow without repeated `@mention`. Top-level channel chatter still drops; threads she's never engaged with still drop. Bots-as-people invariant verified — agents in your workspace can `@Maelle` her in a channel and she responds like to humans.
@@ -56,7 +86,13 @@ Never auto-fix. Never bundle multiple fixes without owner saying so.
 
 **Default version bump: PATCH** unless owner explicitly says minor. He has corrected this multiple times.
 
-**v2.6.7 wave** (most recent — Social Engine redesign closing [#93](https://github.com/odahviing/AI-Executive-Assistant/issues/93)). Three-layer schema: Category → Subject (carries score) → Topic-beat (LRU, no score). Old `social_topics_v2` + `social_engagements` tables dropped (full data reset, owner accepted). New `social_subjects` + `social_topics`. Single-LLM-call classifier does intent + subject merge in one pass — sees active subjects for this person, decides match_existing vs create_new with semantic context (replaces the broken Jaccard ≥ 0.5 surface-string matcher that fragmented Clair Obscur into 9 rows on 2026-05-10). Engagement signal: assistant raise marked via `last_assistant_initiated_at` column; next inbound triggers +1 (matched + non-neg) / −1 (matched + neg / pivot). No closure detection — cold subjects degrade naturally. Cap 5 (was 10), person-init=3, assistant-init=2 — faster turnover. Caps: 5 active subjects/(person, category), 10 topic-beats/subject, soft 3 active categories per person via picker probability schedule (count=0→raise_new always, 1→0.5, 2→0.3). Coda picker picks least-recently-used topic-beat for variety. All `maelle_*` prefixes renamed to `assistant_*` (column + function names). Append-only `social_engagements` log retired — score lives directly on subjects. Files: 1 new (`db/socialSubjects.ts`), 1 deleted (`db/socialTopics.ts`), 7 modified.
+**v2.6.9 wave** (most recent — three patches Sun→Mon, 2026-05-11/12):
+
+- **v2.6.9 (channels reach criteria + cannot-reach rule)** — closes the 2026-05-11 Maya/Yael hallucinated-capability bug. Pre-fix the `CHANNELS YOU CAN REACH PEOPLE THROUGH` block listed transports without saying who each could reach; Sonnet conflated "Slack active" with "everyone reachable on Slack" and promised to "reach out directly" to an external attendee with no slack_id. Fix: each transport now declares its reach criteria (Slack → internal workspace, Email → anyone with email, WhatsApp → anyone with phone). Plus a new CANNOT-REACH RULE with ❌/✅ examples saying when no transport can reach someone, acknowledge honestly + offer alternative (Outlook invite for booking, forward via internal contact). Prompt-only fix, no code changes beyond the systemPrompt.ts rewrite of that block.
+
+- **v2.6.8 (brief approval-hydration SQL fix + coda piggyback disabled)** — two surgical fixes from 2026-05-11 brief inspection. (a) Brief's approval-hydration JOIN at `briefs.ts:450` selected `ask_text` from `approvals` but that column doesn't exist (value lives on `tasks.description`). The SELECT had been throwing silently every brief since v2.6.4, so v2.6.4 #3's whole fix had never actually run. Switched to `JOIN tasks` + `tasks.description AS ask_text`. (b) Coda piggyback gate at `orchestrator/index.ts:1664-1674` fired on any `coordinate_meeting / create_approval / resolve_approval / message_colleague` tool — context-blind picker grabbed highest-engaged subject regardless of conversation topic → "btw that Samuel L. Jackson movie..." mid-meeting-booking (caught by validator + dropped, but misfire pattern is the bug). Owner direction: drop the piggyback entirely. `codaEligible = false` always. Codas still fire via the three preserved paths: kind=social, kind=other+open, hourly `socialOutreachTick` cold-DM cron.
+
+- **v2.6.7 wave** (Social Engine redesign closing [#93](https://github.com/odahviing/AI-Executive-Assistant/issues/93)). Three-layer schema: Category → Subject (carries score) → Topic-beat (LRU, no score). Old `social_topics_v2` + `social_engagements` tables dropped (full data reset, owner accepted). New `social_subjects` + `social_topics`. Single-LLM-call classifier does intent + subject merge in one pass — sees active subjects for this person, decides match_existing vs create_new with semantic context (replaces the broken Jaccard ≥ 0.5 surface-string matcher that fragmented Clair Obscur into 9 rows on 2026-05-10). Engagement signal: assistant raise marked via `last_assistant_initiated_at` column; next inbound triggers +1 (matched + non-neg) / −1 (matched + neg / pivot). No closure detection — cold subjects degrade naturally. Cap 5 (was 10), person-init=3, assistant-init=2 — faster turnover. Caps: 5 active subjects/(person, category), 10 topic-beats/subject, soft 3 active categories per person via picker probability schedule (count=0→raise_new always, 1→0.5, 2→0.3). Coda picker picks least-recently-used topic-beat for variety. All `maelle_*` prefixes renamed to `assistant_*` (column + function names). Append-only `social_engagements` log retired — score lives directly on subjects. Files: 1 new (`db/socialSubjects.ts`), 1 deleted (`db/socialTopics.ts`), 7 modified.
 
 **v2.6.6 wave** (prior — pure-owner patch from two consecutive 2026-05-10 real-chat incidents, Yael DM with external Idan Wagner + Yael/Shayan MPIM): six fixes in one bundle. (1) **Colleague-path Sonnet now sees thread-scoped pending approvals** (`db/approvals.ts` new `getPendingApprovalsForThread` + `core/orchestrator/systemPrompt.ts` lifted `isOwner ?` gate, scoped via JOIN on `tasks.owner_thread_ts`) — closes the 13:06+13:09 duplicate approval pattern where Sonnet re-fired the entire coord+approval cycle on Yael's "תודה ממתינה לעדכון" ack because she had no structured signal "approval already pending in this thread." Privacy preserved (only this thread's approvals). New "WORK ALREADY IN FLIGHT IN THIS THREAD" colleague-path block. (2) **Colleague-path create_meeting books with externals** (`skills/meetings/ops.ts` Guard A loosened) — completes Bug 4(b) from earlier same session. Pre-fix Guard A refused ANY external attendee with `external_requires_coord`, contradicting v2.6.5 fast-path Case B. Now: every attendee must have email; externals-with-email pass through. Missing-email refuses with new `attendee_missing_email` error. Net: when no rule broken, books on colleague-path, Sonnet's reply IS the loop-close to requester, no approval at all. (3) **Channel-aware system prompt; MPIM-only rules ship only in MPIM** — `buildSystemPrompt`/`buildSystemPromptParts` gain `isMpim`/`isChannel`/`threadTs` params plumbed through OrchestratorInput. Audit found 5 blocks belonged in MPIM (PRIVATE OWNER QUESTIONS / SPEAK TO THE GROUP / ONE MESSAGE PER TURN / GROUP DM greet / new REQUESTER NOT ATTENDING — the 2.1 fix). Pre-fix all shipped to DM/MPIM/channel turns AND only fired via `isOwnerInGroup` branch. Consolidated into `mpimRulesBlock` gated on `isMpim`, fires regardless of who typed. The 2.1 rule: requester said "set up between A and B" → don't ask requester to confirm slots. (4) **find_slack_user reads people_memory first; Slack-fallback drops bare timezone field** (`connections/slack/index.ts`) — pre-fix v2.6.4 `(timezone only, city unknown)` cautionary suffix only patched `formatPeopleMemoryForPrompt` (owner-path). Colleague-path Sonnet calling `find_slack_user` got bare `timezone: "Australia/Brisbane"` and inferred city. Two fixes: people_memory pull-through (return memory hits with `tz_iana` + `tz_note` + `state` + `email`); Slack-fallback shape rename (`timezone` → `tz_iana` + `tz_note: "IANA timezone — NOT a city"`). Owner chose Shape A (pull-through, privacy preserved) over Shape B (surface people_memory on colleague-path). (5) **find_available_slots auto-recovers attendee_emails from thread context** — new `utils/threadAttendees.ts` registry (sibling pattern to `threadActivity.ts`). `recordThreadAttendees` called from find_available_slots and coordinate_meeting; `getThreadAttendees` recovers when Sonnet drops them on subsequent calls. Closes the Shayan case where 2nd find_available_slots after Yael's "I'm not a factor" lost his TZ work-hours filter and proposed slots outside his stated 4-6pm Sydney. (6) **create_meeting auto-fills missing attendee emails from people_memory** — port of v2.0.6 pattern from `coordinate_meeting`'s handler to `create_meeting`. Same lookup chain (slack_id primary + fuzzy name fallback). Runs at top of create_meeting case before Guard A. Pairs with #2: missing email → auto-fill from memory, then Guard A passes. Plus a small prompt rule "NARROWING TO ONE — disclose, don't fake 'perfect'" for Bug 2.5 (when Sonnet narrows from spread-3 to fewer because of an attendee's stated time window, name why).
 
