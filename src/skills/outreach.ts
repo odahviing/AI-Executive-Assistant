@@ -25,8 +25,10 @@ import {
   createOutreachJob,
   updateOutreachJob,
   upsertPersonMemory,
+  linkOutreachToRequest,
 } from '../db';
 import { createTask } from '../tasks';
+import { createRequest, updateRequest } from '../db/requests';
 import { calcResponseDeadline } from '../connectors/slack/coordinator';
 import { getConnection } from '../connections/registry';
 import logger from '../utils/logger';
@@ -221,8 +223,53 @@ Only send messages the user explicitly asks for — never reach out to people on
           subject_keyword: subjectKeywordArg,
         });
 
+        // v2.7.0 — paired request on the spine. The brief, scanner, and
+        // system prompt read from requests. Legacy outreach_jobs stays as
+        // the internal state machine; updateOutreachJob's terminal hook
+        // closes the linked request via linkOutreachToRequest above.
+        const colleagueName = args.colleague_name as string;
+        const messageBody = args.message as string;
+        const initialState = isFuture
+          ? 'in_flight'                             // future-dated, not yet sent
+          : (args.await_reply ? 'awaiting_colleague' : 'resolved');  // fire-and-forget resolves at send
+        const requestRow = createRequest({
+          ownerUserId: userId,
+          initiatedBy: context.userId,
+          initiatedByRole: context.senderRole === 'colleague' ? 'colleague' : 'owner',
+          kind: 'outreach',
+          subkind: intent ?? 'general',
+          subject: args.await_reply
+            ? `Waiting for reply from ${colleagueName}`
+            : `Messaged ${colleagueName}`,
+          description: messageBody,
+          state: initialState,
+          informed: context.senderRole === 'owner' ? 1 : 0,
+          targetSlackId: colleagueSlackId,
+          targetName: colleagueName,
+          originChannel: context.channelId,
+          originThreadTs: context.threadTs,
+          originIsMpim: !!context.isMpim,
+          expiresAt: deadline ?? undefined,
+          nextCheckAt: isFuture ? sendAt : (args.await_reply ? deadline : undefined),
+          nextCheckHandler: isFuture
+            ? 'send_scheduled_outreach'
+            : (args.await_reply ? 'outreach_expiry' : undefined),
+          details: {
+            outreach_job_id: jobId,
+            message: messageBody,
+            await_reply: !!args.await_reply,
+            sent_at: isFuture ? null : new Date().toISOString(),
+            scheduled_at: sendAt ?? null,
+            intent: intent ?? null,
+            proposed_slots: proposedSlotsJson ?? null,
+            subject_keyword: subjectKeywordArg ?? null,
+          },
+        });
+        linkOutreachToRequest(jobId, requestRow.id);
+
         logger.info('message_colleague — outreach row created', {
           jobId,
+          requestId: requestRow.id,
           colleague: args.colleague_name,
           isFuture,
           await_reply: !!args.await_reply,

@@ -1,10 +1,8 @@
 /**
  * Coord utility helpers.
  *
- * Three stateless helpers that don't touch coord DB state or send Slack
+ * Two stateless helpers that don't touch coord DB state or send Slack
  * messages on their own:
- *   - determineSlotLocation: office/home + internal/external + party size →
- *     human-readable location label + isOnline flag for the invite.
  *   - interpretReplyWithAI: a Sonnet micro-prompt that parses a participant's
  *     scheduling reply into a structured verdict (yes/no/maybe + slot index +
  *     alternative + location overrides).
@@ -12,8 +10,10 @@
  *     out-of-thread message continues an existing coord thread, or is a new
  *     request. Used for out-of-thread reply support.
  *
- * Pure — zero DB, zero transport. Moved from connectors/slack/coord/utils.ts
- * as part of the Connection-interface port (issue #1 sub-phase D).
+ * v2.7.0 — determineSlotLocation REMOVED. All location decisions now flow
+ * through src/utils/resolveLocation.ts (one source of truth).
+ *
+ * Pure — zero DB, zero transport.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -23,77 +23,16 @@ import { config } from '../../../config';
 
 const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
 
-// ── Location helpers ─────────────────────────────────────────────────────────
+// ── Shared types ────────────────────────────────────────────────────────────
 
 export interface SlotWithLocation {
   start: string;
   end: string;
-  location: string;       // "Idan's Office" | "Meeting Room" | "Huddle" | "Teams" | "+972..." | custom
-  isOnline: boolean;      // true = Teams link, false = Huddle (no Teams)
+  location: string;       // "" when fully online
+  isOnline: boolean;      // true = Teams link on invite
 }
 
-/**
- * Determines location for a slot based on the day (office/home),
- * participant count, and whether attendees are internal (same domain).
- *
- * v2.2.4 (bug 8b) — `anyParticipantRemote` short-circuits the in-person
- * branches. When ANY participant is currently traveling, joining remotely
- * by company policy, or otherwise can't physically be at the office, the
- * meeting MUST default to Teams (online). Owner could be at the office,
- * the colleague is in Boston — booking "Idan's Office" as the location is
- * a lie. Caller computes this flag from people_memory.currently_traveling
- * (or other signals) and passes it through.
- */
-export function determineSlotLocation(
-  slotStart: string,
-  profile: UserProfile,
-  participantCount: number,
-  isInternal: boolean,
-  customLocation?: string,
-  anyParticipantRemote?: boolean,
-): { location: string; isOnline: boolean } {
-  if (customLocation) {
-    // Phone number (e.g. "+972-54-123-4567"): no Teams link, location is the number itself
-    const isPhone = /^\+?\d[\d\s\-().]{5,}$/.test(customLocation.trim());
-    return { location: customLocation, isOnline: !isPhone };
-  }
-
-  // v2.2.4 (bug 8b) — any participant can't physically be there → online by
-  // default. Skip every in-person branch below.
-  if (anyParticipantRemote) {
-    return { location: '', isOnline: true };
-  }
-
-  const dt = DateTime.fromISO(slotStart).setZone(profile.user.timezone);
-  const dayName = dt.toFormat('EEEE');
-  const isOfficeDay = (profile.schedule.office_days.days as string[]).includes(dayName);
-
-  if (isOfficeDay) {
-    // Office day: ≤3 people → Idan's Office, >3 → Meeting Room. Always Teams link.
-    // v2.3.2 (1C) — when profile.meetings.office_location is configured, use
-    // its real address instead of the bare "${name}'s Office" label so
-    // externals on the invite know where to go. Label/address/parking all
-    // optional in the yaml; unset fields fall back to the legacy label.
-    const officeLoc = profile.meetings.office_location;
-    let location: string;
-    if (participantCount > 3) {
-      location = 'Meeting Room';
-    } else {
-      const baseLabel = officeLoc?.label ?? `${profile.user.name.split(' ')[0]}'s Office`;
-      const parts = [baseLabel];
-      if (officeLoc?.address) parts.push(officeLoc.address);
-      if (officeLoc?.parking) parts.push(`Parking: ${officeLoc.parking}`);
-      location = parts.join(' — ');
-    }
-    return { location, isOnline: true };
-  }
-
-  // Home day
-  if (isInternal) {
-    return { location: 'Huddle', isOnline: false };
-  }
-  return { location: '', isOnline: true }; // external on home day = Teams only
-}
+// determineSlotLocation removed v2.7.0 — see src/utils/resolveLocation.ts.
 
 // ── AI reply interpretation ──────────────────────────────────────────────────
 

@@ -2,7 +2,8 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
 import { buildSkillsPromptSection, getActiveSkills } from '../../skills/registry';
 import { formatPreferencesCatalog, formatPeopleMemoryForPrompt } from '../../db';
-import { getPendingApprovalsForOwner, getPendingApprovalsForThread } from '../../db/approvals';
+import { getAwaitingOwnerRequests, getOpenRequestsForThread } from '../../db/requests';
+import { parseDetails } from '../requests/types';
 import { formatAssistantSelfForPrompt } from '../assistantSelf';
 import { formatPeopleCatalogSync } from '../../memory/peopleMemory';
 import { getEffectiveToday } from '../../utils/effectiveToday';
@@ -135,59 +136,67 @@ Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EE
   // the same flow again on Yael's "thanks waiting" ack. Privacy: scoped on
   // task.owner_thread_ts so colleague only sees approvals from THEIR thread,
   // not the owner's other in-flight work.
-  const pendingApprovals = isOwner
-    ? getPendingApprovalsForOwner(user.slack_user_id)
-    : (threadTs ? getPendingApprovalsForThread(user.slack_user_id, threadTs) : []);
-  const pendingApprovalsSection = isOwner && pendingApprovals.length > 0
+  // v2.7.0 — pending approvals reads from `requests` table (the spine).
+  // Owner-path sees ALL awaiting_owner requests; colleague-path sees only
+  // requests originating in THIS thread (privacy preserved).
+  const pendingRequests = isOwner
+    ? getAwaitingOwnerRequests(user.slack_user_id)
+    : (threadTs
+        ? getOpenRequestsForThread(user.slack_user_id, threadTs).filter(r => r.state === 'awaiting_owner')
+        : []);
+  const pendingApprovalsSection = isOwner && pendingRequests.length > 0
     ? (() => {
-        const lines = pendingApprovals.slice(0, 10).map(a => {
-          let payload: any = {};
-          try { payload = JSON.parse(a.payload_json); } catch (_) {}
-          const createdAt = DateTime.fromSQL(a.created_at, { zone: 'utc' }).setZone(user.timezone);
-          const expiresAt = a.expires_at ? DateTime.fromISO(a.expires_at, { zone: 'utc' }).setZone(user.timezone) : null;
+        const lines = pendingRequests.slice(0, 10).map(r => {
+          const det = parseDetails<Record<string, unknown>>(r) ?? {};
+          const createdAt = DateTime.fromSQL(r.created_at, { zone: 'utc' }).setZone(user.timezone);
+          const expiresAt = r.expires_at ? DateTime.fromISO(r.expires_at, { zone: 'utc' }).setZone(user.timezone) : null;
           const createdRel = createdAt.isValid ? createdAt.toRelative({ base: DateTime.now() }) : '';
           const expLine = expiresAt ? ` · expires ${expiresAt.toFormat("EEE HH:mm")}` : '';
-          // Compact payload preview — just the subject + key fields
-          const subject = payload.subject ? ` "${payload.subject}"` : '';
-          const slotsPreview = Array.isArray(payload.slots) && payload.slots.length > 0
-            ? ` · slots: ${payload.slots.slice(0, 3).map((s: any) => s.label || s.iso || s).join(' | ')}`
-            : '';
-          const question = payload.question ? ` · ${payload.question}` : '';
-          const counter = payload.counter_reason ? ` · ${payload.counter_reason}` : '';
-          return `  - #${a.id} · kind=${a.kind}${subject}${slotsPreview}${question}${counter} · asked ${createdRel}${expLine}`;
+          const subject = r.subject ? ` "${r.subject}"` : '';
+          const slotsArr = Array.isArray(det.slots) ? (det.slots as any[]) : [];
+          const winningSlot = typeof det.winning_slot === 'string' ? det.winning_slot : null;
+          const slotsPreview = slotsArr.length > 0
+            ? ` · slots: ${slotsArr.slice(0, 3).map((s: any) => s.label || s.iso || s).join(' | ')}`
+            : winningSlot
+              ? ` · slot: ${winningSlot}`
+              : '';
+          const question = det.question ? ` · ${det.question}` : '';
+          const kindLabel = r.subkind ?? r.kind;
+          return `  - #${r.id} · kind=${kindLabel}${subject}${slotsPreview}${question} · asked ${createdRel}${expLine}`;
         });
         return `
-PENDING APPROVALS (${pendingApprovals.length} — waiting on ${firstName}):
+PENDING APPROVALS (${pendingRequests.length} — waiting on ${firstName}):
 ${lines.join('\n')}
 
 Binding rules (critical):
 - When ${firstName} replies in a way that looks like a decision (picks a time, says "yes"/"no"/"ok"/"לא"/"כן", proposes an alternative): call resolve_approval with the right approval_id from the list above.
-- Match on subject, timing, or thread — pick the most plausible pending approval. If more than one plausibly fits, ask ${firstName} which one (name them by subject).
+- Match on subject, timing, or thread — pick the most plausible pending request. If more than one plausibly fits, ask ${firstName} which one (name them by subject).
 - Verdicts:
   · approve → ${firstName} agreed as-asked. For slot_pick: pass {slot_iso} in data.
-  · reject → ${firstName} said no / cancel. Parent task cancels automatically.
-  · amend → ${firstName} said "not this but here's an alternative" ("no, but 1:30 works"). Pass the alternative in counter. The approval closes as amended; next turn you relay the alternative to the original requester (send them a DM / outreach).
+  · reject → ${firstName} said no / cancel. Linked work cancels automatically.
+  · amend → ${firstName} said "not this but here's an alternative" ("no, but 1:30 works"). Pass the alternative in counter. The request flips to in_flight; next turn you relay the alternative to the original requester.
 - Do NOT reply with your own prose that implies the decision was recorded unless resolve_approval returned ok:true. Always call the tool first.`;
       })()
     : '';
 
-  // v2.6.6 — colleague-path "work already in flight in this thread" block.
-  // Scoped to approvals raised IN this thread (privacy preserved). Tells
-  // Sonnet "you already escalated this — don't re-fire create_approval on
-  // an ack message." Closes the duplicate-approval pattern.
-  const colleagueThreadApprovalsSection = !isOwner && pendingApprovals.length > 0
+  // Colleague-path "work already in flight in this thread" block. Same data
+  // source as owner-path but scoped to the thread for privacy.
+  const colleagueThreadApprovalsSection = !isOwner && pendingRequests.length > 0
     ? (() => {
-        const lines = pendingApprovals.slice(0, 5).map(a => {
-          let payload: any = {};
-          try { payload = JSON.parse(a.payload_json); } catch (_) {}
-          const subject = payload.subject ? `"${payload.subject}"` : `(${a.kind})`;
-          const slotsPreview = Array.isArray(payload.slots) && payload.slots.length > 0
-            ? ` · slot: ${payload.slots[0].label || payload.slots[0].iso || payload.slots[0]}`
-            : '';
-          return `  - ${subject} · kind=${a.kind}${slotsPreview} · pending ${firstName}'s decision`;
+        const lines = pendingRequests.slice(0, 5).map(r => {
+          const det = parseDetails<Record<string, unknown>>(r) ?? {};
+          const subject = r.subject ? `"${r.subject}"` : `(${r.subkind ?? r.kind})`;
+          const slotsArr = Array.isArray(det.slots) ? (det.slots as any[]) : [];
+          const winningSlot = typeof det.winning_slot === 'string' ? det.winning_slot : null;
+          const slotsPreview = slotsArr.length > 0
+            ? ` · slot: ${slotsArr[0].label || slotsArr[0].iso || slotsArr[0]}`
+            : winningSlot
+              ? ` · slot: ${winningSlot}`
+              : '';
+          return `  - ${subject} · kind=${r.subkind ?? r.kind}${slotsPreview} · pending ${firstName}'s decision`;
         });
         return `
-WORK ALREADY IN FLIGHT IN THIS THREAD (${pendingApprovals.length}):
+WORK ALREADY IN FLIGHT IN THIS THREAD (${pendingRequests.length}):
 ${lines.join('\n')}
 
 Do NOT re-raise these. If the colleague's current message is just acknowledging ("thanks", "waiting", "ok"), don't run new tool calls — answer briefly that you're waiting on ${firstName}, or stay silent. Only re-fire if the colleague is changing the underlying ask (different time, different attendee, withdrawal). Once ${firstName} resolves, the resolver posts the outcome back here automatically.`;

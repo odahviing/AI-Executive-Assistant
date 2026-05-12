@@ -609,6 +609,109 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_summary_sessions_owner ON summary_sessions(owner_user_id, stage);
   `);
 
+  // ── v2.7.0 — requests + cron_schedules (the spine) ────────────────────────
+  // Single source of truth for every user-facing work item: approvals,
+  // outreach, reminders, coord, research. Replaces the tasks/approvals/
+  // coord_jobs/outreach_jobs four-table mess. Lifecycle timers live on the
+  // row itself (next_check_at / next_check_handler) — no separate dispatch
+  // table for one-shot expiries.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS requests (
+      id                       TEXT PRIMARY KEY,
+      created_at               TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at               TEXT NOT NULL DEFAULT (datetime('now')),
+
+      owner_user_id            TEXT NOT NULL,
+      initiated_by             TEXT NOT NULL,
+      initiated_by_role        TEXT NOT NULL,   -- 'owner' | 'colleague' | 'system'
+
+      parent_request_id        TEXT,            -- NULL for top-level
+
+      kind                     TEXT NOT NULL,   -- 'approval' | 'outreach' | 'reminder' | 'follow_up' | 'research' | 'coord' | 'social_outreach'
+      subkind                  TEXT,            -- 'slot_pick' | 'policy_exception' | 'meeting_reschedule' | etc.
+      subject                  TEXT NOT NULL,
+      description              TEXT,
+
+      state                    TEXT NOT NULL,   -- 'awaiting_owner' | 'awaiting_colleague' | 'in_flight' | 'resolved' | 'cancelled' | 'expired'
+      state_changed_at         TEXT NOT NULL DEFAULT (datetime('now')),
+      closure_reason           TEXT,
+      closed_at                TEXT,
+      closed_by                TEXT,            -- 'owner' | 'scanner' | 'expiry' | 'meeting_cascade' | 'colleague_reply' | 'system' | 'brief'
+
+      informed                 INTEGER NOT NULL DEFAULT 0,
+      surfaced_count           INTEGER NOT NULL DEFAULT 0,
+      last_surfaced_at         TEXT,
+
+      expires_at               TEXT,
+      next_check_at            TEXT,
+      next_check_handler       TEXT,
+
+      requester_slack_id       TEXT,
+      requester_name           TEXT,
+      target_slack_id          TEXT,
+      target_email             TEXT,
+      target_name              TEXT,
+
+      origin_channel           TEXT,
+      origin_thread_ts         TEXT,
+      origin_is_mpim           INTEGER NOT NULL DEFAULT 0,
+
+      owner_dm_channel         TEXT,
+      owner_dm_thread_ts       TEXT,
+      terminal_dm_msg_ts       TEXT,
+
+      idempotency_key          TEXT UNIQUE,
+
+      outcome_external_event_id TEXT,
+      outcome_json             TEXT,
+
+      details_json             TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_requests_owner_state ON requests(owner_user_id, state);
+    CREATE INDEX IF NOT EXISTS idx_requests_parent ON requests(parent_request_id);
+    CREATE INDEX IF NOT EXISTS idx_requests_next_check ON requests(next_check_at);
+    CREATE INDEX IF NOT EXISTS idx_requests_terminal_msg ON requests(terminal_dm_msg_ts);
+    CREATE INDEX IF NOT EXISTS idx_requests_thread ON requests(origin_thread_ts);
+    CREATE INDEX IF NOT EXISTS idx_requests_outcome_event ON requests(outcome_external_event_id);
+    CREATE INDEX IF NOT EXISTS idx_requests_target ON requests(target_slack_id, state);
+
+    -- Recurring schedules (replaces routines table + cron-typed rows from tasks)
+    CREATE TABLE IF NOT EXISTS cron_schedules (
+      id                     TEXT PRIMARY KEY,
+      created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at             TEXT NOT NULL DEFAULT (datetime('now')),
+
+      owner_user_id          TEXT,             -- NULL for global ticks
+      name                   TEXT NOT NULL,
+      handler                TEXT NOT NULL,    -- 'morning_brief' | 'social_outreach_tick' | 'social_decay' | 'user_routine' | ...
+
+      interval_seconds       INTEGER,          -- for fixed-interval
+      cron_expression        TEXT,             -- for cron-style schedules
+
+      routine_yaml           TEXT,             -- user-defined routine payload
+
+      enabled                INTEGER NOT NULL DEFAULT 1,
+      last_fired_at          TEXT,
+      last_request_id        TEXT,             -- last request the cron spawned (NULL if no-op)
+      next_fire_at           TEXT NOT NULL,
+
+      consecutive_failures   INTEGER NOT NULL DEFAULT 0,
+      last_error             TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cron_next_fire ON cron_schedules(next_fire_at) WHERE enabled = 1;
+  `);
+
+  // ── v2.7.0 — legacy bridge columns ────────────────────────────────────────
+  // outreach_jobs and coord_jobs stay as internal state machines but every row
+  // gets a request_id pointing at its user-facing requests-spine row. When the
+  // legacy table's status transitions to terminal, the linked request closes.
+  try { db.exec(`ALTER TABLE outreach_jobs ADD COLUMN request_id TEXT`); } catch (_) {}
+  try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN request_id TEXT`); } catch (_) {}
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_outreach_jobs_request ON outreach_jobs(request_id)`); } catch (_) {}
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_coord_jobs_request ON coord_jobs(request_id)`); } catch (_) {}
+
   // ── v1.7.2 — tasks: target_slack_id / target_name ─────────────────────────
   // Lets owner ask "what's open with Brett?" and get every 1:1 task back in
   // one query. Populated for outreach tasks (1:1) and summary_action_followup

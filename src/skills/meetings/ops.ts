@@ -858,6 +858,59 @@ export class SchedulingSkill {
               typeof import('../../connectors/graph/calendar');
             const chosenStarts = new Set(pickSpreadSlots(rawSlots, timezone, 3));
             const slots = rawSlots.filter(s => chosenStarts.has(s.start));
+
+            // v2.7.0 — initiator-aware annotation. Owner-path already pre-
+            // dropped attendee-busy slots via attendeeBusyEmails (line 807).
+            // Colleague-path didn't pre-drop — slots may come back when an
+            // internal attendee is busy. Annotate each slot with each
+            // internal attendee's free/busy status so Sonnet narrates honestly
+            // (per owner direction: colleague-path includes + annotates,
+            // owner-path drops).
+            let annotatedSlots: Array<any> = slots;
+            if (!isOwnerInitiated && attendeeEmails.length > 0) {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { annotateSlotsWithAttendeeStatus } = require('../../utils/annotateSlotsWithAttendeeStatus') as
+                  typeof import('../../utils/annotateSlotsWithAttendeeStatus');
+                const ownerDomain = userEmail.includes('@') ? userEmail.split('@')[1].toLowerCase() : '';
+                const internalAttendees = attendeeEmails.filter(e => {
+                  const lower = e.toLowerCase();
+                  return ownerDomain && lower.endsWith('@' + ownerDomain) && lower !== userEmail.toLowerCase();
+                });
+                // Annotate per internal attendee — one getFreeBusy call each.
+                // External attendees skipped (we can't see their calendar);
+                // they appear in Sonnet's narration with explicit "external,
+                // can't verify" framing instead.
+                const perAttendeeAnnotations = await Promise.all(
+                  internalAttendees.map(async email => {
+                    const ann = await annotateSlotsWithAttendeeStatus({
+                      slots: slots as any,
+                      attendeeEmail: email,
+                      callerEmail: userEmail,
+                      timezone,
+                    });
+                    return { email, ann };
+                  }),
+                );
+                annotatedSlots = slots.map((s: any) => {
+                  const attendee_status = perAttendeeAnnotations.map(p => {
+                    const match = p.ann.find(a => a.slot.start === s.start);
+                    return { email: p.email, kind: 'internal', status: match?.attendeeStatus ?? 'unknown' };
+                  });
+                  // External attendees → always 'unknown'
+                  const externals = attendeeEmails.filter(e => {
+                    const lower = e.toLowerCase();
+                    return !ownerDomain || !lower.endsWith('@' + ownerDomain);
+                  }).map(email => ({ email, kind: 'external', status: 'unknown' as const }));
+                  return { ...s, attendee_status: [...attendee_status, ...externals] };
+                });
+              } catch (err) {
+                logger.warn('find_available_slots — colleague-path annotation threw, returning unannotated slots', {
+                  err: String(err).slice(0, 200),
+                });
+              }
+            }
+
             // v2.5.2 — surface travelers so Sonnet renders dual-TZ on slot
             // lines. Travelers list only present when at least one attendee
             // had an active travel record at availability-load time.
@@ -871,9 +924,9 @@ export class SchedulingSkill {
                 homeTimezone: a.travel!.homeTimezone,
               }));
             if (travelers.length > 0) {
-              return { slots, travelers };
+              return { slots: annotatedSlots, travelers };
             }
-            return slots;
+            return annotatedSlots;
           } catch (err) {
             if (err instanceof GraphPermissionError) {
               return {
@@ -1349,119 +1402,70 @@ export class SchedulingSkill {
           logger.warn('create_meeting idempotency pre-check failed — proceeding with create', { err: String(err) });
         }
 
-        // v2.5.2 (Oran-bug fix #3) — day-aware mode default via
-        // `determineSlotLocation`. The helper encodes:
-        //   - Office day, ≤3 internal → Idan's Office + Teams (hybrid)
-        //   - Office day, >3 internal → Meeting Room + Teams (hybrid)
-        //   - Home day, internal → Huddle (no Teams)
-        //   - Home day, external → Teams ONLY, no location (forced online)
-        //   - Any participant traveling → Teams ONLY (forced online)
-        //
-        // v2.6.5 — REMOVED the `!sonnetSpecifiedMode` gate that skipped the
-        // helper whenever Sonnet passed a location string. Pre-fix, Sonnet
-        // passing a non-empty `location` arg made the helper skip entirely,
-        // so the home-day-external must-be-online rule never fired (the Yael
-        // CISO incident booked with Teams toggle OFF because Sonnet provided
-        // a location and helper was bypassed). Now the helper ALWAYS runs;
-        // its day-aware verdict drives `effectiveIsOnline` below. Sonnet's
-        // `is_online` arg can still upgrade (false→true) or override
-        // (false→false) for non-forced cases, but cannot downgrade the
-        // forced-online cases (external + home day, anyone traveling).
-        let derivedIsOnline: boolean | undefined;
-        let derivedLocationFromHelper: string | undefined;
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { determineSlotLocation } = require('./coord/utils') as typeof import('./coord/utils');
-          const ownerDomain = ownerEmail.includes('@') ? ownerEmail.split('@')[1].toLowerCase() : '';
-          const isInternal = attendees.every(a => {
-            const e = (a.email ?? '').toLowerCase();
-            if (!e) return true;
-            if (e === ownerEmail.toLowerCase()) return true;
-            if (assistantEmail && e === assistantEmail.toLowerCase()) return true;
-            return ownerDomain ? e.endsWith('@' + ownerDomain) : true;
-          });
-          const totalPeople = attendees.length + 1;  // +1 for owner
-          // anyTraveling — quick check for any attendee with active travel.
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getCurrentTravel, searchPeopleMemory } = require('../../db') as typeof import('../../db');
-          let anyTraveling = false;
-          for (const a of attendees) {
-            const lower = (a.email ?? '').toLowerCase();
-            if (!lower || lower === ownerEmail.toLowerCase()) continue;
-            const matches = searchPeopleMemory(a.email ?? '');
-            const person = matches.find(m => (m.email ?? '').toLowerCase() === lower);
-            if (person?.slack_id && getCurrentTravel(person.slack_id)) {
-              anyTraveling = true;
-              break;
-            }
-          }
-          const helperResult = determineSlotLocation(
-            args.start as string,
-            context.profile,
-            totalPeople,
-            isInternal,
-            undefined,
-            anyTraveling,
-          );
-          derivedIsOnline = helperResult.isOnline;
-          derivedLocationFromHelper = helperResult.location;
-          logger.info('create_meeting — day-aware mode default applied', {
-            start: args.start, isInternal, anyTraveling,
-            helperLocation: helperResult.location, helperIsOnline: helperResult.isOnline,
-            sonnetIsOnline: args.is_online, sonnetLocation: args.location,
-          });
-        } catch (err) {
-          logger.warn('create_meeting — determineSlotLocation threw, falling back to legacy default', {
-            err: String(err).slice(0, 200),
-          });
-        }
+        // v2.7.0 — single pipeline through planMeeting. Replaces the v2.6.x
+        // determineSlotLocation + helperForcesOnline + skipLocationField mess.
+        // planMeeting handles category detection, location resolution, and
+        // rule application as ONE coherent decision. Output drives the rest
+        // of the booking.
+        const { planMeeting } = await import('./planMeeting');
+        const plan = await planMeeting({
+          profile: context.profile,
+          intent: 'new_booking',
+          initiator: context.senderRole === 'colleague' ? 'colleague' : 'owner',
+          initiatorSlackId: context.userId,
+          slotStartIso: args.start as string,
+          slotEndIso: args.end as string,
+          subject: args.subject as string,
+          body: args.body as string | undefined,
+          participants: attendees.map(a => ({
+            email: a.email, name: a.name, slack_id: a.slack_id,
+          })),
+          locationHint: args.location as string | undefined,
+          isOnlineHint: typeof args.is_online === 'boolean' ? args.is_online : undefined,
+          allowRelaxed: args.relaxed === true,
+        });
+        logger.info('create_meeting — planMeeting verdict', {
+          action: plan.action, start: args.start, subject: args.subject,
+          reasoning: 'reasoning' in plan ? plan.reasoning : undefined,
+          category: 'category' in plan ? plan.category : undefined,
+        });
 
-        // v2.4.3 (E1) — compute the location parts ONCE so both the
-        // location field and the body block can read from the same source.
-        // Non-online meetings only; online meetings skip both. Each part is
-        // a single line (label, address, parking, etc.) — joined cleanly
-        // downstream (commas in the location field, bullet list in body).
-        //
-        // v2.6.2 (D5) — the original `effectiveIsOnline` variable conflated
-        // two distinct concepts:
-        //   1. "Should the meeting include a Teams link?" — true for office-
-        //      day in-person meetings (hybrid) AND fully-online meetings.
-        //   2. "Should the location field be empty?" — true ONLY for fully-
-        //      online meetings.
-        // determineSlotLocation returns `{ location: 'Idan\'s Office, ...',
-        // isOnline: true }` for office-day internal — meaning "physically at
-        // the office WITH a Teams link," not "no location." Pre-fix, the
-        // shared variable made office-day internal meetings drop their
-        // location field even though the helper had a real address ready
-        // to use. Now: `effectiveIsOnline` still drives the Teams-link
-        // decision (passed as `isOnline:` to createMeeting); a separate
-        // `skipLocationField` drives the location-field path.
-        // v2.6.5 — `helperForcesOnline` captures the cases where the helper
-        // says "this MUST be a Teams meeting" (no location possible):
-        //   - Home day + external attendee → home day means Idan's not at the
-        //     office, external can't show up at his home → remote is the only
-        //     answer. Owner direction: "if external + home day, it has to be
-        //     remote."
-        //   - Anyone traveling → can't physically attend.
-        // In those cases, Sonnet's explicit `is_online: false` does NOT
-        // downgrade — the day/state-aware verdict wins.
-        //
-        // For non-forced cases (office-day hybrid, home-day-internal Huddle),
-        // Sonnet's explicit `is_online` value wins when she passed a boolean,
-        // and the helper's verdict fills in when she didn't.
-        const helperForcesOnline = derivedIsOnline === true
-          && (!derivedLocationFromHelper || derivedLocationFromHelper.trim().length === 0);
-        let effectiveIsOnline: boolean;
-        if (helperForcesOnline) {
-          effectiveIsOnline = true;
-        } else if (typeof args.is_online === 'boolean') {
-          effectiveIsOnline = args.is_online;
-        } else {
-          effectiveIsOnline = derivedIsOnline === true;
+        // Early-return on non-book plans:
+        if (plan.action === 'confirm_override' || plan.action === 'escalate_approval') {
+          return {
+            success: false,
+            error: 'rule_violation',
+            violation_label: plan.violationLabel,
+            suggested_ask_text: plan.suggestedAskText,
+            category: plan.category,
+            _note: plan.action === 'escalate_approval'
+              ? 'A scheduling rule was violated. Use create_approval(kind=policy_exception) with suggested_ask_text to get the owner to decide.'
+              : 'A scheduling rule was violated. Surface suggested_ask_text to the owner and wait for an explicit override before retrying with relaxed=true.',
+          };
         }
-        const skipLocationField =
-          (args.is_online === true && (!args.location || (typeof args.location === 'string' && args.location.trim().length === 0)))
-          || (helperForcesOnline && !args.location);
+        // plan.action === 'book' — extract isOnline/location/category and proceed.
+        // (Other plan kinds — find_slots / decline_and_relay / refuse_not_owners —
+        // can't reach here from a new_booking intent; the type narrowing makes
+        // the cast unconditional after the early-return.)
+        if (plan.action !== 'book') {
+          return {
+            success: false,
+            error: 'unexpected_plan_action',
+            message: `planMeeting returned unexpected action "${plan.action}" for create_meeting — this is a bug.`,
+          };
+        }
+        const effectiveIsOnline: boolean = plan.isOnline;
+        const planLocation: string = plan.location;
+        const planCategory: string | null = plan.category;
+        // skipLocationField fires only when we have NO physical address to stamp
+        // (online-only meetings, or no_default_location categories like Logistic).
+        const skipLocationField = planLocation.trim().length === 0;
+        // Sonnet may have passed args.category explicitly; planCategory may override
+        // when she didn't. Merge so the downstream "is this no_default_location?"
+        // check works correctly.
+        if (planCategory && !args.category) {
+          args.category = planCategory;
+        }
         const resolvedLocationParts: string[] = await (async (): Promise<string[]> => {
           if (skipLocationField) return [];
           // v2.5.1 — yaml-driven skip. Categories flagged
@@ -1475,7 +1479,7 @@ export class SchedulingSkill {
             const match = (context.profile.categories ?? []).find(c => c.name === cat);
             if (match?.no_default_location) return [];
           }
-          const userLoc = (args.location as string | undefined) ?? derivedLocationFromHelper;
+          const userLoc = (args.location as string | undefined) ?? (planLocation && planLocation.trim().length > 0 ? planLocation : undefined);
           if (!userLoc || userLoc.trim().length === 0) {
             const officeLoc = context.profile.meetings.office_location;
             if (!officeLoc) return [];
@@ -1717,19 +1721,25 @@ export class SchedulingSkill {
         // unhelpful; refuse early with a clear human message so Maelle
         // doesn't offer a fake "I'll add the location" then silently fail.
         try {
-          const { getEventOrganizer } = await import('../../connectors/graph/calendar');
-          const organizer = await getEventOrganizer(userEmail, args.meeting_id as string);
-          if (organizer && organizer.address !== userEmail.toLowerCase()) {
+          // v2.7.0 — ownership via findMeetingOwner (per D4 / Q1).
+          const { findMeetingOwner } = await import('./findMeetingOwner');
+          const ownerInfo = await findMeetingOwner({
+            ownerUserId: context.profile.user.slack_user_id,
+            ownerEmail: userEmail,
+            eventId: args.meeting_id as string,
+          });
+          if (!ownerInfo.ownerIsOrganizer && ownerInfo.organizerEmail) {
             const ownerFirst = context.profile.user.name.split(' ')[0];
+            const orgName = ownerInfo.organizerName ?? ownerInfo.organizerEmail;
             logger.info('update_meeting refused — owner is attendee, not organizer', {
-              meetingId: args.meeting_id, organizer: organizer.address,
+              meetingId: args.meeting_id, organizer: ownerInfo.organizerEmail,
             });
             return {
               error: 'not_organizer',
               meeting_subject: args.meeting_subject,
-              organizer_name: organizer.name ?? organizer.address,
-              organizer_email: organizer.address,
-              message: `Can't modify "${args.meeting_subject}" — ${organizer.name ?? organizer.address} organized it, ${ownerFirst} is just an attendee. I can message them to request the change, or decline on ${ownerFirst}'s side. I cannot change the subject, location, or body of a meeting he didn't organize.`,
+              organizer_name: orgName,
+              organizer_email: ownerInfo.organizerEmail,
+              message: `Can't change "${args.meeting_subject}" — ${orgName} organized that one, not ${ownerFirst}. Only the organizer can change the subject, location, or body. Want me to flag it to ${ownerFirst}?`,
             };
           }
         } catch (err) {
@@ -1896,24 +1906,32 @@ export class SchedulingSkill {
         }
 
         // v2.1.4 — same attendee-only guard as update_meeting.
+        // v2.7.0 — ownership check via findMeetingOwner (requests + Graph).
+        // Per D4: when owner isn't organizer, refuse politely. No DM, no
+        // propose-reschedule — just tell the asker it's not the owner's to move.
         try {
-          const { getEventOrganizer } = await import('../../connectors/graph/calendar');
-          const organizer = await getEventOrganizer(userEmail, args.meeting_id as string);
-          if (organizer && organizer.address !== userEmail.toLowerCase()) {
+          const { findMeetingOwner } = await import('./findMeetingOwner');
+          const ownerInfo = await findMeetingOwner({
+            ownerUserId: context.profile.user.slack_user_id,
+            ownerEmail: userEmail,
+            eventId: args.meeting_id as string,
+          });
+          if (!ownerInfo.ownerIsOrganizer && ownerInfo.organizerEmail) {
             const ownerFirst = context.profile.user.name.split(' ')[0];
+            const orgName = ownerInfo.organizerName ?? ownerInfo.organizerEmail;
             logger.info('move_meeting refused — owner is attendee, not organizer', {
-              meetingId: args.meeting_id, organizer: organizer.address,
+              meetingId: args.meeting_id, organizer: ownerInfo.organizerEmail,
             });
             return {
               error: 'not_organizer',
               meeting_subject: args.meeting_subject,
-              organizer_name: organizer.name ?? organizer.address,
-              organizer_email: organizer.address,
-              message: `Can't move "${args.meeting_subject}" — ${organizer.name ?? organizer.address} organized it, ${ownerFirst} is just an attendee. I can message them to request a reschedule, or decline on ${ownerFirst}'s side. I cannot change the time of a meeting he didn't organize.`,
+              organizer_name: orgName,
+              organizer_email: ownerInfo.organizerEmail,
+              message: `Can't move "${args.meeting_subject}" — ${orgName} organized that one, not ${ownerFirst}. The organizer is the only one who can shift the time. Want me to flag it to ${ownerFirst} so he can ping them, or skip?`,
             };
           }
         } catch (err) {
-          logger.warn('move_meeting attendee-only guard threw — proceeding', { err: String(err) });
+          logger.warn('move_meeting ownership lookup threw — proceeding', { err: String(err) });
         }
 
         // v1.8.8 — same series-master block as update_meeting. Moving a
@@ -2064,12 +2082,91 @@ export class SchedulingSkill {
           });
         }
 
+        // v2.7.0 — route the move through planMeeting so location + category
+        // re-resolve when the day-type flips (office↔home). Per Q2: only
+        // re-detect category when location-relevant attributes change; same-
+        // day-type moves keep the existing category. resolveLocation always
+        // runs so the Graph PATCH can update location + isOnline.
+        let movePlanLocation: string | undefined;
+        let movePlanIsOnline: boolean | undefined;
+        let movePlanCategories: string[] | undefined;
+        try {
+          const { planMeeting: planMove } = await import('./planMeeting');
+          // Pull existing event metadata (categories, current location) for
+          // the priorSlotStartIso + existingEventCategories inputs.
+          const existing = await getCalendarEvents(
+            userEmail,
+            DateTime.fromISO(effectiveStart, { zone: timezone }).minus({ days: 1 }).toFormat('yyyy-MM-dd'),
+            DateTime.fromISO(effectiveStart, { zone: timezone }).plus({ days: 1 }).toFormat('yyyy-MM-dd'),
+            timezone,
+          );
+          const movingEvent = existing.find(e => e.id === args.meeting_id);
+          const priorStartIso = movingEvent?.start?.dateTime;
+          const existingCats = ((movingEvent as any)?.categories as string[] | undefined) ?? [];
+          const movePlan = await planMove({
+            profile: context.profile,
+            intent: 'move',
+            initiator: context.senderRole === 'colleague' ? 'colleague' : 'owner',
+            initiatorSlackId: context.userId,
+            slotStartIso: effectiveStart,
+            slotEndIso: effectiveEnd,
+            subject: (movingEvent?.subject ?? args.meeting_subject) as string | undefined,
+            participants: ((movingEvent?.attendees ?? []) as any[]).map(a => ({
+              email: a?.emailAddress?.address,
+              name: a?.emailAddress?.name,
+            })),
+            existingEventId: args.meeting_id as string,
+            existingEventCategories: existingCats,
+            priorSlotStartIso: priorStartIso,
+            allowRelaxed: args.relaxed === true,
+          });
+          logger.info('move_meeting — planMeeting verdict', {
+            action: movePlan.action, meetingId: args.meeting_id,
+            priorStart: priorStartIso, newStart: effectiveStart,
+            reasoning: 'reasoning' in movePlan ? movePlan.reasoning : undefined,
+          });
+          if (movePlan.action === 'confirm_override' || movePlan.action === 'escalate_approval') {
+            return {
+              success: false,
+              error: 'rule_violation',
+              meeting_subject: args.meeting_subject,
+              violation_label: movePlan.violationLabel,
+              suggested_ask_text: movePlan.suggestedAskText,
+              category: movePlan.category,
+              _note: movePlan.action === 'escalate_approval'
+                ? 'Move violates a scheduling rule. Use create_approval(kind=policy_exception) with suggested_ask_text.'
+                : 'Move violates a scheduling rule. Surface suggested_ask_text to the owner; if he confirms, retry with relaxed=true.',
+            };
+          }
+          if (movePlan.action === 'book') {
+            movePlanLocation = movePlan.location;
+            movePlanIsOnline = movePlan.isOnline;
+            if (movePlan.category) {
+              // Preserve any non-yaml-category labels already on the event
+              // (rare but possible), then add the canonical category once.
+              const profileCatNames = new Set((context.profile.categories ?? []).map(c => c.name.toLowerCase()));
+              const preserved = existingCats.filter(c => !profileCatNames.has(c.toLowerCase()));
+              movePlanCategories = [...preserved, movePlan.category];
+            }
+          }
+        } catch (err) {
+          logger.warn('move_meeting — planMeeting threw, proceeding with time-only move', {
+            err: String(err).slice(0, 200), meetingId: args.meeting_id,
+          });
+        }
+
         await updateMeeting({
           userEmail,
           timezone,
           meetingId: args.meeting_id as string,
           start: effectiveStart,
           end: effectiveEnd,
+          // v2.7.0 — pass-through location/isOnline/categories from the
+          // planMeeting verdict. Undefined values leave the existing fields
+          // untouched on Graph's side.
+          location: movePlanLocation,
+          isOnline: movePlanIsOnline,
+          categories: movePlanCategories,
         });
 
         // v2.2.5 (#54) — post-move verification. Graph PATCH can return 200 OK
@@ -2175,6 +2272,86 @@ export class SchedulingSkill {
       }
 
       case 'delete_meeting': {
+        // v2.7.0 — track auto-relay outcome so Sonnet narrates honestly:
+        //   'sent'                  → DM went out to the organizer (Slack)
+        //   'skipped_no_slack_id'   → organizer is external / not in workspace;
+        //                              owner-side decline still landed but the
+        //                              organizer was NOT notified
+        //   'not_attempted'         → owner is the organizer (no relay needed)
+        let relayStatus: 'sent' | 'skipped_no_slack_id' | 'not_attempted' = 'not_attempted';
+        let relayOrganizerName: string | null = null;
+        let relayOrganizerEmail: string | null = null;
+        // v2.7.0 — ownership-aware delete via planMeeting.
+        // Path tree (per D3 / Q1=B / D4):
+        //   - owner is organizer → proceed with delete (existing flow below)
+        //   - owner is attendee + asker is the requester/organizer → decline on
+        //     owner's side (effectively the same Graph delete call from owner's
+        //     calendar — Graph drops the event from his view)
+        //   - owner is attendee + asker is someone ELSE (incl. owner himself) →
+        //     decline on owner's side + auto-DM the organizer politely
+        try {
+          const { planMeeting } = await import('./planMeeting');
+          const decision = await planMeeting({
+            profile: context.profile,
+            intent: 'cancel',
+            initiator: context.senderRole === 'colleague' ? 'colleague' : 'owner',
+            initiatorSlackId: context.userId,
+            existingEventId: args.meeting_id as string,
+            subject: args.meeting_subject as string | undefined,
+            participants: [],
+          });
+          if (decision.action === 'refuse_not_owners') {
+            const ownerFirst = context.profile.user.name.split(' ')[0];
+            const orgName = decision.organizerName ?? decision.organizerEmail ?? 'the organizer';
+            return {
+              error: 'not_organizer_refuse',
+              meeting_subject: args.meeting_subject,
+              organizer_name: decision.organizerName,
+              organizer_email: decision.organizerEmail,
+              message: `Can't cancel "${args.meeting_subject}" — ${orgName} organized that one. Only the organizer can cancel for everyone. I can remove it from ${ownerFirst}'s calendar though if that helps.`,
+            };
+          }
+          if (decision.action === 'decline_and_relay') {
+            // Proceed with the Graph delete (which removes from owner's calendar)
+            // AND post the organizer-DM in parallel (fire-and-forget). Track
+            // whether the DM was actually attempted so the tool result tells
+            // Sonnet the honest story — no over-claiming "I notified the
+            // organizer" when the organizer has no slack_id (external).
+            const orgEmail = decision.organizerEmail;
+            const orgSlackId = decision.organizerSlackId;
+            const orgName = decision.organizerName;
+            const dmText = decision.suggestedDmText;
+            logger.info('delete_meeting — decline_and_relay path', {
+              meetingId: args.meeting_id, organizer: orgEmail, orgSlackId,
+            });
+            if (orgSlackId) {
+              relayStatus = 'sent';
+              relayOrganizerName = orgName;
+              setImmediate(async () => {
+                try {
+                  const { getConnection } = await import('../../connections/registry');
+                  const conn = getConnection(context.profile.user.slack_user_id, 'slack');
+                  if (conn) await conn.sendDirect(orgSlackId, dmText);
+                } catch (err) {
+                  logger.warn('decline_and_relay DM threw — non-fatal', {
+                    err: String(err).slice(0, 200), meetingId: args.meeting_id,
+                  });
+                }
+              });
+            } else {
+              // External organizer or unresolved Slack identity — no DM can be
+              // sent on Slack. Sonnet must NOT claim "I notified the organizer".
+              relayStatus = 'skipped_no_slack_id';
+              relayOrganizerName = orgName;
+              relayOrganizerEmail = orgEmail;
+            }
+          }
+        } catch (err) {
+          logger.warn('delete_meeting planMeeting threw — proceeding with raw delete', {
+            err: String(err).slice(0, 200), meetingId: args.meeting_id,
+          });
+        }
+
         // Defense-in-depth: refuse a series-level delete if the id resolves to
         // a seriesMaster. Mirrors the guard in update_meeting and move_meeting.
         // get_calendar normally returns occurrence ids (Graph calendarView
@@ -2236,11 +2413,28 @@ export class SchedulingSkill {
           details: { subject: args.meeting_subject },
           outcome: 'success',
         });
+        // v2.7.0 — narrate the relay outcome honestly. Three shapes:
+        //   sent                 → "Removed it from your side. I let <name> know."
+        //   skipped_no_slack_id  → "Removed it from your side. <name> organized this one
+        //                          but they're not in Slack so I couldn't ping them — you
+        //                          may want to email them directly."
+        //   not_attempted        → "Cancelled it." (owner was organizer; no relay needed)
+        let actionSummary = `Cancelled '${args.meeting_subject}'.`;
+        if (relayStatus === 'sent') {
+          actionSummary = `Removed '${args.meeting_subject}' from your calendar. I let ${relayOrganizerName ?? 'the organizer'} know on Slack.`;
+        } else if (relayStatus === 'skipped_no_slack_id') {
+          actionSummary = `Removed '${args.meeting_subject}' from your calendar. ${relayOrganizerName ?? 'The organizer'} set it up${relayOrganizerEmail ? ` (${relayOrganizerEmail})` : ''} but they're not in Slack — you may want to email them directly to cancel for everyone.`;
+        }
         return {
           success: true,
           deleted: args.meeting_subject,
-          // v1.8.3 — past-tense summary for owner-visible reply. Issue #26 bug 1.
-          action_summary: `Cancelled '${args.meeting_subject}'.`,
+          relay_status: relayStatus,
+          organizer_name: relayOrganizerName ?? undefined,
+          organizer_email: relayOrganizerEmail ?? undefined,
+          action_summary: actionSummary,
+          _note: relayStatus === 'skipped_no_slack_id'
+            ? 'IMPORTANT: do NOT claim "I notified the organizer" — the organizer has no Slack account, no DM was sent. Tell the owner that explicitly and offer to draft an email if they want.'
+            : undefined,
         };
       }
 

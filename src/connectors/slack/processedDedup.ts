@@ -17,7 +17,15 @@
  */
 
 const processedTs: Set<string> = new Set();
-const TTL_MS = 60_000;
+// v2.7.0 — bumped 60s → 10min. Slack socket mode is at-least-once: when the
+// bot disconnects (e.g. `npm run dev` restart) Slack queues events and
+// re-delivers on reconnect. The retry window can run several minutes after
+// the catch-up flow has already processed and marked the message. 60s TTL
+// expired before that retry landed → duplicate orchestrator turn → duplicate
+// reply. 10min covers realistic socket-reconnect retry windows with no
+// downside (memory cost negligible; ts collisions are essentially impossible
+// at Slack's microsecond ts precision).
+const TTL_MS = 10 * 60 * 1000;
 
 /**
  * Mark a message ts as handled. Returns true if it was newly added;

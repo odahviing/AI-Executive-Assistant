@@ -185,6 +185,49 @@ export function closeMeetingArtifacts(params: {
       params.meetingId,
     );
 
+    // 5. (v2.7.0) Close matching requests on the spine. Two match paths:
+    //    (a) outcome_external_event_id directly matches (coord that already
+    //        booked, request preserved the Graph id).
+    //    (b) details_json references the meeting id under common keys.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getRequestsByExternalEventId, getOpenRequestsForOwner } = require('../db/requests') as
+        typeof import('../db/requests');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { closeRequest } = require('../core/requests/closeRequest') as
+        typeof import('../core/requests/closeRequest');
+
+      const directMatches = getRequestsByExternalEventId(params.ownerUserId, params.meetingId);
+      for (const r of directMatches) {
+        closeRequest({
+          id: r.id,
+          state: 'cancelled',
+          closureReason: `meeting_${params.reason}`,
+          closedBy: 'meeting_cascade',
+        });
+      }
+
+      // Fallback — sweep open top-level requests whose details_json references
+      // this meetingId (catches coords still in-flight whose outcome was never
+      // stamped). Bounded to open state so closed rows aren't disturbed.
+      const open = getOpenRequestsForOwner(params.ownerUserId);
+      for (const r of open) {
+        if (directMatches.some(d => d.id === r.id)) continue;
+        if (payloadReferencesMeeting(r.details_json, params.meetingId)) {
+          closeRequest({
+            id: r.id,
+            state: 'cancelled',
+            closureReason: `meeting_${params.reason}`,
+            closedBy: 'meeting_cascade',
+          });
+        }
+      }
+    } catch (err) {
+      logger.warn('closeMeetingArtifacts — request cascade threw, non-fatal', {
+        err: String(err).slice(0, 200), meetingId: params.meetingId,
+      });
+    }
+
     if (result.approvalsResolved > 0 || result.tasksCancelled > 0 || result.outreachClosed > 0 || result.calendarIssuesResolved > 0) {
       logger.info('closeMeetingArtifacts — cascade fired', {
         meetingId: params.meetingId,

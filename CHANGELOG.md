@@ -2,6 +2,73 @@
 
 ---
 
+## 2.7.0 — The 1-2-3 rewrite trilogy: orphan kill, meeting decision engine, slot finder
+
+First minor in three weeks. Three concurrent rewrites in one sitting — owner declared each "broken by design" and asked for full rewrites instead of more patches. Each followed the same playbook: walk the algo, surface dilemmas, get sign-off, build whole batch, paper-trace against the new code on disk. Net **+1590 / -1938 lines** despite three new architectural primitives — the consolidation work it took to get there was substantial.
+
+### Added
+
+- **Requests spine** (`src/db/requests.ts`, `src/core/requests/`). Every user-facing async work item — approvals, outreach, reminders, follow-ups, research, coord — is now one row in one table with a single closure API (`closeRequest`). Lifecycle timers live on the row itself (`next_check_at` + `next_check_handler`) — no separate dispatch table for one-shot expiries. The four-table mess (tasks/approvals/coord_jobs/outreach_jobs) collapses to one user-facing surface with the legacy tables as internal state machines bridged via `request_id` columns.
+- **`cron_schedules`** table — recurring trigger config (replaces the old `routines` concept folded together with the cron-typed rows that used to live in `tasks`).
+- **`planMeeting` pipeline** (`src/skills/meetings/planMeeting.ts`). Single decision function: every scheduling intent (new_booking / move / cancel / find) flows through it. Six plan actions: `book`, `find_slots`, `confirm_override`, `escalate_approval`, `decline_and_relay`, `refuse_not_owners`. All five tools (`find_available_slots`, `create_meeting`, `move_meeting`, `delete_meeting`, `coordinate_meeting`) route through it.
+- **`scheduleRules.checkSlot`** (`src/utils/scheduleRules.ts`) — single rule engine. Working hours, floating-block movability, category limits, buffer, OOF, travel buffer, owner-busy collision — one source of truth for "is this slot OK?" Replaces the duplicate rule logic that was in `find_available_slots`, `create_meeting` Guard B, `move_meeting` rule check, and `coordinate_meeting` slot loop.
+- **`resolveLocation`** (`src/utils/resolveLocation.ts`) — single location decision. Priority chain: owner explicit > category default > day-type defaults > fallback. Replaces the `determineSlotLocation` + `helperForcesOnline` + `skipLocationField` mess in `create_meeting`.
+- **`findMeetingOwner`** (`src/skills/meetings/findMeetingOwner.ts`) — requests-table-first lookup with Graph organizer fallback. Enriches Graph-organizer's slack_id from `people_memory` so the asker-vs-organizer check works for the common case of meetings not booked through Maelle (weeklies the owner books himself, customer invites, Calendly).
+- **`detectCategory`** (`src/skills/meetings/detectCategory.ts`) — single-event LLM classifier (per-booking version of the autoCategorize batch).
+- **LLM-judged request dedup** (`src/utils/requestDedup.ts`). When a colleague raises an approval, the judge compares to open requests for that (owner, requester) within 48h and returns `match: existing | new`. Conservative — when in doubt, returns `new`. Closes the "Julia 5×, Yael 4×" duplicate-row pattern at the source.
+- **TZ-derived attendee availability + initiator-aware annotation**. Slot finder pre-clips candidate windows to the intersection of each attendee's working hours (TZ-converted). Owner-initiated searches drop slots where any internal attendee is busy. Colleague-initiated searches keep busy slots and tag each with per-attendee status (free/busy/tentative/oof/unknown for externals) so Sonnet narrates honestly without proposing impossibilities.
+- **SCHEDULING PREFERENCES prompt block** — renders `profile.schedule.timezone_preferences` + `night_shift` dynamically from yaml. All-Israeli → prefer morning; non-Israeli attendee → prefer 15:00-19:00. These are SOFT preferences via prompt guidance, NOT hard code rules — Sonnet adapts when no preferred-window slot exists and narrates the trade-off.
+
+### Changed
+
+- Brief generation reads from `requests` table. Surfaces open items daily + uninformed terminal closures once. `surfaced_count >= 3` on `awaiting_owner` requests → auto-park as `cancelled` with reason `surfaced_threshold` + `informed=0`, so the next brief narrates "I stopped working on X" then drops. Auto-park gated to `awaiting_owner` ONLY — reminders/scheduled outreach/research (state=`in_flight`) never auto-cancel before they fire.
+- System prompt PENDING APPROVALS block reads from `requests` table (owner sees all `awaiting_owner`; colleague-path sees thread-scoped open requests). Slot preview reads `details.winning_slot` as fallback so coord-driven approvals render the slot.
+- Emoji ✅ resolution matches `requests.terminal_dm_msg_ts` — only the original terminal-question DM stamps that field; midpoint reminder DMs deliberately do NOT, so ✅ on a reminder is a no-op.
+- `closeLoopOnOwnerHandled` scanner reads open requests + calls `closeRequest`. LLM-only (keyword pre-filter retired per v2.6.5 owner direction).
+- `find_available_slots` colleague-path now annotates each returned slot with per-attendee status (internal: getFreeBusy; external: always `unknown`). Owner-path retains busy-drop behavior.
+- `pickSpreadSlots` tightened: ≤3 total, ≤2/day, ≥1h gap between any two, ≥2 unique days when returning 3. Returns 1-2 gracefully when the caller's frame yields fewer — never crashes, never widens silently.
+- `move_meeting` routes through `planMeeting` so location + category re-resolve when a move flips day-type (office↔home). New `updateMeeting` params: `location`, `isOnline` — Graph PATCH updates them when planMeeting returns a different verdict for the new slot.
+- `delete_meeting` ownership-aware via `findMeetingOwner`: owner-organizer → normal delete; asker == organizer → silent decline on owner's side (no auto-DM, they ARE the asker); asker ≠ organizer → decline + auto-DM organizer with polite template. Tool returns `relay_status: sent | skipped_no_slack_id | not_attempted` so Sonnet narrates honestly when the organizer is external and no Slack DM was sent.
+- `move_meeting` ownership-aware: owner-attendee on move → `refuse_not_owners` (pure refusal, no auto-DM per owner direction — different from cancel).
+- Floating-block rule (lunch / coffee / focus blocks): movability check. A new slot conflicts with a floating block ONLY when accommodating it leaves no contiguous free segment ≥ `block.duration_minutes` in the window. Pre-fix the rule treated the whole window as a wall; a 25-min meeting at 12:00 inside the 11:30-13:30 lunch window falsely failed even though lunch could shift.
+- `idan.yaml` categories: added explicit `default_location` + `default_is_online` to `Physical` (office hybrid) and `Outside` (custom_required, no Teams). Schema already supported these; yaml just wasn't using them.
+
+### Fixed
+
+- **Orphan items in brief** (Julia 5×, Yael 4× pattern across 30+ versions). Root cause: brief read from `tasks`, but the tasks table had no autonomous path home from `pending_owner` — closure required one of 8 separate cascade paths to fire correctly, and most missed. Fix: single-table spine with single closure API; `surfaced_count`/`informed` semantics; tools route through requests not legacy.
+- **Max meeting location empty** (the Topic 2 symptom). Root cause: `helperForcesOnline` + `skipLocationField` flags conspired to skip the office address even when the helper had it ready. Fix: `resolveLocation` returns a single verdict; `create_meeting` reads it; office address stamps for office-day externals.
+- **Wrong "I can't touch this meeting" refusal** when owner IS the organizer (Yael screenshot bug). Root cause: prompt rule + tool guard both pre-refused without trying. Fix: `findMeetingOwner` reads requests table first, Graph organizer fallback; tool actually attempts the action and reports honest verdict.
+- **Slot finder returning 1 afternoon option when many exist** (Yael interview bug). Root cause: `pickSpreadSlots` picked first-of-day chronologically → morning-biased on every day. Combined with the soft-preference for non-IL attendees living only in prompt (Sonnet ignored), only Wed 16:15 survived a post-hoc "after 15:00" filter. Fix: spread rules tightened + preferences rendered as prompt guidance + Sonnet uses judgment to narrow `search_from` per attendee mix.
+- **Duplicate orchestrator turn after cutover restart**. Root cause: `processedDedup` TTL was 60s; Slack socket mode retries queued events for several minutes after reconnect → second delivery bypassed the dedup window. Fix: TTL bumped to 10 minutes (covers realistic socket-reconnect retry windows; ts collisions essentially impossible at Slack's microsecond ts precision).
+- **Catch-up icon missing**. `↩` unicode arrow without variation selector renders as text-style in Slack desktop. Added U+FE0F variation selector → renders as proper emoji.
+
+### Removed
+
+- `src/core/approvals/orphanBackfill.ts` + `src/core/approvals/outreachOrphanBackfill.ts` — the startup orphan-sweeper scripts were the textbook tell of a leaky write path. New spine is correct by construction; if it leaks we fix the leak, not patch with a sweeper.
+- `determineSlotLocation` helper (`coord/utils.ts`). Replaced by `resolveLocation`.
+- `helperForcesOnline` / `skipLocationField` block in `create_meeting`. Replaced by `planMeeting` verdict.
+- Prompt rule about organizer pre-refusal (`meetings.ts` ~2014). Replaced with "always try the tool; planMeeting returns the right action."
+- `markTaskInformed` / `getCompletedUninformedTasks` / `completed→informed` two-step in tasks. Replaced by `surfaced_count` + `informed` on requests.
+
+### Migration
+
+- **One-shot cutover script** (`scripts/cutover-to-requests.cjs`) — wipes in-flight rows from `tasks`/`approvals`/`coord_jobs`/`outreach_jobs` so the new spine starts clean. Per owner direction (no migration code; hard cutover). Owner ran on 2026-05-12 before restart.
+- Schema: new `requests` + `cron_schedules` tables. Legacy tables retained as internal state machines + bridge columns (`request_id`) added to `outreach_jobs` and `coord_jobs`. ALTERs idempotent.
+
+### Invariants preserved
+
+- Maelle-is-a-human filter: every user-facing message still passes through securityGate + humanGate; no bot framings, no "I'm an AI" leaks.
+- Shadow DM remains a passive log, never a notification or approval channel.
+- No personal info in code: all owner names / company / domains / hours read from `profile.*`.
+- Four-layer model: skills don't import from connectors/slack/*; requests spine lives in core/.
+- Owner is gatekeeper of version bumps: this 2.7.0 wrap was explicitly owner-triggered ("go to 2.7. let's wrap up").
+
+### Stress-tested (paper-trace)
+
+10 adversarial scenarios traced against the new code on disk before this wrap — auto-park, reminder survival, dedup, emoji discipline, slot_pick fallback, Max location, home-day external, Yael cancels her own (Maelle-booked + legacy/Calendly), owner cancels someone else's, move office→home. 8/10 ✅, 2 surfaced gaps fixed in the same session (move-flow planMeeting routing + external-organizer relay_status honesty + asker-email lookup for legacy meetings).
+
+---
+
 ## 2.6.10 — Doc wrap: SESSION_STARTER version-bump rule loud, memory caught up
 
 Documentation-only patch. Owner caught the agent shipping 4 patches across Sun/Mon (v2.6.6 → v2.6.9) with 2 of them committed on build-only words ("go" / "go for all") that look like approval but are NOT bundle signals per `feedback_bundle_signals.md`. Memory was correct; agent didn't honor it.

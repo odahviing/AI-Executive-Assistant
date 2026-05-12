@@ -6,8 +6,6 @@ import { getConversationHistory, appendToConversation } from '../db';
 import { runDueTasks } from '../tasks/runner';
 import { materializeRoutineTasks, backfillNullNextRunAt } from '../tasks/routineMaterializer';
 import { ensureBriefingCron, updateBriefingCronChannel } from '../tasks/crons';
-import { backfillOrphanApprovals } from './approvals/orphanBackfill';
-import { backfillOutreachOrphans } from './approvals/outreachOrphanBackfill';
 import logger from '../utils/logger';
 
 // v1.5.1 — tightened scope: DM only, 24h window, reply in thread, last unread
@@ -23,25 +21,8 @@ export function startBackgroundTimer(
   runningApps: Array<{ app: App; name: string }>,
   profiles: Map<string, UserProfile>,
 ): void {
-  // v1.5.1 — startup-once: recover any waiting_owner coords that never got
-  // an approval (pre-v1.5 orphans, lost approvals from earlier bugs). Runs
-  // after a small delay so Slack clients are fully warm.
-  setTimeout(() => {
-    const app = runningApps[0]?.app;
-    if (!app) return;
-    backfillOrphanApprovals(app, profiles).catch(err =>
-      logger.error('Orphan-approval backfill error', { err: String(err) })
-    );
-    // v2.0.8 — same window: clean up sibling outreach_jobs left behind by
-    // coords that booked/cancelled/abandoned BEFORE the v2.0.7 sibling-
-    // cleanup in updateCoordJob existed. Also schedules outreach_decision
-    // tombstones for any bare no_response rows. Idempotent.
-    try {
-      backfillOutreachOrphans(profiles);
-    } catch (err) {
-      logger.error('Outreach-orphan backfill error', { err: String(err) });
-    }
-  }, 30_000);
+  // v2.7.0 — orphan-backfill scripts deleted. The requests spine is correct
+  // by construction; if it leaks we fix the leak, not patch with a sweeper.
 
   // v1.6.0 — single-pipeline background loop. Every former sweep is now a
   // scheduled task (outreach_send, outreach_expiry, coord_nudge, coord_abandon,
@@ -347,7 +328,7 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
   appendToConversation(threadTs, channelId, { role: 'user', content: rawText });
   appendToConversation(threadTs, channelId, { role: 'assistant', content: output.reply });
 
-  const contextLine = `_↩ Catching up on your message from ${timeLabel}_`;
+  const contextLine = `_↩️ Catching up on your message from ${timeLabel}_`;
   const msgPreviewShort = rawText.slice(0, 60) + (rawText.length > 60 ? '…' : '');
 
   // Run through the Slack outbound formatter (scrubs internal leakage + applies

@@ -29,6 +29,7 @@ export type CoordBookingHandler = (args: {
   status?: string;
   subject?: string;
   slot?: string;
+  externalEventId?: string;  // v2.7.0 — Graph event id when book succeeds; resolver stamps it on the request row
 }>;
 
 let handler: CoordBookingHandler | null = null;

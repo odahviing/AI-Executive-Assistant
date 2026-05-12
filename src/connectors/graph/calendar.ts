@@ -151,28 +151,30 @@ function toEndOfDayLocal(dateStr: string, timezone: string): string {
 }
 
 /**
- * Picks up to `count` well-spread slots from a candidate list.
+ * v2.7.0 spread rules:
+ *   • Max 3 total
+ *   • Max 2 per day
+ *   • Every pair of returned slots ≥1h apart
+ *   • ≥2 unique days when returning 3 (no all-same-day)
  *
- * Priority:
- *   1. Different days (ideal: all 3 on different days)
- *   2. If fewer than `count` days available: allow same-day slots,
- *      but require ≥ 2 hours gap between any two slots on the same day.
- *   3. Fallback: ≥ 30 min gap (better than nothing).
+ * Returns 1 or 2 slots if that's all the candidate list yields — caller's
+ * search window may legitimately be narrow (e.g. owner asked "today between
+ * 14:00 and 17:00"). Don't widen silently; just return what's there.
  *
- * This prevents Maelle from proposing Monday 09:00 / 09:30 / 10:00
- * when a single meeting could block all three.
+ * Order: chronological.
  */
 export function pickSpreadSlots(
   slots: Array<{ start: string }>,
   timezone: string,
   count = 3,
 ): string[] {
-  const PREFERRED_GAP_HOURS = 2;
-  const MIN_GAP_HOURS = 0.5;
+  const MIN_GAP_HOURS = 1;
+  const MAX_PER_DAY = 2;
   const chosen: string[] = [];
   const chosenDts: DateTime[] = [];
+  const perDayCount = new Map<string, number>();
 
-  // Pass 1: one slot per day
+  // Pass 1: one slot per day, in chronological order.
   const seenDays = new Set<string>();
   for (const slot of slots) {
     const dt = DateTime.fromISO(slot.start).setZone(timezone);
@@ -181,36 +183,30 @@ export function pickSpreadSlots(
       chosen.push(slot.start);
       chosenDts.push(dt);
       seenDays.add(day);
-      if (chosen.length >= count) return chosen;
-    }
-  }
-
-  // Pass 2: same-day allowed but ≥ PREFERRED_GAP_HOURS apart from all chosen
-  for (const slot of slots) {
-    if (chosen.includes(slot.start)) continue;
-    const dt = DateTime.fromISO(slot.start).setZone(timezone);
-    const tooClose = chosenDts.some(c => Math.abs(dt.diff(c, 'hours').hours) < PREFERRED_GAP_HOURS);
-    if (!tooClose) {
-      chosen.push(slot.start);
-      chosenDts.push(dt);
-      if (chosen.length >= count) return chosen;
-    }
-  }
-
-  // Pass 3: last resort — relax to MIN_GAP_HOURS
-  for (const slot of slots) {
-    if (chosen.includes(slot.start)) continue;
-    const dt = DateTime.fromISO(slot.start).setZone(timezone);
-    const tooClose = chosenDts.some(c => Math.abs(dt.diff(c, 'hours').hours) < MIN_GAP_HOURS);
-    if (!tooClose) {
-      chosen.push(slot.start);
-      chosenDts.push(dt);
+      perDayCount.set(day, 1);
       if (chosen.length >= count) break;
     }
   }
 
-  // HARD constraint: at least 2 unique days when returning 3+ slots.
-  // If all chosen are on the same day, cap at 2 so the caller expands the search window.
+  // Pass 2: allow a second slot on a day already represented IF it's ≥1h
+  // from every other chosen slot AND the day has fewer than MAX_PER_DAY.
+  if (chosen.length < count) {
+    for (const slot of slots) {
+      if (chosen.includes(slot.start)) continue;
+      const dt = DateTime.fromISO(slot.start).setZone(timezone);
+      const day = dt.toFormat('yyyy-MM-dd');
+      if ((perDayCount.get(day) ?? 0) >= MAX_PER_DAY) continue;
+      const tooClose = chosenDts.some(c => Math.abs(dt.diff(c, 'hours').hours) < MIN_GAP_HOURS);
+      if (tooClose) continue;
+      chosen.push(slot.start);
+      chosenDts.push(dt);
+      perDayCount.set(day, (perDayCount.get(day) ?? 0) + 1);
+      if (chosen.length >= count) break;
+    }
+  }
+
+  // HARD constraint: when returning 3, require ≥2 unique days.
+  // If all 3 collapsed to one day for some reason, drop to 2.
   if (chosen.length >= 3) {
     const uniqueDays = new Set(chosenDts.map(dt => dt.toFormat('yyyy-MM-dd')));
     if (uniqueDays.size < 2) {
@@ -218,8 +214,7 @@ export function pickSpreadSlots(
     }
   }
 
-  // Return chronologically ordered — discovery passes can produce out-of-order
-  // results (e.g. Sun, Mon, Sun) which feels strange when shown to a human.
+  // Chronological order in output.
   chosen.sort((a, b) => DateTime.fromISO(a).toMillis() - DateTime.fromISO(b).toMillis());
   return chosen;
 }
@@ -1151,6 +1146,12 @@ export interface UpdateMeetingParams {
   end?: string;
   body?: string;
   categories?: string[];
+  // v2.7.0 — optional location + isOnline. Lets move_meeting flip the
+  // location when a move crosses day-type (office↔home). Pass-through to
+  // Graph PATCH; when omitted, the event's existing location/isOnlineMeeting
+  // are preserved.
+  location?: string;
+  isOnline?: boolean;
 }
 
 /**
@@ -1288,6 +1289,16 @@ export async function updateMeeting(params: UpdateMeetingParams): Promise<void> 
   if (params.end)        patch.end        = { dateTime: normalizeForGraph(params.end,   params.timezone), timeZone: params.timezone };
   if (params.body)       patch.body       = { contentType: 'HTML', content: params.body };
   if (params.categories) patch.categories = params.categories;
+  // v2.7.0 — location + isOnline pass-through.
+  // Empty string on location clears it on Graph's side (e.g. office→home flip
+  // moves to Teams-only with no physical address). Explicit undefined skips
+  // the field entirely so existing location is preserved.
+  if (params.location !== undefined) {
+    patch.location = { displayName: params.location };
+  }
+  if (params.isOnline !== undefined) {
+    patch.isOnlineMeeting = params.isOnline;
+  }
 
   try {
     await client.api(`/users/${params.userEmail}/events/${params.meetingId}`).patch(patch);

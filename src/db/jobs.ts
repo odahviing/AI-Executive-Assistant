@@ -1,4 +1,31 @@
 import { getDb } from './client';
+import { closeRequest } from '../core/requests/closeRequest';
+
+// ── Bridge helpers (v2.7.0) ──────────────────────────────────────────────────
+// Link a legacy outreach_jobs / coord_jobs row to its user-facing requests row.
+// The legacy table stays as the internal state machine; the request is what
+// surfaces in brief, system prompt, scanner. When the legacy row transitions
+// to terminal status, updateOutreachJob / updateCoordJob (below) read the
+// linked request_id and call closeRequest with the appropriate state.
+
+export function linkOutreachToRequest(outreachId: string, requestId: string): void {
+  getDb().prepare(`UPDATE outreach_jobs SET request_id = ?, updated_at = datetime('now') WHERE id = ?`).run(requestId, outreachId);
+}
+
+export function linkCoordToRequest(coordId: string, requestId: string): void {
+  getDb().prepare(`UPDATE coord_jobs SET request_id = ?, updated_at = datetime('now') WHERE id = ?`).run(requestId, coordId);
+}
+
+function getLinkedRequestIdForOutreach(outreachId: string): string | null {
+  const row = getDb().prepare(`SELECT request_id FROM outreach_jobs WHERE id = ?`).get(outreachId) as { request_id: string | null } | undefined;
+  return row?.request_id ?? null;
+}
+
+function getLinkedRequestIdForCoord(coordId: string): string | null {
+  const row = getDb().prepare(`SELECT request_id FROM coord_jobs WHERE id = ?`).get(coordId) as { request_id: string | null } | undefined;
+  return row?.request_id ?? null;
+}
+
 
 // ── Coord vs coordination_jobs (historical) ──────────────────────────────────
 // The old `coordination_jobs` single-colleague table is dropped in 1.6.0.
@@ -187,6 +214,26 @@ export function updateOutreachJob(id: string, updates: Partial<OutreachJob>): vo
         `UPDATE tasks SET status = 'cancelled', updated_at = datetime('now')
          WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague','pending_owner')`
       ).run(id);
+    }
+
+    // v2.7.0 — bridge to requests spine. When the legacy outreach_job
+    // transitions to terminal, close the linked request row too so the brief
+    // narrates closure cleanly. Reason carries the legacy status verbatim
+    // so audit can trace which path closed it.
+    const linkedRequestId = getLinkedRequestIdForOutreach(id);
+    if (linkedRequestId) {
+      const requestState: 'resolved' | 'cancelled' | 'expired' =
+        updates.status === 'replied' || updates.status === 'done' ? 'resolved'
+        : updates.status === 'expired' ? 'expired'
+        : 'cancelled';
+      try {
+        closeRequest({
+          id: linkedRequestId,
+          state: requestState,
+          closureReason: `outreach_${updates.status}`,
+          closedBy: updates.status === 'replied' ? 'colleague_reply' : 'system',
+        });
+      } catch (_) { /* non-fatal */ }
     }
   }
 
@@ -591,6 +638,24 @@ export function updateCoordJob(id: string, updates: Partial<Omit<CoordJob, 'id' 
          WHERE skill_ref = ? AND type = 'coordination'
          AND status IN ('new','in_progress','pending_colleague','pending_owner')`
       ).run(id);
+    }
+
+    // v2.7.0 — bridge to requests spine. When the coord legacy row reaches
+    // terminal, close the linked request too. booked → resolved (with
+    // outcome_external_event_id stamped from updates if present);
+    // cancelled / abandoned → cancelled.
+    const linkedRequestId = getLinkedRequestIdForCoord(id);
+    if (linkedRequestId) {
+      const requestState: 'resolved' | 'cancelled' = terminal === 'booked' ? 'resolved' : 'cancelled';
+      try {
+        closeRequest({
+          id: linkedRequestId,
+          state: requestState,
+          closureReason: `coord_${terminal}`,
+          closedBy: terminal === 'booked' ? 'owner' : 'system',
+          outcomeExternalEventId: (updates as any).external_event_id ?? undefined,
+        });
+      } catch (_) { /* non-fatal */ }
     }
   }
 }

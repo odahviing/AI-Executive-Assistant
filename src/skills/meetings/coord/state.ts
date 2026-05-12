@@ -31,15 +31,17 @@ import {
   upsertPersonMemory,
   getPersonMemory,
   searchPeopleMemory,
+  linkCoordToRequest,
   type PersonInteraction,
   type CoordParticipant,
   type CoordJob,
 } from '../../../db';
 import { createTask } from '../../../tasks';
+import { createRequest } from '../../../db/requests';
 import { findAvailableSlots, pickSpreadSlots } from '../../../connectors/graph/calendar';
 import { shadowNotify } from '../../../utils/shadowNotify';
 import { getConnection } from '../../../connections/registry';
-import { determineSlotLocation, type SlotWithLocation } from './utils';
+import { type SlotWithLocation } from './utils';
 import { emitWaitingOwnerApproval } from './approval';
 import { bookCoordination } from './booking';
 import logger from '../../../utils/logger';
@@ -236,6 +238,33 @@ export async function initiateCoordination(
     pending_on: JSON.stringify(taggedParticipants.filter(p => !p.just_invite).map(p => p.slack_id)),
     skill_origin: 'meetings',
   });
+
+  // v2.7.0 — paired request on the spine. Brief / system prompt / scanner
+  // surface from requests. updateCoordJob's terminal hook closes this request
+  // via linkCoordToRequest below.
+  const participantNames = taggedParticipants.filter(p => !p.just_invite).map(p => p.name);
+  const requestRow = createRequest({
+    ownerUserId: params.ownerUserId,
+    initiatedBy: params.ownerUserId,
+    initiatedByRole: 'owner',
+    kind: 'coord',
+    subject: taskTitle,
+    description: params.topic ?? undefined,
+    state: 'awaiting_colleague',
+    informed: 1,
+    originChannel: params.ownerChannel,
+    originThreadTs: params.ownerThreadTs,
+    details: {
+      coord_job_id: jobId,
+      subject: params.subject,
+      topic: params.topic ?? null,
+      duration_min: params.durationMin,
+      participants: taggedParticipants,
+      participant_names: participantNames,
+      proposed_slots: params.proposedSlots.map(s => s.start),
+    },
+  });
+  linkCoordToRequest(jobId, requestRow.id);
 
   // 24-work-hour nudge as a first-class task.
   const nudgeAt = DateTime.now().plus({ hours: 24 }).toUTC().toISO()!;
@@ -942,13 +971,28 @@ export async function triggerRoundTwo(
     }
   } catch (_) { /* fail open */ }
 
+  // v2.7.0 — unified location via resolveLocation. Replaces determineSlotLocation.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { resolveLocation: rl } = require('../../../utils/resolveLocation') as typeof import('../../../utils/resolveLocation');
+  let coordCategory: string | null = null;
+  try { coordCategory = (JSON.parse(job.notes ?? '{}').category as string | undefined) ?? null; } catch (_) {}
+  const hasExternal = !isInternal;
   const slotsWithLocation: SlotWithLocation[] = chosenSlots.map(slotStart => {
-    const loc = determineSlotLocation(slotStart, profile, totalPeople, isInternal, undefined, anyTraveling);
+    const v = rl({
+      profile,
+      startIso: slotStart,
+      category: coordCategory,
+      participantCount: totalPeople,
+      hasExternalAttendee: hasExternal,
+      anyParticipantRemote: anyTraveling,
+    });
+    const location = v.kind === 'resolved' ? v.location : '';
+    const isOnline = v.kind === 'resolved' ? v.isOnline : true;
     return {
       start: slotStart,
       end: DateTime.fromISO(slotStart).plus({ minutes: job.duration_min }).toISO()!,
-      location: loc.location,
-      isOnline: loc.isOnline,
+      location,
+      isOnline,
     };
   });
 

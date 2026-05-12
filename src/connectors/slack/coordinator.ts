@@ -32,7 +32,8 @@ import {
 } from '../../db';
 import { findAvailableSlots, pickSpreadSlots } from '../graph/calendar';
 import { initiateCoordination } from '../../skills/meetings/coord/state';
-import { determineSlotLocation, type SlotWithLocation } from '../../skills/meetings/coord/utils';
+import { type SlotWithLocation } from '../../skills/meetings/coord/utils';
+import { resolveLocation } from '../../utils/resolveLocation';
 import { searchPeopleMemory, getPersonMemory } from '../../db/people';
 import logger from '../../utils/logger';
 
@@ -615,19 +616,23 @@ export async function handleOutreachReply(
       } catch (_) { /* fail open */ }
 
       const proposedSlots: SlotWithLocation[] = chosen.map(slotStart => {
-        const loc = determineSlotLocation(
-          slotStart,
-          params.profile,
-          2,
-          isColleagueInternal,
-          undefined,
-          colleagueTraveling,
-        );
+        // v2.7.0 — unified location via resolveLocation. 1:1 coord, no
+        // category context yet (will be detected at create_meeting time).
+        const v = resolveLocation({
+          profile: params.profile,
+          startIso: slotStart,
+          category: null,
+          participantCount: 2,
+          hasExternalAttendee: !isColleagueInternal,
+          anyParticipantRemote: colleagueTraveling,
+        });
+        const location = v.kind === 'resolved' ? v.location : '';
+        const isOnline = v.kind === 'resolved' ? v.isOnline : true;
         return {
           start: slotStart,
           end: DateTime.fromISO(slotStart).plus({ minutes: durationMin }).toISO()!,
-          location: loc.location,
-          isOnline: loc.isOnline,
+          location,
+          isOnline,
         };
       });
 

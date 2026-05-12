@@ -32,7 +32,7 @@ import { createMeeting, getCalendarEvents, updateMeeting } from '../../../connec
 import { shadowNotify } from '../../../utils/shadowNotify';
 import { getConnection } from '../../../connections/registry';
 import { registerCoordBookingHandler } from '../../../core/approvals/coordBookingHandler';
-import { determineSlotLocation } from './utils';
+// determineSlotLocation removed v2.7.0 — replaced by resolveLocation below.
 import { emitWaitingOwnerApproval } from './approval';
 import logger from '../../../utils/logger';
 
@@ -183,9 +183,37 @@ export async function bookCoordination(
           if (p.slack_id && getCurrentTravel(p.slack_id)) { anyTraveling = true; break; }
         }
       } catch (_) { /* fail open */ }
-      const locInfo = determineSlotLocation(slot, profile, totalPeople, isInternal, undefined, anyTraveling);
-      location = locInfo.location;
-      isOnline = locInfo.isOnline;
+      // v2.7.0 — unified location resolution via resolveLocation (replaces
+      // determineSlotLocation). Includes category-aware behavior; coord
+      // category comes from notes if set.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { resolveLocation } = require('../../../utils/resolveLocation') as
+        typeof import('../../../utils/resolveLocation');
+      const coordCategory = (notesObj.category as string | undefined) ?? null;
+      const hasExternal = participants.some(p => {
+        const e = (p.email ?? '').toLowerCase();
+        if (!e) return false;
+        return !e.endsWith('@' + profile.user.email.split('@')[1].toLowerCase());
+      });
+      const v = resolveLocation({
+        profile,
+        startIso: slot,
+        category: coordCategory,
+        participantCount: totalPeople,
+        hasExternalAttendee: hasExternal,
+        anyParticipantRemote: anyTraveling,
+      });
+      if (v.kind === 'resolved') {
+        location = v.location;
+        isOnline = v.isOnline;
+      } else if (v.kind === 'no_default_location_category') {
+        location = '';
+        isOnline = false;
+      } else {
+        // vacation/oof fallback — shouldn't reach (slot already passed rule check)
+        location = '';
+        isOnline = true;
+      }
     }
   }
 

@@ -21,7 +21,8 @@ import {
   updateMeeting,
 } from '../connectors/graph/calendar';
 import { SchedulingSkill as _LegacyOpsSkill } from './meetings/ops';
-import { determineSlotLocation, type SlotWithLocation } from './meetings/coord/utils';
+import { type SlotWithLocation } from './meetings/coord/utils';
+import { resolveLocation } from '../utils/resolveLocation';
 import { forceBookCoordinationByOwner } from './meetings/coord/booking';
 import logger from '../utils/logger';
 import { DateTime } from 'luxon';
@@ -1058,12 +1059,24 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
         } catch (_) { /* fail open */ }
 
         const proposedSlots: SlotWithLocation[] = chosenStarts.map(slotStart => {
-          const loc = determineSlotLocation(slotStart, profile, totalPeople, isInternal, customLocation, anyTraveling);
+          // v2.7.0 — unified location via resolveLocation. Coord category
+          // passed when Sonnet supplied it (args.category).
+          const v = resolveLocation({
+            profile,
+            startIso: slotStart,
+            category: (args.category as string | undefined) ?? null,
+            participantCount: totalPeople,
+            hasExternalAttendee: !isInternal,
+            anyParticipantRemote: anyTraveling,
+            ownerLocationHint: customLocation,
+          });
+          const location = v.kind === 'resolved' ? v.location : '';
+          const isOnline = v.kind === 'resolved' ? v.isOnline : true;
           return {
             start: slotStart,
             end: DateTime.fromISO(slotStart).plus({ minutes: durationMin }).toISO()!,
-            location: loc.location,
-            isOnline: loc.isOnline,
+            location,
+            isOnline,
           };
         });
 
@@ -1745,7 +1758,30 @@ ${firstName.toUpperCase()}'S SCHEDULE — these are HARD RULES. Proposing a time
 - Home days: ${homeDays} · ${home.hours_start}–${home.hours_end}
 - Days not listed above are days OFF. Never propose work meetings on those days.
 - Floating blocks (elastic within their window): ${blocksLine || 'none configured'}.
-- Buffer between meetings: the allowed durations (${profile.meetings.allowed_durations.join(' / ')} min) ALREADY bake in ${profile.meetings.buffer_minutes} min of trailing buffer by design — a 55-min meeting at 17:00 ends 17:55, leaving 5 min before 18:00 automatically. You do NOT need to add another 5-min gap BEFORE a new meeting. If a previous meeting ends at 17:00, a new meeting can start at 17:00 (connected) — that is fine and preferred. You may offer 17:15 as an alternative if ${firstName} wants a gap.${categoriesBlock}
+- Buffer between meetings: the allowed durations (${profile.meetings.allowed_durations.join(' / ')} min) ALREADY bake in ${profile.meetings.buffer_minutes} min of trailing buffer by design — a 55-min meeting at 17:00 ends 17:55, leaving 5 min before 18:00 automatically. You do NOT need to add another 5-min gap BEFORE a new meeting. If a previous meeting ends at 17:00, a new meeting can start at 17:00 (connected) — that is fine and preferred. You may offer 17:15 as an alternative if ${firstName} wants a gap.
+
+${firstName.toUpperCase()}'S SCHEDULING PREFERENCES — soft guidance, NOT hard rules. Use judgment when proposing slots.
+${(() => {
+  const tp = profile.schedule.timezone_preferences;
+  const ns = profile.schedule.night_shift;
+  const lines: string[] = [];
+  if (tp) {
+    lines.push(`- All-Israeli meetings (everyone in Asia/Jerusalem): prefer ${tp.local_participants} — saves the afternoon for cross-timezone meetings.`);
+    lines.push(`- Any non-Israeli attendee (US, UK, AU, EU): prefer ${tp.remote_participants} ${firstName}'s time — overlaps best with their working day.`);
+    if (tp.note) lines.push(`- Note from ${firstName}: "${tp.note}"`);
+  }
+  if (ns) {
+    lines.push(`- Night-shift window: ${ns.hours_start}–${ns.hours_end}${ns.typical_day ? ` (typically ${ns.typical_day})` : ''} — only when ${firstName} explicitly offers this for AU/Pacific clients.`);
+  }
+  lines.push('');
+  lines.push('How to apply these:');
+  lines.push(`- When attendees are all Israeli, narrow find_available_slots with \`search_from\` clipped to morning hours where possible.`);
+  lines.push(`- When ANY non-Israeli attendee present, narrow \`search_from\` to 15:00 ${firstName}'s time so afternoon options come back first.`);
+  lines.push(`- These are PREFERENCES not rules — if nothing in the preferred window works, propose outside it and NARRATE the trade-off (*"Nothing in your usual afternoon; best I have is Wed 11:30"*). Never refuse on a soft preference alone.`);
+  lines.push(`- For UK / AU / EU specifically: use Sonnet judgment — UK overlaps with IL late-afternoon, AU may need ${firstName}'s morning OR the night_shift window if he's offered it.`);
+  lines.push(`- ${firstName} can override any preference at any time. The tool's \`relaxed:true\` flag bypasses these AND hard rules; each returned slot carries \`broken_rule_label\` so you narrate what's bypassed.`);
+  return lines.join('\n');
+})()}${categoriesBlock}
 
 FLOATING BLOCKS (any profile-defined block: lunch, coffee, gym, prayer, etc.): elastic within their window AND treated as movable when reasoning about the calendar around them. They're not fixed walls — they bend to make room.
 - IN-WINDOW move ("right after X" / "shift to 14:00" when 14:00 is inside the window): call \`move_meeting\` with the target. Handler does window/buffer/alignment math. Don't compute the slot yourself, don't ask permission.
@@ -2009,10 +2045,13 @@ PROPOSED SLOTS ARE BINDING. When you offered specific times ("Mon 27 Apr at 10:3
 
 REPAIR WITH MOVE, NOT CREATE. When meetings are misplaced (wrong week/day/time), call move_meeting on the existing event id. NEVER create_meeting at the new slot — that produces a duplicate next to the misplaced original. Get existing event ids via get_calendar first if needed.
 
-ORGANIZER FIELD IS THE TRUTH (v2.6.1).
-The \`organizer.emailAddress.address\` on the event decides what's editable — NOT the booking source (Calendly / Comeet / plugin / Outlook are all irrelevant, ignore them). Read get_calendar; trust the field; never guess who the organizer is.
-- organizer == ${firstName} → he can move/cancel/update subject/location/body, AND add/remove attendees. TRY THE TOOL. Don't pre-refuse on "this was booked via Calendly" — that's a hallucinated wall.
-- organizer ≠ ${firstName} → he's an ATTENDEE. He can decline / remove from his own calendar. He CANNOT change subject / location / time / attendees — Graph rejects those PATCHes ("not organizer") and update_meeting / move_meeting refuse in-tool. When asked to do an attendee-illegal action, offer instead: "I can message [organizer] and ask them to update it" / "I can decline it on your side" / "I'll flag the conflict back to you." Never offer the change itself — that's a false promise.
+OWNERSHIP — try the tool, planMeeting decides (v2.7.0).
+Don't pre-refuse a move / cancel / update based on what you think the organizer is. The tool itself runs the ownership check (findMeetingOwner — checks the requests spine FIRST, falls back to Graph organizer). Just call the tool and trust its return:
+- delete_meeting on an event ${firstName} didn't organize → tool runs decline_and_relay path: removes the event from ${firstName}'s side AND auto-DMs the organizer politely. No need to ask ${firstName} for permission first; that's the planMeeting verdict.
+- move_meeting on an event ${firstName} didn't organize → tool returns error: 'not_organizer'. Narrate honestly: "<organizer> set that one up — only they can shift the time. Want me to flag it so ${firstName} can ping them?" Don't DM the organizer automatically (per owner direction).
+- update_meeting on an event ${firstName} didn't organize → same as move_meeting (returns error: 'not_organizer').
+- create_meeting / move_meeting on events ${firstName} DOES organize: tool runs planMeeting → location/category/rules all decided inside. If rules fail, the tool returns error: 'rule_violation' with a suggested_ask_text — surface it to ${firstName} for confirmation (owner-path) or call create_approval(kind=policy_exception) with that text (colleague-path).
+TRUST THE TOOL'S DECISION. Don't second-guess the organizer or hallucinate a wall — call it and let the verdict speak.
 
 Subject: if the user says "meet with X / sync with Y / set up time with Z" without saying what it's about, ASK "What's the meeting about?" first. Don't explain why. Skip asking only if the phrasing gives a clear subject ("review Q3 pricing with Elan", "1:1 with Amazia") or the thread makes it obvious.
 

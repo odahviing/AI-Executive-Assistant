@@ -1673,9 +1673,12 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       }
 
       // ── Path 3: approval-via-emoji ──────────────────────────────────────
+      // v2.7.0 — matches against requests.terminal_dm_msg_ts (the spine).
+      // Per Q3: only the terminal-question DM stamps that field, so ✅ on
+      // a midpoint reminder is a no-op.
       try {
-        const { getPendingApprovalByMsgTs } = await import('../../db/approvals');
-        const approval = getPendingApprovalByMsgTs(item.ts);
+        const { getRequestByTerminalMsgTs } = await import('../../db/requests');
+        const approval = getRequestByTerminalMsgTs(item.ts);
         if (!approval) return;
         // Map the reaction to a verdict. Conservative set per owner direction.
         // Approve: white_check_mark, +1, pray, thumbsup, heavy_check_mark.
@@ -1702,11 +1705,11 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           });
           return;
         }
-        const { resolveApproval } = await import('../../core/approvals/resolver');
+        const { resolveRequest } = await import('../../core/requests/resolver');
         const decision = verdict === 'approve'
           ? { verdict: 'approve' as const, data: {} }
           : { verdict: 'reject' as const, reason: `Owner reacted :${reaction}:` };
-        const result = await resolveApproval(approval.id, decision, { app, profile });
+        const result = await resolveRequest(approval.id, decision, { app, profile });
         logger.info('reaction_added resolved approval via emoji', {
           approvalId: approval.id, verdict, reaction, ok: result.ok,
         });

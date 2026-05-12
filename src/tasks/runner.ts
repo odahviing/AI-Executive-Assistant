@@ -22,6 +22,7 @@ import { App } from '@slack/bolt';
 import type { UserProfile } from '../config/userProfile';
 import { getTasksDueNow, updateTask, type Task } from './index';
 import { DISPATCHERS } from './dispatchers';
+import { sweepDueRequests } from '../core/requests/runner';
 import { getConnection } from '../connections/registry';
 import logger from '../utils/logger';
 
@@ -29,6 +30,17 @@ export async function runDueTasks(
   app: App,
   profiles: Map<string, UserProfile>,
 ): Promise<void> {
+  // v2.7.0 — sweep request lifecycle timers (approval reminders, expiry,
+  // reminder fires, outreach decisions) on the same cadence as the legacy
+  // task runner. Independent loop; never throws past this boundary.
+  try {
+    const profilesByUserId = new Map<string, UserProfile>();
+    for (const p of profiles.values()) profilesByUserId.set(p.user.slack_user_id, p);
+    await sweepDueRequests({ app, profilesByUserId });
+  } catch (err) {
+    logger.error('sweepDueRequests threw — continuing with legacy task sweep', { err: String(err).slice(0, 300) });
+  }
+
   const dueTasks = getTasksDueNow();
   if (dueTasks.length === 0) return;
 
