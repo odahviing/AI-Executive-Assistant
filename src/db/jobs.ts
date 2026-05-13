@@ -592,6 +592,8 @@ export function updateCoordJob(id: string, updates: Partial<Omit<CoordJob, 'id' 
   // request so the brief + system-prompt awaiting-owner block read truth.
   //   waiting_owner  → request.state='awaiting_owner'  (owner must pick a slot)
   //   collecting / negotiating / resolving → request.state='in_flight'
+  // Safety: skip if the linked request is already terminal — never re-open
+  // a closed row from a stale coord_jobs update.
   if (updates.status === 'waiting_owner'
       || updates.status === 'collecting'
       || updates.status === 'negotiating'
@@ -599,11 +601,16 @@ export function updateCoordJob(id: string, updates: Partial<Omit<CoordJob, 'id' 
     const linkedRequestId = getLinkedRequestIdForCoord(id);
     if (linkedRequestId) {
       try {
-        const newState: 'awaiting_owner' | 'in_flight' =
-          updates.status === 'waiting_owner' ? 'awaiting_owner' : 'in_flight';
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const requests = require('./requests') as typeof import('./requests');
-        requests.updateRequest(linkedRequestId, { state: newState });
+        const reqRow = requests.getRequest(linkedRequestId);
+        if (reqRow && reqRow.state !== 'resolved' && reqRow.state !== 'cancelled' && reqRow.state !== 'expired') {
+          const newState: 'awaiting_owner' | 'in_flight' =
+            updates.status === 'waiting_owner' ? 'awaiting_owner' : 'in_flight';
+          if (reqRow.state !== newState) {
+            requests.updateRequest(linkedRequestId, { state: newState });
+          }
+        }
       } catch (_) { /* non-fatal */ }
     }
   }

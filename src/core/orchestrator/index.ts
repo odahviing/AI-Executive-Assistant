@@ -1135,7 +1135,9 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // v2.7.2 — deferred_action auto-attach. When create_approval(kind=
       // policy_exception) follows a rule_violation tool result this turn,
       // copy the captured hint into payload.deferred_action so the resolver
-      // can replay the booking on owner approve.
+      // can replay the booking on owner approve. After attaching, CLEAR the
+      // hint so a second create_approval later in the same turn doesn't
+      // inherit a stale hint from an unrelated rule_violation earlier.
       let toolInputForCall = toolUse.input as Record<string, unknown>;
       if (toolUse.name === 'create_approval'
           && lastDeferredActionHint
@@ -1152,6 +1154,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           logger.info('orchestrator — auto-attached deferred_action to create_approval payload', {
             tool: lastDeferredActionHint.tool, threadTs: input.threadTs,
           });
+          lastDeferredActionHint = null;  // consumed
         }
       }
 

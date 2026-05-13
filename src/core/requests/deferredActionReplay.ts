@@ -51,7 +51,9 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
   // the original args if present; the meeting handlers only use them for
   // shadow notifications, which fail gracefully.
   const channelId = (args.channel_id as string | undefined) ?? '';
-  const threadTs = (args.thread_ts as string | undefined) ?? undefined;
+  // SkillContext.threadTs is required string. Default to empty string when
+  // the original call didn't carry one (synthetic replay context).
+  const threadTs = (args.thread_ts as string | undefined) ?? '';
   const context = {
     userId: ownerUserId,
     senderRole: 'owner' as const,
