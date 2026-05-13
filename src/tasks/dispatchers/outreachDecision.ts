@@ -45,12 +45,23 @@ export const dispatchOutreachDecision: TaskDispatcher = async (_app, task, profi
         colleague_slack_id: string;
         owner_channel: string;
         owner_thread_ts: string | null;
+        request_id?: string | null;
       }
     | undefined;
 
   if (!job) {
     logger.warn('outreach_decision — outreach_jobs row missing, completing task', {
       taskId: task.id, outreachId: task.skill_ref,
+    });
+    completeTask(task.id);
+    return;
+  }
+
+  // v2.7.2 — when this outreach is bridged to a request, the request runner
+  // is authoritative. Skip here to avoid double-fire.
+  if (job.request_id) {
+    logger.info('outreach_decision — bridged to request; runner is authoritative, skipping legacy dispatcher', {
+      taskId: task.id, outreachId: job.id, requestId: job.request_id,
     });
     completeTask(task.id);
     return;

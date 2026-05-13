@@ -1418,6 +1418,13 @@ export class SchedulingSkill {
             violation_label: plan.violationLabel,
             suggested_ask_text: plan.suggestedAskText,
             category: plan.category,
+            // v2.7.2 — deferred_action_hint: the original tool call, ready
+            // to be stamped on a follow-up create_approval. Orchestrator
+            // auto-attaches this to payload.deferred_action when Sonnet
+            // raises a policy_exception this turn, so the resolver can
+            // replay the booking on approve. The "redirect URL token"
+            // pattern — args round-trip through the approval.
+            _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
             _note: plan.action === 'escalate_approval'
               ? 'A scheduling rule was violated. Use create_approval(kind=policy_exception) with suggested_ask_text to get the owner to decide.'
               : 'A scheduling rule was violated. Surface suggested_ask_text to the owner and wait for an explicit override before retrying with relaxed=true.',
@@ -2113,6 +2120,8 @@ export class SchedulingSkill {
               violation_label: movePlan.violationLabel,
               suggested_ask_text: movePlan.suggestedAskText,
               category: movePlan.category,
+              // v2.7.2 — deferred_action_hint for resolver replay on approve.
+              _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
               _note: movePlan.action === 'escalate_approval'
                 ? 'Move violates a scheduling rule. Use create_approval(kind=policy_exception) with suggested_ask_text.'
                 : 'Move violates a scheduling rule. Surface suggested_ask_text to the owner; if he confirms, retry with relaxed=true.',

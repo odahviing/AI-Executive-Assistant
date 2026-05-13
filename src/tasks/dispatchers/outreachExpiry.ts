@@ -31,6 +31,19 @@ export const dispatchOutreachExpiry: TaskDispatcher = async (_app, task, profile
     updateTask(task.id, { status: 'failed' });
     return;
   }
+  // v2.7.2 — when this outreach is bridged to a request (Phase 1), the
+  // request runner (src/core/requests/runner.ts:runOutreachExpiryOrDecision)
+  // is authoritative for the expiry. Skip here to avoid double-fire.
+  if (job.request_id) {
+    const reqRow = getDb().prepare(
+      `SELECT state FROM requests WHERE id = ?`
+    ).get(job.request_id) as { state?: string } | undefined;
+    logger.info('outreach_expiry — bridged to request; runner is authoritative, skipping legacy dispatcher', {
+      taskId: task.id, outreachId: job.id, requestId: job.request_id, requestState: reqRow?.state,
+    });
+    completeTask(task.id);
+    return;
+  }
   if (job.status !== 'sent' && job.status !== 'no_response') {
     logger.info('outreach_expiry — outreach moved past waiting state, skipping', {
       taskId: task.id,

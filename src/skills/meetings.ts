@@ -65,27 +65,21 @@ export class MeetingsSkill implements Skill {
       // meetings concern. Auto-registered when SlackConnection is registered.
       {
         name: 'coordinate_meeting',
-        description: `Set up a NEW meeting from scratch. Finds slots, then either presents annotated options to the REQUESTER (internal-only fast path) or DMs each participant for a vote (external/mixed coord state machine). Books once a slot is confirmed.
+        description: `Set up a NEW multi-party meeting that needs ${profile.user.name.split(' ')[0]}'s INTERNAL attendees DM'd for their availability. The tool DMs each internal participant with proposed slots, collects their responses, negotiates if needed, then books. Use ONLY when there are internal pollable non-owner attendees (slack_id in our workspace + same email domain as ${profile.user.name.split(' ')[0]}). For anything else, use the direct path: find_available_slots + create_meeting.
 
-Use ONLY when there is no existing meeting yet and people need to find a time together. Do NOT use to:
-- Move an existing meeting → message_colleague with intent='meeting_reschedule'
+Do NOT use to:
+- Move an existing meeting → move_meeting (or message_colleague with intent='meeting_reschedule')
 - Check if the owner can join a colleague's meeting → check_join_availability
 - Just check free/busy without booking → get_free_busy
-- Book a slot that was already verbally agreed in this MPIM conversation (owner + participant are both present and have confirmed) → use create_meeting directly. Calling coordinate_meeting here sends the participant fresh slot DMs and re-opens a negotiation they already closed.
+- Book a slot already verbally agreed in this conversation → use create_meeting directly
+- Book a 1:1 with an EXTERNAL person whose calendar we can't poll → find_available_slots + create_meeting (one flow, externals get the calendar invite via Outlook on book)
+- Book when YOU (the requester) and ${profile.user.name.split(' ')[0]} are the only real participants and everyone else is external — find_available_slots + create_meeting
 
-Two flows depending on participant mix:
+The tool will refuse with error 'no_internal_to_poll' if you call it without internal pollable non-owner attendees — that's the signal to switch to the direct path.
 
-INTERNAL-ONLY FAST PATH (v2.3.2) — every participant has an internal email (same domain as the owner):
-1. Find 3 slots on the owner's calendar
-2. Read each internal attendee's free/busy via Graph (no DMs to anyone)
-3. Return slots ANNOTATED with each attendee's status — sorted with all-free slots first
-4. You present the slots to the REQUESTER directly in this conversation, e.g. "Tue 10:00 (everyone free) / Wed 14:00 (Amazia busy) / Thu 11:00 (everyone free) — which works?"
-5. When the requester picks, call create_meeting to book — internal attendees get a heads-up DM after the fact ("Hi Amazia, Oran asked, I checked your calendar, booked Tue 10:00")
-6. If the requester pushes back wanting only all-free options and we showed mixed, call coordinate_meeting AGAIN with a tighter search range (next-week, narrower window) to retry
-
-EXTERNAL OR MIXED PATH — at least one participant has an external email or no email at all:
-1. Find 3 slots on owner's calendar — when the mix includes internal attendees, internal busy time is pre-subtracted so externals never see internal-busy options
-2. DM each key participant with the 3 options
+Flow:
+1. Find 3 slots on owner's calendar
+2. DM each internal participant with the 3 options
 3. Collect responses — negotiate if needed (ping-pong then open-ended, up to 2 rounds)
 4. Book the meeting and send calendar invites
 
@@ -435,6 +429,10 @@ LANGUAGE: subject and body MUST be in English regardless of the language you're 
               type: 'boolean',
               description: 'OPTIONAL (default false). Set TRUE only when the user explicitly asks for a full-day / all-day event ("block the whole day", "full day", "all day", "vacation marker"). When true: the system clamps start/end to midnight of the day → midnight of the next day in the user TZ; you can pass start as the day at any time and the handler normalizes. Owner-only personal blocks (no attendees, focus / prep / vacation marker) → also pass category=Logistic to skip the location stamp.',
             },
+            relaxed: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). Owner override flag. When ${firstName} explicitly asks for a slot that breaks one of his soft rules (outside working hours, on a home day for an office-only category, in a lunch / focus window, over a per-day / per-week category limit, with an internal attendee who is busy at that time), and he has confirmed "book it anyway / override / yes do it" in THIS thread — pass relaxed=true on the retry. The flag bypasses the soft-rule check inside planMeeting so the booking lands. The 5-min buffer between meetings is baked into the standard durations and is NOT a rule — never use relaxed to "force" against it. Owner-path only; ignored on colleague-path calls.',
+            },
           },
           required: ['subject', 'start', 'end', 'attendees', 'is_online', 'category'],
         },
@@ -456,6 +454,10 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             confirm_outside_window: {
               type: 'boolean',
               description: 'OPTIONAL. Owner override flag for floating-block moves. When the meeting being moved is a floating block (lunch / coffee / gym / etc) AND the new_start lands OUTSIDE the block\'s preferred window, the move refuses by default. Set this true to accept the override — owner override IS the approval, no separate lunch_bump approval needed. Use ONLY when the owner has explicitly confirmed they want the block at the out-of-window time. Ignored on non-floating-block moves.',
+            },
+            relaxed: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). Owner override flag. When ${firstName} asks to move a meeting to a slot that breaks one of his soft rules (outside working hours, wrong day type for the meeting\'s category, in a lunch / focus window, over a per-day / per-week category limit, with an internal attendee busy at that new time), and he has confirmed "do it anyway / move it / override" in THIS thread — pass relaxed=true on the retry. Bypasses the soft-rule check inside planMeeting. The 5-min buffer between meetings is NOT a rule — never use relaxed to "force" against it. Owner-path only; ignored on colleague-path calls.',
             },
             category: {
               type: 'string',
@@ -961,9 +963,7 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
                 // free/busy so externals never see options where Amazia is
                 // already booked. Externals' busy is unreadable via Graph and
                 // stays out of this filter — they get DM'd with the surviving
-                // slots through the regular coord state machine. Pure-internal
-                // coords short-circuit through the fast-path below before
-                // reaching the coord state machine at all.
+                // slots through the regular coord state machine.
                 attendeeBusyEmails: participantEmails,
                 // v2.3.6 (#70a) — clip slots to attendee work-hour windows
                 // in their own TZ. Pure work-hour data, no busy/free involvement.
@@ -1095,8 +1095,8 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
         // ask the owner. Two-step lookup per attendee with a missing email:
         //   1. people_memory (cheap, by slack_id or name)
         //   2. Slack collectCoreInfo (by slack_id) — falls back to users.info
-        // Externals that resolve to nothing keep their missing-email status,
-        // which downgrades them out of the v2.3.2 fast-path (handled below).
+        // Externals that resolve to nothing keep their missing-email status —
+        // they'll trip the missing-email refusal further down.
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { searchPeopleMemory, getPersonMemory: getPersonMemoryRow } =
@@ -1167,109 +1167,41 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
           });
         }
 
-        // ── v2.3.2 + v2.6.5 — requester-presents fast path ──────────────────
-        // Bypass the multi-party coord state machine when there's no INTERNAL
-        // POLLABLE NON-OWNER attendee. Two cases collapse here:
-        //   A. All-internal (v2.3.2): every attendee has an internal email,
-        //      slot annotations rendered per attendee — Maelle presents
-        //      annotated options to the REQUESTER, requester picks, book.
-        //   B. Owner-only-pollable (v2.6.5): everyone besides the owner is
-        //      external or in just_invite (no slack_id, can't be DM-polled).
-        //      Polling makes no sense — the only person whose availability
-        //      matters is the owner, and find_available_slots already
-        //      filtered for him. Externals get the calendar invite when
-        //      Sonnet calls create_meeting after requester picks.
+        // ── v2.7.2 — refuse when no internal pollable non-owner exists ──────
+        // coordinate_meeting is the multi-party state-machine path: it DMs
+        // each internal attendee to collect their availability, then books.
+        // When there's nobody internal to DM (external-only, owner-only, or
+        // already-decided 1:1), this tool is the wrong choice. Sonnet should
+        // use find_available_slots + create_meeting directly — one flow, one
+        // mutation, no mid-conversation tool switching.
         //
-        // Pre-v2.6.5 case B fell into the multi-party state machine, which
-        // sat at status='collecting' forever because there was nobody to
-        // poll. Repro: Yael sets up a meeting between Idan and Sapir
-        // (external), doesn't add herself as attendee — Sonnet put her in
-        // just_invite, real participants list ended up empty, coord stuck.
-        //
-        // Mixed (case 2 — has internal pollable non-owner): regular coord
-        // state machine, DMs each internal attendee. The DM annotation logic
-        // in coord/state.ts hides internal attendee status from external
-        // recipients (v2.3.2 mixed-case fix).
-        try {
-          const { isAllInternalParticipants } = await import('../utils/attendeeScope');
-          const allInternal = isAllInternalParticipants(allParticipants as Array<{ email?: string }>, context.profile);
-          // v2.6.5 — also fast-path when no internal pollable non-owner exists.
-          // Pollable = has slack_id (so the state machine COULD DM them).
-          const ownerEmailLower = userEmail.toLowerCase();
-          const ownerDomain = ownerEmailLower.includes('@') ? ownerEmailLower.split('@')[1] : '';
-          const hasInternalPollableNonOwner = (args.participants as any[]).some((p: any) => {
-            if (!p.slack_id) return false;
-            const e = (p.email ?? '').toLowerCase();
-            if (!e || e === ownerEmailLower) return false;
-            return ownerDomain ? e.endsWith('@' + ownerDomain) : false;
+        // History: v2.3.2 + v2.6.5 had two "fast path" Cases (A all-internal,
+        // B owner-only-pollable) that bypassed the state machine and returned
+        // slots for Sonnet to present, then asked her to switch to
+        // create_meeting for the booking step. Sonnet sometimes forgot to
+        // switch — she'd re-call coordinate_meeting at the booking moment and
+        // narrate "I'll send the invite" without ever firing the booking
+        // tool. Bug 2.3 / Gidon 2026-05-13: full conversation, slot picked,
+        // email collected, zero tools fired. Owner direction (v2.7.2): kill
+        // the fast path entirely. One flow.
+        const ownerEmailLowerCheck = userEmail.toLowerCase();
+        const ownerDomainCheck = ownerEmailLowerCheck.includes('@') ? ownerEmailLowerCheck.split('@')[1] : '';
+        const hasInternalPollableNonOwner = (args.participants as any[]).some((p: any) => {
+          if (!p.slack_id) return false;
+          const e = (p.email ?? '').toLowerCase();
+          if (!e || e === ownerEmailLowerCheck) return false;
+          return ownerDomainCheck ? e.endsWith('@' + ownerDomainCheck) : false;
+        });
+        if (!hasInternalPollableNonOwner) {
+          logger.info('coordinate_meeting refused — no internal pollable non-owner; use find_available_slots + create_meeting', {
+            participantCount: (args.participants as any[]).length,
+            subject: args.subject,
+            requester: context.userId,
           });
-          const useFastPath = (allInternal || !hasInternalPollableNonOwner) && proposedSlots.length > 0;
-          if (useFastPath) {
-            // Annotate each slot per non-owner non-self attendee.
-            const { annotateSlotsWithAttendeeStatus } = await import('../utils/annotateSlotsWithAttendeeStatus');
-            const annotateTargets = allParticipants
-              .filter((p: any) => p.email && (p.email as string).toLowerCase() !== userEmail.toLowerCase())
-              .map((p: any) => ({ name: p.name as string, email: p.email as string }));
-
-            const perAttendeeStatuses = await Promise.all(
-              annotateTargets.map(async target => {
-                const annotated = await annotateSlotsWithAttendeeStatus({
-                  slots: proposedSlots,
-                  attendeeEmail: target.email,
-                  callerEmail: userEmail,
-                  timezone,
-                });
-                return { name: target.name, statuses: annotated.map(a => a.attendeeStatus) };
-              })
-            );
-
-            // Build per-slot status map: slot → [{name, status}]
-            const annotatedSlots = proposedSlots.map((slot, idx) => ({
-              start: slot.start,
-              end: slot.end,
-              location: slot.location,
-              isOnline: slot.isOnline,
-              attendeeStatus: perAttendeeStatuses.map(a => ({
-                name: a.name,
-                status: a.statuses[idx] ?? 'unknown' as const,
-              })),
-              allFree: perAttendeeStatuses.every(a => a.statuses[idx] === 'free'),
-            }));
-
-            // Sort: all-free first, then mixed.
-            annotatedSlots.sort((a, b) => Number(b.allFree) - Number(a.allFree));
-
-            logger.info('coordinate_meeting — internal fast-path: presenting annotated slots to requester', {
-              participantCount: allParticipants.length,
-              slotsAllFree: annotatedSlots.filter(s => s.allFree).length,
-              slotsMixed: annotatedSlots.filter(s => !s.allFree).length,
-              requester: context.userId,
-            });
-
-            return {
-              _internal_fast_path: true,
-              _note: 'FAST PATH — present these slots to the REQUESTER directly in this conversation; no DMs to anyone else. Two sub-cases (data tells you which):\n\n(A) attendeeStatus per slot has entries (all-internal case): lead with the all-free option(s), name any "busy" slots honestly so the requester can choose.\n\n(B) attendeeStatus is EMPTY per slot (owner-only-pollable case — externals/just_invite people whose calendars we can\'t check): just present the slots, they\'re all owner-free per the slot finder. The non-pollable attendees will get the calendar invite when you book.\n\nWhen the requester picks (number, time, or "the second one"), call create_meeting to book — internal attendees get a heads-up DM after the fact, externals/just-invites get the calendar invite via Outlook. If the requester pushes back wanting only all-free slots and we showed mixed, call coordinate_meeting again with a tighter search range. Do NOT call coordinate_meeting a second time this turn — that\'s an idempotent no-op.',
-              action: 'present_slots_to_requester',
-              subject: args.subject,
-              topic: args.topic,
-              durationMin,
-              proposedSlots: annotatedSlots,
-              participants: allParticipants.map((p: any) => ({
-                name: p.name,
-                email: p.email,
-                slack_id: p.slack_id,
-                just_invite: p.just_invite === true,
-              })),
-              requesterUserId: context.userId,
-              snappedFromNonStandard,
-              requestedDurationMin: snappedFromNonStandard ? requestedDurationMin : undefined,
-            };
-          }
-        } catch (err) {
-          logger.warn('coordinate_meeting fast-path threw — falling through to coord state machine', {
-            err: String(err).slice(0, 200),
-          });
-          // fall through to existing coord flow
+          return {
+            error: 'no_internal_to_poll',
+            message: `coordinate_meeting is for multi-party booking that needs internal attendees DM'd for their availability. This ask has no internal attendees to poll — use the direct path instead: call find_available_slots to find ${context.profile.user.name.split(' ')[0]}'s slots, present them to the requester, and once a slot is picked call create_meeting to book. Externals get the calendar invite via Outlook on book.`,
+          };
         }
 
         return {
@@ -2030,16 +1962,14 @@ ${firstName} is the IMPLICIT organizer of every coord — coord slots are pre-fi
 - Multi-participant: "On it — I'll send Amazia and Maayan a few options. I'll book once both confirm."
 - Mixed (DM + just_invite): "On it — I'll reach out to Amazia with options; Onn will get the calendar invite once we have a time."
 
-FAST PATH (v2.3.2 + v2.6.5) — coordinate_meeting returns _internal_fast_path=true with action='present_slots_to_requester' in TWO cases:
-(A) ALL participants are internal (same email domain as ${firstName}) — slots come back annotated per attendee with free/busy.
-(B) v2.6.5 — only ${firstName} is a real participant; everyone else is external or in just_invite (no internal pollable non-owner). Slots come back without annotations (attendeeStatus is empty per slot) — they're all owner-free per the slot finder.
+DIRECT BOOKING PATH (v2.7.2) — when there's no internal attendee to DM-poll (external 1:1, ${firstName}-only, or a slot already agreed in-thread), do NOT use coordinate_meeting. One flow:
+1. find_available_slots with the relevant duration + attendee_emails
+2. Present the slots to whoever's asking (${firstName} or the colleague DMing you) — name times, no formatting tricks
+3. When they pick, call create_meeting directly with subject, start, end, attendees, is_online, category
+4. Externals get the calendar invite via Outlook when create_meeting fires; internal attendees get a heads-up DM
+There is no separate "approve and send" step — create_meeting IS the booking. When email/subject/slot are all known, fire create_meeting in the same turn — don't narrate "I will" in future tense, just do it.
 
-Either way: NO DMs were sent. You present the slots to the REQUESTER directly in this conversation:
-- Case A (annotations present): lead with all-free slots if any exist; tag busy ones honestly ("Amazia busy"). Phrase like a human EA: "Tuesday 10:00 works for everyone. Wednesday 14:00 also works for you, but Amazia's booked then. Which sounds good?" — NOT "1. Tue 10:00 (free) 2. Wed 14:00 (busy)" with numbered list and bracketed status. The data carries the structure; you carry the voice.
-- Case B (annotations empty): just present the slots — they're owner-free, externals will get the calendar invite when you book. Phrase: "${firstName} is free Wednesday 12:00 or Thursday 10:00. Which works for Sapir?" — concise, no apology for not annotating.
-- When the requester picks (number, time, "the second one", "Tuesday works"), call create_meeting to book directly. Internal attendees get a heads-up DM after the fact; externals get the calendar invite via Outlook.
-- If they push back wanting only all-free slots and we showed mixed (case A), re-call coordinate_meeting with a tighter / later search range. ONE retry, then escalate to ${firstName} via create_approval if still no fit.
-- For coords with INTERNAL pollable non-owner participants (state machine path), do NOT call create_meeting yourself — wait for the coord state machine to confirm via DMs.
+COORD STATE MACHINE (the only thing coordinate_meeting does post-v2.7.2): multi-party where internal pollable non-owner attendees exist. Tool DMs each internal attendee with proposed slots, collects responses, books on confirm. Wait for the state machine to confirm via DMs — do NOT call create_meeting yourself in this branch. Calling coordinate_meeting WITHOUT internal pollables now returns error 'no_internal_to_poll' — that's the signal to switch to the direct path above.
 
 CONCISION — bundle missing fields into ONE ask, not a ping-pong (v2.3.6 / #72b):
 When you need multiple inputs from ${firstName} before booking (topic, mode, duration, override confirmation, location, etc.), ASK ALL OF THEM IN ONE MESSAGE — not one per turn. Owner-facing example:

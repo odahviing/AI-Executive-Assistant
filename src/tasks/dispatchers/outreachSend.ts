@@ -25,6 +25,15 @@ export const dispatchOutreachSend: TaskDispatcher = async (_app, task, profile) 
     updateTask(task.id, { status: 'failed' });
     return;
   }
+  // v2.7.2 — when this outreach is bridged to a request, the request runner
+  // (runSendScheduledOutreach) is authoritative for the send.
+  if (job.request_id) {
+    logger.info('outreach_send — bridged to request; runner is authoritative, skipping legacy dispatcher', {
+      taskId: task.id, outreachId: job.id, requestId: job.request_id,
+    });
+    completeTask(task.id);
+    return;
+  }
   if (job.status !== 'pending_scheduled') {
     logger.info('outreach_send — outreach already progressed past pending_scheduled, skipping', {
       taskId: task.id,

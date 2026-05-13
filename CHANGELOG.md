@@ -2,6 +2,45 @@
 
 ---
 
+## 2.7.2 — Phase 2 cutover-finish: kill the coord fast path, requests as engine, deferred action replay
+
+Driven by two real-chat bugs this morning: (1) Idan asked Maelle to block his Thursday morning 8:00-10:30; the override path didn't take because `relaxed` was declared on `find_available_slots` but never on `create_meeting` / `move_meeting` even though the handlers read it — pure tool-def oversight from the v2.7.0 trilogy. (2) Gidon (external) DMed asking for 30 min; full back-and-forth conversation, slot/subject/email all collected, zero tools fired — DB trace showed NO coord row, NO outreach row, NO request, NO calendar event. Maelle had said "I will approve and send the invitation" and stopped. Root: the v2.6.5 coord fast path (Case B — owner-only-pollable) returned slots and required Sonnet to switch tools (coordinate_meeting → create_meeting) for the booking step; she didn't switch, narrated "I'll send" without firing.
+
+Owner direction: one strong flow, no mid-conversation tool switching. Kill the fast path. Drive every process from the requests spine. Approvals get a "redirect URL token" pattern so resolving auto-replays the original tool with the override flag.
+
+### Removed
+
+- **Coord fast path entirely (both Case A all-internal and Case B owner-only-pollable)** at [src/skills/meetings.ts:1178-1281](src/skills/meetings.ts) (was 100+ lines of annotate-slots-then-return code). `coordinate_meeting` now ALWAYS goes through the state-machine path. When there's no internal pollable non-owner attendee, the tool refuses with `error: 'no_internal_to_poll'` and a clear message pointing Sonnet to the direct booking path: `find_available_slots` + `create_meeting`. One flow. Helper `isAllInternalParticipants` in `src/utils/attendeeScope.ts` deleted (was sole consumer was the fast path).
+
+### Added
+
+- **`relaxed` flag declared on `create_meeting` and `move_meeting` tool input_schemas** at [src/skills/meetings.ts](src/skills/meetings.ts). The handler code (added v2.7.0) was reading `args.relaxed === true` but the tool defs never declared it, so Sonnet couldn't see the parameter and the override path (Bundle D in v2.7.1) was effectively dead. This was the v2.7.0 oversight that caused both the Ysrael 17:00 loop AND today's 08:00 block failure. Tool defs now match handler behavior.
+- **Deferred action replay (the "redirect URL token" pattern)** — when `create_meeting` / `move_meeting` return `rule_violation`, the result now carries `_deferred_action_hint: { tool, args }`. The orchestrator auto-attaches this to `create_approval(kind=policy_exception).payload.deferred_action` for the same turn — no Sonnet copying required. The resolver, on owner approve, replays the original tool with `relaxed: true` (or `confirm_outside_window: true` for `book_floating_block`) via the new `src/core/requests/deferredActionReplay.ts` helper. Closes the long-standing gap where a colleague-path approval got approved but the booking never executed (root of the Ysrael 2026-05-12 "approved but never moved" failure even before v2.7.1's Bundle D).
+
+### Changed
+
+- **Outreach dispatchers defer to the request runner** ([src/tasks/dispatchers/outreachExpiry.ts](src/tasks/dispatchers/outreachExpiry.ts), [outreachDecision.ts](src/tasks/dispatchers/outreachDecision.ts), [outreachSend.ts](src/tasks/dispatchers/outreachSend.ts)). When the legacy `outreach_jobs` row has `request_id` set (Phase 1 bridge from v2.7.1), the runner's `runOutreachExpiryOrDecision` / `runSendScheduledOutreach` handlers are authoritative — the legacy dispatchers no-op to avoid double-fire. Both timer paths converge on requests as the source of truth.
+- **Coord mid-state cascade to requests** ([src/db/jobs.ts](src/db/jobs.ts) `updateCoordJob`). When coord status transitions to `waiting_owner` / `collecting` / `negotiating` / `resolving`, the linked request's state mirrors (`awaiting_owner` for waiting_owner, `in_flight` for the in-progress states). v2.7.1 Phase 1 added the terminal cascade; this adds the mid-state cascade so the brief + system-prompt `awaiting_owner` block read truth throughout the coord lifecycle — not just at terminal.
+- **`humanGate` ❌/✅ patterns tightened** ([src/utils/humanGate.ts](src/utils/humanGate.ts)). New patterns caught: (a) "Want me to note it down for you to add directly in Outlook" / "you can add it manually in your calendar" — abdication of EA work, ❌. (b) "I will approve" / "אאשר" / "I'll sign off and send" — claiming the approver role she doesn't have, ❌. Both surface today: 1.2 (abdication on the failed block override) and 2.2 (the Gidon coord ending in "I will approve and send" with no tool firing).
+- **`coordinate_meeting` tool description rewritten** to reflect post-fast-path reality — the tool is ONLY for multi-party with internal pollable non-owner attendees; everything else routes through `find_available_slots` + `create_meeting`. Prompt section at meetings.ts also updated: the old "FAST PATH" block replaced with "DIRECT BOOKING PATH" guidance.
+
+### Fixed
+
+- **Bug 1.1: 8:00-10:30 block override didn't take.** Root: `relaxed` flag undeclared on tool schema. Fixed by declaring it.
+- **Bug 1.2: "have me add it in Outlook" abdication.** Root: humanGate didn't catch the pattern. Fixed by tightening the prompt template.
+- **Bug 2.1: asked Gidon for email already in people_memory.** This bug becomes moot under the new direct-booking path — when there's no fast-path return, Sonnet uses people_memory for participants directly (handler already auto-fills from `getPersonMemory(slack_id)` via [meetings.ts:528-549](src/skills/meetings.ts)).
+- **Bug 2.2: "I will approve and send" bot-voice.** Fixed at the language layer via humanGate; root behavior fix is bug 2.3.
+- **Bug 2.3: Gidon coord conversation ended with zero tools fired.** Root: Sonnet had to switch tools (coordinate_meeting → create_meeting) at the booking moment and didn't. Architectural fix: no more fast path. Sonnet uses `find_available_slots` + `create_meeting` from the start — one tool to fire at the booking moment, no switching, no narration without action.
+- **Typecheck regression in v2.7.1 Phase 1 bridges** (`db/jobs.ts:132` and `db/jobs.ts:515`). `await_reply === false` should have been `=== 0` (number, not boolean). `=== 'awaiting_owner'` was a dead branch (the coord_jobs enum only has `waiting_owner`). Caught at owner's local typecheck; folded into this patch.
+
+### Phase 2 of v2.7.0 cutover-finish
+
+This patch completes the readers-migrated-to-requests work flagged in [#94](https://github.com/odahviing/AI-Executive-Assistant/issues/94). Combined with v2.7.1's Phase 1 (writers bridge), the spine now drives every async process: outreach (send/expiry/decision via runner), coord (state mirrored to requests at every transition), approvals (deferred action replay). Phase 3 (drop legacy tables entirely) is deferred — owner direction: "I less care if we truncate the tables; I more care that every process runs from requests" — that's now true.
+
+The fast-path deletion is the headline simplification: ~110 lines of branching code removed, plus the per-attendee annotation logic, plus the prompt's FAST PATH section, plus the `isAllInternalParticipants` helper. One coordinator path remains: state-machine multi-party with internal pollables. Everything else goes through find_available_slots + create_meeting directly.
+
+---
+
 ## 2.7.1 — Day-1 bug-bash on the 2.7 trilogy: buffer-rule deletion, attendee freebusy, requests-spine bridges
 
 First patch after v2.7.0 went live, driven by two real-chat incidents (the Ysrael BiWeekly approval loop that never moved the meeting, plus the morning brief that fabricated a move-coord that didn't happen). Two interactive bug-test sessions surfaced 8 atomic bugs across 4 groups, all rooted in the v2.7.0 spine being half-built: writers weren't bridging into the requests table, so the brief was reading half the truth and Sonnet filled the gap with hallucinations. Phase 1 of the cutover-finish lands here — every legacy `coord_jobs` / `outreach_jobs` / `approvals` write now creates a paired `requests` row, so the brief sees one source of truth.

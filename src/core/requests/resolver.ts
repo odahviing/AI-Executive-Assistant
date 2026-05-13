@@ -115,9 +115,73 @@ export async function resolveRequest(
     return resolveSlotPickApproval(row, approveData, ctx);
   }
 
-  // Generic approve (freeform, policy_exception, lunch_bump, duration_override,
-  // unknown_person) — close + notify. Downstream booking (if any) is the
-  // orchestrator's job next turn; the request just records the decision.
+  // v2.7.2 — deferred action replay. When the approval was raised because a
+  // rule fired and the caller stamped a `deferred_action` on details_json
+  // (the "redirect URL token" pattern: tool name + args saved at the moment
+  // of the rule violation), replay the action with allowRelaxed/relaxed=true
+  // when the owner approves. Closes the long-standing gap where approving a
+  // policy_exception didn't actually do the underlying booking — Sonnet was
+  // expected to retry but often didn't (Ysrael 2026-05-12 / Yael 2026-06-17).
+  //
+  // Shape: details_json.deferred_action = { tool: string, args: Record<string, unknown> }.
+  // tool ∈ { 'create_meeting', 'move_meeting', 'book_floating_block' }.
+  const details = parseDetails<Record<string, unknown>>(row) ?? {};
+  const deferred = details.deferred_action as { tool?: string; args?: Record<string, unknown> } | undefined;
+  if (deferred && typeof deferred.tool === 'string' && deferred.args && typeof deferred.args === 'object') {
+    const supportedTools = new Set(['create_meeting', 'move_meeting', 'book_floating_block']);
+    if (supportedTools.has(deferred.tool)) {
+      // Inject relaxed=true (or confirm_outside_window=true for book_floating_block)
+      // so the replay bypasses the same soft rule that triggered this approval.
+      const replayArgs: Record<string, unknown> = { ...deferred.args };
+      if (deferred.tool === 'book_floating_block') {
+        replayArgs.confirm_outside_window = true;
+      } else {
+        replayArgs.relaxed = true;
+      }
+      logger.info('resolveRequest — deferred_action replay', {
+        id: requestId, tool: deferred.tool, kind: row.kind, subkind: row.subkind,
+      });
+      // Stamp the request as resolved BEFORE the tool fires so any cascade
+      // (closeMeetingArtifacts) doesn't see a still-open row when it sweeps.
+      closeRequest({
+        id: requestId,
+        state: 'resolved',
+        closureReason: `owner approved ${row.subkind ?? row.kind} (auto-replayed ${deferred.tool})`,
+        closedBy: 'owner',
+        outcomeJson: { approved: true, data: approveData, replayed: deferred.tool },
+      });
+      // Fire-and-forget the replay so this resolver doesn't block on the
+      // Graph call. The orchestrator will narrate the booking on the next
+      // owner turn (it sees the calendar update); for now just kick the work
+      // and let the cascade close downstream artifacts.
+      setImmediate(async () => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { runDeferredAction } = require('./deferredActionReplay') as
+            typeof import('./deferredActionReplay');
+          await runDeferredAction({
+            ownerUserId: row.owner_user_id,
+            profile: ctx.profile,
+            tool: deferred.tool!,
+            args: replayArgs,
+            requestId: row.id,
+          });
+        } catch (err) {
+          logger.warn('deferred_action replay threw — owner needs to retry manually', {
+            id: row.id, tool: deferred.tool, err: String(err).slice(0, 300),
+          });
+        }
+      });
+      await notifyRequesterOfDecision(row, 'approve', approveData, undefined, ctx);
+      return {
+        ok: true, request_id: requestId, state: 'resolved',
+        effect: `approved ${row.kind}/${row.subkind ?? '-'} — auto-replaying ${deferred.tool}`,
+      };
+    }
+  }
+
+  // No deferred action — close + notify. Sonnet retries the underlying action
+  // next turn if needed. (Legacy path for approvals without deferred_action.)
   closeRequest({
     id: requestId,
     state: 'resolved',

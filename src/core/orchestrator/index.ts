@@ -672,6 +672,12 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // any second message_colleague call this turn for the same colleague is a
   // no-op with an explicit signal.
   const messagedColleaguesThisTurn = new Set<string>();
+  // v2.7.2 — capture the most recent rule_violation deferred_action_hint
+  // from a meeting tool's result this turn. When create_approval(kind=
+  // policy_exception) fires next, the orchestrator stamps this hint as
+  // payload.deferred_action so the resolver can replay the booking on
+  // approve. The "redirect URL token" pattern in code — no Sonnet copying.
+  let lastDeferredActionHint: { tool: string; args: Record<string, unknown> } | null = null;
   let iteration = 0;
   const MAX_ITERATIONS = 10;
 
@@ -1126,9 +1132,32 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         try { input.onWriteExecuted(toolUse.name); } catch (_) { /* never fail the turn over the callback */ }
       }
 
+      // v2.7.2 — deferred_action auto-attach. When create_approval(kind=
+      // policy_exception) follows a rule_violation tool result this turn,
+      // copy the captured hint into payload.deferred_action so the resolver
+      // can replay the booking on owner approve.
+      let toolInputForCall = toolUse.input as Record<string, unknown>;
+      if (toolUse.name === 'create_approval'
+          && lastDeferredActionHint
+          && (toolInputForCall as { kind?: string }).kind === 'policy_exception') {
+        const payloadIn = (toolInputForCall.payload as Record<string, unknown> | undefined) ?? {};
+        if (!payloadIn.deferred_action) {
+          toolInputForCall = {
+            ...toolInputForCall,
+            payload: {
+              ...payloadIn,
+              deferred_action: lastDeferredActionHint,
+            },
+          };
+          logger.info('orchestrator — auto-attached deferred_action to create_approval payload', {
+            tool: lastDeferredActionHint.tool, threadTs: input.threadTs,
+          });
+        }
+      }
+
       const result = await executeSkillTool(
         toolUse.name,
-        toolUse.input as Record<string, unknown>,
+        toolInputForCall,
         skillContext,
       );
 
@@ -1196,6 +1225,24 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
 
       // Build compact summary for conversation history persistence
       toolCallSummaries.push(summarizeToolCall(toolUse.name, toolUse.input as Record<string, unknown>, result));
+
+      // v2.7.2 — capture the most recent deferred_action_hint from a meeting
+      // tool's rule_violation result. If create_approval(kind=policy_exception)
+      // fires later this turn, the orchestrator auto-stamps this hint as
+      // payload.deferred_action so the resolver can replay the booking on
+      // owner approve. No Sonnet copying required.
+      if (result && typeof result === 'object'
+          && (result as { _deferred_action_hint?: unknown })._deferred_action_hint) {
+        const hint = (result as { _deferred_action_hint: unknown })._deferred_action_hint as
+          | { tool?: string; args?: Record<string, unknown> }
+          | undefined;
+        if (hint && typeof hint.tool === 'string' && hint.args && typeof hint.args === 'object') {
+          lastDeferredActionHint = { tool: hint.tool, args: hint.args };
+          logger.info('orchestrator — captured deferred_action_hint from rule_violation', {
+            tool: hint.tool, threadTs: input.threadTs,
+          });
+        }
+      }
 
       // v2.6.5 — when an active-mode tool surfaces internal mutations via an
       // `internal_actions` array on its result, push entries into the summary

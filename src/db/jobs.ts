@@ -129,7 +129,7 @@ export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' 
       nextCheckHandler = 'send_scheduled_outreach';
     } else if (params.status === 'cancelled') {
       reqState = 'cancelled';
-    } else if (params.await_reply === false) {
+    } else if (params.await_reply === 0) {
       reqState = 'resolved';
     } else if (params.reply_deadline) {
       reqState = 'awaiting_colleague';
@@ -512,9 +512,7 @@ export function createCoordJob(params: Omit<CoordJob, 'id' | 'created_at' | 'upd
       .filter((n): n is string => typeof n === 'string' && n.length > 0);
     const firstParticipantSlack = parsedParticipants.find(p => typeof p?.slack_id === 'string')?.slack_id;
     const reqState: 'in_flight' | 'awaiting_owner' =
-      params.status === 'waiting_owner' || params.status === 'awaiting_owner'
-        ? 'awaiting_owner'
-        : 'in_flight';
+      params.status === 'waiting_owner' ? 'awaiting_owner' : 'in_flight';
     const details: Record<string, unknown> = {
       participant_names: participantNames,
       participants: parsedParticipants,
@@ -587,6 +585,28 @@ export function updateCoordJob(id: string, updates: Partial<Omit<CoordJob, 'id' 
   const params: Record<string, unknown> = { id };
   for (const [k, v] of Object.entries(updates)) params[k] = v ?? null;
   db.prepare(`UPDATE coord_jobs SET ${fields}, updated_at = datetime('now') WHERE id = @id`).run(params);
+
+  // v2.7.2 — mid-state cascade to the linked request. When coord_jobs.status
+  // transitions WITHOUT being terminal (terminal is handled below by the
+  // existing closeRequest cascade), reflect the lifecycle stage on the
+  // request so the brief + system-prompt awaiting-owner block read truth.
+  //   waiting_owner  → request.state='awaiting_owner'  (owner must pick a slot)
+  //   collecting / negotiating / resolving → request.state='in_flight'
+  if (updates.status === 'waiting_owner'
+      || updates.status === 'collecting'
+      || updates.status === 'negotiating'
+      || updates.status === 'resolving') {
+    const linkedRequestId = getLinkedRequestIdForCoord(id);
+    if (linkedRequestId) {
+      try {
+        const newState: 'awaiting_owner' | 'in_flight' =
+          updates.status === 'waiting_owner' ? 'awaiting_owner' : 'in_flight';
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const requests = require('./requests') as typeof import('./requests');
+        requests.updateRequest(linkedRequestId, { state: newState });
+      } catch (_) { /* non-fatal */ }
+    }
+  }
 
   // v1.6.2 — whenever a coord reaches a terminal state, sync its approvals to
   // a matching terminal state in the same transaction. This is THE single

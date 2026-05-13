@@ -57,31 +57,11 @@ export function isInternalOnly(
 
 /**
  * v2.3.2 — coord-side internal-only check. Takes a participant list shaped
- * like `coordinate_meeting`'s args (objects with optional `email` field) and
- * returns true iff EVERY participant has an email AND the email's domain
- * matches the owner's. STRICT: any participant missing an email, OR one
- * external email, returns false. The caller falls back to the regular coord
- * state machine in that case.
- *
- * Stricter than `isInternalOnly` deliberately: the coord fast-path needs
- * confidence that we can read everyone's free/busy via Graph. Missing email
- * means we can't verify, so we don't risk silently treating an unknown
- * person as internal.
+ * (v2.7.2) Function removed — was used solely by the coord fast-path that
+ * v2.7.2 deleted. coord now always runs the state-machine path; the
+ * "no internal pollables" case refuses with a clear error so Sonnet
+ * switches to find_available_slots + create_meeting. See meetings.ts.
  */
-export function isAllInternalParticipants(
-  participants: Array<{ email?: string }>,
-  profile: UserProfile,
-): boolean {
-  const domain = getOwnerDomain(profile);
-  if (!domain) return false;
-  if (participants.length === 0) return false;
-  for (const p of participants) {
-    const email = (p.email ?? '').toLowerCase();
-    if (!email) return false;
-    if (!email.endsWith('@' + domain)) return false;
-  }
-  return true;
-}
 
 /**
  * Count attendees that will realistically show up. Includes the organizer
