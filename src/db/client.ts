@@ -565,6 +565,13 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_approvals_skill_ref ON approvals(skill_ref);
   `);
 
+  // v2.7.1 — bridge column to requests spine. Every approval row should also
+  // exist as a request (kind='approval') so the brief reads from one source
+  // of truth. coord_jobs / outreach_jobs already have this column; approvals
+  // was missing it. Idempotent ALTER — safe to re-run.
+  try { db.exec(`ALTER TABLE approvals ADD COLUMN request_id TEXT`); } catch (_) {}
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_approvals_request_id ON approvals(request_id)`); } catch (_) {}
+
   // Requesters / idempotency on coord_jobs (v1.5)
   try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN requesters TEXT NOT NULL DEFAULT '[]'`); } catch (_) {}
   try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN external_event_id TEXT`); } catch (_) {}

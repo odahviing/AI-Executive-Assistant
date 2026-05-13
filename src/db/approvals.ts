@@ -116,15 +116,76 @@ export function createApproval(input: CreateApprovalInput): { approval: Approval
   }
 
   const id = `appr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+  // v2.7.1 — bridge to requests spine. createRequest gets called for every
+  // approval so the brief reads from one source. The terminal-state bridge
+  // (setApprovalDecision below) closes the linked request when the legacy
+  // approval transitions to approved / rejected / superseded / expired.
+  //
+  // Note: when called from tasks/skill.ts (the primary create_approval tool),
+  // a request row is ALREADY created there directly — this bridge would
+  // create a SECOND row. The tasks/skill.ts path therefore short-circuits
+  // before reaching this function (it never calls db/approvals.createApproval).
+  // This bridge fires only when the LEGACY callers reach in — today that's
+  // the resolver's stale-slot calendar_conflict follow-up.
+  let requestId: string | null = null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const requests = require('./requests') as typeof import('./requests');
+    // Compose a one-line subject from the payload (rule + kind, or fallback).
+    const payloadObj = input.payload as Record<string, unknown>;
+    const subjectFromPayload =
+      (typeof payloadObj.subject === 'string' && payloadObj.subject) ||
+      (typeof payloadObj.rule === 'string' && payloadObj.rule.slice(0, 80)) ||
+      `${input.kind.replace(/_/g, ' ')} needs your input`;
+    const description =
+      (typeof payloadObj.ask_text === 'string' && payloadObj.ask_text) ||
+      (typeof payloadObj.context === 'string' && payloadObj.context) ||
+      undefined;
+    const requesterSlackId = typeof payloadObj.requester_slack_id === 'string' ? payloadObj.requester_slack_id : undefined;
+    const requesterName = typeof payloadObj.requester_name === 'string' ? payloadObj.requester_name : undefined;
+
+    // Bridge idempotency: same legacy idempotency_key should not yield two
+    // request rows. Reuse if one already exists.
+    const bridgeKey = `appr-bridge-${idempotencyKey}`;
+    const existing = requests.getRequestByIdempotencyKey(bridgeKey);
+    if (existing) {
+      requestId = existing.id;
+    } else {
+      const row = requests.createRequest({
+        ownerUserId: input.ownerUserId,
+        initiatedBy: requesterSlackId ?? input.ownerUserId,
+        initiatedByRole: requesterSlackId ? 'colleague' : 'system',
+        kind: 'approval',
+        subkind: input.kind,
+        subject: subjectFromPayload,
+        description,
+        state: 'awaiting_owner',
+        requesterSlackId,
+        requesterName,
+        originChannel: input.slackChannel,
+        originThreadTs: input.slackThreadTs,
+        expiresAt: input.expiresAt,
+        idempotencyKey: bridgeKey,
+        details: { ...payloadObj, legacy_approval_id: id },
+      });
+      requestId = row.id;
+    }
+  } catch (err) {
+    logger.warn('createApproval — requests bridge threw, legacy row only', {
+      err: String(err).slice(0, 200), kind: input.kind, taskId: input.taskId,
+    });
+  }
+
   db.prepare(`
     INSERT INTO approvals (
       id, task_id, owner_user_id, kind, status, payload_json,
       skill_ref, slack_channel, slack_thread_ts, slack_msg_ts,
-      expires_at, idempotency_key, notes
+      expires_at, idempotency_key, notes, request_id
     ) VALUES (
       @id, @task_id, @owner_user_id, @kind, 'pending', @payload_json,
       @skill_ref, @slack_channel, @slack_thread_ts, @slack_msg_ts,
-      @expires_at, @idempotency_key, @notes
+      @expires_at, @idempotency_key, @notes, @request_id
     )
   `).run({
     id,
@@ -139,6 +200,7 @@ export function createApproval(input: CreateApprovalInput): { approval: Approval
     expires_at: input.expiresAt ?? null,
     idempotency_key: idempotencyKey,
     notes: input.notes ?? null,
+    request_id: requestId,
   });
 
   // Flip the parent task to pending_owner + point its due_at to the approval expiry.
@@ -339,6 +401,31 @@ export function setApprovalDecision(opts: {
       AND skill_ref = @approval_id
       AND status IN ('new','scheduled','in_progress','pending_owner')
   `).run({ approval_id: opts.id });
+
+  // v2.7.1 — bridge to requests spine. When the legacy approval transitions
+  // to terminal, close the linked request too. Note: most approval flows now
+  // run via tasks/skill.ts.create_approval which calls createRequest directly
+  // (no legacy row); this bridge fires only for legacy callers (resolver's
+  // stale-slot calendar_conflict follow-up). Idempotent — closeRequest no-ops
+  // on already-terminal rows.
+  try {
+    const row = db.prepare(`SELECT request_id FROM approvals WHERE id = ?`).get(opts.id) as { request_id: string | null } | undefined;
+    if (row?.request_id) {
+      const reqState: 'resolved' | 'cancelled' | 'expired' =
+        opts.status === 'approved' || opts.status === 'amended' ? 'resolved'
+        : opts.status === 'expired' ? 'expired'
+        : 'cancelled';
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { closeRequest } = require('../core/requests/closeRequest') as typeof import('../core/requests/closeRequest');
+      closeRequest({
+        id: row.request_id,
+        state: reqState,
+        closureReason: `approval_${opts.status}`,
+        closedBy: opts.status === 'expired' ? 'expiry' : 'owner',
+      });
+    }
+  } catch (_) { /* non-fatal */ }
+
   logger.info('setApprovalDecision', { id: opts.id, status: opts.status });
 }
 

@@ -487,8 +487,10 @@ TASK OWNERSHIP:
 - NO SELF-CONTRADICTION — if you closed an item in a colleague paragraph, that SAME item MUST NOT appear in ACTION ITEMS.
 - MULTI-CONFLICT AGGREGATION — bundle, don't enumerate.
 - outreach awaiting_colleague with no decision → "X hasn't replied — want me to try again or drop it?"
-- kind="tombstoned_colleague" → ONE passive past-tense line, no question.
-- kind="auto_categorized" → ONE informational paragraph, NOT a question.
+- kind="tombstoned_colleague" → ONE passive past-tense line about the PERSON in plain human words. ✅ "I'll stop pinging Yael for now — she hasn't replied to a few of my pings, will pick it back up when she's around." ❌ "Yael is no longer active in the system" / "removed from my working list" / "deactivated her record" / any phrasing that exposes internal tracking, system state, or bot framing.
+- kind="auto_categorized":
+  - For events in \`applied\` (categories Maelle figured out) → ONE informational past-tense line, NOT a question. ("Tagged 'X' as Weekly.")
+  - For events in \`skipped_unmatched\` (categories Maelle couldn't determine) → ASK what category it is, OPEN-ENDED. ✅ "'Idan & Michael' — what category should that be?" ❌ "Want me to tag 'Idan & Michael' as Weekly too?" / "Should I tag it as X, or something else?" — never propose a specific category as the default in the question; that primes the wrong answer when you genuinely don't know.
 
 AWAIT-REPLY AWARENESS:
 - If outreach has awaitsReply=false, narrate past-tense closed loop ("I let X know"), don't say "still waiting".
@@ -584,11 +586,29 @@ export async function sendMorningBriefing(
 
   // Generate + send.
   const rawText = await generateBriefingText(items, profile, peopleGender);
+
+  // v2.7.1 (bug 4.5) — humanGate the brief. The brief generator skipped the
+  // owner-facing voice check that postReply.ts applies to regular replies,
+  // letting machine framing leak ("Yael is no longer active in the system",
+  // "removed from my working list"). One Sonnet rewrite pass on flag.
+  let textToSend = rawText;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { runHumanGate } = require('../utils/humanGate') as typeof import('../utils/humanGate');
+    const verdict = await runHumanGate(rawText, profile);
+    if (!verdict.ok && verdict.rewrite) {
+      textToSend = verdict.rewrite;
+      logger.info('briefs — humanGate rewrote the brief', { ownerUserId });
+    }
+  } catch (err) {
+    logger.warn('briefs — humanGate threw, sending raw', { err: String(err).slice(0, 200) });
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
   const conn = getConnection(ownerUserId, 'slack');
   if (conn) {
-    await conn.postToChannel(ownerChannel, rawText);
+    await conn.postToChannel(ownerChannel, textToSend);
   } else {
     logger.warn('briefs — no Slack connection registered', { ownerUserId });
   }

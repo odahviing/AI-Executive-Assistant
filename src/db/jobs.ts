@@ -107,17 +107,86 @@ export interface OutreachJob {
 export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' | 'updated_at'>): string {
   const db = getDb();
   const id = `out_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+  // v2.7.1 — bridge to requests spine. Every outreach_jobs row now has a
+  // paired request (kind='outreach') so the brief reads from one source of
+  // truth. State mapping:
+  //   - scheduled_at set       → state='in_flight', next_check=send_scheduled_outreach
+  //   - status='sent' + await_reply → state='awaiting_colleague'
+  //   - status='sent' + !await_reply → state='resolved' (informational, no reply needed)
+  //   - status='cancelled'     → state='cancelled'
+  // Terminal transitions in updateOutreachJob cascade to closeRequest.
+  let requestId: string | null = null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const requests = require('./requests') as typeof import('./requests');
+    let reqState: 'in_flight' | 'awaiting_colleague' | 'resolved' | 'cancelled' = 'awaiting_colleague';
+    let nextCheckAt: string | undefined;
+    let nextCheckHandler: 'send_scheduled_outreach' | 'outreach_expiry' | undefined;
+    if (params.scheduled_at) {
+      reqState = 'in_flight';
+      nextCheckAt = params.scheduled_at;
+      nextCheckHandler = 'send_scheduled_outreach';
+    } else if (params.status === 'cancelled') {
+      reqState = 'cancelled';
+    } else if (params.await_reply === false) {
+      reqState = 'resolved';
+    } else if (params.reply_deadline) {
+      reqState = 'awaiting_colleague';
+      nextCheckAt = params.reply_deadline;
+      nextCheckHandler = 'outreach_expiry';
+    }
+    const details: Record<string, unknown> = {
+      message: params.message,
+      await_reply: params.await_reply,
+      sent_at: params.sent_at,
+      scheduled_at: params.scheduled_at,
+      intent: params.intent,
+      context_json: params.context_json,
+      proposed_slots: params.proposed_slots,
+      subject_keyword: params.subject_keyword,
+    };
+    const subjectPreview = params.message.slice(0, 80).replace(/\s+/g, ' ').trim();
+    const row = requests.createRequest({
+      ownerUserId: params.owner_user_id,
+      initiatedBy: params.owner_user_id,
+      initiatedByRole: 'system',
+      kind: 'outreach',
+      subkind: params.intent ?? undefined,
+      subject: subjectPreview || `Outreach to ${params.colleague_name}`,
+      description: params.message,
+      state: reqState,
+      informed: 1,  // owner-initiated outreach; he asked for it
+      targetSlackId: params.colleague_slack_id,
+      targetName: params.colleague_name,
+      originChannel: params.owner_channel,
+      originThreadTs: params.owner_thread_ts ?? undefined,
+      nextCheckAt,
+      nextCheckHandler,
+      details,
+    });
+    requestId = row.id;
+  } catch (err) {
+    // Bridge failure is non-fatal. Legacy row still writes; brief will miss
+    // this one until next deploy. Log loudly so we catch the regression.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const logger = require('../utils/logger').default;
+    logger.warn('createOutreachJob — requests bridge threw, legacy row only', {
+      err: String(err).slice(0, 200), colleague: params.colleague_name,
+    });
+  }
+
   db.prepare(`
     INSERT INTO outreach_jobs (
       id, owner_user_id, owner_channel, owner_thread_ts,
       colleague_slack_id, colleague_name, colleague_tz, message, await_reply, status,
       sent_at, reply_deadline, scheduled_at, intent, context_json,
-      proposed_slots, subject_keyword
+      proposed_slots, subject_keyword, request_id
     ) VALUES (
       @id, @owner_user_id, @owner_channel, @owner_thread_ts,
       @colleague_slack_id, @colleague_name, @colleague_tz, @message, @await_reply, @status,
       @sent_at, @reply_deadline, @scheduled_at, @intent, @context_json,
-      @proposed_slots, @subject_keyword
+      @proposed_slots, @subject_keyword, @request_id
     )
   `).run({
     id,
@@ -137,6 +206,7 @@ export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' 
     context_json: params.context_json ?? null,
     proposed_slots: params.proposed_slots ?? null,
     subject_keyword: params.subject_keyword ?? null,
+    request_id: requestId,
   });
   return id;
 }
@@ -418,15 +488,77 @@ export interface CoordJob {
 export function createCoordJob(params: Omit<CoordJob, 'id' | 'created_at' | 'updated_at'>): string {
   const db = getDb();
   const id = `coord_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+  // v2.7.1 — bridge to requests spine. Coord = multi-party booking. State
+  // mapping from legacy coord_jobs.status:
+  //   collecting / awaiting_response → in_flight (Maelle is working it)
+  //   waiting_owner / awaiting_owner → awaiting_owner
+  //   booked → resolved (handled in updateCoordJob terminal bridge below)
+  //   cancelled / abandoned → cancelled / expired (same)
+  let requestId: string | null = null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const requests = require('./requests') as typeof import('./requests');
+    const parsedParticipants = (() => {
+      try { return JSON.parse(params.participants) as Array<{ name?: string; slack_id?: string; email?: string }>; }
+      catch { return []; }
+    })();
+    const parsedSlots = (() => {
+      try { return JSON.parse(params.proposed_slots) as string[]; }
+      catch { return []; }
+    })();
+    const participantNames = parsedParticipants
+      .map(p => p?.name)
+      .filter((n): n is string => typeof n === 'string' && n.length > 0);
+    const firstParticipantSlack = parsedParticipants.find(p => typeof p?.slack_id === 'string')?.slack_id;
+    const reqState: 'in_flight' | 'awaiting_owner' =
+      params.status === 'waiting_owner' || params.status === 'awaiting_owner'
+        ? 'awaiting_owner'
+        : 'in_flight';
+    const details: Record<string, unknown> = {
+      participant_names: participantNames,
+      participants: parsedParticipants,
+      proposed_slots: parsedSlots,
+      topic: params.topic,
+      duration_min: params.duration_min,
+      intent: params.intent ?? 'schedule',
+      existing_event_id: params.existing_event_id,
+    };
+    const row = requests.createRequest({
+      ownerUserId: params.owner_user_id,
+      initiatedBy: params.owner_user_id,
+      initiatedByRole: 'system',
+      kind: 'coord',
+      subkind: params.intent ?? 'schedule',
+      subject: params.subject,
+      description: params.topic ?? undefined,
+      state: reqState,
+      informed: 1,  // coord initiation is the owner's ask; he knows about it
+      targetSlackId: firstParticipantSlack,
+      targetName: participantNames[0],
+      originChannel: params.owner_channel,
+      originThreadTs: params.owner_thread_ts ?? undefined,
+      outcomeExternalEventId: params.existing_event_id,
+      details,
+    });
+    requestId = row.id;
+  } catch (err) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const logger = require('../utils/logger').default;
+    logger.warn('createCoordJob — requests bridge threw, legacy row only', {
+      err: String(err).slice(0, 200), subject: params.subject,
+    });
+  }
+
   db.prepare(`
     INSERT INTO coord_jobs (
       id, owner_user_id, owner_channel, owner_thread_ts,
       subject, topic, duration_min, status, proposed_slots, participants, notes, last_calendar_check,
-      intent, existing_event_id
+      intent, existing_event_id, request_id
     ) VALUES (
       @id, @owner_user_id, @owner_channel, @owner_thread_ts,
       @subject, @topic, @duration_min, @status, @proposed_slots, @participants, @notes, @last_calendar_check,
-      @intent, @existing_event_id
+      @intent, @existing_event_id, @request_id
     )
   `).run({
     id,
@@ -443,6 +575,7 @@ export function createCoordJob(params: Omit<CoordJob, 'id' | 'created_at' | 'upd
     last_calendar_check: params.last_calendar_check ?? new Date().toISOString(),
     intent: params.intent ?? 'schedule',
     existing_event_id: params.existing_event_id ?? null,
+    request_id: requestId,
   });
   return id;
 }

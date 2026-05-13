@@ -1213,15 +1213,14 @@ export class SchedulingSkill {
                 // fabricated reason. broken_rule_label === 'unknown' means
                 // the diagnostics didn't fire (rare — defensive); Sonnet
                 // says so honestly rather than guessing.
-                // v2.6.5 — owner_busy_or_buffer_collision split into
-                // owner_busy_collision (hard — actual overlap) and
-                // owner_buffer_collision (soft — within buffer only).
+                // v2.7.1 — owner_buffer_collision removed (was a soft-preference
+                // collision check that duplicated the buffer baked into standard
+                // durations). Connected back-to-backs are fine by design.
                 const labelFor = (reason: string | undefined): string => {
                   switch (reason) {
                     case 'outside_owner_work_hours': return `outside ${ownerFirst}'s work hours`;
                     case 'outside_attendee_work_hours': return `outside the attendee's working hours`;
                     case 'owner_busy_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
-                    case 'owner_buffer_collision': return `back-to-back with another meeting on ${ownerFirst}'s calendar (no buffer between them)`;
                     // legacy label name kept as alias in case any older diagnostics path still emits it
                     case 'owner_busy_or_buffer_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
                     case 'overlaps_meeting_being_moved': return `overlaps the meeting being moved`;
@@ -1243,24 +1242,6 @@ export class SchedulingSkill {
                 // either way.
                 const brokenRule = fired[0];
 
-                // v2.6.5 — buffer-only collision is a SOFT preference, not
-                // a rule. When the only reason a slot was rejected is buffer
-                // collision (no actual overlap, no work-hours / focus / etc.
-                // breach), don't escalate to approval — proceed with the
-                // booking and skip the rule check below. The buffer is a
-                // helper for healthy back-to-backs that Maelle honors when
-                // searching for slots herself; an external party (e.g. Yael
-                // asking to reinstate a meeting at a specific time) shouldn't
-                // be blocked by it. The flow falls through to the normal
-                // booking path; a shadow line will surface in the post-book
-                // shadowNotify ("booked back-to-back, no buffer").
-                const isBufferOnly = fired.length === 1 && fired[0] === 'owner_buffer_collision';
-                if (isBufferOnly) {
-                  logger.info('create_meeting colleague-path proceeding despite buffer-only collision', {
-                    start: args.start, end: args.end, requester: context.userId,
-                  });
-                  // do not return — fall through to booking
-                } else {
                 const brokenRuleLabel = labelFor(brokenRule);
                 logger.info('create_meeting colleague-path refused — slot breaks owner rules', {
                   start: args.start, end: args.end, requester: context.userId,
@@ -1276,7 +1257,6 @@ export class SchedulingSkill {
                     ? `That time doesn't pass ${ownerFirst}'s scheduling rules and I can't tell exactly which one flagged it. Call create_approval(kind=policy_exception) — describe the slot honestly and let him decide.`
                     : `That time is ${brokenRuleLabel} for ${ownerFirst}. I can't book it on my own — call create_approval(kind=policy_exception) and pass the same phrase ("${brokenRuleLabel}") in ask_text so he knows what he's overriding.`,
                 };
-                }
               }
             }
           } catch (err) {

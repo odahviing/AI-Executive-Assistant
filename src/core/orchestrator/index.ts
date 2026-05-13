@@ -1212,6 +1212,31 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           }
         }
       }
+
+      // v2.7.1 (bug 2.3 / 3.1) — open a follow_up request when owner-initiated
+      // meeting work spills past this turn (rule_violation, options to pick,
+      // not_organizer, etc.). Closure rides on existing closeMeetingArtifacts
+      // cascade + closeLoopOnOwnerHandled scanner. No new tool exposed to
+      // Sonnet — purely an orchestrator-level tracking hook.
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const m = require('../requests/maybeOpenInFlightMeetingRequest') as
+          typeof import('../requests/maybeOpenInFlightMeetingRequest');
+        m.maybeOpenInFlightMeetingRequest({
+          ownerUserId: profile.user.slack_user_id,
+          initiatorSlackId: input.userId,
+          initiatorRole: input.senderRole === 'owner' ? 'owner' : 'colleague',
+          threadTs: input.threadTs,
+          channel: input.channelId,
+          toolName: toolUse.name,
+          toolInput: toolUse.input as Record<string, unknown>,
+          toolResult: result,
+        });
+      } catch (err) {
+        logger.warn('maybeOpenInFlightMeetingRequest threw — non-fatal', {
+          err: String(err).slice(0, 200), tool: toolUse.name,
+        });
+      }
     }
 
     messages.push({ role: 'user', content: toolResults });

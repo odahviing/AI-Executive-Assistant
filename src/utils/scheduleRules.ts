@@ -21,8 +21,13 @@
  *                                   (bypassed when allow_relaxed = true)
  *   7. travel_buffer_collision    — category.requires_travel_buffer & adjacent meeting too tight
  *   8. owner_busy_collision       — owner has a hard conflict (delegated to caller's getCalendarEvents)
- *   9. owner_buffer_collision     — within profile.meetings.between_buffer_minutes of another meeting
- *                                   (NOT bypassed by allow_relaxed; soft preference, return label)
+ *
+ * NOTE on between-meeting buffer (v2.7.1) — the 5-min buffer is NOT enforced
+ * as a collision rule. The allowed durations (10/25/40/55) and aligned starts
+ * (:00/:15/:30/:45) already bake in 5 min of trailing gap by design. A 55-min
+ * meeting starting where another ends is fine — connected back-to-back is the
+ * preferred shape, not a violation. (Prior wave had rule (9)
+ * `owner_buffer_collision`; deleted v2.7.1.)
  */
 
 import { DateTime } from 'luxon';
@@ -39,7 +44,7 @@ export type RuleViolationKind =
   | 'floating_block_overlap'
   | 'travel_buffer_collision'
   | 'owner_busy_collision'
-  | 'owner_buffer_collision';
+  | 'attendee_busy_collision';
 
 export interface RuleCheckInput {
   profile: UserProfile;
@@ -247,30 +252,11 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
     }
   }
 
-  // ── (9) soft buffer collision ───────────────────────────────────────────
-  // Within profile.meetings.between_buffer_minutes of another meeting.
-  const between = profile.meetings?.buffer_minutes ?? 5;
-  if (between > 0) {
-    for (const ev of input.events) {
-      if (ev.isCancelled) continue;
-      if (excludeSet.has(ev.id)) continue;
-      if ((ev as any).showAs === 'free') continue;
-      const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
-      const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
-      // Touch within `between` min before or after?
-      const slotEndPlus = slotEnd.plus({ minutes: between });
-      const slotStartMinus = slotStart.minus({ minutes: between });
-      const within = evStart < slotEndPlus && evEnd > slotStartMinus
-                     && !(evStart < slotEnd && evEnd > slotStart);  // not a hard overlap (handled above)
-      if (within) {
-        return {
-          passes: false,
-          violation_kind: 'owner_buffer_collision',
-          violation_label: `Slot is within ${between}min of "${ev.subject ?? 'another meeting'}" (${evStart.setZone(tz).toFormat('HH:mm')}–${evEnd.setZone(tz).toFormat('HH:mm')})`,
-        };
-      }
-    }
-  }
+  // v2.7.1 — rule (9) owner_buffer_collision deleted. The 5-min between-meeting
+  // buffer is baked into the standard durations (10/25/40/55) at aligned
+  // starts (:00/:15/:30/:45). Connected back-to-backs are fine; a separate
+  // collision check duplicated the work and incorrectly rejected slots like
+  // 17:00 directly after a meeting ending 17:00.
 
   return { passes: true };
 }

@@ -23,7 +23,7 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
-import { getCalendarEvents, type CalendarEvent } from '../../connectors/graph/calendar';
+import { getCalendarEvents, getFreeBusy, type CalendarEvent } from '../../connectors/graph/calendar';
 import { resolveLocation, type LocationVerdict } from '../../utils/resolveLocation';
 import { checkSlot, type RuleCheckResult } from '../../utils/scheduleRules';
 import { detectCategory } from './detectCategory';
@@ -255,6 +255,75 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         return { action: 'confirm_override', violationLabel: label, suggestedAskText: askText, category };
       }
       return { action: 'escalate_approval', violationLabel: label, suggestedAskText: askText, category };
+    }
+
+    // ── Owner-initiated: check internal-attendee freebusy (v2.7.1) ─────────
+    // Design intent: when the OWNER asks Maelle to book / move a meeting that
+    // has internal attendees, planMeeting must confirm those attendees are
+    // free at the chosen slot. Otherwise the meeting silently lands on top
+    // of someone's existing time. Override path stays open — owner can say
+    // "do it anyway" and the retry with allowRelaxed bypasses the check.
+    //
+    // Colleague-initiated path is NOT checked here. Slot finder
+    // (annotateSlotsWithAttendeeStatus) already annotates colleague-facing
+    // results with per-attendee status — that's annotation, not a block.
+    if (initiator === 'owner' && !input.allowRelaxed && input.participants.length > 0) {
+      const ownerDomainLower = ownerEmail.split('@')[1].toLowerCase();
+      const internalEmails: string[] = [];
+      for (const p of input.participants) {
+        const e = (p.email ?? '').toLowerCase();
+        if (!e) continue;
+        if (e === ownerEmail.toLowerCase()) continue;       // skip owner himself
+        if (e.endsWith('@' + ownerDomainLower)) internalEmails.push(e);
+      }
+      if (internalEmails.length > 0) {
+        try {
+          const fb = await getFreeBusy(
+            ownerEmail, internalEmails,
+            input.slotStartIso, input.slotEndIso,
+            profile.user.timezone,
+          );
+          const slotStart = DateTime.fromISO(input.slotStartIso);
+          const slotEnd = DateTime.fromISO(input.slotEndIso);
+          const busyAttendees: string[] = [];
+          for (const email of internalEmails) {
+            const slots = fb[email] ?? [];
+            const overlap = slots.some(s => {
+              if (s.status === 'free') return false;
+              const sStart = DateTime.fromISO(s.start, { zone: (s as any)._timezone ?? 'utc' });
+              const sEnd = DateTime.fromISO(s.end, { zone: (s as any)._timezone ?? 'utc' });
+              return sStart < slotEnd && sEnd > slotStart;
+            });
+            if (overlap) busyAttendees.push(email);
+          }
+          if (busyAttendees.length > 0) {
+            // Pretty-name each busy attendee via people_memory where possible.
+            const names = busyAttendees.map(email => {
+              try {
+                const memMatches = (require('../../db/people') as typeof import('../../db/people'))
+                  .searchPeopleMemory(email.split('@')[0]);
+                const m = (memMatches ?? []).find((x: any) => x.email?.toLowerCase() === email);
+                return m?.name?.split(' ')[0] ?? email.split('@')[0];
+              } catch { return email.split('@')[0]; }
+            });
+            const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+            const label = `${who} ${names.length === 1 ? 'is' : 'are'} busy at this time`;
+            const subj = input.subject ?? 'this meeting';
+            const askText = `Heads up — ${who} ${names.length === 1 ? 'is' : 'are'} on another meeting at ${DateTime.fromISO(input.slotStartIso).setZone(profile.user.timezone).toFormat("EEEE 'at' HH:mm")}. Book "${subj}" anyway, or pick a different time?`;
+            logger.info('planMeeting — attendee busy collision', {
+              busyAttendees, slot: input.slotStartIso,
+            });
+            return { action: 'confirm_override', violationLabel: label, suggestedAskText: askText, category };
+          }
+        } catch (err) {
+          // Permission errors (Calendars.Read) or transient Graph failures —
+          // fail open. The owner-side rule check has already passed; trust
+          // owner's judgment on the attendee side rather than block.
+          logger.warn('planMeeting — attendee freebusy check threw, proceeding', {
+            err: String(err).slice(0, 200), attendees: internalEmails,
+          });
+        }
+      }
     }
   }
 
