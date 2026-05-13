@@ -1317,6 +1317,29 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     });
   });
 
+  // ── Handler 1c: Assistant thread opened (v2.7.3) ──────────────────────────
+  // Slack's assistant panel (separate UI surface from regular DM) fires this
+  // event when a user opens Maelle in it. We register the thread so subsequent
+  // setStatus("Working…") calls during tool iterations actually surface in the
+  // panel. No greeting message is sent — assistant panels show the suggested-
+  // prompts UI by default; we don't want to push past that.
+  app.event('assistant_thread_started' as any, async ({ event }: any) => {
+    try {
+      const assistantThread = event?.assistant_thread;
+      if (!assistantThread) return;
+      const channelId = assistantThread.channel_id ?? assistantThread.context?.channel_id;
+      const threadTs = assistantThread.thread_ts;
+      if (!channelId || !threadTs) {
+        logger.warn('assistant_thread_started — missing channel_id or thread_ts, skipping', { event: JSON.stringify(event).slice(0, 300) });
+        return;
+      }
+      const { registerAssistantThread } = await import('./assistantThreads');
+      registerAssistantThread({ channelId, threadTs });
+    } catch (err) {
+      logger.warn('assistant_thread_started handler threw', { err: String(err).slice(0, 200) });
+    }
+  });
+
   // ── Handler 2: Group DMs / MPIM ───────────────────────────────────────────
   // Fires for messages in multi-person DMs — no mention needed
   app.event('message', async ({ event, say, client }) => {

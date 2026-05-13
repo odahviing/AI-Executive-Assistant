@@ -2,6 +2,36 @@
 
 ---
 
+## 2.7.3 — Slack assistant-panel surface + "Working…" indicator
+
+Slack's mid-2026 "Slack Agents" rollout is mostly branding on top of the same Slack-app model — no new platform layer, existing Bolt + socket-mode handlers unchanged. The genuinely useful new affordances are the dedicated assistant-panel UI and an in-panel status indicator while tools run. This patch opts Maelle into both, additively. Regular DM continues to work identically.
+
+### Added
+
+- **`assistant_thread_started` event handler** ([src/connectors/slack/app.ts](src/connectors/slack/app.ts), [src/connectors/slack/assistantThreads.ts](src/connectors/slack/assistantThreads.ts) new). When a user opens Maelle in the Slack assistant panel, the event registers the (channel_id, thread_ts) pair in a process-level Map with 24h TTL. No greeting message — the panel's native suggested-prompts UI handles that.
+- **`setAssistantStatus` primitive** ([src/connections/slack/messaging.ts](src/connections/slack/messaging.ts)). Wraps Slack's `assistant.threads.setStatus` API. Fire-and-forget; failures are non-fatal (swallows the API error when called on a non-assistant thread). Requires `assistant:write` scope.
+- **"Working…" status fired before each tool call** in the orchestrator ([src/core/orchestrator/index.ts](src/core/orchestrator/index.ts)). Consults the assistant-thread registry to skip the API call when in regular DM. Closes the silence gap when Maelle spends 5-15s running multiple tool iterations.
+
+### Manifest changes (owner action required)
+
+This release needs Slack-side configuration to take effect. In the Slack app dashboard:
+
+1. **OAuth scopes** — add `assistant:write` under Bot Token Scopes.
+2. **Event subscriptions** — subscribe to `assistant_thread_started` (under Bot Events).
+3. **App home / agent features** — under "Agents & AI Apps", enable the assistant feature. Optionally configure suggested prompts.
+4. Reinstall the app to your workspace so the new scope takes effect.
+
+No manifest file in the repo — Maelle's Slack app is configured per-tenant via the Slack dashboard. Bot token comes from `profile.assistant.slack.bot_token` as before.
+
+### Not changed
+
+- Regular DM behavior — identical to v2.7.2. The assistant panel is a NEW surface, not a replacement.
+- Event handlers for `app_mention`, `message`, `reaction_added` — unchanged.
+- Bolt version — still `^3.19.0`. The `Assistant` helper class (Bolt 4.x) isn't used; we wire the event + status API at the lower level for zero breaking-change risk.
+- Tool execution latency — `setAssistantStatus` is fired with `void` (no await), so it doesn't add to turn latency.
+
+---
+
 ## 2.7.2 — Phase 2 cutover-finish: kill the coord fast path, requests as engine, deferred action replay
 
 Driven by two real-chat bugs this morning: (1) Idan asked Maelle to block his Thursday morning 8:00-10:30; the override path didn't take because `relaxed` was declared on `find_available_slots` but never on `create_meeting` / `move_meeting` even though the handlers read it — pure tool-def oversight from the v2.7.0 trilogy. (2) Gidon (external) DMed asking for 30 min; full back-and-forth conversation, slot/subject/email all collected, zero tools fired — DB trace showed NO coord row, NO outreach row, NO request, NO calendar event. Maelle had said "I will approve and send the invitation" and stopped. Root: the v2.6.5 coord fast path (Case B — owner-only-pollable) returned slots and required Sonnet to switch tools (coordinate_meeting → create_meeting) for the booking step; she didn't switch, narrated "I'll send" without firing.

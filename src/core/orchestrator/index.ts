@@ -1158,6 +1158,30 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         }
       }
 
+      // v2.7.3 — "Working…" indicator in Slack assistant-panel threads.
+      // Fires before each tool call so the user sees activity instead of
+      // silence during multi-tool turns. No-op when the current thread
+      // wasn't opened via the assistant panel (regular DM gets nothing —
+      // Slack API rejects, helper swallows).
+      if (input.app && input.channelId && input.threadTs) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { isAssistantThread } = require('../../connectors/slack/assistantThreads') as
+            typeof import('../../connectors/slack/assistantThreads');
+          if (isAssistantThread({ channelId: input.channelId, threadTs: input.threadTs })) {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { setAssistantStatus } = require('../../connections/slack/messaging') as
+              typeof import('../../connections/slack/messaging');
+            // Fire-and-forget — never await; status is UX polish, not load-bearing.
+            void setAssistantStatus(input.app, input.profile.assistant.slack.bot_token, {
+              channelId: input.channelId,
+              threadTs: input.threadTs,
+              status: 'Working…',
+            });
+          }
+        } catch (_) { /* helper failure is non-fatal */ }
+      }
+
       const result = await executeSkillTool(
         toolUse.name,
         toolInputForCall,

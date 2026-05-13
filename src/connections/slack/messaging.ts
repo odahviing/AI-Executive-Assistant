@@ -267,3 +267,42 @@ export async function findChannelByName(
     return [];
   }
 }
+
+/**
+ * Set the "Working…" status indicator in an assistant-panel thread (v2.7.3).
+ *
+ * Slack's assistant-panel surface supports an ephemeral status indicator that
+ * shows above the input field while the agent is processing. The indicator
+ * clears automatically when the agent posts its reply.
+ *
+ * Requires `assistant:write` scope. Only works in threads that opened via
+ * the assistant panel — for regular DM messages the API returns
+ * `channel_not_found` or `not_in_assistant_thread`. Callers should consult
+ * `isAssistantThread()` from connectors/slack/assistantThreads before calling
+ * to avoid noisy failures.
+ *
+ * Pass empty status to clear (Slack also clears on next chat.postMessage).
+ * Fire-and-forget; never blocks tool execution. Errors are logged at debug
+ * (we expect transient mismatches when the tracker is stale post-restart).
+ */
+export async function setAssistantStatus(
+  app: App,
+  botToken: string,
+  params: { channelId: string; threadTs: string; status: string },
+): Promise<void> {
+  try {
+    await app.client.apiCall('assistant.threads.setStatus', {
+      token: botToken,
+      channel_id: params.channelId,
+      thread_ts: params.threadTs,
+      status: params.status,
+    });
+  } catch (err) {
+    // Don't escalate — status is UX polish. If it fails (wrong thread type,
+    // scope missing, etc.) the agent reply still lands fine.
+    logger.debug('setAssistantStatus failed (non-fatal)', {
+      channelId: params.channelId, threadTs: params.threadTs,
+      status: params.status, err: String(err).slice(0, 200),
+    });
+  }
+}
