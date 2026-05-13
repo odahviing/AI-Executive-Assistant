@@ -162,7 +162,17 @@ Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EE
               : '';
           const question = det.question ? ` · ${det.question}` : '';
           const kindLabel = r.subkind ?? r.kind;
-          return `  - #${r.id} · kind=${kindLabel}${subject}${slotsPreview}${question} · asked ${createdRel}${expLine}`;
+          // v2.7.2 — mark the approval bound to the CURRENT thread. When
+          // ${firstName} replies in a thread, that thread's ts matches the
+          // original approval DM's ts (which is stored as terminal_dm_msg_ts
+          // on the request). The marker tells Sonnet "this is the approval
+          // he's replying to — use this approval_id unless he names a
+          // different one." Closes the misroute-amplification risk when
+          // multiple policy_exception approvals are open at once.
+          const threadBoundMarker = threadTs && r.terminal_dm_msg_ts === threadTs
+            ? '  ← THIS THREAD'
+            : '';
+          return `  - #${r.id} · kind=${kindLabel}${subject}${slotsPreview}${question} · asked ${createdRel}${expLine}${threadBoundMarker}`;
         });
         return `
 PENDING APPROVALS (${pendingRequests.length} — waiting on ${firstName}):
@@ -170,7 +180,8 @@ ${lines.join('\n')}
 
 Binding rules (critical):
 - When ${firstName} replies in a way that looks like a decision (picks a time, says "yes"/"no"/"ok"/"לא"/"כן", proposes an alternative): call resolve_approval with the right approval_id from the list above.
-- Match on subject, timing, or thread — pick the most plausible pending request. If more than one plausibly fits, ask ${firstName} which one (name them by subject).
+- THREAD-BOUND APPROVAL — if a line above is marked "← THIS THREAD", that's the approval whose original DM is the parent of this reply thread. Default to that approval_id unless ${firstName} explicitly named a different one ("no, I meant the Yael one"). When the marker is present and ${firstName} typed a vague "yes" / "ok" / "כן", use the marked approval — that's what he's responding to.
+- No marker present + multiple pending — match on subject, timing, or thread context. If more than one plausibly fits, ask ${firstName} which one (name them by subject).
 - Verdicts:
   · approve → ${firstName} agreed as-asked. For slot_pick: pass {slot_iso} in data.
   · reject → ${firstName} said no / cancel. Linked work cancels automatically.
