@@ -15,14 +15,61 @@ export interface CalendarIssue {
 }
 
 /**
- * Build a unique key for a calendar issue so we can match dismissals / dedup.
- * Format: "{type}:{time}:{subject}" — e.g. "double_booking:16:15:Weekly Sales Ops"
+ * v2.7.4 — Issue-class normalization. Different issue types describe the
+ * same underlying problem from different angles:
+ *   double_booking + back_to_back + no_buffer → all are "overlap"
+ *   oof_conflict → "oof"
+ * The dismissal fingerprint should be class-based, not type-based, so a
+ * dismissed double_booking row doesn't get re-flagged as back_to_back on
+ * the next run (the May 12 Michal-Happy-Hour dismissal failure).
  */
-export function buildIssueKey(type: string, detail: string): string {
+function normalizeIssueClass(type: string): string {
+  switch (type) {
+    case 'double_booking':
+    case 'back_to_back':
+    case 'no_buffer':
+    case 'overlap':
+      return 'overlap';
+    case 'oof_conflict':
+      return 'oof';
+    case 'missing_floating_block':
+      return 'missing_block';
+    case 'work_on_day_off':
+      return 'day_off';
+    case 'busy_day':
+      return 'busy_day';
+    case 'category_limit_exceeded':
+      return 'category_limit';
+    default:
+      return type;  // unknown types fall back to literal
+  }
+}
+
+/**
+ * Build a unique key for a calendar issue so we can match dismissals / dedup.
+ *
+ * v2.7.4 — stable fingerprint via (class, sorted_event_ids) when event IDs
+ * are available; falls back to (type, time-extract, prose-prefix) for legacy
+ * callers that dismiss by free-form description without IDs. Same overlap
+ * across runs now keys identically regardless of how the description prose
+ * is phrased (Sonnet free-form vs analyzer structured).
+ *
+ * Format with IDs: "{class}:{id1},{id2}"     — stable
+ * Format legacy:   "{type}:{time}:{prefix}"  — old behavior, used when no IDs
+ */
+export function buildIssueKey(type: string, detail: string, eventIds?: string[]): string {
+  const cls = normalizeIssueClass(type);
+  if (eventIds && eventIds.length > 0) {
+    const sorted = [...eventIds].sort().join(',');
+    return `${cls}:${sorted}`;
+  }
+  // Legacy fallback — used when caller has no eventIds (older Sonnet-typed
+  // dismissals via dismiss_calendar_issue free-text). Less stable but at
+  // least carries forward for items dismissed before this version.
   const timeMatch = detail.match(/(\d{2}:\d{2})/);
   const time = timeMatch ? timeMatch[1] : 'unknown';
   const fingerprint = detail.slice(0, 40).replace(/[^a-zA-Z0-9 ]/g, '').trim();
-  return `${type}:${time}:${fingerprint}`;
+  return `${cls}:${type}:${time}:${fingerprint}`;
 }
 
 /**
@@ -52,7 +99,8 @@ export function upsertCalendarIssue(
   eventIds?: string[],
 ): boolean {
   const db = getDb();
-  const issueKey = buildIssueKey(issueType, detail);
+  // v2.7.4 — pass eventIds through so fingerprint is stable across runs.
+  const issueKey = buildIssueKey(issueType, detail, eventIds);
 
   // Check if already tracked
   const existing = db.prepare(`

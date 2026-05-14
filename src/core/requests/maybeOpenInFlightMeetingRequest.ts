@@ -102,6 +102,15 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
     return;
   }
 
+  // v2.7.4 — give the row an expiry timer so the request runner sweeps it.
+  // Without this, in_flight rows that never naturally close (e.g., a failed
+  // tool call that nobody retries) become orphans. 24h is a reasonable
+  // outer bound: if owner doesn't follow up by tomorrow's brief, the work
+  // is stale. The runner's runExpiry handler closes to state='expired' on
+  // fire; closeRequest cascades + informs the brief via informed=0 so it
+  // surfaces once with closure narration then drops.
+  const expiresAtIso = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
   try {
     createRequest({
       ownerUserId: input.ownerUserId,
@@ -117,6 +126,9 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
       originThreadTs: input.threadTs,
       outcomeExternalEventId: eventId,
       idempotencyKey,
+      expiresAt: expiresAtIso,
+      nextCheckAt: expiresAtIso,
+      nextCheckHandler: 'expiry',
       details: {
         meeting_id: eventId,
         subject,
@@ -125,7 +137,7 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
       },
     });
     logger.info('opened in_flight_action follow_up', {
-      ownerUserId: input.ownerUserId, tool: input.toolName, eventId, subject,
+      ownerUserId: input.ownerUserId, tool: input.toolName, eventId, subject, expiresAt: expiresAtIso,
     });
   } catch (err) {
     // Idempotency-key collision or other DB constraint — non-fatal.

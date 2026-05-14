@@ -11,6 +11,7 @@ import {
 } from '../connectors/graph/calendar';
 import { auditLog, upsertCalendarIssue, getActiveCalendarIssues, updateCalendarIssueStatus, getDismissedIssueKeys, buildIssueKey, type CalendarIssueStatus } from '../db';
 import logger from '../utils/logger';
+import { displaySubject } from '../utils/displaySubject';
 import type { PreferPosition, AnchorEvent } from '../utils/floatingBlocks';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -444,13 +445,17 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                   && !bProt.reasons.includes('has external attendee');
                 const pick = protection.pickMovableSide(a, b, profile);
 
+                // v2.7.4 — mask private subjects in issue descriptions so the
+                // brief / coord DMs / shadow notes don't leak.
+                const aDisp = displaySubject(a, profile);
+                const bDisp = displaySubject(b, profile);
                 issues.push({
                   type: 'double_booking',
                   date: dayStr,
-                  description: `"${a.subject}" (${aStart.toFormat('HH:mm')}-${aEnd.toFormat('HH:mm')}) overlaps with "${b.subject}" (${bStart.toFormat('HH:mm')}-${bEnd.toFormat('HH:mm')})`,
+                  description: `"${aDisp}" (${aStart.toFormat('HH:mm')}-${aEnd.toFormat('HH:mm')}) overlaps with "${bDisp}" (${bStart.toFormat('HH:mm')}-${bEnd.toFormat('HH:mm')})`,
                   eventIds: [a.id, b.id],
                   suggestion: pick
-                    ? `Propose moving "${pick.movable.subject}" — the less-protected side. The other meeting is protected (${(pick.movable === a ? bProt : aProt).reasons.join(', ')}).`
+                    ? `Propose moving "${displaySubject(pick.movable, profile)}" — the less-protected side. The other meeting is protected (${(pick.movable === a ? bProt : aProt).reasons.join(', ')}).`
                     : 'Both sides are protected — the owner needs to decide which to move.',
                   internal_only: bothInternal,
                   movable_event_id: pick?.movable.id,
@@ -648,7 +653,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
         const dismissedKeys = getDismissedIssueKeys(ownerUserId, startDate, endDate);
         if (dismissedKeys.size > 0) {
           const preCount = issues.length;
-          const filtered = issues.filter(i => !dismissedKeys.has(buildIssueKey(i.type, i.description)));
+          const filtered = issues.filter(i => !dismissedKeys.has(buildIssueKey(i.type, i.description, i.eventIds)));
           if (filtered.length !== preCount) {
             logger.info('Calendar health: suppressed already-approved issues', {
               suppressed: preCount - filtered.length,
@@ -778,9 +783,12 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                       const mEnd = parseGraphDt(conflicting.end.dateTime, conflicting.end.timeZone, timezone);
                       const durationMin = Math.round(mEnd.diff(mStart, 'minutes').minutes);
 
+                      // v2.7.4 — only filter 'declined'; 'none' is Graph's
+                      // default (untracked response) and should NOT drop the
+                      // attendee. See parallel fix at line ~981.
                       const participantsRaw = (conflicting.attendees ?? []).filter(a => {
                         const status = a.status?.response;
-                        return status !== 'declined' && status !== 'none';
+                        return status !== 'declined';
                       });
                       const attendeeEmails = participantsRaw
                         .map(a => a.emailAddress.address)
@@ -976,9 +984,15 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                     const durationMin = Math.round(mEnd.diff(mStart, 'minutes').minutes);
 
                     // Find fresh slots to propose.
+                    // v2.7.4 — only filter out 'declined'. Per Microsoft Graph
+                    // docs, 'none' is the default response status — attendees
+                    // who haven't been tracked yet (common when YOU organized
+                    // and they haven't accepted). Outlook's "Didn't respond"
+                    // UI label maps to 'none' AND 'notResponded'; both should
+                    // KEEP the attendee for downstream coord/move logic.
                     const participantsRaw = (movable.attendees ?? []).filter(a => {
                       const status = a.status?.response;
-                      return status !== 'declined' && status !== 'none';
+                      return status !== 'declined';
                     });
                     const attendeeEmails = participantsRaw
                       .map(a => a.emailAddress.address)
@@ -1054,7 +1068,9 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                         ownerName: profile.user.name,
                         ownerEmail: profile.user.email,
                         ownerTz: profile.user.timezone,
-                        subject: movable.subject ?? 'Meeting',
+                        // v2.7.4 — mask private subjects on outbound coord
+                        // (DMs to colleagues quote the subject).
+                        subject: displaySubject(movable, profile) || 'Meeting',
                         durationMin,
                         participants: coordParticipants as Parameters<typeof stateMod.initiateCoordination>[0]['participants'],
                         proposedSlots: proposed as Parameters<typeof stateMod.initiateCoordination>[0]['proposedSlots'],
@@ -1067,8 +1083,17 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
                         },
                       });
                       issue.fixed = true;
-                      issue.fix_detail = `Started a move-coord: asking ${coordParticipants.map(p => p.name).join(' and ')} to shift "${movable.subject}" (currently ${mStart.toFormat('HH:mm')}–${mEnd.toFormat('HH:mm')}). Will book once they agree.`;
+                      issue.fix_detail = `Started a move-coord: asking ${coordParticipants.map(p => p.name).join(' and ')} to shift "${displaySubject(movable, profile)}" (currently ${mStart.toFormat('HH:mm')}–${mEnd.toFormat('HH:mm')}). Will book once they agree.`;
                       fixesApplied += 1;
+                      // v2.7.4 — add to internal_actions so the routine
+                      // narration + claim-checker see the move-coord fired.
+                      // Previously this branch silently fixed without
+                      // signaling, so Sonnet narrated the same shape
+                      // whether or not the coord actually initiated.
+                      internalActions.push({
+                        tool: 'initiate_coordination',
+                        detail: `Move-coord for "${displaySubject(movable, profile)}" — DMing ${coordParticipants.map(p => p.name).join(', ')}`,
+                      });
                     }
                   }
                 } catch (err) {
@@ -1101,6 +1126,32 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
           });
         }
 
+        // v2.7.4 — Route 2 narration. Build a deterministic per-issue summary
+        // text directly from the issue list + fix outcomes. The routine
+        // prompt uses this verbatim instead of asking Sonnet to "tell me
+        // what got done" (which led to fabrications when fix_failed wasn't
+        // narrated honestly). humanGate on the postReply path humanizes
+        // the deterministic template. One truth source.
+        const summaryLines: string[] = [];
+        for (const i of issues) {
+          if (i.fixed && i.fix_detail) {
+            // Successful fix — narrate the action.
+            summaryLines.push(`✓ ${i.fix_detail}`);
+          } else if (i.fix_failed) {
+            // Attempted fix but failed — narrate the attempt + the reason.
+            const reason = i.fix_error ?? 'unknown reason';
+            summaryLines.push(`× Tried to fix "${i.description}" but couldn't: ${reason}`);
+          } else if (mode === 'active') {
+            // Detected but no autofix attempted (or autofix skipped). Surface.
+            summaryLines.push(`! Detected: ${i.description}`);
+          }
+        }
+        const summaryText = summaryLines.length > 0
+          ? summaryLines.join('\n')
+          : (issues.length === 0
+              ? 'Calendar looks healthy — no issues found.'
+              : `Scanned ${startDate} to ${endDate} — ${issues.length} issue${issues.length === 1 ? '' : 's'} detected.`);
+
         return {
           issues,
           count: issues.length,
@@ -1111,6 +1162,10 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
           // empty — only populated when active mode actually mutated something.
           internal_actions: internalActions.length > 0 ? internalActions : undefined,
           activeTrackedIssues: activeIssues.length > 0 ? activeIssues : undefined,
+          // v2.7.4 — deterministic summary text the caller (routine, brief,
+          // narration) should pass verbatim instead of having Sonnet improvise
+          // from issues[]. humanGate humanizes the template downstream.
+          summary_text: summaryText,
           summary: issues.length === 0
             ? 'Calendar looks healthy — no issues found.'
             : mode === 'active'
@@ -1230,14 +1285,54 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             };
           }
 
-          // Category resolution (same as the positional path below)
-          const categoryArg = (args.category as string | undefined)?.trim();
-          const validCategoryNames = (profile.categories ?? []).map(c => c.name);
+          // v2.7.4 — delegate category/location/rule-check to planMeeting.
+          // Window-aware slot finding stays here; the booking step joins
+          // the unified flow. confirm_outside_window=true → allowRelaxed=true
+          // so planMeeting bypasses outside-working-hours etc., matching the
+          // historical override semantic.
           let blockCategories: string[] | undefined = undefined;
-          if (block.default_category && validCategoryNames.includes(block.default_category)) {
-            blockCategories = [block.default_category];
-          } else if (categoryArg) {
-            if (validCategoryNames.length === 0 || validCategoryNames.includes(categoryArg)) {
+          let blockLocation: string = '';
+          let blockIsOnline: boolean = false;
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { planMeeting } = require('./meetings/planMeeting') as typeof import('./meetings/planMeeting');
+            const plan = await planMeeting({
+              profile,
+              intent: 'new_booking',
+              initiator: 'owner',
+              initiatorSlackId: context.userId,
+              slotStartIso: overrideStart.toISO()!,
+              slotEndIso: overrideEnd.toISO()!,
+              subject: blockLabel,
+              participants: [],
+              allowRelaxed: true,  // override path always bypasses soft rules
+            });
+            if (plan.action === 'confirm_override' || plan.action === 'escalate_approval') {
+              // Should be unreachable with allowRelaxed=true. If somehow
+              // hit, surface the violation back to Sonnet.
+              return {
+                error: 'rule_violation',
+                message: `Override slot still violates a rule planMeeting can't bypass: ${plan.violationLabel}`,
+              };
+            }
+            if (plan.action === 'book') {
+              if (plan.category) blockCategories = [plan.category];
+              blockLocation = plan.location;
+              blockIsOnline = plan.isOnline;
+            }
+          } catch (err) {
+            logger.warn('book_floating_block override-path: planMeeting threw, falling back to raw category', {
+              err: String(err).slice(0, 200),
+            });
+          }
+
+          // Fallback: yaml block.default_category if planMeeting couldn't classify.
+          if (!blockCategories) {
+            const categoryArg = (args.category as string | undefined)?.trim();
+            const validCategoryNames = (profile.categories ?? []).map(c => c.name);
+            if (block.default_category && validCategoryNames.includes(block.default_category)) {
+              blockCategories = [block.default_category];
+            } else if (categoryArg && (validCategoryNames.length === 0 || validCategoryNames.includes(categoryArg))) {
               blockCategories = [categoryArg];
             }
           }
@@ -1249,7 +1344,8 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
               end: overrideEnd.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
               attendees: [],
               body: `<p>${blockLabel} — booked by ${profile.assistant.name}, ${profile.user.name.split(' ')[0]} Assistant. (Owner-override: outside the ${block.preferred_start}-${block.preferred_end} window.)</p>`,
-              isOnline: false,
+              isOnline: blockIsOnline,
+              location: blockLocation || undefined,
               categories: blockCategories,
               userEmail,
               timezone,
@@ -1426,22 +1522,64 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
         const blockStart = DateTime.fromMillis(bestStart).setZone(timezone);
         const blockEnd = blockStart.plus({ minutes: block.duration_minutes });
 
-        // Category: read from yaml's default_category if set, otherwise honor
-        // Sonnet's category arg. Fallback ladder: yaml default → arg → none.
-        const categoryArg = (args.category as string | undefined)?.trim();
-        const validCategoryNames = (profile.categories ?? []).map(c => c.name);
+        // v2.7.4 — delegate category/location/rule-check to planMeeting so
+        // the floating-block path uses the same engine as regular bookings.
+        // Window-aware slot finding stayed above; the booking step is unified.
         let blockCategories: string[] | undefined = undefined;
-        if (block.default_category && validCategoryNames.includes(block.default_category)) {
-          blockCategories = [block.default_category];
-        } else if (categoryArg) {
-          if (validCategoryNames.length === 0 || validCategoryNames.includes(categoryArg)) {
-            blockCategories = [categoryArg];
-          } else {
-            logger.warn('book_floating_block: agent proposed category not in profile — dropping', {
-              proposed: categoryArg,
-              allowed: validCategoryNames,
-              blockName: block.name,
-            });
+        let blockLocation: string = '';
+        let blockIsOnline: boolean = false;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { planMeeting } = require('./meetings/planMeeting') as typeof import('./meetings/planMeeting');
+          const plan = await planMeeting({
+            profile,
+            intent: 'new_booking',
+            initiator: 'owner',
+            initiatorSlackId: context.userId,
+            slotStartIso: blockStart.toISO()!,
+            slotEndIso: blockEnd.toISO()!,
+            subject: blockLabel,
+            participants: [],
+            // Inside the block's preferred window — soft rules should pass,
+            // so allowRelaxed stays false. If a rule fires, return error
+            // pointing Sonnet to retry with confirm_outside_window=true.
+            allowRelaxed: false,
+          });
+          if (plan.action === 'confirm_override' || plan.action === 'escalate_approval') {
+            return {
+              error: 'rule_violation',
+              violation_label: plan.violationLabel,
+              suggested_ask_text: plan.suggestedAskText,
+              message: `${blockLabel} at ${blockStart.toFormat('HH:mm')} on ${date} can't book: ${plan.violationLabel}. To override, retry book_floating_block with confirm_outside_window=true and start_time="${blockStart.toFormat('HH:mm')}".`,
+            };
+          }
+          if (plan.action === 'book') {
+            if (plan.category) blockCategories = [plan.category];
+            blockLocation = plan.location;
+            blockIsOnline = plan.isOnline;
+          }
+        } catch (err) {
+          logger.warn('book_floating_block: planMeeting threw, falling back to yaml category', {
+            err: String(err).slice(0, 200),
+          });
+        }
+
+        // Fallback ladder: planMeeting category → yaml block.default_category → Sonnet's arg → none.
+        if (!blockCategories) {
+          const categoryArg = (args.category as string | undefined)?.trim();
+          const validCategoryNames = (profile.categories ?? []).map(c => c.name);
+          if (block.default_category && validCategoryNames.includes(block.default_category)) {
+            blockCategories = [block.default_category];
+          } else if (categoryArg) {
+            if (validCategoryNames.length === 0 || validCategoryNames.includes(categoryArg)) {
+              blockCategories = [categoryArg];
+            } else {
+              logger.warn('book_floating_block: agent proposed category not in profile — dropping', {
+                proposed: categoryArg,
+                allowed: validCategoryNames,
+                blockName: block.name,
+              });
+            }
           }
         }
 
@@ -1453,7 +1591,8 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             attendees: [],
             // Invite-body attribution names this assistant + owner.
             body: `<p>${blockLabel} — booked by ${profile.assistant.name}, ${profile.user.name.split(' ')[0]} Assistant.</p>`,
-            isOnline: false,
+            isOnline: blockIsOnline,
+            location: blockLocation || undefined,
             categories: blockCategories,
             // No sensitivity tag — pre-v2.1.7 'personal' stamps caused the
             // recurring "Private block" misdetection bug. Floating-block
@@ -1618,10 +1757,16 @@ Calendar issue workflow:
    - "cancel X" → use delete_meeting, then call update_calendar_issue with "resolved"
 4. Approved/resolved issues won't be flagged again
 
-NARRATING ACTIVE-MODE RESULTS:
-When check_calendar_health is called in active mode, the response includes \`fixes_applied\` count and each auto-fixed issue carries \`fixed:true\` + \`fix_detail\`. Your reply MUST acknowledge what was done using those fix_detail strings. Example:
-- RIGHT: "Booked lunch Thursday 12:00–12:25 and tagged two uncategorized meetings as Meeting. Still open: Wednesday has a conflict between Fulcrum and FC Capri — which do you want to move?"
-- WRONG: "Calendar looks good" (erases the autonomous actions) or "I ran a check, no issues" (also wrong).
+NARRATING ACTIVE-MODE RESULTS — use \`summary_text\` verbatim (v2.7.4):
+When check_calendar_health returns, the response carries a \`summary_text\` field that is a DETERMINISTIC per-issue summary built from \`fixed: true + fix_detail\` (successes) and \`fix_failed: true + fix_error\` (failures). USE THIS VERBATIM as the body of your reply — do NOT improvise from \`issues[]\` directly, do NOT skip fix_failed lines, do NOT add invented commentary about what got done.
+
+Why: previously Sonnet narrated "I started moving X" when the move-coord actually failed silently (slot search returned zero). The summary_text is the only honest source for "what got done this turn" — fixed actions appear as ✓ lines, failed attempts as × lines, undetected/skipped as ! lines. Owner sees the truth.
+
+Light polish only: you may strip the ✓/×/! prefix characters when posting to Slack, and may slightly rephrase awkward template strings into natural EA voice (humanGate runs after you anyway). But every CLAIM in your reply must trace back to a line in summary_text. If summary_text is "Calendar looks healthy — no issues found." then your reply is "Calendar looks good." or similar — nothing more.
+
+WRONG: "Calendar looks good" when summary_text contains ✓ lines (erases the autonomous actions).
+WRONG: "I started moving Michal's biweekly" when summary_text says "× Tried to fix ... but couldn't" — must narrate the failure honestly, not the wish.
+
 Every fix fires a shadow DM automatically (via \`book_floating_block\` / \`set_event_category\` wrappers + v1_shadow_mode) — you don't need to DM separately.
 
 PROTECTION RULES (v2.1.1 — deterministic, in code):

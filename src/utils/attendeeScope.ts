@@ -45,9 +45,11 @@ export function isInternalOnly(
   for (const a of attendees) {
     const rec = a as { emailAddress?: { address?: string }; status?: { response?: string } };
     const status = rec.status?.response;
-    // Skip attendees who declined or haven't been invited yet — they won't
-    // be on the meeting anyway.
-    if (status === 'declined' || status === 'none') continue;
+    // v2.7.4 — only skip 'declined'. Per Microsoft Graph, 'none' is the
+    // default response state (attendee added but not tracked yet) and
+    // SHOULD count as an attendee. Outlook's "Didn't respond" label maps
+    // to 'none' AND 'notResponded' — both real attendees.
+    if (status === 'declined') continue;
     const email = (rec.emailAddress?.address ?? '').toLowerCase();
     if (!email) continue;  // missing email — inconclusive, skip
     if (!email.endsWith('@' + domain)) return false;
@@ -66,7 +68,8 @@ export function isInternalOnly(
 /**
  * Count attendees that will realistically show up. Includes the organizer
  * (implicit +1 since Graph's `attendees` array does not include them).
- * Declined / none statuses are dropped — we care about true participant count.
+ * v2.7.4 — only 'declined' is dropped. 'none' is the default response state
+ * in Graph (untracked); those attendees still count.
  */
 export function countEffectiveAttendees(
   event: Pick<CalendarEvent, 'attendees'> | { attendees?: unknown },
@@ -76,7 +79,7 @@ export function countEffectiveAttendees(
   for (const a of attendees) {
     const rec = a as { status?: { response?: string }; emailAddress?: { address?: string } };
     const status = rec.status?.response;
-    if (status === 'declined' || status === 'none') continue;
+    if (status === 'declined') continue;
     if (!rec.emailAddress?.address) continue;
     count += 1;
   }

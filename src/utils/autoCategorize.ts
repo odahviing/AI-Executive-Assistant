@@ -29,6 +29,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../config';
 import { updateMeeting, type CalendarEvent } from '../connectors/graph/calendar';
 import type { UserProfile } from '../config/userProfile';
+import { displaySubject } from './displaySubject';
 import logger from './logger';
 
 export interface AutoCategorizeChange {
@@ -198,7 +199,10 @@ Example: [1] Interview | Subject mentions "candidate", external attendee from a 
     if (rawName.toUpperCase() === 'UNMATCHED') {
       result.skipped_unmatched.push({
         event_id: event.id,
-        subject: event.subject ?? '',
+        // v2.7.4 — mask subject if event is private. Owner reads the brief
+        // but quoted subjects can also reach colleagues via shared
+        // conversation history; mask universally for safety.
+        subject: displaySubject(event, opts.profile),
         reason: reason || 'no clear category match',
       });
       continue;
@@ -210,7 +214,7 @@ Example: [1] Interview | Subject mentions "candidate", external attendee from a 
       });
       result.skipped_unmatched.push({
         event_id: event.id,
-        subject: event.subject ?? '',
+        subject: displaySubject(event, opts.profile),
         reason: `Sonnet returned unknown category "${rawName}"`,
       });
       continue;
@@ -231,7 +235,15 @@ Example: [1] Interview | Subject mentions "candidate", external attendee from a 
       });
       result.applied.push({
         event_id: event.id,
-        subject: event.subject ?? '',
+        // v2.7.4 — mask private-event subjects. The newly-applied category
+        // may also carry sets_sensitivity_private (e.g., Interview added
+        // mid-categorization); merge that into the categories list before
+        // the mask check so an event becoming-private THIS turn is masked
+        // immediately in the brief item.
+        subject: displaySubject(
+          { ...event, categories: merged },
+          opts.profile,
+        ),
         start_iso: event.start.dateTime,
         category_assigned: canonicalName,
         reason: reason || undefined,
