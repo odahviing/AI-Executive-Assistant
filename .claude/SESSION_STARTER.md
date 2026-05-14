@@ -56,10 +56,48 @@ NOT:
 
 ---
 
-## Where we are — v2.7.0 just shipped (2026-05-12)
+## Where we are — v2.7.4 shipped (2026-05-14)
 
 **Phase right now: bug bash for stability — NOT new features.**
-The next two days are dedicated to shaking out anything that broke in the 1-2-3 trilogy rewrite. The goal is to make v2.7 the first version that owner trusts as **stable enough to leave alone for a week**. Every regression caught and squashed during this window is worth more than any new capability.
+v2.7 had three follow-up patches after the trilogy: 2.7.1 (Phase 1 cutover-finish), 2.7.2 (Phase 2 + kill coord fast path), 2.7.3 (Slack assistant-panel surface), 2.7.4 (6 real-day bug fixes + book_floating_block → planMeeting unification). Goal is still v2.7 being the first version owner trusts as stable enough to leave alone for a week. Every regression caught here is worth more than new capability.
+
+### What landed in v2.7.1 → v2.7.4 (carry-forward)
+
+**v2.7.1** — deleted `scheduleRules` rule (9) `owner_buffer_collision` (the 5-min buffer is baked into 10/25/40/55 durations at :00/:15/:30/:45 starts; redundant rule was rejecting valid back-to-back slots like 17:00 after a 17:00-ending meeting — root of yesterday's Ysrael loop). Owner-path overrides retry in-thread with `relaxed: true`, NEVER via a separate `create_approval(policy_exception)` DM (Bundle D). `planMeeting` checks internal-attendee freebusy on owner-initiated move/booking (was in design intent, missing in v2.7.0). Phase 1 cutover-finish: `createOutreachJob` / `createCoordJob` / `createApproval` all bridge to `requests` spine; new `approvals.request_id` column.
+
+**v2.7.2** — coord fast-path entirely deleted (both Case A all-internal + Case B owner-only-pollable). `coordinate_meeting` now ALWAYS state-machine path; refuses `no_internal_to_poll` for external-only asks and routes to `find_available_slots` + `create_meeting`. One flow, no mid-conversation tool switching (root cause of Gidon "I will approve and send" with zero tools fired). `relaxed` declared on `create_meeting` / `move_meeting` tool input_schemas (v2.7.0 oversight — handlers read it but Sonnet couldn't see it). Deferred-action replay ("redirect URL token"): rule_violation tool results carry `_deferred_action_hint`; orchestrator auto-attaches to `create_approval.payload.deferred_action`; resolver replays original tool with `relaxed: true` on owner approve via `src/core/requests/deferredActionReplay.ts`. Outreach dispatchers defer to runner when bridged. Coord mid-state cascade in `updateCoordJob` (`waiting_owner` → `request.state='awaiting_owner'`).
+
+**v2.7.3** — Slack assistant-panel surface. `assistant_thread_started` handler registers panel threads in `connectors/slack/assistantThreads.ts` (24h TTL). New `setAssistantStatus` primitive wraps `assistant.threads.setStatus`. Orchestrator fires "Working…" before each tool call when running in registered assistant thread. Regular DM unaffected. Requires Slack dashboard: `assistant:write` scope + `assistant_thread_started` event subscription + Agents & AI Apps feature enabled. Owner has done this. Indicator only shows in owner's private panel — does NOT fire in MPIMs or channels (Slack constraint, not ours).
+
+**v2.7.4** — bug bash, 6 fixes from real-day brief inspections:
+- **Attendee filter** dropped `responseStatus.response === 'none'` as if declined. Per Graph, `'none'` is the default untracked state for attendees who haven't been tracked yet. Root cause of "I started moving Michal" with no coord row: Michal's status was 'none', filter dropped her, autofix saw empty attendees, never coord-init. Now only `'declined'` is filtered (4 sites: calendarHealth.ts:783/981, attendeeScope.ts:50/79).
+- **Dismissal fingerprint stabilized**: `(normalized_class, sorted_event_ids)` when IDs available; falls back to legacy prose-based otherwise. Same overlap reclassified between runs (`back_to_back` vs `double_booking`) now keys identically. Dismissals carry forward across days.
+- **Privacy mask**: new `src/utils/displaySubject.ts` helper masks `[Private]` when `event.sensitivity ∈ {private,personal}` OR any event category has `sets_sensitivity_private: true`. Refactored `autoCategorize.applied[]`, `autoCategorize.skipped_unmatched[]`, `analyzeCalendar` issue descriptions + suggestion strings, and `initiateCoordination` subject from autofix. **Any new emit-to-text path that references `event.subject` MUST go through `displaySubject(event, profile)` — single source of truth for "what subject to show".**
+- **A2 orphan lifecycle**: `in_flight_action` follow_up requests now get `expires_at` + `next_check_at` = +24h, `next_check_handler='expiry'`. Runner's `runExpiry` handles closure cleanly. One-shot `scripts/cleanup-orphan-in-flight-actions.cjs` cleared the existing stale Do Not Schedule row from May 13.
+- **Route 2 deterministic narration**: `check_calendar_health` returns new `summary_text` field built from per-issue `fix_detail` / `fix_failed` / `fix_error` (✓ / × / ! prefixes). Routine prompt at `calendarHealth.ts:NARRATING ACTIVE-MODE RESULTS` updated to use verbatim. humanGate humanizes. Sonnet no longer improvises "what got done" — reads the deterministic summary. Internal-actions push added to move-coord branch (was missing).
+- **`book_floating_block` routes through `planMeeting`** (owner direction). Window-aware slot search stays in `book_floating_block` (preferred_start/end, can_skip, day-of-week scope, alignment). Once slot is determined, booking step delegates to `planMeeting` with `intent='new_booking'` — same engine as `create_meeting` / `move_meeting`. Category detection, location resolution, rule-check unified. Fallback to yaml `block.default_category` when planMeeting's `detectCategory` returns null. `confirm_outside_window=true` → `allowRelaxed=true`. Both override + positional booking sites join the unified flow. Side effect: lunch (no `default_category` in yaml) now correctly tagged as `Logistic` via planMeeting's detectCategory.
+
+### Open architectural debt (deferred — NOT a blocker)
+
+- **Phase 3 cutover-finish** (drop legacy `coord_jobs` / `outreach_jobs` / `approvals` tables) — owner direction: deferred because "I less care if we truncate; I care that every process runs from requests." Phase 2 achieved that; Phase 3 is cleanup, not a blocker.
+- **humanGate doesn't force tool firing.** When Sonnet says "I will book" then doesn't fire `create_meeting`, current mitigations are humanGate (catches voice) + Route 2 narration (catches retrospective lies in `check_calendar_health` routine narration only). Live failure mode for in-the-moment fabrications on colleague-path is still a pure model-behavior issue — claim-checker doesn't run colleague-path. Monitor; surface if recurring.
+
+### On-deploy actions for v2.7.4 (one-time)
+
+- Restart `npm run dev` to pick up.
+- Some previously-dismissed `calendar_dismissed_issues` may re-flag once on first run after deploy (legacy fingerprint format → new format). Re-dismissing produces the new stable key and they stay dismissed.
+- The Do Not Schedule orphan row from May 13 was closed via cleanup script. Next brief will narrate the closure once via informed=0 path then drop.
+
+### What to watch (validation in real use)
+
+- Override path (8:00 block / Ysrael 17:00) should work end-to-end without DM approval loops.
+- External 1:1 booking (Gidon pattern) — `coordinate_meeting` refuses `no_internal_to_poll`, Sonnet falls back to find_available_slots + create_meeting.
+- Approval ✅ replay — owner reacts ✅ on colleague-raised policy_exception DM → resolver auto-replays underlying tool with `relaxed: true`.
+- Brief / routine narration — uses `summary_text` verbatim; no more "I started moving X" when X didn't happen.
+- Floating block category — lunches auto-tagged Logistic.
+- Privacy mask — Interview events show as `[Private]` in brief.
+- Dismissed issues stay dismissed across days.
+- Assistant panel "Working…" indicator fires for owner's private panel only.
 
 After v2.7 is verifiably stable, the roadmap unlocks:
 - **WhatsApp Connection** — new transport behind the existing Connection interface (Email connector skeleton already in tree; WhatsApp follows the same shape).
