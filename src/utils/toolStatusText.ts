@@ -60,7 +60,6 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
   delete_routine: 'Removing the routine',
 
   // Knowledge / web / summary
-  list_company_knowledge: 'Thinking',
   get_company_knowledge: 'Thinking',
   ingest_knowledge_from_url: 'Memorizing it',
   web_search: 'Searching the web',

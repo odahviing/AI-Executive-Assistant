@@ -29,22 +29,9 @@ export class AssistantSkill implements Skill {
         name: 'learn_preference',
         description: `Save a durable fact about the OWNER — how they work, their habits, or their personal style. ONE topic per row, never bundle.
 
-Call this when:
-- The owner teaches you something about how they prefer to work ("I always do focus blocks in the morning")
-- You notice a clear behavioural pattern worth remembering across conversations
-- Something personal/funny comes up that would make future interactions feel more human
+Examples: "prefers calls before noon local time" · "uses metric" · "linkedin posts always published tomorrow afternoon".
 
-Examples:
-- "prefers calls before noon local time"
-- "uses metric — Celsius, kilometers"
-- "linkedin posts always published tomorrow afternoon"
-
-DO NOT use this for:
-- Facts about other PEOPLE (their role, communication style, where they live, working hours, what they handle, slack id, hebrew name) → use update_person_memory(person, section, text) for free-text bio facts and update_person_profile(...) for structured fields (timezone, state, gender, working_hours_structured, name_he).
-- COMPANY / PRODUCT knowledge (positioning, ICP, customer quotes, competitive differentiation, product capabilities, market segments) → these belong in the knowledge base. The owner edits .md files directly under config/users/<owner>_kb/. You don't write KB files via this tool.
-- One-off task details ("today's lunch is at 1pm").
-
-If you're unsure whether something is owner-pref vs person-fact vs company-knowledge, lean toward person/company tools — over-saving prefs about other people or business knowledge is the failure pattern this tool description is here to prevent.`,
+NOT for: facts about other PEOPLE (→ update_person_memory / update_person_profile), company/product knowledge (→ KB markdown files), one-off task details. When unsure between owner-pref vs person-fact vs company-knowledge, lean toward person/company tools.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -339,23 +326,13 @@ Keep calls narrow — one person at a time. If the person isn't in the catalog, 
       },
       {
         name: 'update_person_memory',
-        description: `Write a durable fact about a person into their markdown notes file. This is for OPERATIONAL facts that help you be a better assistant — not for social topics.
+        description: `Write a durable OPERATIONAL fact about a person into their markdown notes file — residence, workplace, working hours, communication style, how-to-address, preferred meeting mode, etc.
 
-Use for facts like:
-- Where they live (residence): "[Person] lives in [city]."
-- Where they work (workplace): "[Company] office in [city], goes in Mon/Wed/Thu."
-- Working hours: "Responds US Eastern mornings, offline after 5pm ET for school pickup."
-- Communication style: "Prefers brief replies. Never uses greetings."
-- How to address them: "Goes by Ike, not Isaac."
-- Preferred meeting mode: "Always does Teams, even for 1:1s."
+Examples: "[Person] lives in [city]" · "Responds US Eastern mornings, offline after 5pm ET" · "Prefers brief replies, never greetings" · "Always does Teams, even for 1:1s".
 
-Do NOT use for:
-- Social topics / hobbies / family stories — those go to note_about_person or note_about_self. The Social Engine owns that.
-- Ephemeral state (mood today, running late) — that's a log_interaction entry.
+NOT for: social topics / hobbies / family stories (→ note_about_person / note_about_self) or ephemeral state like mood-today / running-late (→ log_interaction).
 
-Sections: pick a h2 header that describes the fact — "Residence", "Workplace", "Working hours", "Communication style", "What we've discussed", or a new one that fits. If the section already exists in the file, its body will be REPLACED. If it doesn't, the section is APPENDED.
-
-First call for a person auto-creates their md file. Empty-until-real-fact — don't write empty or speculative content just to create a file.`,
+Section header behavior: existing section's body gets REPLACED; new header gets APPENDED. First call for a person auto-creates their md file — don't write speculative content just to create one.`,
         input_schema: {
           type: 'object' as const,
           properties: {

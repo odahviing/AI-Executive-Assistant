@@ -9,7 +9,7 @@ import {
   updateMeeting,
   findAvailableSlots,
 } from '../connectors/graph/calendar';
-import { auditLog, upsertCalendarIssue, getActiveCalendarIssues, updateCalendarIssueStatus, getDismissedIssueKeys, buildIssueKey, type CalendarIssueStatus } from '../db';
+import { auditLog, upsertCalendarIssue, getActiveCalendarIssues, updateCalendarIssueStatus, getDismissedIssueKeys, buildIssueKey, dismissCalendarIssue, type CalendarIssueStatus } from '../db';
 import logger from '../utils/logger';
 import { displaySubject } from '../utils/displaySubject';
 import type { PreferPosition, AnchorEvent } from '../utils/floatingBlocks';
@@ -270,22 +270,28 @@ Use this to check if there are outstanding calendar problems the owner needs to 
       },
       {
         name: 'update_calendar_issue',
-        description: `Update the status of a tracked calendar issue.
+        description: `Update the status of a calendar issue. Two paths depending on where the issue came from:
 
-Statuses:
-- "approved" — owner is aware and says it's fine, stop flagging it
-- "to_resolve" — owner wants it fixed; include their instructions in resolution_notes, then use move_meeting or coordinate_meeting to fix it
-- "resolved" — the issue has been fixed (meeting moved, cancelled, etc.)
+A. TRACKED issues (from get_calendar_issues / check_calendar_health) — they have a real issue_id. Pass issue_id + status (approved | to_resolve | resolved). Use "to_resolve" with resolution_notes when the owner wants it fixed (then call move_meeting / coordinate_meeting, then call this again with "resolved").
 
-After setting "to_resolve": act on the owner's instructions (e.g. move a meeting), then call this again with "resolved".`,
+B. ANALYZE-CALENDAR issues (from analyze_calendar) — no issue_id; identified by event_date + issue_type + detail. Pass those three + status (dismissed | resolved). Use this when the owner says "that's fine / leave it / I know" about a flagged issue so it won't be flagged again.
+
+Status:
+- "approved" — tracked issue: owner aware, stop flagging
+- "dismissed" — analyze issue: owner is ok with it, stop flagging
+- "to_resolve" — tracked issue: owner wants it fixed
+- "resolved" — issue has been fixed (either path)`,
         input_schema: {
           type: 'object',
           properties: {
-            issue_id: { type: 'string', description: 'The calendar issue ID (from get_calendar_issues or check_calendar_health)' },
-            status: { type: 'string', enum: ['approved', 'to_resolve', 'resolved'], description: 'New status' },
-            resolution_notes: { type: 'string', description: 'What the owner said to do, or what was done to resolve it' },
+            issue_id: { type: 'string', description: 'For TRACKED issues — the issue_id from get_calendar_issues or check_calendar_health. Omit for analyze-calendar issues.' },
+            event_date: { type: 'string', description: 'For ANALYZE-CALENDAR issues — date YYYY-MM-DD. Pair with issue_type + detail.' },
+            issue_type: { type: 'string', enum: ['back_to_back', 'no_buffer', 'missing_floating_block', 'oof_with_meetings', 'work_on_day_off', 'overlap'], description: 'For ANALYZE-CALENDAR issues — type of the issue.' },
+            detail: { type: 'string', description: 'For ANALYZE-CALENDAR issues — brief description of the specific issue.' },
+            status: { type: 'string', enum: ['approved', 'dismissed', 'to_resolve', 'resolved'], description: 'New status (see description for which status fits which path).' },
+            resolution_notes: { type: 'string', description: 'Optional. Owner instructions (for to_resolve) or what was done (for resolved).' },
           },
-          required: ['issue_id', 'status'],
+          required: ['status'],
         },
       },
     ];
@@ -1682,11 +1688,53 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
       }
 
       case 'update_calendar_issue': {
-        const issueId = args.issue_id as string;
-        const status = args.status as CalendarIssueStatus;
+        const status = args.status as string;
         const notes = args.resolution_notes as string | undefined;
+        const issueId = args.issue_id as string | undefined;
+        const eventDate = args.event_date as string | undefined;
+        const issueType = args.issue_type as string | undefined;
+        const detail = args.detail as string | undefined;
 
-        const updated = updateCalendarIssueStatus(issueId, status, notes);
+        // Path B — fingerprint dismissal for analyze-calendar issues (no issue_id).
+        // v2.7.6 — folded former dismiss_calendar_issue into this tool. Same DB
+        // write (calendar_dismissed_issues), one tool surface.
+        if (!issueId) {
+          if (!eventDate || !issueType || !detail) {
+            return {
+              error: 'Need either issue_id (for tracked issues from get_calendar_issues / check_calendar_health) OR event_date + issue_type + detail (for analyze_calendar issues).',
+            };
+          }
+          if (status !== 'dismissed' && status !== 'resolved') {
+            return {
+              error: `Analyze-calendar issues use status "dismissed" or "resolved"; got "${status}". For tracked issues with issue_id, use "approved" / "to_resolve" / "resolved".`,
+            };
+          }
+          const issueKey = buildIssueKey(issueType, detail);
+          dismissCalendarIssue(
+            profile.user.slack_user_id,
+            eventDate,
+            issueType,
+            issueKey,
+            detail,
+            status,
+          );
+          auditLog({
+            action: 'update_calendar_issue',
+            source: 'calendar_health',
+            actor: profile.user.name,
+            details: { eventDate, issueType, detail, status },
+            outcome: 'success',
+          });
+          return { dismissed: true, issue_key: issueKey, status };
+        }
+
+        // Path A — tracked issue (has issue_id).
+        if (status !== 'approved' && status !== 'to_resolve' && status !== 'resolved') {
+          return {
+            error: `Tracked issues use status "approved" / "to_resolve" / "resolved"; got "${status}". For analyze_calendar issues without an issue_id, use "dismissed" / "resolved".`,
+          };
+        }
+        const updated = updateCalendarIssueStatus(issueId, status as CalendarIssueStatus, notes);
         if (!updated) {
           return { error: `Issue "${issueId}" not found.` };
         }
@@ -1805,10 +1853,10 @@ BUSY_DAY — narrate from the structured numbers, briefly:
 When the analyzer flags a \`busy_day\` issue, it carries \`free_minutes\` (total free during work hours), \`longest_gap_minutes\` (the longest single uninterrupted block), and \`threshold_minutes\` (the owner's target). Surface ONE short line per day in HUMAN time — never "80 min" / "110 min": "Wed 14 May runs tight — just under 1.5h free, under your 2h office-day target." Don't enumerate the meetings on that day — owner can ask for detail if he wants it. If multiple days flag, bundle: "Wed 14, Thu 7, and Wed 13 are all under your 2h office-day target." Offer to look at moveable items only when owner asks. Active mode does NOT auto-resolve these — picking what to move is judgment-heavy.
 
 CATEGORY_LIMIT_EXCEEDED — surface as informational, ask for direction:
-When the analyzer flags a \`category_limit_exceeded\` issue, narrate it briefly with the named category, the rule (per_day or per_week), the count vs limit, and the day/week label. Active mode does NOT auto-resolve these — picking which interview / outside-meeting to bump is judgment-heavy and only ${firstName} can decide. Frame as a question: "Tuesday has 3 interviews, your limit is 2 — want me to move one, or keep all 3?". Include the affected event subjects (look them up via \`get_calendar\` if not already in context) so ${firstName} can pick. On owner decline ("keep them all" / "leave it"), call \`dismiss_calendar_issue\` with the issue_id so tomorrow's check doesn't re-surface the same row.
+When the analyzer flags a \`category_limit_exceeded\` issue, narrate it briefly with the named category, the rule (per_day or per_week), the count vs limit, and the day/week label. Active mode does NOT auto-resolve these — picking which interview / outside-meeting to bump is judgment-heavy and only ${firstName} can decide. Frame as a question: "Tuesday has 3 interviews, your limit is 2 — want me to move one, or keep all 3?". Include the affected event subjects (look them up via \`get_calendar\` if not already in context) so ${firstName} can pick. On owner decline ("keep them all" / "leave it"), call \`update_calendar_issue\` with the issue_id and status='approved' so tomorrow's check doesn't re-surface the same row.
 
 OOF_CONFLICT WITH PROTECTION REASONS — frame as a question, not a status line.
-When an \`oof_conflict\` issue carries \`protection_reasons\` (the meeting can't be auto-moved because it has externals, ≥4 attendees, etc.), present it to the owner as a QUESTION: "External meeting on Thursday during your vacation — want me to handle, or you'll fix it yourself?". Include the meeting subject + date + the protection reasons in plain words, and the issue_id. If the owner says "I'll fix it" / "no, leave it" / "I'll handle", call \`dismiss_calendar_issue\` with that issue_id so tomorrow's check doesn't re-surface the same row. Don't dismiss without explicit owner intent — only on a clear "I'll handle / leave it / no" reply.
+When an \`oof_conflict\` issue carries \`protection_reasons\` (the meeting can't be auto-moved because it has externals, ≥4 attendees, etc.), present it to the owner as a QUESTION: "External meeting on Thursday during your vacation — want me to handle, or you'll fix it yourself?". Include the meeting subject + date + the protection reasons in plain words, and the issue_id. If the owner says "I'll fix it" / "no, leave it" / "I'll handle", call \`update_calendar_issue\` with that issue_id and status='approved' so tomorrow's check doesn't re-surface the same row. Don't dismiss without explicit owner intent — only on a clear "I'll handle / leave it / no" reply.
 
 Rules:
 - In passive mode: only book floating blocks when explicitly asked or after check_calendar_health reveals a gap

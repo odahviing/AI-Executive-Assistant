@@ -2,6 +2,40 @@
 
 ---
 
+## 2.7.6 — Per-attendee slot blame, auto-relaxed recovery on narrow windows, tool consolidation
+
+Two sessions of compounding improvements. (1) When `find_available_slots` rejects a slot for a busy collision, the cause is now attributed by email — owner-side busy stays `owner_busy_collision`, attendee-side becomes `attendee_busy_collision:<email>`, and day_summary surfaces a `blocked_by` aggregate so Sonnet can narrate "Isaac blocked 8 slots Monday" instead of fabricating "Monday is fully booked." (2) On owner-named narrow windows (≤7 days), when the strict pass returns 0 slots, the tool auto-retries with `relaxed=true` and tags the result so Sonnet presents the soft-rule violation explicitly ("12:30 fits everyone but eats into your focus block — book anyway?") instead of returning empty. (3) Two tool consolidations: `dismiss_calendar_issue` folded into `update_calendar_issue` (cross-skill merge, two storage models stay separate but one tool surface); `list_company_knowledge` folded into `get_company_knowledge` (omit `section_id` → catalog, pass it → content). Tool count 56 → 54. Plus a P1+P2 prompt-bloat pass on tool descriptions.
+
+### Added
+
+- **Per-attendee blame in `findAvailableSlots`** (`src/connectors/graph/calendar.ts`). Each busy interval is now tagged with its source email; rule-8 rejections become `owner_busy_collision` (owner's own) or `attendee_busy_collision:<email>` (specific attendee). `day_summary[].blocked_by` aggregates per-day per-attendee slot counts. Closes "Monday is fully booked" misattribution when an attendee's calendar was the real blocker. Owner direction: "did Maelle go only for me, or the other?".
+- **Auto-relaxed recovery on user-named narrow windows** (`src/skills/meetings/ops.ts`). When the strict pass returns 0 AND the user named a specific day/window (≤7 days) AND owner didn't already opt into `relaxed`, the handler auto-runs a second pass with `relaxed: true` (bypasses focus/lunch/work-hours, keeps attendee-busy enforced). Result is tagged `_relaxed_recovery: true` with a `_recovery_note` instructing Sonnet to narrate the trade-off using the STRICT `day_summary` (the original blame, not the relaxed pass). Owner-path only. Closes the "Monday 10:30?" → "Monday fully booked" pattern when the right answer was "fits but breaks your focus block — book anyway?".
+- **Narrow-window detection in slot search** (`src/skills/meetings/ops.ts`). When the span between `search_from` and `search_to` is ≤7 days, `autoExpand` is disabled — open-ended "when can we meet" asks keep the auto-expand behavior. Pairs with the auto-relaxed recovery above.
+
+### Changed
+
+- **`update_calendar_issue` now handles both tracked and analyze-calendar paths** (`src/skills/calendarHealth.ts`, `src/skills/meetings.ts`, `src/skills/meetings/ops.ts`). Pre-fix two tools handled "owner says it's fine about an issue": `update_calendar_issue` (DB-keyed tracked rows) and `dismiss_calendar_issue` (fingerprint-keyed analyze-calendar issues). Same intent, two storage models, two tool surfaces — Sonnet had to know which to call. Now one tool: pass `issue_id` for tracked rows (statuses `approved | to_resolve | resolved`), or pass `event_date + issue_type + detail` for analyze-calendar issues (statuses `dismissed | resolved`). Storage models stay separate; tool surface unifies. References cleaned in WRITE_TOOLS, textScrubber, orchestrator verb map + history rendering, system prompt, MeetingsSkill prompt section.
+- **`get_company_knowledge` does list + fetch in one tool** (`src/skills/knowledge.ts`). Same pattern as `recall_preferences(category?, key?)`. Omit `section_id` → catalog of available sections; pass it → fetch that section's markdown content. `list_company_knowledge` removed. References cleaned in textScrubber, orchestrator verb map, toolStatusText.
+- **`resolveLocation`: owner explicit `is_online=false` now auto-stamps office/Meeting Room/Huddle by day type** (`src/utils/resolveLocation.ts`). Pre-fix, owner saying "in person" without a venue produced an empty `location` field — meetings landed with no address. Now: office day + internal-only ≤3 → office stamp; office day + internal >3 → Meeting Room; home day → Huddle; vacation day → empty (untouched). Hand-in-glove with the existing day-type defaults; the only new branch is the previously-broken empty-location path.
+- **`formatOfficeLocation` is attendee-aware** (`src/utils/resolveLocation.ts`). Internal-only meetings get the short office label (colleagues already know where the office is); meetings with at least one external attendee get the full address + parking notes. Threading `hasExternalAttendee` through the three call sites where it's known.
+- **`getFreeBusy` guards against invalid time windows** (`src/connectors/graph/calendar.ts`). Pre-fix, edge cases in the auto-expand loop could produce zero or inverted windows; Graph returned an opaque `ErrorInvalidTimeInterval` 400 that crashed the slot finder mid-iteration. New guards: zero/inverted window → empty result + warn; >62 days → clamp to 62 + recurse; `ErrorInvalidTimeInterval` from Graph → catch + return empty + warn. Graph's hard requirement (1h–62 day window, start<end) is now enforced before the wire call.
+- **Tool description hygiene pass** (`src/skills/meetings.ts`, `src/core/assistant.ts`). P1 dedupe: `coordinate_meeting` description lost its Duration paragraph + Location auto-determination block + Date-range line (all duplicated in MeetingsSkill cached prompt section); `relaxed` arg description on `find_available_slots`, `create_meeting`, `move_meeting` collapsed to a one-line pointer ("see OWNER-PATH OVERRIDE rule in skill section"); `confirm_outside_window` on `move_meeting` same. P2 trim: `learn_preference` cut ~1500 → ~400 chars (removed the 3× "what NOT to use for" repetition); `update_person_memory` ~1000 → ~600 chars (tightened "no social topics" duplication and the section-header explainer). Side win: the three `relaxed` descriptions had a `${firstName}` template inside a single-quoted string — shipping literally as text — removed by the trim.
+
+### Removed
+
+- **`dismiss_calendar_issue` tool** — capability folded into `update_calendar_issue` (see above).
+- **`list_company_knowledge` tool** — capability folded into `get_company_knowledge` (see above).
+
+### Added (docs)
+
+- **`.claude/PROJECT_REDUCE_PROMPTS.md`** — the multi-version prompt-reduction project plan ([#95](https://github.com/odahviing/issues/95)). 7 modules sketched (D / A / B / F / E / C / G), build order, caching trade-off notes, standing rules. Read first when continuing this project in a new chat.
+
+### Tool count
+
+56 → 54. Calendar-issue trio (`get_calendar_issues` / `update_calendar_issue` / `dismiss_calendar_issue`) → pair; knowledge-base pair (`list_company_knowledge` / `get_company_knowledge`) → single.
+
+---
+
 ## 2.7.5 — Slot-finder reform, owner override widened, Slack status text, prompt cache restructure
 
 A session of compounding improvements: slot-finder now prefers same-day options on moves (and packs same-day on new bookings); owner's "override" flag truly overrides — bypasses his own busy AND attendee busy when he says "book it anyway"; floating blocks coexist with meetings in the conflict check (Outlook does, so should we); Slack assistant-panel status now reads from a per-tool map with Slack's built-in rotating defaults ("Gathering information…", "Reviewing findings…", "Summarizing findings…") explicitly suppressed; assistant-thread registry moved to SQLite so panel registrations survive `npm run dev` restarts; system prompt restructured to push ~7k tokens of timeless content from the dynamic chunk into the cached chunk; new `day_summary` diagnostic from find_available_slots lets Sonnet answer "why no Monday?" honestly instead of fabricating.

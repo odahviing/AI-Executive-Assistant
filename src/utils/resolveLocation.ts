@@ -73,10 +73,41 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
       reasoning: 'owner-explicit location string',
     };
   }
-  // Owner explicit is_online=false WITHOUT a location → don't auto-stamp office;
-  // they may want to add it later.
-  if (input.ownerIsOnlineHint === false) {
-    return { kind: 'resolved', isOnline: false, location: '', reasoning: 'owner-explicit is_online=false, no location supplied' };
+  // v2.7.6 — Owner explicit is_online=false WITHOUT a location.
+  // Pre-fix this returned empty location, leaving in-person office-day
+  // meetings with no address. Owner direction: "Mon is an office day,
+  // internal meeting, should auto-stamp the office." Now: respect the
+  // is_online=false (no Teams) BUT still resolve location from day-type
+  // defaults. Office day → office label (short for internal-only). Home
+  // day → "Huddle" (no Teams, in-person). Skip vacation days.
+  if (input.ownerIsOnlineHint === false && !isVacationDay) {
+    if (isOfficeDay) {
+      // 4+ internal people → meeting room (mirror the rule-5 day-type default).
+      const internalCount = input.participantCount - (input.hasExternalAttendee ? 1 : 0);
+      if (!input.hasExternalAttendee && internalCount > 3) {
+        return {
+          kind: 'resolved',
+          isOnline: false,
+          location: 'Meeting Room',
+          reasoning: 'owner-explicit is_online=false on office day, internal >3 → meeting room',
+        };
+      }
+      return {
+        kind: 'resolved',
+        isOnline: false,
+        location: formatOfficeLocation(profile, input.hasExternalAttendee),
+        reasoning: 'owner-explicit is_online=false on office day → office stamp, no Teams',
+      };
+    }
+    if (isHomeDay) {
+      return {
+        kind: 'resolved',
+        isOnline: false,
+        location: 'Huddle',
+        reasoning: 'owner-explicit is_online=false on home day → Huddle',
+      };
+    }
+    return { kind: 'resolved', isOnline: false, location: '', reasoning: 'owner-explicit is_online=false, day-type unknown' };
   }
 
   // ── (2) Travel / remote state ───────────────────────────────────────────
@@ -102,7 +133,7 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
         return { kind: 'resolved', isOnline: true, location: '', reasoning: `category ${cat.name} default=online` };
       }
       if (cat.default_location === 'office') {
-        const loc = formatOfficeLocation(profile);
+        const loc = formatOfficeLocation(profile, input.hasExternalAttendee);
         const isOnline = cat.default_is_online !== false;  // default hybrid
         return { kind: 'resolved', isOnline, location: loc, reasoning: `category ${cat.name} default=office (hybrid=${isOnline})` };
       }
@@ -124,7 +155,7 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
     return {
       kind: 'resolved',
       isOnline: true,
-      location: formatOfficeLocation(profile),
+      location: formatOfficeLocation(profile, input.hasExternalAttendee),
       reasoning: input.hasExternalAttendee ? 'office day, external present (hybrid)' : 'office day, internal ≤3 (hybrid)',
     };
   }
@@ -142,9 +173,15 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   return { kind: 'resolved', isOnline: true, location: '', reasoning: 'fallback: default online' };
 }
 
-function formatOfficeLocation(profile: UserProfile): string {
+function formatOfficeLocation(profile: UserProfile, hasExternalAttendee: boolean = false): string {
   const officeLoc = profile.meetings.office_location;
   if (!officeLoc) return `${profile.user.name.split(' ')[0]}'s Office`;
+  // v2.7.6 — internal-only meetings get the short label (colleagues know
+  // where the office is; address + parking are noise). External attendees
+  // get the full address + parking — they need to navigate.
+  if (!hasExternalAttendee) {
+    return officeLoc.label || `${profile.user.name.split(' ')[0]}'s Office`;
+  }
   const parts: string[] = [];
   if (officeLoc.label) parts.push(officeLoc.label);
   if (officeLoc.address) parts.push(officeLoc.address);

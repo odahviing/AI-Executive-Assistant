@@ -3,9 +3,9 @@
  *
  * This file holds the direct calendar operations (`get_calendar`, `create_meeting`,
  * `move_meeting`, `delete_meeting`, `update_meeting`, `get_free_busy`,
- * `find_available_slots`, `analyze_calendar`, `dismiss_calendar_issue`) and the
- * pure helpers `processCalendarEvents` and `analyzeCalendar` used by the task
- * runner's `calendar_fix` dispatcher.
+ * `find_available_slots`, `analyze_calendar`) and the pure helpers
+ * `processCalendarEvents` and `analyzeCalendar` used by the task runner's
+ * `calendar_fix` dispatcher.
  *
  * It exposes a class (`SchedulingSkill`) that conforms to the Skill interface
  * ONLY because `MeetingsSkill` instantiates it and delegates `executeToolCall`
@@ -108,8 +108,6 @@ import {
   getDb,
   auditLog,
   getDismissedIssueKeys,
-  dismissCalendarIssue,
-  buildIssueKey,
 } from '../../db';
 import { closeMeetingArtifacts } from '../../utils/closeMeetingArtifacts';
 
@@ -640,19 +638,6 @@ export class SchedulingSkill {
         return analyzeCalendar(processed, args.start_date as string, args.end_date as string, context.profile, dismissedKeys);
       }
 
-      case 'dismiss_calendar_issue': {
-        const issueKey = buildIssueKey(args.issue_type as string, args.detail as string);
-        dismissCalendarIssue(
-          context.profile.user.slack_user_id,
-          args.event_date as string,
-          args.issue_type as string,
-          issueKey,
-          args.detail as string,
-          (args.resolution as 'dismissed' | 'resolved') ?? 'dismissed',
-        );
-        return { dismissed: true, issue_key: issueKey };
-      }
-
       case 'get_free_busy':
         try {
           const raw = await getFreeBusy(userEmail, args.emails as string[], args.start_date as string, args.end_date as string, timezone);
@@ -861,8 +846,29 @@ export class SchedulingSkill {
           const diagnosticsOut: {
             rejectedCounts?: Record<string, number>;
             rejectedExamples?: Record<string, string[]>;
-            daySummary?: Array<{ date: string; accepted: number; top_reasons: string[] }>;
+            daySummary?: Array<{
+              date: string;
+              accepted: number;
+              top_reasons: string[];
+              blocked_by?: Array<{ email: string; slots_blocked: number }>;
+            }>;
           } = {};
+
+          // v2.7.6 — narrow-window detection. When owner explicitly named a
+          // day/window ("Monday", "this week", "Tuesday afternoon"), the
+          // search window will be ≤7 days. Disable auto-expand in that case
+          // so we don't silently jump to next week. Open-ended asks ("when
+          // can we meet") usually pass wider windows and benefit from
+          // auto-expand.
+          const userNamedNarrowWindow = (() => {
+            try {
+              const from = DateTime.fromISO(effectiveSearchFrom, { zone: timezone });
+              const to = DateTime.fromISO(args.search_to as string, { zone: timezone });
+              if (!from.isValid || !to.isValid) return false;
+              const spanDays = to.diff(from, 'days').days;
+              return spanDays <= 7;
+            } catch { return false; }
+          })();
 
           try {
             const rawSlots = await findAvailableSlots({
@@ -877,6 +883,7 @@ export class SchedulingSkill {
               meetingMode: mode as import('../../connectors/graph/calendar').MeetingMode,
               travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
               attendeeAvailability,
+              autoExpand: !userNamedNarrowWindow,
               minBufferHours: (context.senderRole === 'owner' || context.isOwnerInGroup === true)
                 ? 1
                 : (context.profile.meetings.min_slot_buffer_hours ?? 4),
@@ -909,7 +916,67 @@ export class SchedulingSkill {
             // rule, "can we do X at Y?") naturally return ≤1 candidate from
             // findAvailableSlots, and pickSpreadSlots' Pass 1 (one-per-day)
             // returns it unchanged. No regression on the validation path.
-            if (rawSlots.length === 0) return rawSlots;
+
+            // v2.7.6 — auto-relaxed recovery on user-named narrow windows.
+            // When strict returns 0 AND owner asked about a specific day/window
+            // AND he didn't already opt into relaxed, automatically re-run with
+            // relaxed=true so soft-rule-breaking slots surface tagged. Lets
+            // Sonnet narrate "12:30 fits everyone but breaks your focus block
+            // — book anyway?" instead of "Monday fully booked." Owner-path only.
+            const isAlreadyRelaxed = args.relaxed === true && context.senderRole === 'owner';
+            const shouldRecover =
+              rawSlots.length === 0
+              && isOwnerInitiatedSearch
+              && userNamedNarrowWindow
+              && !isAlreadyRelaxed;
+            if (rawSlots.length === 0 && !shouldRecover) {
+              return rawSlots;
+            }
+            let relaxedRecoverySlots: typeof rawSlots = [];
+            const strictDaySummary = diagnosticsOut.daySummary;
+            if (shouldRecover) {
+              try {
+                relaxedRecoverySlots = await findAvailableSlots({
+                  userEmail,
+                  timezone,
+                  durationMinutes: args.duration_minutes as number,
+                  attendeeEmails,
+                  attendeeBusyEmails,
+                  searchFrom: effectiveSearchFrom,
+                  searchTo: args.search_to as string,
+                  preferMorning: args.prefer_morning as boolean | undefined,
+                  meetingMode: mode as import('../../connectors/graph/calendar').MeetingMode,
+                  travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
+                  attendeeAvailability,
+                  minBufferHours: (context.senderRole === 'owner' || context.isOwnerInGroup === true)
+                    ? 1
+                    : (context.profile.meetings.min_slot_buffer_hours ?? 4),
+                  profile: context.profile,
+                  relaxed: true,  // bypass focus/lunch/work-hours; attendee busy still enforced
+                  excludeEventIds: Array.isArray(args.moving_event_ids)
+                    ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
+                    : undefined,
+                  category: args.category as string | undefined,
+                  autoExpand: false,  // recovery stays inside the user's window
+                });
+                logger.info('find_available_slots — relaxed recovery', {
+                  strictAccepted: 0,
+                  relaxedAccepted: relaxedRecoverySlots.length,
+                  windowDays: 'narrow',
+                });
+              } catch (recErr) {
+                logger.warn('find_available_slots — relaxed recovery threw', {
+                  err: String(recErr).slice(0, 200),
+                });
+              }
+              if (relaxedRecoverySlots.length === 0) {
+                // Recovery also empty — return original empty result with day_summary.
+                if (strictDaySummary && strictDaySummary.length > 0) {
+                  return { slots: [], day_summary: strictDaySummary };
+                }
+                return [];
+              }
+            }
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { pickSpreadSlots } = require('../../connectors/graph/calendar') as
               typeof import('../../connectors/graph/calendar');
@@ -925,8 +992,15 @@ export class SchedulingSkill {
             const anchorDay = movingIds.length > 0
               ? await resolveMovingAnchorDay(movingIds, userEmail, timezone)
               : undefined;
-            const chosenStarts = new Set(pickSpreadSlots(rawSlots, timezone, 3, anchorDay));
-            const slots = rawSlots.filter(s => chosenStarts.has(s.start));
+            // v2.7.6 — when relaxed recovery surfaced slots, use those as the
+            // candidate set. They came from the relaxed pass which bypassed
+            // soft rules (focus / lunch / work-hours). Sonnet narrates the
+            // violation from the strict day_summary so the owner sees the
+            // trade-off explicitly: "12:30 fits everyone but eats into your
+            // 2h focus block — want it anyway?"
+            const candidateSet = relaxedRecoverySlots.length > 0 ? relaxedRecoverySlots : rawSlots;
+            const chosenStarts = new Set(pickSpreadSlots(candidateSet, timezone, 3, anchorDay));
+            const slots = candidateSet.filter(s => chosenStarts.has(s.start));
 
             // v2.7.0 — initiator-aware annotation. Owner-path already pre-
             // dropped attendee-busy slots via attendeeBusyEmails (line 807).
@@ -996,12 +1070,27 @@ export class SchedulingSkill {
             // "why no Monday?" honestly. When both travelers and day_summary
             // are empty, fall back to the legacy array shape so existing
             // narration paths see the same plain list.
-            const daySummary = diagnosticsOut.daySummary;
+            // strictDaySummary holds the rejection breakdown from the STRICT
+            // pass — that's the authoritative "why was this slot relaxed-only"
+            // signal. diagnosticsOut.daySummary at this point reflects whichever
+            // pass ran last (strict OR recovery); strictDaySummary was captured
+            // before recovery to preserve the original blame.
+            const isRecoveryResult = relaxedRecoverySlots.length > 0;
+            const daySummary = isRecoveryResult
+              ? strictDaySummary
+              : diagnosticsOut.daySummary;
             const hasDaySummary = Array.isArray(daySummary) && daySummary.length > 0;
-            if (travelers.length > 0 || hasDaySummary) {
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               if (travelers.length > 0) result.travelers = travelers;
               if (hasDaySummary) result.day_summary = daySummary;
+              if (isRecoveryResult) {
+                // Flag so Sonnet knows these slots break soft rules — she
+                // should narrate the trade-off, not present as clean options.
+                result._relaxed_recovery = true;
+                result._recovery_note =
+                  'Strict pass returned 0 in the named window. These slots come from a relaxed retry that bypassed soft rules (focus_time / lunch / work-hours). Read day_summary.top_reasons to see WHICH rule each slot is breaking, and present with that trade-off explicitly ("X fits but eats into your focus block — book anyway?"). Owner gets the final say.';
+              }
               return result;
             }
             return annotatedSlots;

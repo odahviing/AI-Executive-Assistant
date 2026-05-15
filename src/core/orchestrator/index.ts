@@ -106,8 +106,6 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
       }
       case 'coordinate_meeting':
         return `[coordinate_meeting: "${(input as any).subject}" with ${((input as any).participants as any[])?.map((p: any) => p.name).join(', ')}]`;
-      case 'dismiss_calendar_issue':
-        return `[dismiss_calendar_issue: ${input.issue_type} on ${input.event_date}]`;
       case 'find_slack_user':
         return `[find_slack_user: "${input.name}"]`;
       case 'message_colleague':
@@ -1523,7 +1521,6 @@ Rules:
           set_event_category: 'categorized the event',
           get_calendar_issues: 'checked calendar issues',
           update_calendar_issue: 'updated the calendar issue',
-          dismiss_calendar_issue: 'dismissed the calendar issue',
           // Outreach
           message_colleague: 'sent the message',
           find_slack_channel: 'found the channel',
@@ -1531,7 +1528,6 @@ Rules:
           // Search / knowledge
           web_search: 'searched the web',
           web_extract: 'pulled the page',
-          list_company_knowledge: 'checked the knowledge base',
           get_company_knowledge: 'read from the knowledge base',
           // Routines
           create_routine: 'set up the routine',

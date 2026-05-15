@@ -9,8 +9,6 @@ import {
   searchPeopleMemory,
   getPersonMemory,
   getDismissedIssueKeys,
-  buildIssueKey,
-  dismissCalendarIssue,
   type CoordParticipant,
 } from '../db';
 import {
@@ -52,7 +50,6 @@ export class MeetingsSkill implements Skill {
 
   getTools(profile: UserProfile): Anthropic.Tool[] {
     const allowedDurations = profile.meetings.allowed_durations.join('/');
-    const bufferMin = profile.meetings.buffer_minutes;
     // Read category enum from yaml instead of hardcoding owner-specific
     // names. Empty enum is invalid in Anthropic schemas, so a profile
     // without categories defined gets the field omitted entirely (matches
@@ -74,6 +71,7 @@ Do NOT use to:
 - Book a slot already verbally agreed in this conversation → use create_meeting directly
 - Book a 1:1 with an EXTERNAL person whose calendar we can't poll → find_available_slots + create_meeting (one flow, externals get the calendar invite via Outlook on book)
 - Book when YOU (the requester) and ${profile.user.name.split(' ')[0]} are the only real participants and everyone else is external — find_available_slots + create_meeting
+- ${profile.user.name.split(' ')[0]} named a SPECIFIC NARROW WINDOW (a single day / "Monday" / "tomorrow morning") AND attendees are internal → call find_available_slots FIRST. The slot finder surfaces soft-rule trade-offs (focus_time / lunch / work-hours) via relaxed-recovery, so ${profile.user.name.split(' ')[0]} sees what's actually blocking BEFORE we DM attendees. Once a slot is confirmed by him, call create_meeting directly with relaxed:true on a confirmed trade-off — the attendees are already free (slot finder verified), and skipping coord avoids redundant DMs about a pre-confirmed time.
 
 The tool will refuse with error 'no_internal_to_poll' if you call it without internal pollable non-owner attendees — that's the signal to switch to the direct path.
 
@@ -87,16 +85,7 @@ Two tiers of attendees:
 - participants: will be DM'd to pick a slot (max 4). For a 1-on-1, just one person.
 - just_invite: added to calendar invite only — no DM, no slot selection.
 
-Duration: standard durations are ${allowedDurations} minutes (each bakes in a ${bufferMin}-min trailing buffer by design). When a colleague asks for a casual round number ("30 min", "an hour", "45 min", "15 min") that isn't in the standard list, just call coordinate_meeting with their stated value — the system silently snaps it to the nearest allowed duration when the delta is ≤10 min. Do NOT ask the colleague to pick between standards or correct them; that reads pedantic. The owner can request any duration. Approval only fires when the snap can't be made cleanly (delta >10 min — e.g. 90 min when allowed is ${allowedDurations}).
-
-Date range: if not specified, search from now going forward until 3 valid options are found.
-
-Location is auto-determined per slot:
-- Office day, ≤3 people → owner's office + Teams link
-- Office day, >3 people → Meeting Room + Teams link
-- Home day, internal → Huddle (no Teams)
-- Home day, external → Teams only
-Override with custom_location if a specific external venue is needed.`,
+Allowed durations: ${allowedDurations} min (snap rules + location auto-determination live in the MEETINGS SKILL section).`,
         input_schema: {
           type: 'object',
           properties: {
@@ -286,20 +275,6 @@ If the meeting is NOT yet booked and they need to find a time together, use coor
         },
       },
       {
-        name: 'dismiss_calendar_issue',
-        description: `Mark a calendar issue as acknowledged so it won't be flagged again in future checks. Use this when the user says "that's fine", "I'm ok with that", "no need to fix", "leave it", or similar about a specific calendar issue.`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            event_date: { type: 'string', description: 'Date of the issue YYYY-MM-DD' },
-            issue_type: { type: 'string', enum: ['back_to_back', 'no_buffer', 'missing_floating_block', 'oof_with_meetings', 'work_on_day_off', 'overlap'], description: 'Type of the calendar issue' },
-            detail: { type: 'string', description: 'Brief description of the specific issue' },
-            resolution: { type: 'string', enum: ['dismissed', 'resolved'], description: '"dismissed" = user is ok with it, "resolved" = the issue was fixed' },
-          },
-          required: ['event_date', 'issue_type', 'detail'],
-        },
-      },
-      {
         name: 'get_free_busy',
         description: `Check free/busy data for ${profile.user.name.split(' ')[0]}'s own calendar over a date range — e.g. "when is ${profile.user.name.split(' ')[0]} free this week?".
 
@@ -377,7 +352,7 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
             },
             relaxed: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). Owner-only "show me everything" mode. When true, the search bypasses focus-time protection, lunch / floating-block windows, and work-hour strictness — but ALWAYS keeps the 5-min buffer between meetings (sacred). Use ONLY when the strict pass returned 0 / too few options AND the owner is asking "what else is open?". When you present these slots to the owner, MUST flag the soft rule each one breaks: "outside your work hours", "would land on your lunch", "leaves only X min of focus time". Owner decides whether to book.',
+              description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
             },
             moving_event_ids: {
               type: 'array',
@@ -442,7 +417,7 @@ LANGUAGE: subject and body MUST be in English regardless of the language you're 
             },
             relaxed: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). Owner override flag. When ${firstName} explicitly asks for a slot that breaks one of his soft rules (outside working hours, on a home day for an office-only category, in a lunch / focus window, over a per-day / per-week category limit, with an internal attendee who is busy at that time), and he has confirmed "book it anyway / override / yes do it" in THIS thread — pass relaxed=true on the retry. The flag bypasses the soft-rule check inside planMeeting so the booking lands. The 5-min buffer between meetings is baked into the standard durations and is NOT a rule — never use relaxed to "force" against it. Owner-path only; ignored on colleague-path calls.',
+              description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
             },
           },
           required: ['subject', 'start', 'end', 'attendees', 'is_online', 'category'],
@@ -464,11 +439,11 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             new_end: { type: 'string' },
             confirm_outside_window: {
               type: 'boolean',
-              description: 'OPTIONAL. Owner override flag for floating-block moves. When the meeting being moved is a floating block (lunch / coffee / gym / etc) AND the new_start lands OUTSIDE the block\'s preferred window, the move refuses by default. Set this true to accept the override — owner override IS the approval, no separate lunch_bump approval needed. Use ONLY when the owner has explicitly confirmed they want the block at the out-of-window time. Ignored on non-floating-block moves.',
+              description: 'OPTIONAL. Floating-block out-of-window override — see FLOATING BLOCKS rule in the MEETINGS SKILL section. Ignored on non-floating-block moves.',
             },
             relaxed: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). Owner override flag. When ${firstName} asks to move a meeting to a slot that breaks one of his soft rules (outside working hours, wrong day type for the meeting\'s category, in a lunch / focus window, over a per-day / per-week category limit, with an internal attendee busy at that new time), and he has confirmed "do it anyway / move it / override" in THIS thread — pass relaxed=true on the retry. Bypasses the soft-rule check inside planMeeting. The 5-min buffer between meetings is NOT a rule — never use relaxed to "force" against it. Owner-path only; ignored on colleague-path calls.',
+              description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
             },
             category: {
               type: 'string',
@@ -1031,6 +1006,83 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
           // Expand search window by 1 week
           const currentEnd = DateTime.fromISO(searchEndDate, { zone: timezone });
           searchEndDate = currentEnd.plus({ weeks: 1 }).toFormat("yyyy-MM-dd'T'HH:mm:ss");
+        }
+
+        // v2.7.6 — auto-relaxed recovery on owner-named narrow windows.
+        // When the strict search returned 0 AND the owner asked about a
+        // specific narrow window AND extended_hours_ok wasn't used yet,
+        // re-run with relaxed=true to surface slots that break soft rules
+        // (focus_time / lunch / work-hours). Owner-path only. Returns the
+        // slots WITH a trade-off flag so Sonnet narrates "X fits but breaks
+        // your focus block — book anyway?" BEFORE initiating coord DMs.
+        // On owner confirm, Sonnet calls create_meeting directly with
+        // relaxed=true (skipping coord because we already verified
+        // attendees are free at the chosen slot).
+        const coordIsOwnerInitiated =
+          context.senderRole === 'owner' || context.isOwnerInGroup === true;
+        const coordUserNamedNarrowWindow = (() => {
+          try {
+            if (!args.search_to) return false;
+            const from = DateTime.fromISO(searchFromDate, { zone: timezone });
+            const to = DateTime.fromISO(searchEndDate, { zone: timezone });
+            if (!from.isValid || !to.isValid) return false;
+            return to.diff(from, 'days').days <= 7;
+          } catch { return false; }
+        })();
+
+        if (allCandidateSlots.length === 0 && coordIsOwnerInitiated && coordUserNamedNarrowWindow && !extendedHours) {
+          // Try relaxed pass — bypasses soft owner rules, attendee busy stays enforced.
+          let relaxedSlots: Array<{ start: string; end: string }> = [];
+          try {
+            relaxedSlots = await findAvailableSlots({
+              userEmail,
+              timezone,
+              durationMinutes: durationMin,
+              attendeeEmails: participantEmails,
+              attendeeBusyEmails: participantEmails,
+              attendeeAvailability,
+              searchFrom: searchFromDate,
+              searchTo: searchEndDate,
+              preferMorning: true,
+              workDays: allWorkDays,
+              workHoursStart: context.profile.schedule.home_days.hours_start,
+              workHoursEnd: context.profile.schedule.office_days.hours_end,
+              minBufferHours,
+              profile: context.profile,
+              meetingMode: 'either',
+              autoExpand: false,
+              category: args.category as string | undefined,
+              relaxed: true,  // bypass focus/lunch/work-hours; attendee busy still enforced
+            });
+          } catch (recErr) {
+            logger.warn('coordinate_meeting — relaxed recovery threw', {
+              err: String(recErr).slice(0, 200),
+            });
+          }
+          if (relaxedSlots.length > 0) {
+            // Spread + return without initiating coord. Owner needs to confirm
+            // the trade-off before we DM attendees.
+            const recoverySpread = pickSpreadSlots(relaxedSlots, timezone, 3);
+            logger.info('coordinate_meeting — relaxed recovery surfaced slots, awaiting owner confirm', {
+              strictAccepted: 0,
+              relaxedAccepted: relaxedSlots.length,
+              presentedToOwner: recoverySpread.length,
+            });
+            return {
+              _relaxed_recovery: true,
+              _needs_owner_confirmation: true,
+              candidate_slots: recoverySpread.map(start => {
+                const startDt = DateTime.fromISO(start, { zone: timezone });
+                return {
+                  start,
+                  end: startDt.plus({ minutes: durationMin }).toISO(),
+                  label: startDt.toFormat('EEE d MMM HH:mm'),
+                };
+              }),
+              message:
+                'Strict pass found 0 slots in the named window. These slots come from a relaxed retry: attendees are free, but the slot breaks one of the owner\'s soft rules (focus_time / lunch / work-hours). Present to the owner with the trade-off named explicitly ("X fits Isaac+Dina but eats into your 2h focus block — book anyway?"). On owner confirm, call create_meeting with `relaxed: true` and the chosen slot — DO NOT re-call coordinate_meeting (we already verified the attendees are free). On reject, drop it or look elsewhere.',
+            };
+          }
         }
 
         if (allCandidateSlots.length === 0) {
@@ -1608,7 +1660,6 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
       // ── Direct calendar ops (delegated to the former SchedulingSkill) ────
       case 'get_calendar':
       case 'analyze_calendar':
-      case 'dismiss_calendar_issue':
       case 'get_free_busy':
       case 'find_available_slots':
       case 'create_meeting':
@@ -1683,7 +1734,7 @@ DEFAULT LOCATION precedence (when you don't pass \`location\` or \`is_online\` t
 
 CALENDAR OVERVIEW / SUMMARY — route issue detection through \`analyze_calendar\` (v2.7.1).
 When ${firstName} asks a multi-day summary question ("how's my calendar?", "anything broken next week?", "what's my week look like?"), you may use \`get_calendar\` to list events plainly, but ANY issue you flag (overlap, no-lunch, OOF conflict, back-to-back, category limit, etc.) MUST come from a \`analyze_calendar\` call over the same range. Don't eyeball overlaps from get_calendar results and write your own "⚠ Overlap: ...". The analyzer returns issues with stable \`issue_id\`s — surface them by id so ${firstName}'s replies stick:
-- ${firstName} says "don't worry about that one" / "I'm ok with it" / "leave it" → call \`dismiss_calendar_issue(event_date, issue_type, detail, resolution='dismissed')\`. Future overviews skip it.
+- ${firstName} says "don't worry about that one" / "I'm ok with it" / "leave it" → call \`update_calendar_issue(event_date, issue_type, detail, status='dismissed')\`. Future overviews skip it.
 - The issue resolves via a move/delete in the same conversation → the meeting mutation's cascade closes it automatically (no manual call needed).
 - If a flag isn't in analyze_calendar's output, DON'T flag it. The analyzer's silence is the source of truth.
 
@@ -1890,7 +1941,7 @@ DELETE-MEETING PROTOCOL — irreversible, follow exactly:
 6. AFTER delete_meeting returns success: the reply MUST name what was deleted, using the subject + day + time FROM the tool result — not from memory. Example: "Deleted 'Sales Sync' from Wed 22 Apr 16:15." If you claim to have deleted something but the tool did not return success, you are lying.
 7. The orchestrator will short-circuit a second delete_meeting call with the SAME event_id as a safety net (returns ok:false, reason:already_deleted_this_turn). When you see that signal, do NOT narrate a second deletion — say only what was actually deleted.
 - get_calendar / get_free_busy / find_available_slots — reads for specific scheduling decisions.
-- analyze_calendar / dismiss_calendar_issue — weekly review & issue handling.
+- analyze_calendar / update_calendar_issue — weekly review & issue handling.
 
 COORDINATION (when participants need to agree on a time): use coordinate_meeting below.
 

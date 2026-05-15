@@ -67,7 +67,7 @@ export const WRITE_TOOLS = new Set([
   // Routines
   'create_routine', 'update_routine', 'delete_routine',
   // Calendar issues
-  'dismiss_calendar_issue', 'update_calendar_issue',
+  'update_calendar_issue',
   // Knowledge / summary writes
   'share_summary', 'ingest_knowledge_from_url',
   'learn_summary_style', 'update_summary_draft',

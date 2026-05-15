@@ -334,6 +334,36 @@ export async function getFreeBusy(
   endDate: string,
   timezone: string
 ): Promise<Record<string, FreeBusySlot[]>> {
+  // v2.7.6 — guard against invalid time windows that crash Graph's
+  // getSchedule with ErrorInvalidTimeInterval. Graph requires
+  // startTime < endTime AND a window between 1 hour and 62 days. Pre-fix,
+  // the auto-expand loop in findAvailableSlots could produce equal or
+  // inverted windows on edge cases (off-by-one when search_from was at the
+  // boundary of an iteration). Throw a clean TypeError instead of poking
+  // Graph and letting the slot finder die mid-loop with an opaque 400.
+  const parsedStart = DateTime.fromISO(startDate, { zone: timezone });
+  const parsedEnd = DateTime.fromISO(endDate, { zone: timezone });
+  if (!parsedStart.isValid || !parsedEnd.isValid) {
+    logger.warn('getFreeBusy — invalid date param, returning empty', {
+      startDate, endDate, parsedStartValid: parsedStart.isValid, parsedEndValid: parsedEnd.isValid,
+    });
+    return {};
+  }
+  const windowMinutes = parsedEnd.diff(parsedStart, 'minutes').minutes;
+  if (windowMinutes <= 0) {
+    logger.warn('getFreeBusy — zero or inverted window, returning empty', {
+      startDate, endDate, windowMinutes,
+    });
+    return {};
+  }
+  if (windowMinutes > 62 * 24 * 60) {
+    logger.warn('getFreeBusy — window > 62 days, clamping to 62 days', {
+      startDate, endDate, windowMinutes,
+    });
+    const clamped = parsedStart.plus({ days: 62 }).toISO()!;
+    return getFreeBusy(callerEmail, emails, startDate, clamped, timezone);
+  }
+
   const client = getClient();
   try {
     const response = await client.api(`/users/${callerEmail}/calendar/getSchedule`).post({
@@ -362,6 +392,14 @@ export async function getFreeBusy(
         'The Azure app does not have Calendars.Read permission to query other users\' availability. ' +
         'A tenant admin needs to grant Calendars.Read application permission in Azure AD.',
       );
+    }
+    // ErrorInvalidTimeInterval — return empty so the slot finder iteration
+    // doesn't die. Pre-fix, this 400 propagated up and broke the whole search.
+    if (err?.code === 'ErrorInvalidTimeInterval' || err?.body?.includes?.('ErrorInvalidTimeInterval')) {
+      logger.warn('getFreeBusy — Graph returned ErrorInvalidTimeInterval, returning empty', {
+        startDate, endDate, emails,
+      });
+      return {};
     }
     throw err;
   }
@@ -526,6 +564,13 @@ export async function findAvailableSlots(params: {
       date: string;
       accepted: number;
       top_reasons: string[];
+      /**
+       * Per-attendee blame for this day. Populated when one or more attendees'
+       * busy time blocked slots. Empty when the blockers were all owner-side
+       * (owner_busy / focus_time / etc). Lets Sonnet narrate "Isaac blocked
+       * 8 slots on Monday, that's where it dies" instead of "fully booked."
+       */
+      blocked_by?: Array<{ email: string; slots_blocked: number }>;
     }>;
   };
 }): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other' }>> {
@@ -581,13 +626,22 @@ export async function findAvailableSlots(params: {
     // anyone changed the call site without knowing the convention. The
     // chokepoint helper makes the convention live in the data, not the
     // reader.
-    const allBusy: Array<{ start: Date; end: Date }> = [];
-    for (const slots of Object.values(busyMap)) {
+    // Tag each busy interval with the email it came from so rule-8 rejections
+    // can distinguish owner-vs-attendee blame. Owner direction (2026-05-15):
+    // "did Maelle go only for me, or the other?" — pre-fix every busy hit was
+    // labeled owner_busy_collision even when an attendee's calendar was the
+    // real blocker. Now attendee blocks get `attendee_busy_collision:<email>`
+    // and surface per-attendee in day_summary.blocked_by.
+    const ownerEmailLower = params.userEmail.toLowerCase();
+    const allBusy: Array<{ start: Date; end: Date; email: string }> = [];
+    for (const [emailKey, slots] of Object.entries(busyMap)) {
+      const email = emailKey.toLowerCase();
       for (const slot of slots) {
         if (slot.status !== 'free') {
           allBusy.push({
             start: DateTime.fromISO(slot.start).toJSDate(),
             end:   DateTime.fromISO(slot.end).toJSDate(),
+            email,
           });
         }
       }
@@ -718,7 +772,7 @@ export async function findAvailableSlots(params: {
           .setZone(params.timezone).startOf('day').toJSDate();
         const dayEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
           .setZone(params.timezone).endOf('day').toJSDate();
-        allBusy.push({ start: dayStart, end: dayEnd });
+        allBusy.push({ start: dayStart, end: dayEnd, email: ownerEmailLower });
       }
     }
 
@@ -928,7 +982,14 @@ export async function findAvailableSlots(params: {
         slotEnd.getTime() > busy.start.getTime()
       );
       if (overlapsBusy) {
-        trackReject('owner_busy_collision', cursorDt.toISO()!);
+        // v2.7.6 — attribute by email. Owner's own busy stays
+        // `owner_busy_collision`; an attendee's busy time becomes
+        // `attendee_busy_collision:<email>` so Sonnet can narrate WHO is
+        // blocking (closes "Monday fully booked" misattribution).
+        const label = overlapsBusy.email === ownerEmailLower
+          ? 'owner_busy_collision'
+          : `attendee_busy_collision:${overlapsBusy.email}`;
+        trackReject(label, cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
         continue;
       }
@@ -1181,23 +1242,44 @@ export async function findAvailableSlots(params: {
         const daySummary = [...allDays].sort().map(date => {
           const accepted = acceptedPerDay.get(date) ?? 0;
           let top_reasons: string[] = [];
+          let blocked_by: Array<{ email: string; slots_blocked: number }> | undefined;
           if (accepted === 0) {
             const reasons = dayReasons.get(date);
             if (reasons) {
-              const ranked = [...reasons.entries()]
+              // Split per-attendee labels (`attendee_busy_collision:<email>`)
+              // out into the blocked_by aggregate, and collapse them to the
+              // single canonical label in top_reasons so output stays clean.
+              const perAttendee = new Map<string, number>();
+              const reasonCounts = new Map<string, number>();
+              for (const [r, c] of reasons.entries()) {
+                if (r.startsWith('attendee_busy_collision:')) {
+                  const email = r.slice('attendee_busy_collision:'.length);
+                  perAttendee.set(email, (perAttendee.get(email) ?? 0) + c);
+                  reasonCounts.set('attendee_busy_collision',
+                    (reasonCounts.get('attendee_busy_collision') ?? 0) + c);
+                } else {
+                  reasonCounts.set(r, (reasonCounts.get(r) ?? 0) + c);
+                }
+              }
+              const ranked = [...reasonCounts.entries()]
                 .filter(([r]) => !IRRELEVANT_FOR_DAY.has(r))
                 .sort((a, b) => b[1] - a[1])
                 .map(([r]) => r);
               top_reasons = ranked.slice(0, 2);
-              if (top_reasons.length === 0 && reasons.size > 0) {
-                // Fallback: only noise-class reasons existed (rare). Use the
-                // first one rather than returning empty.
-                const first = reasons.keys().next().value;
+              if (top_reasons.length === 0 && reasonCounts.size > 0) {
+                const first = reasonCounts.keys().next().value;
                 if (first) top_reasons = [first];
+              }
+              if (perAttendee.size > 0) {
+                blocked_by = [...perAttendee.entries()]
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([email, slots_blocked]) => ({ email, slots_blocked }));
               }
             }
           }
-          return { date, accepted, top_reasons };
+          return blocked_by
+            ? { date, accepted, top_reasons, blocked_by }
+            : { date, accepted, top_reasons };
         });
         params.diagnosticsOut.daySummary = daySummary;
       }

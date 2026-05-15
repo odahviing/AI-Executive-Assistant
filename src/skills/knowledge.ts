@@ -434,28 +434,22 @@ export class KnowledgeBaseSkill implements Skill {
   getTools(_profile: UserProfile): Anthropic.Tool[] {
     return [
       {
-        name: 'list_company_knowledge',
-        description: `List all available knowledge sections in the owner's KB. Returns section IDs you can pass to get_company_knowledge. Cheap — call any time you're not sure what's available before a meeting summary, research task, or deeper company question.`,
-        input_schema: { type: 'object', properties: {}, required: [] },
-      },
-      {
         name: 'get_company_knowledge',
-        description: `Fetch the full content of one knowledge section by ID (e.g. "company/product", "team/leadership"). Use when:
-- Owner asks something specific about the company / product / team
-- You're drafting a summary for a product/strategy/customer/competitive meeting
-- Doing research that needs grounding in real company facts
-- Answering "what do you know about X" with real depth
+        description: `Knowledge base access — list mode + fetch mode in one tool.
 
-Don't pull every section by default — just the ones relevant to the current task. Section content is freeform markdown; use it as background, don't quote verbatim large chunks.`,
+- Omit \`section_id\` → returns the catalog of available section IDs. Cheap; call when you're not sure what's available.
+- Pass \`section_id\` (e.g. "company/product", "team/leadership") → returns the full markdown content of that section.
+
+Use when the owner asks something specific about the company / product / team, when drafting a summary that needs company grounding, doing research, or answering "what do you know about X" with real depth. Don't pull every section by default — just the relevant ones. Use content as background; don't quote verbatim large chunks.`,
         input_schema: {
           type: 'object',
           properties: {
             section_id: {
               type: 'string',
-              description: 'Section identifier from list_company_knowledge, e.g. "company/product"',
+              description: 'OPTIONAL. Section identifier (e.g. "company/product"). Omit to list available sections.',
             },
           },
-          required: ['section_id'],
+          required: [],
         },
       },
       {
@@ -479,21 +473,21 @@ Don't pull every section by default — just the ones relevant to the current ta
     context: SkillContext,
   ): Promise<unknown | null> {
     switch (toolName) {
-      case 'list_company_knowledge': {
-        const sections = await listSections(context.profile);
-        return {
-          ok: true,
-          count: sections.length,
-          sections: sections.map(s => ({ id: s.id, size_bytes: s.size })),
-          _note: sections.length === 0
-            ? 'KB is empty. Tell the owner there\'s no knowledge base content yet — they can add markdown files under config/users/<name>_kb/.'
-            : 'These are the sections available. Call get_company_knowledge(section_id) to fetch any relevant section.',
-        };
-      }
-
       case 'get_company_knowledge': {
         const sectionId = String(args.section_id ?? '').trim();
-        if (!sectionId) return { ok: false, error: 'missing_section_id' };
+        // v2.7.6 — folded former list_company_knowledge into this tool. Omit
+        // section_id → catalog list; pass it → section content.
+        if (!sectionId) {
+          const sections = await listSections(context.profile);
+          return {
+            ok: true,
+            count: sections.length,
+            sections: sections.map(s => ({ id: s.id, size_bytes: s.size })),
+            _note: sections.length === 0
+              ? 'KB is empty. Tell the owner there\'s no knowledge base content yet — they can add markdown files under config/users/<name>_kb/.'
+              : 'These are the sections available. Call get_company_knowledge(section_id) to fetch any relevant section.',
+          };
+        }
         const r = await readSection(context.profile, sectionId);
         if ('error' in r) {
           logger.info('KB section read failed', { sectionId, error: r.error });
