@@ -335,6 +335,25 @@ const UserProfileSchema = z.object({
     //     busy-day threshold breaches fire a DM to the owner. Internal-
     //     overlap auto-resolve ships in v2.2 (needs move-coord state).
     calendar_health_mode: z.enum(['passive', 'active']).default('passive'),
+    // v2.7.7 (Module G) — intent-aware tool scoping. When true, a pre-Sonnet
+    // Haiku classifier picks the tool scopes relevant to this turn (e.g.
+    // "meetings", "tasks") and getSkillTools filters the tool list to
+    // always-on core + the chosen scopes. Cuts tools JSON from ~23k to ~12k
+    // tokens per typical turn (uncached, billed every turn). When false (the
+    // default), Sonnet sees all tools every turn (legacy behavior). Owner
+    // path only — colleague path keeps the COLLEAGUE_ALLOWED_TOOLS allowlist
+    // unchanged regardless.
+    intent_aware_tools: z.boolean().default(false),
+    // v2.7.7 (Module D) — deterministic auto-resolve for thread-bound vague-yes.
+    // When true, a pre-orchestrator Haiku pre-pass detects short owner replies
+    // that match a pending approval's thread (`terminal_dm_msg_ts`), classifies
+    // verdict as 'approve' / 'reject' / 'pass_to_sonnet', and on approve/reject
+    // calls resolveRequest directly — skipping the full Sonnet owner-DM turn.
+    // Cuts latency from ~3s to ~300ms on these turns + removes a Sonnet-misroute
+    // risk on multi-pending-approval threads. Amend cases pass through to Sonnet
+    // (amend counter shape is approval-kind-specific; Haiku can't build it
+    // reliably). Fails open: any classifier error → pass to Sonnet.
+    deterministic_approval_resolve: z.boolean().default(false),
     // v2.2 — proactive colleague social knobs. Master on/off has moved to
     // `skills.social` (v2.6.2 rename + consolidation); this block keeps the
     // fine-tuning sub-config (window hours, cooldown, weekend skip).

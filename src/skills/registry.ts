@@ -95,6 +95,115 @@ function buildSkillMap(): Map<SkillId, Skill> {
 const SKILL_MAP = buildSkillMap();
 
 /**
+ * Module G (v2.7.7) — owner-side tool scoping.
+ *
+ * The orchestrator may pass a scope set (from classifyToolScope) to filter
+ * which tools Sonnet sees this turn. Tools listed here in ALWAYS_ON ship
+ * every turn; every other tool maps to one scope and only ships when that
+ * scope (or 'general') is requested.
+ *
+ * The scope filter is OWNER-PATH ONLY. Colleagues already have the static
+ * COLLEAGUE_ALLOWED_TOOLS allowlist applied later in this file; scope is
+ * not consulted for colleague turns.
+ *
+ * "general" is the widening scope — pass it (or include it alongside others)
+ * to get every owner tool back. Returned by classifyToolScope on uncertainty.
+ *
+ * Tools not in ALWAYS_ON and not in any scope map (forgotten? misnamed?) are
+ * SHIPPED by default — better to over-include than to lose a tool silently.
+ * They'll show up in the diagnostic log line.
+ */
+const ALWAYS_ON_TOOLS = new Set<string>([
+  // Memory + people (AssistantSkill)
+  'learn_preference', 'forget_preference', 'recall_preferences',
+  'recall_interactions', 'update_person_profile', 'log_interaction',
+  'confirm_gender', 'get_person_memory', 'update_person_memory',
+  // Outreach
+  'message_colleague',
+  // Tasks core (basic CRUD always available)
+  'create_task', 'edit_task', 'cancel_task', 'get_my_tasks',
+  'get_briefing', 'send_briefing_now',
+  // Approvals — any turn might escalate
+  'create_approval', 'resolve_approval', 'list_pending_approvals',
+  // Slack directory lookups — any turn might need a slack_id
+  'find_slack_user', 'find_slack_channel',
+  // Web — light research available anywhere
+  'web_search', 'web_extract',
+  // Social writes — only ship when SocialSkill is loaded (handled by
+  // toggle in registry); include here so they're owner-always when on.
+  'note_about_person', 'note_about_self',
+]);
+
+const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
+  meetings: new Set<string>([
+    'coordinate_meeting', 'get_active_coordinations', 'cancel_coordination',
+    'finalize_coord_meeting', 'check_join_availability',
+    'find_available_slots', 'get_calendar', 'analyze_calendar', 'get_free_busy',
+    'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
+    'check_calendar_health', 'book_floating_block', 'set_event_category',
+    'get_calendar_issues', 'update_calendar_issue',
+  ]),
+  tasks: new Set<string>([
+    // Routines live here too — they're scheduled task templates.
+    'create_routine', 'update_routine', 'delete_routine', 'get_routines',
+  ]),
+  knowledge: new Set<string>([
+    'get_company_knowledge', 'ingest_knowledge_from_url', 'classify_document',
+  ]),
+  summary: new Set<string>([
+    'classify_summary_feedback', 'share_summary', 'update_summary_draft',
+    'learn_summary_style', 'list_speaker_unknowns',
+  ]),
+  // 'social' scope is currently a NO-OP: note_about_person + note_about_self
+  // are in ALWAYS_ON_TOOLS already. Kept as a recognized scope so the
+  // classifier can signal "this turn has a social-write intent" — useful
+  // for future logging / observability — without changing the shipped set.
+  social: new Set<string>([]),
+};
+
+/**
+ * Decide which tools to ship for an owner turn given the scope set from
+ * classifyToolScope. Returns the union of always-on tools + tools in any
+ * of the requested scopes. 'general' (or no scope) → all tools, no filter.
+ */
+function filterToolsByScope(
+  allTools: import('@anthropic-ai/sdk').default.Tool[],
+  scopes: string[] | undefined,
+): import('@anthropic-ai/sdk').default.Tool[] {
+  if (!scopes || scopes.length === 0 || scopes.includes('general')) {
+    return allTools;
+  }
+  // Build the set of allowed tool names: always-on + every tool in any
+  // requested scope.
+  const allowed = new Set<string>(ALWAYS_ON_TOOLS);
+  for (const scope of scopes) {
+    const tools = SCOPE_TO_TOOLS[scope];
+    if (tools) for (const t of tools) allowed.add(t);
+  }
+  // Tools not in always-on and not in any known scope → ship anyway. This
+  // catches the "forgot to map it" case so new tools don't disappear silently.
+  const KNOWN_SCOPED = new Set<string>();
+  for (const set of Object.values(SCOPE_TO_TOOLS)) for (const t of set) KNOWN_SCOPED.add(t);
+  const filtered = allTools.filter(t => {
+    if (allowed.has(t.name)) return true;
+    if (!KNOWN_SCOPED.has(t.name) && !ALWAYS_ON_TOOLS.has(t.name)) {
+      // Unmapped → keep + log once (per process) so the omission is fixable.
+      logUnmappedToolOnce(t.name);
+      return true;
+    }
+    return false;
+  });
+  return filtered;
+}
+
+const _unmappedLoggedOnce = new Set<string>();
+function logUnmappedToolOnce(toolName: string): void {
+  if (_unmappedLoggedOnce.has(toolName)) return;
+  _unmappedLoggedOnce.add(toolName);
+  logger.warn('Module G — tool not mapped to ALWAYS_ON or any scope; shipping by default', { tool: toolName });
+}
+
+/**
  * Tools a colleague (non-owner) is allowed to trigger.
  * Everything else is owner-only — blocked before it reaches Claude.
  *
@@ -215,8 +324,17 @@ export function getActiveSkills(profile: UserProfile): Skill[] {
  * Collect all Anthropic tool definitions from active skills.
  * When senderRole is 'colleague', only tools in COLLEAGUE_ALLOWED_TOOLS are returned —
  * this is a hard technical control, not just a prompt instruction.
+ *
+ * v2.7.7 (Module G) — owner-path only: `scopes` filters the tool list to
+ * (always-on core) ∪ (tools in any requested scope). Pass undefined (or
+ * include 'general') to ship every tool. Colleagues always see the static
+ * allowlist regardless of `scopes`.
  */
-export function getSkillTools(profile: UserProfile, senderRole: 'owner' | 'colleague' = 'owner'): Anthropic.Tool[] {
+export function getSkillTools(
+  profile: UserProfile,
+  senderRole: 'owner' | 'colleague' = 'owner',
+  scopes?: string[],
+): Anthropic.Tool[] {
   // Always include assistant and coordination skill tools regardless of config
   const assistantTools = CORE_MODULES.flatMap(s => s.getTools(profile));
 
@@ -254,12 +372,15 @@ export function getSkillTools(profile: UserProfile, senderRole: 'owner' | 'colle
     return true;
   });
 
-  // Colleagues only get the explicitly allowed subset — block everything else
+  // Colleagues only get the explicitly allowed subset — block everything else.
+  // Scope filter does NOT apply on the colleague path (the static allowlist is
+  // the hard limit; scope would be redundant).
   if (senderRole === 'colleague') {
     return deduped.filter(t => COLLEAGUE_ALLOWED_TOOLS.has(t.name));
   }
 
-  return deduped;
+  // Owner-path Module G filter (no-op if scopes is undefined or includes 'general').
+  return filterToolsByScope(deduped, scopes);
 }
 
 /**

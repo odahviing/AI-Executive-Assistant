@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../../config';
 import { buildSystemPromptParts } from './systemPrompt';
 import { classifyOwnerIntent, type OwnerIntentClassification } from '../social/classifyOwnerIntent';
+import { classifyToolScope } from '../social/classifyToolScope';
 import { reconcileTopic } from '../social/reconcileTopic';
 import { chooseSocialDirective, formatDirectiveForPromptBlock, type SocialDirective, noDirective } from '../social/stateMachine';
 import { generateSocialCoda } from '../social/generateCoda';
@@ -657,9 +658,53 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       ]
     : [{ type: 'text', text: systemBlocksDynamic } as Anthropic.TextBlockParam];
 
-  // Tools are collected from active skills — filtered by sender role
-  // Colleagues get a restricted subset; owner gets everything
-  const tools = getSkillTools(profile, input.senderRole);
+  // v2.7.7 (Module G) — intent-aware tool scoping. Gated on
+  // profile.behavior.intent_aware_tools. Owner turns only; colleagues already
+  // use the static COLLEAGUE_ALLOWED_TOOLS allowlist. Fails open: any error
+  // returns undefined scopes → getSkillTools ships every tool as before.
+  let toolScopes: string[] | undefined;
+  if (
+    profile.behavior?.intent_aware_tools === true
+    && isOwnerTurn
+    && userMessage
+    && userMessage.trim().length > 0
+  ) {
+    try {
+      const scopeRecentContext = conversationHistory
+        .slice(-4)
+        .map(m => `${m.role === 'user' ? (input.senderName ?? profile.user.name.split(' ')[0]) : profile.assistant.name}: ${m.content.slice(0, 280)}`)
+        .join('\n');
+      const scopeResult = await classifyToolScope({
+        anthropic,
+        ownerMessage: userMessage,
+        profile,
+        recentContext: scopeRecentContext || undefined,
+      });
+      toolScopes = scopeResult.scopes;
+    } catch (err) {
+      logger.warn('classifyToolScope wrap threw — shipping all tools', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
+  // Tools are collected from active skills — filtered by sender role and
+  // (when Module G is on) by the classifier-picked scope set.
+  // Colleagues get the static restricted subset; owner gets scope-filtered.
+  const tools = getSkillTools(profile, input.senderRole, toolScopes);
+
+  // Diagnostic: log the scope decision + the tool-count effect so we can
+  // see Module G hits vs misses in production logs. Cheap; only on owner
+  // turns when the flag is on.
+  if (toolScopes !== undefined) {
+    const allOwnerToolsCount = getSkillTools(profile, 'owner', undefined).length;
+    logger.info('Module G — tool scope applied', {
+      scopes: toolScopes,
+      toolsShipped: tools.length,
+      toolsAllOwner: allOwnerToolsCount,
+      savedTools: allOwnerToolsCount - tools.length,
+    });
+  }
 
   let requiresApproval = false;
   let approvalId: string | undefined;

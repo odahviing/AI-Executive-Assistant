@@ -664,6 +664,54 @@ export function createSlackAppForProfile(profile: UserProfile): App {
               });
             }
           }
+          // v2.7.7 (Module D) — thread-bound approval auto-resolve.
+          // When the owner replies in a thread that uniquely matches a
+          // pending approval AND a Haiku classifier reads the reply as a
+          // clean approve/reject (NOT amend, NOT topic-change), call
+          // resolveRequest directly and skip the orchestrator entirely.
+          // Latency drops from ~3s to ~300ms; saves a ~50k-token Sonnet turn.
+          // Fails open: any mismatch / ambiguity / classifier error →
+          // falls through to runOrchestrator as before.
+          if (
+            profile.behavior?.deterministic_approval_resolve === true
+            && role === 'owner'
+            && threadTs
+            && mergedText
+            && mergedText.trim().length > 0
+          ) {
+            try {
+              const { tryAutoResolveThreadBoundApproval } = await import('../../utils/threadBoundApprovalAutoResolve');
+              const autoResolve = await tryAutoResolveThreadBoundApproval({
+                message: mergedText,
+                threadTs,
+                ownerUserId: senderId,
+                profile,
+                app,
+              });
+              if (autoResolve.resolved) {
+                // Acknowledge with a reaction on the owner's message; the
+                // resolver itself runs downstream effects (booking, requester
+                // DM, closeRequest cascade) which post their own confirmations
+                // where relevant. No text reply from us — avoids duplication
+                // with whatever the resolver posts.
+                const emoji = autoResolve.verdict === 'approve' ? 'white_check_mark' : 'x';
+                client.reactions.add({ channel: channelId, timestamp: ts, name: emoji }).catch(() => {});
+                logger.info('Module D — orchestrator skipped via auto-resolve', {
+                  senderId, threadTs, requestId: autoResolve.request_id, verdict: autoResolve.verdict,
+                });
+                markWrite();
+                return;
+              }
+              logger.debug('Module D — auto-resolve declined, falling through to orchestrator', {
+                reason: autoResolve.reason,
+              });
+            } catch (err) {
+              logger.warn('Module D — auto-resolve threw, falling through to orchestrator', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          }
+
           logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== userMessage, hasPriorOutboundContext: !!priorOutboundContext });
           const result = await runOrchestrator({
             userMessage: mergedText,

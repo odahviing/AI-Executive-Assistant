@@ -2,6 +2,45 @@
 
 ---
 
+## 2.7.7 — Module G (intent-aware tool scoping) + Module D (deterministic approval auto-resolve)
+
+Two new pre-Sonnet Haiku classifiers landed, both gated by profile yaml flags. (1) **Module G** — every owner turn classifies the relevant tool scopes (`meetings` / `tasks` / `knowledge` / `summary` / `social` / `general`) and `getSkillTools` ships only the always-on core (~24 tools) plus tools in those scopes. Cuts the uncached tools-JSON shipped to Sonnet from ~23k to ~12k tokens on a typical meetings turn (and harder on tasks/summary/knowledge turns). UNION-on-ambiguity + fails open to `general`. (2) **Module D** — when an owner replies in a thread that uniquely matches a pending approval's `terminal_dm_msg_ts`, a Haiku classifier reads the reply as `approve` / `reject` / `pass_to_sonnet`. Clean approve/reject calls `resolveRequest` deterministically and skips the full owner-DM Sonnet turn entirely. ~3s → ~300ms latency on resolved turns; eliminates the multi-pending-approval misroute risk that 2.7.2's thread-bound marker only partially addressed. Plus two prompt trims (CALENDAR ISSUES routing dup at systemPrompt.ts:469, HEBREW GENDERED FORMS verb-list at systemPrompt.ts:443).
+
+### Added
+
+- **Module G: `classifyToolScope`** ([src/core/social/classifyToolScope.ts](src/core/social/classifyToolScope.ts) new). Haiku-based pre-pass that picks 1+ scopes from `meetings | tasks | knowledge | summary | social | general`. Profile-aware (only offers scopes for active skills). Pure-ack short-circuit on `"ok"` / `"thanks"` / `"כן"` etc. — those skip the classifier entirely and get `['general']`. Bias toward UNION when ambiguous (e.g. `"what's pending? also any conflicts?"` → `['tasks', 'meetings']`). Fails open to `['general']` on any error.
+- **Module G: scope-filtered `getSkillTools`** ([src/skills/registry.ts](src/skills/registry.ts)). New `ALWAYS_ON_TOOLS` set (~24 tools that ship every owner turn regardless: memory writes, approvals, basic task CRUD, briefing, web, outreach, Slack directory). `SCOPE_TO_TOOLS` map per scope. Owner-path filter: union of always-on + tools in any requested scope. Colleague-path unchanged (static `COLLEAGUE_ALLOWED_TOOLS` allowlist). Unmapped-tool safety net: tools not in `ALWAYS_ON` and not in any scope ship anyway + warn-once log so new tools can't silently disappear.
+- **Module G wiring** ([src/core/orchestrator/index.ts](src/core/orchestrator/index.ts)). Calls `classifyToolScope` when `profile.behavior.intent_aware_tools === true`. Diagnostic log line per turn: `Module G — tool scope applied` with scopes + toolsShipped + savedTools.
+- **Module D: `tryAutoResolveThreadBoundApproval`** ([src/utils/threadBoundApprovalAutoResolve.ts](src/utils/threadBoundApprovalAutoResolve.ts) new). Pre-filter: thread reply + exactly one `awaiting_owner` request matches `terminal_dm_msg_ts` + message ≤400 chars. Haiku classifier receives the approval CONTEXT (kind, subject, proposed slots, question) plus the reply, returns `approve | reject | pass_to_sonnet`. On approve/reject → calls `resolveRequest` directly. Amend cases pass to Sonnet (counter shape is approval-kind-specific; Haiku can't build it reliably). Fails open: pre-filter miss / classifier error / resolver not-ok → pass to Sonnet so the orchestrator can recover.
+- **Module D wiring** ([src/connectors/slack/app.ts](src/connectors/slack/app.ts)). Hooked inside the inbound queue runner, right before `runOrchestrator`. On resolve: reacts ✅ (approve) or ❌ (reject) on the owner's message, calls `markWrite()` so the queue's abort-if-safe gate sees the write, returns early. Resolver itself handles downstream effects (booking, requester DM, closeRequest cascade) so no duplicate text reply needed.
+- **Two feature flags** ([src/config/userProfile.ts](src/config/userProfile.ts) behavior block): `intent_aware_tools: boolean` (default false), `deterministic_approval_resolve: boolean` (default false). Owner-path only; colleague path keeps its static allowlists unchanged. Both flags ship off by default so legacy yamls don't change behavior; owner opts in per profile.
+
+### Changed
+
+- **systemPrompt.ts trim** — removed the CALENDAR ISSUES routing line ([systemPrompt.ts:469](src/core/orchestrator/systemPrompt.ts:469), ~280 chars). The "owner says fine → call update_calendar_issue" instruction is already present (more specifically) in MeetingsSkill's prompt section at [meetings.ts:1737](src/skills/meetings.ts:1737). The "don't re-check the same calendar question twice" half is covered by the adjacent THREAD MEMORY rule.
+- **systemPrompt.ts trim** — HEBREW GENDERED FORMS block ([systemPrompt.ts:443](src/core/orchestrator/systemPrompt.ts:443)) cut from ~720 to ~370 chars. Removed the 14-verb conjugation list (`אתה / שואל / עובד / ...` and the feminine equivalents) — Sonnet 4.6 knows Hebrew grammar; the rule just needs the actionable bits (apply gender field both directions, unknown → male polite default + ask once, never re-ask after `confirm_gender`).
+
+### Invariants preserved
+
+- Module D does NOT delete the PENDING APPROVALS Binding rules from the system prompt. Sonnet still handles amend, multi-pending-approval threads, ambiguous replies, and topic-changes — those turns still need the binding rules.
+- Module G's scope filter applies only on the owner path. Colleagues keep the static `COLLEAGUE_ALLOWED_TOOLS` allowlist as the hard security boundary.
+- Both flags default OFF. Existing yamls without the flag continue to ship every tool + run the full orchestrator on every owner turn.
+
+### To enable per profile
+
+```yaml
+behavior:
+  intent_aware_tools: true
+  deterministic_approval_resolve: true
+```
+Restart `npm run dev` to pick up the changes.
+
+### Project reference
+
+Modules G + D from [.claude/PROJECT_REDUCE_PROMPTS.md](.claude/PROJECT_REDUCE_PROMPTS.md). Per project plan: each module ships as its own patch. Remaining modules (A / B / F / E / C) are smaller post-draft scrubbers (voice/tone, Hebrew output, honesty rules extension, length validator, refusal humanizer) and can ship independently.
+
+---
+
 ## 2.7.6 — Per-attendee slot blame, auto-relaxed recovery on narrow windows, tool consolidation
 
 Two sessions of compounding improvements. (1) When `find_available_slots` rejects a slot for a busy collision, the cause is now attributed by email — owner-side busy stays `owner_busy_collision`, attendee-side becomes `attendee_busy_collision:<email>`, and day_summary surfaces a `blocked_by` aggregate so Sonnet can narrate "Isaac blocked 8 slots Monday" instead of fabricating "Monday is fully booked." (2) On owner-named narrow windows (≤7 days), when the strict pass returns 0 slots, the tool auto-retries with `relaxed=true` and tags the result so Sonnet presents the soft-rule violation explicitly ("12:30 fits everyone but eats into your focus block — book anyway?") instead of returning empty. (3) Two tool consolidations: `dismiss_calendar_issue` folded into `update_calendar_issue` (cross-skill merge, two storage models stay separate but one tool surface); `list_company_knowledge` folded into `get_company_knowledge` (omit `section_id` → catalog, pass it → content). Tool count 56 → 54. Plus a P1+P2 prompt-bloat pass on tool descriptions.
