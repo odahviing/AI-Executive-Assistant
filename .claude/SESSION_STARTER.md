@@ -56,10 +56,21 @@ NOT:
 
 ---
 
-## Where we are — v2.7.5 shipped (2026-05-15)
+## Where we are — v2.8.0 shipped (2026-05-15)
 
-**Phase right now: bug bash for stability — NOT new features.**
-v2.7 had four follow-up patches after the trilogy: 2.7.1 (Phase 1 cutover-finish), 2.7.2 (Phase 2 + kill coord fast path), 2.7.3 (Slack assistant-panel surface), 2.7.4 (6 real-day bug fixes), 2.7.5 (slot-finder reform + owner override widened + prompt cache restructure). Goal is still v2.7 being the first version owner trusts as stable enough to leave alone for a week.
+**Phase right now:** v2.7 closed out as a stability wave. v2.8.0 is a clean baseline marking the end of the 2.7 line — no new code over 2.7.7, just a release-marker bump because "enough massive changes accumulated in 2.7" (owner direction).
+
+**Next phase: prompt-reduction project ([#95](https://github.com/odahviing/AI-Executive-Assistant/issues/95)).** Modules G + D shipped in 2.7.7. Modules A (voice/tone scrubber), B (Hebrew processor), C (refusal humanizer), E (length/repetition validator), F (extended claimChecker) are ahead. Plan at [.claude/PROJECT_REDUCE_PROMPTS.md](.claude/PROJECT_REDUCE_PROMPTS.md).
+
+**The 2.7 line (8 versions) shipped:**
+- 2.7.0 — trilogy: requests spine + planMeeting engine + slot finder reform
+- 2.7.1 — Phase 1 cutover-finish (writers bridge to requests)
+- 2.7.2 — Phase 2 cutover-finish (kill coord fast path, deferred action replay)
+- 2.7.3 — Slack assistant-panel surface
+- 2.7.4 — 6 real-day brief bug fixes
+- 2.7.5 — slot picker reform + owner override widened + prompt cache restructure
+- 2.7.6 — per-attendee blame + auto-relaxed recovery + location auto-stamp + tool consolidation
+- 2.7.7 — Module G (intent-aware tool scoping) + Module D (deterministic approval auto-resolve)
 
 ### What landed in v2.7.5
 

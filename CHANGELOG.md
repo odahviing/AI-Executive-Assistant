@@ -2,6 +2,69 @@
 
 ---
 
+## 2.8.0 — Stability baseline for the 2.7 wave
+
+Owner-called release threshold: "enough massive changes in 2.7." No new code over 2.7.7 — this version is a stability rebaseline that closes out the v2.7 line and starts a clean v2.8 surface for the next phase of work (planned: continued execution of the prompt-reduction project tracked in [#95](https://github.com/odahviing/AI-Executive-Assistant/issues/95) — Modules A/B/C/E/F still ahead).
+
+### What v2.7.x shipped, cumulative
+
+The 2.7 line spanned 8 versions (2.7.0–2.7.7) covering three meaningful architectural shifts plus seven follow-up patches:
+
+**The trilogy (v2.7.0):**
+- **Requests spine** — single user-facing work-item table replacing scattered tasks/approvals/coord_jobs/outreach_jobs ad-hoc state. One `closeRequest` API. Lifecycle timers on the row. Legacy tables retained as internal state machines, bridged via `request_id`.
+- **`planMeeting` decision engine** — every scheduling intent (find / book / move / cancel) flows through one decision function. `resolveLocation` is the single location authority. `scheduleRules.checkSlot` is the single rule engine. All five meeting tools route through it.
+- **Slot finder reform** — `pickSpreadSlots` tightened (≤3 total, ≤2/day, ≥1h gap, ≥2 unique days when 3). Initiator-aware annotation. Soft preferences (timezone, night_shift) rendered in prompt with Sonnet judgment.
+
+**Cutover-finish (v2.7.1, v2.7.2):**
+- Phase 1: writers (`createOutreachJob`, `createCoordJob`, `createApproval`) bridge to requests spine.
+- Phase 2: coord fast-path entirely deleted — `coordinate_meeting` always state-machine path. `relaxed` flag declared on `create_meeting` / `move_meeting` schemas. Deferred-action replay via `_deferred_action_hint` → orchestrator stamps `payload.deferred_action` → resolver replays underlying tool with `relaxed: true` on approve. Outreach dispatchers defer to runner when bridged.
+
+**Slack assistant-panel surface (v2.7.3):**
+- `assistant_thread_started` event handler, `setAssistantStatus` primitive, status indicator fired before each tool call.
+
+**Bug-bash + observability (v2.7.4, v2.7.5, v2.7.6):**
+- Attendee filter corrected (`responseStatus.response === 'none'` is untracked, not declined).
+- Dismissal fingerprint stabilized (`(normalized_class, sorted_event_ids)`).
+- Privacy mask via `displaySubject` for events with `sensitivity: private` or `sets_sensitivity_private` category.
+- A2 orphan request lifecycle (in_flight_action follow_ups get `expires_at` + `next_check_at`).
+- Route 2 deterministic narration in `check_calendar_health` via `summary_text` field.
+- `book_floating_block` unified through `planMeeting`.
+- Slot picker anchor-day support + same-day packing (move flows + new-booking shape).
+- Owner override truly overrides (`allowRelaxed=true` bypasses owner_busy + attendee_busy on owner-path).
+- Floating blocks coexist with meetings (rule 8 bypass).
+- `day_summary` diagnostic with per-attendee `blocked_by` blame.
+- Auto-relaxed recovery on user-named narrow windows.
+- `find_available_slots` auto-fills attendees from moving event on owner-path moves.
+- Per-tool Slack assistant-panel status text via `TOOL_STATUS_TEXT` map.
+- Slack rotating defaults suppressed via explicit `loading_messages: ['']`.
+- DB-backed assistant-thread registry (survives `npm run dev` restarts).
+- System prompt cache restructure: dynamic chunk ~10.5k → ~3.3k tokens per turn.
+- Office-location auto-stamp on `is_online=false` (short label internal, full address external, "Meeting Room" for 4+ internal).
+
+**Prompt reduction begins (v2.7.7):**
+- **Module G** — intent-aware tool scoping (`classifyToolScope` Haiku pre-pass + `getSkillTools` scope filter). Owner-DM tools JSON ~23k → ~12k tokens on typical meetings turn.
+- **Module D** — deterministic approval auto-resolve. Thread-bound vague-yes ("yes" / "go" / "כן") on a uniquely-matched pending approval skips orchestrator Sonnet entirely. ~3s → ~300ms latency.
+- Prompt trims: CALENDAR ISSUES routing dup, HEBREW GENDERED FORMS verb-list.
+
+### Phase ahead
+
+[#95](https://github.com/odahviing/AI-Executive-Assistant/issues/95) — prompt-reduction project continues in v2.8.x. Modules A (voice/tone scrubber), B (Hebrew processor), C (refusal humanizer), E (length/repetition validator), F (extended claimChecker) all still to build. Plan documented in [.claude/PROJECT_REDUCE_PROMPTS.md](.claude/PROJECT_REDUCE_PROMPTS.md).
+
+### Migration
+
+None. Pure version baseline.
+
+### Not changed
+
+Nothing material since 2.7.7. This is a release-marker bump only.
+
+### Closed during the 2.7 wave
+
+- [#43](https://github.com/odahviing/AI-Executive-Assistant/issues/43) closed completed — workdays + work-hours intersection per attendee (Shabbat, non-Israeli Mon-Fri) shipped across v2.3.6 / v2.7.6; hard constraints intentionally out of scope.
+- [#48](https://github.com/odahviing/AI-Executive-Assistant/issues/48) closed not-planned — coord clarify-and-resume sub-state superseded by people_memory auto-load + Sonnet's free-form ask + existing coord_abandon dispatcher.
+
+---
+
 ## 2.7.7 — Module G (intent-aware tool scoping) + Module D (deterministic approval auto-resolve)
 
 Two new pre-Sonnet Haiku classifiers landed, both gated by profile yaml flags. (1) **Module G** — every owner turn classifies the relevant tool scopes (`meetings` / `tasks` / `knowledge` / `summary` / `social` / `general`) and `getSkillTools` ships only the always-on core (~24 tools) plus tools in those scopes. Cuts the uncached tools-JSON shipped to Sonnet from ~23k to ~12k tokens on a typical meetings turn (and harder on tasks/summary/knowledge turns). UNION-on-ambiguity + fails open to `general`. (2) **Module D** — when an owner replies in a thread that uniquely matches a pending approval's `terminal_dm_msg_ts`, a Haiku classifier reads the reply as `approve` / `reject` / `pass_to_sonnet`. Clean approve/reject calls `resolveRequest` deterministically and skips the full owner-DM Sonnet turn entirely. ~3s → ~300ms latency on resolved turns; eliminates the multi-pending-approval misroute risk that 2.7.2's thread-bound marker only partially addressed. Plus two prompt trims (CALENDAR ISSUES routing dup at systemPrompt.ts:469, HEBREW GENDERED FORMS verb-list at systemPrompt.ts:443).
