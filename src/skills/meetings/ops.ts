@@ -750,6 +750,49 @@ export class SchedulingSkill {
           // I'll handle the others" scenarios.
           let attendeeEmails = (args.attendee_emails as string[]) ?? [];
 
+          // MOVE-PATH AUTHORITY (owner-path only): when moving_event_ids is set
+          // AND the owner is the initiator, the meeting's existing attendees
+          // ARE the attendees to check. Owner direction: "find_available_slots
+          // should just take the list of people to check if they're free or
+          // not" — tool reads them itself; Sonnet doesn't have to remember.
+          // Closes the painful Sales BiWeekly trace where Sonnet's later call
+          // dropped Isaac from attendee_emails and 17:00 was proposed without
+          // Isaac being verified. Colleague-path skips this — that flow uses
+          // per-attendee annotation (see v2.7.0 colleague-path block below).
+          const isOwnerInitiatedSearch =
+            context.senderRole === 'owner' || context.isOwnerInGroup === true;
+          const movingIdsForAttendees = (isOwnerInitiatedSearch && Array.isArray(args.moving_event_ids))
+            ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
+            : [];
+          if (movingIdsForAttendees.length > 0) {
+            try {
+              const { resolveMovingEventAttendees } = await import('../../utils/movingEventAttendees');
+              const fromEvent = await resolveMovingEventAttendees(
+                movingIdsForAttendees,
+                userEmail,
+                timezone,
+              );
+              if (fromEvent.length > 0) {
+                // Union with any explicit args.attendee_emails (don't drop what
+                // Sonnet passed; just guarantee the event's attendees are in).
+                const merged = new Set<string>([...attendeeEmails.map(e => e.toLowerCase()), ...fromEvent.map(e => e.toLowerCase())]);
+                const before = attendeeEmails.length;
+                attendeeEmails = [...merged];
+                if (attendeeEmails.length > before) {
+                  logger.info('find_available_slots — auto-filled attendees from moving event', {
+                    movingEventIds: movingIdsForAttendees,
+                    addedFromEvent: fromEvent,
+                    finalAttendees: attendeeEmails,
+                  });
+                }
+              }
+            } catch (err) {
+              logger.warn('find_available_slots — moving-event attendees recovery threw', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          }
+
           // v2.6.6 — auto-fill from this thread's prior attendee context.
           // When Sonnet calls find_available_slots WITHOUT attendee_emails
           // but a previous call in this thread already established who the
@@ -788,7 +831,13 @@ export class SchedulingSkill {
           // another meeting, not to wake up at 3 AM." So
           // `attendeeAvailability` (work-hours clip) is unconditional;
           // `ignore_attendee_availability` only suppresses the busy filter.
-          const ignoreAttendeeBusy = args.ignore_attendee_availability === true;
+          // Owner direction (2026-05-14): `relaxed=true` (owner override) ALSO
+          // implies ignoring attendee busy — when owner says "book it anyway,"
+          // he's overriding everyone's other meetings, not just his own. Their
+          // work hours stay enforced (no 3-AM bookings).
+          const ignoreAttendeeBusy =
+            args.ignore_attendee_availability === true
+            || (args.relaxed === true && isOwnerInitiatedSearch);
 
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { loadAttendeeAvailabilityForEmails } = require('../../utils/attendeeAvailability') as
@@ -803,10 +852,17 @@ export class SchedulingSkill {
           // colleague-initiated path (coord state machine) deliberately
           // does NOT auto-pass — coord uses annotateSlotsWithAttendeeStatus
           // to TAG slots with status, showing all options per owner's rule.
-          const isOwnerInitiated = context.senderRole === 'owner' || context.isOwnerInGroup === true;
-          const attendeeBusyEmails = (isOwnerInitiated && !ignoreAttendeeBusy && attendeeEmails.length > 0)
+          const attendeeBusyEmails = (isOwnerInitiatedSearch && !ignoreAttendeeBusy && attendeeEmails.length > 0)
             ? attendeeEmails
             : undefined;
+
+          // Diagnostics receiver — surfaces per-day summary to Sonnet so she
+          // can honestly answer "why no Monday?" instead of fabricating.
+          const diagnosticsOut: {
+            rejectedCounts?: Record<string, number>;
+            rejectedExamples?: Record<string, string[]>;
+            daySummary?: Array<{ date: string; accepted: number; top_reasons: string[] }>;
+          } = {};
 
           try {
             const rawSlots = await findAvailableSlots({
@@ -839,6 +895,7 @@ export class SchedulingSkill {
               // out slots that would violate the category's day_type / per_day
               // / per_week limits.
               category: args.category as string | undefined,
+              diagnosticsOut,
             });
             // v2.4.2 — narrow to 3 spread options before returning to Sonnet.
             // Owner spec: "spread 3 options as I want" — one per day where
@@ -856,7 +913,19 @@ export class SchedulingSkill {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { pickSpreadSlots } = require('../../connectors/graph/calendar') as
               typeof import('../../connectors/graph/calendar');
-            const chosenStarts = new Set(pickSpreadSlots(rawSlots, timezone, 3));
+            // When the call is a MOVE (moving_event_ids set), prefer same-day
+            // options for the meeting being moved. resolveMovingAnchorDay
+            // looks up the moving event's local date (cheap — getCalendarEvents
+            // is per-turn memoized) and pickSpreadSlots walks that day first.
+            // Falls back to undefined → pure chronological for new bookings.
+            const { resolveMovingAnchorDay } = await import('../../utils/movingAnchorDay');
+            const movingIds = Array.isArray(args.moving_event_ids)
+              ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
+              : [];
+            const anchorDay = movingIds.length > 0
+              ? await resolveMovingAnchorDay(movingIds, userEmail, timezone)
+              : undefined;
+            const chosenStarts = new Set(pickSpreadSlots(rawSlots, timezone, 3, anchorDay));
             const slots = rawSlots.filter(s => chosenStarts.has(s.start));
 
             // v2.7.0 — initiator-aware annotation. Owner-path already pre-
@@ -867,7 +936,7 @@ export class SchedulingSkill {
             // (per owner direction: colleague-path includes + annotates,
             // owner-path drops).
             let annotatedSlots: Array<any> = slots;
-            if (!isOwnerInitiated && attendeeEmails.length > 0) {
+            if (!isOwnerInitiatedSearch && attendeeEmails.length > 0) {
               try {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const { annotateSlotsWithAttendeeStatus } = require('../../utils/annotateSlotsWithAttendeeStatus') as
@@ -923,8 +992,17 @@ export class SchedulingSkill {
                 travelTimezone: a.timezone,
                 homeTimezone: a.travel!.homeTimezone,
               }));
-            if (travelers.length > 0) {
-              return { slots: annotatedSlots, travelers };
+            // Surface per-day summary alongside slots so Sonnet can answer
+            // "why no Monday?" honestly. When both travelers and day_summary
+            // are empty, fall back to the legacy array shape so existing
+            // narration paths see the same plain list.
+            const daySummary = diagnosticsOut.daySummary;
+            const hasDaySummary = Array.isArray(daySummary) && daySummary.length > 0;
+            if (travelers.length > 0 || hasDaySummary) {
+              const result: Record<string, unknown> = { slots: annotatedSlots };
+              if (travelers.length > 0) result.travelers = travelers;
+              if (hasDaySummary) result.day_summary = daySummary;
+              return result;
             }
             return annotatedSlots;
           } catch (err) {

@@ -9,9 +9,25 @@ import { formatPeopleCatalogSync } from '../../memory/peopleMemory';
 import { getEffectiveToday } from '../../utils/effectiveToday';
 
 /**
- * Build the system prompt as two parts for prompt caching:
- *   static  → skills section (large, purely profile-driven, cacheable)
- *   dynamic → date/time, prefs, people memory, auth line (changes per request)
+ * Build the system prompt as two parts for prompt caching.
+ *
+ * Restructured to push ALL content that doesn't change per turn into the
+ * cacheable `static` block:
+ *   static  → identity, all rule blocks (honesty, tone, language, hebrew,
+ *             internals, channels, calendar invites, owner learning),
+ *             auth line, mpim rules, categories, skills section.
+ *             Cached for 5min within a session — paid once per cache window.
+ *   dynamic → date/time/week tables, owner-context state (prefs catalog,
+ *             people memory, pending approvals), per-thread approvals.
+ *             Fresh every turn — billed at full price.
+ *
+ * Pre-refactor, only the skills section was cached; everything else was
+ * dynamic. The owner-DM dynamic chunk was ~10.5k tokens billed every turn.
+ * This refactor moves ~7-8k of those tokens into the cached portion, keeping
+ * the dynamic block to just what's actually state-dependent.
+ *
+ * Note: cached content must come BEFORE non-cached content in the API
+ * request. Assembly order is static → dynamic everywhere.
  */
 export function buildSystemPromptParts(
   profile: UserProfile,
@@ -28,26 +44,13 @@ export function buildSystemPromptParts(
   isChannel?: boolean,
   threadTs?: string,
 ): { static: string; dynamic: string } {
-  const full = buildSystemPrompt(profile, senderRole, senderName, isOwnerInGroup, focusSlackIds, isMpim, isChannel, threadTs);
-  const skills = buildSkillsPromptSection(profile);
-  // Skills section sits at the end of the full prompt — extract it as the cacheable block
-  const dynamic = skills ? full.replace(skills, '').trimEnd() : full;
-  return { static: skills, dynamic };
-}
-
-export function buildSystemPrompt(
-  profile: UserProfile,
-  senderRole: 'owner' | 'colleague' = 'owner',
-  senderName?: string,
-  isOwnerInGroup?: boolean,
-  focusSlackIds?: Set<string>,
-  isMpim?: boolean,
-  isChannel?: boolean,
-  threadTs?: string,
-): string {
   const { user, assistant } = profile;
   const firstName = user.name.split(' ')[0];
   const companyRef = user.company ? ` and a full member of the ${user.company} team` : '';
+  const isOwner = senderRole === 'owner';
+
+  // ── DYNAMIC INPUTS ────────────────────────────────────────────────────────
+  // These compute fresh per turn. Used only inside `dynamicContent` below.
 
   const now = new Date().toLocaleString('en-IL', {
     timeZone: user.timezone,
@@ -64,8 +67,6 @@ export function buildSystemPrompt(
   // prompt and the date verifier agree about what day "today" / "tomorrow"
   // mean when the owner is up past midnight.
   const todayLocal = getEffectiveToday(profile);
-  const todayDate = todayLocal.toFormat('yyyy-MM-dd');
-  const todayStr = todayLocal.toFormat('EEEE, d MMMM yyyy');
   const weekMap = Array.from({ length: 14 }, (_, i) => {
     const d = todayLocal.plus({ days: i });
     // Include weekday on Today/Tomorrow so the LLM never has to back-compute
@@ -96,8 +97,6 @@ export function buildSystemPrompt(
   const weekBoundaries = `Week starts on ${weekStartDayName} in ${user.timezone}.
 This week: ${thisWeekStart.toFormat('EEE d MMM')} – ${thisWeekStart.plus({ days: 6 }).toFormat('EEE d MMM')} [${thisWeekStart.toFormat('yyyy-MM-dd')} to ${thisWeekStart.plus({ days: 6 }).toFormat('yyyy-MM-dd')}]
 Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EEE d MMM')} [${nextWeekStart.toFormat('yyyy-MM-dd')} to ${nextWeekEnd.toFormat('yyyy-MM-dd')}]`;
-
-  const isOwner = senderRole === 'owner';
 
   // ── Owner-only context (never shown to colleagues) ─────────────────────────
   // v2.3.9 — preferences switched to a catalog model (mirror v2.2.1 people-md).
@@ -214,6 +213,19 @@ Do NOT re-raise these. If the colleague's current message is just acknowledging 
       })()
     : '';
 
+  const ownerContextSection = isOwner ? `
+WHAT YOU KNOW ABOUT ${user.name.toUpperCase()} (learned over time):
+${prefsSection}
+${peopleSection ? '\n' + peopleSection : ''}
+${peopleCatalog ? '\n' + peopleCatalog : ''}
+${pendingApprovalsSection}` : '';
+
+  // ── STATIC INPUTS ─────────────────────────────────────────────────────────
+  // These are functions only of `profile` + conversation-shape flags
+  // (senderRole, isOwnerInGroup, isMpim, isChannel). They don't change per
+  // turn for the same conversation, so the assembled `staticContent` is
+  // cache-friendly.
+
   const activeSkills = getActiveSkills(profile);
   const skillNames = activeSkills.map(s => s.name).join(', ') || 'none';
   const skillsSection = buildSkillsPromptSection(profile);
@@ -223,19 +235,11 @@ Do NOT re-raise these. If the colleague's current message is just acknowledging 
     .map(([k]) => k)
     .join(', ') || 'slack';
 
-  // v1.7.8 — Owner-defined Outlook categories. Rendered when defined so the
-  // LLM knows which categories exist in the owner's real Outlook and what
-  // each means. Without this, tools that tag events (book_floating_block, create_meeting,
-  // set_event_category) would either hardcode names that don't exist in the
-  // owner's Outlook OR skip categorization entirely.
+  // v1.7.8 — Owner-defined Outlook categories.
   const categoriesBlock = profile.categories && profile.categories.length > 0
     ? `\nEVENT CATEGORIES (${user.name.split(' ')[0]}'s own Outlook categories — use these names EXACTLY when tagging events):\n${profile.categories.map(c => `- ${c.name}: ${c.description}`).join('\n')}\n\nWhen creating or categorizing an event, pick the ONE category whose description best fits what the event is. If none fits, leave the event uncategorized rather than guessing.`
     : '';
 
-  // ── Authorization + privacy rules ─────────────────────────────────────────
-  // v2.6.6 — opening identity line (3-way split). MPIM-specific privacy /
-  // group-speech / private-ask rules now live in `mpimRulesBlock` below,
-  // gated on isMpim so they only ship when actually relevant.
   const authLine = isOwnerInGroup
     ? `Speaking with: ${user.name} (your principal) IN A GROUP CONVERSATION with one or more colleagues.
 
@@ -298,12 +302,6 @@ Right: acknowledge → create_approval → wait → send the approved version af
 DEFAULT: when in doubt, don't share. "I can't help with that" beats a leak.`;
 
   // ── MPIM-only rules (v2.6.6) ─────────────────────────────────────────────
-  // Ships only when isMpim=true. Pre-2.6.6 these rules were buried inside the
-  // isOwnerInGroup branch of authLine, so they fired only when the owner
-  // typed in MPIM — not when a colleague typed in MPIM (which is the more
-  // common case). They also redundantly shipped to 1:1 DMs and channels (in
-  // earlier iterations) where they're irrelevant. Now: MPIM only, regardless
-  // of who typed.
   const mpimRulesBlock = isMpim ? `
 GROUP CHAT — multiple people read every message in this thread.
 
@@ -330,14 +328,6 @@ SPEAK TO THE GROUP — everyone in the thread reads your messages.
 
 GROUP DMs: greet whoever ${firstName} introduces, not him. Don't leak private data.
 ` : '';
-
-  // ── Owner-only prompt sections ──────────────────────────────────────────────
-  const ownerContextSection = isOwner ? `
-WHAT YOU KNOW ABOUT ${user.name.toUpperCase()} (learned over time):
-${prefsSection}
-${peopleSection ? '\n' + peopleSection : ''}
-${peopleCatalog ? '\n' + peopleCatalog : ''}
-${pendingApprovalsSection}` : '';
 
   const ownerLearningSection = isOwner ? `
 VOICE — ${user.name}'s voice messages get audio replies automatically when short enough. If his message starts with "[Voice message]:", reply in ENGLISH regardless of transcript language (Hebrew TTS quality gap, issue #12).
@@ -366,28 +356,31 @@ INTERACTION MEMORY — log_interaction + note_about_person build the per-person 
   const assistantSelfBlock = formatAssistantSelfForPrompt(profile, isOwner);
   const assistantSelfSection = assistantSelfBlock ? `\n${assistantSelfBlock}\n` : '';
 
-  return `You are ${assistant.name}, personal executive assistant to ${user.name}, ${user.role}.${hebrewNameNote}
+  // Channels-you-can-reach block — derived from the connections registry.
+  // Connections don't change per turn; this is effectively static within a
+  // process lifetime.
+  const channelsYouCanReach = (() => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { listConnections } = require('../../connections/registry') as typeof import('../../connections/registry');
+    const active = listConnections(profile.user.slack_user_id);
+    if (active.length === 0) return '- (no channels currently registered — flag to ' + firstName + ' if you need to reach someone)';
+    // v2.6.9 — each transport declares WHO it can reach. Pre-fix the block
+    // listed transports as available without saying who they could reach,
+    // and Sonnet conflated "Slack is active" with "everyone reachable on
+    // Slack." Result: Maelle promised to "reach out directly" to externals
+    // not in the Slack workspace (Maya/Comsec, 2026-05-11 22:29). Now each
+    // transport names its reach criteria so Sonnet can map person → channel.
+    return active.map(id => {
+      if (id === 'slack')    return '- Slack — reaches INTERNAL workspace members only (need a slack_id in people_memory). External attendees (different email domain, gmail / company.com that isn\'t the owner\'s) are NOT on Slack and CANNOT be DMed.';
+      if (id === 'email')    return '- Email — reaches anyone with an email address (internal or external).';
+      if (id === 'whatsapp') return '- WhatsApp — reaches anyone with a phone number on record.';
+      return `- ${id}`;
+    }).join('\n');
+  })();
+
+  // ── ASSEMBLE STATIC (cached) ──────────────────────────────────────────────
+  const staticContent = `You are ${assistant.name}, personal executive assistant to ${user.name}, ${user.role}.${hebrewNameNote}
 ${companyContextSection}${assistantSelfSection}
-Now: ${now} | Timezone: ${user.timezone} | Time of day: ${timeOfDay}
-When greeting: use "good ${timeOfDay}" — never use morning/afternoon/evening/night based on anything other than this. At night (after 21:00 or before 05:00) avoid time-of-day greetings entirely, just say "hi" or "hey".
-
-DATE LOOKUP (use these exactly — never calculate):
-${weekMap}
-
-WEEK BOUNDARIES (critical — use these when interpreting "this week" / "next week"):
-${weekBoundaries}
-"Next Sunday" = ${nextWeekStart.toFormat('EEE d MMM')} (${nextWeekStart.toFormat('yyyy-MM-dd')})
-When fetching "next week's calendar" use the date range listed above for Next week.
-
-Rule: Always use the exact dates from the tables above. Never calculate — use the lookup.
-Before writing any day name + date pair (e.g. "Thursday the 17th"), verify it matches the DATE LOOKUP. If the table says "Friday 17 Apr", it's Friday — not Thursday. Wrong day names destroy trust.
-Calendar events are returned already in the user's local timezone (${user.timezone}).
-The time in start.dateTime is ALREADY LOCAL — display it exactly as-is. Never add or subtract hours.
-If an event says 18:30, it IS 18:30 in Israel. Do not convert it. Do not adjust it. Just say 6:30 PM.
-
-LATE NIGHT RULE: If the current time is between midnight and ${profile.schedule.day_boundary_hour}, the user has not slept yet. The DATE LOOKUP above is already adjusted — "Today" is the day the user is still awake in, "Tomorrow" is the next waking day. Same applies to "tonight" / "this evening" (= today's evening = the day the user hasn't slept past) and "tomorrow night" (= next waking day's evening). Trust the table — do not add an extra day.
-${ownerContextSection}
-
 IDENTITY
 Your name is ${assistant.name}. You are ${user.name}'s personal executive assistant${companyRef}. You work alongside everyone, you know the people, you care about the work. To colleagues, you are simply ${assistant.name} — a person on ${firstName}'s team.
 
@@ -460,7 +453,6 @@ ${categoriesBlock}
 AUTHORIZATION
 ${authLine}
 Approval commands (approve/reject) accepted only from ${user.name}.
-${colleagueThreadApprovalsSection}
 ${mpimRulesBlock}
 TONE: short, direct, plain text, answers the actual question. Check current time before describing when something happens. Never list meetings out of order.
 "what's my next meeting?" → "EMEA Forecast started 10 minutes ago, runs until 10:00."
@@ -482,24 +474,7 @@ OWNERSHIP: you're the assistant, not an advisor. Never "you might want to / you 
 
 CHANNELS YOU CAN REACH PEOPLE THROUGH — when you commit to contact someone or "let them know" something, you're using one of these. Anything you promise must be deliverable through this list.
 
-${(() => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { listConnections } = require('../../connections/registry') as typeof import('../../connections/registry');
-  const active = listConnections(profile.user.slack_user_id);
-  if (active.length === 0) return '- (no channels currently registered — flag to ' + firstName + ' if you need to reach someone)';
-  // v2.6.9 — each transport declares WHO it can reach. Pre-fix the block
-  // listed transports as available without saying who they could reach,
-  // and Sonnet conflated "Slack is active" with "everyone reachable on
-  // Slack." Result: Maelle promised to "reach out directly" to externals
-  // not in the Slack workspace (Maya/Comsec, 2026-05-11 22:29). Now each
-  // transport names its reach criteria so Sonnet can map person → channel.
-  return active.map(id => {
-    if (id === 'slack')    return '- Slack — reaches INTERNAL workspace members only (need a slack_id in people_memory). External attendees (different email domain, gmail / company.com that isn\'t the owner\'s) are NOT on Slack and CANNOT be DMed.';
-    if (id === 'email')    return '- Email — reaches anyone with an email address (internal or external).';
-    if (id === 'whatsapp') return '- WhatsApp — reaches anyone with a phone number on record.';
-    return `- ${id}`;
-  }).join('\n');
-})()}
+${channelsYouCanReach}
 
 CANNOT-REACH RULE — when no transport above can reach someone, say so honestly. Don't promise.
 - The person you'd contact must have a property that matches one of the active transports above (slack_id for Slack, email for Email, phone for WhatsApp).
@@ -509,6 +484,12 @@ CANNOT-REACH RULE — when no transport above can reach someone, say so honestly
 - ✅ When stuck: surface honestly + offer alternative (forward to internal contact / Outlook invite as the implicit confirm / escalate to owner).
 
 CALENDAR INVITES vs YOUR OWN MESSAGES — calendar invites are sent BY OUTLOOK automatically when you create a meeting; that's the calendar system, not you. Don't claim "I'll email an invite" — say "Outlook will send the invite" or just create the meeting and trust it. The split: messages YOU send go through the channels above; calendar invites are Outlook's job.
+
+CALENDAR EVENT TIMES — calendar events are returned already in the user's local timezone (${user.timezone}). The time in start.dateTime is ALREADY LOCAL — display it exactly as-is. Never add or subtract hours. If an event says 18:30, it IS 18:30 in ${user.timezone}. Do not convert it. Do not adjust it. Just say 6:30 PM.
+
+DATE HANDLING — always use the exact dates from the DATE LOOKUP and WEEK BOUNDARIES tables below in the dynamic context. Never calculate dates yourself. Before writing any day name + date pair (e.g. "Thursday the 17th"), verify it matches the DATE LOOKUP. If the table says "Friday 17 Apr", it's Friday — not Thursday. Wrong day names destroy trust.
+
+LATE NIGHT RULE: If the current time is between midnight and ${profile.schedule.day_boundary_hour}, the user has not slept yet. The DATE LOOKUP table is already adjusted — "Today" is the day the user is still awake in, "Tomorrow" is the next waking day. Same applies to "tonight" / "this evening" (= today's evening = the day the user hasn't slept past) and "tomorrow night" (= next waking day's evening). Trust the table — do not add an extra day.
 
 HONESTY RULES — these are non-negotiable. Trust is everything.
 
@@ -565,4 +546,38 @@ Draft/revise emails, Slack messages, LinkedIn posts, briefs, talking points — 
 ${ownerLearningSection}
 
 ${skillsSection}`;
+
+  // ── ASSEMBLE DYNAMIC (NOT cached) ─────────────────────────────────────────
+  const dynamicContent = `Now: ${now} | Timezone: ${user.timezone} | Time of day: ${timeOfDay}
+When greeting: use "good ${timeOfDay}" — never use morning/afternoon/evening/night based on anything other than this. At night (after 21:00 or before 05:00) avoid time-of-day greetings entirely, just say "hi" or "hey".
+
+DATE LOOKUP (use these exactly — never calculate):
+${weekMap}
+
+WEEK BOUNDARIES (critical — use these when interpreting "this week" / "next week"):
+${weekBoundaries}
+"Next Sunday" = ${nextWeekStart.toFormat('EEE d MMM')} (${nextWeekStart.toFormat('yyyy-MM-dd')})
+When fetching "next week's calendar" use the date range listed above for Next week.
+${ownerContextSection}${colleagueThreadApprovalsSection}`;
+
+  return { static: staticContent, dynamic: dynamicContent };
+}
+
+/**
+ * Back-compat wrapper. Returns the concatenated full prompt for callers that
+ * expect a single string (scripts/measure-prompt.ts). The orchestrator's hot
+ * path uses buildSystemPromptParts directly so caching can attach.
+ */
+export function buildSystemPrompt(
+  profile: UserProfile,
+  senderRole: 'owner' | 'colleague' = 'owner',
+  senderName?: string,
+  isOwnerInGroup?: boolean,
+  focusSlackIds?: Set<string>,
+  isMpim?: boolean,
+  isChannel?: boolean,
+  threadTs?: string,
+): string {
+  const parts = buildSystemPromptParts(profile, senderRole, senderName, isOwnerInGroup, focusSlackIds, isMpim, isChannel, threadTs);
+  return `${parts.static}\n\n${parts.dynamic}`;
 }

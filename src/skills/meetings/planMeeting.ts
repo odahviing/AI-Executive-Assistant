@@ -76,6 +76,10 @@ export interface PlanMeetingInput {
   // Owner-explicit override (e.g. "yes book it even though it breaks the rule")
   allowRelaxed?: boolean;
 
+  // Floating-block booking path (lunch / focus / gym). Skips the owner_busy_collision
+  // rule — floating blocks are signals, not competing time. See scheduleRules.checkSlot.
+  isFloatingBlock?: boolean;
+
   // Optional pre-fetched calendar (saves a Graph call when caller already has it)
   preloadedEvents?: CalendarEvent[];
 }
@@ -244,6 +248,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       events,
       excludeEventIds: input.existingEventId ? [input.existingEventId] : [],
       allowRelaxed: !!input.allowRelaxed,
+      isFloatingBlock: !!input.isFloatingBlock,
     });
 
     if (!ruleResult.passes) {

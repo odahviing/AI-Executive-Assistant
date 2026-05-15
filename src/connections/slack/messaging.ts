@@ -296,6 +296,14 @@ export async function setAssistantStatus(
       channel_id: params.channelId,
       thread_ts: params.threadTs,
       status: params.status,
+      // CRITICAL: pass loading_messages explicitly to suppress Slack's built-in
+      // rotating defaults ("Gathering information…", "Reviewing findings…",
+      // "Summarizing findings…", "Finding answers…"). Without this, the
+      // assistant panel's top rotating banner fills with Slack's own phrases
+      // — which read as a separate "AI activity indicator" alongside our
+      // status. Passing a single empty string gives Slack nothing to rotate,
+      // collapsing the top banner. Bottom status (params.status) is unaffected.
+      loading_messages: [''],
     });
   } catch (err) {
     // Don't escalate — status is UX polish. If it fails (wrong thread type,

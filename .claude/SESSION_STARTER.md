@@ -56,10 +56,25 @@ NOT:
 
 ---
 
-## Where we are — v2.7.4 shipped (2026-05-14)
+## Where we are — v2.7.5 shipped (2026-05-15)
 
 **Phase right now: bug bash for stability — NOT new features.**
-v2.7 had three follow-up patches after the trilogy: 2.7.1 (Phase 1 cutover-finish), 2.7.2 (Phase 2 + kill coord fast path), 2.7.3 (Slack assistant-panel surface), 2.7.4 (6 real-day bug fixes + book_floating_block → planMeeting unification). Goal is still v2.7 being the first version owner trusts as stable enough to leave alone for a week. Every regression caught here is worth more than new capability.
+v2.7 had four follow-up patches after the trilogy: 2.7.1 (Phase 1 cutover-finish), 2.7.2 (Phase 2 + kill coord fast path), 2.7.3 (Slack assistant-panel surface), 2.7.4 (6 real-day bug fixes), 2.7.5 (slot-finder reform + owner override widened + prompt cache restructure). Goal is still v2.7 being the first version owner trusts as stable enough to leave alone for a week.
+
+### What landed in v2.7.5
+
+**v2.7.5** — session of compounding improvements driven by real-day painful traces:
+- **`pickSpreadSlots` rewrite** (`src/connectors/graph/calendar.ts`). Anchor-day support — when `moving_event_ids` is set on owner-path, picker walks the original day FIRST then other days chronologically. Packs up to 2 slots per day with ≥1h gap, then spills. Same pack-then-spill shape applies to new bookings (owner direction: "I ask for ≥2 days, never 3 — fine to get 2 Sunday + 1 Monday"). New helpers `src/utils/movingAnchorDay.ts` + `src/utils/movingEventAttendees.ts` (both turn-cache-memoized).
+- **Owner override widened** (`src/utils/scheduleRules.ts`). Rule 8 `owner_busy_collision` now bypassed by `allowRelaxed=true` OR `isFloatingBlock=true`. On owner-path, `relaxed=true` also implies `ignoreAttendeeBusy=true` (attendee work hours stay enforced). Owner direction: "it's my calendar — I can double-book myself. Flag once, then book." Floating blocks coexist with meetings unconditionally — Outlook does, so does the rule check. `book_floating_block` passes `isFloatingBlock: true` + result includes `overlapping_events` so Maelle can offer to move them. `planMeeting.isFloatingBlock` plumbed through.
+- **`day_summary` diagnostic** (`src/connectors/graph/calendar.ts` + ops.ts plumbing). find_available_slots returns per-workday `{date, accepted, top_reasons}` array. `wrong_day_type` reason emitted for workweek days excluded by meetingMode (Monday=home, mode=in_person). `outside_owner_work_hours` filtered as iteration noise. Closes the "why no Monday?" fabrication pattern — paired prompt rule "EXPLAINING WHY A DAY ISN'T OFFERED" teaches narration from data.
+- **Auto-fill attendees from moving event on owner-path** (`src/skills/meetings/ops.ts`). When `moving_event_ids` set AND `senderRole='owner'`, handler reads attendees from the event and unions with explicit args. Sonnet can't shortcut around busy-checking all attendees. Colleague-path unchanged (keeps annotation behavior).
+- **Per-tool Slack status text** (`src/utils/toolStatusText.ts` new + orchestrator/index.ts). `TOOL_STATUS_TEXT` map — human-EA-voiced phrases ("Checking calendar", "Booking it", "Closing the time", "Memorizing it"). Orchestrator fires "On it" at turn start before classifyOwnerIntent.
+- **Slack rotating defaults suppressed** (`src/connections/slack/messaging.ts`). `setAssistantStatus` always passes `loading_messages: ['']` to kill Slack's built-in "Gathering information…" / "Reviewing findings…" / "Summarizing findings…" / "Finding answers…" rotation.
+- **DB-backed assistant-thread registry** (`src/connectors/slack/assistantThreads.ts` rewritten + new `assistant_threads` SQLite table in `db/client.ts`). Survives `npm run dev` restarts. First deploy: existing open panel threads need one close+reopen to register.
+- **System prompt cache restructure** (`src/core/orchestrator/systemPrompt.ts` rewritten). Pre-fix only `skillsSection` was cached; now STATIC includes identity, all rule blocks (honesty, tone, language, hebrew, channels, calendar invites, owner learning), auth, mpim rules, categories, skills section. DYNAMIC contains only state-changing content (date/time tables, prefs catalog, people memory, pending approvals). Owner-DM dynamic chunk ~10.5k → ~3.3k tokens. No content deleted, pure reordering.
+- **`CONVERGENCE IS BINDING` replaces `PROPOSED SLOTS ARE BINDING`** in `meetings.ts` — broader scope (slots, focus windows, blocks), triggers on "I already said yes", includes "trust owner's declared future state" clause.
+- **Tool description**: "onsite" / "at our office" / "in the office" mapped to `meeting_mode='in_person'`. New `ONLINE ≠ AT HOME` clause clarifies online is connection method not owner-location.
+- **New script `scripts/measure-prompts.cjs`** for prompt-bloat measurement (owner DM system prompt + tools JSON, char/token breakdown, top-N tool sizes, sidecar Sonnet calls).
 
 ### What landed in v2.7.1 → v2.7.4 (carry-forward)
 

@@ -1306,6 +1306,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
               subject: blockLabel,
               participants: [],
               allowRelaxed: true,  // override path always bypasses soft rules
+              isFloatingBlock: true,  // skip owner_busy_collision — focus/lunch blocks coexist with meetings
             });
             if (plan.action === 'confirm_override' || plan.action === 'escalate_approval') {
               // Should be unreachable with allowRelaxed=true. If somehow
@@ -1544,6 +1545,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             // so allowRelaxed stays false. If a rule fires, return error
             // pointing Sonnet to retry with confirm_outside_window=true.
             allowRelaxed: false,
+            isFloatingBlock: true,  // skip owner_busy_collision — focus/lunch blocks coexist with meetings
           });
           if (plan.action === 'confirm_override' || plan.action === 'escalate_approval') {
             return {
@@ -1603,6 +1605,27 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             timezone,
           });
 
+          // Surface any pre-existing meetings sitting inside the booked
+          // floating-block window. Floating blocks coexist with meetings by
+          // design, but the caller (Sonnet) should know so she can offer to
+          // move them: "Blocked 13:00–18:15. Your BiWeekly at 17:00 sits
+          // inside — want me to find it a new slot?"
+          const overlapping = events
+            .filter(ev => !ev.isCancelled && (ev as any).showAs !== 'free')
+            .filter(ev => {
+              const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
+              const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
+              return evStart < blockEnd && evEnd > blockStart;
+            })
+            .map(ev => ({
+              event_id: ev.id,
+              subject: ev.subject,
+              start: DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' })
+                .setZone(timezone).toFormat('HH:mm'),
+              end: DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' })
+                .setZone(timezone).toFormat('HH:mm'),
+            }));
+
           return {
             ok: true,
             created: true,
@@ -1615,6 +1638,7 @@ After setting "to_resolve": act on the owner's instructions (e.g. move a meeting
             block_name: block.name,
             booked: true,
             message: `I booked ${blockLabel} on ${date} from ${blockStart.toFormat('HH:mm')} to ${blockEnd.toFormat('HH:mm')}.`,
+            ...(overlapping.length > 0 ? { overlapping_events: overlapping } : {}),
           };
         } catch (err) {
           logger.error('book_floating_block: failed to create event', { err, blockName });

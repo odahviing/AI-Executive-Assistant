@@ -314,6 +314,29 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     preview: userMessage.slice(0, 80),
   });
 
+  // Initial assistant-panel status — fires the instant the message lands so
+  // the user sees "On it" instead of Slack's auto-default ("Gathering
+  // information…" / "Reviewing findings…") during the ~10s pre-first-tool
+  // reasoning gap (classifyOwnerIntent + initial Sonnet pass). Per-tool
+  // status text from the pre-tool hook below overwrites this as tools fire.
+  if (input.app && input.channelId && input.threadTs) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { isAssistantThread } = require('../../connectors/slack/assistantThreads') as
+        typeof import('../../connectors/slack/assistantThreads');
+      if (isAssistantThread({ channelId: input.channelId, threadTs: input.threadTs })) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { setAssistantStatus } = require('../../connections/slack/messaging') as
+          typeof import('../../connections/slack/messaging');
+        void setAssistantStatus(input.app, input.profile.assistant.slack.bot_token, {
+          channelId: input.channelId,
+          threadTs: input.threadTs,
+          status: 'On it',
+        });
+      }
+    } catch (_) { /* helper failure is non-fatal */ }
+  }
+
   // v2.2.3 — clear the proactive-ping anti-spam lock when a colleague sends
   // an inbound message. Their reply (to anything — the prior proactive ping
   // itself, a task-driven DM Maelle sent, or a fresh ask of their own) is the
@@ -1158,11 +1181,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         }
       }
 
-      // v2.7.3 — "Working…" indicator in Slack assistant-panel threads.
-      // Fires before each tool call so the user sees activity instead of
-      // silence during multi-tool turns. No-op when the current thread
-      // wasn't opened via the assistant panel (regular DM gets nothing —
-      // Slack API rejects, helper swallows).
+      // Slack assistant-panel status indicator. Fires before each tool call
+      // with per-tool human-EA-voiced text (see utils/toolStatusText). Tools
+      // without a mapping get '' which actively clears Slack's auto-default
+      // ("Gathering information…") — observation / memory tools stay silent.
+      // No-op when the current thread wasn't opened via the assistant panel.
       if (input.app && input.channelId && input.threadTs) {
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1172,11 +1195,14 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { setAssistantStatus } = require('../../connections/slack/messaging') as
               typeof import('../../connections/slack/messaging');
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { statusForTool } = require('../../utils/toolStatusText') as
+              typeof import('../../utils/toolStatusText');
             // Fire-and-forget — never await; status is UX polish, not load-bearing.
             void setAssistantStatus(input.app, input.profile.assistant.slack.bot_token, {
               channelId: input.channelId,
               threadTs: input.threadTs,
-              status: 'Working…',
+              status: statusForTool(toolUse.name),
             });
           }
         } catch (_) { /* helper failure is non-fatal */ }

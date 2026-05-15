@@ -21,6 +21,8 @@
  *                                   (bypassed when allow_relaxed = true)
  *   7. travel_buffer_collision    — category.requires_travel_buffer & adjacent meeting too tight
  *   8. owner_busy_collision       — owner has a hard conflict (delegated to caller's getCalendarEvents)
+ *                                   (bypassed when allow_relaxed = true OR isFloatingBlock = true —
+ *                                    owner can override his own time; signals coexist with meetings)
  *
  * NOTE on between-meeting buffer (v2.7.1) — the 5-min buffer is NOT enforced
  * as a collision rule. The allowed durations (10/25/40/55) and aligned starts
@@ -54,6 +56,16 @@ export interface RuleCheckInput {
   events: CalendarEvent[];          // owner's events covering at least slot's week
   excludeEventIds?: string[];       // for move: drop the moving event from collision detection
   allowRelaxed?: boolean;           // owner override mode — bypass soft rules
+  /**
+   * Floating-block booking path (lunch / focus / gym / etc). When true, rule 8
+   * (owner_busy_collision) is skipped — floating blocks are SIGNALS that
+   * coexist with meetings in Outlook, not competing slots. Owner direction:
+   * Outlook doesn't refuse overlapping events; we shouldn't either when
+   * booking a floating block. The overlap surfaces elsewhere (check_calendar_health
+   * double_booking issues, or the book_floating_block caller can read overlapping
+   * events from the result and offer to move them).
+   */
+  isFloatingBlock?: boolean;
 }
 
 export interface RuleCheckResult {
@@ -237,18 +249,28 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   }
 
   // ── (8) hard busy collision ─────────────────────────────────────────────
-  for (const ev of input.events) {
-    if (ev.isCancelled) continue;
-    if (excludeSet.has(ev.id)) continue;
-    if ((ev as any).showAs === 'free') continue;  // free/tentative blocks don't collide
-    const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
-    const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
-    if (evStart < slotEnd && evEnd > slotStart) {
-      return {
-        passes: false,
-        violation_kind: 'owner_busy_collision',
-        violation_label: `${profile.user.name.split(' ')[0]} is already busy at this time ("${ev.subject ?? 'meeting'}" ${evStart.setZone(tz).toFormat('HH:mm')}–${evEnd.setZone(tz).toFormat('HH:mm')})`,
-      };
+  // Owner direction: it's HIS calendar. Maelle can flag a conflict ONCE
+  // (confirm_override path), but after he approves she just books. The owner
+  // is allowed to double-book himself any time he wants. Two carve-outs:
+  //   • `allowRelaxed: true` — owner explicit override after a flag.
+  //   • `isFloatingBlock: true` — focus / lunch / gym blocks are SIGNALS that
+  //     coexist with meetings by design; never block them on owner_busy.
+  // Regular create_meeting still flags overlaps first time (allowRelaxed=false)
+  // so Maelle doesn't silently double-book a meeting with attendees.
+  if (!input.allowRelaxed && !input.isFloatingBlock) {
+    for (const ev of input.events) {
+      if (ev.isCancelled) continue;
+      if (excludeSet.has(ev.id)) continue;
+      if ((ev as any).showAs === 'free') continue;  // free/tentative blocks don't collide
+      const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
+      const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
+      if (evStart < slotEnd && evEnd > slotStart) {
+        return {
+          passes: false,
+          violation_kind: 'owner_busy_collision',
+          violation_label: `${profile.user.name.split(' ')[0]} is already busy at this time ("${ev.subject ?? 'meeting'}" ${evStart.setZone(tz).toFormat('HH:mm')}–${evEnd.setZone(tz).toFormat('HH:mm')})`,
+        };
+      }
     }
   }
 

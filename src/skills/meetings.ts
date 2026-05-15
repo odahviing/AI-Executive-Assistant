@@ -334,9 +334,20 @@ SMART-SKIP THE ASK: when at least one attendee is in a different timezone than $
 
 Then YOU pick the right meeting_mode based on what they said:
   • "online" / "Teams" / "Zoom" / "call" / "video" → meeting_mode='online'
-  • "in person at the office" / "in person" with no other venue → meeting_mode='in_person'
+  • "in person at the office" / "in person" with no other venue / "onsite" / "at our office" / "from the office" / "in the office" → meeting_mode='in_person'
   • "in person at <somewhere else>" / "at the client" / "their place" / "offsite" / "I need to join their meeting" → meeting_mode='custom' AND pass travel_buffer_minutes from their answer (one-way minutes)
   • "either" / "whatever works" / "doesn't matter" → meeting_mode='either'
+
+ONLINE ≠ "AT HOME". meeting_mode='online' is a scheduling flag — it tells the tool the meeting does NOT require physical presence at the office, so all day types are searched. It does NOT mean ${profile.user.name.split(' ')[0]} attends from home. An online meeting can land on an office day; he may be at the office while joining via Teams/Zoom. Never frame online and in-person as mutually exclusive places — they describe the meeting's connection method, not where he sits.
+
+EXPLAINING WHY A DAY ISN'T OFFERED. The tool returns a \`day_summary\` array with one entry per workday touched: \`{ date, accepted, top_reasons }\`. When the user pushes back ("what about Monday?" / "nothing on Tuesday?"), look up that date in \`day_summary\` and narrate the actual reason:
+  • \`accepted: 0, top_reasons: ['owner_busy_collision', 'focus_time_office']\` → "Monday is fully booked — back-to-back meetings and a focus block."
+  • \`accepted: 0, top_reasons: ['wrong_day_type']\` → "Monday is a home day, in-person needs an office day."
+  • \`accepted: 0, top_reasons: ['category_per_day']\` → "Already at the daily cap for that category."
+  • \`accepted: >0\` → the day HAS options; if Sonnet's spread picker didn't surface one, say "there are slots that day, want me to pull them?"
+  • Date not in \`day_summary\` at all → "I didn't search that day — it's outside the window I checked."
+
+NEVER fabricate a reason. Don't say "day off" / "not a workday" unless \`top_reasons\` is \`['wrong_day_type']\`. The data has the truth — use it.
 
 The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
         input_schema: {
@@ -1990,7 +2001,7 @@ Don't summarize unresolved as resolved. Use "booked / on the calendar" for confi
 
 Use the exact title and time from get_calendar results. No rephrasing, no combining details from different meetings.
 
-PROPOSED SLOTS ARE BINDING. When you offered specific times ("Mon 27 Apr at 10:30, Wed 29 Apr at 13:15") and ${firstName} says "book", "go", "yes", "do it", "book all" — call create_meeting with those EXACT slot times verbatim. Don't re-run find_available_slots, don't round to a different quarter, don't search for "better" alternatives. The conversation converged.
+CONVERGENCE IS BINDING. When you've narrowed to a concrete plan — specific slot times, a focus window ("13:00 until home time"), a block to book — and ${firstName} says "book" / "go" / "yes" / "do it" / "I already said yes" — call the appropriate tool with those exact values verbatim. Don't re-run find_available_slots, don't round, don't search for "better." Don't fire another "want me to...?" — the conversation converged. If ${firstName} declared a future state as part of the ask ("the BiWeekly will be moved, block until home time"), treat that state as resolved for the current action: plan around it as if done, then either handle the side-task yourself or ask once where the displaced event should land.
 
 REPAIR WITH MOVE, NOT CREATE. When meetings are misplaced (wrong week/day/time), call move_meeting on the existing event id. NEVER create_meeting at the new slot — that produces a duplicate next to the misplaced original. Get existing event ids via get_calendar first if needed.
 

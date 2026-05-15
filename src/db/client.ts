@@ -708,6 +708,17 @@ function initSchema(db: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_cron_next_fire ON cron_schedules(next_fire_at) WHERE enabled = 1;
+
+    -- Slack assistant-panel thread registry. Slack fires assistant_thread_started
+    -- only on first open of a panel thread; we persist so registrations survive
+    -- process restarts. Otherwise the in-memory Map drops and existing open
+    -- panel threads stop getting setStatus calls until the user closes/re-opens.
+    CREATE TABLE IF NOT EXISTS assistant_threads (
+      channel_id      TEXT NOT NULL,
+      thread_ts       TEXT NOT NULL,
+      registered_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (channel_id, thread_ts)
+    );
   `);
 
   // ── v2.7.0 — legacy bridge columns ────────────────────────────────────────

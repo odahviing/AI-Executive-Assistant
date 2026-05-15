@@ -151,62 +151,76 @@ function toEndOfDayLocal(dateStr: string, timezone: string): string {
 }
 
 /**
- * v2.7.0 spread rules:
+ * Spread rules:
  *   • Max 3 total
- *   • Max 2 per day
- *   • Every pair of returned slots ≥1h apart
+ *   • Max 2 per day (with ≥1h gap between same-day picks)
  *   • ≥2 unique days when returning 3 (no all-same-day)
+ *
+ * Day walk order:
+ *   • If `anchorDay` (yyyy-MM-dd) is set and has candidates → walk that day
+ *     first, then the rest of the days in chronological order. This is the
+ *     "move" shape — prefer same-day options for the meeting being moved,
+ *     spill to other days to satisfy the ≥2 unique days rule.
+ *   • Otherwise → pure chronological. The "new booking" shape — packs the
+ *     earliest day's candidates up to 2, then spills to the next day.
+ *
+ * Within each day: walk the day's candidates chronologically, take up to 2
+ * with ≥1h gap from every already-chosen slot.
  *
  * Returns 1 or 2 slots if that's all the candidate list yields — caller's
  * search window may legitimately be narrow (e.g. owner asked "today between
  * 14:00 and 17:00"). Don't widen silently; just return what's there.
  *
- * Order: chronological.
+ * Output: chronological regardless of internal day walk order.
  */
 export function pickSpreadSlots(
   slots: Array<{ start: string }>,
   timezone: string,
   count = 3,
+  anchorDay?: string,
 ): string[] {
   const MIN_GAP_HOURS = 1;
   const MAX_PER_DAY = 2;
-  const chosen: string[] = [];
-  const chosenDts: DateTime[] = [];
-  const perDayCount = new Map<string, number>();
 
-  // Pass 1: one slot per day, in chronological order.
-  const seenDays = new Set<string>();
-  for (const slot of slots) {
-    const dt = DateTime.fromISO(slot.start).setZone(timezone);
+  // Group candidates by local day.
+  const byDay = new Map<string, Array<{ start: string; dt: DateTime }>>();
+  for (const s of slots) {
+    const dt = DateTime.fromISO(s.start).setZone(timezone);
     const day = dt.toFormat('yyyy-MM-dd');
-    if (!seenDays.has(day)) {
-      chosen.push(slot.start);
-      chosenDts.push(dt);
-      seenDays.add(day);
-      perDayCount.set(day, 1);
-      if (chosen.length >= count) break;
-    }
+    let bucket = byDay.get(day);
+    if (!bucket) { bucket = []; byDay.set(day, bucket); }
+    bucket.push({ start: s.start, dt });
   }
 
-  // Pass 2: allow a second slot on a day already represented IF it's ≥1h
-  // from every other chosen slot AND the day has fewer than MAX_PER_DAY.
-  if (chosen.length < count) {
-    for (const slot of slots) {
-      if (chosen.includes(slot.start)) continue;
-      const dt = DateTime.fromISO(slot.start).setZone(timezone);
-      const day = dt.toFormat('yyyy-MM-dd');
-      if ((perDayCount.get(day) ?? 0) >= MAX_PER_DAY) continue;
+  // Chronological day list. Slots from findAvailableSlots are already
+  // chronological so per-day buckets are too; just sort the day keys.
+  const allDays = [...byDay.keys()].sort();
+  const dayOrder = (anchorDay && byDay.has(anchorDay))
+    ? [anchorDay, ...allDays.filter(d => d !== anchorDay)]
+    : allDays;
+
+  const chosen: string[] = [];
+  const chosenDts: DateTime[] = [];
+
+  for (const day of dayOrder) {
+    if (chosen.length >= count) break;
+    const bucket = byDay.get(day)!;
+    let perDay = 0;
+    for (const { start, dt } of bucket) {
+      if (chosen.length >= count) break;
+      if (perDay >= MAX_PER_DAY) break;
       const tooClose = chosenDts.some(c => Math.abs(dt.diff(c, 'hours').hours) < MIN_GAP_HOURS);
       if (tooClose) continue;
-      chosen.push(slot.start);
+      chosen.push(start);
       chosenDts.push(dt);
-      perDayCount.set(day, (perDayCount.get(day) ?? 0) + 1);
-      if (chosen.length >= count) break;
+      perDay++;
     }
   }
 
   // HARD constraint: when returning 3, require ≥2 unique days.
-  // If all 3 collapsed to one day for some reason, drop to 2.
+  // If only one day had candidates and we packed 2 from it, we already
+  // returned 2 (loop above exits). If somehow 3 collapsed to one day,
+  // drop to 2.
   if (chosen.length >= 3) {
     const uniqueDays = new Set(chosenDts.map(dt => dt.toFormat('yyyy-MM-dd')));
     if (uniqueDays.size < 2) {
@@ -214,7 +228,7 @@ export function pickSpreadSlots(
     }
   }
 
-  // Chronological order in output.
+  // Output chronological regardless of day walk order.
   chosen.sort((a, b) => DateTime.fromISO(a).toMillis() - DateTime.fromISO(b).toMillis());
   return chosen;
 }
@@ -500,6 +514,19 @@ export async function findAvailableSlots(params: {
   diagnosticsOut?: {
     rejectedCounts?: Record<string, number>;
     rejectedExamples?: Record<string, string[]>;
+    /**
+     * Per-day summary across the search window. One entry per workday touched
+     * by the slot walker (off-workweek days like Friday/Saturday are omitted).
+     * `accepted` is the count of slots that survived all rules for that day;
+     * `top_reasons` is the top 2 distinct rejection reasons ordered by count,
+     * empty when the day accepted ≥1 slot. Used by Sonnet to narrate honestly
+     * when the user asks "why no Monday?" — instead of fabricating.
+     */
+    daySummary?: Array<{
+      date: string;
+      accepted: number;
+      top_reasons: string[];
+    }>;
   };
 }): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other' }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
@@ -831,11 +858,30 @@ export async function findAvailableSlots(params: {
     // rejected slots per reason for grepping in logs.
     const rejectedCounts: Record<string, number> = {};
     const rejectedExamples: Record<string, string[]> = {};
+    // Per-day reason aggregation. Same trackReject feeds both global counts
+    // and per-day. The per-day map drives the daySummary that's surfaced to
+    // Sonnet via diagnosticsOut so she can narrate "Monday was fully booked"
+    // instead of fabricating "Monday is a day off."
+    const dayReasons = new Map<string, Map<string, number>>();
     const trackReject = (reason: string, slotIso: string) => {
       rejectedCounts[reason] = (rejectedCounts[reason] ?? 0) + 1;
       if (!rejectedExamples[reason]) rejectedExamples[reason] = [];
       if (rejectedExamples[reason].length < 5) rejectedExamples[reason].push(slotIso);
+      const day = slotIso.slice(0, 10);  // yyyy-MM-dd prefix of ISO
+      let dayMap = dayReasons.get(day);
+      if (!dayMap) { dayMap = new Map(); dayReasons.set(day, dayMap); }
+      dayMap.set(reason, (dayMap.get(reason) ?? 0) + 1);
     };
+
+    // All workweek days regardless of meetingMode filter — used to detect
+    // when a workday was excluded specifically because of the requested mode
+    // (e.g. Monday is a home day; meetingMode='in_person' excludes it). We
+    // surface this as `wrong_day_type` in daySummary so Sonnet can narrate
+    // "Monday is a home day, in-person needs an office day" instead of
+    // fabricating "Monday is a day off."
+    const allWorkweekDays: string[] = profile
+      ? [...officeDayNames, ...homeDayNames]
+      : workDays;
 
     let cursor = DateTime.fromISO(params.searchFrom, { zone: params.timezone }).toJSDate();
     while (cursor.getTime() + durationMs <= searchEnd.getTime()) {
@@ -844,6 +890,13 @@ export async function findAvailableSlots(params: {
       const dayKey = cursorDt.toFormat('yyyy-MM-dd');
 
       if (!workDays.includes(dayName)) {
+        // Track once per day when this workweek day was excluded by meetingMode
+        // (e.g. home day with mode='in_person'). Pure off-workweek days
+        // (Fri/Sat for Israel) skip silently — they're not interesting to
+        // surface.
+        if (allWorkweekDays.includes(dayName) && !dayReasons.has(dayKey)) {
+          dayReasons.set(dayKey, new Map([['wrong_day_type', 1]]));
+        }
         cursor = new Date(cursor.getTime() + step);
         continue;
       }
@@ -1112,6 +1165,41 @@ export async function findAvailableSlots(params: {
       if (params.diagnosticsOut) {
         params.diagnosticsOut.rejectedCounts = rejectedCounts;
         params.diagnosticsOut.rejectedExamples = rejectedExamples;
+
+        // Per-day summary for Sonnet's narration. accepted=count of slots
+        // surviving all rules per day; top_reasons=top 2 rejection causes when
+        // accepted=0. `outside_owner_work_hours` is iteration noise (every
+        // quarter-hour outside work hours gets tracked) — excluded from
+        // top_reasons.
+        const IRRELEVANT_FOR_DAY = new Set(['outside_owner_work_hours']);
+        const acceptedPerDay = new Map<string, number>();
+        for (const c of candidates) {
+          const day = c.start.slice(0, 10);
+          acceptedPerDay.set(day, (acceptedPerDay.get(day) ?? 0) + 1);
+        }
+        const allDays = new Set<string>([...acceptedPerDay.keys(), ...dayReasons.keys()]);
+        const daySummary = [...allDays].sort().map(date => {
+          const accepted = acceptedPerDay.get(date) ?? 0;
+          let top_reasons: string[] = [];
+          if (accepted === 0) {
+            const reasons = dayReasons.get(date);
+            if (reasons) {
+              const ranked = [...reasons.entries()]
+                .filter(([r]) => !IRRELEVANT_FOR_DAY.has(r))
+                .sort((a, b) => b[1] - a[1])
+                .map(([r]) => r);
+              top_reasons = ranked.slice(0, 2);
+              if (top_reasons.length === 0 && reasons.size > 0) {
+                // Fallback: only noise-class reasons existed (rare). Use the
+                // first one rather than returning empty.
+                const first = reasons.keys().next().value;
+                if (first) top_reasons = [first];
+              }
+            }
+          }
+          return { date, accepted, top_reasons };
+        });
+        params.diagnosticsOut.daySummary = daySummary;
       }
     }
 
