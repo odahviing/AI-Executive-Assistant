@@ -50,17 +50,19 @@ The 2.7.5 cache restructure pushed ~7k tokens from dynamic to static — good wi
 
 Build order — lowest-risk first. Each module ships as its own version bump (patch).
 
-| # | Module | Lines | Token cut | Risk |
-|---|---|---|---|---|
-| D | Auto-resolve thread-bound vague-yes | ~120 | ~150 | low |
-| A | Voice/tone post-draft scrubber | ~250 | ~450 | low |
-| B | Hebrew output processor | ~200 | ~250 | low |
-| F | Honesty rules → extended claimChecker | ~200 | ~625 | medium |
-| E | Length / repetition validator | ~120 | ~375 | medium |
-| C | Refusal humanizer extension | ~150 | ~375 | medium |
-| G | Intent-aware tool selection | ~250 | ~11,000 | **high** |
+| # | Module | Lines | Token cut | Risk | Status |
+|---|---|---|---|---|---|
+| D | Auto-resolve thread-bound vague-yes | ~120 | ~150 | low | **✅ shipped 2.7.7** |
+| A | Voice/tone post-draft scrubber | ~250 | ~450 | low | **TODO** |
+| B | Hebrew output processor | ~200 | ~250 | low | **TODO** |
+| F | Honesty rules → extended claimChecker | ~200 | ~625 | medium | **✅ shipped 2.8.1** |
+| E | Length / repetition validator | ~120 | ~375 | medium | **✅ partial shipped 2.8.1** (re_asked_after_convergence + re_asked_own_question booleans; too_long_for_context deliberately skipped) |
+| C | Refusal humanizer extension | ~150 | ~375 | medium | **✅ shipped 2.8.1** (humanGate MECHANICAL REFUSAL section) |
+| G | Intent-aware tool selection | ~250 | ~11,000 | **high** | **✅ shipped 2.7.7** |
 
-**Total expected reduction: ~13,200 tokens per turn (~26% of the ~50,900 baseline).** To go further than 26% would require consolidating judgment-only rules (LANGUAGE / AUTHORIZATION colleague-side / ownerLearningSection) — separate decision when we get there.
+**Remaining: Modules A + B only.** Combined estimate: ~450 lines, ~700 token cut. Both low risk.
+
+**Total expected reduction across all 7 modules: ~13,200 tokens per turn (~26% of the ~50,900 baseline).** To go further than 26% would require consolidating judgment-only rules (LANGUAGE / AUTHORIZATION colleague-side / ownerLearningSection) — separate decision when we get there.
 
 ### Module D — Auto-resolve thread-bound vague-yes (~120 lines, ~150 tokens cut)
 

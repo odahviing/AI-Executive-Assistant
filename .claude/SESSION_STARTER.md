@@ -56,20 +56,20 @@ NOT:
 
 ---
 
-## Where we are — v2.8.1 shipped (2026-05-16)
+## Where we are — v2.8.1 shipped (2026-05-16), hotfix commit d02ccbb on top
 
-**Phase right now:** v2.8.x is the prompt-reduction project ([#95](https://github.com/odahviing/AI-Executive-Assistant/issues/95)) + opportunistic architecture cleanup. v2.8.0 was the closing marker for the 2.7 wave; v2.8.1 ships Vertex prep + multi-window work hours + the next batch of code-replaced prompt rules (Modules F + E partial + C).
+**Phase right now:** v2.8.x is the prompt-reduction project ([#95](https://github.com/odahviing/AI-Executive-Assistant/issues/95)) + opportunistic architecture cleanup. v2.8.0 closed the 2.7 wave as a stability marker (no new code over 2.7.7). v2.8.1 shipped Vertex prep, multi-window work hours, and four prompt-reduction modules; plus a follow-up hotfix (d02ccbb) for a stray brace + three missed work-hours migrations.
 
 **v2.8.1 highlights:**
 - **Vertex prep** — `LLM_PROVIDER=anthropic|vertex` env var, factory `getAnthropicClient()` swaps client. 31 call sites migrated, Vertex SDK lazy-loaded.
-- **Multi-window work hours** — new canonical `schedule.work_hours: { Tuesday: ["09:00-15:30", "21:30-23:59"], ... }` yaml field. Legacy `office_days.hours_start/end` accepted on input, normalized + stripped. `office_days`/`home_days` become days-only classification.
+- **Multi-window work hours** — new canonical `schedule.work_hours: { Tuesday: ["09:00-15:30", "21:30-23:59"], ... }` yaml field. Legacy `office_days.hours_start/end` accepted on input, normalized + stripped. `office_days`/`home_days` become days-only classification. Slot finder, scheduleRules, brief, coord, ops.ts `buildOutOfHoursBusy`, `calendarHealth` double-booking exclusion all multi-window aware. **Owner action needed if split-shift Tuesday wanted**: add `work_hours` map to `config/users/idan.yaml` (legacy single-range Tuesday is synthesized by default).
 - **Module F + E partial + C shipped** — claim-checker extended with 6 new honesty/repetition booleans (RULES 2b/3/5b/7/9 + self-repetition), humanGate extended with MECHANICAL REFUSAL section. HONESTY RULES 1/2/2b/2c/2d/3/5b/9 + REFUSAL PHRASING block deleted from prompt (kept 4/5/7/8). ~900 cached tokens cut.
 - **CALENDAR INVITES rule trimmed** — Maelle no longer says "Outlook will send the invite"; just "Done" / "Booked."
 - **Recovery pass deleted (#41)** — second Sonnet call when no text post-tool-use; verbMap tool-grounded fallback stays as deterministic backstop.
 
-**Phase right now:** v2.7 closed out as a stability wave. v2.8.0 is a clean baseline marking the end of the 2.7 line — no new code over 2.7.7, just a release-marker bump because "enough massive changes accumulated in 2.7" (owner direction).
+**Next phase: prompt-reduction project ([#95](https://github.com/odahviing/AI-Executive-Assistant/issues/95)) — only Modules A and B remain.** A = voice/tone post-draft scrubber (em-dashes, banned words, deliberation markers). B = Hebrew output processor (markdown stripping, name_he substitution, gendered-form check). Plan at [.claude/PROJECT_REDUCE_PROMPTS.md](.claude/PROJECT_REDUCE_PROMPTS.md). Modules C/D/E/F/G all done.
 
-**Next phase: prompt-reduction project ([#95](https://github.com/odahviing/AI-Executive-Assistant/issues/95)).** Modules G + D shipped in 2.7.7. Modules A (voice/tone scrubber), B (Hebrew processor), C (refusal humanizer), E (length/repetition validator), F (extended claimChecker) are ahead. Plan at [.claude/PROJECT_REDUCE_PROMPTS.md](.claude/PROJECT_REDUCE_PROMPTS.md).
+**⚠️ Typecheck gotcha (caught in 2.8.1 hotfix).** If running from a Claude Code worktree under `.claude/worktrees/`, `npm run typecheck` checks the worktree's stale source — NOT the main repo. The worktree was frozen at v2.7.4 and its `npm` invocation passes there. To get real coverage, run project-mode tsc against the main repo directly: `npx tsc --noEmit -p tsconfig.json` from `E:/Code/Maelle`. The 2.8.1 ship was missing a stray `}` for hours until ts-node-dev failed at boot — worktree typecheck had passed every step.
 
 **The 2.7 line (8 versions) shipped:**
 - 2.7.0 — trilogy: requests spine + planMeeting engine + slot finder reform
