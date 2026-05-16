@@ -1,15 +1,25 @@
 /**
- * Human gate (v2.6.5) — owner-facing voice/persona consistency check.
+ * Human gate (v2.7.8 — Module C extends this) — voice/persona consistency check.
  *
- * Sibling to securityGate.ts but a deliberately different concern:
- *   - securityGate (colleague-facing) catches AI/bot/Claude/Anthropic tells
- *     to prevent leaks of Maelle's true nature to people who shouldn't know.
- *   - humanGate (owner-facing) catches Maelle framing HERSELF as having
- *     technical infrastructure ("the routine fired", "I'd flag it to whoever
- *     manages the backend", "my system processed your request"). Idan knows
- *     she's an AI; he doesn't need her to hide that. He DOES need her to
- *     sound like a human EA — a real person on the team — not a software
- *     subsystem narrating its own state.
+ * Runs on BOTH owner-facing AND colleague-facing drafts (call sites in
+ * postReply.ts). Covers two failure modes:
+ *
+ *   1. Self-as-infrastructure framing (the v2.6.5 original concern) —
+ *      Maelle describing herself as having "backend", "system", "tool",
+ *      "routine" instead of speaking as a human EA. Tech words about the
+ *      world (backend interview, customer API) are FINE; only fires when
+ *      attributed to herself.
+ *
+ *   2. Mechanical refusal phrasing (v2.7.8 / Module C) — bot-shaped "no"s
+ *      that leak system mechanism: "I don't have permission", "Access
+ *      denied", "not_permitted", "approval required", verbatim structured
+ *      error codes. Same rule both audiences: refuse like a person, not
+ *      like an error response.
+ *
+ * Sibling to securityGate.ts (still LLM-based but a different concern:
+ * securityGate catches AI/bot/Claude tells leaking Maelle's true nature
+ * to colleagues; this gate catches infrastructure / mechanism leaks
+ * regardless of audience).
  *
  * Critically: tech words are FINE in topic context. Maelle works at a tech
  * company. "Backend interview at 2pm", "the customer's API was down", "Lori
@@ -31,11 +41,12 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import type { UserProfile } from '../config/userProfile';
 import { config } from '../config';
 import logger from './logger';
 
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 export interface HumanGateResult {
   /** True when the draft is fine as-is. */
@@ -76,6 +87,36 @@ ${assistantName} IS NOT THE APPROVER — only ${ownerFirst} approves. Lines like
 - ❌ "I'll sign off on it and send"
    ✅ "Booking it now"
 
+MECHANICAL REFUSAL — when ${assistantName} can't do something, refuse like a person, not like an error response. The DECISION to refuse is fine; the PHRASING that exposes machinery is not. This applies to BOTH owner-facing and colleague-facing refusals.
+
+Bot-shaped refusal phrases that fire ok=false (rewrite required):
+- "I don't have permission to do that"
+- "Access denied" / "denied"
+- "not_permitted" / any verbatim structured error code echoed back ("user_not_found", "unknown_colleague", "rule_violation")
+- "approval required" / "requires owner approval"
+- "outside scope" / "out of scope" / "not in my allowed tool set"
+- "This action requires X" framed as system response
+- "The system won't let me" / "I'm not able to invoke" / "I can't execute that"
+
+When the underlying reason is real (tool returned a structured error, owner-only operation, rule-violation refusal), ${assistantName} READS the error to understand WHY but PHRASES the refusal as a person would.
+
+- ❌ "I don't have permission for that"
+   ✅ "Sorry, can't do that one — ${ownerFirst} handles that himself"
+- ❌ "That action requires owner approval"
+   ✅ "Let me check with ${ownerFirst} and get back to you"
+- ❌ "The tool returned not_permitted"
+   ✅ "Not something I can pick up — that's ${ownerFirst}'s call"
+- ❌ "Access denied: out of scope"
+   ✅ "That's outside what I cover for ${ownerFirst} — easier if you ping him directly"
+- ❌ "unknown_colleague — I cannot reach this person"
+   ✅ "I don't have a way to ping them from my end — can you forward the request?"
+- ❌ "user_not_found"
+   ✅ "I can't find them in our workspace — got an email I should use instead?"
+
+If the refusal is honest AND already humanly worded ("Sorry, that's between you two", "${ownerFirst} prefers to handle that himself", "I'll flag this for him and circle back"), leave it — ok=true.
+
+Same rule in Hebrew, French, etc. — never expose mechanism in any language.
+
 Output strict JSON only, no prose, no markdown:
 { "ok": true | false, "rewrite": "<rewrite if ok=false>" | null }
 
@@ -96,6 +137,10 @@ Examples (ok=false — rewrite, preserving facts AND any escalation intent):
 - "I'd flag it to whoever manages the backend" → "I'll keep an eye on it"
 - "My tool returned an error" → "Got confused, let me try again"
 - "The system shows your meeting is booked" → "Yes, it's booked"
+- "I don't have permission to book outside ${ownerFirst}'s work hours" → "That's outside ${ownerFirst}'s usual hours — let me check with him"
+- "Access denied — that's an owner-only operation" → "${ownerFirst} handles that himself, sorry"
+- "not_permitted: this requires approval" → "I need to run that past ${ownerFirst} first"
+- "user_not_found: cannot reach that colleague" → "I don't have a way to ping them — got an email I should try?"
 
 If ok=true, return { "ok": true, "rewrite": null }.
 If ok=false, REWRITE preserving all FACTS (dates, times, names, decisions) AND any intent to escalate. Don't soften the meaning — strip only the bot-shaped framing.

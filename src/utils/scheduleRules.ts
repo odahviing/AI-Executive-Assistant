@@ -116,18 +116,24 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   }
 
   // ── (5) working hours ───────────────────────────────────────────────────
-  // Day-specific hours: office_days vs home_days carry independent ranges.
+  // v2.8.1 — multi-window aware. Slot must fit fully inside ANY of the
+  // owner's work-hour windows for the day (e.g. Tuesday split into
+  // 09:00-15:30 + 21:30-23:59 — a 21:45-22:10 slot is valid).
   if (!input.allowRelaxed) {
-    const sched = officeDays.includes(dayName) ? profile.schedule.office_days : profile.schedule.home_days;
-    const [hsH, hsM] = (sched.hours_start as string).split(':').map(Number);
-    const [heH, heM] = (sched.hours_end as string).split(':').map(Number);
-    const windowStart = slotStart.set({ hour: hsH, minute: hsM, second: 0, millisecond: 0 });
-    const windowEnd = slotStart.set({ hour: heH, minute: heM, second: 0, millisecond: 0 });
-    if (slotStart < windowStart || slotEnd > windowEnd) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getOwnerWorkHoursForDay } = require('./workHours') as typeof import('./workHours');
+    const windows = getOwnerWorkHoursForDay(profile, dayName);
+    const slotStartMin = slotStart.hour * 60 + slotStart.minute;
+    const slotEndMin = slotEnd.hour * 60 + slotEnd.minute;
+    const fits = windows.some(w => slotStartMin >= w.startMin && slotEndMin <= w.endMin);
+    if (!fits) {
+      const windowsLabel = windows.length === 0
+        ? '(no work hours configured for this day)'
+        : windows.map(w => `${String(Math.floor(w.startMin/60)).padStart(2,'0')}:${String(w.startMin%60).padStart(2,'0')}–${String(Math.floor(w.endMin/60)).padStart(2,'0')}:${String(w.endMin%60).padStart(2,'0')}`).join(', ');
       return {
         passes: false,
         violation_kind: 'outside_working_hours',
-        violation_label: `Slot ${slotStart.toFormat('HH:mm')}–${slotEnd.toFormat('HH:mm')} is outside working hours (${sched.hours_start}–${sched.hours_end})`,
+        violation_label: `Slot ${slotStart.toFormat('HH:mm')}–${slotEnd.toFormat('HH:mm')} is outside working hours (${windowsLabel})`,
       };
     }
   }

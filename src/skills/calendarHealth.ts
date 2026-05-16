@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import type { Skill, SkillContext } from './types';
 import type { UserProfile } from '../config/userProfile';
 import { DateTime } from 'luxon';
@@ -44,7 +45,7 @@ async function classifyEventCategory(
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const Anthropic = (require('@anthropic-ai/sdk') as typeof import('@anthropic-ai/sdk')).default;
-    const client = new Anthropic();
+    const client = getAnthropicClient();
     const resp = await client.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 200,
@@ -525,17 +526,16 @@ Status:
                 ?? profile.meetings.free_time_per_office_day_hours);
             const freeTimeThresholdMin = freeTimeThresholdHours * 60;
 
-            const hoursStart = isOffice
-              ? profile.schedule.office_days.hours_start
-              : profile.schedule.home_days.hours_start;
-            const hoursEnd = isOffice
-              ? profile.schedule.office_days.hours_end
-              : profile.schedule.home_days.hours_end;
-            const [sh, sm] = hoursStart.split(':').map(Number);
-            const [eh, em] = hoursEnd.split(':').map(Number);
-            const workStartMin = sh * 60 + sm;
-            const workEndMin = eh * 60 + em;
-            const workTotalMin = workEndMin - workStartMin;
+            // v2.8.1 — multi-window aware. Read all of today's windows;
+            // workStart = earliest window start, workEnd = latest window end,
+            // workTotal = sum of window durations (matters for split shifts).
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { getOwnerWorkHoursForDay, totalWorkMinutes } = require('../utils/workHours') as
+              typeof import('../utils/workHours');
+            const windows = getOwnerWorkHoursForDay(profile, dayName);
+            const workStartMin = windows.length > 0 ? windows[0].startMin : 9 * 60;
+            const workEndMin = windows.length > 0 ? windows[windows.length - 1].endMin : 18 * 60;
+            const workTotalMin = totalWorkMinutes(windows) || (workEndMin - workStartMin);
 
             // Compute free time in work hours
             const busyInWork = nonAllDay

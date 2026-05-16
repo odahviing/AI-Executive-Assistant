@@ -24,10 +24,11 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import logger from './logger';
 
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 export interface ClaimCheckInput {
   reply: string;
@@ -43,6 +44,14 @@ export interface ClaimCheckInput {
     isMpim: boolean;
     participantSlackIds: string[];   // all non-bot member IDs in the MPIM
   };
+  // v2.7.8 (Module F) — additional honesty checks. Pass these on the owner-
+  // path so the checker can detect:
+  //   - RULE 2b: draft asks about a fact Maelle already stated in priorAssistantReply
+  //   - RULE 5b: owner corrected Maelle (visible in currentUserMessage) and the
+  //     draft invents a new explanation instead of admitting
+  // Both optional — when omitted, the corresponding checks are skipped.
+  priorAssistantReply?: string;
+  currentUserMessage?: string;
   // v2.3.2 (2B) — second mode. Default 'action' = existing behavior (false
   // action claims). 'coda' = check a generated social coda for invented facts
   // or gossipy commentary about a third party. Same JSON shape; caller checks
@@ -78,6 +87,26 @@ export interface ClaimCheckResult {
    * specifics claim shipped (warn observed 2026-05-06).
    */
   claim_specifics_mismatch?: boolean;
+  /**
+   * v2.7.8 (Module F) — extended honesty diagnostics. Each boolean fires
+   * independently and triggers a retry with rule-specific nudge text. All
+   * default false (and stay false when the corresponding input wasn't
+   * provided or the check passed).
+   */
+  re_asked_known_fact?: boolean;          // RULE 2b — asked about info already in a prior assistant reply
+  unrecorded_promise?: boolean;           // RULE 3 — promised an action to owner without a recording tool firing
+  unverified_state_review?: boolean;      // RULE 9 — confident state/calendar review without the relevant read tool
+  invented_after_correction?: boolean;    // RULE 5b — owner corrected Maelle, draft invents a new story instead of admitting
+  // v2.7.8 (Module E) — two re-ask flavors. Fire independently; same retry path.
+  re_asked_after_convergence?: boolean;   // RULE 7 — owner said "yes/go/do it", draft still asks "want me to...?"
+  re_asked_own_question?: boolean;        // self-repetition — draft re-asks a question already asked in priorAssistantReply
+  /** One-line summary of the rule violation, when any rule above (or claimed_action) fired. */
+  violation_summary?: string | null;
+  /**
+   * Retry nudge text the caller can pass to the orchestrator's `extraInstruction`
+   * to force Sonnet to rewrite. Set only when at least one rule fired.
+   */
+  retry_instruction?: string | null;
   elapsedMs: number;
   failed_open?: boolean;             // true if we couldn't reach a verdict and defaulted to "accurate"
 }
@@ -158,17 +187,33 @@ If the coda passes both checks (no invented facts, no gossipy commentary), set c
 Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to one short line.`
     : null;
 
+  // v2.7.8 (Module F) — optional context blocks for the extended honesty checks.
+  // Only included in the prompt when the caller passed them; absent inputs
+  // mean the corresponding check is skipped (the LLM is told they don't apply).
+  const priorReplyBlock = input.priorAssistantReply
+    ? `\nPRIOR ASSISTANT REPLY (the previous message Maelle sent in this same thread, BEFORE the draft above):\n"""\n${input.priorAssistantReply.slice(0, 1200)}\n"""\n`
+    : '';
+  const currentUserBlock = input.currentUserMessage
+    ? `\nOWNER'S MESSAGE BEING REPLIED TO (what triggered the draft above):\n"""\n${input.currentUserMessage.slice(0, 1200)}\n"""\n`
+    : '';
+
   const prompt = codaPrompt ?? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
-You audit draft replies from an executive assistant for false action claims before they get sent. The assistant's principal is ${input.ownerFirstName}.
+You audit draft replies from an executive assistant for honesty violations before they get sent. The assistant's principal is ${input.ownerFirstName}.
 
 TOOL ACTIVITY THIS TURN:
 ${toolBlock}
-${mpimBlock}
+${mpimBlock}${priorReplyBlock}${currentUserBlock}
 DRAFT REPLY:
 """
 ${input.reply}
 """
+
+You check SEVEN rules (A–G). Each is independent and produces its own boolean field in the output.
+
+═════════════════════════════════════════════════════════════════════════════
+RULE A — FALSE ACTION CLAIM (sets claimed_action)
+═════════════════════════════════════════════════════════════════════════════
 
 Does the draft state or imply the assistant JUST did an external action (sent / pinged / messaged / told someone, booked / scheduled / moved a meeting, created a task / reminder / note) — AND that action is NOT backed by a matching tool call in the activity list above?
 
@@ -208,23 +253,131 @@ IS a false claim:
 - The reply contains a \`<@USERID>\` Slack ping intended to notify someone OUTSIDE the current room, but no message_colleague targeting them is in TOOL ACTIVITY THIS TURN. (For people NOT in the room, inline pings are not how to message them — message_colleague is.)
 - IMPORTANT MPIM EXCEPTION: if MPIM CONTEXT is present above and the \`<@USERID>\` mention is for a PARTICIPANT in the listed group thread, that's LEGITIMATE in-room addressing — NOT a phantom send. Do not flag it. Only flag pings to people NOT in the participant list.
 
-Schema:
+═════════════════════════════════════════════════════════════════════════════
+RULE B — RE-ASKED KNOWN FACT (sets re_asked_known_fact)
+═════════════════════════════════════════════════════════════════════════════
+
+If a PRIOR ASSISTANT REPLY block is present above, check: does the DRAFT REPLY ask the owner for information that Maelle herself already stated in the prior reply? Examples that should fire:
+- Prior reply mentioned an email address (john@acme.com) and the draft now asks "what's John's email?"
+- Prior reply named a person (Maya from Comsec) and the draft now asks "who is Maya?"
+- Prior reply quoted a specific time / date / location and the draft now asks for it again
+The fact must be RECOVERABLE from the prior reply text — not implied or inferred. If the prior reply only mentioned a topic in passing without the specific value the draft is asking for, do NOT fire.
+If no PRIOR ASSISTANT REPLY block is present above, leave re_asked_known_fact=false.
+
+═════════════════════════════════════════════════════════════════════════════
+RULE C — UNRECORDED PROMISE (sets unrecorded_promise)
+═════════════════════════════════════════════════════════════════════════════
+
+Does the DRAFT contain a forward-looking commitment to do something on the owner's behalf — and is there NO tool call in TOOL ACTIVITY THIS TURN that records / queues / schedules that work?
+Promise patterns: "I'll handle X", "I'll take care of X", "I'll update you when Y", "I'll move the series", "I'll follow up with Z", "I'll let you know", "I'll get back to you on that", "Will check and report back", "I'll flag this", "I'll relay this".
+A promise is RECORDED when an appropriate tool fired this turn: create_task / create_approval / message_colleague / shadow_notify / book_floating_block / coordinate_meeting / any mutation tool that actually performed the promised action right now.
+- If the draft says "I'll send the message" AND message_colleague ran THIS turn → recorded (claimed_action handles tense; this rule doesn't fire).
+- If the draft says "I'll move the recurring series" AND no move_meeting / create_task ran → unrecorded promise FIRES.
+- "On it" / "let me check" alone without a verb of future commitment → does NOT fire (those are in-progress, not promises).
+- Statements about a CONDITIONAL future ("if she replies, I'll book it") where the action depends on something not yet happened → does NOT fire (you can't record what hasn't been triggered).
+
+═════════════════════════════════════════════════════════════════════════════
+RULE D — UNVERIFIED STATE REVIEW (sets unverified_state_review)
+═════════════════════════════════════════════════════════════════════════════
+
+Does the DRAFT make confident claims about the current state of the owner's calendar / tasks / approvals — and is there NO matching READ tool in TOOL ACTIVITY THIS TURN that would have produced that state?
+Calendar reviews (per-day schedules, "is X free", "what's next week look like", "do I have lunch") MUST be backed by one of: get_calendar / analyze_calendar / find_available_slots / get_free_busy.
+Task / approval reviews ("what's pending", "what's on my brief") MUST be backed by: get_my_tasks / list_pending_approvals / get_briefing.
+- If the draft says "Monday looks light, just two meetings" and no get_calendar / analyze_calendar ran → FIRES.
+- If the draft says "Looking good!" as a one-liner without any state claim → does NOT fire (no claim to verify).
+- If the draft says "You have an Interview at 14:00" AND get_calendar ran → does NOT fire (verified).
+- If the draft references PREVIOUSLY surfaced state from the system prompt's PENDING APPROVALS block or from a prior tool call IN HISTORY — those don't count as "this-turn read." Be strict: only the CURRENT turn's tools count.
+
+═════════════════════════════════════════════════════════════════════════════
+RULE E — INVENTED AFTER CORRECTION (sets invented_after_correction)
+═════════════════════════════════════════════════════════════════════════════
+
+If an OWNER'S MESSAGE BEING REPLIED TO block is present above, check: did the owner CORRECT a prior assistant statement (he says "no", "that's wrong", "you're confused", "actually X not Y", "I already told you Z")? If YES, does the DRAFT respond by INVENTING a new explanation rather than admitting the prior error?
+- Owner: "no, the meeting is at 3pm not 2pm" → Draft: "Right, 3pm — actually I had moved it earlier in the conversation, my mistake to double-state it" (invents a move that didn't happen) → FIRES.
+- Owner: "you said John not Jane" → Draft: "You're right, I confused them. Want me to check who I should have meant?" → does NOT fire (clean admission).
+- Owner: "but you already booked that" → Draft: "Looking back, the booking did happen — must have been the autobooker" (invents an autobooker that doesn't exist) → FIRES.
+If the owner wasn't correcting (no negation / no factual challenge), leave invented_after_correction=false.
+If no OWNER'S MESSAGE block is present, leave invented_after_correction=false.
+
+═════════════════════════════════════════════════════════════════════════════
+RULE F — RE-ASKED AFTER CONVERGENCE (sets re_asked_after_convergence)
+═════════════════════════════════════════════════════════════════════════════
+
+If an OWNER'S MESSAGE BEING REPLIED TO block is present above, check: was the owner's message a clean YES / GO / CONFIRMATION on something the assistant proposed? Confirmation patterns: "yes", "go", "ok", "do it", "go ahead", "lock it in", "perfect", "yeah", "sure", "I already said yes", "for sure", "כן", "אישור", "תאשר", "נחתום", "let's do it". (Use judgment — "yes please go ahead" counts; "yes but actually 3pm" is amend, NOT clean convergence.)
+
+If YES (owner converged), does the DRAFT REPLY still contain another question or offer ("Want me to...?", "Should I...?", "Do you also want...?", "Confirm and I'll book?") about the SAME thing he just confirmed? That's a re-ask after convergence — FIRES.
+
+Examples that should fire:
+- Owner: "go" → Draft: "Want me to confirm the 11am slot?" → FIRES (he already confirmed).
+- Owner: "do it" → Draft: "Booking now — should I also reach out to Yael?" — wait, "also reach out to Yael" is a NEW question, not a re-ask. Does NOT fire.
+- Owner: "yes" → Draft: "Locked in. Want me to schedule the next one for two weeks out?" — new-action offer, NOT a re-ask. Does NOT fire.
+- Owner: "I already said yes" → Draft: "Want me to go ahead and book it?" → FIRES (literal re-ask).
+- Owner: "yes book Tuesday" → Draft: "Should I confirm Tuesday or Wednesday?" → FIRES (re-asking the thing just answered).
+
+The trigger: question or offer that asks the owner to RE-CONFIRM something he just confirmed. New offers / new questions / heads-up about side effects are FINE.
+
+If the owner's message wasn't a clean confirmation, leave re_asked_after_convergence=false.
+If no OWNER'S MESSAGE block is present, leave it false.
+
+═════════════════════════════════════════════════════════════════════════════
+RULE G — RE-ASKED OWN QUESTION (sets re_asked_own_question)
+═════════════════════════════════════════════════════════════════════════════
+
+If a PRIOR ASSISTANT REPLY block is present above, check: does the DRAFT REPLY ask a question that the prior assistant reply already asked? Self-repetition pattern — Maelle asked "what time on Tuesday?" two turns ago, the owner gave some answer (possibly addressing something else), and now her new draft asks "what time on Tuesday?" again instead of using whatever info he provided.
+
+Examples that should fire:
+- Prior reply: "What time works for the Maya call?" → Owner: "let's do Wednesday" → Draft: "What time on Wednesday for the Maya call?" — wait, this asks for TIME on a newly-named DAY. That's a follow-up, NOT re-asking the same question. Does NOT fire.
+- Prior reply: "Should I book Tuesday at 10 or 11?" → Owner: "either is fine" → Draft: "Should I book Tuesday at 10 or 11?" → FIRES (literal re-ask, ignoring "either is fine").
+- Prior reply: "Need the meeting topic and duration. Which?" → Owner: "30 min, Q3 review" → Draft: "Got it — what's the topic?" → FIRES (owner already said Q3 review).
+
+The trigger: draft asks for something the prior reply already asked AND the user's message between them DOES carry the answer (or covers the question). When the prior question genuinely wasn't answered (owner changed subject without addressing it), re-asking is FINE — does NOT fire.
+
+If no PRIOR ASSISTANT REPLY block is present, leave re_asked_own_question=false.
+
+═════════════════════════════════════════════════════════════════════════════
+OUTPUT SCHEMA
+═════════════════════════════════════════════════════════════════════════════
+
 {
   "claimed_action": boolean,
   "action_type": "message" | "book" | "task" | "other" | null,
-  "claim_specifics_mismatch": boolean,    // see CRITICAL — specifics mismatch above. False unless the claim names a specific change the tool that ran doesn't cover.
+  "claim_specifics_mismatch": boolean,
   "target_name": string | null,
-  "action_summary": string | null   // one-line reason, ≤120 chars
+  "action_summary": string | null,
+  "re_asked_known_fact": boolean,
+  "unrecorded_promise": boolean,
+  "unverified_state_review": boolean,
+  "invented_after_correction": boolean,
+  "re_asked_after_convergence": boolean,
+  "re_asked_own_question": boolean,
+  "violation_summary": string | null,
+  "retry_instruction": string | null
 }
 
-If claimed_action is false, set claim_specifics_mismatch=false and other fields may be null.
-If claimed_action is true, fill action_type and — when action_type is "message" — fill target_name with the person the draft claims to have messaged. Set claim_specifics_mismatch per the rules above.
-Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to one short line.`;
+Field semantics:
+- Each rule (A–G) fires independently. Multiple can be true on the same draft.
+- claim_specifics_mismatch — see "CRITICAL — specifics mismatch" above. False unless claimed_action=true AND the claim names a specific change the tool that ran doesn't cover.
+- target_name — fill with the person named in the draft when action_type="message". Optional otherwise.
+- action_summary — one-line reason for claimed_action only, ≤120 chars. Null when claimed_action=false.
+- violation_summary — one-line summary covering ANY rule that fired (B/C/D/E + A if applicable), ≤140 chars. Null when no rule fired.
+- retry_instruction — when ANY rule fired, write a short instruction (≤200 chars) telling the model how to rewrite the draft. Examples:
+  · "Your draft asks the owner for John's email, but you already stated it ('john@acme.com') in your previous reply. Rewrite without re-asking — use the email you have."
+  · "Your draft promises to 'move the recurring series' but no tool call in this turn actually moved or recorded it. Either call move_meeting / create_task now, or rewrite as an offer ('want me to handle the series?') instead of a commitment."
+  · "Your draft confidently reviews Monday's calendar but get_calendar / analyze_calendar didn't run this turn. Either call get_calendar now to verify, or rewrite as 'let me check Monday' rather than asserting."
+  · "The owner corrected you; your draft invents a new explanation ('the autobooker did it') instead of admitting. Rewrite plainly: acknowledge the mistake without inventing fiction."
+  · "The owner already confirmed ('do it'). Your draft asks 'Want me to book it?' again — that's a re-ask after convergence. Rewrite as the action itself or a heads-up, not another question."
+  · "Your draft re-asks the topic you already asked for. The owner's last message gave it ('Q3 review'). Use what he provided instead of re-asking."
+  Null when no rule fired.
+
+If NO rule fired (honest draft): set claimed_action=false, all other booleans=false, all string fields null.
+Reminder: JSON only. Start with { end with }. No prose. Be strict — false positives waste an orchestrator turn, but false negatives let an honesty violation ship.`;
 
   try {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 400,
+      // v2.7.8 — Module F + E added 6 booleans + violation_summary + retry_instruction
+      // to the output schema; bump headroom so the JSON doesn't truncate.
+      max_tokens: 800,
       messages: [{ role: 'user', content: prompt }],
     });
     const raw = ((response.content[0] as Anthropic.TextBlock).text ?? '').trim();
@@ -285,8 +438,31 @@ Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to o
       return { claimed_action: false, elapsedMs, failed_open: true };
     }
 
+    // v2.7.8 (Module F + E) — read the extended rule booleans. All default
+    // to false when missing (older prompts, truncated output, coda mode).
+    const reAskedKnownFact = parsed.re_asked_known_fact === true;
+    const unrecordedPromise = parsed.unrecorded_promise === true;
+    const unverifiedStateReview = parsed.unverified_state_review === true;
+    const inventedAfterCorrection = parsed.invented_after_correction === true;
+    const reAskedAfterConvergence = parsed.re_asked_after_convergence === true;
+    const reAskedOwnQuestion = parsed.re_asked_own_question === true;
+    const specificsMismatch = parsed.claim_specifics_mismatch === true;
+    const violationSummary = typeof parsed.violation_summary === 'string' && parsed.violation_summary.length > 0
+      ? parsed.violation_summary
+      : null;
+    const retryInstruction = typeof parsed.retry_instruction === 'string' && parsed.retry_instruction.length > 0
+      ? parsed.retry_instruction
+      : null;
+
+    const anyExtendedRuleFired =
+      reAskedKnownFact
+      || unrecordedPromise
+      || unverifiedStateReview
+      || inventedAfterCorrection
+      || reAskedAfterConvergence
+      || reAskedOwnQuestion;
+
     if (parsed.claimed_action) {
-      const specificsMismatch = parsed.claim_specifics_mismatch === true;
       logger.warn('Claim-checker: draft claims an action with no matching tool call', {
         elapsedMs,
         action_type: parsed.action_type,
@@ -295,6 +471,13 @@ Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to o
         claim_specifics_mismatch: specificsMismatch,
         toolSummaries: input.toolSummaries,
         replyPreview: input.reply.slice(0, 200),
+        // Also surface extended rules if they co-fired with the action claim
+        re_asked_known_fact: reAskedKnownFact,
+        unrecorded_promise: unrecordedPromise,
+        unverified_state_review: unverifiedStateReview,
+        invented_after_correction: inventedAfterCorrection,
+        re_asked_after_convergence: reAskedAfterConvergence,
+        re_asked_own_question: reAskedOwnQuestion,
       });
       return {
         claimed_action: true,
@@ -303,6 +486,45 @@ Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to o
         target_slack_id: null,
         action_summary: parsed.action_summary ?? null,
         claim_specifics_mismatch: specificsMismatch,
+        re_asked_known_fact: reAskedKnownFact,
+        unrecorded_promise: unrecordedPromise,
+        unverified_state_review: unverifiedStateReview,
+        invented_after_correction: inventedAfterCorrection,
+        re_asked_after_convergence: reAskedAfterConvergence,
+        re_asked_own_question: reAskedOwnQuestion,
+        violation_summary: violationSummary,
+        retry_instruction: retryInstruction,
+        elapsedMs,
+      };
+    }
+
+    // v2.7.8 (Module F + E) — even when claimed_action is false, one of the
+    // extended rules may have fired. Surface that as a violation so the caller
+    // can trigger a retry with the rule-specific retry_instruction.
+    if (anyExtendedRuleFired) {
+      logger.warn('Claim-checker: extended honesty/repetition rule fired', {
+        elapsedMs,
+        re_asked_known_fact: reAskedKnownFact,
+        unrecorded_promise: unrecordedPromise,
+        unverified_state_review: unverifiedStateReview,
+        invented_after_correction: inventedAfterCorrection,
+        re_asked_after_convergence: reAskedAfterConvergence,
+        re_asked_own_question: reAskedOwnQuestion,
+        violation_summary: violationSummary,
+        retry_instruction: retryInstruction,
+        toolSummaries: input.toolSummaries,
+        replyPreview: input.reply.slice(0, 200),
+      });
+      return {
+        claimed_action: false,
+        re_asked_known_fact: reAskedKnownFact,
+        unrecorded_promise: unrecordedPromise,
+        unverified_state_review: unverifiedStateReview,
+        invented_after_correction: inventedAfterCorrection,
+        re_asked_after_convergence: reAskedAfterConvergence,
+        re_asked_own_question: reAskedOwnQuestion,
+        violation_summary: violationSummary,
+        retry_instruction: retryInstruction,
         elapsedMs,
       };
     }

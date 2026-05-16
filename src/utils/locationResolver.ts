@@ -14,6 +14,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import { tavilySearch } from '../skills/general';
 import logger from './logger';
@@ -30,7 +31,7 @@ interface ResolveOptions {
   countryHint?: string;    // 'Israel'
 }
 
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 export async function resolveVenueLocation(
   input: string,

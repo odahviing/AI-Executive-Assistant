@@ -90,27 +90,22 @@ function checkCompliance(
     .setZone(tz);
   const dayName = eStart.toFormat('EEEE');
 
-  // 1. Work hours check
-  const officeDays = profile.schedule.office_days.days as string[];
-  const homeDays = profile.schedule.home_days.days as string[];
-  let hoursStart: string | null = null;
-  let hoursEnd: string | null = null;
-  if (officeDays.includes(dayName)) {
-    hoursStart = profile.schedule.office_days.hours_start;
-    hoursEnd = profile.schedule.office_days.hours_end;
-  } else if (homeDays.includes(dayName)) {
-    hoursStart = profile.schedule.home_days.hours_start;
-    hoursEnd = profile.schedule.home_days.hours_end;
-  } else {
+  // 1. Work hours check (v2.8.1 — multi-window aware).
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getOwnerWorkHoursForDay } = require('./workHours') as typeof import('./workHours');
+  const windows = getOwnerWorkHoursForDay(profile, dayName);
+  if (windows.length === 0) {
     issues.push(`booked on ${dayName} (${eStart.toFormat('d MMM')}) — not a work day`);
-  }
-  if (hoursStart && hoursEnd) {
-    const [sh, sm] = hoursStart.split(':').map(Number);
-    const [eh, em] = hoursEnd.split(':').map(Number);
+  } else {
     const startMin = eStart.hour * 60 + eStart.minute;
     const endMin = eEnd.hour * 60 + eEnd.minute;
-    if (startMin < sh * 60 + sm) issues.push(`starts before your work hours (${hoursStart})`);
-    if (endMin > eh * 60 + em) issues.push(`runs past your work hours (${hoursEnd})`);
+    const fits = windows.some(w => startMin >= w.startMin && endMin <= w.endMin);
+    if (!fits) {
+      const summary = windows
+        .map(w => `${String(Math.floor(w.startMin/60)).padStart(2,'0')}:${String(w.startMin%60).padStart(2,'0')}–${String(Math.floor(w.endMin/60)).padStart(2,'0')}:${String(w.endMin%60).padStart(2,'0')}`)
+        .join(', ');
+      issues.push(`outside your work hours (${summary})`);
+    }
   }
 
   // 2. Floating-block feasibility — any block for this day-of-week that

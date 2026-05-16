@@ -10,10 +10,11 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import logger from './logger';
 
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 // ── (a) Injection-pattern scan ──────────────────────────────────────────────
 // Specific to coordination context — look for payloads mimicking owner

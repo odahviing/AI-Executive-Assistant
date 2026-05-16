@@ -349,19 +349,14 @@ export function analyzeCalendar(
     const isOffice   = officeDays.has(dayName);
     const dayType: DayAnalysis['dayType'] = isOffice ? 'office' : allWorkDays.has(dayName) ? 'home' : 'day_off';
 
-    // Work hours for this day type
-    const hoursStart = isOffice
-      ? profile.schedule.office_days.hours_start
-      : profile.schedule.home_days.hours_start ?? '09:00';
-    const hoursEnd = isOffice
-      ? profile.schedule.office_days.hours_end
-      : profile.schedule.home_days.hours_end ?? '19:00';
-
-    const [wsH, wsM] = hoursStart.split(':').map(Number);
-    const [weH, weM] = hoursEnd.split(':').map(Number);
-    const workStartMin = wsH * 60 + wsM;
-    const workEndMin   = weH * 60 + weM;
-    const workTotalMin = workEndMin - workStartMin;
+    // v2.8.1 — multi-window aware work hours for this day.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getOwnerWorkHoursForDay, totalWorkMinutes } = require('../../utils/workHours') as
+      typeof import('../../utils/workHours');
+    const windows = getOwnerWorkHoursForDay(profile, dayName);
+    const workStartMin = windows.length > 0 ? windows[0].startMin : 9 * 60;
+    const workEndMin = windows.length > 0 ? windows[windows.length - 1].endMin : 19 * 60;
+    const workTotalMin = totalWorkMinutes(windows) || (workEndMin - workStartMin);
 
     // All events for this date
     const dayEvents = events

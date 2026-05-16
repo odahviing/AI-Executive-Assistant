@@ -2,6 +2,51 @@
 
 ---
 
+## 2.8.1 — Vertex prep, multi-window work hours, code-replacement of honesty/refusal rules
+
+Two parallel chats this session contributed: code-side patches (Vertex prep, multi-window work hours, calendar invites prompt trim, recovery pass deleted) and the prompt-reduction project (Modules F, E partial, C — replacing 8 honesty rules + refusal phrasing block with deterministic claim-checker + humanGate logic). Net effect: meaningful per-turn token cut from the cached static block + new optional Vertex LLM provider + per-day multi-range work hours.
+
+### Added
+
+- **LLM provider abstraction — Vertex AI ready** (`src/llm/client.ts` + `src/llm/modelId.ts` new, `src/config/index.ts`). New `LLM_PROVIDER` env var (`'anthropic'` default | `'vertex'`). `getAnthropicClient()` factory returned by 31 call sites in place of `new Anthropic({ apiKey })`. Vertex SDK lazy-required only when the flag is `'vertex'` — no install needed until the switch flips. Cross-field validator in config refuses startup if Vertex selected without `VERTEX_PROJECT_ID`. Model ID resolver in `modelId.ts` maps logical names (`claude-sonnet-4-6`) to Vertex versioned IDs (`claude-sonnet-4-6@20251220`) when needed. Migration path documented in client.ts file header.
+- **Multi-window work hours per weekday** (`src/config/userProfile.ts` schema, `src/utils/workHours.ts` helpers). New canonical `schedule.work_hours: Record<weekday, string[]>` field where each string is a `"HH:MM-HH:MM"` range. Multiple ranges per day supported — e.g. `Tuesday: ["09:00-15:30", "21:30-23:59"]` for split-shift days. Legacy `office_days.hours_start/hours_end` + `home_days.hours_start/hours_end` accepted on input and synthesized into `work_hours` at load time, then **stripped** from the in-memory profile so callers see a single source of truth. New helpers: `getOwnerWorkHoursForDay`, `isSlotInWorkHours`, `totalWorkMinutes`. Slot finder (`findAvailableSlots` in `connectors/graph/calendar.ts`), `scheduleRules.checkSlot`, and brief/coord/verify callers all updated to multi-window. Day-type classification (office vs home) stays separate from hours — it always reads from `office_days.days` / `home_days.days` for category rules + location resolution.
+- **Module F — claim-checker extended with 4 honesty checks** (`src/utils/claimChecker.ts`, `src/connectors/slack/postReply.ts`). New boolean output fields on the Sonnet validator: `re_asked_known_fact` (RULE 2b — asked for info already in a prior assistant reply), `unrecorded_promise` (RULE 3 — relay promise without a recording tool firing), `unverified_state_review` (RULE 9 — confident state/calendar review without the read tool), `invented_after_correction` (RULE 5b — owner correction → draft invents new story instead of admitting). New inputs `priorAssistantReply` + `currentUserMessage` plumbed through from `postReply.ts:360`. Retry instruction returned by checker drives the existing retry loop.
+- **Module E — length/repetition validator (partial)** (`src/utils/claimChecker.ts`). Two more booleans on the same validator: `re_asked_after_convergence` (owner said yes/go/do-it, draft still asks "want me to...?"), `re_asked_own_question` (draft re-asks something already asked in the same thread). Third intended check (`too_long_for_context`) deliberately skipped per owner direction. Max-tokens bumped 400 → 800 to accommodate the extended output schema.
+- **Module C — humanGate `MECHANICAL REFUSAL` section** (`src/utils/humanGate.ts`). Existing humanGate prompt gains a new section catching mechanical refusal phrasings ("I don't have permission", "Access denied", `not_permitted` / `unknown_colleague` / `rule_violation` verbatim echoes, "approval required"). Applies on BOTH owner-facing and colleague-facing drafts. No new file, no new Sonnet call — humanGate already runs in `postReply.ts` for both paths. Replaces the deleted `REFUSAL PHRASING` prompt block.
+
+### Changed
+
+- **`scheduleRules` rule 5 (outside_working_hours)** now reads from `getOwnerWorkHoursForDay` and accepts a slot if it fits in ANY window for the day. Violation label lists all windows so the rejection narrative names where the slot actually is.
+- **`findAvailableSlots`** in calendar.ts uses `getOwnerWorkHoursForDay` per-day. The `params.workHoursStart`/`workHoursEnd` overrides still apply only in extended-hours / relaxed mode. Coord callers (`meetings.ts`, `coordinator.ts`) stop passing per-day-type hours — calendar.ts now looks them up.
+- **`getDayQualityFree`** (calendar.ts) sums free minutes across all work windows for the day so focus-time budget recalculates correctly on split shifts.
+- **CALENDAR INVITES prompt rule trimmed** (`src/core/orchestrator/systemPrompt.ts`). Pre-fix the rule said "say 'Outlook will send the invite' or just create the meeting and trust it" — Maelle kept narrating the mechanism. Now: "just say 'Done' / 'Booked' — the invite handles itself, don't explain the plumbing." One-line trim, no new rule added.
+- **Example yaml** (`config/users.example/user.example.yaml`) updated to the canonical shape: `office_days.days` only (no hours), `home_days.days` only, full `work_hours` map with a split-shift Tuesday example commented out.
+
+### Removed
+
+- **Orchestrator recovery pass (#41)** (`src/core/orchestrator/index.ts`). The second Sonnet call that fired when the main pass produced tool_use but no text — built in v1.6.5 when silent-after-action was a Sonnet pattern. Sonnet 4.6 rarely goes silent post-action; the existing v1.7.3 tool-grounded verbMap fallback (45 mapped verbs + safe generic) covers the same case deterministically. Removing the LLM recovery pass: cheaper per-turn, no fabrication risk, no drift across models. ~60 lines + the recovery prompt deleted. Verb-map backstop unchanged.
+- **`HONESTY RULES 1, 2, 2b, 2c, 2d, 3, 5b, 9`** (`src/core/orchestrator/systemPrompt.ts`). All 8 are now enforced via the extended claim-checker (Module F). Kept RULES 4 / 5 / 7 / 8 — judgment-class rules the checker can't replace (tone, information source honesty, one-confirmation flow, thread continuity).
+- **`REFUSAL PHRASING` block** (`src/core/orchestrator/systemPrompt.ts`). Code-enforced via humanGate's new `MECHANICAL REFUSAL` section (Module C).
+- **Legacy `hours_start` / `hours_end` fields** stripped from in-memory profile after loader normalization. Old yaml still parses (back-compat); the canonical runtime type has only `office_days.{days,notes?}` + `home_days.{days,notes?}` + `work_hours`.
+
+### Migration
+
+- **Profile yaml**: existing profiles using the legacy `office_days: { days, hours_start, hours_end }` / `home_days: { days, hours_start, hours_end }` shape continue to work — the loader synthesizes `work_hours` from those fields. To enable a split-shift day (e.g. Tuesday evening overlap), add a `schedule.work_hours` map explicitly. Once `work_hours` is set, the legacy `hours_start`/`hours_end` are ignored and stripped.
+- **LLM_PROVIDER**: defaults to `'anthropic'`. Existing deploys unchanged. To switch to Vertex: install `@anthropic-ai/vertex-sdk`, set `LLM_PROVIDER=vertex VERTEX_PROJECT_ID=… VERTEX_REGION=us-east5 GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json`, restart.
+- **`#41`** closed not-planned (delete-the-pass executed).
+
+### Validated
+
+Paper-traced 4 scenarios for the multi-window work-hours change:
+1. Owner books regular Monday 10:00 with internal colleague → office-day in-hours, "Idan Office" location, hybrid Teams — works.
+2. Owner books split-shift Tuesday 22:00 with ET colleague (Brett) → second window accepted, owner work-hours pass, Teams forced by cross-TZ — works.
+3. Owner asks Tuesday 16:00 (the gap between windows) → all strict slots rejected as `outside_owner_work_hours`, auto-relaxed-recovery kicks in, returns 16:00 with trade-off note — works.
+4. Colleague queries Idan's Tuesday 22:00 availability → multi-window owner check accepts, attendee annotation runs — works.
+
+Module F/E/C regression coverage verified against the 8 deleted honesty rules — each has a corresponding code path catching the bug pattern it was meant to prevent (table in commit body).
+
+---
+
 ## 2.8.0 — Stability baseline for the 2.7 wave
 
 Owner-called release threshold: "enough massive changes in 2.7." No new code over 2.7.7 — this version is a stability rebaseline that closes out the v2.7 line and starts a clean v2.8 surface for the next phase of work (planned: continued execution of the prompt-reduction project tracked in [#95](https://github.com/odahviing/AI-Executive-Assistant/issues/95) — Modules A/B/C/E/F still ahead).

@@ -13,6 +13,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../../../llm/client';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../../config/userProfile';
 import { config } from '../../../config';
@@ -31,7 +32,7 @@ import { interpretReplyWithAI, isCoordReplyByContext } from './utils';
 import { resolveCoordination, triggerRoundTwo } from './state';
 import logger from '../../../utils/logger';
 
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 /**
  * Handles a coordination reply. Supports in-thread replies and out-of-thread
@@ -575,7 +576,7 @@ Classify the follow-up. Today is ${today} (${params.timezone}). Output ONE of:
 
 Only set intent=counter if you can tell they want a DIFFERENT time from the original. "Still works for me" = confirm, NOT counter. Convert relative dates ("next Monday", "tomorrow") to ISO relative to today.`;
 
-  const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+  const anthropic = getAnthropicClient();
   try {
     const resp = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',

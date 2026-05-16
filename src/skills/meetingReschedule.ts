@@ -20,6 +20,7 @@
 
 import type { App } from '@slack/bolt';
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import type { OutreachJob } from '../db/jobs';
@@ -64,7 +65,7 @@ async function classifyRescheduleReply(params: {
   assistantName: string;
   ownerName: string;
 }): Promise<RescheduleClassification> {
-  const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+  const anthropic = getAnthropicClient();
   const prompt = `You are ${params.assistantName}, ${params.ownerName}'s executive assistant.
 
 You asked ${params.colleagueName} to reschedule "${params.askedAbout}" to ${params.proposedStartLocal}–${params.proposedEndLocal}.

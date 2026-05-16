@@ -28,6 +28,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../../llm/client';
 import { DateTime } from 'luxon';
 import { completeTask, createTask } from '../index';
 import { getDb, adjustEngagementRank } from '../../db';
@@ -498,7 +499,7 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
     // logs the transition back to "nothing today".
     lastNoCandidateSignature.delete(profile.user.slack_user_id);
 
-    const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+    const anthropic = getAnthropicClient();
     const notes: string[] = (() => {
       try { return (JSON.parse(pick.notes || '[]') as Array<{ note?: string }>).map(n => n.note || '').filter(Boolean); } catch { return []; }
     })();

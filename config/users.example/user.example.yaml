@@ -35,17 +35,28 @@ assistant:
 
 # ── Work schedule ─────────────────────────────────────────────
 schedule:
+  # Day-type classification only — used by category rules ("Interview is office-only")
+  # and location auto-stamp ("internal in-person on office day → office address").
+  # NO hours here; hours live in work_hours below.
   office_days:
     days: ["Monday", "Wednesday", "Thursday"]
-    hours_start: "10:30"
-    hours_end: "19:00"
     notes: "Best for important, multi-participant, external meetings"
 
   home_days:
     days: ["Sunday", "Tuesday"]
-    hours_start: "09:00"
-    hours_end: "15:30"
     notes: "Better for internal, lighter, recurring meetings"
+
+  # Authoritative work-hour windows per weekday. Multiple ranges allowed for
+  # split-shift days (e.g. morning + evening overlap with a remote TZ).
+  # Absent weekdays = non-working day.
+  work_hours:
+    Sunday:    ["09:00-15:30"]
+    Monday:    ["10:30-19:00"]
+    Tuesday:   ["09:00-15:30"]
+    Wednesday: ["10:30-19:00"]
+    Thursday:  ["10:30-19:00"]
+    # Example split shift: morning + late evening
+    # Tuesday: ["09:00-15:30", "21:30-23:59"]
 
   timezone_preferences:
     local_participants: "morning"

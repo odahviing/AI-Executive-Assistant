@@ -26,6 +26,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import { config } from '../config';
@@ -55,7 +56,7 @@ import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calen
 import { selectRelevantKbForMeeting } from './knowledge';
 import logger from '../utils/logger';
 
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

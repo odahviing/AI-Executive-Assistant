@@ -11,6 +11,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../../llm/client';
 import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
 import logger from '../../utils/logger';
@@ -84,7 +85,7 @@ Example: Physical | External attendee from accept2.com coming for an in-person m
 
   let raw = '';
   try {
-    const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+    const anthropic = getAnthropicClient();
     const resp = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 120,

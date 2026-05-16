@@ -56,7 +56,16 @@ NOT:
 
 ---
 
-## Where we are — v2.8.0 shipped (2026-05-15)
+## Where we are — v2.8.1 shipped (2026-05-16)
+
+**Phase right now:** v2.8.x is the prompt-reduction project ([#95](https://github.com/odahviing/AI-Executive-Assistant/issues/95)) + opportunistic architecture cleanup. v2.8.0 was the closing marker for the 2.7 wave; v2.8.1 ships Vertex prep + multi-window work hours + the next batch of code-replaced prompt rules (Modules F + E partial + C).
+
+**v2.8.1 highlights:**
+- **Vertex prep** — `LLM_PROVIDER=anthropic|vertex` env var, factory `getAnthropicClient()` swaps client. 31 call sites migrated, Vertex SDK lazy-loaded.
+- **Multi-window work hours** — new canonical `schedule.work_hours: { Tuesday: ["09:00-15:30", "21:30-23:59"], ... }` yaml field. Legacy `office_days.hours_start/end` accepted on input, normalized + stripped. `office_days`/`home_days` become days-only classification.
+- **Module F + E partial + C shipped** — claim-checker extended with 6 new honesty/repetition booleans (RULES 2b/3/5b/7/9 + self-repetition), humanGate extended with MECHANICAL REFUSAL section. HONESTY RULES 1/2/2b/2c/2d/3/5b/9 + REFUSAL PHRASING block deleted from prompt (kept 4/5/7/8). ~900 cached tokens cut.
+- **CALENDAR INVITES rule trimmed** — Maelle no longer says "Outlook will send the invite"; just "Done" / "Booked."
+- **Recovery pass deleted (#41)** — second Sonnet call when no text post-tool-use; verbMap tool-grounded fallback stays as deterministic backstop.
 
 **Phase right now:** v2.7 closed out as a stability wave. v2.8.0 is a clean baseline marking the end of the 2.7 line — no new code over 2.7.7, just a release-marker bump because "enough massive changes accumulated in 2.7" (owner direction).
 

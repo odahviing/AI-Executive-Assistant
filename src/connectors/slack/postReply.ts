@@ -1,3 +1,4 @@
+import { getAnthropicClient } from '../../llm/client';
 /**
  * Reply pipeline (v1.6.2 split from app.ts).
  *
@@ -350,6 +351,14 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
 
   try {
     const { checkReplyClaims } = await import('../../utils/claimChecker');
+
+    // v2.7.8 (Module F) — feed the checker prior context for the extended
+    // rules: RULE 2b reads the last assistant reply to detect re-asked
+    // known facts; RULE 5b reads the current user message to detect
+    // invented-after-correction patterns. Both optional — undefined cleanly
+    // skips the corresponding checks.
+    const priorAssistantReply = [...history].reverse().find(m => m.role === 'assistant')?.content;
+
     const verdict = await checkReplyClaims({
       reply: cleanReply,
       toolSummaries: result.toolSummaries ?? [],
@@ -360,7 +369,73 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
       mpimContext: ctx.isMpim
         ? { isMpim: true, participantSlackIds: ctx.mpimMemberIds ?? [] }
         : undefined,
+      // v2.7.8 — Module F inputs
+      priorAssistantReply,
+      currentUserMessage: userMessage,
     });
+
+    // v2.7.8 (Module F + E) — extended honesty/repetition rules. When
+    // claimed_action is false but one of the new booleans fired, the checker
+    // has supplied a rule-specific retry_instruction. Trigger the same retry
+    // path used for claimed_action, but with the checker's instruction text
+    // instead of the hand-rolled action nudge.
+    const extendedRuleFired =
+      verdict.re_asked_known_fact === true
+      || verdict.unrecorded_promise === true
+      || verdict.unverified_state_review === true
+      || verdict.invented_after_correction === true
+      || verdict.re_asked_after_convergence === true
+      || verdict.re_asked_own_question === true;
+
+    if (!verdict.claimed_action && extendedRuleFired && verdict.retry_instruction) {
+      logger.warn('Claim-checker (Module F/E): extended rule fired — retrying with rule-specific nudge', {
+        senderId: ctx.senderId,
+        threadTs: ctx.threadTs,
+        re_asked_known_fact: verdict.re_asked_known_fact,
+        unrecorded_promise: verdict.unrecorded_promise,
+        unverified_state_review: verdict.unverified_state_review,
+        invented_after_correction: verdict.invented_after_correction,
+        re_asked_after_convergence: verdict.re_asked_after_convergence,
+        re_asked_own_question: verdict.re_asked_own_question,
+        violation_summary: verdict.violation_summary,
+        retry_instruction: verdict.retry_instruction,
+      });
+      try {
+        const retry = await runOrchestrator({
+          userMessage,
+          conversationHistory: history,
+          threadTs: ctx.threadTs,
+          channelId: ctx.channelId,
+          userId: ctx.senderId,
+          senderRole: ctx.role as 'owner' | 'colleague',
+          senderName: ctx.colleagueName,
+          channel: 'slack' as ChannelId,
+          profile,
+          app,
+          isMpim: ctx.isMpim,
+          isOwnerInGroup: ctx.isOwnerInGroup,
+          mpimMemberIds: ctx.mpimMemberIds,
+          extraInstruction: verdict.retry_instruction,
+        });
+        const retried = retry.reply?.trim();
+        if (retried && retried.length > 0) {
+          logger.info('Claim-checker (Module F/E): retry produced new draft', {
+            senderId: ctx.senderId,
+            threadTs: ctx.threadTs,
+            previewBefore: cleanReply.slice(0, 100),
+            previewAfter: retried.slice(0, 100),
+          });
+          return retried;
+        }
+        logger.warn('Claim-checker (Module F/E): retry returned empty — keeping original draft');
+      } catch (err) {
+        logger.warn('Claim-checker (Module F/E): retry threw — keeping original draft', {
+          err: String(err).slice(0, 200),
+        });
+      }
+      // Fall through to return cleanReply below if retry didn't yield text.
+      return cleanReply;
+    }
 
     if (!verdict.claimed_action) return cleanReply;
 
@@ -714,7 +789,7 @@ async function runConcisionPassIfNeeded(rawReply: string, profile: UserProfile):
 
   try {
     const Anthropic = (await import('@anthropic-ai/sdk')).default;
-    const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+    const anthropic = getAnthropicClient();
     const ownerFirst = profile.user.name.split(' ')[0];
     const resp = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',

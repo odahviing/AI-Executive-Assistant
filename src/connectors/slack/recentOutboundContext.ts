@@ -43,12 +43,13 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../../llm/client';
 import { getDb } from '../../db/client';
 import logger from '../../utils/logger';
 import { config } from '../../config';
 import type { OutreachJob } from '../../db/jobs';
 
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 /** Minutes inside which an inbound DM is deterministically treated as a continuation. */
 const DETERMINISTIC_WINDOW_MINUTES = 10;

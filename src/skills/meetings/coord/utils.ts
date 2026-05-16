@@ -17,11 +17,12 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../../../llm/client';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../../config/userProfile';
 import { config } from '../../../config';
 
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 // ── Shared types ────────────────────────────────────────────────────────────
 

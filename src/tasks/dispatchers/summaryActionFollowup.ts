@@ -18,6 +18,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../../llm/client';
 import { config } from '../../config';
 import { completeTask, createTask, updateTask } from '../index';
 import {
@@ -29,7 +30,7 @@ import { getConnection } from '../../connections/registry';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
 
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 interface FollowupContext {
   summary_session_id?: number;

@@ -15,6 +15,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import type { RequestRow } from '../core/requests/types';
 import logger from './logger';
 
@@ -63,7 +64,7 @@ export async function judgeRequestDedup(params: {
   }));
 
   try {
-    const client = new Anthropic();
+    const client = getAnthropicClient();
     const userPrompt = [
       params.requesterName ? `Requester: ${params.requesterName}` : '',
       `Proposed new request:`,

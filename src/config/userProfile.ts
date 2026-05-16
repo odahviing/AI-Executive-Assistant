@@ -127,18 +127,42 @@ const UserProfileSchema = z.object({
   }),
 
   schedule: z.object({
+    // v2.8.1 — DAYS-ONLY classification. Each entry is the list of weekday
+    // names where the owner is on office / home schedule. NO HOURS here —
+    // those live in `work_hours` (the canonical source). Day-type
+    // classification is used by category rules + location resolution.
     office_days: z.object({
       days: z.array(z.enum(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'])).min(1),
-      hours_start: z.string().regex(/^\d{2}:\d{2}$/),
-      hours_end: z.string().regex(/^\d{2}:\d{2}$/),
       notes: z.string().optional(),
+      // Back-compat input only — accepted on read, normalized into work_hours,
+      // then stripped from the canonical profile. Don't read these anywhere.
+      hours_start: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+      hours_end: z.string().regex(/^\d{2}:\d{2}$/).optional(),
     }),
     home_days: z.object({
       days: z.array(z.enum(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'])).min(1),
-      hours_start: z.string().regex(/^\d{2}:\d{2}$/),
-      hours_end: z.string().regex(/^\d{2}:\d{2}$/),
       notes: z.string().optional(),
+      hours_start: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+      hours_end: z.string().regex(/^\d{2}:\d{2}$/).optional(),
     }),
+    // v2.8.1 — CANONICAL work hours per weekday. After normalization this is
+    // always populated. Multiple ranges per day supported (split shifts).
+    //
+    //   work_hours:
+    //     Sunday:    ["09:00-17:30"]
+    //     Monday:    ["09:00-17:30"]
+    //     Tuesday:   ["09:00-15:30", "21:30-23:59"]   # split day
+    //     Wednesday: ["10:30-18:30"]
+    //     Thursday:  ["10:30-18:30"]
+    //
+    // Legacy yaml shape (office_days.hours_start/hours_end +
+    // home_days.hours_start/hours_end) is accepted on input and synthesized
+    // into this map at load time. Profiles can use either input style; in-memory
+    // representation is always the canonical `work_hours` map.
+    work_hours: z.record(
+      z.enum(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']),
+      z.array(z.string().regex(/^\d{2}:\d{2}-\d{2}:\d{2}$/)).min(1),
+    ).optional(),
     timezone_preferences: z.object({
       local_participants: z.string(),
       remote_participants: z.string(),
@@ -453,7 +477,18 @@ const UserProfileSchema = z.object({
   }),
 });
 
-export type UserProfile = z.infer<typeof UserProfileSchema>;
+// Canonical UserProfile — after the loader normalizes legacy fields.
+// `work_hours` is always populated; `office_days.hours_start/hours_end` and
+// `home_days.hours_start/hours_end` are stripped at load time. Callers
+// MUST NOT read those legacy fields — they don't exist on the runtime object.
+type _RawUserProfile = z.infer<typeof UserProfileSchema>;
+export type UserProfile = Omit<_RawUserProfile, 'schedule'> & {
+  schedule: Omit<_RawUserProfile['schedule'], 'office_days' | 'home_days' | 'work_hours'> & {
+    office_days: { days: Array<'Sunday'|'Monday'|'Tuesday'|'Wednesday'|'Thursday'|'Friday'|'Saturday'>; notes?: string };
+    home_days:   { days: Array<'Sunday'|'Monday'|'Tuesday'|'Wednesday'|'Thursday'|'Friday'|'Saturday'>; notes?: string };
+    work_hours:  Record<'Sunday'|'Monday'|'Tuesday'|'Wednesday'|'Thursday'|'Friday'|'Saturday', string[]>;
+  };
+};
 export type VipContact = z.infer<typeof VipContactSchema>;
 export type ReschedulingRule = z.infer<typeof ReschedulingRuleSchema>;
 
@@ -495,7 +530,50 @@ export function loadUserProfile(profileName: string): UserProfile {
     skillsAny.social = true;
   }
 
-  profileCache.set(profileName, parsed.data);
+  // v2.8.1 — normalize work_hours. If yaml uses the legacy shape
+  // (office_days.hours_start/hours_end + home_days.hours_start/hours_end),
+  // synthesize the canonical work_hours map from it. Then strip the legacy
+  // fields so callers never see two sources of truth. If yaml already has
+  // work_hours set, the legacy fields (if any) are ignored and stripped.
+  const sched = parsed.data.schedule as {
+    office_days: { days: string[]; hours_start?: string; hours_end?: string };
+    home_days:   { days: string[]; hours_start?: string; hours_end?: string };
+    work_hours?: Record<string, string[]>;
+  };
+
+  if (!sched.work_hours || Object.keys(sched.work_hours).length === 0) {
+    const wh: Record<string, string[]> = {};
+    const officeStart = sched.office_days.hours_start;
+    const officeEnd = sched.office_days.hours_end;
+    const homeStart = sched.home_days.hours_start;
+    const homeEnd = sched.home_days.hours_end;
+    if (officeStart && officeEnd) {
+      for (const d of sched.office_days.days) {
+        wh[d] = [`${officeStart}-${officeEnd}`];
+      }
+    }
+    if (homeStart && homeEnd) {
+      for (const d of sched.home_days.days) {
+        // If a day appears in BOTH lists (unusual), home wins by being last.
+        wh[d] = [`${homeStart}-${homeEnd}`];
+      }
+    }
+    if (Object.keys(wh).length === 0) {
+      throw new Error(
+        `Profile ${profileName}.yaml: no work_hours and no legacy hours_start/hours_end. ` +
+        `Add a schedule.work_hours map, e.g.:\n  schedule:\n    work_hours:\n      Sunday: ["09:00-17:30"]\n      Monday: ["09:00-17:30"]\n      ...`,
+      );
+    }
+    sched.work_hours = wh;
+  }
+
+  // Strip legacy fields so callers can't accidentally read stale hours.
+  delete sched.office_days.hours_start;
+  delete sched.office_days.hours_end;
+  delete sched.home_days.hours_start;
+  delete sched.home_days.hours_end;
+
+  profileCache.set(profileName, parsed.data as UserProfile);
   logger.info('User profile loaded', {
     profile: profileName,
     user: parsed.data.user.name,

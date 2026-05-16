@@ -25,6 +25,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import type { UserProfile } from '../config/userProfile';
 import { getAwaitingOwnerRequests } from '../db/requests';
@@ -35,7 +36,7 @@ import type { App } from '@slack/bolt';
 
 // Module-level singleton — the auto-resolver fires often (every owner thread
 // reply when the flag is on); reusing the client avoids per-call HTTP setup.
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 export type AutoResolveVerdict = 'approve' | 'reject' | 'pass_to_sonnet';
 

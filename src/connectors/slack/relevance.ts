@@ -1,9 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../../llm/client';
 import { config } from '../../config';
 import logger from '../../utils/logger';
 
 // Single client instance — not recreated per call
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 /**
  * Decides whether the assistant should respond to a message in a group DM (MPIM).

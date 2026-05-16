@@ -18,6 +18,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../../llm/client';
 import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import { config } from '../../config';
@@ -112,7 +113,7 @@ async function isOutreachReplyByContext(params: {
   assistantName: string;
 }): Promise<boolean> {
   try {
-    const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+    const anthropic = getAnthropicClient();
     const historyText = params.conversation.length > 0
       ? '\n\nPrior back-and-forth:\n' + params.conversation
           .map(m => `${m.role === 'maelle' ? params.assistantName : params.colleagueName}: ${m.text}`)
@@ -155,7 +156,7 @@ async function processOutreachReply(params: {
   | { action: 'continue'; response: string }
   | { action: 'schedule'; summary: string; details: { subject: string; preferredDay?: string; preferredTime?: string; durationMin: number; isOnline: boolean } }
 > {
-  const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+  const anthropic = getAnthropicClient();
 
   const historyText = params.conversation.length > 0
     ? '\n\nConversation so far:\n' + params.conversation
@@ -565,8 +566,7 @@ export async function handleOutreachReply(
         searchTo: searchTo.toISO()!,
         preferMorning: true,
         workDays: allWorkDays,
-        workHoursStart: schedule.home_days.hours_start,
-        workHoursEnd: schedule.office_days.hours_end,
+        // v2.8.1 — calendar.ts reads per-day work_hours via getOwnerWorkHoursForDay; no widening here.
         minBufferHours: params.profile.meetings.min_slot_buffer_hours ?? 4,
         meetingMode: 'either',  // coord outreach — location determined later
         autoExpand: false,

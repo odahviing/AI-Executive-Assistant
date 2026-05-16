@@ -9,8 +9,20 @@ dotenv.config();
  * Slack tokens also live in the YAML per user, not here.
  */
 const configSchema = z.object({
-  // Anthropic
-  ANTHROPIC_API_KEY: z.string().startsWith('sk-ant-'),
+  // ── LLM provider ─────────────────────────────────────────────────────────
+  // Where Claude calls actually go: direct Anthropic API (default) or Google
+  // Vertex AI (for company-hosted LLM access). Same model family, same tool
+  // semantics — only the client construction + auth differs.
+  LLM_PROVIDER: z.enum(['anthropic', 'vertex']).default('anthropic'),
+
+  // Anthropic direct (required when LLM_PROVIDER=anthropic, ignored on vertex)
+  ANTHROPIC_API_KEY: z.string().optional().default(''),
+
+  // Vertex (required when LLM_PROVIDER=vertex, ignored on anthropic)
+  // GOOGLE_APPLICATION_CREDENTIALS is the standard Google env var pointing
+  // at a service account JSON; read by the Vertex SDK automatically.
+  VERTEX_PROJECT_ID: z.string().optional().default(''),
+  VERTEX_REGION: z.string().optional().default('us-east5'),
 
   // Azure / Microsoft Graph (app-only service principal)
   AZURE_TENANT_ID: z.string().uuid(),
@@ -47,5 +59,23 @@ if (!parsed.success) {
   process.exit(1);
 }
 
-export const config = parsed.data;
+// Cross-field validation — required keys depend on the chosen provider.
+const cfg = parsed.data;
+if (cfg.LLM_PROVIDER === 'anthropic') {
+  if (!cfg.ANTHROPIC_API_KEY || !cfg.ANTHROPIC_API_KEY.startsWith('sk-ant-')) {
+    console.error('❌ LLM_PROVIDER=anthropic requires ANTHROPIC_API_KEY starting with "sk-ant-".');
+    process.exit(1);
+  }
+} else if (cfg.LLM_PROVIDER === 'vertex') {
+  if (!cfg.VERTEX_PROJECT_ID) {
+    console.error('❌ LLM_PROVIDER=vertex requires VERTEX_PROJECT_ID.');
+    process.exit(1);
+  }
+  // GOOGLE_APPLICATION_CREDENTIALS is read by the Vertex SDK directly; warn if missing.
+  if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    console.warn('⚠️  LLM_PROVIDER=vertex but GOOGLE_APPLICATION_CREDENTIALS is not set. Vertex SDK will look in the default Google Cloud auth chain (gcloud CLI, metadata server, etc).');
+  }
+}
+
+export const config = cfg;
 export type Config = typeof config;

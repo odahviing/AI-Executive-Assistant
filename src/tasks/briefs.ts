@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
@@ -425,7 +426,7 @@ async function generateBriefingText(
     return `${g} — all clear, nothing new.`;
   }
 
-  const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+  const anthropic = getAnthropicClient();
   const firstName = profile.user.name.split(' ')[0];
   const dataText = JSON.stringify(items, null, 2);
 
@@ -651,11 +652,17 @@ export function getBriefingHourMin(profile: UserProfile): [number, number] {
     const match = timePref.value.match(/\b(\d{1,2}):(\d{2})\b/);
     if (match) return [parseInt(match[1], 10), parseInt(match[2], 10)];
   }
-  const startTimes = [
-    profile.schedule.office_days.hours_start,
-    profile.schedule.home_days.hours_start,
-  ].filter(Boolean).sort();
-  const earliest = startTimes[0] ?? '09:00';
+  // v2.8.1 — earliest work-hour start across all days in the canonical work_hours map.
+  const wh = profile.schedule.work_hours ?? {};
+  const allStarts: string[] = [];
+  for (const ranges of Object.values(wh)) {
+    for (const r of ranges) {
+      const m = r.match(/^(\d{2}:\d{2})-/);
+      if (m) allStarts.push(m[1]);
+    }
+  }
+  allStarts.sort();
+  const earliest = allStarts[0] ?? '09:00';
   const [h, m] = earliest.split(':').map(Number);
   return [h, m ?? 0];
 }

@@ -13,10 +13,11 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import logger from './logger';
 
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 // ── Narrow regex triggers — each one is a specific leak pattern ─────────────
 // These are intentionally strict. "Call", "tool", "function" alone never match;

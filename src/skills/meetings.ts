@@ -958,8 +958,9 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
                 searchTo: searchEndDate,
                 preferMorning: true,
                 workDays: allWorkDays,
-                workHoursStart: extendedHours ? '07:00' : context.profile.schedule.home_days.hours_start,
-                workHoursEnd: extendedHours ? '22:00' : context.profile.schedule.office_days.hours_end,
+                // v2.8.1 — workHoursStart/End only matter when extendedHours=true.
+                // Otherwise calendar.ts reads per-day work_hours via getOwnerWorkHoursForDay.
+                ...(extendedHours ? { workHoursStart: '07:00', workHoursEnd: '22:00' } : {}),
                 minBufferHours,
                 profile: context.profile,
                 // coord flow doesn't know mode upfront — location is auto-determined
@@ -981,8 +982,7 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
                   searchTo: searchEndDate,
                   preferMorning: true,
                   workDays: allWorkDays,
-                  workHoursStart: extendedHours ? '07:00' : context.profile.schedule.home_days.hours_start,
-                  workHoursEnd: extendedHours ? '22:00' : context.profile.schedule.office_days.hours_end,
+                  ...(extendedHours ? { workHoursStart: '07:00', workHoursEnd: '22:00' } : {}),
                   minBufferHours,
                   profile: context.profile,
                   meetingMode: 'either',
@@ -1045,8 +1045,7 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
               searchTo: searchEndDate,
               preferMorning: true,
               workDays: allWorkDays,
-              workHoursStart: context.profile.schedule.home_days.hours_start,
-              workHoursEnd: context.profile.schedule.office_days.hours_end,
+              // v2.8.1 — calendar.ts reads per-day work_hours via getOwnerWorkHoursForDay; no widening here.
               minBufferHours,
               profile: context.profile,
               meetingMode: 'either',

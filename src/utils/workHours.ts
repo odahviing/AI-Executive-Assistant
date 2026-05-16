@@ -1,40 +1,102 @@
 /**
  * Owner work-hours helpers.
  *
- * Used by task dispatchers that send system→owner notifications outside of
- * the user's flow. Respects the owner's `schedule.office_days` + `home_days`
- * windows from the profile so Maelle doesn't DM at 3am Saturday.
+ * v2.8.1 — multi-window support. Each weekday can have multiple work-hour
+ * ranges (e.g. Tuesday "09:00-15:30" + "21:30-23:59" for a split-shift day).
+ * The yaml field `schedule.work_hours: Record<weekday, string[]>` is the
+ * authoritative source when set; otherwise the legacy single-window from
+ * `office_days.hours_start/hours_end` (or `home_days.*`) is used.
  *
- * Extracted from tasks/dispatchers/outreachExpiry.ts (v1.8.0) when coord_nudge
- * picked up the same pattern.
+ * Day-type classification (office vs home) is independent of work_hours —
+ * it always comes from office_days.days / home_days.days for category
+ * rules + location resolution.
+ *
+ * Originally used only by task dispatchers; now also by the slot finder
+ * (calendar.ts) and scheduleRules.checkSlot.
  */
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 
-/**
- * Returns true if `now` falls within ANY of the owner's defined work windows
- * (office_days OR home_days, each with their own hours).
- */
-export function isWithinOwnerWorkHours(profile: UserProfile, now: DateTime): boolean {
-  const day = now.toFormat('EEEE'); // "Monday"
-  const officeDays = profile.schedule.office_days.days as string[];
-  const homeDays = profile.schedule.home_days.days as string[];
-
-  if (officeDays.includes(day)) {
-    return isInWindow(now, profile.schedule.office_days.hours_start, profile.schedule.office_days.hours_end);
-  }
-  if (homeDays.includes(day)) {
-    return isInWindow(now, profile.schedule.home_days.hours_start, profile.schedule.home_days.hours_end);
-  }
-  return false; // not a work day
+export interface WorkHourRange {
+  startMin: number;  // inclusive, minutes since local midnight
+  endMin: number;    // exclusive
 }
 
-function isInWindow(dt: DateTime, startHHMM: string, endHHMM: string): boolean {
-  const [sh, sm] = startHHMM.split(':').map(Number);
-  const [eh, em] = endHHMM.split(':').map(Number);
-  const minutes = dt.hour * 60 + dt.minute;
-  return minutes >= (sh * 60 + sm) && minutes <= (eh * 60 + em);
+function parseHHMM(s: string): number {
+  const [h, m] = s.split(':').map(Number);
+  return h * 60 + m;
+}
+
+function parseRange(rangeStr: string): WorkHourRange | null {
+  const m = rangeStr.match(/^(\d{2}:\d{2})-(\d{2}:\d{2})$/);
+  if (!m) return null;
+  const startMin = parseHHMM(m[1]);
+  const endMin = parseHHMM(m[2]);
+  if (endMin <= startMin) return null;
+  return { startMin, endMin };
+}
+
+/**
+ * Returns the work-hour windows for `dayName` (English weekday).
+ * Empty array means non-workday.
+ *
+ * Resolution: yaml `work_hours[dayName]` if set, else fall back to
+ * office_days/home_days legacy shape. Day-type classification (office vs
+ * home) is unrelated; that's read separately from office_days.days /
+ * home_days.days.
+ */
+export function getOwnerWorkHoursForDay(
+  profile: UserProfile,
+  dayName: string,
+): WorkHourRange[] {
+  const wh = profile.schedule.work_hours;
+  const dayRanges = wh ? wh[dayName as keyof typeof wh] : undefined;
+  if (!dayRanges || dayRanges.length === 0) return [];
+  const ranges: WorkHourRange[] = [];
+  for (const r of dayRanges) {
+    const parsed = parseRange(r);
+    if (parsed) ranges.push(parsed);
+  }
+  return ranges.sort((a, b) => a.startMin - b.startMin);
+}
+
+/**
+ * True iff [slotStartMin, slotEndMin) fits fully inside ANY window in the day.
+ */
+export function isSlotInWorkHours(
+  windows: WorkHourRange[],
+  slotStartMin: number,
+  slotEndMin: number,
+): boolean {
+  for (const w of windows) {
+    if (slotStartMin >= w.startMin && slotEndMin <= w.endMin) return true;
+  }
+  return false;
+}
+
+/**
+ * Sum of work-hour minutes across all windows on the day. Used by
+ * focus-time computation.
+ */
+export function totalWorkMinutes(windows: WorkHourRange[]): number {
+  return windows.reduce((acc, w) => acc + (w.endMin - w.startMin), 0);
+}
+
+/**
+ * Returns true if `now` falls within ANY of the owner's work windows for
+ * the current weekday. Multi-window aware (Tuesday split into morning +
+ * evening windows is honored if yaml defines it).
+ */
+export function isWithinOwnerWorkHours(profile: UserProfile, now: DateTime): boolean {
+  const day = now.toFormat('EEEE');
+  const windows = getOwnerWorkHoursForDay(profile, day);
+  if (windows.length === 0) return false;
+  const minutes = now.hour * 60 + now.minute;
+  for (const w of windows) {
+    if (minutes >= w.startMin && minutes < w.endMin) return true;
+  }
+  return false;
 }
 
 /**
@@ -126,14 +188,19 @@ export function computeHealthCheckWindow(profile: UserProfile): {
   }
 
   // Compute the end-of-work-hours timestamp for the selected endWorkday.
-  // Pick the correct hours_end based on office vs home day.
+  // v2.8.1 — multi-window aware: use the LAST window's end on the day
+  // (so Tuesday "09:00-15:30, 21:30-23:59" → end is 23:59).
   const dayName = endWorkday.toFormat('EEEE');
-  const isOffice = officeDays.includes(dayName);
-  const hoursEnd = isOffice
-    ? profile.schedule.office_days.hours_end
-    : profile.schedule.home_days.hours_end;
-  const [eh, em] = hoursEnd.split(':').map(Number);
-  const endDt = endWorkday.set({ hour: eh, minute: em, second: 0, millisecond: 0 });
+  const windows = getOwnerWorkHoursForDay(profile, dayName);
+  const lastWindow = windows.length > 0 ? windows[windows.length - 1] : null;
+  const endDt = lastWindow
+    ? endWorkday.set({
+        hour: Math.floor(lastWindow.endMin / 60),
+        minute: lastWindow.endMin % 60,
+        second: 0,
+        millisecond: 0,
+      })
+    : endWorkday.endOf('day');
 
   // If the full window is <= 24 hours, we're essentially out of runway
   // this week. Extend into next week so there's time to coordinate moves.
@@ -172,25 +239,24 @@ export function workTimeBaseFromNow(profile: UserProfile): string {
  */
 export function nextOwnerWorkdayStart(profile: UserProfile): string {
   const cursor = DateTime.now().setZone(profile.user.timezone);
-  const officeDays = profile.schedule.office_days.days as string[];
-  const homeDays = profile.schedule.home_days.days as string[];
 
   for (let i = 0; i < 14; i++) {
     const candidate = cursor.plus({ days: i });
     const day = candidate.toFormat('EEEE');
-    if (officeDays.includes(day)) {
-      const [h, m] = profile.schedule.office_days.hours_start.split(':').map(Number);
-      const dt = candidate.set({ hour: h, minute: m, second: 0, millisecond: 0 });
-      if (i === 0 && dt < cursor) continue; // already past today's start; try tomorrow
-      return dt.toUTC().toISO()!;
-    }
-    if (homeDays.includes(day)) {
-      const [h, m] = profile.schedule.home_days.hours_start.split(':').map(Number);
-      const dt = candidate.set({ hour: h, minute: m, second: 0, millisecond: 0 });
-      if (i === 0 && dt < cursor) continue;
-      return dt.toUTC().toISO()!;
+    const windows = getOwnerWorkHoursForDay(profile, day);
+    if (windows.length === 0) continue;
+    // Find the earliest window start that's still in the future (or first
+    // window of a future day). Multi-window: a slot at 21:30 after the
+    // current 17:30 cutoff is still "next work-time start" for the same day.
+    for (const w of windows) {
+      const dt = candidate.set({
+        hour: Math.floor(w.startMin / 60),
+        minute: w.startMin % 60,
+        second: 0,
+        millisecond: 0,
+      });
+      if (dt >= cursor) return dt.toUTC().toISO()!;
     }
   }
-  // Fallback — schedule looks empty; fire in 8 hours
   return cursor.plus({ hours: 8 }).toUTC().toISO()!;
 }

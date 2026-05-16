@@ -10,6 +10,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import type { UserProfile } from '../config/userProfile';
 import { getOpenScannerItems } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
@@ -55,7 +56,7 @@ export async function closeLoopOnOwnerHandled(params: {
 
   let closedIds: Array<{ id: string; reason: string }> = [];
   try {
-    const client = new Anthropic();
+    const client = getAnthropicClient();
     const userPrompt = [
       `Owner just said: "${params.ownerMessage.slice(0, 800)}"`,
       ``,

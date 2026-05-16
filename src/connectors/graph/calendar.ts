@@ -857,41 +857,46 @@ export async function findAvailableSlots(params: {
       if (homeDayNames.includes(dayName)) return 'home';
       return 'other';
     };
-    const getWorkHoursForDay = (dayName: string): { startMin: number; endMin: number } | null => {
-      // v2.3.2 (2A) — `relaxed` mode treats hours as extended (07-22), same
-      // as the explicit `extendedHours` flag. Owner can override their own
-      // work hours when they ask for "show me everything".
-      if (profile && !params.extendedHours && !params.relaxed) {
-        const { office_days, home_days } = profile.schedule;
-        if (officeDayNames.includes(dayName)) {
-          const [sh, sm] = office_days.hours_start.split(':').map(Number);
-          const [eh, em] = office_days.hours_end.split(':').map(Number);
-          return { startMin: sh * 60 + sm, endMin: eh * 60 + em };
-        }
-        if (homeDayNames.includes(dayName)) {
-          const [sh, sm] = home_days.hours_start.split(':').map(Number);
-          const [eh, em] = home_days.hours_end.split(':').map(Number);
-          return { startMin: sh * 60 + sm, endMin: eh * 60 + em };
-        }
-        return null; // not a known work day in profile
+    // v2.8.1 — multi-window per-day work hours. Returns an ARRAY of ranges;
+    // a slot is valid if it falls within any one of them. Splits on the
+    // yaml `schedule.work_hours[dayName]` if defined; otherwise falls back
+    // to legacy office_days/home_days hours.
+    const getWorkHoursForDay = (dayName: string): Array<{ startMin: number; endMin: number }> => {
+      // `relaxed` mode and `extendedHours` flag widen to a single 07-22 window
+      // (or whatever defaultStart/End come from params). Bypasses multi-window
+      // so owner's "show me everything" really shows everything.
+      if (!profile || params.extendedHours || params.relaxed) {
+        return [{
+          startMin: defaultStartHour * 60 + defaultStartMin,
+          endMin: defaultEndHour * 60 + defaultEndMin,
+        }];
       }
-      return { startMin: defaultStartHour * 60 + defaultStartMin, endMin: defaultEndHour * 60 + defaultEndMin };
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getOwnerWorkHoursForDay } = require('../../utils/workHours') as
+        typeof import('../../utils/workHours');
+      return getOwnerWorkHoursForDay(profile, dayName);
     };
 
     const minToStr = (m: number) =>
       `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 
-    // Pre-compute per-day quality free time (thinking-time check)
+    // Pre-compute per-day quality free time (thinking-time check).
+    // v2.8.1 — multi-window aware: sum free-minutes across all work windows
+    // on the day so a split-shift Tuesday (9-15:30 + 21:30-23:59) gets the
+    // total quality time from BOTH windows, not just one.
     const dayFreeTimeCache = new Map<string, number>();
-    const getDayQualityFree = (dayDate: string, dayHours: { startMin: number; endMin: number }): number => {
+    const getDayQualityFree = (dayDate: string, dayHours: Array<{ startMin: number; endMin: number }>): number => {
       if (dayFreeTimeCache.has(dayDate)) return dayFreeTimeCache.get(dayDate)!;
-      const freeMin = computeDayQualityFreeMinutes(
-        dayDate, params.timezone,
-        minToStr(dayHours.startMin), minToStr(dayHours.endMin),
-        allBusy, thinkingTimeMinChunk,
-      );
-      dayFreeTimeCache.set(dayDate, freeMin);
-      return freeMin;
+      let totalFree = 0;
+      for (const w of dayHours) {
+        totalFree += computeDayQualityFreeMinutes(
+          dayDate, params.timezone,
+          minToStr(w.startMin), minToStr(w.endMin),
+          allBusy, thinkingTimeMinChunk,
+        );
+      }
+      dayFreeTimeCache.set(dayDate, totalFree);
+      return totalFree;
     };
 
     // v2.0.9 — walker collects ALL valid 15-min-stepped candidates per day
@@ -955,12 +960,14 @@ export async function findAvailableSlots(params: {
         continue;
       }
       const dayHours = getWorkHoursForDay(dayName);
-      if (!dayHours) {
+      if (dayHours.length === 0) {
         cursor = new Date(cursor.getTime() + step);
         continue;
       }
       const slotTotalMin = cursorDt.hour * 60 + cursorDt.minute;
-      if (slotTotalMin < dayHours.startMin || slotTotalMin + params.durationMinutes > dayHours.endMin) {
+      const slotEndMin = slotTotalMin + params.durationMinutes;
+      const inAnyWindow = dayHours.some(w => slotTotalMin >= w.startMin && slotEndMin <= w.endMin);
+      if (!inAnyWindow) {
         trackReject('outside_owner_work_hours', cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
         continue;

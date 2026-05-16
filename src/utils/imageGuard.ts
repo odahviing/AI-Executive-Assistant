@@ -13,11 +13,12 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import logger from './logger';
 import type { DownloadedImage } from '../vision';
 
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 export interface ImageScanResult {
   suspicious: boolean;

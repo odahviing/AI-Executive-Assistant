@@ -26,6 +26,7 @@
 
 import { DateTime } from 'luxon';
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import logger from './logger';
 import { config } from '../config';
 import type { UserProfile } from '../config/userProfile';
@@ -261,7 +262,7 @@ Output:
 
 Empty array if everything is consistent. Keep output minimal.`;
 
-  const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+  const anthropic = getAnthropicClient();
   const resp = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 400,

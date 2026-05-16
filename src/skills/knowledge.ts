@@ -31,6 +31,7 @@
  */
 
 import type Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import type { Skill, SkillContext } from './types';
 import type { UserProfile } from '../config/userProfile';
 import { promises as fs } from 'fs';
@@ -513,7 +514,7 @@ Use when the owner asks something specific about the company / product / team, w
             return { ok: false, error: 'page_unreadable', url, detail: extracted.error || 'no content returned' };
           }
           const Anthropic = (await import('@anthropic-ai/sdk')).default;
-          const anthropic = new Anthropic();
+          const anthropic = getAnthropicClient();
           const result = await ingestKnowledgeDoc({
             profile: context.profile,
             text: extracted.content,

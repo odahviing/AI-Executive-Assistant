@@ -18,6 +18,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../../llm/client';
 import type { UserProfile } from '../../config/userProfile';
 import type { LegacySocialDirectiveShape as SocialDirective } from './stateMachine';
 import { config } from '../../config';
@@ -116,7 +117,7 @@ ${!isOwner ? `You're talking to ${senderFirstName} (not ${ownerFirst}). Address 
 Output the coda sentence only. No quotes, no label.`;
 
   try {
-    const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+    const anthropic = getAnthropicClient();
     const resp = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 100,

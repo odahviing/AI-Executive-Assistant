@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../../llm/client';
 import { config } from '../../config';
 import { buildSystemPromptParts } from './systemPrompt';
 import { classifyOwnerIntent, type OwnerIntentClassification } from '../social/classifyOwnerIntent';
@@ -14,7 +15,7 @@ import { getActiveJobsForThread } from '../../tasks';
 import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
 
-const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+const anthropic = getAnthropicClient();
 
 /**
  * Wraps anthropic.messages.create with a single retry on 429 rate-limit errors.
@@ -1401,75 +1402,16 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     }
   }
 
-  // v2.1.5 — never synthesize recovery text on a colleague-facing turn.
-  // The recovery pass was built to cover "owner asked Maelle to delete X,
-  // tool succeeded, Claude went silent, owner needs confirmation." In a
-  // colleague conversation the same mechanism fabricates owner-narrative
-  // text ("Yael mentioned she's planning to fly to Boston") and delivers
-  // it to the colleague as if Maelle said it. Colleague-facing text must
-  // only be what Claude itself wrote — if the main pass went silent, the
-  // honest outcome is silence. Owner path keeps the recovery safety net.
-  const isColleagueFacing = input.senderRole === 'colleague' && !input.isOwnerInGroup;
+  // v2.8.1 (#41) — recovery pass DELETED. Pre-fix, when Sonnet ran tools but
+  // produced no text, the orchestrator made a second Sonnet call to generate
+  // a one-line summary. That was useful pre-Sonnet-4.6 when silent-after-action
+  // was common; today it's rare. The tool-grounded fallback below (verbMap,
+  // 45 mapped verbs + safe generic) is the deterministic backstop and never
+  // fabricates outside the actual tool set. Removing the LLM recovery pass:
+  // cheaper, faster, can't drift, can't fabricate. If the fallback can't
+  // produce text from real tool calls, silence is the honest outcome.
 
-  if (!finalReply && !isColleagueFacing) {
-    // v1.6.5 — recovery call. The model ran tools but produced no text.
-    // Silence (the v1.6.4 behavior) was honest but jarring. Instead we run
-    // ONE more Claude pass with a tight system prompt: "you just handled
-    // this turn but produced no text; describe what you did in one short
-    // human sentence." This is grounded in the real conversation history
-    // (the model saw every tool result) so it cannot fabricate from thin
-    // air, and the claim-checker still runs on the recovered reply
-    // afterwards in postReply.ts. Only if THIS also returns empty do we
-    // silence and log.
-    const firstName = profile.user.name.split(' ')[0];
-    const recoverySystem = `You just handled a turn for ${firstName} but did not write a reply.
-Look at the conversation above (${firstName}'s last message + your tool calls + their results). Write ONE short, plain-text sentence.
-
-LANGUAGE — mirror the language of ${firstName}'s MOST RECENT message ONLY. If his latest message is English, reply English. If his latest message is Hebrew, reply Hebrew. Ignore the language of earlier turns, names, or meeting subjects. No inertia, no "natural default", no carry-over.
-
-Three branches — pick the one that fits:
-
-A) YOU DID SOMETHING → describe it grounded in the tool results. One sentence. Example: "Deleted 'Sales Sync' from Wed 22 Apr 16:15."
-
-B) YOU DID NOTHING BECAUSE ${firstName.toUpperCase()}'S REQUEST WAS AMBIGUOUS → say so plainly AND ask ONE specific clarifying question. Example: "Not sure I follow — did you mean Tuesday or Wednesday?" / "Which meeting did you want me to move?". Never fake confidence to avoid the question.
-
-C) YOU DID NOTHING AND CAN'T ARTICULATE WHY → write exactly: NO_REPLY
-
-Rules:
-- One sentence (one question is fine in branch B). Plain text. No markdown, no bullets, no preamble.
-- If a tool returned an error or did nothing, say so honestly.
-- Do not invent results that are not in the tool history.
-- Do not call any tools — just write the sentence.`;
-    try {
-      const recovery = await callClaude({
-        model,
-        max_tokens: 200,
-        system: recoverySystem,
-        messages,
-      });
-      const recoveryText = recovery.content
-        .filter(b => b.type === 'text')
-        .map(b => (b as Anthropic.TextBlock).text)
-        .join(' ')
-        .trim();
-      if (recoveryText && !/^NO_REPLY\s*$/i.test(recoveryText)) {
-        logger.info('Orchestrator empty reply recovered via summarizer pass', {
-          threadTs, iterations: iteration,
-          recoveryPreview: recoveryText.slice(0, 200),
-        });
-        finalReply = recoveryText;
-      } else {
-        logger.warn('Orchestrator recovery pass returned NO_REPLY or empty — silencing', {
-          threadTs, iterations: iteration, recoveryRaw: recoveryText.slice(0, 200),
-        });
-      }
-    } catch (err) {
-      logger.warn('Orchestrator recovery pass errored — silencing', {
-        threadTs, iterations: iteration, err: String(err),
-      });
-    }
-
-    if (!finalReply) {
+  if (!finalReply) {
       // v1.7.3 — last-resort fallback. If tools actually ran this turn but
       // both the model AND the recovery pass produced nothing, silence is the
       // wrong answer — the owner has no idea their request landed. Post a

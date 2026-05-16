@@ -26,6 +26,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import { updateMeeting, type CalendarEvent } from '../connectors/graph/calendar';
 import type { UserProfile } from '../config/userProfile';
@@ -171,7 +172,7 @@ Example: [1] Interview | Subject mentions "candidate", external attendee from a 
 
   let raw = '';
   try {
-    const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+    const anthropic = getAnthropicClient();
     const resp = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 60 * opts.events.length + 200,

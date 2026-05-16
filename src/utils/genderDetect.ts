@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import { getPersonMemory, setCoreFieldWithProvenance } from '../db';
 import type { PersonGender } from '../db';
@@ -49,7 +50,7 @@ async function detectGenderFromImage(
   if (!image) return 'unknown';
 
   try {
-    const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+    const anthropic = getAnthropicClient();
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 5,
@@ -86,7 +87,7 @@ async function detectGenderFromName(name: string): Promise<PersonGender> {
   if (!config.ANTHROPIC_API_KEY || !name || !name.trim()) return 'unknown';
 
   try {
-    const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+    const anthropic = getAnthropicClient();
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 5,

@@ -23,6 +23,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import logger from '../utils/logger';
 
@@ -35,7 +36,7 @@ export async function isBriefRequest(userMessage: string): Promise<boolean> {
   if (!PRE_FILTER.test(trimmed)) return false;
 
   try {
-    const anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+    const anthropic = getAnthropicClient();
     const resp = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 80,
