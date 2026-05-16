@@ -34,7 +34,13 @@ import {
   insertVenue,
   type VenueRow,
 } from '../db/venues';
-import { searchVenueCandidates, resolveVenueByName, type VenueCandidate } from '../utils/venueSearch';
+import {
+  searchVenueCandidates,
+  resolveVenueByName,
+  evaluateVenueHours,
+  type VenueCandidate,
+  type HoursStatus,
+} from '../utils/venueSearch';
 import logger from '../utils/logger';
 
 type FindVenueArgs = {
@@ -42,6 +48,7 @@ type FindVenueArgs = {
   type?: string;
   type_tags?: string[];
   name_hint?: string;
+  meeting_time?: string;          // v2.8.4 — ISO datetime; deterministic hours filter
   include_hidden?: boolean;
   max_options?: number;
 };
@@ -73,6 +80,8 @@ Ranks (from the owner's catalog of previously-booked venues):
 
 When the owner names a venue you've never booked before, the catalog doesn't have it yet; the tool returns the freshly-resolved candidate without rank metadata. After booking, the venue gets auto-saved with rank=2.
 
+When you know the meeting time (or a tentative slot), pass it as \`meeting_time\` (ISO datetime). The tool deterministically filters out venues KNOWN to be closed at that time and tags each survivor with \`hours_status\`: \`open\` (verified open), \`closed\` (filtered out — won't be in results), or \`unknown\` (opening hours not in our data — Sonnet should surface this to the owner).
+
 Use this tool when:
 - Owner asks for a coffee / lunch / dinner / drinks place ("find me a kosher restaurant in Tel Aviv")
 - Owner names a specific external venue and you need the address ("Coffee Landwer Ness Ziona Tuesday 3pm")
@@ -102,6 +111,10 @@ Do NOT use when:
             name_hint: {
               type: 'string',
               description: 'Specific venue name for Case-1 resolution. May include city/branch hint inline ("Coffee Landwer Ness Ziona"). Optional.',
+            },
+            meeting_time: {
+              type: 'string',
+              description: 'OPTIONAL ISO datetime of the planned meeting. When provided, the tool deterministically drops venues known to be closed at that time and tags survivors with hours_status (open / unknown). Pass it whenever the time is known — much better than guessing.',
             },
             include_hidden: {
               type: 'boolean',
@@ -162,6 +175,10 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
 
   private async findVenue(args: FindVenueArgs, context: SkillContext): Promise<unknown> {
     const ownerUserId = context.profile.user.slack_user_id;
+    const tz = context.profile.user.timezone;
+    const meetingTimeIso = (typeof args.meeting_time === 'string' && args.meeting_time.trim().length > 0)
+      ? args.meeting_time.trim()
+      : undefined;
     const max = Math.min(Math.max(args.max_options ?? 3, 1), 5);
     const hasNameHint = typeof args.name_hint === 'string' && args.name_hint.trim().length > 0;
     const hasAreaType = (args.area && args.area.trim().length > 0) || (args.type && args.type.trim().length > 0);
@@ -199,12 +216,13 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
     //   If not, resolve fresh via Tavily and return the resolved venue.
     if (hasNameHint && !hasAreaType) {
       if (catalogHits.length > 0) {
+        const filtered = applyHoursFilter(catalogHits.map(v => ({ row: v as VenueRow | null, cand: null as VenueCandidate | null })), meetingTimeIso, tz);
         return {
           success: true,
           source: 'catalog',
-          options: catalogHits.map(serializeVenue),
+          options: filtered.map(serializeFiltered),
           hidden_count,
-          ambiguity_flag: catalogHits.length > 1,
+          ambiguity_flag: filtered.length > 1,
         };
       }
       const fresh = await resolveVenueByName(args.name_hint!, args.area);
@@ -215,10 +233,11 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
           message: `Couldn't resolve "${args.name_hint}" to a known venue. Ask the owner for the full address.`,
         };
       }
+      const filtered = applyHoursFilter([{ row: null, cand: fresh }], meetingTimeIso, tz);
       return {
         success: true,
         source: 'fresh',
-        options: [serializeCandidate(fresh)],
+        options: filtered.map(serializeFiltered),
         hidden_count,
         ambiguity_flag: false,
       };
@@ -228,10 +247,11 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
     //   If catalog has ≥ max hits, return those (the owner has enough preference data here).
     //   Otherwise, top up with Tavily candidates.
     if (catalogHits.length >= max) {
+      const filtered = applyHoursFilter(catalogHits.map(v => ({ row: v, cand: null as VenueCandidate | null })), meetingTimeIso, tz);
       return {
         success: true,
         source: 'catalog',
-        options: catalogHits.map(serializeVenue),
+        options: filtered.map(serializeFiltered),
         hidden_count,
         ambiguity_flag: false,
       };
@@ -256,13 +276,16 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
     const catalogNames = new Set(catalogHits.map(v => v.name.toLowerCase()));
     const freshDeduped = freshCandidates.filter(c => !catalogNames.has(c.name.toLowerCase())).slice(0, remaining);
 
+    const merged: Array<{ row: VenueRow | null; cand: VenueCandidate | null }> = [
+      ...catalogHits.map(v => ({ row: v as VenueRow | null, cand: null as VenueCandidate | null })),
+      ...freshDeduped.map(c => ({ row: null as VenueRow | null, cand: c })),
+    ];
+    const filtered = applyHoursFilter(merged, meetingTimeIso, tz);
+
     return {
       success: true,
       source: catalogHits.length > 0 ? 'mixed' : 'fresh',
-      options: [
-        ...catalogHits.map(serializeVenue),
-        ...freshDeduped.map(serializeCandidate),
-      ],
+      options: filtered.map(serializeFiltered),
       hidden_count,
       ambiguity_flag: false,
     };
@@ -328,7 +351,9 @@ Rank legend (carried on each option):
 - rank 1 → avoid — hidden by default
 - rank null → newly-discovered, not yet in his catalog
 
-After he picks a venue from a Case-2 search, surface the \`reservation_url\` (if present) and \`phone\` so he can book the table himself. Once he confirms the reservation done, call \`create_meeting\` with \`location\` set to the venue's display string (name + address). The venue gets saved to his catalog automatically on booking with rank=2.
+After he picks a venue from a Case-2 search, surface the \`reservation_url\` (if present) and \`phone\` so he can book the table himself. EVERY option you present must include the \`maps_url\` link the tool returned — that's the always-present fallback link he can click to see the place on Google Maps. If \`phone\` is absent, say so plainly ("no phone in my data — look it up via the Maps link"). Once he confirms the reservation done, call \`create_meeting\` with \`location\` set to the venue's display string (name + address). The venue gets saved to his catalog automatically on booking with rank=2.
+
+OPENING HOURS — pass \`meeting_time\` to \`find_venue\` whenever you know the time. The tool drops closed venues deterministically. Surviving candidates carry \`hours_status\`: when it's \`unknown\`, mention that openly ("opening hours not in my data — worth a quick check"). When it's \`open\`, you're cleared. Don't invent hours either way.
 
 Owner can re-rank venues in chat ("rank Coffee Landwer 3", "drop Aroma to 1", "make that my favorite") → call \`rank_venue\`. The catalog only carries places he's previously booked; tell him so if he tries to rank something brand-new.
 
@@ -337,6 +362,48 @@ When the venue skill is the right tool: any meeting where ${firstName} or a coll
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * v2.8.4 — deterministic opening-hours filter.
+ *
+ * Input: mixed list of catalog rows + fresh candidates. Output: same list
+ * minus any entry KNOWN to be closed at meetingTimeIso. Each survivor is
+ * paired with its hours_status (`open` | `unknown`). When meetingTimeIso is
+ * undefined, every entry passes with hours_status='unknown'.
+ *
+ * Catalog rows don't currently carry opening_hours yet (future schema —
+ * tracked at #96 alongside Google Places). Today they're always `unknown`
+ * unless a fresh candidate happens to have hours we extracted from Tavily.
+ */
+type FilteredEntry = {
+  row: VenueRow | null;
+  cand: VenueCandidate | null;
+  hours_status: HoursStatus;
+};
+
+function applyHoursFilter(
+  entries: Array<{ row: VenueRow | null; cand: VenueCandidate | null }>,
+  meetingTimeIso: string | undefined,
+  timezone: string,
+): FilteredEntry[] {
+  const out: FilteredEntry[] = [];
+  for (const e of entries) {
+    const hoursByDay = e.cand?.opening_hours_by_day;
+    const status = evaluateVenueHours({
+      openingHoursByDay: hoursByDay,
+      meetingTimeIso,
+      timezone,
+    });
+    if (status === 'closed') continue;  // hard drop — won't reach Sonnet
+    out.push({ ...e, hours_status: status });
+  }
+  return out;
+}
+
+function serializeFiltered(e: FilteredEntry): Record<string, unknown> {
+  const base = e.row ? serializeVenue(e.row) : e.cand ? serializeCandidate(e.cand) : {};
+  return { ...base, hours_status: e.hours_status };
+}
 
 function serializeVenue(v: VenueRow): Record<string, unknown> {
   return {
@@ -349,6 +416,7 @@ function serializeVenue(v: VenueRow): Record<string, unknown> {
     type_tags: v.type_tags,
     phone: v.phone,
     reservation_url: v.reservation_url,
+    maps_url: buildMapsSearchUrl(v.name, v.branch_name ?? undefined, v.address ?? undefined),
     notes: v.notes,
     rank: v.rank,
     last_used_at: v.last_used_at,
@@ -366,10 +434,28 @@ function serializeCandidate(c: VenueCandidate): Record<string, unknown> {
     type_tags: c.type_tags ?? [],
     phone: c.phone ?? null,
     reservation_url: c.reservation_url ?? null,
+    // v2.8.4 — always include a usable link. When Tavily / Google Places
+    // surfaces a reservation_url it goes above; otherwise this Maps search
+    // URL is the fallback so Sonnet always has something clickable to give
+    // the owner. Deterministic, no extra API call.
+    maps_url: buildMapsSearchUrl(c.name, c.branch_name, c.address),
     notes: c.notes ?? null,
     rank: null,
     last_used_at: null,
   };
+}
+
+/**
+ * Deterministic Google Maps search URL for a venue. Combines name +
+ * branch_name + address so the search query is as specific as possible.
+ * No API call — pure URL construction.
+ */
+function buildMapsSearchUrl(name: string, branchName?: string | null, address?: string | null): string {
+  const parts: string[] = [name];
+  if (branchName) parts.push(branchName);
+  if (address) parts.push(address);
+  const query = encodeURIComponent(parts.join(' '));
+  return `https://www.google.com/maps/search/?api=1&query=${query}`;
 }
 
 /**
