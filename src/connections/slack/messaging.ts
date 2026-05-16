@@ -296,14 +296,17 @@ export async function setAssistantStatus(
       channel_id: params.channelId,
       thread_ts: params.threadTs,
       status: params.status,
-      // CRITICAL: pass loading_messages explicitly to suppress Slack's built-in
+      // Pass a single non-empty loading_message to suppress Slack's built-in
       // rotating defaults ("Gathering information…", "Reviewing findings…",
-      // "Summarizing findings…", "Finding answers…"). Without this, the
-      // assistant panel's top rotating banner fills with Slack's own phrases
-      // — which read as a separate "AI activity indicator" alongside our
-      // status. Passing a single empty string gives Slack nothing to rotate,
-      // collapsing the top banner. Bottom status (params.status) is unaffected.
-      loading_messages: [''],
+      // "Summarizing findings…", "Finding answers…") while keeping the bottom
+      // status (params.status) visible.
+      //
+      // v2.8.4 fix — pre-fix this was `loading_messages: ['']`. Slack treated
+      // the empty-string entry as an invalid call (or collapsed the entire
+      // indicator); the bottom status never showed up either. Latent since
+      // v2.7.5. Now: one static word — gives Slack nothing to rotate AND
+      // doesn't blank the indicator.
+      loading_messages: ['Working'],
     });
   } catch (err) {
     // Don't escalate — status is UX polish. If it fails (wrong thread type,
