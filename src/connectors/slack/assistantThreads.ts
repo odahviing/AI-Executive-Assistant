@@ -71,6 +71,22 @@ export function registerAssistantThread(key: AssistantThreadKey): void {
  * True iff the given (channel, thread) is a registered assistant-panel thread
  * within the TTL. Sync (the orchestrator's pre-tool-call hook needs sync) —
  * cache-first with one-time DB lookup on miss per process.
+ *
+ * v2.8.3+ — REFRESH ON ACTIVITY. Slack fires `assistant_thread_started` only
+ * on FIRST panel open, never on subsequent messages. Pre-fix the row's
+ * registered_at was frozen at first-open, so any panel session crossing the
+ * 24h TTL would silently drop out of the registry — leaving the owner with
+ * "no status indicator" for the same panel he uses daily. Now: every time
+ * this function does a DB lookup that finds a valid row, registered_at is
+ * bumped to NOW. Active panels stay registered indefinitely. Truly idle
+ * panels (panel closed, never used again) still expire after 24h of no
+ * lookups. The TTL still gets the deletion sweep on register and on stale
+ * read; only the TIMER restarts.
+ *
+ * Process-local cache (`cacheHits`) is per-run only. After every restart
+ * the cache rebuilds from DB lookups, which refresh registered_at. So the
+ * combination of (frequent dev restarts + refresh-on-lookup) keeps the
+ * row alive without needing to refresh on every cached hit.
  */
 export function isAssistantThread(key: AssistantThreadKey): boolean {
   const k = keyOf(key);
@@ -89,7 +105,9 @@ export function isAssistantThread(key: AssistantThreadKey): boolean {
       return false;
     }
 
-    // TTL check.
+    // TTL check against the EXISTING registered_at — if the row hasn't been
+    // touched in 24h+, drop it. Otherwise refresh registered_at to now so
+    // active panels never expire.
     const registeredAtMs = Date.parse(row.registered_at.replace(' ', 'T') + 'Z');
     if (Date.now() - registeredAtMs > TTL_MS) {
       db.prepare(`DELETE FROM assistant_threads WHERE channel_id = ? AND thread_ts = ?`)
@@ -97,6 +115,14 @@ export function isAssistantThread(key: AssistantThreadKey): boolean {
       cacheMisses.add(k);
       return false;
     }
+
+    // Within TTL — refresh the timestamp so the row stays alive while the
+    // panel is being actively used. Fire-and-forget feel; this is a 1-row
+    // UPDATE so cost is negligible.
+    try {
+      db.prepare(`UPDATE assistant_threads SET registered_at = datetime('now') WHERE channel_id = ? AND thread_ts = ?`)
+        .run(key.channelId, key.threadTs);
+    } catch (_) { /* refresh is opportunistic; never block the read */ }
 
     cacheHits.add(k);
     return true;

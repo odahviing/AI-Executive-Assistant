@@ -2,6 +2,30 @@
 
 ---
 
+## 2.8.4 — Three real-day bug fixes (TZ math, claim-checker double-fire, assistant-panel TTL)
+
+Closes three bugs caught in live use 2026-05-16/17. Each one is a "code over prompt" win — fixing the data path rather than tightening a rule.
+
+### Fixed
+
+- **Sonnet was inventing cross-timezone math in chat** (Lori "10:30 IL = 08:30 Boston" — actually 03:30 Boston, off ~5h). Two parts: (a) Lori's `people_memory` row had `state="Boston"` but `timezone="Asia/Jerusalem"` — both owner-stamped from some earlier path. One-shot data fix script at `scripts/fix-lori-timezone.cjs` (already executed). (b) The `find_available_slots` handler in `skills/meetings/ops.ts` now post-processes each slot: for every attendee whose stored TZ differs from owner's, it pre-renders `per_attendee_local: [{ email, timezone, local_iso, local_display }]`. Sonnet quotes `local_display` verbatim — no math. One-line prompt rule in `meetings.ts` ("CROSS-TZ ATTENDEE — quote `local_display`, don't recompute") replaces the older multi-paragraph TRAVELING ATTENDEE rule. Net prompt shorter, behavior strictly more correct.
+
+- **Claim-checker retry path double-fired write tools.** Real-day reproduction: "yes perfect" → `create_meeting` at 15:00 succeeded → claim-checker's `unverified_state_review` retry path re-invoked the orchestrator with NO awareness of the first write → Sonnet called `find_available_slots` fresh (15:00 now busy from her own booking!) → fired `create_meeting` at 15:30 → second event. Root cause was a 2.8.1 regression: the new Module F/E retry path was missing the `priorActionsHint` plumbing the classic v2.3.4 retry path had. Fix: `OrchestratorOutput.mutationActions: Array<{tool, ok, subject?, start?, eventId?, …}>` field added, populated alongside the truncated `toolSummaries` — carries FULL event IDs. New `buildPriorActionsHint` helper in `postReply.ts` renders a structured block ("In this turn you already executed: …") followed by the amend-vs-rewrite playbook: "USUALLY rewrite the draft to match the action; RARELY amend via move_meeting/update_meeting/delete_meeting referencing the id above; NEVER re-call create_meeting / book_floating_block / coordinate_meeting / message_colleague — those create duplicates." Wired into both retry call sites.
+
+- **Assistant-panel status indicator silently broke after 24h.** Slack only fires `assistant_thread_started` on FIRST panel open. The DB-backed `assistant_threads` table stamped `registered_at` at first-open and enforced a 24h TTL at read time — any panel session crossing the 24h mark dropped out of the registry with no event to re-register it. Fix in `assistantThreads.ts`: `isAssistantThread` now refreshes `registered_at` on every successful DB lookup. Active panels stay registered indefinitely. Truly-closed panels still expire after 24h of no lookups. Latent since v2.7.5 (when DB-backed registry shipped); only visible to long-lived panel users.
+
+### Added
+
+- `OrchestratorOutput.mutationActions` — structured per-write record for downstream consumers. Today only the claim-checker retry hint uses it; future amend-aware features can read the same field.
+- `scripts/fix-lori-timezone.cjs` — one-off data fix (idempotent). Audit trail for the Lori row repair.
+
+### Not changed
+
+- No DB schema migrations.
+- No new tools (consistent with the recent "tooling over new tools" direction).
+
+---
+
 ## 2.8.3 — Venue skill + tool consolidation (13 owner tools → 5)
 
 New `venue` skill for external meeting venues (cafés, restaurants, customer offices). Two flows: `find_venue` resolves owner-named places via Tavily OR returns 3 candidates for an area+type search; `rank_venue` curates a per-owner catalog with ranks 1-3 (1 hidden, 2 default, 3 favorite first). Save-on-book hook auto-files non-company locations to the catalog at rank 2. Toggle: `skills.venue: true`.

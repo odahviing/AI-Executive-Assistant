@@ -374,6 +374,45 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
       currentUserMessage: userMessage,
     });
 
+    // v2.8.3+ — shared helper for the priorActionsHint appended to BOTH
+    // claim-checker retry paths. Without this hint, a retry that follows a
+    // turn which already fired a write tool (create_meeting etc.) can
+    // re-fire the same write and create a duplicate — the 2026-05-16
+    // "Offensive Pricing Suggestions" double-booking bug. The hint gives
+    // Sonnet (a) the FULL event ids needed to amend via move/update/delete
+    // and (b) the playbook: usually the DRAFT was wrong → rewrite; rarely
+    // the ACTION was wrong → amend referencing the id. Never re-fire the
+    // creation tools.
+    const buildPriorActionsHint = (): string => {
+      const compactSummaries = result.toolSummaries ?? [];
+      const mutations = (result.mutationActions ?? []).filter(m => m.ok);
+      if (compactSummaries.length === 0 && mutations.length === 0) return '';
+      const lines: string[] = ['', '', 'IN THIS SAME TURN you already executed:'];
+      if (mutations.length > 0) {
+        for (const m of mutations) {
+          const parts: string[] = [m.tool];
+          if (m.subject) parts.push(`subject="${m.subject}"`);
+          if (m.start) parts.push(`start=${m.start}`);
+          if (m.new_start && m.new_start !== m.start) parts.push(`new_start=${m.new_start}`);
+          if (m.eventId) parts.push(`event_id=${m.eventId}`);
+          lines.push(`  • ${parts.join(' ')} → succeeded`);
+        }
+      } else {
+        // No mutation rich-data — fall back to the compact summaries list.
+        lines.push(`  ${compactSummaries.join(' ')}`);
+      }
+      if (mutations.length > 0) {
+        lines.push('');
+        lines.push('If your draft contradicts what an action above actually did, ONE of these is true:');
+        lines.push('- USUALLY: your draft was wrong. REWRITE the draft to match the tool\'s actual execution (e.g. if it booked 15:00 and you wrote 15:30, fix the text to say 15:00).');
+        lines.push('- RARELY: the action itself was wrong (e.g. wrong time, wrong attendees, wrong subject). AMEND via move_meeting / update_meeting / delete_meeting referencing the event_id above. NEVER re-call create_meeting / book_floating_block / coordinate_meeting / message_colleague — those would create duplicates.');
+        lines.push('If your draft does NOT contradict the action, just fix the specific honesty rule the checker flagged — don\'t change what was done.');
+      } else {
+        lines.push('Don\'t re-run those tools — and don\'t narrate their effects as if someone else did them.');
+      }
+      return lines.join('\n');
+    };
+
     // v2.7.8 (Module F + E) — extended honesty/repetition rules. When
     // claimed_action is false but one of the new booleans fired, the checker
     // has supplied a rule-specific retry_instruction. Trigger the same retry
@@ -415,7 +454,10 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
           isMpim: ctx.isMpim,
           isOwnerInGroup: ctx.isOwnerInGroup,
           mpimMemberIds: ctx.mpimMemberIds,
-          extraInstruction: verdict.retry_instruction,
+          // v2.8.3+ — append priorActionsHint so the retry can't re-fire a
+          // write tool that turn 1 already executed. Closes the duplicate-
+          // create_meeting bug surfaced on 2026-05-16.
+          extraInstruction: verdict.retry_instruction + buildPriorActionsHint(),
         });
         const retried = retry.reply?.trim();
         if (retried && retried.length > 0) {
@@ -503,14 +545,10 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
     });
 
     const targetLabel = verdict.target_name ?? 'the person mentioned';
-    // v2.3.4 — surface this turn's tool calls into the corrective nudge.
-    // The retry's conversationHistory only carries PRIOR turns; the just-
-    // completed tool calls aren't in it, so without this hint Sonnet can
-    // re-read the calendar and narrate her own actions as someone else's.
-    // Empty-list path keeps the nudge clean for genuine over-claims.
-    const priorActionsHint = (result.toolSummaries ?? []).length > 0
-      ? `\n\nFor context, in THIS SAME TURN you already executed: ${(result.toolSummaries ?? []).join(' ')}. Don't re-run those — and don't narrate their effects as if someone else did them.`
-      : '';
+    // v2.8.3+ — shared hint (see buildPriorActionsHint above). Carries the
+    // full event_ids for any write tool that fired turn 1 + amend-vs-rewrite
+    // playbook so the retry doesn't re-create duplicates.
+    const priorActionsHint = buildPriorActionsHint();
     const nudge =
       verdict.action_type === 'message'
         ? `Your previous draft claimed you already messaged ${targetLabel}, but no send tool ran. Call message_colleague now to actually send it.${priorActionsHint}`

@@ -259,6 +259,24 @@ export interface OrchestratorOutput {
    *  but this is false, the reply is rewritten to a safe fallback. */
   bookingOccurred?: boolean;
   toolSummaries?: string[];     // compact summaries of tool calls for conversation history
+  /**
+   * v2.8.3+ — rich per-mutation record for this turn. Populated whenever a
+   * write tool fires (create_meeting / move_meeting / update_meeting /
+   * delete_meeting / finalize_coord_meeting / book_floating_block). Carries
+   * the FULL event id so the claim-checker retry path can build a hint with
+   * actionable references — Sonnet uses these ids to amend (move/update/
+   * delete) instead of re-creating duplicates. The truncated `toolSummaries`
+   * above is for history compactness; this field is for retry context.
+   */
+  mutationActions?: Array<{
+    tool: string;
+    ok: boolean;
+    subject?: string;
+    start?: string;
+    new_start?: string;
+    eventId?: string;
+    reason?: string;
+  }>;
 }
 
 /**
@@ -712,6 +730,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // Track tools called so we can save a summary in conversation history.
   // This prevents Claude from forgetting what it just did on the next turn.
   const toolCallSummaries: string[] = [];
+  // v2.8.3+ — rich per-mutation record used by the claim-checker retry path
+  // (postReply.ts). Carries FULL event ids so a retry can build a hint that
+  // tells Sonnet "to amend this booking, call move_meeting with id=X — don't
+  // re-call create_meeting".
+  const mutationActions: NonNullable<OrchestratorOutput['mutationActions']> = [];
   let finalReply = '';
   const slackActions: SlackAction[] = [];
   // True if any tool in this turn actually performed a real calendar booking.
@@ -1322,6 +1345,30 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
 
       // Build compact summary for conversation history persistence
       toolCallSummaries.push(summarizeToolCall(toolUse.name, toolUse.input as Record<string, unknown>, result));
+
+      // v2.8.3+ — rich mutation record for the claim-checker retry hint.
+      // Mutations only (create/move/update/delete/finalize/book_floating_block);
+      // reads don't need amend handles.
+      const mutationToolNames = new Set([
+        'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
+        'finalize_coord_meeting', 'book_floating_block',
+      ]);
+      if (mutationToolNames.has(toolUse.name)) {
+        const outcome = mutationOutcome(result);
+        const input = toolUse.input as Record<string, unknown>;
+        mutationActions.push({
+          tool: toolUse.name,
+          ok: outcome.ok,
+          subject: typeof input.subject === 'string' ? input.subject : undefined,
+          start: typeof input.start === 'string' ? input.start
+            : typeof input.new_start === 'string' ? input.new_start : undefined,
+          new_start: typeof input.new_start === 'string' ? input.new_start : undefined,
+          eventId: outcome.eventId
+            ?? (typeof input.meeting_id === 'string' ? input.meeting_id : undefined)
+            ?? (typeof input.event_id === 'string' ? input.event_id : undefined),
+          reason: outcome.reason,
+        });
+      }
 
       // v2.7.2 — capture the most recent deferred_action_hint from a meeting
       // tool's rule_violation result. If create_approval(kind=policy_exception)
@@ -1947,6 +1994,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     slackActions,
     bookingOccurred,
     toolSummaries: toolCallSummaries.length > 0 ? toolCallSummaries : undefined,
+    mutationActions: mutationActions.length > 0 ? mutationActions : undefined,
   };
 }
 

@@ -1089,6 +1089,31 @@ export class SchedulingSkill {
                 travelTimezone: a.timezone,
                 homeTimezone: a.travel!.homeTimezone,
               }));
+
+            // v2.8.3 hotfix — when attendees live in a TZ different from
+            // owner's, pre-render the slot in each such attendee's local TZ
+            // and attach to the slot result. Sonnet quotes verbatim instead
+            // of doing the math in chat (real-day bug 2026-05-16: she said
+            // "10:30 IL = 08:30 Boston", off by ~5h). Code over prompt: the
+            // conversion is pure determinism, no judgment.
+            const differentTzAttendees = (attendeeAvailability ?? []).filter(
+              a => a.timezone && a.timezone !== timezone,
+            );
+            if (differentTzAttendees.length > 0) {
+              annotatedSlots = annotatedSlots.map((s: any) => {
+                const per_attendee_local = differentTzAttendees.map(a => {
+                  const dt = DateTime.fromISO(s.start, { zone: timezone }).setZone(a.timezone);
+                  if (!dt.isValid) return null;
+                  return {
+                    email: a.email,
+                    timezone: a.timezone,
+                    local_iso: dt.toISO(),
+                    local_display: dt.toFormat('EEE d MMM HH:mm'),
+                  };
+                }).filter((p): p is NonNullable<typeof p> => p !== null);
+                return per_attendee_local.length > 0 ? { ...s, per_attendee_local } : s;
+              });
+            }
             // Surface per-day summary alongside slots so Sonnet can answer
             // "why no Monday?" honestly. When both travelers and day_summary
             // are empty, fall back to the legacy array shape so existing
