@@ -1121,19 +1121,25 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
         } catch (_) { /* fail open */ }
 
         const proposedSlots: SlotWithLocation[] = chosenStarts.map(slotStart => {
-          // v2.7.0 — unified location via resolveLocation. Coord category
-          // passed when Sonnet supplied it (args.category).
+          // v2.8.2 — unified location via resolveLocation. If the office-day
+          // external same/unknown-TZ ask path fires, default this annotation
+          // to online — at coord-state-machine time we can't ask the owner,
+          // and ops.ts will surface the ask later if it still applies.
           const v = resolveLocation({
             profile,
             startIso: slotStart,
-            category: (args.category as string | undefined) ?? null,
+            intent: 'new_booking',
             participantCount: totalPeople,
             hasExternalAttendee: !isInternal,
             anyParticipantRemote: anyTraveling,
             ownerLocationHint: customLocation,
           });
-          const location = v.kind === 'resolved' ? v.location : '';
-          const isOnline = v.kind === 'resolved' ? v.isOnline : true;
+          let location = '';
+          let isOnline = true;
+          if (v.kind === 'resolved') {
+            location = v.location;
+            isOnline = v.isOnline;
+          }
           return {
             start: slotStart,
             end: DateTime.fromISO(slotStart).plus({ minutes: durationMin }).toISO()!,
@@ -1725,10 +1731,11 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
         if (c.limits?.per_week !== undefined) parts.push(`max ${c.limits.per_week}/week`);
         if (c.day_type === 'office_days') parts.push('office days only');
         if (c.day_type === 'home_days') parts.push('home days only');
-        if (c.default_location === 'office') parts.push('default location: office');
-        if (c.default_location === 'online') parts.push('default location: online');
-        if (c.default_location === 'custom_required') parts.push('default location: ASK for venue');
         if (c.requires_travel_buffer) parts.push('auto travel buffer');
+        // v2.8.2 — category-level location overrides (default_location /
+        // default_is_online / no_default_location) no longer affect the
+        // location decision; location is deterministic via day-type + party
+        // shape. Don't render those fields here either.
         const rules = parts.length > 0 ? ` [${parts.join(', ')}]` : '';
         return `  ${idx + 1}. ${c.name} — ${c.description.replace(/\n/g, ' ').trim()}${rules}`;
       }).join('\n');
@@ -1747,12 +1754,25 @@ ALWAYS PASS CATEGORY to slot tools:
 - Owner asking "when am I free?" with no specific meeting — fine to omit \`category\` (today's behavior, no enforcement).
 - Once the category is decided, it stays the same across find_available_slots → create_meeting in the same turn. Don't switch mid-flow.
 
-DEFAULT LOCATION precedence (when you don't pass \`location\` or \`is_online\` to create_meeting):
-1. Category's \`default_location\` (if set on the chosen category) wins first.
-2. Day-type constraint already filtered slots that don't fit (handled at slot search).
-3. v2.5.2 day-aware default (office day → office; home day + internal → Huddle; home day + external → online).
-4. Profile \`office_location\` final fallback.
-- Categories WITH \`default_location\` override the day-aware default. Categories WITHOUT it fall through.
+LOCATION (v2.8.2) — deterministic, decided by \`resolveLocation\`. You do NOT compute it. Pass \`location\` / \`is_online\` only when ${firstName} explicitly states one.
+CATEGORY-DRIVEN SKIPS:
+- Categories flagged \`no_default_location\` (e.g. Logistic — floating blocks, focus time, lunch) → tool stamps NO location. You don't need to ask; these are personal time-on-calendar with no place to be.
+- Categories flagged \`sets_sensitivity_private\` (e.g. Private — personal/family events) → tool stamps NO location. ASK ${firstName} where the event should be ("Where should this private event be?") UNLESS he already told you. Don't auto-default to Teams or Office for Private events.
+The decision tree (FYI, for your reasoning — the tool enforces it):
+- MOVE within same day-type with no new hint → existing location preserved (no overwrite).
+- Owner-explicit hint → respected as-is.
+- Office day + external + KNOWN-DIFFERENT timezone → online, Teams link as location.
+- Office day + external + SAME or UNKNOWN timezone → tool refuses with \`error: 'location_mode_unspecified'\` + \`suggested_ask_text\`. YOU ASK ${firstName} online vs physical, then re-call with \`is_online=true\` OR \`location=<office address>\`. NEVER guess.
+- Office day + internal-only, ≥4 people → "Meeting Room" + meeting room mailbox added optional + Teams in body.
+- Office day + internal-only, ≤3 people → short office label + Teams in body.
+- Home day + external → online, Teams link as location.
+- Home day + internal-only → "Huddle", no Teams link.
+- Anyone traveling/remote → online, Teams link as location.
+What ${firstName} can say in chat that bypasses the ask (you forward as a hint):
+- "online" / "Teams" / "video" → pass \`is_online=true\`.
+- "in the office" / "at HQ" / "physical" → pass \`is_online=false\` (no location string needed; the tool stamps the right office label).
+- "let's meet at <coffee shop / their place / address>" → pass that text as \`location\`.
+- "at my home" → pass \`location="${firstName}'s home"\` (or whatever phrasing he used).
 
 CALENDAR OVERVIEW / SUMMARY — route issue detection through \`analyze_calendar\` (v2.7.1).
 When ${firstName} asks a multi-day summary question ("how's my calendar?", "anything broken next week?", "what's my week look like?"), you may use \`get_calendar\` to list events plainly, but ANY issue you flag (overlap, no-lunch, OOF conflict, back-to-back, category limit, etc.) MUST come from a \`analyze_calendar\` call over the same range. Don't eyeball overlaps from get_calendar results and write your own "⚠ Overlap: ...". The analyzer returns issues with stable \`issue_id\`s — surface them by id so ${firstName}'s replies stick:

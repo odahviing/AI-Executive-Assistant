@@ -1351,7 +1351,7 @@ Status:
           }
 
           try {
-            const eventId = await createMeeting({
+            const created = await createMeeting({
               subject: blockLabel,
               start: overrideStart.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
               end: overrideEnd.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
@@ -1363,6 +1363,7 @@ Status:
               userEmail,
               timezone,
             });
+            const eventId = created.id;
             logger.info('book_floating_block: owner-override booking', {
               blockName: block.name, date, start_time: explicitStartTime,
               window: `${block.preferred_start}-${block.preferred_end}`,
@@ -1598,7 +1599,7 @@ Status:
         }
 
         try {
-          const eventId = await createMeeting({
+          const created = await createMeeting({
             subject: blockLabel,
             start: blockStart.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
             end: blockEnd.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
@@ -1616,6 +1617,7 @@ Status:
             userEmail,
             timezone,
           });
+          const eventId = created.id;
 
           // Surface any pre-existing meetings sitting inside the booked
           // floating-block window. Floating blocks coexist with meetings by

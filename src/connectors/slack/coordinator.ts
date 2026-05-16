@@ -616,18 +616,27 @@ export async function handleOutreachReply(
       } catch (_) { /* fail open */ }
 
       const proposedSlots: SlotWithLocation[] = chosen.map(slotStart => {
-        // v2.7.0 — unified location via resolveLocation. 1:1 coord, no
-        // category context yet (will be detected at create_meeting time).
+        // v2.8.2 — unified location via resolveLocation. 1:1 coord with no
+        // owner/category context yet. If the office-day+external+same/unknown-TZ
+        // ask path fires, default this annotation to online — the question
+        // gets answered at create_meeting time, when ops.ts can refuse with
+        // the ask. Annotation-time is too early to ask the owner.
         const v = resolveLocation({
           profile: params.profile,
           startIso: slotStart,
-          category: null,
+          intent: 'new_booking',
           participantCount: 2,
           hasExternalAttendee: !isColleagueInternal,
           anyParticipantRemote: colleagueTraveling,
         });
-        const location = v.kind === 'resolved' ? v.location : '';
-        const isOnline = v.kind === 'resolved' ? v.isOnline : true;
+        let location = '';
+        let isOnline = true;
+        if (v.kind === 'resolved') {
+          location = v.location;
+          isOnline = v.isOnline;
+        }
+        // preserve_existing can't fire here (new_booking), ask_owner falls through
+        // to the default-online annotation above.
         return {
           start: slotStart,
           end: DateTime.fromISO(slotStart).plus({ minutes: durationMin }).toISO()!,

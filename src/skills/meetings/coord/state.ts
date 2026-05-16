@@ -974,20 +974,24 @@ export async function triggerRoundTwo(
   // v2.7.0 — unified location via resolveLocation. Replaces determineSlotLocation.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { resolveLocation: rl } = require('../../../utils/resolveLocation') as typeof import('../../../utils/resolveLocation');
-  let coordCategory: string | null = null;
-  try { coordCategory = (JSON.parse(job.notes ?? '{}').category as string | undefined) ?? null; } catch (_) {}
   const hasExternal = !isInternal;
   const slotsWithLocation: SlotWithLocation[] = chosenSlots.map(slotStart => {
+    // v2.8.2 — categories no longer drive location. ask_owner can't be asked
+    // here (we're mid-coord), so default to online if it fires.
     const v = rl({
       profile,
       startIso: slotStart,
-      category: coordCategory,
+      intent: 'new_booking',
       participantCount: totalPeople,
       hasExternalAttendee: hasExternal,
       anyParticipantRemote: anyTraveling,
     });
-    const location = v.kind === 'resolved' ? v.location : '';
-    const isOnline = v.kind === 'resolved' ? v.isOnline : true;
+    let location = '';
+    let isOnline = true;
+    if (v.kind === 'resolved') {
+      location = v.location;
+      isOnline = v.isOnline;
+    }
     return {
       start: slotStart,
       end: DateTime.fromISO(slotStart).plus({ minutes: job.duration_min }).toISO()!,

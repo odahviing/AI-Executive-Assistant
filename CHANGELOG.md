@@ -2,6 +2,43 @@
 
 ---
 
+## 2.8.2 — Location decision rewrite: deterministic by day-type and party shape
+
+`resolveLocation` rewritten from scratch as a single, deterministic decision tree driven by day-type + party shape + owner-explicit hints. Categories no longer influence location (they still drive limits, day-type, travel buffer). New behaviors: existing event locations are preserved on same-day-type moves (Michal BiWeekly's "Huddle" no longer gets overwritten on every move); office-day + external attendee with same/unknown timezone refuses to book and asks the owner online-or-physical; office-day + internal-only ≥4 stamps a Meeting Room with the room mailbox invited as optional AND runs a Graph free/busy check on the room — busy + ≤5 people falls back to a small-room label, busy + ≥6 surfaces an ask. Online-flavor verdicts (external on home day, traveling participants, owner-explicit `is_online=true`) now patch the location field with the Teams join URL after the event lands. The three real-day bugs that motivated the rewrite (Simon empty location, Oran "Reflectiz HQ" instead of "Idan Office", Michal "Huddle" overwritten with full address) all close.
+
+### Added
+
+- **`resolveLocation` rewrite — single deterministic tree** (`src/utils/resolveLocation.ts`). New shape: `(profile, startIso, intent, participants, externalAttendeeInDifferentTz?, ownerLocationHint?, ownerIsOnlineHint?, priorStartIso?, existingLocation?, existingIsOnline?, category?) → LocationVerdict`. Verdicts: `resolved` (with optional `addRoomEmail` + `teamsUrlAsLocation` flags), `preserve_existing` (move within same day-type, no owner hint → keep existing event's location/isOnline as-is), `ask_owner_online_or_physical` (office day + external + same/unknown TZ → caller refuses + relays question), `skip_stamp` (category flagged `no_default_location` or `sets_sensitivity_private` → no auto-stamp). Categories' `default_location` / `default_is_online` field is no longer consulted for location.
+- **Meeting room availability check** (`src/utils/meetingRoomAvailability.ts` new). When the verdict picks Meeting Room (office day + internal ≥4), `planMeeting` runs `getFreeBusy` on `profile.meetings.room_email` for the slot. Three outcomes: room free → proceed as planned; room busy + ≤5 people → swap location to `small_meeting_room_label` ("Office") and drop the room mailbox; room busy + ≥6 → refuse with `room_unavailable_large` action surfaced as `meeting_room_unavailable_large_meeting` error + `suggested_ask_text`. Fails open on Graph errors. Coord state machine path (`coord/booking.ts`) does the same check and, since it can't synchronously ask the owner mid-flow, falls back to the small label on ≥6 and shadow-DMs the owner via the existing `coord:${jobId}` conversation.
+- **Teams URL as location field** (`src/connectors/graph/calendar.ts` + `ops.ts` + `coord/booking.ts`). `createMeeting` return type grew from `Promise<string>` to `Promise<{ id, joinUrl? }>`. When `resolveLocation` flags `teamsUrlAsLocation: true` (external on home day, traveling participants, owner-explicit `is_online=true`, non-work-day default), the booking flow fires one PATCH after createEvent to set `location.displayName` to the Teams join URL. Location field is never left empty for online meetings.
+- **Meeting room mailbox as optional attendee.** `CreateMeetingParams.attendees` now accepts `optional?: boolean` per row; mapped to Graph attendee `type: 'optional'`. The room mailbox is appended at create-meeting time when the room is free (or omitted when the small-room fallback fires). Coord path mirrors the same behavior.
+- **Owner-explicit hints flow through `move_meeting` too** (`ops.ts:2329`). Pre-fix the move pipeline ignored `args.location` and `args.is_online` — every move rebooted location resolution from day-type defaults. Now hints flow through and `resolveLocation` honors them on moves (path 1 of the tree).
+
+### Changed
+
+- **Office location yaml shape** (`config/users/idan.yaml` + `src/config/userProfile.ts`). New canonical fields: `meetings.office_location.{short_label, meeting_room_label, small_meeting_room_label, full_label}`. `short_label` ("Idan Office") fires for internal-only office-day meetings ≤3 people. `meeting_room_label` ("Meeting Room") fires for ≥4. `small_meeting_room_label` ("Office") is the room-busy fallback. `full_label` ("Reflectiz HQ, Shoham 5 (13th floor), Ramat Gan") fires for external attendees physically visiting. Legacy `label` / `address` / `parking` fields still accepted on input for back-compat; resolver ignores them.
+- **System prompt LOCATION block** (`src/skills/meetings.ts`). Replaced the old multi-tier `DEFAULT LOCATION precedence` text (categories override day-aware default → office_location fallback) with a deterministic tree description matching the rewrite. Added CATEGORY-DRIVEN SKIPS section: Logistic / floating-block categories get no stamp; Private categories get no stamp AND Sonnet asks the owner "where should this private event be?" before booking.
+- **Move-meeting preserve-on-same-day-type** (`planMeeting.ts` + `ops.ts:2363`). When a move keeps the event on the same day-type (office → office, home → home) and no owner location/online hint is set, the Graph PATCH omits `location` + `isOnlineMeeting` so the event keeps whatever it had. Closes the recurring "Huddle gets overwritten to office address on every move" pattern.
+
+### Fixed
+
+- **Simon: meeting on owner's office day landed with empty location.** Category-driven location override would silently pick `isOnline=true, location=''` for Cadence/Weekly. New tree always stamps `short_label` for internal-only office-day meetings ≤3 people, no category bypass.
+- **Oran: office-day meeting stamped "Reflectiz HQ" instead of owner-personalized label.** Old `formatOfficeLocation` returned the yaml `label` field ("Reflectiz HQ") for internal short-path. New `short_label` carries "Idan Office" — owner-personalized for internal calendar; "Reflectiz HQ ..." full address fires only when an external attendee is physically visiting.
+- **Michal BiWeekly: existing "Huddle" overwritten with full office address on every move.** `planMeeting` ran resolveLocation fresh on each move, even when day-type didn't flip. New `preserve_existing` verdict fires when intent='move' AND day-type unchanged AND no owner hint — Graph PATCH leaves location/isOnline alone. Recurring conventions stick across moves.
+- **Hybrid Teams + Huddle drift on home-day internal 1:1s.** Weekly/biweekly events on owner's home days were carrying both Huddle as location AND isOnlineMeeting=true (Teams in body), accumulated from old hybrid bookings. New rule: home day + internal-only → Huddle, isOnline=false (no Teams). Future bookings stamp the clean shape; existing events stay on `preserve_existing` until rebooked.
+- **Office-day external attendees got silently defaulted to Teams.** Pre-fix `inferDefaultMeetingMode` smart-skip picked online without asking when external attendee TZ wasn't known-different. New: office day + external + same/unknown TZ → refuse with `location_mode_unspecified` + `suggested_ask_text`; Sonnet asks owner online-or-physical and re-calls with the explicit hint. Office day + external + known-different TZ keeps the auto-online behavior (no point asking when one party is remote).
+
+### Removed
+
+- **Categories' `default_location` / `default_is_online` field** no longer affects the location decision. Field still parses (back-compat) and still renders in the categories block of the prompt for the description text, but doesn't drive `resolveLocation`. Yaml fields can be removed in a future cleanup once all profiles have been migrated.
+
+### Migration
+
+- **Yaml** — workspaces using `meetings.office_location.label/address/parking` should migrate to `short_label` / `full_label` to get the personalized rendering. Legacy fields keep working; falls back to `${firstName} Office` if no `short_label` set. Idan's `idan.yaml` migrated in this commit.
+- **No DB migration.** All changes are code + yaml only.
+
+---
+
 ## 2.8.1 — Vertex prep, multi-window work hours, code-replacement of honesty/refusal rules
 
 Two parallel chats this session contributed: code-side patches (Vertex prep, multi-window work hours, calendar invites prompt trim, recovery pass deleted) and the prompt-reduction project (Modules F, E partial, C — replacing 8 honesty rules + refusal phrasing block with deterministic claim-checker + humanGate logic). Net effect: meaningful per-turn token cut from the cached static block + new optional Vertex LLM provider + per-day multi-range work hours.

@@ -28,7 +28,7 @@ import { resolveLocation, type LocationVerdict } from '../../utils/resolveLocati
 import { checkSlot, type RuleCheckResult } from '../../utils/scheduleRules';
 import { detectCategory } from './detectCategory';
 import { findMeetingOwner, type MeetingOwnerInfo } from './findMeetingOwner';
-import { getCurrentTravel, getPersonMemory } from '../../db/people';
+import { getCurrentTravel, getPersonMemory, searchPeopleMemory } from '../../db/people';
 import logger from '../../utils/logger';
 
 // ── Input shapes ────────────────────────────────────────────────────────────
@@ -69,8 +69,10 @@ export interface PlanMeetingInput {
   existingEventId?: string;
   existingEventCategories?: string[];
   existingEventLocation?: string;
+  existingEventIsOnline?: boolean;     // for move preserve-location path
 
-  // Move-specific: prior slot for comparison (decides if category needs re-detect)
+  // Move-specific: prior slot for comparison (decides if category needs re-detect
+  // AND drives the location preserve path)
   priorSlotStartIso?: string;
 
   // Owner-explicit override (e.g. "yes book it even though it breaks the rule")
@@ -87,12 +89,23 @@ export interface PlanMeetingInput {
 // ── Plan output ─────────────────────────────────────────────────────────────
 
 export type PlanAction =
-  | { action: 'book'; isOnline: boolean; location: string; category: string | null; reasoning: string }
+  | {
+      action: 'book';
+      isOnline: boolean;
+      location: string;
+      addRoomEmail?: boolean;          // ops.ts adds profile.meetings.room_email as optional attendee
+      teamsUrlAsLocation?: boolean;    // ops.ts patches location.displayName with onlineMeeting.joinUrl after create
+      preserveExisting?: boolean;      // ops.ts leaves the existing event's location/isOnline alone (move case)
+      category: string | null;
+      reasoning: string;
+    }
   | { action: 'find_slots'; category: string | null; reasoning: string }
   | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; category: string | null }
   | { action: 'escalate_approval'; violationLabel: string; suggestedAskText: string; category: string | null }
   | { action: 'decline_and_relay'; organizerName: string | null; organizerEmail: string | null; organizerSlackId: string | null; suggestedDmText: string }
-  | { action: 'refuse_not_owners'; organizerName: string | null; organizerEmail: string | null };
+  | { action: 'refuse_not_owners'; organizerName: string | null; organizerEmail: string | null }
+  | { action: 'ask_location_mode'; suggestedAskText: string; category: string | null; reasoning: string }
+  | { action: 'room_unavailable_large'; suggestedAskText: string; category: string | null; reasoning: string };
 
 // ── Entry ───────────────────────────────────────────────────────────────────
 
@@ -214,26 +227,59 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   let locationVerdict: LocationVerdict | null = null;
   if (input.slotStartIso) {
     const ownerDomain = ownerEmail.split('@')[1].toLowerCase();
-    const hasExternal = input.participants.some(p => {
+    const externalEmails: string[] = [];
+    for (const p of input.participants) {
       const e = (p.email ?? '').toLowerCase();
-      return e && !e.endsWith('@' + ownerDomain);
-    });
+      if (e && !e.endsWith('@' + ownerDomain)) externalEmails.push(e);
+    }
+    const hasExternal = externalEmails.length > 0;
+    // Decide if ANY external attendee is in a known-different TZ. Lookup is
+    // best-effort: people_memory exact-email match → row.timezone (IANA). If
+    // any external is known-different from owner's TZ, fire the auto-online
+    // path (3a). If all externals are same-TZ → ask. If any external TZ is
+    // unknown AND no external is known-different → ask.
+    let externalAttendeeInDifferentTz: boolean | undefined = undefined;
+    if (hasExternal) {
+      const ownerTz = profile.user.timezone;
+      let anyDifferent = false;
+      let anyUnknown = false;
+      for (const email of externalEmails) {
+        const matches = searchPeopleMemory(email);
+        const exact = matches.find(m => (m.email ?? '').toLowerCase() === email);
+        const tz = exact?.timezone;
+        if (!tz) { anyUnknown = true; continue; }
+        if (tz !== ownerTz) { anyDifferent = true; break; }
+      }
+      if (anyDifferent) externalAttendeeInDifferentTz = true;
+      else if (anyUnknown) externalAttendeeInDifferentTz = undefined; // unknown → ask
+      else externalAttendeeInDifferentTz = false;                      // all same → ask
+    }
     locationVerdict = resolveLocation({
       profile,
       startIso: input.slotStartIso,
-      category,
+      // find_slots early-returns above; by here intent is new_booking | move | cancel.
+      intent: intent as 'new_booking' | 'move' | 'cancel',
+      category,                              // v2.8.2 — drives Logistic / Private skip-stamp
       participantCount: input.participants.length + 1,  // +1 for owner
       hasExternalAttendee: hasExternal,
+      externalAttendeeInDifferentTz,
       anyParticipantRemote,
       ownerLocationHint: input.locationHint,
       ownerIsOnlineHint: input.isOnlineHint,
+      priorStartIso: input.priorSlotStartIso,
+      existingLocation: input.existingEventLocation,
+      existingIsOnline: input.existingEventIsOnline,
     });
-    if (locationVerdict.kind === 'refuse_vacation_or_oof') {
-      const ownerFirst = profile.user.name.split(' ')[0];
-      const askText = `${input.subject ? `"${input.subject}"` : 'This meeting'} would land on ${DateTime.fromISO(input.slotStartIso).setZone(profile.user.timezone).toFormat('EEEE d MMM')} — ${ownerFirst} doesn't normally work that day. Book it anyway, or move it?`;
-      return initiator === 'owner'
-        ? { action: 'confirm_override', violationLabel: locationVerdict.reasoning, suggestedAskText: askText, category }
-        : { action: 'escalate_approval', violationLabel: locationVerdict.reasoning, suggestedAskText: askText, category };
+    // (v2.8.2) ask_owner_online_or_physical: caller must ask, never auto-pick.
+    // Owner-path AND colleague-path both surface the question; colleague-path
+    // routes through create_approval so Sonnet doesn't try to resolve it locally.
+    if (locationVerdict.kind === 'ask_owner_online_or_physical') {
+      return {
+        action: 'ask_location_mode',
+        suggestedAskText: locationVerdict.suggestedAskText,
+        category,
+        reasoning: locationVerdict.reasoning,
+      };
     }
   }
 
@@ -333,24 +379,79 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   }
 
   // ── Book ────────────────────────────────────────────────────────────────
-  // location/online from the location verdict (or sensible defaults for cancel)
+  // location/online + flags from the location verdict.
   let isOnline: boolean;
   let location: string;
+  let addRoomEmail: boolean | undefined;
+  let teamsUrlAsLocation: boolean | undefined;
+  let preserveExisting: boolean | undefined;
   if (locationVerdict && locationVerdict.kind === 'resolved') {
     isOnline = locationVerdict.isOnline;
     location = locationVerdict.location;
-  } else if (locationVerdict && locationVerdict.kind === 'no_default_location_category') {
+    addRoomEmail = locationVerdict.addRoomEmail;
+    teamsUrlAsLocation = locationVerdict.teamsUrlAsLocation;
+  } else if (locationVerdict && locationVerdict.kind === 'preserve_existing') {
+    isOnline = locationVerdict.isOnline;
+    location = locationVerdict.location;
+    preserveExisting = true;
+  } else if (locationVerdict && locationVerdict.kind === 'skip_stamp') {
+    // Logistic / Private category — no auto-stamp. Empty location, not online.
     isOnline = false;
     location = '';
   } else {
-    // cancel intent (no slot) or fallback — owner direction "default is online"
+    // cancel intent (no slot) or unreachable fallback — default online
     isOnline = true;
     location = '';
   }
+
+  // ── Meeting room availability ───────────────────────────────────────────
+  // When the verdict pointed at the big Meeting Room (office day + internal
+  // ≥4), check the room mailbox is actually free. Three outcomes:
+  //   - free: proceed as-is.
+  //   - busy + ≤5 people: swap to small-room label, drop the room mailbox.
+  //   - busy + ≥6 people: refuse, surface ask to owner.
+  if (addRoomEmail && input.slotStartIso && input.slotEndIso) {
+    try {
+      const { checkMeetingRoomAvailability } = await import('../../utils/meetingRoomAvailability');
+      const verdict = await checkMeetingRoomAvailability({
+        profile,
+        startIso: input.slotStartIso,
+        endIso: input.slotEndIso,
+        participantCount: input.participants.length + 1,
+      });
+      if (verdict.kind === 'room_busy_small_fits') {
+        location = verdict.smallLabel;
+        addRoomEmail = false;
+        logger.info('planMeeting — meeting room busy, falling back to small room label', {
+          slot: input.slotStartIso, smallLabel: verdict.smallLabel,
+          participantCount: input.participants.length + 1,
+        });
+      } else if (verdict.kind === 'room_busy_too_big') {
+        logger.info('planMeeting — meeting room busy + group too large for fallback', {
+          slot: input.slotStartIso, participantCount: input.participants.length + 1,
+        });
+        return {
+          action: 'room_unavailable_large',
+          suggestedAskText: verdict.suggestedAskText,
+          category,
+          reasoning: 'meeting room mailbox busy and ≥6 people — small fallback not viable',
+        };
+      }
+    } catch (err) {
+      // Fail open: if anything throws, proceed with the original verdict.
+      logger.warn('planMeeting — meeting room availability check threw, proceeding', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
   return {
     action: 'book',
     isOnline,
     location,
+    addRoomEmail,
+    teamsUrlAsLocation,
+    preserveExisting,
     category,
     reasoning: `category=${category ?? 'none'} (${categoryReason}); location=${locationVerdict?.reasoning ?? 'n/a'}`,
   };

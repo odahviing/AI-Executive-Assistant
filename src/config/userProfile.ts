@@ -198,14 +198,21 @@ const UserProfileSchema = z.object({
     min_slot_buffer_hours: z.number().min(0).max(12).default(4),
     physical_meetings_require_office_day: z.boolean(),
     room_email: z.string().email().optional(),   // e.g. "meeting@company.com" — used to book physical meeting rooms
-    // v2.3.2 (1C) — owner's actual office address for physical meetings.
-    // Lands in the calendar invite location so external attendees know where
-    // to go (vs. just "Idan's Office" label which means nothing to them).
-    // All fields optional — if unset, fall back to the legacy label-only behavior.
+    // v2.8.2 — three labels for the three output flavors of the location
+    // decision tree (see src/utils/resolveLocation.ts). All optional so
+    // workspaces without an office can leave them unset; the resolver falls
+    // back to "${firstName} Office" / "Meeting Room" defaults.
     office_location: z.object({
-      label: z.string().optional(),     // override the "${name}'s Office" label
-      address: z.string().optional(),   // street address, building, floor
-      parking: z.string().optional(),   // parking instructions for visitors
+      short_label: z.string().optional(),               // internal-only office day, ≤3 people
+      meeting_room_label: z.string().optional(),       // internal-only office day, ≥4 people
+      small_meeting_room_label: z.string().optional(), // fallback when meeting room is busy and ≤5 people
+      full_label: z.string().optional(),               // external attendee physical visit
+      // Legacy fields (pre-2.8.2). Still accepted on input so old yamls boot,
+      // but resolveLocation no longer reads them. Remove in a future patch
+      // once all workspaces are migrated.
+      label: z.string().optional(),
+      address: z.string().optional(),
+      parking: z.string().optional(),
     }).optional(),
     // v2.1.1 — each entry must supply EITHER name (subject match, existing)
     // OR category (Outlook-category match, new). This is additive-compatible:

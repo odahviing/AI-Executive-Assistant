@@ -1620,6 +1620,32 @@ export class SchedulingSkill {
               : 'A scheduling rule was violated. Surface suggested_ask_text to the owner and wait for an explicit override before retrying with relaxed=true.',
           };
         }
+        // v2.8.2 — ask_location_mode: office day + external + same/unknown TZ
+        // with no owner hint. Refuse and surface the ask. Sonnet relays to the
+        // owner, the owner replies online/physical, Sonnet re-calls with
+        // is_online=true OR location=<full address> set explicitly.
+        if (plan.action === 'ask_location_mode') {
+          return {
+            success: false,
+            error: 'location_mode_unspecified',
+            suggested_ask_text: plan.suggestedAskText,
+            category: plan.category,
+            _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
+            _note: 'Office day + external attendee in same/unknown timezone. Ask the owner online vs physical, then re-call create_meeting with either is_online=true or location=<full office address>.',
+          };
+        }
+        // v2.8.2 — meeting room mailbox busy + ≥6 people (small-room fallback
+        // doesn't fit). Refuse + surface the ask.
+        if (plan.action === 'room_unavailable_large') {
+          return {
+            success: false,
+            error: 'meeting_room_unavailable_large_meeting',
+            suggested_ask_text: plan.suggestedAskText,
+            category: plan.category,
+            _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
+            _note: 'Meeting Room is taken at this time and the group is too large for the small-room fallback. Ask the owner whether to push the time, trim the attendee list, or pick a different day.',
+          };
+        }
         // plan.action === 'book' — extract isOnline/location/category and proceed.
         // (Other plan kinds — find_slots / decline_and_relay / refuse_not_owners —
         // can't reach here from a new_booking intent; the type narrowing makes
@@ -1634,56 +1660,49 @@ export class SchedulingSkill {
         const effectiveIsOnline: boolean = plan.isOnline;
         const planLocation: string = plan.location;
         const planCategory: string | null = plan.category;
-        // skipLocationField fires only when we have NO physical address to stamp
-        // (online-only meetings, or no_default_location categories like Logistic).
+        const planAddRoomEmail = plan.addRoomEmail === true;
+        const planTeamsUrlAsLocation = plan.teamsUrlAsLocation === true;
+        // skipLocationField fires when resolveLocation gave us no physical
+        // string AND we're not in the Teams-URL-as-location flow (those get
+        // patched post-create, so the create call sends empty location).
         const skipLocationField = planLocation.trim().length === 0;
-        // Sonnet may have passed args.category explicitly; planCategory may override
-        // when she didn't. Merge so the downstream "is this no_default_location?"
-        // check works correctly.
         if (planCategory && !args.category) {
           args.category = planCategory;
         }
+        // v2.8.2 — location stamping is now a single string from resolveLocation
+        // (no more multi-part label/address/parking joining). For owner-explicit
+        // non-ASCII venues we still resolve to English for the calendar.
         const resolvedLocationParts: string[] = await (async (): Promise<string[]> => {
           if (skipLocationField) return [];
-          // v2.5.1 — yaml-driven skip. Categories flagged
-          // `no_default_location: true` are personal time-on-calendar
-          // (focus blocks, buffer/think time) where the office address
-          // would be a wrong stamp. Reads from profile so a future
-          // category in any profile that wants the same behavior just
-          // sets the flag — no code knows which category name does this.
-          const cat = (args.category as string | undefined) ?? null;
-          if (cat) {
-            const match = (context.profile.categories ?? []).find(c => c.name === cat);
-            if (match?.no_default_location) return [];
-          }
-          const userLoc = (args.location as string | undefined) ?? (planLocation && planLocation.trim().length > 0 ? planLocation : undefined);
-          if (!userLoc || userLoc.trim().length === 0) {
-            const officeLoc = context.profile.meetings.office_location;
-            if (!officeLoc) return [];
-            const parts: string[] = [];
-            if (officeLoc.label) parts.push(officeLoc.label);
-            if (officeLoc.address) parts.push(officeLoc.address);
-            if (officeLoc.parking) parts.push(`Parking: ${officeLoc.parking}`);
-            return parts;
-          }
-          // External venue — resolve non-ASCII names to English. Pre-v2.4.3
-          // this happened inline in the location field; now extracted so
-          // the body can also use the resolved string.
-          const hasNonAscii = /[^\x20-\x7e]/.test(userLoc);
-          if (!hasNonAscii) return [userLoc];
+          const hasNonAscii = /[^\x20-\x7e]/.test(planLocation);
+          if (!hasNonAscii) return [planLocation];
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { resolveVenueLocation } = require('../../utils/locationResolver') as
               typeof import('../../utils/locationResolver');
-            const resolved = await resolveVenueLocation(userLoc, 'en');
-            return [resolved.resolved ? resolved.fullDisplay : userLoc];
+            const resolved = await resolveVenueLocation(planLocation, 'en');
+            return [resolved.resolved ? resolved.fullDisplay : planLocation];
           } catch (err) {
-            logger.warn('venue resolution threw — using user-provided location', {
+            logger.warn('venue resolution threw — using planMeeting location verbatim', {
               err: String(err).slice(0, 200),
             });
-            return [userLoc];
+            return [planLocation];
           }
         })();
+        // v2.8.2 — for office-day internal ≥4, planMeeting flagged addRoomEmail.
+        // Add profile.meetings.room_email as an OPTIONAL attendee on the create
+        // call. Room mailbox auto-accepts the slot when free.
+        if (planAddRoomEmail && context.profile.meetings.room_email) {
+          const roomEmail = context.profile.meetings.room_email.toLowerCase();
+          const already = attendees.some(a => (a.email ?? '').toLowerCase() === roomEmail);
+          if (!already) {
+            attendees.push({
+              email: context.profile.meetings.room_email,
+              name: planLocation,           // "Meeting Room"
+              optional: true,
+            } as typeof attendees[number]);
+          }
+        }
 
         return createMeeting({
           userEmail,
@@ -1766,7 +1785,31 @@ export class SchedulingSkill {
           })(),
           // v2.3.1 (B23) — invite-body attribution names this assistant + owner.
           defaultBodyAuthor: `${context.profile.assistant.name}, ${context.profile.user.name.split(' ')[0]} Assistant`,
-        }).then(async meetingId => {
+        }).then(async createdMeeting => {
+          const meetingId = createdMeeting.id;
+          // v2.8.2 — Teams-URL-as-location patch. When the location decision
+          // tree said "online with Teams URL as the location" (4a1, 5a,
+          // travel-override, non-work-day default), read the joinUrl back from
+          // Graph and patch the event's location.displayName so the calendar
+          // invite shows the join link as the location.
+          if (planTeamsUrlAsLocation && createdMeeting.joinUrl) {
+            try {
+              const { updateMeeting } = await import('../../connectors/graph/calendar');
+              await updateMeeting({
+                userEmail,
+                timezone,
+                meetingId,
+                location: createdMeeting.joinUrl,
+              });
+              logger.info('create_meeting — patched location with Teams join URL', {
+                meetingId, joinUrl: createdMeeting.joinUrl,
+              });
+            } catch (err) {
+              logger.warn('create_meeting — Teams URL location patch failed, leaving as auto', {
+                meetingId, err: String(err).slice(0, 200),
+              });
+            }
+          }
           // v2.2.5 (#54) — post-create verification. Graph occasionally returns
           // 200 OK + an event id on writes that didn't actually land (sync
           // delays, race conditions). Re-read by id and confirm the start time
@@ -2267,6 +2310,8 @@ export class SchedulingSkill {
         let movePlanLocation: string | undefined;
         let movePlanIsOnline: boolean | undefined;
         let movePlanCategories: string[] | undefined;
+        let movePlanPreserveExisting = false;
+        let movePlanTeamsUrlAsLocation = false;
         try {
           const { planMeeting: planMove } = await import('./planMeeting');
           // Pull existing event metadata (categories, current location) for
@@ -2280,6 +2325,8 @@ export class SchedulingSkill {
           const movingEvent = existing.find(e => e.id === args.meeting_id);
           const priorStartIso = movingEvent?.start?.dateTime;
           const existingCats = ((movingEvent as any)?.categories as string[] | undefined) ?? [];
+          const existingLocation = (movingEvent as any)?.location?.displayName as string | undefined;
+          const existingIsOnline = (movingEvent as any)?.isOnlineMeeting as boolean | undefined;
           const movePlan = await planMove({
             profile: context.profile,
             intent: 'move',
@@ -2294,7 +2341,14 @@ export class SchedulingSkill {
             })),
             existingEventId: args.meeting_id as string,
             existingEventCategories: existingCats,
+            existingEventLocation: existingLocation,
+            existingEventIsOnline: existingIsOnline,
             priorSlotStartIso: priorStartIso,
+            // v2.8.2 — owner-explicit hints flow through on move too. Without
+            // these, every owner-explicit "move it to 3pm in person" lost the
+            // physical signal and resolveLocation defaulted to day-type rules.
+            locationHint: args.location as string | undefined,
+            isOnlineHint: typeof args.is_online === 'boolean' ? args.is_online : undefined,
             allowRelaxed: args.relaxed === true,
           });
           logger.info('move_meeting — planMeeting verdict', {
@@ -2317,9 +2371,41 @@ export class SchedulingSkill {
                 : 'Move violates a scheduling rule. Surface suggested_ask_text to the owner; if he confirms, retry with relaxed=true.',
             };
           }
+          // v2.8.2 — ask_location_mode on move (rare — external attendee, same/unknown TZ,
+          // and the move flips into office day). Refuse + surface the ask.
+          if (movePlan.action === 'ask_location_mode') {
+            return {
+              success: false,
+              error: 'location_mode_unspecified',
+              meeting_subject: args.meeting_subject,
+              suggested_ask_text: movePlan.suggestedAskText,
+              category: movePlan.category,
+              _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
+              _note: 'Move lands on an office day with external attendee in same/unknown timezone. Ask the owner online vs physical, then re-call move_meeting with either is_online=true or location=<full office address>.',
+            };
+          }
+          // v2.8.2 — meeting room busy + ≥6 people on the move target slot.
+          if (movePlan.action === 'room_unavailable_large') {
+            return {
+              success: false,
+              error: 'meeting_room_unavailable_large_meeting',
+              meeting_subject: args.meeting_subject,
+              suggested_ask_text: movePlan.suggestedAskText,
+              category: movePlan.category,
+              _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
+              _note: 'Move target time has the Meeting Room taken and the group is too large for the small-room fallback. Ask the owner whether to push the time, trim attendees, or pick another day.',
+            };
+          }
           if (movePlan.action === 'book') {
-            movePlanLocation = movePlan.location;
-            movePlanIsOnline = movePlan.isOnline;
+            movePlanPreserveExisting = movePlan.preserveExisting === true;
+            movePlanTeamsUrlAsLocation = movePlan.teamsUrlAsLocation === true;
+            // (v2.8.2) preserveExisting: leave location/isOnline undefined so the
+            // Graph PATCH doesn't touch them. Re-stamping the BiWeekly's "Huddle"
+            // with the office address on every move is exactly what we're killing.
+            if (!movePlanPreserveExisting) {
+              movePlanLocation = movePlan.location;
+              movePlanIsOnline = movePlan.isOnline;
+            }
             if (movePlan.category) {
               // Preserve any non-yaml-category labels already on the event
               // (rare but possible), then add the canonical category once.
@@ -2342,11 +2428,43 @@ export class SchedulingSkill {
           end: effectiveEnd,
           // v2.7.0 — pass-through location/isOnline/categories from the
           // planMeeting verdict. Undefined values leave the existing fields
-          // untouched on Graph's side.
+          // untouched on Graph's side. v2.8.2 — preserveExisting keeps both
+          // undefined so a move within the same day-type doesn't overwrite
+          // owner conventions like "Huddle".
           location: movePlanLocation,
           isOnline: movePlanIsOnline,
           categories: movePlanCategories,
         });
+
+        // v2.8.2 — post-move Teams URL patch. When the move flipped into an
+        // online location-flavor, the updateMeeting call above set isOnline=true
+        // but left location empty. Read the event back to get joinUrl and
+        // patch location.displayName with it.
+        if (movePlanTeamsUrlAsLocation) {
+          try {
+            const { getCalendarEvents: getCal, updateMeeting: updateMeeting2 } = await import('../../connectors/graph/calendar');
+            const dayStart = DateTime.fromISO(effectiveStart, { zone: timezone }).toFormat('yyyy-MM-dd');
+            const dayEnd = DateTime.fromISO(effectiveStart, { zone: timezone }).plus({ days: 1 }).toFormat('yyyy-MM-dd');
+            const refreshed = await getCal(userEmail, dayStart, dayEnd, timezone);
+            const ev = refreshed.find(e => e.id === args.meeting_id);
+            const joinUrl = (ev as any)?.onlineMeeting?.joinUrl as string | undefined;
+            if (joinUrl) {
+              await updateMeeting2({
+                userEmail,
+                timezone,
+                meetingId: args.meeting_id as string,
+                location: joinUrl,
+              });
+              logger.info('move_meeting — patched location with Teams join URL', {
+                meetingId: args.meeting_id, joinUrl,
+              });
+            }
+          } catch (err) {
+            logger.warn('move_meeting — Teams URL location patch failed', {
+              meetingId: args.meeting_id, err: String(err).slice(0, 200),
+            });
+          }
+        }
 
         // v2.2.5 (#54) — post-move verification. Graph PATCH can return 200 OK
         // without the change landing (sync delays, race conditions). Re-read

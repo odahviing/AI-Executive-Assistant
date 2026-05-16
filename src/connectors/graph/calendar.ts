@@ -93,11 +93,16 @@ export function parseGraphFreeBusySlot(item: any, requestedTz: string): FreeBusy
   };
 }
 
+export interface CreatedMeeting {
+  id: string;
+  joinUrl?: string;            // Teams join URL when isOnline=true
+}
+
 export interface CreateMeetingParams {
   subject: string;
   start: string;
   end: string;
-  attendees: Array<{ name: string; email: string }>;
+  attendees: Array<{ name: string; email: string; optional?: boolean }>;
   body?: string;
   isOnline?: boolean;         // true = generate Teams meeting link
   location?: string;          // display name e.g. "Idan's office", "Meeting Room"
@@ -1623,7 +1628,7 @@ export async function verifyEventMoved(
   return verifyEventStartMatches(userEmail, meetingId, expectedStartIso, expectedTimezone);
 }
 
-export async function createMeeting(params: CreateMeetingParams): Promise<string> {
+export async function createMeeting(params: CreateMeetingParams): Promise<CreatedMeeting> {
   const client = getClient();
 
   // Teams-location sanitization: when isOnline=true, Graph auto-creates the
@@ -1674,7 +1679,7 @@ export async function createMeeting(params: CreateMeetingParams): Promise<string
     end:   { dateTime: normalizeForGraph(endIso,   params.timezone), timeZone: params.timezone },
     attendees: params.attendees.map(a => ({
       emailAddress: { address: a.email, name: a.name },
-      type: 'required',
+      type: a.optional ? 'optional' : 'required',
     })),
     isOnlineMeeting: params.isOnline ?? false,
     ...(params.isOnline && {
@@ -1699,7 +1704,8 @@ export async function createMeeting(params: CreateMeetingParams): Promise<string
     });
 
     logger.info('Meeting created', { id: created.id, subject: params.subject, start: params.start });
-    return created.id;
+    const joinUrl: string | undefined = created?.onlineMeeting?.joinUrl;
+    return { id: created.id, joinUrl };
   } catch (err) {
     auditLog({
       action: 'create_meeting',

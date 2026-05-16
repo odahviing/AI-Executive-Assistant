@@ -1,31 +1,47 @@
 /**
- * resolveLocation (v2.7.0) — single source of truth for "where does this
- * meeting happen?"
+ * resolveLocation (v2.8.2 rewrite) — single source of truth for "where does
+ * this meeting happen?"
  *
- * Replaces the v2.6.x `determineSlotLocation` + `helperForcesOnline` +
- * `skipLocationField` mess in skills/meetings/ops.ts. One function, one
- * decision tree, one output: { isOnline, location, reasoning }.
+ * Deterministic decision tree. Categories no longer influence location.
+ * The tree, top-down:
  *
- * Priority chain (highest first):
- *   1. Owner-explicit hints (location string OR is_online boolean)
- *      → owner just said what they want, respect it.
- *   2. Travel state — any participant currently traveling / remote-only
- *      → force online with empty location (can't physically meet).
- *   3. Vacation / OOF day for owner
- *      → return refuse_book (caller should not book on this day).
- *   4. Category default — `default_location` + `default_is_online` flags.
- *      Per D1 owner direction: home day stays home day. A category that
- *      says "office" will conflict with home day → rule engine catches.
- *   5. Day-type defaults:
- *      - office_day + internal ≤3 → Reflectiz HQ (full address + parking)
- *      - office_day + internal >3 → "Meeting Room"
- *      - office_day + external    → Reflectiz HQ + Teams (hybrid)
- *      - home_day + internal      → Huddle, no Teams
- *      - home_day + external      → Teams only (per D2)
- *      - default                  → online (matches yaml owner direction "default is online")
+ *   0. PRESERVE (move intent only):
+ *      intent='move' + day-type didn't flip + no owner hint
+ *      → return preserve_existing. Caller leaves location/isOnline alone.
  *
- * Output `isOnline=true` means Teams link is on the invite. Office-day
- * physical meetings ARE hybrid (Teams link + physical room).
+ *   1. OWNER-EXPLICIT HINT:
+ *      ownerLocationHint OR ownerIsOnlineHint set → respect.
+ *
+ *   2. TRAVEL OVERRIDE:
+ *      Any participant remote/traveling → online; caller patches the location
+ *      field with the Teams join URL after Graph createEvent.
+ *
+ *   3. OFFICE DAY:
+ *      a. External attendee + known-different TZ
+ *         → online; teams URL as location (post-create patch).
+ *      b. External attendee + same TZ OR unknown TZ
+ *         → ask_owner_online_or_physical. Caller refuses + asks owner.
+ *      c. Internal-only, count ≥4
+ *         → meeting_room_label + addRoomEmail + isOnline=true
+ *         (Teams link goes in body, not location).
+ *      d. Internal-only, count ≤3
+ *         → short_label + isOnline=true
+ *         (Teams link goes in body, not location).
+ *
+ *   4. HOME DAY:
+ *      a. External attendee → online; teams URL as location (post-create patch).
+ *      b. Internal-only → "Huddle", isOnline=false.
+ *
+ *   5. NON-WORK DAY (Fri/Sat for an Israeli profile, etc.):
+ *      Resolve location anyway — the BOOK decision in planMeeting handles the
+ *      OOF refusal. Default to online; teams URL as location.
+ *
+ * Output flavors:
+ *   - resolved          : caller stamps location/isOnline directly, plus
+ *                         optional addRoomEmail + teamsUrlAsLocation flags
+ *                         that ops.ts acts on after create.
+ *   - preserve_existing : caller leaves existing event location/isOnline as-is.
+ *   - ask_owner         : caller refuses + relays the suggested ask.
  */
 
 import { DateTime } from 'luxon';
@@ -34,38 +50,98 @@ import type { UserProfile } from '../config/userProfile';
 export interface ResolveLocationInput {
   profile: UserProfile;
   startIso: string;
-  category: string | null;                  // detected category name (from yaml) or null
-  participantCount: number;                 // total attendees including externals
-  hasExternalAttendee: boolean;
-  anyParticipantRemote?: boolean;           // someone traveling / remote-only
+  intent: 'new_booking' | 'move' | 'cancel';
 
-  ownerLocationHint?: string;               // what Sonnet passed via args.location
-  ownerIsOnlineHint?: boolean;              // what Sonnet passed via args.is_online
+  // Detected category (from detectCategory) — drives the no-stamp skip when
+  // the category is flagged `no_default_location: true` (Logistic / floating
+  // blocks) or `sets_sensitivity_private: true` (Private / personal events).
+  category?: string | null;
+
+  // Party shape
+  participantCount: number;                 // total including owner + externals
+  hasExternalAttendee: boolean;
+
+  // TZ signal for office+external case (path 3a vs 3b)
+  externalAttendeeInDifferentTz?: boolean;  // undefined = unknown → ask path
+
+  // Travel state
+  anyParticipantRemote?: boolean;
+
+  // Owner-explicit hints (Sonnet passes these via tool args)
+  ownerLocationHint?: string;
+  ownerIsOnlineHint?: boolean;
+
+  // Move-only inputs (drive the preserve path)
+  priorStartIso?: string;
+  existingLocation?: string;
+  existingIsOnline?: boolean;
 }
 
 export type LocationVerdict =
-  | { kind: 'resolved'; isOnline: boolean; location: string; reasoning: string }
-  | { kind: 'no_default_location_category'; reasoning: string }
-  | { kind: 'refuse_vacation_or_oof'; reasoning: string };
+  | {
+      kind: 'resolved';
+      isOnline: boolean;
+      location: string;
+      addRoomEmail?: boolean;          // ops.ts adds profile.meetings.room_email as optional attendee
+      teamsUrlAsLocation?: boolean;    // ops.ts patches location.displayName with joinUrl after create
+      reasoning: string;
+    }
+  | { kind: 'preserve_existing'; isOnline: boolean; location: string; reasoning: string }
+  | { kind: 'ask_owner_online_or_physical'; suggestedAskText: string; reasoning: string }
+  | {
+      // Categories flagged `no_default_location` (Logistic / floating blocks)
+      // or `sets_sensitivity_private` (Private / personal events). Caller
+      // passes location='' + isOnline=false; no Teams URL patch, no room
+      // email. Sonnet decides whether to ask owner (prompt rule handles the
+      // Private case — "where should this private event be?").
+      kind: 'skip_stamp';
+      reasoning: string;
+    };
+
+const HUDDLE_LABEL = 'Huddle';
 
 export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   const { profile } = input;
-  const ownerName = profile.user.name.split(' ')[0];
-  const dt = DateTime.fromISO(input.startIso).setZone(profile.user.timezone);
+  const tz = profile.user.timezone;
+  const dt = DateTime.fromISO(input.startIso).setZone(tz);
   const dayName = dt.toFormat('EEEE');
-  const isOfficeDay = (profile.schedule.office_days.days as string[]).includes(dayName);
-  const isHomeDay = (profile.schedule.home_days.days as string[]).includes(dayName);
-  const isVacationDay = !isOfficeDay && !isHomeDay;  // Fri/Sat etc.
+  const officeDays = profile.schedule.office_days.days as string[];
+  const homeDays = profile.schedule.home_days.days as string[];
+  const isOfficeDay = officeDays.includes(dayName);
+  const isHomeDay = homeDays.includes(dayName);
 
-  // ── (1) Owner-explicit hints ────────────────────────────────────────────
-  // Sonnet passed both → trust both, with normalization for phone-as-location.
+  // ── (0) PRESERVE on move when day-type didn't flip and no owner hint ────
+  const hasOwnerHint =
+    (input.ownerLocationHint && input.ownerLocationHint.trim().length > 0) ||
+    input.ownerIsOnlineHint !== undefined;
+
+  if (
+    input.intent === 'move' &&
+    !hasOwnerHint &&
+    input.priorStartIso &&
+    input.existingLocation !== undefined &&
+    input.existingIsOnline !== undefined
+  ) {
+    const priorDay = DateTime.fromISO(input.priorStartIso).setZone(tz).toFormat('EEEE');
+    const typeOf = (d: string): 'office' | 'home' | 'off' =>
+      officeDays.includes(d) ? 'office' : homeDays.includes(d) ? 'home' : 'off';
+    if (typeOf(priorDay) === typeOf(dayName)) {
+      return {
+        kind: 'preserve_existing',
+        isOnline: input.existingIsOnline,
+        location: input.existingLocation,
+        reasoning: `move within same day-type (${typeOf(dayName)}) — preserving existing location`,
+      };
+    }
+  }
+
+  // ── (1) OWNER-EXPLICIT HINT ─────────────────────────────────────────────
   if (input.ownerLocationHint && input.ownerLocationHint.trim().length > 0) {
     const loc = input.ownerLocationHint.trim();
     const isPhone = /^\+?\d[\d\s\-().]{5,}$/.test(loc);
     if (isPhone) {
       return { kind: 'resolved', isOnline: false, location: loc, reasoning: 'owner-explicit phone location' };
     }
-    // Owner gave a physical location — respect, but also keep Teams link if owner said is_online=true
     return {
       kind: 'resolved',
       isOnline: input.ownerIsOnlineHint === true,
@@ -73,118 +149,164 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
       reasoning: 'owner-explicit location string',
     };
   }
-  // v2.7.6 — Owner explicit is_online=false WITHOUT a location.
-  // Pre-fix this returned empty location, leaving in-person office-day
-  // meetings with no address. Owner direction: "Mon is an office day,
-  // internal meeting, should auto-stamp the office." Now: respect the
-  // is_online=false (no Teams) BUT still resolve location from day-type
-  // defaults. Office day → office label (short for internal-only). Home
-  // day → "Huddle" (no Teams, in-person). Skip vacation days.
-  if (input.ownerIsOnlineHint === false && !isVacationDay) {
-    if (isOfficeDay) {
-      // 4+ internal people → meeting room (mirror the rule-5 day-type default).
-      const internalCount = input.participantCount - (input.hasExternalAttendee ? 1 : 0);
-      if (!input.hasExternalAttendee && internalCount > 3) {
-        return {
-          kind: 'resolved',
-          isOnline: false,
-          location: 'Meeting Room',
-          reasoning: 'owner-explicit is_online=false on office day, internal >3 → meeting room',
-        };
-      }
-      return {
-        kind: 'resolved',
-        isOnline: false,
-        location: formatOfficeLocation(profile, input.hasExternalAttendee),
-        reasoning: 'owner-explicit is_online=false on office day → office stamp, no Teams',
-      };
-    }
-    if (isHomeDay) {
-      return {
-        kind: 'resolved',
-        isOnline: false,
-        location: 'Huddle',
-        reasoning: 'owner-explicit is_online=false on home day → Huddle',
-      };
-    }
-    return { kind: 'resolved', isOnline: false, location: '', reasoning: 'owner-explicit is_online=false, day-type unknown' };
-  }
-
-  // ── (2) Travel / remote state ───────────────────────────────────────────
-  if (input.anyParticipantRemote) {
-    return { kind: 'resolved', isOnline: true, location: '', reasoning: 'someone traveling/remote — forced online' };
-  }
-
-  // ── (3) Vacation / OOF ──────────────────────────────────────────────────
-  if (isVacationDay) {
-    return { kind: 'refuse_vacation_or_oof', reasoning: `${dayName} is not a working day for ${ownerName}` };
-  }
-
-  // ── (4) Category-driven default ─────────────────────────────────────────
-  // Categories carry { default_location, default_is_online, no_default_location }.
-  // Per yaml schema: 'office' | 'online' | 'custom_required' | 'none'.
-  if (input.category) {
-    const cat = (profile.categories ?? []).find(c => c.name === input.category);
-    if (cat) {
-      if (cat.no_default_location) {
-        return { kind: 'no_default_location_category', reasoning: `category ${cat.name} flagged no_default_location` };
-      }
-      if (cat.default_location === 'online') {
-        return { kind: 'resolved', isOnline: true, location: '', reasoning: `category ${cat.name} default=online` };
-      }
-      if (cat.default_location === 'office') {
-        const loc = formatOfficeLocation(profile, input.hasExternalAttendee);
-        const isOnline = cat.default_is_online !== false;  // default hybrid
-        return { kind: 'resolved', isOnline, location: loc, reasoning: `category ${cat.name} default=office (hybrid=${isOnline})` };
-      }
-      if (cat.default_location === 'custom_required') {
-        // Caller must ask owner for venue — no auto-stamp.
-        return { kind: 'resolved', isOnline: false, location: '', reasoning: `category ${cat.name} requires custom venue (caller must ask)` };
-      }
-      // default_location === 'none' or unset → fall through to day-type defaults
-    }
-  }
-
-  // ── (5) Day-type defaults ───────────────────────────────────────────────
-  if (isOfficeDay) {
-    // Office day: address + Teams link (hybrid) for ≤3 internal; meeting room for big.
-    const internalCount = input.participantCount - (input.hasExternalAttendee ? 1 : 0);
-    if (!input.hasExternalAttendee && internalCount > 3) {
-      return { kind: 'resolved', isOnline: true, location: 'Meeting Room', reasoning: 'office day, internal >3 people' };
-    }
+  // Owner explicit is_online=true with no location → online, teams URL as location.
+  if (input.ownerIsOnlineHint === true) {
     return {
       kind: 'resolved',
       isOnline: true,
-      location: formatOfficeLocation(profile, input.hasExternalAttendee),
-      reasoning: input.hasExternalAttendee ? 'office day, external present (hybrid)' : 'office day, internal ≤3 (hybrid)',
+      location: '',
+      teamsUrlAsLocation: true,
+      reasoning: 'owner-explicit is_online=true → Teams URL as location',
+    };
+  }
+  // Owner explicit is_online=false with no location → physical, but we still
+  // need to decide WHICH physical label. Fall through to day-type defaults,
+  // forcing isOnline=false at the resolved branch.
+  const ownerForcedPhysical = input.ownerIsOnlineHint === false;
+
+  // ── (1.5) CATEGORY-DRIVEN SKIP ──────────────────────────────────────────
+  // Categories flagged `no_default_location: true` (Logistic / floating
+  // blocks) OR `sets_sensitivity_private: true` (Private / personal) skip
+  // the auto-stamp entirely. The event lands with no location and no Teams
+  // link. For Private, the prompt rule tells Sonnet to ask the owner where
+  // the event should be before booking. Owner-explicit hints (path 1 above)
+  // override this skip — that's where "I'm meeting Amazia at my home" wins
+  // over the Huddle / no-stamp default.
+  if (input.category) {
+    const cat = (profile.categories ?? []).find(c => c.name === input.category);
+    if (cat && (cat.no_default_location === true || cat.sets_sensitivity_private === true)) {
+      return {
+        kind: 'skip_stamp',
+        reasoning: `category ${cat.name} flagged ${cat.no_default_location ? 'no_default_location' : 'sets_sensitivity_private'} — no auto-stamp`,
+      };
+    }
+  }
+
+  // ── (2) TRAVEL OVERRIDE ─────────────────────────────────────────────────
+  if (input.anyParticipantRemote && !ownerForcedPhysical) {
+    return {
+      kind: 'resolved',
+      isOnline: true,
+      location: '',
+      teamsUrlAsLocation: true,
+      reasoning: 'participant traveling/remote — online with Teams URL as location',
     };
   }
 
-  if (isHomeDay) {
-    if (input.hasExternalAttendee) {
-      // Per D2: external + home day → Teams only.
-      return { kind: 'resolved', isOnline: true, location: '', reasoning: 'home day, external present (Teams only)' };
-    }
-    // Internal only on home day → Huddle (no Teams).
-    return { kind: 'resolved', isOnline: false, location: 'Huddle', reasoning: 'home day, internal only (Huddle)' };
-  }
-
-  // Safety fallback (shouldn't reach — vacation handled above)
-  return { kind: 'resolved', isOnline: true, location: '', reasoning: 'fallback: default online' };
-}
-
-function formatOfficeLocation(profile: UserProfile, hasExternalAttendee: boolean = false): string {
   const officeLoc = profile.meetings.office_location;
-  if (!officeLoc) return `${profile.user.name.split(' ')[0]}'s Office`;
-  // v2.7.6 — internal-only meetings get the short label (colleagues know
-  // where the office is; address + parking are noise). External attendees
-  // get the full address + parking — they need to navigate.
-  if (!hasExternalAttendee) {
-    return officeLoc.label || `${profile.user.name.split(' ')[0]}'s Office`;
+  const firstName = profile.user.name.split(' ')[0];
+  const shortLabel = officeLoc?.short_label || `${firstName} Office`;
+  const meetingRoomLabel = officeLoc?.meeting_room_label || 'Meeting Room';
+  const fullLabel = officeLoc?.full_label || shortLabel;
+
+  // ── (3) OFFICE DAY ──────────────────────────────────────────────────────
+  if (isOfficeDay) {
+    if (input.hasExternalAttendee) {
+      // (3a) Known-different TZ → online auto.
+      if (input.externalAttendeeInDifferentTz === true) {
+        if (ownerForcedPhysical) {
+          // Owner said in-person — respect, stamp the full address.
+          return {
+            kind: 'resolved',
+            isOnline: false,
+            location: fullLabel,
+            reasoning: 'office day + external (different TZ) + owner forced physical',
+          };
+        }
+        return {
+          kind: 'resolved',
+          isOnline: true,
+          location: '',
+          teamsUrlAsLocation: true,
+          reasoning: 'office day + external in different TZ → online (Teams URL as location)',
+        };
+      }
+      // (3b) Owner forced physical → stamp full address, no ask needed.
+      if (ownerForcedPhysical) {
+        return {
+          kind: 'resolved',
+          isOnline: false,
+          location: fullLabel,
+          reasoning: 'office day + external + owner forced physical',
+        };
+      }
+      // Same TZ OR unknown TZ AND no owner hint → ask.
+      return {
+        kind: 'ask_owner_online_or_physical',
+        suggestedAskText: `Office day with an external guest — online or physical at ${fullLabel}?`,
+        reasoning: input.externalAttendeeInDifferentTz === false
+          ? 'office day + external in same TZ → must ask owner'
+          : 'office day + external with unknown TZ → must ask owner',
+      };
+    }
+    // Internal-only on office day.
+    if (input.participantCount >= 4) {
+      // (3c) Big internal → Meeting Room + room_email + Teams in body.
+      return {
+        kind: 'resolved',
+        isOnline: !ownerForcedPhysical,
+        location: meetingRoomLabel,
+        addRoomEmail: true,
+        reasoning: `office day + internal ≥4 → ${meetingRoomLabel} (+ room email, Teams backup in body)`,
+      };
+    }
+    // (3d) Small internal → short_label + Teams in body.
+    return {
+      kind: 'resolved',
+      isOnline: !ownerForcedPhysical,
+      location: shortLabel,
+      reasoning: `office day + internal ≤3 → ${shortLabel} (Teams backup in body)`,
+    };
   }
-  const parts: string[] = [];
-  if (officeLoc.label) parts.push(officeLoc.label);
-  if (officeLoc.address) parts.push(officeLoc.address);
-  if (officeLoc.parking) parts.push(`Parking: ${officeLoc.parking}`);
-  return parts.join(' — ');
+
+  // ── (4) HOME DAY ────────────────────────────────────────────────────────
+  if (isHomeDay) {
+    if (input.hasExternalAttendee && !ownerForcedPhysical) {
+      // (4a) External on home day → online; Teams URL as location.
+      return {
+        kind: 'resolved',
+        isOnline: true,
+        location: '',
+        teamsUrlAsLocation: true,
+        reasoning: 'home day + external → online (Teams URL as location)',
+      };
+    }
+    if (input.hasExternalAttendee && ownerForcedPhysical) {
+      // Owner forced physical with an external on a home day — owner is
+      // probably hosting at home. Stamp short_label as best-effort label;
+      // owner-explicit text hint is the proper channel for "my home".
+      return {
+        kind: 'resolved',
+        isOnline: false,
+        location: shortLabel,
+        reasoning: 'home day + external + owner forced physical (fallback to short label)',
+      };
+    }
+    // (4b) Internal-only on home day → Huddle.
+    return {
+      kind: 'resolved',
+      isOnline: false,
+      location: HUDDLE_LABEL,
+      reasoning: 'home day + internal-only → Huddle',
+    };
+  }
+
+  // ── (5) NON-WORK DAY ────────────────────────────────────────────────────
+  // OOF refusal is the booking layer's job, not location's. Just pick a
+  // sensible default so the event has SOMETHING if it does get booked.
+  if (ownerForcedPhysical) {
+    return {
+      kind: 'resolved',
+      isOnline: false,
+      location: shortLabel,
+      reasoning: 'non-work day + owner forced physical (fallback to short label)',
+    };
+  }
+  return {
+    kind: 'resolved',
+    isOnline: true,
+    location: '',
+    teamsUrlAsLocation: true,
+    reasoning: 'non-work day → default online (Teams URL as location)',
+  };
 }

@@ -162,6 +162,7 @@ export async function bookCoordination(
 
   let isOnline: boolean;
   let location: string | undefined;
+  let coordRoomMailboxToAdd = false;  // v2.8.2 — flag set when the Meeting Room mailbox should be invited (room-busy check passed)
 
   if (notesObj.locationOverride) {
     location = notesObj.locationOverride as string;
@@ -183,13 +184,13 @@ export async function bookCoordination(
           if (p.slack_id && getCurrentTravel(p.slack_id)) { anyTraveling = true; break; }
         }
       } catch (_) { /* fail open */ }
-      // v2.7.0 — unified location resolution via resolveLocation (replaces
-      // determineSlotLocation). Includes category-aware behavior; coord
-      // category comes from notes if set.
+      // v2.8.2 — unified location via resolveLocation. Categories no longer
+      // drive location (rewrite is deterministic by day-type + party shape).
+      // At coord-booking time we're past the ask point, so a fallback default
+      // of online is acceptable if the ask path somehow fires.
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { resolveLocation } = require('../../../utils/resolveLocation') as
         typeof import('../../../utils/resolveLocation');
-      const coordCategory = (notesObj.category as string | undefined) ?? null;
       const hasExternal = participants.some(p => {
         const e = (p.email ?? '').toLowerCase();
         if (!e) return false;
@@ -198,22 +199,67 @@ export async function bookCoordination(
       const v = resolveLocation({
         profile,
         startIso: slot,
-        category: coordCategory,
+        intent: 'new_booking',
         participantCount: totalPeople,
         hasExternalAttendee: hasExternal,
         anyParticipantRemote: anyTraveling,
       });
+      let coordAddRoomEmail = false;
       if (v.kind === 'resolved') {
         location = v.location;
         isOnline = v.isOnline;
-      } else if (v.kind === 'no_default_location_category') {
-        location = '';
-        isOnline = false;
+        coordAddRoomEmail = v.addRoomEmail === true;
       } else {
-        // vacation/oof fallback — shouldn't reach (slot already passed rule check)
+        // ask_owner / preserve_existing can't meaningfully apply here. Default online.
         location = '';
         isOnline = true;
       }
+      // v2.8.2 — Meeting Room busy/free check on coord path. Mid-state-machine
+      // we can't ask the owner synchronously, so the ≥6 case falls back to the
+      // small label AND shadow-notifies the owner — he can react in his DM.
+      if (coordAddRoomEmail) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { checkMeetingRoomAvailability } = require('../../../utils/meetingRoomAvailability') as
+            typeof import('../../../utils/meetingRoomAvailability');
+          const roomVerdict = await checkMeetingRoomAvailability({
+            profile,
+            startIso: slot,
+            endIso: endDt.toISO()!,
+            participantCount: totalPeople,
+          });
+          if (roomVerdict.kind === 'room_busy_small_fits') {
+            location = roomVerdict.smallLabel;
+            coordAddRoomEmail = false;
+          } else if (roomVerdict.kind === 'room_busy_too_big') {
+            // Best-effort: use the small label anyway and shadow-DM the owner.
+            location = profile.meetings.office_location?.small_meeting_room_label || 'Office';
+            coordAddRoomEmail = false;
+            try {
+              const { shadowNotify } = await import('../../../utils/shadowNotify');
+              await shadowNotify(profile, {
+                channel: job.owner_channel,
+                threadTs: job.owner_thread_ts,
+                action: 'Meeting Room busy',
+                detail: roomVerdict.suggestedAskText + ` I went with the small space for now — let me know if you want to push the time.`,
+                conversationKey: `coord:${jobId}`,
+                conversationHeader: `Coord: ${job.subject}`,
+              });
+            } catch (err) {
+              logger.warn('coord booking — room-busy shadow notify failed', {
+                jobId, err: String(err).slice(0, 200),
+              });
+            }
+          }
+        } catch (err) {
+          logger.warn('coord booking — meeting room availability check threw, proceeding', {
+            jobId, err: String(err).slice(0, 200),
+          });
+        }
+      }
+      // (room mailbox attendee is appended at createMeeting call time below
+      //  when coordAddRoomEmail is still set after the busy check.)
+      coordRoomMailboxToAdd = coordAddRoomEmail && !!profile.meetings.room_email;
     }
   }
 
@@ -360,13 +406,29 @@ export async function bookCoordination(
       }
 
       if (!newEventId) {
-        newEventId = await createMeeting({
+        // Build the attendee list. When the busy-check came back free for the
+        // Meeting Room mailbox, append it here as OPTIONAL — keeps the room
+        // out of CoordParticipant (whose shape is reserved for human voters).
+        const coordAttendees: Array<{ name: string; email: string; optional?: boolean }> =
+          participants.map(p => ({ name: p.name, email: p.email || '' }));
+        if (coordRoomMailboxToAdd && profile.meetings.room_email) {
+          const roomEmail = profile.meetings.room_email.toLowerCase();
+          const already = coordAttendees.some(a => a.email.toLowerCase() === roomEmail);
+          if (!already) {
+            coordAttendees.push({
+              email: profile.meetings.room_email,
+              name: location ?? 'Meeting Room',
+              optional: true,
+            });
+          }
+        }
+        const created = await createMeeting({
           userEmail: profile.user.email,
           timezone: profile.user.timezone,
           subject: job.subject,
           start: slot,
           end: endDt.toISO()!,
-          attendees: participants.map(p => ({ name: p.name, email: p.email || '' })),
+          attendees: coordAttendees,
           body: job.topic ? `Topic: ${job.topic}` : undefined,
           isOnline,
           location: location || undefined,
@@ -377,6 +439,25 @@ export async function bookCoordination(
           // v2.3.1 (B23) — invite-body attribution.
           defaultBodyAuthor: `${profile.assistant.name}, ${profile.user.name.split(' ')[0]} Assistant`,
         });
+        newEventId = created.id;
+        // v2.8.2 — coord-side Teams-URL-as-location: when the slot is online
+        // and the resolved location string is empty, patch with joinUrl so
+        // the invite location field shows the Teams link.
+        if (isOnline && (!location || location.length === 0) && created.joinUrl) {
+          try {
+            const { updateMeeting } = await import('../../../connectors/graph/calendar');
+            await updateMeeting({
+              userEmail: profile.user.email,
+              timezone: profile.user.timezone,
+              meetingId: created.id,
+              location: created.joinUrl,
+            });
+          } catch (err) {
+            logger.warn('coord booking — Teams URL location patch failed', {
+              jobId, err: String(err).slice(0, 200),
+            });
+          }
+        }
       }
     }
 
