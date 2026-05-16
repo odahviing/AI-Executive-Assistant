@@ -90,7 +90,7 @@ Examples of good notes:
 - "Has a cat named Mochi"
 - "Studying for an MBA part-time"
 
-Do NOT call this for purely work-related facts (those go in learn_preference). This is for human, personal, relationship-building context.`,
+Do NOT call this for purely work-related facts (those go in manage_preference(action='set')). This is for human, personal, relationship-building context.`,
         input_schema: {
           type: 'object' as const,
           properties: {

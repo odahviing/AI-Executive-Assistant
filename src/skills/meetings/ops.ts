@@ -1923,6 +1923,33 @@ export class SchedulingSkill {
             }
           }
 
+          // v2.9 — venue skill save-on-book hook. Persist non-company venues
+          // to the owner's catalog at rank=2 (or bump last_used_at if already
+          // saved). Only fires when the skill is on AND the stamped location
+          // is an external venue (not the office, not Huddle, not Teams URL).
+          if ((context.profile.skills as any)?.venue === true && planLocation && planLocation.trim().length > 0) {
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { isCompanyLocation } = require('../../db/venues') as typeof import('../../db/venues');
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { saveOrBumpVenueOnBook } = require('../venue') as typeof import('../venue');
+              const officeLoc = context.profile.meetings.office_location ?? {};
+              if (!isCompanyLocation(planLocation, officeLoc)) {
+                saveOrBumpVenueOnBook({
+                  ownerUserId: context.profile.user.slack_user_id,
+                  name: planLocation,
+                  // address is the same as name for the v2.9 MVP — the stamped
+                  // location string typically already includes "Name, Street City".
+                  // Future Google-Places integration (#96) will split these out.
+                });
+              }
+            } catch (err) {
+              logger.warn('venue save-on-book hook failed — continuing', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          }
+
           return {
             success: true,
             meetingId,

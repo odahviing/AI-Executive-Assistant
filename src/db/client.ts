@@ -719,6 +719,33 @@ function initSchema(db: Database.Database): void {
       registered_at   TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (channel_id, thread_ts)
     );
+
+    -- v2.9 — venue skill: owner-curated catalog of external meeting venues
+    -- (cafés, restaurants, pubs, customer offices). Populated on book whenever
+    -- a non-company location lands on a calendar event. Rank 3 = offer first,
+    -- 2 = offer normally (default for new venues), 1 = hidden by default.
+    CREATE TABLE IF NOT EXISTS venues (
+      id                TEXT PRIMARY KEY,
+      owner_user_id     TEXT NOT NULL,
+      name              TEXT NOT NULL,
+      branch_name       TEXT,
+      address           TEXT,
+      area_tags         TEXT NOT NULL DEFAULT '[]',  -- JSON array
+      type              TEXT,                          -- 'coffee' | 'restaurant' | 'pub' | 'park' | ...
+      type_tags         TEXT NOT NULL DEFAULT '[]',  -- JSON array — refinements ('kosher', 'italian')
+      phone             TEXT,
+      reservation_url   TEXT,
+      place_id          TEXT,                          -- Google Places place_id when available (future)
+      booking_links     TEXT,                          -- JSON array of { platform, url } (future)
+      notes             TEXT,
+      rank              INTEGER,                       -- 1 | 2 | 3 — owner-curated
+      last_used_at      TEXT,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_venues_owner_type ON venues(owner_user_id, type);
+    CREATE INDEX IF NOT EXISTS idx_venues_owner_rank ON venues(owner_user_id, rank);
+    CREATE INDEX IF NOT EXISTS idx_venues_owner_name ON venues(owner_user_id, name);
   `);
 
   // ── v2.7.0 — legacy bridge columns ────────────────────────────────────────

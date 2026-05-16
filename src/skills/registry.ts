@@ -81,6 +81,14 @@ function buildSkillMap(): Map<SkillId, Skill> {
         return new SocialSkill();
       },
     },
+    {
+      id: 'venue',
+      loader: () => {
+        // v2.9 — external venue discovery + rank catalog.
+        const { VenueSkill } = require('./venue');
+        return new VenueSkill();
+      },
+    },
   ];
 
   const map = new Map<SkillId, Skill>();
@@ -114,14 +122,15 @@ const SKILL_MAP = buildSkillMap();
  * They'll show up in the diagnostic log line.
  */
 const ALWAYS_ON_TOOLS = new Set<string>([
-  // Memory + people (AssistantSkill)
-  'learn_preference', 'forget_preference', 'recall_preferences',
+  // Memory + people (AssistantSkill). v2.9 — three preference tools merged into manage_preference.
+  'manage_preference',
   'recall_interactions', 'update_person_profile', 'log_interaction',
   'confirm_gender', 'get_person_memory', 'update_person_memory',
   // Outreach
   'message_colleague',
-  // Tasks core (basic CRUD always available)
-  'create_task', 'edit_task', 'cancel_task', 'get_my_tasks',
+  // Tasks core. v2.9 — edit_task + cancel_task merged into update_task; create_task and
+  // get_my_tasks stay separate (claim-checker references create_task by name).
+  'create_task', 'update_task', 'get_my_tasks',
   'get_briefing', 'send_briefing_now',
   // Approvals — any turn might escalate
   'create_approval', 'resolve_approval', 'list_pending_approvals',
@@ -141,14 +150,19 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
     'find_available_slots', 'get_calendar', 'analyze_calendar', 'get_free_busy',
     'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
     'check_calendar_health', 'book_floating_block', 'set_event_category',
-    'get_calendar_issues', 'update_calendar_issue',
+    // v2.9 — get_calendar_issues + update_calendar_issue merged.
+    'manage_calendar_issue',
+    // v2.9 — find_venue is reachable from a meetings-flavored turn
+    // ("book coffee with Yael"); also lives in the 'venue' scope.
+    'find_venue',
   ]),
   tasks: new Set<string>([
-    // Routines live here too — they're scheduled task templates.
-    'create_routine', 'update_routine', 'delete_routine', 'get_routines',
+    // v2.9 — 4 routine tools merged into manage_routine.
+    'manage_routine',
   ]),
   knowledge: new Set<string>([
-    'get_company_knowledge', 'ingest_knowledge_from_url', 'classify_document',
+    // v2.9 — get_company_knowledge + ingest_knowledge_from_url merged.
+    'manage_knowledge', 'classify_document',
   ]),
   summary: new Set<string>([
     'classify_summary_feedback', 'share_summary', 'update_summary_draft',
@@ -159,6 +173,13 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
   // classifier can signal "this turn has a social-write intent" — useful
   // for future logging / observability — without changing the shipped set.
   social: new Set<string>([]),
+  // v2.9 — venue skill: external-venue discovery and rank curation.
+  // find_venue is also useful from a meetings-shaped turn (booking a coffee
+  // chat), so it's accessible through both 'venue' and 'meetings' scopes
+  // via the union semantics in filterToolsByScope.
+  venue: new Set<string>([
+    'find_venue', 'rank_venue',
+  ]),
 };
 
 /**

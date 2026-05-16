@@ -437,6 +437,9 @@ const UserProfileSchema = z.object({
     // timezone, state, preferences, per-person md operational facts) is
     // always on regardless.
     social: z.boolean().default(false),
+    // v2.9 — external-venue discovery + rank catalog. Off by default; flip true
+    // to expose `find_venue` + `rank_venue` and auto-save bookings to the catalog.
+    venue: z.boolean().default(false),
     // Legacy aliases — auto-migrated at runtime; kept optional so old YAMLs boot.
     persona: z.boolean().optional(),             // → social (v2.6.2)
     scheduling: z.boolean().optional(),          // → meetings

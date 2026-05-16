@@ -11,3 +11,4 @@ export * from './approvals';
 export * from './summarySessions';
 export * from './socialSubjects';
 export * from './engagementRank';
+export * from './venues';

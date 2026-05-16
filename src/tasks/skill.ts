@@ -75,19 +75,29 @@ Task types:
         },
       },
       {
-        name: 'edit_task',
-        description: `Edit an existing task — change its title, description, due date, message, or type.`,
+        // v2.9 — merged edit_task + cancel_task. create_task and get_my_tasks
+        // stay separate (claim-checker honesty rules reference create_task by
+        // name; get_my_tasks is a read with optional filter).
+        name: 'update_task',
+        description: `Update an existing task. Two actions:
+
+action='edit' — change a task's title, description, due_at, message, or type. Required: task_id. Pass any subset of mutable fields.
+
+action='cancel' — cancel a pending task. Required: task_id.
+
+For creating a new task, use \`create_task\`. For listing tasks, use \`get_my_tasks\`.`,
         input_schema: {
           type: 'object',
           properties: {
-            task_id: { type: 'string' },
-            title: { type: 'string' },
-            description: { type: 'string' },
-            due_at: { type: 'string' },
-            type: { type: 'string', enum: ['reminder', 'follow_up', 'research'] },
-            message: { type: 'string' },
+            action: { type: 'string', enum: ['edit', 'cancel'], description: 'edit or cancel.' },
+            task_id: { type: 'string', description: 'REQUIRED for both actions.' },
+            title: { type: 'string', description: 'edit: optional.' },
+            description: { type: 'string', description: 'edit: optional.' },
+            due_at: { type: 'string', description: 'edit: optional ISO 8601 datetime.' },
+            type: { type: 'string', enum: ['reminder', 'follow_up', 'research'], description: 'edit: optional task type.' },
+            message: { type: 'string', description: 'edit: optional message body.' },
           },
-          required: ['task_id'],
+          required: ['action', 'task_id'],
         },
       },
       {
@@ -103,15 +113,6 @@ ALSO CHECK ROUTINES when the owner asks about recurring activities ("did you do 
             with_person: { type: 'string', description: 'Optional Slack user ID to filter by counterpart.' },
           },
           required: [],
-        },
-      },
-      {
-        name: 'cancel_task',
-        description: 'Cancel a pending task.',
-        input_schema: {
-          type: 'object',
-          properties: { task_id: { type: 'string' } },
-          required: ['task_id'],
         },
       },
       {
@@ -199,6 +200,16 @@ Binding — how to pick the right approval_id:
   ): Promise<unknown | null> {
     const { profile, channelId, threadTs } = context;
     const ownerUserId = profile.user.slack_user_id;
+
+    // v2.9 — narrow merge: update_task dispatches into edit_task or cancel_task.
+    // create_task and get_my_tasks stay separate (claim-checker honesty rule
+    // references create_task by name; get_my_tasks is a read with optional filter).
+    if (toolName === 'update_task') {
+      const action = String(args.action ?? '').toLowerCase();
+      if (action === 'edit')         toolName = 'edit_task';
+      else if (action === 'cancel')  toolName = 'cancel_task';
+      else return { error: 'bad_action', message: `update_task action must be 'edit' | 'cancel', got "${action}".` };
+    }
 
     switch (toolName) {
 

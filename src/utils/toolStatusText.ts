@@ -44,8 +44,7 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
 
   // Tasks / approvals / brief
   create_task: 'Noting it down',
-  edit_task: 'Updating the task',
-  cancel_task: 'Cancelling the task',
+  update_task: 'Updating the task',           // v2.9 — merged edit + cancel
   get_my_tasks: 'Pulling tasks',
   create_approval: 'Flagging it',
   resolve_approval: 'Closing it out',
@@ -53,19 +52,25 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
   get_briefing: 'Pulling the brief',
   send_briefing_now: 'Sending the brief',
 
-  // Routines
-  create_routine: 'Setting up the routine',
-  get_routines: 'Checking routines',
-  update_routine: 'Updating the routine',
-  delete_routine: 'Removing the routine',
+  // Routines. v2.9 — 4 tools merged into manage_routine.
+  manage_routine: 'Managing the routine',
 
   // Knowledge / web / summary
-  get_company_knowledge: 'Thinking',
-  ingest_knowledge_from_url: 'Memorizing it',
+  manage_knowledge: 'Thinking',               // v2.9 — get + ingest merged
   web_search: 'Searching the web',
   web_extract: 'Reading the page',
   share_summary: 'Sharing the summary',
   update_summary_draft: 'Tweaking the draft',
+
+  // Preferences (v2.9 — merged)
+  manage_preference: 'Memorizing it',
+
+  // Calendar issues (v2.9 — merged)
+  manage_calendar_issue: 'Checking calendar issues',
+
+  // Venues (v2.9)
+  find_venue: 'Looking for a place',
+  rank_venue: 'Updating your list',
 };
 
 /**

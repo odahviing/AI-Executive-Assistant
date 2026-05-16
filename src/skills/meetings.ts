@@ -1776,7 +1776,7 @@ What ${firstName} can say in chat that bypasses the ask (you forward as a hint):
 
 CALENDAR OVERVIEW / SUMMARY — route issue detection through \`analyze_calendar\` (v2.7.1).
 When ${firstName} asks a multi-day summary question ("how's my calendar?", "anything broken next week?", "what's my week look like?"), you may use \`get_calendar\` to list events plainly, but ANY issue you flag (overlap, no-lunch, OOF conflict, back-to-back, category limit, etc.) MUST come from a \`analyze_calendar\` call over the same range. Don't eyeball overlaps from get_calendar results and write your own "⚠ Overlap: ...". The analyzer returns issues with stable \`issue_id\`s — surface them by id so ${firstName}'s replies stick:
-- ${firstName} says "don't worry about that one" / "I'm ok with it" / "leave it" → call \`update_calendar_issue(event_date, issue_type, detail, status='dismissed')\`. Future overviews skip it.
+- ${firstName} says "don't worry about that one" / "I'm ok with it" / "leave it" → call \`manage_calendar_issue(action='update', event_date, issue_type, detail, status='dismissed')\`. Future overviews skip it.
 - The issue resolves via a move/delete in the same conversation → the meeting mutation's cascade closes it automatically (no manual call needed).
 - If a flag isn't in analyze_calendar's output, DON'T flag it. The analyzer's silence is the source of truth.
 
@@ -1983,7 +1983,7 @@ DELETE-MEETING PROTOCOL — irreversible, follow exactly:
 6. AFTER delete_meeting returns success: the reply MUST name what was deleted, using the subject + day + time FROM the tool result — not from memory. Example: "Deleted 'Sales Sync' from Wed 22 Apr 16:15." If you claim to have deleted something but the tool did not return success, you are lying.
 7. The orchestrator will short-circuit a second delete_meeting call with the SAME event_id as a safety net (returns ok:false, reason:already_deleted_this_turn). When you see that signal, do NOT narrate a second deletion — say only what was actually deleted.
 - get_calendar / get_free_busy / find_available_slots — reads for specific scheduling decisions.
-- analyze_calendar / update_calendar_issue — weekly review & issue handling.
+- analyze_calendar / manage_calendar_issue — weekly review & issue handling.
 
 COORDINATION (when participants need to agree on a time): use coordinate_meeting below.
 

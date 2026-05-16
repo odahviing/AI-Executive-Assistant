@@ -2,6 +2,28 @@
 
 ---
 
+## 2.8.3 — Venue skill + tool consolidation (13 owner tools → 5)
+
+New `venue` skill for external meeting venues (cafés, restaurants, customer offices). Two flows: `find_venue` resolves owner-named places via Tavily OR returns 3 candidates for an area+type search; `rank_venue` curates a per-owner catalog with ranks 1-3 (1 hidden, 2 default, 3 favorite first). Save-on-book hook auto-files non-company locations to the catalog at rank 2. Toggle: `skills.venue: true`.
+
+Tool consolidation: 5 merges, 13 → 5. `learn_preference` + `forget_preference` + `recall_preferences` → `manage_preference`. `create_routine` + `update_routine` + `delete_routine` + `get_routines` → `manage_routine`. `get_calendar_issues` + `update_calendar_issue` → `manage_calendar_issue`. `get_company_knowledge` + `ingest_knowledge_from_url` → `manage_knowledge`. `edit_task` + `cancel_task` → `update_task` (narrow — `create_task` stays separate because the claim-checker honesty rule references it by name).
+
+### Added
+
+- **Venue skill** (`src/skills/venue.ts`, `src/db/venues.ts`, `src/utils/venueSearch.ts`). New SQLite `venues` table with per-owner ranking. `find_venue` returns `hidden_count` so Sonnet can mention rank-1 venues without showing them; `include_hidden: true` re-call surfaces them. Tavily-backed search; Google Places migration tracked at [#96](https://github.com/odahviing/AI-Executive-Assistant/issues/96).
+- **Save-on-book hook** in `create_meeting` (`skills/meetings/ops.ts`). When `skills.venue: true` and the booked location is non-company, the venue is auto-inserted at rank 2 (or `last_used_at` bumped). Company labels (`short_label` / `meeting_room_label` / `full_label` / `Huddle` / Teams URLs) are recognized and skipped.
+
+### Changed
+
+- **5 merged tools** with `action` enum dispatch. Old tool names removed from `ALWAYS_ON_TOOLS` and `SCOPE_TO_TOOLS`. `inboundQueue.WRITE_TOOLS` updated. `textScrubber` carries both new + legacy names for back-compat scrubbing. `toolStatusText` rewired. System prompt references migrated to the new tool names.
+
+### Migration
+
+- No DB migration. The legacy tool-name strings stay scrubbed by `textScrubber` so any cached transcript references won't leak.
+- Restart `npm run dev` to load the new tool definitions.
+
+---
+
 ## 2.8.2 — Location decision rewrite: deterministic by day-type and party shape
 
 `resolveLocation` rewritten from scratch as a single, deterministic decision tree driven by day-type + party shape + owner-explicit hints. Categories no longer influence location (they still drive limits, day-type, travel buffer). New behaviors: existing event locations are preserved on same-day-type moves (Michal BiWeekly's "Huddle" no longer gets overwritten on every move); office-day + external attendee with same/unknown timezone refuses to book and asks the owner online-or-physical; office-day + internal-only ≥4 stamps a Meeting Room with the room mailbox invited as optional AND runs a Graph free/busy check on the room — busy + ≤5 people falls back to a small-room label, busy + ≥6 surfaces an ask. Online-flavor verdicts (external on home day, traveling participants, owner-explicit `is_online=true`) now patch the location field with the Teams join URL after the event lands. The three real-day bugs that motivated the rewrite (Simon empty location, Oran "Reflectiz HQ" instead of "Idan Office", Michal "Huddle" overwritten with full address) all close.

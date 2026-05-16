@@ -26,75 +26,48 @@ export class AssistantSkill implements Skill {
   getTools(_profile: UserProfile): Anthropic.Tool[] {
     return [
       {
-        name: 'learn_preference',
-        description: `Save a durable fact about the OWNER — how they work, their habits, or their personal style. ONE topic per row, never bundle.
+        // v2.9 — merged from learn_preference + forget_preference + recall_preferences.
+        // One tool, three actions on the owner's preference catalog.
+        name: 'manage_preference',
+        description: `Owner preference catalog — durable facts about how the OWNER works, their habits, or personal style. ONE topic per row, never bundle.
 
-Examples: "prefers calls before noon local time" · "uses metric" · "linkedin posts always published tomorrow afternoon".
+Pick one of three actions:
 
-NOT for: facts about other PEOPLE (→ update_person_memory / update_person_profile), company/product knowledge (→ KB markdown files), one-off task details. When unsure between owner-pref vs person-fact vs company-knowledge, lean toward person/company tools.`,
+action='set' — save or update a preference. Requires \`category\`, \`key\`, \`value\`.
+  Examples: "prefers calls before noon local time" · "uses metric" · "linkedin posts always published tomorrow afternoon".
+  NOT for: facts about other PEOPLE (→ update_person_memory / update_person_profile), company/product knowledge (→ KB markdown files), one-off task details.
+
+action='forget' — remove a previously learned preference. Requires \`key\`.
+
+action='recall' — load preferences from the catalog. The system prompt already shows a PREFERENCES INDEX (categories + key list); use this to load the FULL TEXT.
+  - \`category\` → load every preference in that category.
+  - \`key\` → load one specific preference by exact key.
+  - both omitted → load EVERYTHING (use sparingly — costs tokens; prefer category or key).
+
+Categories are scheduling / communication / general (all about the OWNER).`,
         input_schema: {
           type: 'object',
           properties: {
+            action: {
+              type: 'string',
+              enum: ['set', 'forget', 'recall'],
+              description: 'set=create/update, forget=delete, recall=read.',
+            },
             category: {
               type: 'string',
               enum: ['scheduling', 'communication', 'general'],
-              description: 'scheduling=owner calendar habits, communication=how owner likes to communicate, general=anything else about the OWNER. (people/company knowledge → use update_person_memory or KB files instead.)',
+              description: 'set: REQUIRED. recall: optional filter. forget: ignored.',
             },
             key: {
               type: 'string',
-              description: 'Short unique identifier, lowercase with underscores. e.g. "prefers_morning_calls", "uses_metric_system". Do NOT prefix with a person name (those facts belong in update_person_memory).',
+              description: 'set: REQUIRED, short unique identifier (lowercase_with_underscores, no name prefix). forget: REQUIRED. recall: optional exact-key load.',
             },
             value: {
               type: 'string',
-              description: 'The fact in plain English, ONE topic. Don\'t pile multiple ideas into one value.',
+              description: 'set: REQUIRED, the fact in plain English, ONE topic. forget/recall: ignored.',
             },
           },
-          required: ['category', 'key', 'value'],
-        },
-      },
-      {
-        name: 'forget_preference',
-        description: 'Remove a previously learned preference that is no longer accurate.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            key: {
-              type: 'string',
-              description: 'The key of the preference to remove',
-            },
-          },
-          required: ['key'],
-        },
-      },
-      {
-        name: 'recall_preferences',
-        description: `Retrieve learned preferences about the user. The system prompt shows you a PREFERENCES INDEX (categories + key list) — call this tool to load the FULL TEXT for a category or a specific key when a turn needs it.
-
-Pass:
-- category=...  → load every preference in that category (one of "scheduling", "communication", "general").
-- key=...       → load one specific preference by exact key.
-- both omitted  → load EVERYTHING (use sparingly — costs tokens; prefer category or key).
-
-Examples:
-- About to propose meeting times → recall_preferences(category="scheduling")
-- Drafting a colleague-facing message → recall_preferences(category="communication")
-- Specific key from the index → recall_preferences(key="lunch_block_settings")
-
-Categories are scheduling / communication / general (all about the OWNER). Person facts live in get_person_memory; company knowledge lives in get_company_knowledge.`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            category: {
-              type: 'string',
-              enum: ['scheduling', 'communication', 'general'],
-              description: 'Optional category filter — load every preference in this category.',
-            },
-            key: {
-              type: 'string',
-              description: 'Optional exact key — load one specific preference.',
-            },
-          },
-          required: [],
+          required: ['action'],
         },
       },
       // v1.6.1 — message_colleague and find_slack_channel moved into
@@ -488,37 +461,45 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
         };
       }
 
-      case 'learn_preference': {
-        const prefValue = args.value as string | null | undefined;
-        if (prefValue == null || prefValue === '') {
-          logger.warn('learn_preference called with empty value — skipped', { key: args.key });
-          return { saved: false, reason: 'value was empty — nothing stored' };
+      case 'manage_preference': {
+        const action = String(args.action ?? '').toLowerCase();
+        if (action === 'set') {
+          const prefValue = args.value as string | null | undefined;
+          if (prefValue == null || prefValue === '') {
+            logger.warn('manage_preference set — empty value, skipped', { key: args.key });
+            return { saved: false, reason: 'value was empty — nothing stored' };
+          }
+          if (!args.category || !args.key) {
+            return { saved: false, error: 'missing_fields', message: 'set requires category, key, and value.' };
+          }
+          savePreference({
+            userId,
+            category: args.category as string,
+            key: args.key as string,
+            value: prefValue,
+            source: 'user_taught',
+          });
+          logger.info('Preference saved', { userId, key: args.key, value: prefValue });
+          return { saved: true, key: args.key };
         }
-        savePreference({
-          userId,
-          category: args.category as string,
-          key: args.key as string,
-          value: prefValue,
-          source: 'user_taught',
-        });
-        logger.info('Preference saved', { userId, key: args.key, value: prefValue });
-        return { saved: true, key: args.key };
-      }
-
-      case 'forget_preference': {
-        const deleted = deletePreference(userId, args.key as string);
-        logger.info('Preference deleted', { userId, key: args.key, deleted });
-        return { deleted, key: args.key };
-      }
-
-      case 'recall_preferences': {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { getPreferencesFiltered } = require('../db') as typeof import('../db');
-        const category = (args.category as string | undefined) || undefined;
-        const key = (args.key as string | undefined) || undefined;
-        const prefs = getPreferencesFiltered(userId, { category, key });
-        logger.info('recall_preferences', { userId, category, key, count: prefs.length });
-        return { preferences: prefs, count: prefs.length, filter: { category, key } };
+        if (action === 'forget') {
+          if (!args.key) {
+            return { deleted: false, error: 'missing_fields', message: 'forget requires key.' };
+          }
+          const deleted = deletePreference(userId, args.key as string);
+          logger.info('Preference deleted', { userId, key: args.key, deleted });
+          return { deleted, key: args.key };
+        }
+        if (action === 'recall') {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getPreferencesFiltered } = require('../db') as typeof import('../db');
+          const category = (args.category as string | undefined) || undefined;
+          const key = (args.key as string | undefined) || undefined;
+          const prefs = getPreferencesFiltered(userId, { category, key });
+          logger.info('recall_preferences', { userId, category, key, count: prefs.length });
+          return { preferences: prefs, count: prefs.length, filter: { category, key } };
+        }
+        return { error: 'bad_action', message: `manage_preference action must be one of 'set' | 'forget' | 'recall', got "${action}".` };
       }
 
 

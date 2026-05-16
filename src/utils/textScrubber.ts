@@ -21,23 +21,40 @@
 // with `name: '...'` tool definitions across src/skills/ + src/core/assistant.ts
 // + src/tasks/*.
 const TOOL_NAMES = [
-  'analyze_calendar', 'book_floating_block', 'cancel_coordination', 'cancel_task',
-  'check_calendar_health', 'check_join_availability', 'classify_summary_feedback',
-  'confirm_gender', 'coordinate_meeting', 'create_approval', 'create_meeting',
-  'create_routine', 'create_task', 'delete_meeting', 'delete_routine',
-  'edit_task', 'escalate_to_user', 'finalize_coord_meeting',
-  'find_available_slots', 'find_slack_channel', 'find_slack_user',
-  'forget_preference', 'get_active_coordinations', 'get_briefing', 'get_calendar',
-  'get_calendar_issues', 'get_company_knowledge', 'get_free_busy', 'get_my_tasks',
-  'get_pending_requests', 'get_routines', 'ingest_knowledge_from_url',
-  'learn_preference', 'learn_summary_style',
-  'list_pending_approvals', 'list_speaker_unknowns', 'log_interaction',
-  'message_colleague', 'move_meeting', 'note_about_person', 'note_about_self',
-  'recall_interactions', 'recall_preferences', 'resolve_approval', 'resolve_request',
-  'send_briefing_now', 'set_event_category', 'share_summary', 'store_request',
-  'update_calendar_issue', 'update_meeting', 'update_person_profile',
-  'update_routine', 'update_summary_draft', 'web_extract', 'web_search',
-  'file_document', 'classify_document', 'classify_engagement',
+  // Calendar / meeting
+  'analyze_calendar', 'book_floating_block', 'cancel_coordination',
+  'check_calendar_health', 'check_join_availability', 'coordinate_meeting',
+  'create_meeting', 'delete_meeting', 'escalate_to_user', 'finalize_coord_meeting',
+  'find_available_slots', 'get_active_coordinations', 'get_calendar', 'get_free_busy',
+  'move_meeting', 'set_event_category', 'update_meeting', 'manage_calendar_issue',
+  // Slack lookups
+  'find_slack_channel', 'find_slack_user',
+  // Knowledge
+  'manage_knowledge', 'classify_document',
+  // Memory / people
+  'manage_preference', 'recall_interactions', 'update_person_profile',
+  'update_person_memory', 'get_person_memory', 'confirm_gender', 'log_interaction',
+  // Social writes
+  'note_about_person', 'note_about_self',
+  // Tasks + routines
+  'create_task', 'update_task', 'get_my_tasks', 'manage_routine',
+  // Briefing + approvals
+  'get_briefing', 'send_briefing_now',
+  'create_approval', 'resolve_approval', 'list_pending_approvals',
+  // Outreach + web + summary
+  'message_colleague', 'web_extract', 'web_search',
+  'classify_summary_feedback', 'learn_summary_style', 'list_speaker_unknowns',
+  'share_summary', 'update_summary_draft',
+  // Venue (v2.9)
+  'find_venue', 'rank_venue',
+  // Legacy names — kept so any leak still gets scrubbed during the rollout
+  'cancel_task', 'edit_task',
+  'create_routine', 'delete_routine', 'update_routine', 'get_routines',
+  'get_calendar_issues', 'update_calendar_issue',
+  'get_company_knowledge', 'ingest_knowledge_from_url',
+  'learn_preference', 'forget_preference', 'recall_preferences',
+  'get_pending_requests', 'resolve_request', 'store_request', 'file_document',
+  'classify_engagement',
 ];
 const TOOL_NAME_RE = new RegExp(`\\b(?:${TOOL_NAMES.join('|')})\\b`, 'g');
 // Matches ALL_CAPS_WITH_UNDERSCORES tokens (2+ segments). Real prose never

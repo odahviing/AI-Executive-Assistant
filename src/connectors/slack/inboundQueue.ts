@@ -62,17 +62,18 @@ export const WRITE_TOOLS = new Set([
   'coordinate_meeting', 'message_colleague', 'cancel_coordination',
   // Approvals (DM owner)
   'create_approval', 'resolve_approval',
-  // Tasks (visible state)
-  'create_task', 'edit_task', 'cancel_task',
-  // Routines
-  'create_routine', 'update_routine', 'delete_routine',
-  // Calendar issues
-  'update_calendar_issue',
-  // Knowledge / summary writes
-  'share_summary', 'ingest_knowledge_from_url',
+  // Tasks (visible state). v2.9 — edit/cancel merged into update_task.
+  'create_task', 'update_task',
+  // Routines. v2.9 — 4 tools merged into manage_routine; create/update/delete
+  // actions all flow through the same write tool.
+  'manage_routine',
+  // Calendar issues. v2.9 — merged into manage_calendar_issue (update action is the write).
+  'manage_calendar_issue',
+  // Knowledge / summary writes. v2.9 — ingest merged into manage_knowledge.
+  'share_summary', 'manage_knowledge',
   'learn_summary_style', 'update_summary_draft',
-  // Memory writes
-  'learn_preference', 'forget_preference',
+  // Memory writes. v2.9 — preferences merged into manage_preference (set/forget are writes).
+  'manage_preference',
   'note_about_person', 'note_about_self',
   'log_interaction', 'update_person_profile', 'update_person_memory',
   'confirm_gender',

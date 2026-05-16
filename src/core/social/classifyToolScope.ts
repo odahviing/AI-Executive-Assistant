@@ -31,9 +31,9 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { UserProfile } from '../../config/userProfile';
 import logger from '../../utils/logger';
 
-export type ToolScope = 'meetings' | 'tasks' | 'knowledge' | 'summary' | 'social' | 'general';
+export type ToolScope = 'meetings' | 'tasks' | 'knowledge' | 'summary' | 'social' | 'venue' | 'general';
 
-export const ALL_SCOPES: ToolScope[] = ['meetings', 'tasks', 'knowledge', 'summary', 'social', 'general'];
+export const ALL_SCOPES: ToolScope[] = ['meetings', 'tasks', 'knowledge', 'summary', 'social', 'venue', 'general'];
 
 export interface ToolScopeResult {
   scopes: ToolScope[];
@@ -86,6 +86,7 @@ export async function classifyToolScope(params: {
   const summaryActive = (profile.skills as any)?.summary === true;
   const knowledgeActive = (profile.skills as any)?.knowledge === true;
   const socialActive = (profile.skills as any)?.social === true;
+  const venueActive = (profile.skills as any)?.venue === true;
 
   // Build the list of in-play scopes for this profile. Disabled skills are
   // dropped — saves Sonnet's attention budget for the classifier.
@@ -93,6 +94,7 @@ export async function classifyToolScope(params: {
   if (knowledgeActive) inPlayScopes.push('knowledge');
   if (summaryActive) inPlayScopes.push('summary');
   if (socialActive) inPlayScopes.push('social');
+  if (venueActive) inPlayScopes.push('venue');
   inPlayScopes.push('general');
 
   const systemPrompt = `You pick which tool scopes are relevant to ${ownerFirst}'s message.
@@ -102,7 +104,7 @@ Output EXACTLY ONE call to pick_scopes. No prose.
 Scopes available this turn (you may pick one or more):
 - meetings    — anything calendar-shaped: checking calendar, booking, moving, cancelling, finding slots, coordinating, "when am I free", "is X open", checking attendee availability, "do I have lunch?". Includes calendar-health checks.
 - tasks       — task list / routines / briefing requests: "what's pending?", "what did I miss?", "show me my tasks", "set up a daily routine", "what's on my brief?".
-${knowledgeActive ? '- knowledge   — KB lookups / save this URL / research / "what do we know about X": company info, product, customer, competitor, market.\n' : ''}${summaryActive ? '- summary     — post-meeting summary workflow only: classifying summary feedback, sharing a summary, updating a draft, listing speaker unknowns. Recurring "summary" comes here.\n' : ''}${socialActive ? '- social      — explicit social write asks: "remember she\'s into X", "note that he likes Y", confirming a person\'s gender. Just chatting socially (small talk) is NOT this scope — it doesn\'t need tools.\n' : ''}- general     — pick this when ambiguous, or when you want to err on the side of shipping every tool. Cheap to over-include.
+${knowledgeActive ? '- knowledge   — KB lookups / save this URL / research / "what do we know about X": company info, product, customer, competitor, market.\n' : ''}${summaryActive ? '- summary     — post-meeting summary workflow only: classifying summary feedback, sharing a summary, updating a draft, listing speaker unknowns. Recurring "summary" comes here.\n' : ''}${socialActive ? '- social      — explicit social write asks: "remember she\'s into X", "note that he likes Y", confirming a person\'s gender. Just chatting socially (small talk) is NOT this scope — it doesn\'t need tools.\n' : ''}${venueActive ? '- venue       — external-venue management: ranking a venue ("rank Coffee Landwer 3", "drop Aroma to 1"), or asking about saved venues ("what are my favorite cafés?"). Finding a venue for a meeting also fires here, but ALSO use \'meetings\' because the venue search feeds into a booking flow.\n' : ''}- general     — pick this when ambiguous, or when you want to err on the side of shipping every tool. Cheap to over-include.
 
 How to choose:
 - Default to UNION when the message could touch multiple things. "Move my 2pm and tell Yael" → ['meetings'] (message_colleague is always-on, no need for tasks scope). "Find time with Yael for next week and remember she prefers mornings" → ['meetings'${socialActive ? ", 'social'" : ''}].

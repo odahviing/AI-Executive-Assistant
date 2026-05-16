@@ -435,34 +435,36 @@ export class KnowledgeBaseSkill implements Skill {
   getTools(_profile: UserProfile): Anthropic.Tool[] {
     return [
       {
-        name: 'get_company_knowledge',
-        description: `Knowledge base access — list mode + fetch mode in one tool.
+        // v2.9 — merged get_company_knowledge + ingest_knowledge_from_url.
+        name: 'manage_knowledge',
+        description: `Knowledge base — read sections OR ingest URLs into the owner's KB.
 
-- Omit \`section_id\` → returns the catalog of available section IDs. Cheap; call when you're not sure what's available.
-- Pass \`section_id\` (e.g. "company/product", "team/leadership") → returns the full markdown content of that section.
+action='get' — read mode. Omit \`section_id\` to get the catalog of available section IDs. Pass \`section_id\` (e.g. "company/product", "team/leadership") to fetch the full markdown content.
+  Use when the owner asks something about the company / product / team, drafting a summary that needs company grounding, research, or "what do you know about X". Don't pull every section by default — just the relevant ones. Use content as background; don't quote verbatim large chunks.
 
-Use when the owner asks something specific about the company / product / team, when drafting a summary that needs company grounding, doing research, or answering "what do you know about X" with real depth. Don't pull every section by default — just the relevant ones. Use content as background; don't quote verbatim large chunks.`,
+action='ingest' — save a webpage into the KB. Required: \`url\`. Optional: \`owner_hint\` ("save under investors", "this is our new competitor", etc.) helps file it correctly. Use only when the owner clearly wants durable storage. DO NOT use for one-off research (web_extract is the right tool for that). Fetches the URL, condenses, files under an appropriate section, handles merge/sibling with existing sections automatically.`,
         input_schema: {
           type: 'object',
           properties: {
+            action: {
+              type: 'string',
+              enum: ['get', 'ingest'],
+              description: 'get=read section or list catalog, ingest=save URL.',
+            },
             section_id: {
               type: 'string',
-              description: 'OPTIONAL. Section identifier (e.g. "company/product"). Omit to list available sections.',
+              description: 'get: optional. Section identifier (e.g. "company/product"). Omit to list available sections.',
+            },
+            url: {
+              type: 'string',
+              description: 'ingest: REQUIRED. The URL to fetch and store.',
+            },
+            owner_hint: {
+              type: 'string',
+              description: 'ingest: optional. What the owner said alongside the URL — helps file it in the right place.',
             },
           },
-          required: [],
-        },
-      },
-      {
-        name: 'ingest_knowledge_from_url',
-        description: `Save a webpage into the owner's KB. Use when the owner asks you to remember / learn / file / save the contents of a URL — "save this page", "learn about this company", "file this under investors", etc. DO NOT use for one-off research (use web_extract for that). Only use when the owner clearly wants durable storage. Fetches the URL, condenses, files under an appropriate section, handles merge/sibling with existing sections automatically. Returns the filed section id + title so you can tell the owner where it landed.`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            url: { type: 'string', description: 'The URL to fetch and store' },
-            owner_hint: { type: 'string', description: 'Optional — what the owner said alongside the URL ("save under investors", "this is our new competitor", etc.). Helps file it in the right place.' },
-          },
-          required: ['url'],
+          required: ['action'],
         },
       },
     ];
@@ -473,6 +475,15 @@ Use when the owner asks something specific about the company / product / team, w
     args: Record<string, unknown>,
     context: SkillContext,
   ): Promise<unknown | null> {
+    // v2.9 — merged tool. Dispatch on args.action so the two old cases keep
+    // their original logic with minimal churn.
+    if (toolName === 'manage_knowledge') {
+      const action = String(args.action ?? '').toLowerCase();
+      if (action === 'get')         toolName = 'get_company_knowledge';
+      else if (action === 'ingest') toolName = 'ingest_knowledge_from_url';
+      else return { error: 'bad_action', message: `manage_knowledge action must be 'get' | 'ingest', got "${action}".` };
+    }
+
     switch (toolName) {
       case 'get_company_knowledge': {
         const sectionId = String(args.section_id ?? '').trim();
@@ -486,7 +497,7 @@ Use when the owner asks something specific about the company / product / team, w
             sections: sections.map(s => ({ id: s.id, size_bytes: s.size })),
             _note: sections.length === 0
               ? 'KB is empty. Tell the owner there\'s no knowledge base content yet — they can add markdown files under config/users/<name>_kb/.'
-              : 'These are the sections available. Call get_company_knowledge(section_id) to fetch any relevant section.',
+              : 'These are the sections available. Call manage_knowledge(action=\'get\', section_id) to fetch any relevant section.',
           };
         }
         const r = await readSection(context.profile, sectionId);
@@ -592,7 +603,7 @@ Use when the owner asks something specific about the company / product / team, w
 ${ownerFirst} maintains a small library of markdown knowledge files (company, product, team, domain). Catalog of available sections:
   ${catalogLine}
 
-When to pull a section (call get_company_knowledge):
+When to pull a section (call manage_knowledge(action='get', section_id)):
 - ${ownerFirst} asks something specific about the company, product, customers, market, team
 - You're drafting a meeting summary touching product/strategy/customers/competitors
 - Research tasks that need real company grounding

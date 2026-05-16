@@ -216,92 +216,68 @@ export class CronsSkill implements Skill {
 
     return [
       {
-        name: 'create_routine',
-        description: `Create a recurring routine — an instruction that runs automatically on a schedule.
+        // v2.9 — merged create_routine + update_routine + delete_routine + get_routines.
+        name: 'manage_routine',
+        description: `Recurring routines — instructions that run automatically on a schedule. One tool, four actions.
 
-Use when asked to set up anything recurring, e.g.:
-- "Every work day at 8:30am, check my calendar for conflicts"
-- "Every Sunday, make sure I have a lunch block this week"
-- "Every Thursday at 4pm, remind me to send a weekly status update"
-- "Daily at 9am, alert me if I have back-to-back meetings"
+action='create' — set up a new routine. Required: title, prompt, schedule_type, schedule_time.
+  Examples: "Every work day at 8:30am, check my calendar for conflicts" · "Every Sunday, make sure I have a lunch block this week" · "Daily at 9am, alert me if I have back-to-back meetings".
+  Routines run autonomously and report results to the owner's DM. They have full access to all active skills.
+  IMPORTANT: before creating, call manage_routine(action='list') to check if a similar one already exists — prefer 'update' over duplicate.
 
-Routines run autonomously in the background and report results to your DM.
-They have full access to all active skills — calendar, tasks, coordination, etc.
+action='update' — modify a routine's title, prompt, schedule, status (pause/resume), or flags. Required: routine_id. Pass only the fields you want to change.
 
-IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if a similar one already exists. If a matching routine exists, offer to update it instead of creating a duplicate.`,
+action='delete' — permanently delete a routine. Required: routine_id. Use when asked to "remove", "delete", or "stop" a recurring task.
+
+action='list' — list all routines (active and paused). Call when asked "what routines do you have?", "show my recurring tasks", "what runs automatically?".`,
         input_schema: {
           type: 'object' as const,
           properties: {
+            action: {
+              type: 'string',
+              enum: ['create', 'update', 'delete', 'list'],
+              description: 'create, update, delete, or list.',
+            },
+            routine_id: {
+              type: 'string',
+              description: 'update/delete: REQUIRED, id of the routine. create/list: ignored.',
+            },
             title: {
               type: 'string',
-              description: 'Short name, e.g. "Daily calendar check" or "Weekly lunch guard"',
+              description: 'create: REQUIRED. Short name, e.g. "Daily calendar check". update: optional.',
             },
             prompt: {
               type: 'string',
-              description: 'The full instruction to execute each time. Write it as if giving Maelle a task right now.',
+              description: 'create: REQUIRED. The full instruction to execute each time. update: optional.',
             },
             schedule_type: {
               type: 'string',
               enum: ['daily', 'weekdays', 'weekly', 'monthly'],
-              description: `How often to run: daily (every day), weekdays (${workDaysStr}), weekly (once a week on a specific day), monthly (once a month on a specific day)`,
+              description: `create: REQUIRED. daily (every day), weekdays (${workDaysStr}), weekly (once a week), monthly (once a month). update: optional.`,
             },
             schedule_time: {
               type: 'string',
-              description: 'Time to run in 24h HH:MM format, in the user\'s local timezone. e.g. "08:30"',
+              description: 'create: REQUIRED. Time to run in 24h HH:MM in the user\'s local timezone, e.g. "08:30". update: optional.',
             },
             schedule_day: {
               type: 'string',
-              description: 'Required for weekly (day name, e.g. "Sunday") and monthly (day of month as string, e.g. "1"). Omit for daily/weekdays.',
+              description: 'REQUIRED for weekly (day name, e.g. "Sunday") and monthly (day of month, e.g. "1"). Omit for daily/weekdays.',
+            },
+            status: {
+              type: 'string',
+              enum: ['active', 'paused'],
+              description: 'update only: pause or resume the routine.',
             },
             never_stale: {
               type: 'boolean',
-              description: 'If true, this routine must run at the next opportunity no matter how late — the normal cadence-based skip thresholds (4h for daily, 24h for every-few-days, 48h for weekly, 1 week for monthly) do not apply. Use for critical things the owner explicitly wants run even when delayed. Default false.',
+              description: 'If true, runs at the next opportunity no matter how late — bypasses the normal skip thresholds. Use for critical routines. Default false.',
             },
             notify_on_skip: {
               type: 'boolean',
-              description: 'If true, send a DM when a scheduled firing is skipped because it ran too late. Use only for routines the owner depends on (e.g. morning brief, deadline reminders). Default false — silent skip is correct for low-stakes routines.',
+              description: 'If true, DM the owner when a scheduled firing is skipped. Default false.',
             },
           },
-          required: ['title', 'prompt', 'schedule_type', 'schedule_time'],
-        },
-      },
-      {
-        name: 'get_routines',
-        description: 'List all routines (active and paused). Call when asked "what routines do you have?", "show my recurring tasks", "what runs automatically?", etc.',
-        input_schema: {
-          type: 'object' as const,
-          properties: {},
-          required: [],
-        },
-      },
-      {
-        name: 'update_routine',
-        description: 'Modify a routine — change title, prompt, schedule, or pause/resume it.',
-        input_schema: {
-          type: 'object' as const,
-          properties: {
-            routine_id: { type: 'string', description: 'ID of the routine to update' },
-            title:         { type: 'string' },
-            prompt:        { type: 'string' },
-            schedule_type: { type: 'string', enum: ['daily', 'weekdays', 'weekly', 'monthly'] },
-            schedule_time: { type: 'string', description: 'HH:MM in user timezone' },
-            schedule_day:  { type: 'string' },
-            status:        { type: 'string', enum: ['active', 'paused'], description: 'Pause or resume the routine' },
-            never_stale:   { type: 'boolean', description: 'Toggle the always-run-even-late flag. See create_routine for semantics.' },
-            notify_on_skip: { type: 'boolean', description: 'Toggle the skip-notification flag. See create_routine for semantics.' },
-          },
-          required: ['routine_id'],
-        },
-      },
-      {
-        name: 'delete_routine',
-        description: 'Permanently delete a routine. Use when asked to "remove", "delete", or "stop" a recurring task.',
-        input_schema: {
-          type: 'object' as const,
-          properties: {
-            routine_id: { type: 'string' },
-          },
-          required: ['routine_id'],
+          required: ['action'],
         },
       },
     ];
@@ -315,6 +291,17 @@ IMPORTANT: Before creating a routine, ALWAYS call get_routines first to check if
     const { profile, channelId } = context;
     const db = getDb();
     const ownerUserId = profile.user.slack_user_id;
+
+    // v2.9 — merged tool. Dispatch on args.action so the four old cases keep
+    // their original logic with minimal churn.
+    if (toolName === 'manage_routine') {
+      const action = String(args.action ?? '').toLowerCase();
+      if (action === 'create')      toolName = 'create_routine';
+      else if (action === 'update') toolName = 'update_routine';
+      else if (action === 'delete') toolName = 'delete_routine';
+      else if (action === 'list')   toolName = 'get_routines';
+      else return { error: 'bad_action', message: `manage_routine action must be one of 'create' | 'update' | 'delete' | 'list', got "${action}".` };
+    }
 
     switch (toolName) {
 
@@ -520,15 +507,15 @@ Good uses:
 
 SCHEDULE RULES:
 - "weekdays" means the user's configured work days: ${workDaysStr} — NOT Mon–Fri unless that matches
-- Before creating a routine, ALWAYS call get_routines first to check for duplicates. If a similar one exists, update it instead.
+- Before creating a routine, ALWAYS call \`manage_routine(action='list')\` first to check for duplicates. If a similar one exists, update it instead.
 - Add \`notify_on_skip: true\` to flag a routine as important — I'll DM you if a firing is skipped.
 
-META QUESTIONS — when the owner asks ABOUT a routine ("when does the calendar check run?", "what time is my morning brief?", "how often does X fire?"), use \`get_routines\` to look up the schedule and answer from there. DO NOT call the routine's underlying tool (\`check_calendar_health\`, \`send_briefing_now\`, etc.) just to "see what it would say" — that runs the actual side-effects (auto-fixes, brief sent) and answers the wrong question. The owner asked about the schedule, not for output.
+META QUESTIONS — when the owner asks ABOUT a routine ("when does the calendar check run?", "what time is my morning brief?", "how often does X fire?"), use \`manage_routine(action='list')\` to look up the schedule and answer from there. DO NOT call the routine's underlying tool (\`check_calendar_health\`, \`send_briefing_now\`, etc.) just to "see what it would say" — that runs the actual side-effects (auto-fixes, brief sent) and answers the wrong question. The owner asked about the schedule, not for output.
 
 When creating a routine, write the prompt as a complete, self-contained instruction.
 
 Schedules: daily | weekdays (${workDaysStr}) | weekly (specify day) | monthly (specify day-of-month)
 
-Tools: create_routine, get_routines, update_routine, delete_routine`;
+Tool: \`manage_routine\` — one tool, four actions (create / update / delete / list).`;
   }
 }

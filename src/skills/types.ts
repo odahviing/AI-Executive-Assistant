@@ -58,6 +58,7 @@ export type SkillId =
   | 'calendar'            // v1.7.6 (renamed from calendar_health)
   | 'search'
   | 'social'              // v2.6.2 (renamed from persona) — social engine, codas, proactive outreach
+  | 'venue'               // v2.9 — external venue discovery + rank catalog
   // legacy aliases — auto-migrated at load time, kept so old YAMLs still boot
   | 'scheduling'          // → meetings
   | 'coordination'        // → meetings

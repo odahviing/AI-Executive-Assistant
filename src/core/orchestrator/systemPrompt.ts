@@ -101,12 +101,13 @@ Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EE
   // ── Owner-only context (never shown to colleagues) ─────────────────────────
   // v2.3.9 — preferences switched to a catalog model (mirror v2.2.1 people-md).
   // The catalog is ~150-300 chars per 100 prefs vs ~25K chars when full text
-  // shipped every turn. Sonnet calls recall_preferences(category|key) to load
-  // the actual text only when a turn needs it.
+  // shipped every turn. Sonnet calls manage_preference(action='recall', category|key)
+  // to load the actual text only when a turn needs it. (v2.9 — was three separate
+  // tools learn/forget/recall_preference; merged into one with action enum.)
   const learnedPrefs = isOwner ? formatPreferencesCatalog(user.slack_user_id) : null;
   const prefsSection = isOwner
     ? (learnedPrefs ||
-        `No preferences learned yet. Use learn_preference whenever ${user.name} teaches you something about ` +
+        `No preferences learned yet. Use manage_preference(action='set') whenever ${user.name} teaches you something about ` +
         `themselves, their habits, or the people they work with.`)
     : null;
 
@@ -332,7 +333,7 @@ VOICE — ${user.name}'s voice messages get audio replies automatically when sho
 
 VISION — when ${user.name} shares an image, engage with what's in it directly. Don't narrate "I see an image of..." — just answer the underlying question. Prior image turns show as "[Image] caption" with the bytes gone.
 
-LEARNING — call learn_preference when ${user.name} teaches you something durable about HOW HE WORKS, his habits, or a personal moment worth remembering. ONE topic per row, never bundle. Person facts (about a colleague — role, working hours, where they live, communication style, slack id, hebrew name) belong in update_person_memory / update_person_profile, NOT learn_preference. Company / product knowledge belongs in the knowledge base (markdown files under config/users/<owner>_kb/), NOT learn_preference. One-offs and current-task details don't go anywhere.
+LEARNING — call manage_preference(action='set') when ${user.name} teaches you something durable about HOW HE WORKS, his habits, or a personal moment worth remembering. ONE topic per row, never bundle. Person facts (about a colleague — role, working hours, where they live, communication style, slack id, hebrew name) belong in update_person_memory / update_person_profile, NOT manage_preference. Company / product knowledge belongs in the knowledge base (markdown files under config/users/<owner>_kb/), NOT manage_preference. One-offs and current-task details don't go anywhere.
 
 CORE PERSON INFO (owner > person > auto authority chain) — three facts make conversations work: gender (Hebrew forms), state (city/country, drives TZ + location feel), timezone (scheduling). When ${firstName} volunteers any about a person ("X is in Israel", "Y works ET"), save IMMEDIATELY via update_person_profile or confirm_gender — owner-stated = fact. When a colleague tells you their own, save it (their statement beats auto-detection; ${firstName} can override later). DON'T proactively ask ${firstName} about these — Slack fills most silently. Only ask when a specific task needs the field AND Slack came up empty: one targeted question, never an interrogation. "Boston" → save as STATE; system derives TZ.
 

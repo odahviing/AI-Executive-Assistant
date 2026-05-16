@@ -260,39 +260,33 @@ Use the owner's own categories listed in the EVENT CATEGORIES block of your syst
         },
       },
       {
-        name: 'get_calendar_issues',
-        description: `Get all active (unresolved) calendar issues — double bookings and OOF conflicts that haven't been approved or resolved yet.
-Use this to check if there are outstanding calendar problems the owner needs to address.`,
-        input_schema: {
-          type: 'object',
-          properties: {},
-          required: [],
-        },
-      },
-      {
-        name: 'update_calendar_issue',
-        description: `Update the status of a calendar issue. Two paths depending on where the issue came from:
+        // v2.9 — merged get_calendar_issues + update_calendar_issue.
+        name: 'manage_calendar_issue',
+        description: `Calendar issues (double bookings, OOF conflicts, back-to-back, etc.) — list or update status. One tool, two actions.
 
-A. TRACKED issues (from get_calendar_issues / check_calendar_health) — they have a real issue_id. Pass issue_id + status (approved | to_resolve | resolved). Use "to_resolve" with resolution_notes when the owner wants it fixed (then call move_meeting / coordinate_meeting, then call this again with "resolved").
+action='list' — get all active (unresolved) calendar issues. Use to check outstanding calendar problems the owner needs to address.
 
-B. ANALYZE-CALENDAR issues (from analyze_calendar) — no issue_id; identified by event_date + issue_type + detail. Pass those three + status (dismissed | resolved). Use this when the owner says "that's fine / leave it / I know" about a flagged issue so it won't be flagged again.
+action='update' — change the status of an issue. Two paths depending on source:
+A. TRACKED issues (from manage_calendar_issue(list) / check_calendar_health) — pass \`issue_id\` + new \`status\` (approved | to_resolve | resolved). Use "to_resolve" with \`resolution_notes\` when the owner wants it fixed (then call move_meeting / coordinate_meeting, then call this again with "resolved").
+B. ANALYZE-CALENDAR issues (from analyze_calendar) — no issue_id; identified by \`event_date\` + \`issue_type\` + \`detail\`. Pass those three + \`status\` (dismissed | resolved). Use this when the owner says "that's fine / leave it / I know" so it won't be flagged again.
 
-Status:
-- "approved" — tracked issue: owner aware, stop flagging
-- "dismissed" — analyze issue: owner is ok with it, stop flagging
-- "to_resolve" — tracked issue: owner wants it fixed
-- "resolved" — issue has been fixed (either path)`,
+Status meanings:
+- "approved"  — tracked: owner aware, stop flagging
+- "dismissed" — analyze: owner is ok with it, stop flagging
+- "to_resolve" — tracked: owner wants it fixed
+- "resolved"  — fixed (either path)`,
         input_schema: {
           type: 'object',
           properties: {
-            issue_id: { type: 'string', description: 'For TRACKED issues — the issue_id from get_calendar_issues or check_calendar_health. Omit for analyze-calendar issues.' },
-            event_date: { type: 'string', description: 'For ANALYZE-CALENDAR issues — date YYYY-MM-DD. Pair with issue_type + detail.' },
-            issue_type: { type: 'string', enum: ['back_to_back', 'no_buffer', 'missing_floating_block', 'oof_with_meetings', 'work_on_day_off', 'overlap'], description: 'For ANALYZE-CALENDAR issues — type of the issue.' },
-            detail: { type: 'string', description: 'For ANALYZE-CALENDAR issues — brief description of the specific issue.' },
-            status: { type: 'string', enum: ['approved', 'dismissed', 'to_resolve', 'resolved'], description: 'New status (see description for which status fits which path).' },
-            resolution_notes: { type: 'string', description: 'Optional. Owner instructions (for to_resolve) or what was done (for resolved).' },
+            action: { type: 'string', enum: ['list', 'update'], description: 'list = read, update = state change.' },
+            issue_id: { type: 'string', description: 'update (TRACKED): issue_id from list or check_calendar_health.' },
+            event_date: { type: 'string', description: 'update (ANALYZE): YYYY-MM-DD. Pair with issue_type + detail.' },
+            issue_type: { type: 'string', enum: ['back_to_back', 'no_buffer', 'missing_floating_block', 'oof_with_meetings', 'work_on_day_off', 'overlap'], description: 'update (ANALYZE): type of issue.' },
+            detail: { type: 'string', description: 'update (ANALYZE): brief description of the specific issue.' },
+            status: { type: 'string', enum: ['approved', 'dismissed', 'to_resolve', 'resolved'], description: 'update: REQUIRED. See description for which status fits which path.' },
+            resolution_notes: { type: 'string', description: 'update: optional. Owner instructions (to_resolve) or what was done (resolved).' },
           },
-          required: ['status'],
+          required: ['action'],
         },
       },
     ];
@@ -1684,18 +1678,22 @@ Status:
         }
       }
 
-      case 'get_calendar_issues': {
-        const activeIssues = getActiveCalendarIssues(profile.user.slack_user_id);
-        return {
-          issues: activeIssues,
-          count: activeIssues.length,
-          summary: activeIssues.length === 0
-            ? 'No outstanding calendar issues.'
-            : `${activeIssues.length} active issue(s) need attention.`,
-        };
-      }
-
-      case 'update_calendar_issue': {
+      case 'manage_calendar_issue': {
+        const action = String(args.action ?? '').toLowerCase();
+        if (action === 'list') {
+          const activeIssues = getActiveCalendarIssues(profile.user.slack_user_id);
+          return {
+            issues: activeIssues,
+            count: activeIssues.length,
+            summary: activeIssues.length === 0
+              ? 'No outstanding calendar issues.'
+              : `${activeIssues.length} active issue(s) need attention.`,
+          };
+        }
+        if (action !== 'update') {
+          return { error: 'bad_action', message: `manage_calendar_issue action must be 'list' | 'update', got "${action}".` };
+        }
+        // action === 'update' — body of the former update_calendar_issue case continues below.
         const status = args.status as string;
         const notes = args.resolution_notes as string | undefined;
         const issueId = args.issue_id as string | undefined;
@@ -1709,7 +1707,7 @@ Status:
         if (!issueId) {
           if (!eventDate || !issueType || !detail) {
             return {
-              error: 'Need either issue_id (for tracked issues from get_calendar_issues / check_calendar_health) OR event_date + issue_type + detail (for analyze_calendar issues).',
+              error: 'Need either issue_id (for tracked issues from manage_calendar_issue(list) / check_calendar_health) OR event_date + issue_type + detail (for analyze_calendar issues).',
             };
           }
           if (status !== 'dismissed' && status !== 'resolved') {
