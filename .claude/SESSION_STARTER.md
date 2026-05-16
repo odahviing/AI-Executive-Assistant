@@ -70,17 +70,21 @@ Procedures the owner runs frequently are wired as skills under `.claude/skills/`
 
 ---
 
-## Where we are — v2.8.3 shipped
+## Where we are — v2.8.4 shipped, **expect a bug wave**
 
-**Current phase**: prompt-reduction project ([#95](https://github.com/odahviing/AI-Executive-Assistant/issues/95)) + opportunistic consolidation. The 2.8 line has been all-in on the two governing principles above.
+**Current phase**: the 2.8 line did a lot in a short window — prompt-reduction modules F/E/C (8 honesty rules code-replaced via extended claim-checker, v2.8.1), location decision rewrite (v2.8.2), venue skill + tool consolidation (v2.8.3), and three real-day bug fixes today (v2.8.4 — TZ math, claim-checker double-fire, assistant-panel TTL).
 
-**v2.8.3 highlights**:
-- New `venue` skill — external-venue discovery + per-owner rank catalog (1=hidden, 2=default, 3=favorite). Tavily-backed search; Google Places migration tracked at [#96](https://github.com/odahviing/AI-Executive-Assistant/issues/96).
-- 5 tool consolidations: `manage_preference` (3→1), `manage_routine` (4→1), `manage_calendar_issue` (2→1), `manage_knowledge` (2→1), `update_task` (edit+cancel only — `create_task` stays separate because the claim-checker honesty rule references it by name). 13 owner tools → 5.
+**Expect a bug wave over the next few days.** That's not a worry, it's the expected shape after a stretch of meaningful changes — especially the prompt-reduction work. Module F's new honesty booleans (`unverified_state_review` etc.) catch more real over-claims than the old narrow rules, but they also surface latent bugs the old rules masked (the v2.8.4 claim-checker double-fire was exactly this — Module F retry path was missing the v2.3.4 `priorActionsHint` plumbing). Bug-fix flow is the usual: understand → plan → suggest → wait for owner. Hopefully short wave; one or two days, not weeks.
 
-Earlier in the 2.8 line:
+**v2.8.4 highlights** (three live-use bugs closed):
+- Cross-TZ attendee math no longer trusted to Sonnet — `find_available_slots` pre-renders `per_attendee_local.local_display` per slot; Sonnet quotes verbatim. Plus Lori's row data-fixed (state=Boston, was timezone=Asia/Jerusalem, now America/New_York).
+- Claim-checker retry path no longer re-fires write tools — `OrchestratorOutput.mutationActions` carries full event IDs; `buildPriorActionsHint` helper wired into both retry paths with an amend-vs-rewrite playbook so the retry knows to `move_meeting` an existing ID rather than re-call `create_meeting`.
+- Assistant-panel status TTL fixed — `isAssistantThread` refreshes `registered_at` on every successful lookup. Active panels stay alive indefinitely. Latent bug since v2.7.5 (visible only after a panel crosses 24h).
+
+**Earlier in the 2.8 line**:
+- **v2.8.3**: new `venue` skill + tool consolidation (13 owner tools → 5: `manage_preference`, `manage_routine`, `manage_calendar_issue`, `manage_knowledge`, `update_task`). Google Places migration tracked at [#96](https://github.com/odahviing/AI-Executive-Assistant/issues/96).
 - **v2.8.2**: `resolveLocation` rewritten as a single deterministic decision tree; `planMeeting` `preserve_existing` verdict for moves within same day-type; meeting-room availability check.
-- **v2.8.1**: Vertex AI prep (`LLM_PROVIDER` env var); multi-window work hours (split-shift days); 8 honesty rules code-replaced via extended claim-checker.
+- **v2.8.1**: Vertex AI prep (`LLM_PROVIDER` env var); multi-window work hours (split-shift days); 8 honesty rules code-replaced via extended claim-checker — this is the change most likely to be the source of incoming bug reports, since it broadened what claim-checker flags.
 
 ---
 
