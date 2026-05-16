@@ -65,27 +65,54 @@ function buildOutOfHoursBusy(
       });
       continue;
     }
-    const spec = isOffice ? profile.schedule.office_days : profile.schedule.home_days;
-    const startMin = hhmmToMinutes(spec.hours_start);
-    const endMin = hhmmToMinutes(spec.hours_end);
-    // Morning block: 00:00 → hours_start
-    if (startMin > 0) {
-      const morningEnd = dayStart.plus({ minutes: startMin });
+    // v2.8.1 — read all work-hour windows for this day. Build OOF blocks
+    // for every gap: 00:00 → first window start, between windows, last
+    // window end → 23:59. Multi-window aware (Tuesday "09:00-15:30" +
+    // "21:30-23:59" leaves an OOF block 15:30-21:30 in the middle).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getOwnerWorkHoursForDay } = require('../../utils/workHours') as
+      typeof import('../../utils/workHours');
+    const wins = getOwnerWorkHoursForDay(profile, name);
+    if (wins.length === 0) {
+      // No windows on this workday — treat the whole day as OOF.
       blocks.push({
         start: dayStart.toISO() ?? `${d.toISODate()}T00:00:00`,
-        end: morningEnd.toISO() ?? `${d.toISODate()}T${spec.hours_start}:00`,
+        end: dayEnd.toISO() ?? `${d.toISODate()}T23:59:59`,
+        status: 'oof',
+      });
+      continue;
+    }
+    // Morning block: 00:00 → first window start.
+    if (wins[0].startMin > 0) {
+      const morningEnd = dayStart.plus({ minutes: wins[0].startMin });
+      blocks.push({
+        start: dayStart.toISO() ?? `${d.toISODate()}T00:00:00`,
+        end: morningEnd.toISO() ?? `${d.toISODate()}T00:00:00`,
         status: 'oof',
       });
     }
-    // Evening block: hours_end → end of day
-    if (endMin < 24 * 60) {
-      const eveningStart = dayStart.plus({ minutes: endMin });
+    // Between-windows gaps.
+    for (let i = 0; i < wins.length - 1; i++) {
+      const gapStart = dayStart.plus({ minutes: wins[i].endMin });
+      const gapEnd = dayStart.plus({ minutes: wins[i + 1].startMin });
       blocks.push({
-        start: eveningStart.toISO() ?? `${d.toISODate()}T${spec.hours_end}:00`,
+        start: gapStart.toISO() ?? `${d.toISODate()}T00:00:00`,
+        end: gapEnd.toISO() ?? `${d.toISODate()}T00:00:00`,
+        status: 'oof',
+      });
+    }
+    // Evening block: last window end → end of day.
+    const lastEnd = wins[wins.length - 1].endMin;
+    if (lastEnd < 24 * 60) {
+      const eveningStart = dayStart.plus({ minutes: lastEnd });
+      blocks.push({
+        start: eveningStart.toISO() ?? `${d.toISODate()}T00:00:00`,
         end: dayEnd.toISO() ?? `${d.toISODate()}T23:59:59`,
         status: 'oof',
       });
     }
+    // hhmmToMinutes still referenced by other paths — keep the function defined.
+    void hhmmToMinutes;
   }
   return blocks;
 }
@@ -109,6 +136,7 @@ import {
   auditLog,
   getDismissedIssueKeys,
 } from '../../db';
+import { buildIssueKey } from '../../db/calendarIssues';
 import { closeMeetingArtifacts } from '../../utils/closeMeetingArtifacts';
 
 // ── Calendar event processing ─────────────────────────────────────────────────

@@ -1675,9 +1675,32 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
   getSystemPromptSection(profile: UserProfile): string {
     const officeDays = profile.schedule.office_days.days.join(', ');
     const homeDays = profile.schedule.home_days.days.join(', ');
-    const office = profile.schedule.office_days;
-    const home = profile.schedule.home_days;
     const firstName = profile.user.name.split(' ')[0];
+    // v2.8.1 — render per-day work hours from the canonical work_hours map.
+    // For the prompt section we summarize as "first window's start–last window's end"
+    // for each day-type group (office vs home). Multi-window days display all ranges.
+    const formatHours = (days: string[]): string => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getOwnerWorkHoursForDay } = require('../utils/workHours') as
+        typeof import('../utils/workHours');
+      // Pick the FIRST day in the group as representative; if the group has
+      // mixed hours across days, also show them per-day below.
+      if (days.length === 0) return '(no hours)';
+      const perDay = new Map<string, string>();
+      for (const d of days) {
+        const wins = getOwnerWorkHoursForDay(profile, d);
+        const fmt = wins.length === 0
+          ? '(no hours)'
+          : wins.map(w => `${String(Math.floor(w.startMin/60)).padStart(2,'0')}:${String(w.startMin%60).padStart(2,'0')}–${String(Math.floor(w.endMin/60)).padStart(2,'0')}:${String(w.endMin%60).padStart(2,'0')}`).join(', ');
+        perDay.set(d, fmt);
+      }
+      const uniqueRanges = new Set(perDay.values());
+      if (uniqueRanges.size === 1) return [...uniqueRanges][0];
+      // Mixed — show per-day
+      return [...perDay.entries()].map(([d, r]) => `${d.slice(0, 3)} ${r}`).join(', ');
+    };
+    const officeHours = formatHours(profile.schedule.office_days.days);
+    const homeHours = formatHours(profile.schedule.home_days.days);
     // Enumerate all floating blocks (lunch / coffee / gym / prayer / etc) with
     // their day-scope so the prompt describes reality.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1766,8 +1789,8 @@ MEETINGS SKILL
 Everything about booking meetings — direct calendar operations AND multi-party Slack coordination — lives here. This is the only skill that touches the calendar.
 
 ${firstName.toUpperCase()}'S SCHEDULE — these are HARD RULES. Proposing a time outside them is a scheduling error you must flag explicitly.
-- Office days: ${officeDays} · ${office.hours_start}–${office.hours_end}
-- Home days: ${homeDays} · ${home.hours_start}–${home.hours_end}
+- Office days: ${officeDays} · ${officeHours}
+- Home days: ${homeDays} · ${homeHours}
 - Days not listed above are days OFF. Never propose work meetings on those days.
 - Floating blocks (elastic within their window): ${blocksLine || 'none configured'}.
 - Buffer between meetings: the allowed durations (${profile.meetings.allowed_durations.join(' / ')} min) ALREADY bake in ${profile.meetings.buffer_minutes} min of trailing buffer by design — a 55-min meeting at 17:00 ends 17:55, leaving 5 min before 18:00 automatically. You do NOT need to add another 5-min gap BEFORE a new meeting. If a previous meeting ends at 17:00, a new meeting can start at 17:00 (connected) — that is fine and preferred. You may offer 17:15 as an alternative if ${firstName} wants a gap.

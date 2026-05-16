@@ -1560,7 +1560,9 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         });
       }
     }
-  }
+  // v2.8.1 (#41) — pre-fix this section had a stray outer `}` left over from
+  // deleting the `if (!finalReply && !isColleagueFacing)` wrapper. Now the
+  // verbMap fallback is the only block and closes cleanly.
 
   auditLog({
     action: 'orchestrator_run',

@@ -573,7 +573,7 @@ export function loadUserProfile(profileName: string): UserProfile {
   delete sched.home_days.hours_start;
   delete sched.home_days.hours_end;
 
-  profileCache.set(profileName, parsed.data as UserProfile);
+  profileCache.set(profileName, parsed.data as unknown as UserProfile);
   logger.info('User profile loaded', {
     profile: profileName,
     user: parsed.data.user.name,
@@ -581,7 +581,7 @@ export function loadUserProfile(profileName: string): UserProfile {
     vips: parsed.data.vip_contacts.length,
   });
 
-  return parsed.data;
+  return parsed.data as unknown as UserProfile;
 }
 
 export function loadAllProfiles(): Map<string, UserProfile> {

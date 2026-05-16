@@ -401,15 +401,21 @@ Status:
           //      thinking-time / etc — elastic personal time, not work)
           //   4. entirely outside the day's work-hours window (Boot Camp 20:00-
           //      21:30 on a 10:30-19:00 office day, etc.)
-          const officeDays = profile.schedule.office_days;
-          const homeDays = profile.schedule.home_days;
-          const isOfficeDay = (officeDays.days as string[]).includes(dayName);
-          const dayHoursStart = isOfficeDay
-            ? officeDays.hours_start
-            : (homeDays.hours_start ?? '09:00');
-          const dayHoursEnd = isOfficeDay
-            ? officeDays.hours_end
-            : (homeDays.hours_end ?? '19:00');
+          // v2.8.1 — multi-window aware. workStart = earliest window start,
+          // workEnd = latest window end on this day. Used as outer bounds
+          // for the "entirely outside work-hours" exclusion below — slots
+          // that fall in a between-window gap are still in the outer range
+          // and will be processed normally (no false-exclusion).
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getOwnerWorkHoursForDay: _getWH } = require('../utils/workHours') as
+            typeof import('../utils/workHours');
+          const wins = _getWH(profile, dayName);
+          const dayHoursStart = wins.length > 0
+            ? `${String(Math.floor(wins[0].startMin/60)).padStart(2,'0')}:${String(wins[0].startMin%60).padStart(2,'0')}`
+            : '09:00';
+          const dayHoursEnd = wins.length > 0
+            ? `${String(Math.floor(wins[wins.length-1].endMin/60)).padStart(2,'0')}:${String(wins[wins.length-1].endMin%60).padStart(2,'0')}`
+            : '19:00';
           const dayWorkStart = DateTime.fromISO(`${dayStr}T${dayHoursStart}`, { zone: timezone });
           const dayWorkEnd = DateTime.fromISO(`${dayStr}T${dayHoursEnd}`, { zone: timezone });
           const nightShiftMarker = profile.schedule.night_shift?.blocking_event?.toLowerCase() ?? null;
