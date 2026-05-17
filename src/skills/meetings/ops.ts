@@ -2376,6 +2376,12 @@ export class SchedulingSkill {
           );
           const movingEvent = existing.find(e => e.id === args.meeting_id);
           const priorStartIso = movingEvent?.start?.dateTime;
+          // v2.8.5 — also extract prior END so planMeeting's freebusy
+          // overlap check can exclude the source event when an attendee's
+          // calendar still shows it. Closes the "move 13:00→13:15 trips
+          // confirm_override because Onn is busy at 13:15 (with the very
+          // meeting being moved)" bug.
+          const priorEndIso = movingEvent?.end?.dateTime;
           const existingCats = ((movingEvent as any)?.categories as string[] | undefined) ?? [];
           const existingLocation = (movingEvent as any)?.location?.displayName as string | undefined;
           const existingIsOnline = (movingEvent as any)?.isOnlineMeeting as boolean | undefined;
@@ -2396,6 +2402,7 @@ export class SchedulingSkill {
             existingEventLocation: existingLocation,
             existingEventIsOnline: existingIsOnline,
             priorSlotStartIso: priorStartIso,
+            priorSlotEndIso: priorEndIso,
             // v2.8.2 — owner-explicit hints flow through on move too. Without
             // these, every owner-explicit "move it to 3pm in person" lost the
             // physical signal and resolveLocation defaulted to day-type rules.
@@ -2707,6 +2714,13 @@ export class SchedulingSkill {
         // expands recurring series), so a master id should never reach here
         // through the normal path — but if it ever does, a one-shot mistake
         // would wipe an entire recurring series.
+        //
+        // v2.8.5 — also captures start date so the success audit_log entry
+        // below can record WHICH DAY was deleted. Active-mode's
+        // missing_floating_block branch reads this to avoid re-booking a
+        // block the owner just told us to remove.
+        let preDeleteStartIso: string | undefined;
+        let preDeleteSubject: string | undefined;
         try {
           const { getEventType } = await import('../../connectors/graph/calendar');
           const probe = await getEventType(userEmail, args.meeting_id as string);
@@ -2721,6 +2735,8 @@ export class SchedulingSkill {
               message: `"${probe.subject}" is a recurring series. Deleting the series here would cancel every occurrence — that's not safe to do automatically. To cancel a single occurrence, call delete_meeting with that occurrence's meeting_id (get it from get_calendar for the specific date). To end the series itself, the owner should do that directly in Outlook.`,
             };
           }
+          preDeleteStartIso = probe?.startDateTime;
+          preDeleteSubject = probe?.subject;
         } catch (err) {
           logger.warn('delete_meeting recurring-preflight failed — proceeding', { err: String(err) });
         }
@@ -2759,7 +2775,15 @@ export class SchedulingSkill {
           source: context.channel,
           actor: context.userId,
           target: args.meeting_id as string,
-          details: { subject: args.meeting_subject },
+          // v2.8.5 — `event_start_iso` lets active-mode's
+          // missing_floating_block branch read recent deletions and skip
+          // re-booking on a day the owner just cleared. `subject` falls back
+          // to the Graph probe when Sonnet didn't pass meeting_subject (the
+          // probe runs on the same id, so the names match).
+          details: {
+            subject: args.meeting_subject ?? preDeleteSubject,
+            event_start_iso: preDeleteStartIso,
+          },
           outcome: 'success',
         });
         // v2.7.0 — narrate the relay outcome honestly. Three shapes:

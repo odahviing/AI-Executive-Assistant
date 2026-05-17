@@ -413,72 +413,16 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
       return lines.join('\n');
     };
 
-    // v2.7.8 (Module F + E) — extended honesty/repetition rules. When
-    // claimed_action is false but one of the new booleans fired, the checker
-    // has supplied a rule-specific retry_instruction. Trigger the same retry
-    // path used for claimed_action, but with the checker's instruction text
-    // instead of the hand-rolled action nudge.
-    const extendedRuleFired =
-      verdict.re_asked_known_fact === true
-      || verdict.unrecorded_promise === true
-      || verdict.unverified_state_review === true
-      || verdict.invented_after_correction === true
-      || verdict.re_asked_after_convergence === true
-      || verdict.re_asked_own_question === true;
-
-    if (!verdict.claimed_action && extendedRuleFired && verdict.retry_instruction) {
-      logger.warn('Claim-checker (Module F/E): extended rule fired — retrying with rule-specific nudge', {
-        senderId: ctx.senderId,
-        threadTs: ctx.threadTs,
-        re_asked_known_fact: verdict.re_asked_known_fact,
-        unrecorded_promise: verdict.unrecorded_promise,
-        unverified_state_review: verdict.unverified_state_review,
-        invented_after_correction: verdict.invented_after_correction,
-        re_asked_after_convergence: verdict.re_asked_after_convergence,
-        re_asked_own_question: verdict.re_asked_own_question,
-        violation_summary: verdict.violation_summary,
-        retry_instruction: verdict.retry_instruction,
-      });
-      try {
-        const retry = await runOrchestrator({
-          userMessage,
-          conversationHistory: history,
-          threadTs: ctx.threadTs,
-          channelId: ctx.channelId,
-          userId: ctx.senderId,
-          senderRole: ctx.role as 'owner' | 'colleague',
-          senderName: ctx.colleagueName,
-          channel: 'slack' as ChannelId,
-          profile,
-          app,
-          isMpim: ctx.isMpim,
-          isOwnerInGroup: ctx.isOwnerInGroup,
-          mpimMemberIds: ctx.mpimMemberIds,
-          // v2.8.3+ — append priorActionsHint so the retry can't re-fire a
-          // write tool that turn 1 already executed. Closes the duplicate-
-          // create_meeting bug surfaced on 2026-05-16.
-          extraInstruction: verdict.retry_instruction + buildPriorActionsHint(),
-        });
-        const retried = retry.reply?.trim();
-        if (retried && retried.length > 0) {
-          logger.info('Claim-checker (Module F/E): retry produced new draft', {
-            senderId: ctx.senderId,
-            threadTs: ctx.threadTs,
-            previewBefore: cleanReply.slice(0, 100),
-            previewAfter: retried.slice(0, 100),
-          });
-          return retried;
-        }
-        logger.warn('Claim-checker (Module F/E): retry returned empty — keeping original draft');
-      } catch (err) {
-        logger.warn('Claim-checker (Module F/E): retry threw — keeping original draft', {
-          err: String(err).slice(0, 200),
-        });
-      }
-      // Fall through to return cleanReply below if retry didn't yield text.
-      return cleanReply;
-    }
-
+    // v2.8.5 — Module F + E retry path REMOVED. The judge was injecting
+    // topic-switch directives into retry_instruction when conversation
+    // history showed any topic mismatch (compounded by the inboundQueue
+    // cross-thread bug), derailing replies wholesale on 2026-05-17. Owner
+    // direction: roll back. Honesty rules 1/2/2b/2c/2d/3/5b/9 were
+    // restored to the system prompt in the same patch. The Module F/E
+    // booleans STILL FIRE in the checker (telemetry preserved — we keep
+    // visibility into what they catch) but their verdict is no longer
+    // acted on. Only RULE A (`claimed_action` — the original v1.6.2
+    // false-action-claim check) drives retries from here on.
     if (!verdict.claimed_action) return cleanReply;
 
     // v1.7.4 — defense in depth. The claim-checker can false-positive (saw

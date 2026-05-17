@@ -440,7 +440,9 @@ export class KnowledgeBaseSkill implements Skill {
         description: `Knowledge base — read sections OR ingest URLs into the owner's KB.
 
 action='get' — read mode. Omit \`section_id\` to get the catalog of available section IDs. Pass \`section_id\` (e.g. "company/product", "team/leadership") to fetch the full markdown content.
-  Use when the owner asks something about the company / product / team, drafting a summary that needs company grounding, research, or "what do you know about X". Don't pull every section by default — just the relevant ones. Use content as background; don't quote verbatim large chunks.
+  Use when the owner asks something about the company / product / team, drafting a summary that needs company grounding, or "what do you know about X" from OUR records. Don't pull every section by default — just the relevant ones. Use content as background; don't quote verbatim large chunks.
+
+  INSUFFICIENT ALONE FOR "EXPLORE" / "RESEARCH" REQUESTS: when the owner says "explore X" / "research Y" / "look into Z" / "find me angles on W" / "draft a post about V", the KB is NOT enough on its own — pair with \`web_search\` (and \`web_extract\` on relevant URLs) to bring in outside views before answering or drafting. The KB is OUR voice and OUR positioning; the web is what the OUTSIDE world is currently saying. Both belong in a research-class answer.
 
 action='ingest' — save a webpage into the KB. Required: \`url\`. Optional: \`owner_hint\` ("save under investors", "this is our new competitor", etc.) helps file it correctly. Use only when the owner clearly wants durable storage. DO NOT use for one-off research (web_extract is the right tool for that). Fetches the URL, condenses, files under an appropriate section, handles merge/sibling with existing sections automatically.`,
         input_schema: {

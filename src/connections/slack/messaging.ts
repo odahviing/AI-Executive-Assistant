@@ -196,6 +196,64 @@ export async function postToChannel(
   }
 }
 
+/**
+ * Edit an existing message in place. Used by the routine dispatcher's
+ * placeholder-then-update pattern (v2.8.5): post a "Working…" placeholder
+ * to create the thread (so assistant.threads.setStatus can fire on a real
+ * threadTs during tool calls), then swap in the final content here.
+ *
+ * Fire-and-forget tolerance: returns ok=false on failure, never throws.
+ * The caller should log at info/warn but never block on this — worst case
+ * the placeholder stays as "Working…" forever, which is annoying but not
+ * load-bearing.
+ */
+export async function updateMessage(
+  app: App,
+  botToken: string,
+  channelId: string,
+  ts: string,
+  text: string,
+): Promise<{ ok: boolean; detail?: string }> {
+  try {
+    await app.client.chat.update({
+      token: botToken,
+      channel: channelId,
+      ts,
+      text,
+    });
+    return { ok: true };
+  } catch (err: any) {
+    const code: string = err?.data?.error ?? err?.message ?? '';
+    logger.warn('updateMessage failed', { channelId, ts, detail: code });
+    return { ok: false, detail: code };
+  }
+}
+
+/**
+ * Delete a message. Used by the routine dispatcher when the orchestrator
+ * returns a silent result — we don't want a stale "Working…" placeholder
+ * hanging in the DM. Fire-and-forget like updateMessage.
+ */
+export async function deleteMessage(
+  app: App,
+  botToken: string,
+  channelId: string,
+  ts: string,
+): Promise<{ ok: boolean; detail?: string }> {
+  try {
+    await app.client.chat.delete({
+      token: botToken,
+      channel: channelId,
+      ts,
+    });
+    return { ok: true };
+  } catch (err: any) {
+    const code: string = err?.data?.error ?? err?.message ?? '';
+    logger.warn('deleteMessage failed', { channelId, ts, detail: code });
+    return { ok: false, detail: code };
+  }
+}
+
 // ── Lookups ──────────────────────────────────────────────────────────────────
 
 /**

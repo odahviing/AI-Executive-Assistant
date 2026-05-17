@@ -74,6 +74,17 @@ export interface PlanMeetingInput {
   // Move-specific: prior slot for comparison (decides if category needs re-detect
   // AND drives the location preserve path)
   priorSlotStartIso?: string;
+  // v2.8.5 — prior slot END for the freebusy-overlap exclusion. When move_meeting
+  // shifts a meeting by ≤duration, the meeting's current (prior) window overlaps
+  // the new window. Graph's getSchedule API returns busy slots without event
+  // IDs, so we can't use `excludeEventIds` here (that mechanism only works on
+  // checkSlot, which reads owner's own events with IDs). Instead: the overlap
+  // loop below skips busy windows whose [start,end] equals [priorSlotStartIso,
+  // priorSlotEndIso] — i.e. the source event seen on the attendee's calendar.
+  // Without this, "move my 13:00 meeting back 15 minutes to 13:15" trips
+  // confirm_override because Onn's 13:00 (which IS the meeting being moved)
+  // shows as busy at 13:15.
+  priorSlotEndIso?: string;
 
   // Owner-explicit override (e.g. "yes book it even though it breaks the rule")
   allowRelaxed?: boolean;
@@ -336,6 +347,15 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           );
           const slotStart = DateTime.fromISO(input.slotStartIso);
           const slotEnd = DateTime.fromISO(input.slotEndIso);
+          // v2.8.5 — pre-compute prior-event window for source-event exclusion.
+          // When intent==='move' and we have both prior bounds, busy windows
+          // matching that exact span on attendee calendars are the meeting
+          // being moved (still on their calendar until the move commits).
+          // Skip them so the overlap check doesn't flag the source event as
+          // a conflict with its own move target.
+          const priorStart = input.priorSlotStartIso ? DateTime.fromISO(input.priorSlotStartIso) : null;
+          const priorEnd = input.priorSlotEndIso ? DateTime.fromISO(input.priorSlotEndIso) : null;
+          const hasPriorWindow = !!(priorStart && priorEnd);
           const busyAttendees: string[] = [];
           for (const email of internalEmails) {
             const slots = fb[email] ?? [];
@@ -343,6 +363,14 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
               if (s.status === 'free') return false;
               const sStart = DateTime.fromISO(s.start, { zone: (s as any)._timezone ?? 'utc' });
               const sEnd = DateTime.fromISO(s.end, { zone: (s as any)._timezone ?? 'utc' });
+              // Skip the moving event's prior window. Allow a 60-second
+              // tolerance per side for clock drift / TZ formatting noise.
+              if (hasPriorWindow
+                && Math.abs(sStart.diff(priorStart!, 'seconds').seconds) < 60
+                && Math.abs(sEnd.diff(priorEnd!, 'seconds').seconds) < 60
+              ) {
+                return false;
+              }
               return sStart < slotEnd && sEnd > slotStart;
             });
             if (overlap) busyAttendees.push(email);

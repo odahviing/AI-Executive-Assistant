@@ -89,6 +89,18 @@ interface PendingMessage {
   senderName?: string;
   /** Optional metadata the runner needs (channel, ts, etc.) — opaque to the queue. */
   meta: Record<string, unknown>;
+  /**
+   * v2.8.5 — the runner closure that built this message's context (threadTs,
+   * senderId, role, profile, app, etc.). Stored per-message so that when a
+   * message buffers during an un-abortable turn and is drained later, we
+   * dispatch via THIS message's runner — not the outer scheduleRun's. Pre-
+   * fix, the drain re-used the in-flight turn's closure, which captured
+   * the FIRST message's threadTs. For 1:1 DMs (key=channelId), a NEW thread
+   * opened mid-turn would buffer correctly but then run against the OLD
+   * thread's conversation history — the cross-thread contamination Idan
+   * hit on 2026-05-17 with the Onn move arriving during a LinkedIn turn.
+   */
+  runner: TurnRunner;
 }
 
 interface ThreadState {
@@ -203,6 +215,7 @@ export function enqueueMessage(params: {
     arrivedAt: Date.now(),
     senderName: params.senderName,
     meta: params.meta,
+    runner: params.runner,
   };
 
   // Case: a turn is currently running.
@@ -236,7 +249,7 @@ export function enqueueMessage(params: {
   }
   state.debounceTimer = setTimeout(() => {
     state.debounceTimer = null;
-    void scheduleRun(key, params.runner);
+    void scheduleRun(key);
   }, DEBOUNCE_MS);
 }
 
@@ -245,8 +258,13 @@ export function enqueueMessage(params: {
  * On abort: re-trigger debounce so the next message-arrival completes the
  * cycle. On normal completion: if pending has filled up during the run,
  * process those as a follow-up batch.
+ *
+ * v2.8.5 — the runner is no longer a parameter; it comes from the LAST
+ * pending message in the batch. This keeps the runner aligned with the
+ * thread/sender that produced the most recent context. In the abort path
+ * (which restarts debounce), the same logic re-applies on the next call.
  */
-async function scheduleRun(key: string, runner: TurnRunner): Promise<void> {
+async function scheduleRun(key: string): Promise<void> {
   const state = threadStates.get(key);
   if (!state || state.pending.length === 0) return;
 
@@ -255,7 +273,13 @@ async function scheduleRun(key: string, runner: TurnRunner): Promise<void> {
   const batch = state.pending;
   state.pending = [];
   const mergedText = mergeMessages(batch);
-  const meta = batch[0].meta;  // channel/ts/etc. are stable within a thread
+  // Use the LAST message's runner + meta — that's the most recent context
+  // (latest threadTs, latest priorOutboundContext lookup, etc.). For
+  // single-message batches this is also the only choice; for multi-message
+  // merges it picks the freshest snapshot.
+  const last = batch[batch.length - 1];
+  const meta = last.meta;
+  const runner = last.runner;
 
   const controller = new AbortController();
   state.inFlight = controller;
@@ -281,7 +305,7 @@ async function scheduleRun(key: string, runner: TurnRunner): Promise<void> {
       if (state.debounceTimer) clearTimeout(state.debounceTimer);
       state.debounceTimer = setTimeout(() => {
         state.debounceTimer = null;
-        void scheduleRun(key, runner);
+        void scheduleRun(key);
       }, DEBOUNCE_MS);
       return;
     }
@@ -298,7 +322,7 @@ async function scheduleRun(key: string, runner: TurnRunner): Promise<void> {
     if (state.debounceTimer) clearTimeout(state.debounceTimer);
     state.debounceTimer = setTimeout(() => {
       state.debounceTimer = null;
-      void scheduleRun(key, runner);
+      void scheduleRun(key);
     }, DEBOUNCE_MS);
   }
 }

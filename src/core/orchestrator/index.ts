@@ -337,21 +337,25 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // information…" / "Reviewing findings…") during the ~10s pre-first-tool
   // reasoning gap (classifyOwnerIntent + initial Sonnet pass). Per-tool
   // status text from the pre-tool hook below overwrites this as tools fire.
+  // v2.8.5 — `isAssistantThread` gate removed. The registry was added in
+  // v2.7.3 as an optimization to avoid noisy failures on non-panel threads,
+  // but `assistant_thread_started` only fires on FIRST panel open — if the
+  // socket was disconnected at that moment, or the panel pre-existed before
+  // the handler was installed, the thread is permanently missing from the
+  // registry and status indicators silently never show. We now always try
+  // setStatus when we have channel+thread context; Slack rejects non-panel
+  // calls with channel_not_found / not_in_assistant_thread, which the
+  // catch in setAssistantStatus already swallows at debug level.
   if (input.app && input.channelId && input.threadTs) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { isAssistantThread } = require('../../connectors/slack/assistantThreads') as
-        typeof import('../../connectors/slack/assistantThreads');
-      if (isAssistantThread({ channelId: input.channelId, threadTs: input.threadTs })) {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { setAssistantStatus } = require('../../connections/slack/messaging') as
-          typeof import('../../connections/slack/messaging');
-        void setAssistantStatus(input.app, input.profile.assistant.slack.bot_token, {
-          channelId: input.channelId,
-          threadTs: input.threadTs,
-          status: 'On it',
-        });
-      }
+      const { setAssistantStatus } = require('../../connections/slack/messaging') as
+        typeof import('../../connections/slack/messaging');
+      void setAssistantStatus(input.app, input.profile.assistant.slack.bot_token, {
+        channelId: input.channelId,
+        threadTs: input.threadTs,
+        status: 'On it',
+      });
     } catch (_) { /* helper failure is non-fatal */ }
   }
 
@@ -660,9 +664,34 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     }
   }
 
+  // v2.8.5 — research pre-check. Owner-path only. When the message contains
+  // an explicit "explore X" / "research X" / "look into X" / "what's new
+  // with X" intent, run web_search deterministically and inject the results
+  // as a context block BEFORE the main Sonnet turn. Closes the standing
+  // gap where Sonnet would answer "explore" requests from internal KB +
+  // training alone, never reaching the outside web. Regex miss → empty
+  // block → normal flow (Sonnet still can call web_search herself).
+  let researchPrecheckBlock = '';
+  if (input.senderRole === 'owner' && userMessage && userMessage.trim().length > 0) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { precheckResearch } = require('../../utils/researchPreCheck') as
+        typeof import('../../utils/researchPreCheck');
+      const result = await precheckResearch({ message: userMessage });
+      if (result.ran && result.promptBlock) {
+        researchPrecheckBlock = result.promptBlock;
+      }
+    } catch (err) {
+      logger.warn('researchPreCheck threw — proceeding without pre-check', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
   const systemBlocksDynamic = [
     priorOutboundBlock,
     availabilityPrecheckBlock,
+    researchPrecheckBlock,
     promptParts.dynamic,
     threadContextBlock,
     actionTapeBlock,
@@ -1252,26 +1281,24 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // with per-tool human-EA-voiced text (see utils/toolStatusText). Tools
       // without a mapping get '' which actively clears Slack's auto-default
       // ("Gathering information…") — observation / memory tools stay silent.
-      // No-op when the current thread wasn't opened via the assistant panel.
+      // v2.8.5 — `isAssistantThread` gate removed (see turn-start hook above
+      // for the rationale). Slack rejects non-panel calls with
+      // channel_not_found / not_in_assistant_thread; the catch in
+      // setAssistantStatus swallows that at debug level.
       if (input.app && input.channelId && input.threadTs) {
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { isAssistantThread } = require('../../connectors/slack/assistantThreads') as
-            typeof import('../../connectors/slack/assistantThreads');
-          if (isAssistantThread({ channelId: input.channelId, threadTs: input.threadTs })) {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { setAssistantStatus } = require('../../connections/slack/messaging') as
-              typeof import('../../connections/slack/messaging');
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { statusForTool } = require('../../utils/toolStatusText') as
-              typeof import('../../utils/toolStatusText');
-            // Fire-and-forget — never await; status is UX polish, not load-bearing.
-            void setAssistantStatus(input.app, input.profile.assistant.slack.bot_token, {
-              channelId: input.channelId,
-              threadTs: input.threadTs,
-              status: statusForTool(toolUse.name),
-            });
-          }
+          const { setAssistantStatus } = require('../../connections/slack/messaging') as
+            typeof import('../../connections/slack/messaging');
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { statusForTool } = require('../../utils/toolStatusText') as
+            typeof import('../../utils/toolStatusText');
+          // Fire-and-forget — never await; status is UX polish, not load-bearing.
+          void setAssistantStatus(input.app, input.profile.assistant.slack.bot_token, {
+            channelId: input.channelId,
+            threadTs: input.threadTs,
+            status: statusForTool(toolUse.name),
+          });
         } catch (_) { /* helper failure is non-fatal */ }
       }
 

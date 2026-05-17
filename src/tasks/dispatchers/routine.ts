@@ -108,8 +108,35 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     return;
   }
 
-  // User-created routine — run through orchestrator
-  const runThreadTs = `routine_${routine.id}_${Date.now()}`;
+  // v2.8.5 — placeholder-then-update pattern. Pre-fix the routine ran with a
+  // synthesized threadTs (`routine_${id}_${Date.now()}`) so Slack rejected
+  // every assistant.threads.setStatus call — the owner never saw "Searching
+  // the web" / "Reading the page" during routine tool runs. Now we post a
+  // placeholder FIRST, capture its real ts, run the orchestrator threaded
+  // under it (status indicator now fires on the real thread), then swap the
+  // placeholder for the final content via chat.update (or delete it on a
+  // silent return). Fallback to the old synthesized-ts path if the
+  // placeholder post itself fails — better degraded than blocked.
+  const botToken = profile.assistant.slack.bot_token;
+  let placeholderTs: string | undefined;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { postToChannel } = require('../../connections/slack/messaging') as
+      typeof import('../../connections/slack/messaging');
+    const placeholder = await postToChannel(app, botToken, routine.owner_channel, 'Working…');
+    if (placeholder.ok && placeholder.ts) {
+      placeholderTs = placeholder.ts;
+    } else {
+      logger.warn('dispatchRoutine — placeholder post failed, falling back to synthetic threadTs', {
+        routineId: routine.id, detail: placeholder.ok ? 'no_ts' : placeholder.reason,
+      });
+    }
+  } catch (err) {
+    logger.warn('dispatchRoutine — placeholder post threw, falling back', {
+      routineId: routine.id, err: String(err).slice(0, 200),
+    });
+  }
+  const runThreadTs = placeholderTs ?? `routine_${routine.id}_${Date.now()}`;
 
   try {
     const result = await runOrchestrator({
@@ -133,8 +160,27 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     const isSilent = cleaned.trim().length === 0;
 
     const conn = getConnection(profile.user.slack_user_id, 'slack');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const messaging = require('../../connections/slack/messaging') as
+      typeof import('../../connections/slack/messaging');
     if (!isSilent) {
-      if (conn) {
+      if (placeholderTs) {
+        // Swap the placeholder for the final content. Same message id, no
+        // new notification noise. Slack auto-clears the assistant-panel
+        // status indicator on the update.
+        const upd = await messaging.updateMessage(
+          app, botToken, routine.owner_channel, placeholderTs, cleaned,
+        );
+        if (!upd.ok) {
+          // Update failed — last-resort post a new top-level message so
+          // the result isn't lost.
+          logger.warn('dispatchRoutine — placeholder update failed, posting fresh message', {
+            routineId: routine.id, detail: upd.detail,
+          });
+          if (conn) await conn.postToChannel(routine.owner_channel, cleaned);
+        }
+      } else if (conn) {
+        // Placeholder path failed earlier — fall back to original behaviour.
         // v2.5.1 — no title prepend. The bot-style "*Routine title*\n..."
         // header read as machine framing. Routines that legitimately want
         // a header have Sonnet write one in the body. Most don't.
@@ -143,6 +189,12 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
         logger.warn('dispatchRoutine — no Slack connection registered, routine output dropped', { routineId: routine.id });
       }
     } else {
+      // Silent return — delete the placeholder so the owner doesn't see a
+      // stale "Working…" hanging in their DM. Pre-placeholder we just
+      // posted nothing; the new behaviour matches that effective state.
+      if (placeholderTs) {
+        await messaging.deleteMessage(app, botToken, routine.owner_channel, placeholderTs);
+      }
       logger.info('Routine completed silently (no message sent to owner)', {
         taskId: task.id,
         routineId: routine.id,
@@ -162,6 +214,16 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     if (!isSilent) markTaskInformed(task.id);
   } catch (err) {
     logger.error('Routine orchestrator run failed', { err, routineId: routine.id });
+    // v2.8.5 — clean up the placeholder so the owner doesn't see a stale
+    // "Working…" forever when the routine throws.
+    if (placeholderTs) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { deleteMessage } = require('../../connections/slack/messaging') as
+          typeof import('../../connections/slack/messaging');
+        await deleteMessage(app, botToken, routine.owner_channel, placeholderTs);
+      } catch (_) { /* best effort */ }
+    }
     // v2.6.5 — capture the actual error message in last_result instead of the
     // bare string 'Failed'. Pre-fix, when the owner asked "what went wrong
     // with the routine?", Maelle could only say "the last result shows

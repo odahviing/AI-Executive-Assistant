@@ -812,3 +812,58 @@ export function auditLog(params: {
     outcome: params.outcome,
   });
 }
+
+/**
+ * Read recent audit_log entries for a specific action, within a time window.
+ * Used by active-mode calendar-health to detect "owner just deleted this
+ * floating block — don't re-book it" before auto-creating a missing block.
+ *
+ * Filters at SQL level on action + outcome + timestamp (cheap, indexed by
+ * the AUTOINCREMENT primary key's row order). Returns parsed details so
+ * callers can match on whatever fields they need (subject, event_start_iso,
+ * etc.). Typically 0–10 rows in a normal window — no need to scan further.
+ */
+export function recentAuditEntries(params: {
+  action: string;
+  windowDays?: number;
+  outcome?: 'success' | 'failure' | 'pending_approval';
+}): Array<{
+  id: number;
+  timestamp: string;
+  actor: string | null;
+  target: string | null;
+  details: Record<string, unknown> | null;
+  outcome: string;
+}> {
+  const db = getDb();
+  const windowDays = params.windowDays ?? 14;
+  const outcome = params.outcome ?? 'success';
+  const rows = db.prepare(`
+    SELECT id, timestamp, actor, target, details, outcome
+    FROM audit_log
+    WHERE action = @action
+      AND outcome = @outcome
+      AND timestamp > datetime('now', '-' || @windowDays || ' days')
+    ORDER BY id DESC
+  `).all({ action: params.action, outcome, windowDays }) as Array<{
+    id: number;
+    timestamp: string;
+    actor: string | null;
+    target: string | null;
+    details: string | null;
+    outcome: string;
+  }>;
+  return rows.map(r => ({
+    id: r.id,
+    timestamp: r.timestamp,
+    actor: r.actor,
+    target: r.target,
+    details: r.details ? safeParseJson(r.details) : null,
+    outcome: r.outcome,
+  }));
+}
+
+function safeParseJson(s: string): Record<string, unknown> | null {
+  try { return JSON.parse(s) as Record<string, unknown>; }
+  catch { return null; }
+}

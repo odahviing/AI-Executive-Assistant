@@ -714,6 +714,47 @@ Status meanings:
           for (const issue of issues) {
             try {
               if (issue.type === 'missing_floating_block') {
+                // v2.8.5 — respect recent owner deletions. If the owner
+                // explicitly deleted this block on this day in the last 14
+                // days, don't re-book it. Match by block_name in the
+                // recorded subject + event_start_iso falling on the same
+                // calendar day (issue.date is YYYY-MM-DD in owner's TZ).
+                // The audit_log enrichment in delete_meeting now records
+                // both fields; older rows without event_start_iso are
+                // matched by subject only as a conservative fallback.
+                try {
+                  const { recentAuditEntries } = await import('../db/client');
+                  const recentDeletes = recentAuditEntries({ action: 'delete_meeting', windowDays: 14 });
+                  const blockName = (issue.block_name ?? '').toLowerCase();
+                  const matchesRecentDelete = recentDeletes.some(row => {
+                    if (!row.details) return false;
+                    const subject = String(row.details.subject ?? '').toLowerCase();
+                    if (!blockName || !subject.includes(blockName)) return false;
+                    const startIso = row.details.event_start_iso;
+                    if (typeof startIso !== 'string' || startIso.length === 0) {
+                      // Conservative fallback: subject matches but we don't
+                      // know which day — skip to avoid re-booking anywhere
+                      // recent. Beats re-undoing owner instructions.
+                      return true;
+                    }
+                    return startIso.slice(0, 10) === issue.date;
+                  });
+                  if (matchesRecentDelete) {
+                    issue.fix_detail = `Skipped re-book of ${issue.block_name ?? 'floating block'} on ${issue.date} — owner deleted it recently.`;
+                    logger.info('Calendar health: active-mode skipped re-book — recent owner delete', {
+                      blockName: issue.block_name, date: issue.date,
+                    });
+                    internalActions.push({
+                      tool: 'book_floating_block',
+                      detail: `skipped ${issue.block_name ?? 'floating block'} ${issue.date} — owner deleted recently`,
+                    });
+                    continue;
+                  }
+                } catch (err) {
+                  logger.warn('Calendar health: recent-delete check failed — proceeding with auto-book', {
+                    err: String(err).slice(0, 200),
+                  });
+                }
                 // Reuse book_floating_block so alignment + buffer + day-scope
                 // rules apply consistently. Pass the block_name from the
                 // issue (set by the detector loop above) — the handler now

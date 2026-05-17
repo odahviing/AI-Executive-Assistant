@@ -1,6 +1,6 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v2.8.3** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v2.8.5** — check `package.json` if unsure; it is the source of truth.
 
 Read these two memory files at session start:
 - `C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/project_overview.md`
@@ -70,21 +70,26 @@ Procedures the owner runs frequently are wired as skills under `.claude/skills/`
 
 ---
 
-## Where we are — v2.8.4 shipped, **expect a bug wave**
+## Where we are — v2.8.5 shipped, bug-wave patch including Module F rollback
 
-**Current phase**: the 2.8 line did a lot in a short window — prompt-reduction modules F/E/C (8 honesty rules code-replaced via extended claim-checker, v2.8.1), location decision rewrite (v2.8.2), venue skill + tool consolidation (v2.8.3), and three real-day bug fixes today (v2.8.4 — TZ math, claim-checker double-fire, assistant-panel TTL).
+**Current phase**: the predicted bug wave landed on 2026-05-17 with one big cross-thread incident that surfaced two compounding root causes (inboundQueue using the wrong runner on buffered messages + the Module F judge injecting topic-switch directives into retry_instruction when the conversation context looked mismatched). Both fixed; Module F's retry path is **rolled back** at owner's direction; the eight honesty prompt rules v2.8.1 deleted in favor of Module F are **restored verbatim**. Module F + E booleans still fire as telemetry — we keep visibility into what they catch — but the verdict no longer triggers retries. Only RULE A (`claimed_action`) drives retries from here on.
 
-**Expect a bug wave over the next few days.** That's not a worry, it's the expected shape after a stretch of meaningful changes — especially the prompt-reduction work. Module F's new honesty booleans (`unverified_state_review` etc.) catch more real over-claims than the old narrow rules, but they also surface latent bugs the old rules masked (the v2.8.4 claim-checker double-fire was exactly this — Module F retry path was missing the v2.3.4 `priorActionsHint` plumbing). Bug-fix flow is the usual: understand → plan → suggest → wait for owner. Hopefully short wave; one or two days, not weeks.
-
-**v2.8.4 highlights** (three live-use bugs closed):
-- Cross-TZ attendee math no longer trusted to Sonnet — `find_available_slots` pre-renders `per_attendee_local.local_display` per slot; Sonnet quotes verbatim. Plus Lori's row data-fixed (state=Boston, was timezone=Asia/Jerusalem, now America/New_York).
-- Claim-checker retry path no longer re-fires write tools — `OrchestratorOutput.mutationActions` carries full event IDs; `buildPriorActionsHint` helper wired into both retry paths with an amend-vs-rewrite playbook so the retry knows to `move_meeting` an existing ID rather than re-call `create_meeting`.
-- Assistant-panel status TTL fixed — `isAssistantThread` refreshes `registered_at` on every successful lookup. Active panels stay alive indefinitely. Latent bug since v2.7.5 (visible only after a panel crosses 24h).
+**v2.8.5 highlights** (one-day bug wave, ten fixes bundled):
+- inboundQueue: each `PendingMessage` carries its own runner. `scheduleRun` uses the LAST message's runner instead of the outer-closure runner. Closes cross-thread contamination when buffered messages drain after an un-abortable write turn.
+- Module F retry path **deleted** in `postReply.ts` (~60 lines). Booleans still in `claimChecker.ts` as telemetry. RULES 1/2/2b/2c/2d/3/5b/9 restored in `systemPrompt.ts`. REFUSAL PHRASING stays in humanGate (Module C — separate rollback decision if ever needed).
+- planMeeting freebusy: new `priorSlotEndIso` param; overlap loop skips source event's prior window (60s tolerance). Fixes "move 13:00→13:15 falsely flags Onn busy because the meeting being moved overlaps the new slot." excludeEventIds stays on the rule-check path (different mechanism, doesn't apply to Graph's getSchedule).
+- Active mode `missing_floating_block` respects recent owner deletions. `delete_meeting` audit_log enriched with `event_start_iso`; new `recentAuditEntries({ action, windowDays })` helper in `db/client.ts` does a tiny SELECT (last 14 days, ≤10 rows in practice). Generic — pattern reusable for other "respect owner's recent instruction" checks.
+- New `researchPreCheck.ts` — owner-path regex on `explore X` / `research X` / `look into X` / `what's new with X` / `tell me about X` runs `web_search` deterministically before the main turn, injects results as a context block. `manage_knowledge` tool description tightened ("INSUFFICIENT ALONE FOR EXPLORE/RESEARCH").
+- Routine dispatcher: placeholder-then-update pattern via new `updateMessage` + `deleteMessage` primitives. Routines no longer use synthetic `routine_${id}_${ts}` threadTs — they post `"Working…"` first, capture real ts, run orchestrator with that, then `chat.update` (or `chat.delete` on silent/throw). Status indicator now works during routine tool runs.
+- Assistant-panel status: `isAssistantThread` gate dropped at both orchestrator call sites. Slack rejects non-panel calls; the existing try/catch swallows at debug. Status indicator now works on panel threads that missed registration.
+- Brief ACTION ITEMS section removed; replaced with a ONE-PLACE RULE for narration. Open items now appear once, in the most natural surface.
+- Legacy skill toggle cleanup: `persona`/`scheduling`/`coordination`/`meeting_summaries`/`knowledge_base`/`calendar_health` deleted from the toggles map after auto-migration. No more once-per-process "enabled in profile but not available" warnings.
 
 **Earlier in the 2.8 line**:
+- **v2.8.4**: Cross-TZ attendee math (`per_attendee_local.local_display` pre-rendered per slot); claim-checker retry double-fire fix (`OrchestratorOutput.mutationActions` + `buildPriorActionsHint` with amend-vs-rewrite playbook); assistant-panel TTL refresh on lookup.
 - **v2.8.3**: new `venue` skill + tool consolidation (13 owner tools → 5: `manage_preference`, `manage_routine`, `manage_calendar_issue`, `manage_knowledge`, `update_task`). Google Places migration tracked at [#96](https://github.com/odahviing/AI-Executive-Assistant/issues/96).
 - **v2.8.2**: `resolveLocation` rewritten as a single deterministic decision tree; `planMeeting` `preserve_existing` verdict for moves within same day-type; meeting-room availability check.
-- **v2.8.1**: Vertex AI prep (`LLM_PROVIDER` env var); multi-window work hours (split-shift days); 8 honesty rules code-replaced via extended claim-checker — this is the change most likely to be the source of incoming bug reports, since it broadened what claim-checker flags.
+- **v2.8.1**: Vertex AI prep (`LLM_PROVIDER` env var); multi-window work hours (split-shift days); 8 honesty rules code-replaced via extended claim-checker — **partially rolled back in v2.8.5**: the booleans stay as telemetry, but the retry path that consumed them is gone, and the original prompt rules are back.
 
 ---
 

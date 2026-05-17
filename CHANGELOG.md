@@ -2,6 +2,57 @@
 
 ---
 
+## 2.8.5 — Bug wave: cross-thread runner contamination, Module F rollback, planMeeting self-conflict, brief duplication, lunch undo, status indicator
+
+Day-long sweep through bugs surfaced in live use 2026-05-17. The headline is a Module F rollback after the cross-thread incident: the inboundQueue was running buffered messages through the previous turn's runner closure, so a new-thread message landed against the wrong conversation history; the claim-checker judge — seeing the mismatched context — injected a topic-switch directive into its retry instruction and derailed the reply wholesale. Both root causes addressed (the queue and the retry path), and the eight honesty rules that v2.8.1 deleted in favor of Module F are back in the system prompt. Plus a stack of smaller-but-real fixes that each were independently planned this session.
+
+### Fixed (high-impact)
+
+- **inboundQueue ran buffered messages through the wrong runner.** For 1:1 DMs the queue key is `channelId` only (intentional, so typing-bursts across the same DM coalesce). When a message arrived during an un-abortable in-flight turn (writes already fired), it was buffered correctly — but when the in-flight finished and the pending buffer was drained, `scheduleRun` re-used the OUTER scheduleRun's `runner` parameter, which was the in-flight turn's closure with the in-flight turn's threadTs / senderId / priorOutboundContext / etc. New-thread messages dispatched against the old thread's conversation history. Repro on 2026-05-17: owner started a new thread "can we move my meeting with onn 15 mins back?" during a LinkedIn-article turn; the orchestrator was called with the LinkedIn thread's threadTs and history. Fix: `PendingMessage` now carries its own `runner` field; `scheduleRun` uses `batch[batch.length-1].runner` instead of the outer-closure runner; the abort-restart path in scheduleRun no longer takes a runner parameter at all (it reads from pending on the next call). One file: `connectors/slack/inboundQueue.ts`.
+
+- **Module F retry path derailed replies on judge false positives.** Same 2026-05-17 incident, second root cause. The judge's `unverified_state_review` fired despite `get_calendar` being in `toolSummaries` — and the same judge call **also** included a topic-switch directive in `retry_instruction` ("the owner asked for a LinkedIn article recommendation; address that instead") drawn from the cross-thread-contaminated history. Sonnet's retry faithfully obeyed and produced a LinkedIn answer to a meeting-move question. Owner direction: roll back Module F retries; restore the honesty rules they were supposed to replace. Fix: `postReply.ts` — the `extendedRuleFired` retry block (~60 lines) deleted. Module F + E booleans (`re_asked_known_fact` / `unrecorded_promise` / `unverified_state_review` / `invented_after_correction` / `re_asked_after_convergence` / `re_asked_own_question`) still fire in the checker as telemetry — we keep visibility into what they catch — but the verdict no longer triggers retries. Only `claimed_action` (RULE A, since v1.6.2) drives retries from here on. `systemPrompt.ts` — RULES 1 / 2 / 2b / 2c / 2d / 3 / 5b / 9 restored verbatim from their pre-v2.8.1 text. REFUSAL PHRASING stays in humanGate (Module C — not in scope of this rollback). Net: ~60 lines deleted from `postReply.ts`, ~30 lines added back to `systemPrompt.ts`.
+
+- **planMeeting freebusy counted the moving event as its own conflict.** Real repro: "can we move my meeting with Onn 15 mins back?" with a 13:00–13:30 meeting → planMeeting checks Onn's freebusy at 13:15 → Graph `getSchedule` returns Onn busy at 13:00–13:30 (because the meeting being moved is still on his calendar) → `confirm_override` fires citing Onn as busy. v2.4.1 fixed this for `findAvailableSlots` via `excludeEventIds`, but Graph's `getSchedule` API doesn't expose event IDs — it returns busy windows only — so excludeEventIds can't help in the second freebusy path that v2.7.1 added to planMeeting. Fix: new `priorSlotEndIso` parameter on `PlanInput`; the overlap loop in `planMeeting.ts` skips busy windows whose `[start,end]` matches the moving event's prior `[start,end]` with a 60-second tolerance per side (for TZ formatting noise). `move_meeting` handler in `skills/meetings/ops.ts` already extracted `movingEvent.start.dateTime` for the existing `priorSlotStartIso`; now also extracts `.end.dateTime` and passes both.
+
+- **Active mode re-booked floating blocks the owner had explicitly deleted.** Owner asked Maelle days ago to delete the lunch on a half-day Thursday; this morning's active-mode pass saw `missing_floating_block` and re-booked it. Owner direction: "if I already did a change, don't undo it." Fix: enrich the `delete_meeting` success audit_log entry with `event_start_iso` (captured from the existing recurring-preflight Graph probe — no extra round-trip); active-mode's `missing_floating_block` branch now reads recent `delete_meeting` audit entries (last 14 days) and skips the auto-book when block_name matches in the subject AND `event_start_iso` falls on the same calendar day. New helper `recentAuditEntries({ action, windowDays })` in `db/client.ts` next to `auditLog()` — reusable for any future "respect owner's recent instruction" check. `getEventType` in `connectors/graph/calendar.ts` extended with `startDateTime` / `startTimeZone` for the audit enrichment.
+
+- **Assistant-panel status indicator stayed empty when registration was missed.** `assistant_thread_started` only fires on FIRST panel open. If the bot was disconnected at that moment, or the panel pre-existed before the handler was installed, the thread permanently dropped out of the registry. `isAssistantThread` would return false for the rest of the panel's life, the gate at the orchestrator's turn-start + per-tool hooks dropped the `setAssistantStatus` calls, and the owner saw an empty status indicator forever. Fix: drop the `isAssistantThread` gate at both call sites in `core/orchestrator/index.ts`. Slack rejects non-panel calls with `channel_not_found` / `not_in_assistant_thread` — already swallowed at debug level. One extra failed API round-trip per tool call in non-panel contexts (colleague DMs, channels, MPIMs); negligible cost.
+
+- **Routines fired status indicators against synthetic threadTs that Slack rejected.** The routine dispatcher built `runThreadTs = "routine_${id}_${Date.now()}"` — not a real Slack thread, so every `assistant.threads.setStatus` call during a routine's tool runs got rejected silently. Owner saw no status indicator during routine work (e.g. the Sunday LinkedIn ideas routine doing 2 web_extracts + 1 KB read). Fix: placeholder-then-update flow in `tasks/dispatchers/routine.ts`. Post `"Working…"` to the owner channel FIRST, capture its real `ts`, run the orchestrator with that real threadTs, then swap in the final content via `chat.update` (or `chat.delete` on a silent return / orchestrator throw). New `updateMessage` + `deleteMessage` primitives in `connections/slack/messaging.ts`. Graceful fallback to the old synthetic-ts path if the placeholder post itself fails.
+
+### Fixed (smaller)
+
+- **Brief duplicated open items between "Open" lines and ACTION ITEMS.** Owner direction: drop the ACTION ITEMS section entirely; per-person paragraphs + freestanding lines carry everything. `tasks/briefs.ts` structure item 5 deleted; strict-definition block deleted; ACTION-ITEM CONTEXT → APPROVAL CONTEXT (rule still useful for rendering approvals, just no longer tied to a section); CLOSURE NARRATION reworded; the existing NO SELF-CONTRADICTION rule replaced with a stronger ONE-PLACE RULE covering open items too. No more duplication possible by construction.
+
+- **Stale legacy skill toggles fired a debug warning every process start.** `skills/registry.ts` auto-migrates `scheduling` / `coordination` / `meeting_summaries` / `knowledge_base` / `calendar_health` / `persona` to their new keys but didn't delete the originals; the loop iterated over them, couldn't find them in `SKILL_MAP`, and emitted a "enabled in profile but not available — skipping" line once per process per stale key. `delete toggles.X` added after each migration line.
+
+- **Routine prompt for the Sunday LinkedIn ideas updated.** DB-only change (no code commit): `routine_1775935889360_f7r7` rewritten to do `web_search` for current angles + `web_extract` the Reflectiz LinkedIn page + `manage_knowledge` cross-reference. Goal made explicit ("weekly LinkedIn post, covering something interesting, either of Reflectiz or the market or hopefully both"). Already applied to the running DB.
+
+### Added
+
+- **Research pre-check** (`src/utils/researchPreCheck.ts`, new). Owner-path regex on `explore X` / `research X` / `look into X` / `what's new with X` / `tell me about X` runs `web_search` deterministically before the main Sonnet turn (30-day window, ≤5 results), injects the formatted summary + top results into the orchestrator's dynamic system prompt. Closes the standing gap where Sonnet answered "explore" requests from KB + training alone, never reaching the outside web. Fails open: regex miss → empty block → normal flow. Sibling to `availabilityPreCheck.ts` — same shape, same trade-offs. Wired in `core/orchestrator/index.ts`.
+
+- **`manage_knowledge` tool description tightened** to say it's INSUFFICIENT ALONE FOR EXPLORE / RESEARCH requests — pair with `web_search` and `web_extract` to bring in outside views. Closes the same gap from the prompt side without adding a free-floating prompt rule.
+
+- **`recentAuditEntries(action, windowDays)` helper** in `db/client.ts`. Reads recent audit_log entries matching action + outcome + time window; returns parsed `details` JSON. First consumer is active-mode's "respect recent owner deletions" check; reusable for any future similar guard.
+
+- **`updateMessage` + `deleteMessage` primitives** in `connections/slack/messaging.ts`. Used by the routine dispatcher's placeholder-then-update flow. Fire-and-forget tolerance, logs at warn on failure.
+
+- **`getEventType` extended** with `startDateTime` / `startTimeZone` so `delete_meeting`'s audit_log can record WHICH DAY was affected — feeding the active-mode recent-delete check.
+
+### Removed
+
+- ACTION ITEMS section in the brief prompt (`tasks/briefs.ts`). Replaced by the ONE-PLACE RULE narration.
+- Module F + E retry path in `postReply.ts`. Booleans still fire in the checker; the retry trigger is gone.
+
+### Not changed
+
+- DB schema. No migrations.
+- No new tools (consistent with "tooling over new tools").
+- Module F booleans + their judge prompt still exist (telemetry intact). The rollback is at the *consumer* layer.
+
+---
+
 ## 2.8.4 — Three real-day bug fixes (TZ math, claim-checker double-fire, assistant-panel TTL)
 
 Closes three bugs caught in live use 2026-05-16/17. Each one is a "code over prompt" win — fixing the data path rather than tightening a rule.

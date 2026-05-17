@@ -1435,16 +1435,23 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
   type?: 'singleInstance' | 'occurrence' | 'exception' | 'seriesMaster';
   subject?: string;
   seriesMasterId?: string;
+  // v2.8.5 — also surface start so callers (notably delete_meeting's audit
+  // log) can record WHICH DAY was affected, enabling active-mode to detect
+  // "owner just deleted this floating block — don't re-book it" later.
+  startDateTime?: string;
+  startTimeZone?: string;
 }> {
   const client = getClient();
   const event = await client
     .api(`/users/${userEmail}/events/${meetingId}`)
-    .select('id,type,subject,seriesMasterId')
+    .select('id,type,subject,seriesMasterId,start')
     .get();
   return {
     type: event?.type,
     subject: event?.subject,
     seriesMasterId: event?.seriesMasterId,
+    startDateTime: event?.start?.dateTime,
+    startTimeZone: event?.start?.timeZone,
   };
 }
 

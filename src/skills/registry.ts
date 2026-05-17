@@ -309,13 +309,23 @@ export function getActiveSkills(profile: UserProfile): Skill[] {
   // the profile boots without edits. Duplicates (both set) are idempotent.
   // v1.7.6 — three more renames: meeting_summaries → summary,
   // knowledge_base → knowledge, calendar_health → calendar.
+  // v2.8.5 — also DELETE the legacy keys after the migration. Pre-fix the
+  // loop below iterated over the stale keys, couldn't find them in
+  // SKILL_MAP, and fired the "enabled in profile but not available"
+  // debug warning once per process per stale key. Harmless but noisy.
   const toggles: Record<string, boolean | undefined> = { ...(profile.skills as any) };
   if (toggles.scheduling || toggles.coordination) toggles.meetings = true;
+  delete toggles.scheduling;
+  delete toggles.coordination;
   if (toggles.meeting_summaries) toggles.summary = true;
+  delete toggles.meeting_summaries;
   if (toggles.knowledge_base) toggles.knowledge = true;
+  delete toggles.knowledge_base;
   if (toggles.calendar_health) toggles.calendar = true;
+  delete toggles.calendar_health;
   // v2.6.2 — `persona` skill was renamed to `social`. Old yamls auto-migrate.
   if (toggles.persona) toggles.social = true;
+  delete toggles.persona;
 
   for (const [id, enabled] of Object.entries(toggles)) {
     if (!enabled) continue;
