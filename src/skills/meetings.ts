@@ -419,6 +419,11 @@ LANGUAGE: subject and body MUST be in English regardless of the language you're 
               type: 'boolean',
               description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
             },
+            sensitivity: {
+              type: 'string',
+              enum: ['normal', 'personal', 'private', 'confidential'],
+              description: 'OPTIONAL. Outlook sensitivity field — controls how this meeting renders on shared free/busy views. DEFAULT: omit (Outlook treats as normal). DO NOT proactively ask or set. Only pass when the owner OR an attendee on this meeting EXPLICITLY asks for it ("mark this private", "make it confidential", "hide the subject"). When an attendee asks for "private" on a meeting they\'re on, that\'s a legitimate attendee right (different from the Maelle category tagging that the owner curates). Map: "private" → \'private\', "confidential" → \'confidential\', "personal" / "off-record" → \'personal\'.',
+            },
           },
           required: ['subject', 'start', 'end', 'attendees', 'is_online', 'category'],
         },
@@ -1732,6 +1737,13 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
         if (c.day_type === 'office_days') parts.push('office days only');
         if (c.day_type === 'home_days') parts.push('home days only');
         if (c.requires_travel_buffer) parts.push('auto travel buffer');
+        // v2.8.6 — surface `is_recurring: true` as a bracket tag so the
+        // qualification rule shows up next to the description, not buried in
+        // 5 lines of prose. Closes the 2026-05-18 "suggested Cadence for a
+        // one-time Company lecture" — Cadence is `is_recurring: true` in
+        // yaml + the description spells out a strict-recurring rule, but
+        // pre-fix only the prose carried it and Sonnet missed it.
+        if (c.is_recurring) parts.push('recurring series only');
         // v2.8.2 — category-level location overrides (default_location /
         // default_is_online / no_default_location) no longer affect the
         // location decision; location is deterministic via day-type + party

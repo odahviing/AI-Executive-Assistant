@@ -1518,10 +1518,45 @@ export async function updateMeeting(params: UpdateMeetingParams): Promise<void> 
 
 export async function deleteMeeting(
   userEmail: string,
-  meetingId: string
+  meetingId: string,
+  options: { comment?: string } = {},
 ): Promise<void> {
   const client = getClient();
-  await client.api(`/users/${userEmail}/events/${meetingId}`).delete();
+
+  // v2.8.6 — use Graph's POST /cancel endpoint instead of bare DELETE. Pre-fix
+  // `.delete()` removed the event from the organizer's calendar but did NOT
+  // reliably send cancellation invites to attendees — they'd keep orphaned
+  // copies of the meeting on their own calendars (root of the 2026-05-18 Dirk
+  // incident: Maelle "deleted" the meeting from owner's view but Dirk's copy
+  // stayed for hours, owner had to manually delete it).
+  //
+  // /cancel is the right endpoint: it sends a "Cancelled: <subject>" invite
+  // to every attendee AND removes the event from the organizer's calendar in
+  // one call. Requires the user to be the organizer; non-organizer cancels
+  // (when owner is invited to someone else's meeting) take the v2.7.0
+  // not_organizer path instead, which never reaches here.
+  //
+  // Fallback: if Graph rejects /cancel (rare — happens when the event is in
+  // a draft state with no attendees), retry with DELETE. Solo events
+  // ("personal block" with no attendees) tolerate either endpoint.
+  try {
+    await client.api(`/users/${userEmail}/events/${meetingId}/cancel`).post({
+      Comment: options.comment ?? '',
+    });
+    return;
+  } catch (err: any) {
+    const code = err?.statusCode ?? err?.code;
+    // 400 BadRequest happens when the event has no attendees — fall back to
+    // DELETE (which is the right call for solo events anyway).
+    if (code === 400 || code === 'ErrorMissingArgument') {
+      logger.info('deleteMeeting — /cancel rejected (likely no attendees), falling back to DELETE', {
+        meetingId, code,
+      });
+      await client.api(`/users/${userEmail}/events/${meetingId}`).delete();
+      return;
+    }
+    throw err;
+  }
 }
 
 /**

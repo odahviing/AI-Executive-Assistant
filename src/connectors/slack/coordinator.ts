@@ -449,31 +449,13 @@ export async function handleOutreachReply(
     const colleagueEmail = personInfo?.email ?? undefined;
 
     const { preferredDay, preferredTime, isOnline, subject } = decision.details;
-    let { durationMin } = decision.details;
+    const { durationMin } = decision.details;
 
-    // v2.2.4 (bug 7) — snap classifier-guessed duration to the profile's
-    // allowed_durations ladder. Sonnet's free-text guess in
-    // processOutreachReply has no awareness of which durations the owner
-    // actually books (Idan's BiWeekly is 55 min, never 60 — 60 min meetings
-    // are explicitly off the menu). Pick the allowed duration closest to the
-    // guess so the handoff at least uses a legal length. The handoff path
-    // itself stays subject to bug-4 idempotency; this is a safety net for
-    // the residual case where it does fire on a fresh schedule request.
-    const allowed = params.profile.meetings.allowed_durations;
-    if (Array.isArray(allowed) && allowed.length > 0) {
-      const snapped = allowed.reduce((best, candidate) =>
-        Math.abs(candidate - durationMin) < Math.abs(best - durationMin) ? candidate : best
-      , allowed[0]);
-      if (snapped !== durationMin) {
-        logger.info('Outreach handoff — snapped duration to allowed_durations', {
-          jobId: job.id,
-          fromGuess: durationMin,
-          snappedTo: snapped,
-          allowed,
-        });
-        durationMin = snapped;
-      }
-    }
+    // v2.8.6 — the snap to allowed_durations now lives at the create_meeting
+    // handler entry (single chokepoint for direct Sonnet calls, coord
+    // handoffs, and deferred replays). The duplicate snap that used to live
+    // here was removed in the same patch — no behavior change, just one
+    // source of truth.
 
     const ownerTz = params.profile.user.timezone;
     const now = DateTime.now().setZone(ownerTz);

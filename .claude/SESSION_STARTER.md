@@ -1,6 +1,6 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v2.8.5** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v2.8.6** — check `package.json` if unsure; it is the source of truth.
 
 Read these two memory files at session start:
 - `C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/project_overview.md`
@@ -70,22 +70,32 @@ Procedures the owner runs frequently are wired as skills under `.claude/skills/`
 
 ---
 
-## Where we are — v2.8.5 shipped, bug-wave patch including Module F rollback
+## Where we are — v2.8.6 shipped, real-day bug wave closing 5 GitHub bugs + Mayrav incident
 
-**Current phase**: the predicted bug wave landed on 2026-05-17 with one big cross-thread incident that surfaced two compounding root causes (inboundQueue using the wrong runner on buffered messages + the Module F judge injecting topic-switch directives into retry_instruction when the conversation context looked mismatched). Both fixed; Module F's retry path is **rolled back** at owner's direction; the eight honesty prompt rules v2.8.1 deleted in favor of Module F are **restored verbatim**. Module F + E booleans still fire as telemetry — we keep visibility into what they catch — but the verdict no longer triggers retries. Only RULE A (`claimed_action`) drives retries from here on.
+**Current phase**: 2026-05-18 real-day wave. Five GitHub bugs closed in one patch (#98 / #99 / #100 / #101 / #102) plus the Mayrav 22:30 MPIM incident (no ticket — referenced as #103). The headline chain: Dirk's freeform-cancel approval was ✅'d by owner but never executed (`deferred_action` replay only covered create/move/book_floating_block, not delete) → 3h later Sonnet re-fired the cancel during an unrelated turn → dateVerifier returned a false-positive weekday mismatch → retry with full tool access deleted the wrong event. Plus the `detectCategory` "owner omitted from attendees" undercount that made every Maelle-booked meeting look like a single-attendee personal block. Plus the `deleteMeeting` bare-DELETE that left Dirk's attendee copy orphaned. Plus Mayrav's owner-in-MPIM 22:30 proposal getting routed through a `policy_exception` approval that leaked "Idan said yes on policy exception needs your input" into MPIM.
 
-**v2.8.5 highlights** (one-day bug wave, ten fixes bundled):
-- inboundQueue: each `PendingMessage` carries its own runner. `scheduleRun` uses the LAST message's runner instead of the outer-closure runner. Closes cross-thread contamination when buffered messages drain after an un-abortable write turn.
-- Module F retry path **deleted** in `postReply.ts` (~60 lines). Booleans still in `claimChecker.ts` as telemetry. RULES 1/2/2b/2c/2d/3/5b/9 restored in `systemPrompt.ts`. REFUSAL PHRASING stays in humanGate (Module C — separate rollback decision if ever needed).
-- planMeeting freebusy: new `priorSlotEndIso` param; overlap loop skips source event's prior window (60s tolerance). Fixes "move 13:00→13:15 falsely flags Onn busy because the meeting being moved overlaps the new slot." excludeEventIds stays on the rule-check path (different mechanism, doesn't apply to Graph's getSchedule).
-- Active mode `missing_floating_block` respects recent owner deletions. `delete_meeting` audit_log enriched with `event_start_iso`; new `recentAuditEntries({ action, windowDays })` helper in `db/client.ts` does a tiny SELECT (last 14 days, ≤10 rows in practice). Generic — pattern reusable for other "respect owner's recent instruction" checks.
-- New `researchPreCheck.ts` — owner-path regex on `explore X` / `research X` / `look into X` / `what's new with X` / `tell me about X` runs `web_search` deterministically before the main turn, injects results as a context block. `manage_knowledge` tool description tightened ("INSUFFICIENT ALONE FOR EXPLORE/RESEARCH").
-- Routine dispatcher: placeholder-then-update pattern via new `updateMessage` + `deleteMessage` primitives. Routines no longer use synthetic `routine_${id}_${ts}` threadTs — they post `"Working…"` first, capture real ts, run orchestrator with that, then `chat.update` (or `chat.delete` on silent/throw). Status indicator now works during routine tool runs.
-- Assistant-panel status: `isAssistantThread` gate dropped at both orchestrator call sites. Slack rejects non-panel calls; the existing try/catch swallows at debug. Status indicator now works on panel threads that missed registration.
-- Brief ACTION ITEMS section removed; replaced with a ONE-PLACE RULE for narration. Open items now appear once, in the most natural surface.
-- Legacy skill toggle cleanup: `persona`/`scheduling`/`coordination`/`meeting_summaries`/`knowledge_base`/`calendar_health` deleted from the toggles map after auto-migration. No more once-per-process "enabled in profile but not available" warnings.
+**v2.8.6 highlights** (18 items bundled):
+- **`detectCategory` injects owner into attendee count + list.** Root of the 2026-05-18 morning "single-attendee Logistic" cascade. Sonnet's create_meeting tool description treats `attendees` as the OTHER people; classifier saw 1 attendee and tagged Logistic, which has `no_default_location` → "online or in person?" defensive ask + rebalance skipped lunch move. Fix at `skills/meetings/detectCategory.ts` — truthful injection, classifier now picks `Meeting`. Verified offline via new `scripts/simulate-create-meeting-args.ts`.
+- **Cancellation replay extended to `delete_meeting`.** `core/requests/resolver.ts` supportedTools + `deferredActionReplay.ts` delete branch + `tasks/skill.ts` tool description teaching Sonnet to pass `payload.deferred_action = {tool:'delete_meeting', args:{...}}` on cancellation asks. Soft side — Sonnet judgment dependent.
+- **`proseOnly: true` flag on `OrchestratorInput`** — strips every WRITE_TOOL when set. dateVerifier retry passes it. Retries can fix prose; they cannot fire writes. Deterministic.
+- **dateVerifier qualified-weekday hallucination filter** — post-filter drops LLM mismatches where `draft_excerpt` has a date adjacent to the weekday (regex on `\d{1,2}\s+(jan|...|may|...)`). LLM prompt tightened too.
+- **`deleteMeeting` uses POST /events/{id}/cancel** — sends "Cancelled: X" invites + removes organizer copy in one call. Falls back to DELETE on 400 (events with no attendees). Signature change: optional `options.comment`.
+- **`get_calendar` audit enrichment on empty-window owner-DM turns** — appends `_audit_context` listing recent `create_meeting` + `delete_meeting` audit entries from last 7 days that intersect the query window. Closes 99C "I don't have a record of booking" amnesia.
+- **`night_shift` auto-merges into `work_hours` at profile load** — synthesis appends `night_shift.hours_start-hours_end` to `work_hours[typical_day]`. `00:00` end normalized to `23:59`. Tuesday's `work_hours` now `["09:00-15:30","21:30-23:59"]` automatically. Side effect: `isWithinOwnerWorkHours` true at 22:30 Tuesday — coord nudges / outreach expiry may fire at night per owner direction "fair game, this is my night shift."
+- **`ownerProposedSlot` helper** — new `src/utils/ownerProposedSlot.ts`. Latest owner-typed message in MPIM matching slot time + proposal cue (`?`, "what about", "let's do", "isn't", Hebrew "מה לגבי") triggers `args.relaxed=true` + skips Guard B. Closes Mayrav 22:30 case.
+- **103e wiring**: colleague-path early-rejection now stamps `_deferred_action_hint` (was missing — empty "I'll take it from here" promise). Resolver template prefers `deferred_action.args.subject` over `payload.subject` + filters meta phrases via `looksLikeApprovalMeta()`.
+- **PEOPLE IN THIS THREAD dynamic prompt block** for colleague-path turns — `db/people.ts:formatThreadPeopleBlock`. Surfaces email + tz + gender for speaker + MPIM members. Closes 101a "asked for email already on file."
+- **Duration snap at `create_meeting` handler entry** — single chokepoint for direct calls, coord handoffs, deferred replays. coordinator.ts duplicate removed.
+- **`sensitivity` at booking** — `create_meeting` schema accepts the field; handler-side colleague-path gate honors only when colleague is in `args.attendees`. Closes 102a Yael-private refusal.
+- **TZ note rephrased** — "City not on file — TZ is reliable for time math; only ask for city when location/venue matters." (Was: "Don't infer where they live" — over-rotated.)
+- **`verbMap` fallback picks top 1-or-2 verbs by tier priority** — closes 98b "Done — found the person, booked the meeting, and logged the interaction" robot-listy phrasing.
+- **Slot-narration rule tightened** with ❌/✅ covering both busy-slot AND qualified-free-slot patterns. Colleague block only.
+- **`loading_messages: ['​']`** — zero-width space; Slack min-length passes, glyph invisible. Only the per-tool bottom status renders.
+- **In-flight follow-up subject prefixed with verb** — "In flight: moving Website Update" instead of just "Website Update."
+- **GitHub skill — five-rules block + anti-pattern entries** codifies lessons from today: build signals exact-per-bug, reads free, no tier jargon, regex suspect, no new prompt rules without approval.
 
 **Earlier in the 2.8 line**:
+- **v2.8.5**: Bug wave (10 fixes) — inboundQueue cross-thread runner bug; Module F retry path rolled back (booleans stay as telemetry, RULES 1/2/2b/2c/2d/3/5b/9 restored); planMeeting freebusy self-conflict fix via `priorSlotEndIso`; active-mode respects recent owner deletions; new `researchPreCheck.ts`; routine placeholder-then-update flow; assistant-panel gate dropped; brief ACTION ITEMS removed; legacy skill toggle cleanup.
 - **v2.8.4**: Cross-TZ attendee math (`per_attendee_local.local_display` pre-rendered per slot); claim-checker retry double-fire fix (`OrchestratorOutput.mutationActions` + `buildPriorActionsHint` with amend-vs-rewrite playbook); assistant-panel TTL refresh on lookup.
 - **v2.8.3**: new `venue` skill + tool consolidation (13 owner tools → 5: `manage_preference`, `manage_routine`, `manage_calendar_issue`, `manage_knowledge`, `update_task`). Google Places migration tracked at [#96](https://github.com/odahviing/AI-Executive-Assistant/issues/96).
 - **v2.8.2**: `resolveLocation` rewritten as a single deterministic decision tree; `planMeeting` `preserve_existing` verdict for moves within same day-type; meeting-room availability check.

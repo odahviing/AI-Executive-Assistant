@@ -359,12 +359,11 @@ export async function setAssistantStatus(
       // "Summarizing findings…", "Finding answers…") while keeping the bottom
       // status (params.status) visible.
       //
-      // v2.8.4 fix — pre-fix this was `loading_messages: ['']`. Slack treated
-      // the empty-string entry as an invalid call (or collapsed the entire
-      // indicator); the bottom status never showed up either. Latent since
-      // v2.7.5. Now: one static word — gives Slack nothing to rotate AND
-      // doesn't blank the indicator.
-      loading_messages: ['Working'],
+      // v2.8.6 — drop the visible "Working" word. Pass a zero-width space:
+      // Slack's min-length check passes (length=1), but the rendered glyph is
+      // invisible, so only the bottom status (params.status) shows. If Slack
+      // rejects U+200B too, swap back to ['Working'] — that's v2.8.4 state.
+      loading_messages: ['​'],
     });
   } catch (err) {
     // Don't escalate — status is UX polish. If it fails (wrong thread type,

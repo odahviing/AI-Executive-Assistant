@@ -196,6 +196,16 @@ export interface OrchestratorInput {
    */
   extraInstruction?: string;
   /**
+   * v2.8.6 — when true, every tool in WRITE_TOOLS is stripped from the tool
+   * list before the run. Used by the dateVerifier retry path so a draft-prose
+   * correction can't fire a fresh calendar mutation (root of the 2026-05-18
+   * Michal incident: dateVerifier flagged a wrong weekday in the draft, the
+   * retry orchestrator ran with full tool access, and Sonnet re-fired
+   * planMeeting cancel on the wrong event). The retry should ONLY rewrite
+   * the prose — reads stay available, writes don't.
+   */
+  proseOnly?: boolean;
+  /**
    * v2.6.1 (D4) — recent-outbound context block for inbound colleague DMs.
    * Populated by the Slack connector when a colleague's inbound DM lands
    * within 24h of a Maelle-originated message_colleague to that colleague,
@@ -527,7 +537,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   const focusSlackIds = input.isMpim && input.mpimMemberIds
     ? new Set(input.mpimMemberIds.filter(id => id !== profile.user.slack_user_id))
     : undefined;
-  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs);
+  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs, input.userId, input.mpimMemberIds);
 
   // Inject active jobs for this thread so Maelle knows what she already committed to.
   // This prevents her from treating follow-up messages as new requests.
@@ -739,7 +749,23 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // Tools are collected from active skills — filtered by sender role and
   // (when Module G is on) by the classifier-picked scope set.
   // Colleagues get the static restricted subset; owner gets scope-filtered.
-  const tools = getSkillTools(profile, input.senderRole, toolScopes);
+  let tools = getSkillTools(profile, input.senderRole, toolScopes);
+
+  // v2.8.6 — prose-only mode strips every write tool. Used by the
+  // dateVerifier retry path so a date-typo retry can't fire a fresh
+  // calendar mutation. Reads (get_calendar / find_available_slots /
+  // get_my_tasks / recall_*) stay available so Sonnet can re-verify state
+  // while she rewrites the wording.
+  if (input.proseOnly === true) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { WRITE_TOOLS } = require('../../connectors/slack/inboundQueue') as
+      typeof import('../../connectors/slack/inboundQueue');
+    const before = tools.length;
+    tools = tools.filter(t => !WRITE_TOOLS.has(t.name));
+    logger.info('Orchestrator — proseOnly mode: filtered out write tools', {
+      before, after: tools.length, dropped: before - tools.length,
+    });
+  }
 
   // Diagnostic: log the scope decision + the tool-count effect so we can
   // see Module G hits vs misses in production logs. Cheap; only on owner
@@ -890,6 +916,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // the Slack transport so this defaults to 'slack'. When email/WhatsApp
       // inbound lands, those callers will set their own id.
       inboundConnectionId: input.inboundConnectionId ?? 'slack',
+      // v2.8.6 — plumb recent history for the 103D/F owner-in-MPIM-proposed-slot
+      // check inside the colleague-path create_meeting handler. Last 8 turns
+      // is plenty for "did owner just suggest this time?" detection; passing
+      // the whole history would bloat every handler call.
+      conversationHistory: conversationHistory.slice(-8),
     };
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
@@ -1599,20 +1630,41 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           get_briefing: 'pulled your briefing',
           send_briefing_now: 'sent the briefing',
         };
-        const mapped = distinct.map(n => verbMap[n]).filter((v): v is string => !!v);
-        // If every tool maps cleanly, list what happened. Otherwise use a
-        // generic human phrase so raw tool names never reach the user.
-        // v2.6.5 — proper Oxford-comma joining for 3+ items. Pre-fix,
-        // mapped.join(' and ') produced "X and Y and Z and W" for 4 items,
-        // which read robotically. Now: 1 item → bare; 2 → "X and Y";
-        // 3+ → "X, Y, Z, and W".
-        const verbsText = mapped.length === distinct.length && mapped.length > 0
-          ? (mapped.length === 1
-              ? mapped[0]
-              : mapped.length === 2
-                ? mapped.join(' and ')
-                : mapped.slice(0, -1).join(', ') + ', and ' + mapped[mapped.length - 1])
-          : 'handled a few things';
+        // v2.8.6 (98b) — pick the 1-2 highest-impact verbs instead of joining
+        // every tool that ran. Pre-fix, "Done — found the person, booked the
+        // meeting, and logged the interaction" read robotically — a verb-list
+        // that mirrors the tool tape rather than what a human EA would say.
+        // The headline action is what matters; observation tools like
+        // log_interaction and find_slack_user don't need to be narrated.
+        // Priority list orders tools by user-facing impact: state-changing
+        // calendar mutations rank highest; coord, approvals, and tasks rank
+        // next; everything else is silent in the fallback.
+        const VERB_PRIORITY: string[] = [
+          // Tier 1 — calendar mutations (the headline)
+          'create_meeting', 'move_meeting', 'delete_meeting', 'book_floating_block',
+          'update_meeting',
+          // Tier 2 — coord + approvals + tasks
+          'coordinate_meeting', 'finalize_coord_meeting', 'cancel_coordination',
+          'create_approval', 'resolve_approval',
+          'create_task', 'edit_task', 'cancel_task',
+          // Tier 3 — outreach + briefings
+          'message_colleague', 'send_briefing_now',
+          // Tier 4 — calendar health
+          'check_calendar_health', 'set_event_category', 'update_calendar_issue',
+          // Tier 5 — knowledge / routines (rarely standalone)
+          'manage_knowledge', 'create_routine', 'update_routine', 'delete_routine',
+        ];
+        const ranked = distinct
+          .filter(n => verbMap[n] !== undefined)
+          .map(n => ({ name: n, rank: VERB_PRIORITY.indexOf(n) }))
+          .filter(t => t.rank >= 0)
+          .sort((a, b) => a.rank - b.rank);
+        const topVerbs = ranked.slice(0, 2).map(t => verbMap[t.name]);
+        const verbsText = topVerbs.length === 0
+          ? 'handled a few things'
+          : topVerbs.length === 1
+            ? topVerbs[0]
+            : `${topVerbs[0]} and ${topVerbs[1]}`;
         finalReply = `Done — ${verbsText}. Let me know if anything's off.`;
         logger.warn('Orchestrator: tool work happened but no reply text — posted grounded fallback', {
           threadTs,

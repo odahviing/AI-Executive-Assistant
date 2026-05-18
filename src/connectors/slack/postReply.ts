@@ -680,6 +680,15 @@ async function runDateVerifierAndMaybeRetry(ctx: DateVerifyContext): Promise<str
         isOwnerInGroup: ctx.isOwnerInGroup,
         mpimMemberIds: ctx.mpimMemberIds,
         extraInstruction: nudge,
+        // v2.8.6 — date-correction retry must NOT fire writes. The original
+        // turn already executed whatever calendar mutations it was going to;
+        // this retry is for prose correction only. Without this guard, the
+        // retry's orchestrator ran with full tool access and Sonnet refired
+        // a write (root of the 2026-05-18 Michal incident: the draft said
+        // "Tuesday 19 May", dateVerifier flagged the weekday, the retry
+        // pass deleted the wrong meeting). Reads stay available so Sonnet
+        // can re-verify state while rewriting the wording.
+        proseOnly: true,
       });
       if (retry.reply && retry.reply.trim().length > 0) {
         retriedReply = formatForSlack(retry.reply);

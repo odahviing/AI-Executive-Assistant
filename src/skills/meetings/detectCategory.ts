@@ -49,18 +49,28 @@ export async function detectCategory(input: DetectCategoryInput): Promise<Detect
     return `${idx + 1}. ${c.name} — ${c.description.replace(/\n/g, ' ').trim()}${tagPart}`;
   }).join('\n');
 
-  const attendeesLine = input.attendees
-    .map(a => {
-      const e = (a.email ?? '').toLowerCase();
-      if (!e) return null;
-      const isExternal = ownerDomain && !e.endsWith('@' + ownerDomain);
-      return isExternal ? `${e} (external)` : e;
-    })
-    .filter(Boolean)
-    .slice(0, 8)
-    .join(', ');
-
-  const attendeeCount = input.attendees.length;
+  // v2.8.6 — include the owner in the headcount and the attendees list.
+  // Sonnet's create_meeting tool description treats `attendees` as "the OTHER
+  // people", so input.attendees omits the owner — passing `[Michal]` for a
+  // 2-person meeting. Pre-fix, detectCategory's prompt told the classifier
+  // "Attendee count: 1" + listed Michal only → classifier read it as a
+  // single-attendee personal block → category=Logistic. Root cause of the
+  // 2026-05-18 Michal "Sales Commissions" miscategorization. Owner is
+  // ALWAYS an attendee of a meeting on his calendar; injecting him here is
+  // truthful and deterministic.
+  const ownerLine = ownerEmail;
+  const externalSuffixForAttendee = (e: string) => {
+    if (!ownerDomain) return e;
+    return e.endsWith('@' + ownerDomain) ? e : `${e} (external)`;
+  };
+  const otherAttendees = input.attendees
+    .map(a => (a.email ?? '').toLowerCase())
+    .filter(e => e && e !== ownerEmail)
+    .slice(0, 7)
+    .map(externalSuffixForAttendee);
+  const allAttendees = [ownerLine, ...otherAttendees];
+  const attendeesLine = allAttendees.join(', ');
+  const attendeeCount = allAttendees.length;
 
   const prompt = `You are categorizing ONE meeting for ${input.profile.user.name}. Pick the FIRST category from the list whose description matches. Use subject, attendees, body, and recurrence.
 
@@ -74,8 +84,8 @@ RULES:
 MEETING:
 Subject: ${input.subject.slice(0, 200)}
 Recurring: ${input.isRecurring ? 'YES (part of a series)' : 'NO (one-time)'}
-Attendee count: ${attendeeCount}
-${attendeesLine ? `Attendees: ${attendeesLine}` : 'Attendees: (none / owner only)'}
+Attendee count: ${attendeeCount} (${input.profile.user.name.split(' ')[0]} included)
+Attendees: ${attendeesLine}
 ${input.body ? `Body: ${input.body.slice(0, 300)}` : ''}
 
 OUTPUT — ONE LINE in this exact format:

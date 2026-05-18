@@ -124,18 +124,24 @@ export async function resolveRequest(
   // expected to retry but often didn't (Ysrael 2026-05-12 / Yael 2026-06-17).
   //
   // Shape: details_json.deferred_action = { tool: string, args: Record<string, unknown> }.
-  // tool ∈ { 'create_meeting', 'move_meeting', 'book_floating_block' }.
+  // tool ∈ { 'create_meeting', 'move_meeting', 'book_floating_block', 'delete_meeting' }.
+  // v2.8.6 — 'delete_meeting' added so freeform-cancel approvals actually
+  // execute the cancellation on approve (root of the 2026-05-18 Dirk
+  // incident: owner approved the "should I cancel?" DM at 09:53 but no
+  // delete fired until 12:59, in an unrelated turn).
   const details = parseDetails<Record<string, unknown>>(row) ?? {};
   const deferred = details.deferred_action as { tool?: string; args?: Record<string, unknown> } | undefined;
   if (deferred && typeof deferred.tool === 'string' && deferred.args && typeof deferred.args === 'object') {
-    const supportedTools = new Set(['create_meeting', 'move_meeting', 'book_floating_block']);
+    const supportedTools = new Set(['create_meeting', 'move_meeting', 'book_floating_block', 'delete_meeting']);
     if (supportedTools.has(deferred.tool)) {
       // Inject relaxed=true (or confirm_outside_window=true for book_floating_block)
       // so the replay bypasses the same soft rule that triggered this approval.
+      // delete_meeting has no override flag — the destructive action IS the
+      // approval; no rule to bypass.
       const replayArgs: Record<string, unknown> = { ...deferred.args };
       if (deferred.tool === 'book_floating_block') {
         replayArgs.confirm_outside_window = true;
-      } else {
+      } else if (deferred.tool !== 'delete_meeting') {
         replayArgs.relaxed = true;
       }
       logger.info('resolveRequest — deferred_action replay', {
@@ -352,6 +358,23 @@ async function resolveSlotPickApproval(
 
 // ── Requester loop-close DM ─────────────────────────────────────────────────
 
+/**
+ * v2.8.6 — filter out the auto-generated `<subkind> needs your input` phrase
+ * that lands on row.subject when Sonnet didn't pass an explicit subject. That
+ * phrase leaked into MPIM resolution messages as "Idan said yes on policy
+ * exception needs your input" — internal jargon visible to colleagues. When
+ * this returns true, the caller falls back to a generic phrase instead.
+ */
+function looksLikeApprovalMeta(subject: string): boolean {
+  const lower = subject.toLowerCase();
+  return lower.endsWith('needs your input')
+    || lower === 'unknown person'
+    || lower === 'policy exception'
+    || lower === 'duration override'
+    || lower === 'lunch bump'
+    || lower === 'calendar conflict';
+}
+
 async function notifyRequesterOfDecision(
   row: RequestRow,
   verdict: 'approve' | 'reject' | 'amend',
@@ -367,10 +390,28 @@ async function notifyRequesterOfDecision(
 
   const details = parseDetails(row) ?? {};
   const requesterName = row.requester_name ?? (details.requester_name as string | undefined);
+
+  // v2.8.6 — subject for the requester-facing "Idan said yes on X" message.
+  // Source priority:
+  //   (1) deferred_action.args.subject — the meeting subject from the
+  //       underlying tool call; most accurate when a replay is wired
+  //   (2) details.subject — what Sonnet explicitly passed
+  //   (3) details.question — the freeform question text
+  //   (4) row.subject — the auto-generated fallback (e.g. "policy exception
+  //       needs your input"), filtered through looksLikeApprovalMeta to
+  //       avoid leaking internal jargon to colleagues
+  //   (5) generic "that ask"
+  // Pre-fix this fell straight to row.subject, leaking the auto-generated
+  // "<subkind> needs your input" phrase into MPIM resolution messages.
+  const deferred = details.deferred_action as { args?: Record<string, unknown> } | undefined;
+  const deferredSubject = typeof deferred?.args?.subject === 'string'
+    ? deferred.args.subject as string
+    : (typeof deferred?.args?.meeting_subject === 'string' ? deferred.args.meeting_subject as string : undefined);
   const subject =
+    (deferredSubject && deferredSubject.trim()) ||
     (typeof details.subject === 'string' && details.subject) ||
     (typeof details.question === 'string' && details.question) ||
-    row.subject ||
+    (row.subject && !looksLikeApprovalMeta(row.subject) ? row.subject : undefined) ||
     'that ask';
 
   const { getConnection } = await import('../../connections/registry');

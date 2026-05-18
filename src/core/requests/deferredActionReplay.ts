@@ -67,10 +67,10 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
 
   let skill: { executeToolCall?: (name: string, args: Record<string, unknown>, ctx: typeof context) => Promise<unknown> } | undefined;
   try {
-    if (tool === 'create_meeting' || tool === 'move_meeting') {
+    if (tool === 'create_meeting' || tool === 'move_meeting' || tool === 'delete_meeting') {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const m = require('../../skills/meetings/ops') as typeof import('../../skills/meetings/ops');
-      // SchedulingSkill is the direct-ops home for create_meeting / move_meeting / etc.
+      // SchedulingSkill is the direct-ops home for create_meeting / move_meeting / delete_meeting.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       skill = new (m as unknown as { SchedulingSkill: new () => any }).SchedulingSkill();
     } else if (tool === 'book_floating_block') {

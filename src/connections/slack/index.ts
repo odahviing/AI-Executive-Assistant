@@ -212,7 +212,7 @@ If you already have an email for the person, you don't need this tool to book a 
                 slack_id: p.slack_id,
                 name: p.name,
                 tz_iana: p.timezone || 'UTC',
-                tz_note: p.timezone && !p.state ? 'IANA timezone — NOT a city. Don\'t infer where they live.' : undefined,
+                tz_note: p.timezone && !p.state ? 'City not on file — TZ is reliable for time math; only ask for city when location/venue matters.' : undefined,
                 state: p.state || undefined,
                 email: p.email || undefined,
               }));
@@ -320,7 +320,7 @@ If you already have an email for the person, you don't need this tool to book a 
             return {
               ...m,
               tz_iana: timezone || 'UTC',
-              tz_note: timezone ? 'IANA timezone — NOT a city. Don\'t infer where they live.' : undefined,
+              tz_note: timezone ? 'City not on file — TZ is reliable for time math; only ask for city when location/venue matters.' : undefined,
               state: undefined,
             };
           });

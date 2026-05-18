@@ -142,6 +142,18 @@ Kinds:
 - calendar_conflict: the chosen slot went stale — offer fresh options. Payload: { coord_job_id, original_slot, conflict_reason, slots: [...] }.
 - freeform: catch-all yes/no/amend question. Payload: { question, context, subject }.
 
+DEFERRED ACTION (auto-execute on approve) — v2.8.6:
+When the approval is asking permission for a SPECIFIC tool call (e.g. "should I cancel Dirk's meeting?", "OK to book this off-hours?"), include payload.deferred_action so the resolver fires the action when the owner approves — instead of you having to call the tool yourself in a follow-up turn. Without this, "approved but never executed" turns happen (root of the 2026-05-18 Dirk incident).
+
+Shape: \`payload.deferred_action = { tool: "<tool-name>", args: <full-tool-args> }\`.
+Supported tools: \`create_meeting\`, \`move_meeting\`, \`book_floating_block\`, \`delete_meeting\`.
+
+Cancellations specifically: when you raise create_approval(kind=freeform) to ask "should I cancel X?", pass:
+  payload.deferred_action = { tool: "delete_meeting", args: { meeting_id, meeting_subject } }
+The resolver will call delete_meeting the instant the owner ✅'s the DM — no second turn needed.
+
+For policy_exception approvals raised after a rule_violation on create_meeting / move_meeting / book_floating_block, the orchestrator auto-stamps deferred_action from the prior rule_violation's hint — you don't need to set it yourself. Only freeform cancellation asks (which don't go through rule_violation) need you to pass deferred_action explicitly.
+
 Behavior:
 - DMs the owner immediately with ask_text. LLM-judged dedup against open requests for this (owner, requester) — if the same logical ask is already open, returns the existing one.
 - Default expiry is 2 owner-workdays (Fri/Sat skipped for this profile). Owner-silent past expiry → request closes as expired + owner gets a tombstone DM.

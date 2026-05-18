@@ -529,6 +529,57 @@ export function searchPeopleMemory(query: string): PersonMemory[] {
 }
 
 /**
+ * v2.8.6 — render the "people Maelle is interacting with right now" data
+ * block for the dynamic prompt section. Used by the colleague-path system
+ * prompt so Sonnet sees email / tz / gender as DATA (no rules, no "never
+ * ask"), and stops defensively asking the colleague for facts already on
+ * file. Pre-fix, the handler-side auto-fill at meetings/ops.ts:1175 covered
+ * the WRITE side (filling missing emails from people_memory at create_meeting
+ * time) but Sonnet's draft sometimes asked anyway because the prompt didn't
+ * surface known data — root of the 2026-05-18 Maayan ask.
+ *
+ * Scope: speakers Maelle can see THIS turn. The speaking colleague + any
+ * other MPIM members (when in MPIM). Owner excluded. The speaking colleague
+ * themselves IS included — Maelle may book FOR them, so their email/tz
+ * matter even though they typed the request.
+ *
+ * Missing fields render as "unknown" so Sonnet knows to ask when needed.
+ * Returns '' when nothing to surface (e.g. owner DM, all unknown lookups).
+ */
+export function formatThreadPeopleBlock(
+  speakerSlackId: string | undefined,
+  otherMemberIds: string[] | undefined,
+  ownerSlackId: string,
+): string {
+  const ids = new Set<string>();
+  if (speakerSlackId && speakerSlackId !== ownerSlackId) ids.add(speakerSlackId);
+  if (otherMemberIds) {
+    for (const id of otherMemberIds) {
+      if (id && id !== ownerSlackId) ids.add(id);
+    }
+  }
+  if (ids.size === 0) return '';
+
+  const lines: string[] = [];
+  for (const id of ids) {
+    const p = getPersonMemory(id);
+    if (!p) {
+      lines.push(`- ${id}: email=unknown, tz=unknown, gender=unknown`);
+      continue;
+    }
+    const email = p.email || 'unknown';
+    const tz = p.timezone
+      ? (p.state ? `${p.timezone} (${p.state})` : p.timezone)
+      : 'unknown';
+    const gender = p.gender && p.gender !== 'unknown' ? p.gender : 'unknown';
+    lines.push(`- ${p.name}: email=${email}, tz=${tz}, gender=${gender}`);
+  }
+  if (lines.length === 0) return '';
+  return `PEOPLE IN THIS THREAD — data Maelle has on file. Use it when booking; don't ask for fields shown here. Fields marked "unknown" need to be asked the FIRST time they become relevant (and ONLY when relevant — gender isn't a booking gate).
+${lines.join('\n')}`;
+}
+
+/**
  * Format recent contacts as a compact block for injection into the system prompt.
  * Excludes the owner themselves. Shows ALL known notes per person — each note is
  * short, and the richness of context is worth the tokens.
@@ -612,7 +663,7 @@ export function formatPeopleMemoryForPrompt(
     // unknown)" inline in the prompt data keeps the constraint visible
     // without needing a separate prompt rule.
     const tzPart = p.timezone
-      ? `, tz: ${p.timezone}${!p.state ? ' (timezone only, city unknown)' : ''}`
+      ? `, tz: ${p.timezone}${!p.state ? ' (city not on file — TZ is reliable for time math; only ask for city when location/venue matters)' : ''}`
       : '';
 
     const parts: string[] = [

@@ -86,6 +86,14 @@ export interface SkillContext {
    * carry 'email' / 'whatsapp' when those transports are added.
    */
   inboundConnectionId?: import('../connections/types').ConnectionId;
+  /**
+   * v2.8.6 — recent conversation history. Plumbed for the 103D/F deterministic
+   * owner-in-MPIM check: when a colleague-path tool call runs in an MPIM where
+   * the owner is present and the owner recently proposed the specific slot in
+   * chat, the handler treats his presence as the approval and bypasses the
+   * policy_exception escalation. Empty array when caller didn't pass history.
+   */
+  conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
 }
 
 /** All supported communication channels */

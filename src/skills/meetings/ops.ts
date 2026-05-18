@@ -642,7 +642,59 @@ export class SchedulingSkill {
           args.end_date as string,
           timezone,
         );
-        return processCalendarEvents(rawEvents, userEmail, context.profile.user.name, timezone, context.profile);
+        const processed = processCalendarEvents(rawEvents, userEmail, context.profile.user.name, timezone, context.profile);
+
+        // v2.8.6 (99C, Shape A) — when the query window comes back with no
+        // events on an owner-DM turn, enrich the result with recent
+        // delete_meeting + create_meeting audit entries that intersect the
+        // window. Closes the "did you cancel the meeting you booked with X?"
+        // amnesia (root of the 2026-05-18 Michal incident: get_calendar
+        // returned empty post-delete, Sonnet asserted "I don't have a record
+        // of booking a meeting with Michal" — the booking + delete were both
+        // in audit_log but never read). Owner-DM only — colleagues mustn't
+        // see audit traces of meetings they're not on.
+        const isOwnerDm = context.senderRole === 'owner' && context.isMpim !== true;
+        const eventCount = Array.isArray(processed) ? processed.length : 0;
+        if (isOwnerDm && eventCount === 0) {
+          try {
+            const { recentAuditEntries } = await import('../../db/client');
+            const audits = recentAuditEntries({ action: 'delete_meeting', windowDays: 7 });
+            const auditsCreate = recentAuditEntries({ action: 'create_meeting', windowDays: 7 });
+            // Filter to entries whose event_start_iso falls inside the queried window.
+            const windowStartMs = Date.parse(args.start_date as string);
+            const windowEndMs = Date.parse(args.end_date as string);
+            const inWindow = (e: { details: Record<string, unknown> | null }): boolean => {
+              const start = e.details?.event_start_iso;
+              if (typeof start !== 'string') return false;
+              const ms = Date.parse(start);
+              if (!Number.isFinite(ms)) return false;
+              return ms >= windowStartMs && ms <= windowEndMs + 24 * 60 * 60 * 1000;
+            };
+            const relevantDeletes = audits.filter(inWindow);
+            const relevantCreates = auditsCreate.filter(inWindow);
+            if (relevantDeletes.length > 0 || relevantCreates.length > 0) {
+              const fmt = (action: 'cancelled' | 'created', e: { timestamp: string; details: Record<string, unknown> | null }) => {
+                const subj = (e.details?.subject as string | undefined) ?? '(no subject)';
+                const start = (e.details?.event_start_iso as string | undefined) ?? '';
+                return `- ${action} "${subj}" (was on ${start.slice(0, 16) || 'unknown date'}) at ${e.timestamp}`;
+              };
+              const lines = [
+                ...relevantCreates.map(e => fmt('created', e)),
+                ...relevantDeletes.map(e => fmt('cancelled', e)),
+              ];
+              return {
+                events: processed,
+                _audit_context: `Calendar window is empty for the requested range, but Maelle has performed recent calendar actions inside this window. When the owner asks "did you do X" / "have you booked Y" / "what happened to Z", use this audit context BEFORE saying "I don't have a record":\n${lines.join('\n')}`,
+              };
+            }
+          } catch (err) {
+            logger.warn('get_calendar audit enrichment threw — returning bare events', {
+              err: String(err).slice(0, 200),
+            });
+          }
+        }
+
+        return processed;
       }
 
       case 'analyze_calendar': {
@@ -1161,6 +1213,83 @@ export class SchedulingSkill {
         const assistantEmail = context.profile.assistant.email;
         const ownerEmail = context.profile.user.email;
 
+        // v2.8.6 (102a) — sensitivity gate on colleague-path. The tool schema
+        // exposes `sensitivity` so Yael can ask "mark this private" at booking
+        // time (attendee right). But we don't trust an arbitrary colleague-
+        // path call to set sensitivity on a meeting they're NOT on — that
+        // would let a random colleague mark someone else's calendar event
+        // private. Gate handler-side: drop the arg unless the colleague's
+        // email is in args.attendees. Owner-path is trusted, no gate.
+        if (context.senderRole === 'colleague'
+            && args.sensitivity !== undefined
+            && args.sensitivity !== 'normal') {
+          let colleagueEmail: string | undefined;
+          try {
+            const { getPersonMemory } = await import('../../db');
+            const mem = getPersonMemory(context.userId);
+            colleagueEmail = mem?.email?.toLowerCase();
+          } catch (_) { /* fail open — treat as unknown */ }
+          const onAttendees = colleagueEmail && Array.isArray(attendees)
+            && attendees.some(a => (a.email ?? '').toLowerCase() === colleagueEmail);
+          if (!onAttendees) {
+            logger.info('create_meeting colleague-path — sensitivity dropped (colleague not on attendee list)', {
+              requester: context.userId,
+              requesterEmail: colleagueEmail,
+              requestedSensitivity: args.sensitivity,
+              attendeeEmails: Array.isArray(attendees) ? attendees.map(a => a.email) : [],
+            });
+            delete args.sensitivity;
+          }
+        }
+
+        // v2.8.6 — snap duration to profile.meetings.allowed_durations at the
+        // single chokepoint every booking path reaches (direct Sonnet call,
+        // outreach handoff, deferred-replay). Pre-fix, only the outreach
+        // handoff in coordinator.ts snapped; direct create_meeting calls
+        // shipped whatever start/end Sonnet passed (root of the Maayan 20-min
+        // booking landing at 12:15-12:35 off-alignment).
+        const startIsoIn = args.start as string | undefined;
+        const endIsoIn   = args.end   as string | undefined;
+        if (typeof startIsoIn === 'string' && typeof endIsoIn === 'string') {
+          const startMs = Date.parse(startIsoIn);
+          const endMs   = Date.parse(endIsoIn);
+          if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+            const requestedMin = Math.round((endMs - startMs) / 60000);
+            const allowed = context.profile.meetings.allowed_durations;
+            if (Array.isArray(allowed) && allowed.length > 0 && !allowed.includes(requestedMin)) {
+              const snapped = allowed.reduce((best, candidate) =>
+                Math.abs(candidate - requestedMin) < Math.abs(best - requestedMin) ? candidate : best,
+              allowed[0]);
+              const newEndIso = new Date(startMs + snapped * 60000).toISOString();
+              logger.info('create_meeting — snapped duration to allowed_durations', {
+                requested: requestedMin, snappedTo: snapped, allowed,
+                start: startIsoIn, endWas: endIsoIn, endNow: newEndIso,
+              });
+              args.end = newEndIso;
+            }
+          }
+        }
+
+        // v2.8.6 — temporary diagnostic for the "single-attendee Logistic"
+        // misclassification investigation (bug 98A on the 2026-05-18 wave).
+        // Logs the full args Sonnet passed so we can verify whether attendees
+        // are being dropped at the tool-call boundary or whether detectCategory
+        // is just counting non-owner attendees. Remove once the root is pinned.
+        logger.debug('create_meeting args (98A diagnostic)', {
+          subject: args.subject,
+          start: args.start,
+          end: args.end,
+          attendee_count: Array.isArray(attendees) ? attendees.length : 0,
+          attendee_emails: Array.isArray(attendees)
+            ? attendees.map(a => a?.email ?? a?.slack_id ?? a?.name ?? '?')
+            : [],
+          is_online: args.is_online,
+          category: args.category,
+          location: args.location,
+          relaxed: args.relaxed,
+          senderRole: context.senderRole,
+        });
+
         // v2.6.6 — port of v2.0.6 coord email auto-fill to create_meeting.
         // Sonnet sometimes drops the email field even though we have it in
         // people_memory (the 2026-05-10 Shayan MPIM incident: email was in
@@ -1335,6 +1464,39 @@ export class SchedulingSkill {
             });
           }
 
+          // v2.8.6 (103D/F) — owner-in-MPIM deterministic override. When the
+          // owner is present in this MPIM and recently proposed THIS exact
+          // slot in chat (24h or 12h time format match against owner-typed
+          // messages in the recent history), treat his presence as the
+          // approval. Set relaxed=true on the args so the downstream Guard B
+          // check and planMeeting both bypass soft rules (work hours, focus,
+          // floating blocks). Closes the path that today produces the leaked
+          // "Idan said yes on policy exception needs your input" MPIM message
+          // — when owner just typed "what about 10:30pm?" in the same thread,
+          // there's no reason to escalate it back to him as an approval.
+          if (context.isMpim === true && context.isOwnerInGroup === true && args.relaxed !== true) {
+            try {
+              const { ownerProposedSlot } = await import('../../utils/ownerProposedSlot');
+              const matched = ownerProposedSlot(
+                context.conversationHistory,
+                args.start as string,
+                context.profile.user.name,
+                timezone,
+              );
+              if (matched) {
+                logger.info('create_meeting colleague-path — owner-in-MPIM proposed this slot, applying relaxed=true', {
+                  start: args.start,
+                  subject: args.subject,
+                });
+                args.relaxed = true;
+              }
+            } catch (err) {
+              logger.warn('owner-in-MPIM check threw — proceeding without override', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          }
+
           // Guard A — every attendee must have an email so the calendar
           // invite can actually reach them. Internal attendees and the
           // requester themselves pass trivially; externals are also allowed
@@ -1373,7 +1535,16 @@ export class SchedulingSkill {
           }
 
           // Guard B — slot rule-compliance via findAvailableSlots narrow window.
-          try {
+          // v2.8.6 — skipped entirely when args.relaxed=true was set by the
+          // owner-in-MPIM override block above. Owner's presence is the
+          // authority; let planMeeting decide with allowRelaxed=true.
+          const skipGuardB = args.relaxed === true && context.isOwnerInGroup === true;
+          if (skipGuardB) {
+            logger.info('create_meeting colleague-path — skipping Guard B (owner-in-MPIM relaxed override)', {
+              start: args.start, subject: args.subject,
+            });
+          }
+          if (!skipGuardB) try {
             const startDt = DateTime.fromISO(args.start as string, { zone: timezone });
             const endDt = DateTime.fromISO(args.end as string, { zone: timezone });
             if (startDt.isValid && endDt.isValid) {
@@ -1471,6 +1642,15 @@ export class SchedulingSkill {
                   message: brokenRuleLabel === 'unknown'
                     ? `That time doesn't pass ${ownerFirst}'s scheduling rules and I can't tell exactly which one flagged it. Call create_approval(kind=policy_exception) — describe the slot honestly and let him decide.`
                     : `That time is ${brokenRuleLabel} for ${ownerFirst}. I can't book it on my own — call create_approval(kind=policy_exception) and pass the same phrase ("${brokenRuleLabel}") in ask_text so he knows what he's overriding.`,
+                  // v2.8.6 (103E wiring) — stamp the deferred_action_hint so
+                  // the orchestrator can auto-attach it to the follow-up
+                  // create_approval. Pre-fix this colleague-path early-reject
+                  // returned without a hint, so owner-approve resolved the
+                  // request with no replay — booking never fired, requester
+                  // got the "I'll take it from here" empty promise. Now the
+                  // same `payload.deferred_action` machinery that the
+                  // planMeeting-path refusals use also covers this path.
+                  _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
                 };
               }
             }
@@ -1802,7 +1982,16 @@ export class SchedulingSkill {
           // from profile rather than hardcoding any specific category name —
           // a future profile that wants a different category to be its
           // privacy marker just sets the flag in yaml.
+          // v2.8.6 — explicit args.sensitivity overrides the category-driven
+          // default. Lets owner OR an attendee ask "mark this private" at
+          // booking time. Default is undefined (Outlook normal); only set
+          // when the conversation asked for it (102a on the 2026-05-18 wave).
           sensitivity: (() => {
+            const explicit = args.sensitivity as string | undefined;
+            const ALLOWED = ['normal', 'personal', 'private', 'confidential'];
+            if (explicit && ALLOWED.includes(explicit) && explicit !== 'normal') {
+              return explicit as 'personal' | 'private' | 'confidential';
+            }
             const cat = (args.category as string | undefined) ?? null;
             if (!cat) return undefined;
             const match = (context.profile.categories ?? []).find(c => c.name === cat);

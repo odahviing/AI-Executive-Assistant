@@ -247,6 +247,7 @@ Rules for judging:
 - If the user explicitly named a weekday (e.g. "on Friday") and the reply uses the same weekday, that's fine.
 - A future-facing weekday far from now ("I'll ping you Monday" when today is Sunday) is NOT wrong — it refers to the next Monday, not a mismatched today.
 - Only flag mismatches where the weekday clearly refers to the day the user is asking about.
+- DO NOT flag a weekday that's already QUALIFIED BY A DATE next to it ("Tuesday 19 May", "Friday, June 7th", "Mon 20 Apr") — those are weekday+date pairs and a separate deterministic check handles them. If the weekday has a calendar date right next to it, it's NOT a bare weekday for the purposes of this task. Skip it.
 
 Output:
 {
@@ -281,8 +282,32 @@ Empty array if everything is consistent. Keep output minimal.`;
     }>;
   };
   if (!parsed.mismatches || parsed.mismatches.length === 0) return [];
+
+  // v2.8.6 — defensive post-filter. The LLM sometimes flags weekdays that
+  // are already qualified by a date right next to them (e.g. "Tuesday 19
+  // May"). Those are weekday+date pairs — the regex pass at the top of
+  // verifyDates already validates them. If the regex didn't fire a
+  // mismatch for THIS draft, any LLM mismatch on a qualified weekday is
+  // almost certainly a hallucination (root of the 2026-05-18 Michal
+  // incident: draft said "from Tuesday 19 May" which is correct; LLM
+  // returned correctWeekday=Monday; the spurious retry that followed
+  // deleted the wrong meeting).
+  const dateAdjacentRe = /\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i;
+
   return parsed.mismatches
     .filter(mm => mm.written_weekday && mm.correct_weekday && mm.written_weekday !== mm.correct_weekday)
+    .filter(mm => {
+      // Drop the mismatch when the excerpt clearly carries a date next to
+      // the weekday — that's not a bare weekday. The regex pass owns that
+      // case and would have caught any real mismatch.
+      if (mm.draft_excerpt && dateAdjacentRe.test(mm.draft_excerpt)) {
+        logger.info('dateVerifier: dropping LLM mismatch on qualified weekday (date adjacent)', {
+          excerpt: mm.draft_excerpt, llmCorrectWeekday: mm.correct_weekday,
+        });
+        return false;
+      }
+      return true;
+    })
     .map(mm => ({
       writtenWeekday: mm.written_weekday,
       writtenDate: mm.draft_excerpt ? `(${mm.draft_excerpt})` : '(bare weekday)',

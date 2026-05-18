@@ -111,6 +111,21 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
   // surfaces once with closure narration then drops.
   const expiresAtIso = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
+  // v2.8.6 — prepend the triggering verb so the brief shows WHAT was being
+  // attempted, not just the event subject. Pre-fix the brief read "still in
+  // flight on the Website Update calendar work" — owner didn't recognize
+  // "Website Update" as the calendar subject for his recurring Onn meeting,
+  // so it read as an unrelated topic. "In flight: moving Website Update"
+  // makes the operation explicit.
+  const verbByTool: Record<string, string> = {
+    find_available_slots: 'rescheduling',
+    create_meeting: 'booking',
+    move_meeting: 'moving',
+    delete_meeting: 'cancelling',
+  };
+  const verb = verbByTool[input.toolName] ?? 'updating';
+  const subjectLine = `In flight: ${verb} ${subject}`;
+
   try {
     createRequest({
       ownerUserId: input.ownerUserId,
@@ -118,8 +133,8 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
       initiatedByRole: 'owner',
       kind: 'follow_up',
       subkind: 'in_flight_action',
-      subject: `In flight: ${subject}`,
-      description: `Calendar work for "${subject}" started this turn and didn't close — tracking until resolved.`,
+      subject: subjectLine,
+      description: `Calendar work — ${verb} "${subject}" — started this turn and didn't close. Tracking until resolved.`,
       state: 'in_flight',
       informed: 1,  // owner asked for it; he already knows about it
       originChannel: input.channel,

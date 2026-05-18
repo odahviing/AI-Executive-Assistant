@@ -8,6 +8,24 @@ description: |
 
 Use this skill when the owner wants to walk through open GitHub bugs in this repo. Strict propose-first flow — plan thoroughly, fix only after approval.
 
+## The five rules that override everything else
+
+These came out of the 2026-05-18 incident where the agent built five fixes the owner had explicitly rejected. Read these before doing anything else:
+
+1. **Build signals are EXACT and EXPLICIT, per bug.** Only these words mean "write code on this specific bug":
+   - "fix it" / "fix bug N" / "go build that" / "land it" / "do it" / "build it" — applied to a SPECIFIC bug
+   - The owner saying "yes" / "ok" / "go" with no bug reference is ambiguous; ask "yes on N specifically?"
+   - **NOT build signals**: "No, I want X different" (this is a REJECTION asking for a revised proposal), "explain better" (this is asking for clarity, not code), "are you sure?" (this is challenging the proposal), "start with that" after rejections (this means "start by re-proposing those correctly")
+   - When in doubt: do NOT build. The cost of waiting for confirmation is small; the cost of unwanted code is large.
+
+2. **Do reads without asking.** `gh issue view`, `node scripts/db-query.cjs`, `git log`, log file grep, Graph API reads via a temp script — these are free. Never ask "want me to verify X" — verify, then report. The owner is tired of granting permission for basic investigation.
+
+3. **No tier numbering or skill jargon when talking to the owner.** Don't say "tier 3 fix" / "small `if`" / "tier 4 helper". Describe the fix shape concretely: which file, which function, what's added vs deleted, in plain English.
+
+4. **Regex-based scaling is suspect.** If a fix relies on regex to catch open-ended natural language input (intent, addressee, "did you X" phrasing, etc.), pause and propose alternatives — DB-side helpers, tool-result enrichment, intent classifier extensions, code-side determinism on the producer end. Regex over user input rarely scales to Hebrew, multi-clause sentences, indirect phrasings.
+
+5. **No new prompt rules without explicit owner approval.** The project direction is `code over prompt`. v2.8.5 just rolled back Module F because broad LLM-judge layers were creating more problems than they solved. Existing prompt rules can sometimes be tightened (delete-don't-add). New ones are last resort. If proposing a prompt edit, say so clearly and wait for explicit OK.
+
 ## Procedure
 
 ### 1. Pull the open bugs (Bug-labeled only)
@@ -87,12 +105,18 @@ Owner fixes area after area, then bundles everything into ONE final commit + ver
 ## Anti-patterns
 
 - ❌ Auto-fixing during the bug run. Propose first; owner says go before any code changes.
+- ❌ Treating "No, I want X different" or "explain better" as a build signal. Those are revision requests — write a new proposal, do NOT touch code.
+- ❌ Building MULTIPLE bugs from a single "go" / "ok" without per-bug confirmation. Each bug needs its own explicit instruction.
 - ❌ Assuming the root cause without reading code or logs. Prove it.
+- ❌ Asking permission for read-only investigation (Graph queries, DB SELECTs, log greps, yaml inspection). Just do them.
+- ❌ Using tier numbering ("tier 3 fix") in owner-facing summaries. Describe shape concretely.
 - ❌ Reaching for a new tool / new prompt rule when a small edit to existing surface would do. Small over big.
+- ❌ Regex-based pattern matching on open-ended natural-language input as a primary mechanism. Doesn't scale to Hebrew, multi-clause sentences, indirect phrasings.
 - ❌ Stacking a new fix on top of a rotten prior fix without removing the prior one.
 - ❌ Grouping bundles by severity instead of code area.
 - ❌ Skipping the reappearance check on bugs that look "new" — many aren't.
 - ❌ Bumping version per bundle. One bump at the end of the whole run.
+- ❌ Writing "probably" / "likely" / "I think" with a confident shape underneath. Either prove it or say "uncertain" — never confident-wrong.
 
 ## Closing the run — summary table FIRST
 
@@ -114,3 +138,20 @@ The "Summary" column is one to two short lines — owner reads this to remember 
 ## When you're confused
 
 If a bug doesn't fit any pattern (mislabeled feature request, two issues describing the same atomic bug, scope ambiguity), stop and ask the owner before guessing. Mislabels are part of the conversation.
+
+## Per-atomic-bug report format
+
+For every atomic bug, write the report in this exact shape — no shortcuts:
+
+```
+### <id> — <one-line title>
+- **What happened**: facts from logs / chat / DB. Quote actual phrasing where it matters.
+- **What should have happened**: the contract, in one sentence.
+- **Where the gap is**: file:line, verified against current files on disk (not memory).
+- **Reappearance**: prior fix references from git log + memory files. If new, say "new pattern".
+- **Suggested fix**: specific shape — which function, what's added/deleted, no jargon.
+- **Tradeoffs / open questions**: anything the owner needs to decide before this can ship.
+- **Broader process broken** (optional): which architectural surface this lives in — approval lifecycle / retry isolation / coord handoff / channel routing / etc. The owner cares about the architectural thread, not just the single fix.
+```
+
+Then the summary table at the end. Then **stop** — wait for per-bug build instructions.

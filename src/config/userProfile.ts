@@ -549,6 +549,7 @@ export function loadUserProfile(profileName: string): UserProfile {
     office_days: { days: string[]; hours_start?: string; hours_end?: string };
     home_days:   { days: string[]; hours_start?: string; hours_end?: string };
     work_hours?: Record<string, string[]>;
+    night_shift?: { typical_day?: string; hours_start?: string; hours_end?: string };
   };
 
   if (!sched.work_hours || Object.keys(sched.work_hours).length === 0) {
@@ -575,6 +576,29 @@ export function loadUserProfile(profileName: string): UserProfile {
       );
     }
     sched.work_hours = wh;
+  }
+
+  // v2.8.6 — auto-merge `night_shift` into the day's work_hours when the
+  // typical_day is set. Before this, the night-shift block was a separate
+  // concept used only by overlap/double-booking checks; the slot finder had
+  // no knowledge of it, so a 22:30 Tuesday ask got rejected as
+  // outside_owner_work_hours even though the owner's profile clearly defines
+  // Tuesday as a night-shift day. Owner had to manually duplicate the range
+  // into schedule.work_hours.Tuesday — the v2.8.1 "owner action" that never
+  // got committed. With this synthesis it's automatic. If yaml also has an
+  // explicit work_hours entry for the same day, the night_shift range is
+  // APPENDED (split-shift), not replaced — so day + night both work.
+  // hours_end="00:00" is treated as "23:59" so isSlotInWorkHours doesn't
+  // wrap around midnight (we never bookwork past local midnight).
+  const ns = sched.night_shift;
+  if (ns?.typical_day && ns.hours_start && ns.hours_end) {
+    const day = ns.typical_day;
+    const endNormalized = ns.hours_end === '00:00' ? '23:59' : ns.hours_end;
+    const range = `${ns.hours_start}-${endNormalized}`;
+    const existing = sched.work_hours[day] ?? [];
+    if (!existing.includes(range)) {
+      sched.work_hours[day] = [...existing, range];
+    }
   }
 
   // Strip legacy fields so callers can't accidentally read stale hours.
