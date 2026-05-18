@@ -348,22 +348,27 @@ export async function setAssistantStatus(
   botToken: string,
   params: { channelId: string; threadTs: string; status: string },
 ): Promise<void> {
+  // v2.8.7 — surface the per-tool status as the loading_messages text itself
+  // (the TOP row). Per-tool status reads like "On it" / "Booking it" /
+  // "Looking at your calendar" — that's what the owner wants visible.
+  // Pre-fix tries:
+  //   v2.7.5 → '' (Slack rejected empty)
+  //   v2.8.4 → 'Working' (worked, but generic word on top)
+  //   v2.8.6 → zero-width space (collapsed the WHOLE indicator including the
+  //            bottom status — owner saw only the avatar+name)
+  // This version puts the meaningful per-tool string in the visible row.
+  // When params.status is empty (rare — e.g. observation-only tools), fall
+  // back to 'Working' so we don't trip Slack's min-length check.
+  const visible = params.status && params.status.trim().length > 0
+    ? params.status
+    : 'Working';
   try {
     await app.client.apiCall('assistant.threads.setStatus', {
       token: botToken,
       channel_id: params.channelId,
       thread_ts: params.threadTs,
       status: params.status,
-      // Pass a single non-empty loading_message to suppress Slack's built-in
-      // rotating defaults ("Gathering information…", "Reviewing findings…",
-      // "Summarizing findings…", "Finding answers…") while keeping the bottom
-      // status (params.status) visible.
-      //
-      // v2.8.6 — drop the visible "Working" word. Pass a zero-width space:
-      // Slack's min-length check passes (length=1), but the rendered glyph is
-      // invisible, so only the bottom status (params.status) shows. If Slack
-      // rejects U+200B too, swap back to ['Working'] — that's v2.8.4 state.
-      loading_messages: ['​'],
+      loading_messages: [visible],
     });
   } catch (err) {
     // Don't escalate — status is UX polish. If it fails (wrong thread type,
