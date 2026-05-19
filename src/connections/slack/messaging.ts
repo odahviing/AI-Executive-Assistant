@@ -348,20 +348,23 @@ export async function setAssistantStatus(
   botToken: string,
   params: { channelId: string; threadTs: string; status: string },
 ): Promise<void> {
-  // v2.8.7 — back to v2.8.4 behavior ('Working' in loading_messages, per-tool
-  // string in status). Two prior attempts to surface only the per-tool text:
-  //   v2.8.6  → zero-width space → collapsed the whole indicator
-  //   v2.8.6+ → per-tool string in both → owner saw no top text, status only
-  // Slack's rendering of these two fields is inconsistent across clients;
-  // chasing it via API config isn't working. Accept "Working" / status as
-  // the stable shape. Owner can revisit when Slack ships better docs.
+  // v2.8.7 — swap the two text slots. Owner direction:
+  //   TOP (loading_messages): the per-tool status ("On it",
+  //                            "Opening calendar", "Booking it", …)
+  //   BOTTOM (status):         a static "writing…" — same shape as
+  //                            Slack's normal user-typing indicator
+  // Fallback when params.status is empty (rare — observation-only tools
+  // that intentionally clear): 'Working' to keep min-length safe.
+  const topText = params.status && params.status.trim().length > 0
+    ? params.status
+    : 'Working';
   try {
     await app.client.apiCall('assistant.threads.setStatus', {
       token: botToken,
       channel_id: params.channelId,
       thread_ts: params.threadTs,
-      status: params.status,
-      loading_messages: ['Working'],
+      status: 'is typing…',
+      loading_messages: [topText],
     });
   } catch (err) {
     // Don't escalate — status is UX polish. If it fails (wrong thread type,

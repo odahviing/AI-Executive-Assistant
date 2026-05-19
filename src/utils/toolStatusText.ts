@@ -15,69 +15,84 @@
  * Used by the orchestrator before each tool call. Fire-and-forget; never
  * blocks tool execution.
  */
+// Strings may contain `{owner}` — substituted with the owner's first name
+// at render time so the status reads natural for any deployment.
+// Example: `Checking with {owner}` → `Checking with Idan`.
 export const TOOL_STATUS_TEXT: Record<string, string> = {
   // Calendar — reading
-  get_calendar: 'Checking calendar',
-  analyze_calendar: 'Reviewing calendar',
-  get_free_busy: 'Checking availability',
-  find_available_slots: 'Looking for a time',
-  check_join_availability: 'Checking who can join',
-  check_calendar_health: 'Reviewing calendar',
+  get_calendar: 'Checking the calendar',
+  analyze_calendar: 'Going through the week',
+  get_free_busy: "Checking who's free",
+  find_available_slots: 'Finding a time',
+  check_join_availability: 'Checking who can make it',
+  check_calendar_health: 'Reviewing the calendar',
 
   // Calendar — writing
-  create_meeting: 'Booking it',
-  move_meeting: 'Moving the meeting',
+  create_meeting: 'Setting up the meeting',
+  move_meeting: 'Rescheduling the meeting',
   update_meeting: 'Updating the meeting',
-  delete_meeting: 'Cancelling it',
-  book_floating_block: 'Closing the time',
-  set_event_category: 'Tagging the meeting',
+  delete_meeting: 'Cancelling the meeting',
+  book_floating_block: 'Blocking the time',
+  set_event_category: 'Sorting the meeting',
 
   // Coordination
-  coordinate_meeting: 'Reaching out to find a time',
-  cancel_coordination: 'Calling it off',
-  finalize_coord_meeting: 'Locking it in',
+  coordinate_meeting: 'Setting up a time',
+  cancel_coordination: 'Calling off the meeting',
+  finalize_coord_meeting: 'Confirming the time',
 
   // Messaging / lookups
-  message_colleague: 'Reaching out',
-  find_slack_user: 'Finding the right contact',
+  message_colleague: 'Sending the message',
+  find_slack_user: 'Finding the person',
   find_slack_channel: 'Finding the channel',
 
-  // Tasks / approvals / brief
-  create_task: 'Noting it down',
+  // Tasks
+  create_task: 'Adding to the list',
   update_task: 'Updating the task',           // v2.9 — merged edit + cancel
-  get_my_tasks: 'Pulling tasks',
-  create_approval: 'Flagging it',
-  resolve_approval: 'Closing it out',
-  list_pending_approvals: 'Checking what’s pending',
-  get_briefing: 'Pulling the brief',
-  send_briefing_now: 'Sending the brief',
+  get_my_tasks: 'Checking my list',
+
+  // Approvals — owner-name substitution
+  create_approval: 'Checking with {owner}',
+  resolve_approval: 'Closing the loop',
+  list_pending_approvals: "Checking what's open",
+
+  // Brief
+  get_briefing: 'Reading the summary',
+  send_briefing_now: 'Sending the summary',
 
   // Routines. v2.9 — 4 tools merged into manage_routine.
-  manage_routine: 'Managing the routine',
+  manage_routine: 'Updating the routine',
 
-  // Knowledge / web / summary
-  manage_knowledge: 'Thinking',               // v2.9 — get + ingest merged
+  // Knowledge / web
+  manage_knowledge: 'Going over my notes',    // v2.9 — get + ingest merged
   web_search: 'Searching the web',
   web_extract: 'Reading the page',
-  share_summary: 'Sharing the summary',
-  update_summary_draft: 'Tweaking the draft',
+
+  // Meeting summary
+  share_summary: 'Sending the recap',
+  update_summary_draft: 'Editing the recap',
 
   // Preferences (v2.9 — merged)
-  manage_preference: 'Memorizing it',
+  manage_preference: 'Saving the preference',
 
   // Calendar issues (v2.9 — merged)
-  manage_calendar_issue: 'Checking calendar issues',
+  manage_calendar_issue: 'Sorting the calendar',
 
   // Venues (v2.9)
-  find_venue: 'Looking for a place',
-  rank_venue: 'Updating your list',
+  find_venue: 'Finding a place',
+  rank_venue: 'Updating places list',
 };
 
 /**
  * Get the status text for a tool. Returns '' for unmapped tools — that
  * actively clears Slack's auto-default while observation / silent tools
  * run, so the panel stays quiet instead of showing "Gathering information…"
+ *
+ * `ownerFirstName` substitutes `{owner}` placeholders in the text (e.g.
+ * "Checking with {owner}" → "Checking with Idan"). Falls back to "the
+ * owner" when not provided.
  */
-export function statusForTool(toolName: string): string {
-  return TOOL_STATUS_TEXT[toolName] ?? '';
+export function statusForTool(toolName: string, ownerFirstName?: string): string {
+  const raw = TOOL_STATUS_TEXT[toolName] ?? '';
+  if (!raw.includes('{owner}')) return raw;
+  return raw.replace(/\{owner\}/g, ownerFirstName ?? 'the owner');
 }

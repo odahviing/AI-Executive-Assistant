@@ -1,6 +1,6 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v2.8.6** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v2.9.0** — check `package.json` if unsure; it is the source of truth.
 
 Read these two memory files at session start:
 - `C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/project_overview.md`
@@ -28,6 +28,19 @@ Every bug report follows the same four steps:
 4. **Build.** Only after explicit approval. Run typecheck. Stop. Summarize the uncommitted tree.
 
 **Never bundle multiple fixes without owner saying so.** Default version bump is PATCH unless the owner explicitly says minor.
+
+### The build-signal trap (read this, you WILL fail it otherwise)
+
+The single most-recurring drift pattern: the agent treats "owner is reporting/talking about bugs" as approval to fix them. **It is not.** During the 2026-05-19 session the agent broke this rule four times in one day — three calendarHealth fixes during wrap, then three brief-side fixes immediately after. Each time owner pushed back. Each time the agent had to revert.
+
+Recognize the trap. Frustration, ALL-CAPS, "this is disappointing", "still broken", "yesterday's wave didn't fix it" — these are **diagnostic signals**, not build signals. They mean **propose more thoroughly**, not **start typing code**.
+
+Hard rules:
+- **Only these are build signals**: "fix it" / "fix N" / "go build that" / "land it" / "do it" / "do A" / "build B" — applied to a SPECIFIC bug or fix shape. Never "OK", "yes", "go ahead" with no referent — those are ambiguous, ask.
+- **NOT build signals**: bug reports, frustration, screenshots, "this should have been fixed yesterday", "doesn't make sense", "isn't it X?". When in doubt, propose and wait.
+- **When the owner stops a wrap-up to flag bugs**: don't try to "fold them into the wrap". The wrap is paused. New bugs → new propose-only pass. Bundle later only on explicit "OK, wrap with these too".
+- **Reads are free, writes are not**: `gh issue view`, DB queries, log greps, code reads — never ask permission. But code edits, even small, need explicit per-bug build signal.
+- **Reverting your own unapproved fixes is cheap; living with rejected ones is expensive**. If you've already typed code without approval: stop, list what you wrote, offer per-fix revert, do not commit.
 
 ---
 
@@ -70,9 +83,35 @@ Procedures the owner runs frequently are wired as skills under `.claude/skills/`
 
 ---
 
-## Where we are — v2.8.6 shipped, real-day bug wave closing 5 GitHub bugs + Mayrav incident
+## Where we are — v2.9.0 shipped, BookingRequest normalizer (Phase A) + calendar-health morning-brief fixes
 
-**Current phase**: 2026-05-18 real-day wave. Five GitHub bugs closed in one patch (#98 / #99 / #100 / #101 / #102) plus the Mayrav 22:30 MPIM incident (no ticket — referenced as #103). The headline chain: Dirk's freeform-cancel approval was ✅'d by owner but never executed (`deferred_action` replay only covered create/move/book_floating_block, not delete) → 3h later Sonnet re-fired the cancel during an unrelated turn → dateVerifier returned a false-positive weekday mismatch → retry with full tool access deleted the wrong event. Plus the `detectCategory` "owner omitted from attendees" undercount that made every Maelle-booked meeting look like a single-attendee personal block. Plus the `deleteMeeting` bare-DELETE that left Dirk's attendee copy orphaned. Plus Mayrav's owner-in-MPIM 22:30 proposal getting routed through a `policy_exception` approval that leaked "Idan said yes on policy exception needs your input" into MPIM.
+**Current phase**: First minor in a month. Two architectural moves bundled with the 2026-05-19 morning-brief bug-wave.
+
+**Phase A — `BookingRequest` normalizer** (`src/skills/meetings/bookingRequest.ts`): every meeting tool's handler entry now flows raw Sonnet args through `normalizeBookingRequest()` before reaching `planMeeting`. The normalizer is the single chokepoint that validates owner-in-participants invariant, snaps duration, gates sensitivity for colleague-path attendee-membership, gates relaxed by senderRole + owner-in-MPIM-proposes detection + deferred-replay context, pre-computes cross-cutting signals (ownerProposedThisSlotInMpim, recentBlockDeletes). Wired for `create_meeting` + `delete_meeting`. `planInputFromBookingRequest()` adapter bridges to the legacy `PlanMeetingInput` shape so planMeeting internals stay untouched. The owner-in-participants invariant flows into planMeeting — `detectCategory` updated; "+1 for owner" math removed. `scripts/simulate-booking-request.ts` has 9 scenarios / 21 assertions, runs offline in <2s. Phase B (deferred) consolidates handler-side duplicate prep, rule registry, migrates move_meeting + coord + calendarHealth's two planMeeting callers.
+
+**Phase A motivation**: yesterday's v2.8.6 bug wave touched 6 layers (Sonnet args, orchestrator auto-stamp, handler entry, planMeeting, Graph layer, parallel retry systems) because each layer had its own ad-hoc contract with Sonnet's input shape. The normalizer collapses contract drift into one place. Future booking-orbit bugs become one line in one file.
+
+**Calendar-health fixes (5 bugs from the 2026-05-19 morning brief)** — all in `src/skills/calendarHealth.ts`, one file:
+- `oof_conflict` skips owner-only events on his own OOF day (Bookcamp solo-attendee no longer flagged as clash with Holiday Block).
+- `oof_conflict` auto-move honors `initiateCoordination` return: `'no_participants'` flips to `fix_failed` with honest reason (was: lying "kicked off a move" when no coord started).
+- `missing_floating_block` detection respects recent owner deletes (was: brief surfaced "no lunch on Thursday" daily even though active-mode auto-book correctly skipped).
+- `busy_day` math is per-window aware on multi-window days (was: bounding-box math counted mid-window gap as both busy and free → impossible "0 free time + 110-min gap" narration).
+- (Phase A's owner-in-participants invariant + detectCategory dedup closes the "+1 for owner" math regression class.)
+
+**v2.9.0 highlights** (top-level):
+
+**v2.8.6 was**: 2026-05-18 real-day wave. Five GitHub bugs closed in one patch (#98 / #99 / #100 / #101 / #102) plus the Mayrav 22:30 MPIM incident (no ticket — referenced as #103). The headline chain: Dirk's freeform-cancel approval was ✅'d by owner but never executed (`deferred_action` replay only covered create/move/book_floating_block, not delete) → 3h later Sonnet re-fired the cancel during an unrelated turn → dateVerifier returned a false-positive weekday mismatch → retry with full tool access deleted the wrong event. Plus the `detectCategory` "owner omitted from attendees" undercount that made every Maelle-booked meeting look like a single-attendee personal block. Plus the `deleteMeeting` bare-DELETE that left Dirk's attendee copy orphaned. Plus Mayrav's owner-in-MPIM 22:30 proposal getting routed through a `policy_exception` approval that leaked "Idan said yes on policy exception needs your input" into MPIM.
+
+**v2.9.0 top-level items**:
+- New `src/skills/meetings/bookingRequest.ts` — `BookingRequest` interface + `normalizeBookingRequest()` function. Validates + normalizes raw Sonnet args into one typed shape before `planMeeting` sees them.
+- `planInputFromBookingRequest()` adapter in `planMeeting.ts` — maps BookingRequest to legacy PlanMeetingInput. Phase B will flip planMeeting's signature; Phase A keeps it surgical.
+- `planMeeting` enforces owner-in-participants invariant (auto-injects for legacy callers). All `+1 for owner` math removed; reads `participants.length` directly. `nonOwnerParticipants` filter for the few places that need it.
+- `detectCategory` updated to dedupe-owner — handles the new "owner already in attendees" contract from the normalizer without double-listing.
+- 5 calendar-health fixes (one file, `src/skills/calendarHealth.ts`): oof_conflict skips owner-only events; oof auto-move honors initiateCoordination return; missing_floating_block detection respects recent owner deletes; busy_day math iterates per-window; (BookingRequest fix above closes the +1-for-owner regression class).
+- **Y.1** — get_calendar tool-result-side annotation on colleague-path 1:1 DM: wraps events with `_colleague_view: true` + `_enumeration_rule` instructing Sonnet not to list more than one meeting back to a colleague. Closes 2026-05-19 Yael chat leak (enumerated 6 internal meetings incl. "Bank Hapoalim in Ramat Gan").
+- **Y.2** — Module D auto-resolve precondition at `utils/threadBoundApprovalAutoResolve.ts`: skip auto-resolve when the approval has neither `deferred_action` nor a slot_pick / calendar_conflict subkind. Generalizes 103e: deterministic auto-resolve is safe ONLY when there's a concrete replay path; otherwise Sonnet must interpret owner's reply and execute. Closes 2026-05-19 Yael Thursday "I'll take it from here" empty-promise pattern.
+- Slack indicator: `status: 'is typing…'` (was `'typing…'`) — Slack renders avatar+name above, so the prior value read "Maelle typing…" missing the verb.
+- `scripts/simulate-booking-request.ts` — offline 9-scenario / 21-assertion verifier for the normalizer. Runs in <2s without Slack or Graph.
 
 **v2.8.6 highlights** (18 items bundled):
 - **`detectCategory` injects owner into attendee count + list.** Root of the 2026-05-18 morning "single-attendee Logistic" cascade. Sonnet's create_meeting tool description treats `attendees` as the OTHER people; classifier saw 1 attendee and tagged Logistic, which has `no_default_location` → "online or in person?" defensive ask + rebalance skipped lunch move. Fix at `skills/meetings/detectCategory.ts` — truthful injection, classifier now picks `Meeting`. Verified offline via new `scripts/simulate-create-meeting-args.ts`.

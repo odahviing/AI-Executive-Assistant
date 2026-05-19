@@ -364,7 +364,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       void setAssistantStatus(input.app, input.profile.assistant.slack.bot_token, {
         channelId: input.channelId,
         threadTs: input.threadTs,
-        status: 'On it',
+        status: 'Thinking',
       });
     } catch (_) { /* helper failure is non-fatal */ }
   }
@@ -1328,7 +1328,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           void setAssistantStatus(input.app, input.profile.assistant.slack.bot_token, {
             channelId: input.channelId,
             threadTs: input.threadTs,
-            status: statusForTool(toolUse.name),
+            status: statusForTool(toolUse.name, profile.user.name.split(' ')[0]),
           });
         } catch (_) { /* helper failure is non-fatal */ }
       }

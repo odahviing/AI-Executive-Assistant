@@ -694,6 +694,26 @@ export class SchedulingSkill {
           }
         }
 
+        // v2.9.0 (bug Y.1) — colleague-path enumeration guard. When a
+        // colleague (not in MPIM with owner present) reads the owner's
+        // calendar, wrap the events with a `_colleague_view` flag + a
+        // hard-rule note so Sonnet does NOT enumerate subjects/companies/
+        // locations back to the requester. Closes the 2026-05-19 Yael chat
+        // leak — Sonnet listed 6 items including "Bank Hapoalim in Ramat
+        // Gan" in response to "what can move?". The colleague-block
+        // prompt rule's "title + time = fine" was over-permissive for the
+        // "show me the day" pattern; this tool-side guard keeps the data
+        // available for Maelle's OWN reasoning (e.g. which slot to
+        // propose) while telling Sonnet to summarize, not enumerate.
+        const isColleaguePath = context.senderRole === 'colleague' && context.isOwnerInGroup !== true;
+        if (isColleaguePath) {
+          return {
+            events: processed,
+            _colleague_view: true,
+            _enumeration_rule: 'You are reading the owner\'s calendar on behalf of a colleague. Do NOT list more than one specific meeting back to them. "He has a 1:1 at 11am" is fine when proposing a slot; "he has Isaac at 10:45, Elan at 11:30, Bank Hapoalim at 12:30..." is a privacy leak. Default response when the day is busy: "He\'s fully booked Thursday." If they push for which meetings could move, escalate via create_approval(kind=freeform) asking the owner — DO NOT enumerate options to the colleague yourself.',
+          };
+        }
+
         return processed;
       }
 
@@ -1212,6 +1232,20 @@ export class SchedulingSkill {
         const attendees = args.attendees as Array<{ name?: string; email?: string; slack_id?: string }>;
         const assistantEmail = context.profile.assistant.email;
         const ownerEmail = context.profile.user.email;
+
+        // v2.9.0 — BookingRequest normalization. Single validated pre-data
+        // shape that planMeeting consumes (replacing ad-hoc PlanMeetingInput
+        // construction below). The normalizer is idempotent: it reads from
+        // args (after the legacy in-handler prep below runs), produces a
+        // strict BookingRequest with owner-in-participants invariant +
+        // snapped duration + gated sensitivity + gated relaxed + cross-
+        // cutting signals (ownerProposedThisSlotInMpim, recentBlockDeletes,
+        // …). Phase A keeps the legacy handler prep alongside; Phase B (or
+        // a follow-up commit) consolidates by reading req.X downstream and
+        // removing the duplicate handler-side blocks. Owner direction was
+        // "smaller move first" — this is that smaller move.
+        const { normalizeBookingRequest } = await import('./bookingRequest');
+        const { planInputFromBookingRequest } = await import('./planMeeting');
 
         // v2.8.6 (102a) — sensitivity gate on colleague-path. The tool schema
         // exposes `sensitivity` so Yael can ask "mark this private" at booking
@@ -1783,22 +1817,16 @@ export class SchedulingSkill {
         // rule application as ONE coherent decision. Output drives the rest
         // of the booking.
         const { planMeeting } = await import('./planMeeting');
-        const plan = await planMeeting({
-          profile: context.profile,
-          intent: 'new_booking',
-          initiator: context.senderRole === 'colleague' ? 'colleague' : 'owner',
-          initiatorSlackId: context.userId,
-          slotStartIso: args.start as string,
-          slotEndIso: args.end as string,
-          subject: args.subject as string,
-          body: args.body as string | undefined,
-          participants: attendees.map(a => ({
-            email: a.email, name: a.name, slack_id: a.slack_id,
-          })),
-          locationHint: args.location as string | undefined,
-          isOnlineHint: typeof args.is_online === 'boolean' ? args.is_online : undefined,
-          allowRelaxed: args.relaxed === true,
-        });
+        // v2.9.0 — build the normalized BookingRequest and feed it through
+        // planInputFromBookingRequest. Replaces the previous ad-hoc
+        // PlanMeetingInput construction. Args are passed AS-IS to the
+        // normalizer — the legacy in-handler prep above already applied
+        // (duration snap, sensitivity gate, email auto-fill); the
+        // normalizer reads those mutated values and produces the canonical
+        // shape. See bookingRequest.ts for the invariants the normalizer
+        // enforces.
+        const bookingRequest = await normalizeBookingRequest('create_meeting', args, context);
+        const plan = await planMeeting(planInputFromBookingRequest(bookingRequest, context.profile));
         logger.info('create_meeting — planMeeting verdict', {
           action: plan.action, start: args.start, subject: args.subject,
           reasoning: 'reasoning' in plan ? plan.reasoning : undefined,
@@ -2835,16 +2863,20 @@ export class SchedulingSkill {
         //   - owner is attendee + asker is someone ELSE (incl. owner himself) →
         //     decline on owner's side + auto-DM the organizer politely
         try {
-          const { planMeeting } = await import('./planMeeting');
-          const decision = await planMeeting({
-            profile: context.profile,
-            intent: 'cancel',
-            initiator: context.senderRole === 'colleague' ? 'colleague' : 'owner',
-            initiatorSlackId: context.userId,
-            existingEventId: args.meeting_id as string,
-            subject: args.meeting_subject as string | undefined,
-            participants: [],
-          });
+          const { planMeeting, planInputFromBookingRequest } = await import('./planMeeting');
+          const { normalizeBookingRequest } = await import('./bookingRequest');
+          // v2.9.0 — normalized BookingRequest for the cancel path. Owner-
+          // in-participants invariant lets findMeetingOwner / decline-and-
+          // relay branch reason over a uniform shape. The cancel intent
+          // doesn't carry a slot or other attendees by default — the
+          // normalizer + planMeeting handle the absent fields gracefully.
+          const cancelReq = await normalizeBookingRequest('delete_meeting', args, context, { intent: 'cancel' });
+          // Carry the subject through for narration (delete_meeting passes
+          // meeting_subject, not subject — normalizer doesn't auto-fetch it).
+          if (!cancelReq.subject && typeof args.meeting_subject === 'string') {
+            cancelReq.subject = args.meeting_subject;
+          }
+          const decision = await planMeeting(planInputFromBookingRequest(cancelReq, context.profile));
           if (decision.action === 'refuse_not_owners') {
             const ownerFirst = context.profile.user.name.split(' ')[0];
             const orgName = decision.organizerName ?? decision.organizerEmail ?? 'the organizer';

@@ -49,26 +49,27 @@ export async function detectCategory(input: DetectCategoryInput): Promise<Detect
     return `${idx + 1}. ${c.name} — ${c.description.replace(/\n/g, ' ').trim()}${tagPart}`;
   }).join('\n');
 
-  // v2.8.6 — include the owner in the headcount and the attendees list.
-  // Sonnet's create_meeting tool description treats `attendees` as "the OTHER
-  // people", so input.attendees omits the owner — passing `[Michal]` for a
-  // 2-person meeting. Pre-fix, detectCategory's prompt told the classifier
-  // "Attendee count: 1" + listed Michal only → classifier read it as a
-  // single-attendee personal block → category=Logistic. Root cause of the
-  // 2026-05-18 Michal "Sales Commissions" miscategorization. Owner is
-  // ALWAYS an attendee of a meeting on his calendar; injecting him here is
-  // truthful and deterministic.
-  const ownerLine = ownerEmail;
+  // v2.9.0 — caller (normalizeBookingRequest) guarantees owner is in
+  // input.attendees with isOwner flag. Legacy callers may still omit the
+  // owner; we inject defensively when missing. Either way: deduplicate so
+  // we never count or list the owner twice. The previous (v2.8.6) fix
+  // injected the owner unconditionally — under the v2.9 contract that
+  // produced a double-row when called via the normalizer.
   const externalSuffixForAttendee = (e: string) => {
     if (!ownerDomain) return e;
     return e.endsWith('@' + ownerDomain) ? e : `${e} (external)`;
   };
-  const otherAttendees = input.attendees
+  const emails = input.attendees
     .map(a => (a.email ?? '').toLowerCase())
-    .filter(e => e && e !== ownerEmail)
+    .filter(e => !!e);
+  const hasOwner = emails.includes(ownerEmail);
+  const otherAttendees = emails
+    .filter(e => e !== ownerEmail)
     .slice(0, 7)
     .map(externalSuffixForAttendee);
-  const allAttendees = [ownerLine, ...otherAttendees];
+  const allAttendees = hasOwner
+    ? [ownerEmail, ...otherAttendees]
+    : [ownerEmail, ...otherAttendees];  // owner ALWAYS first
   const attendeesLine = allAttendees.join(', ');
   const attendeeCount = allAttendees.length;
 

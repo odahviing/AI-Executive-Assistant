@@ -336,6 +336,37 @@ Status meanings:
           ...profile.schedule.home_days.days,
         ] as string[];
 
+        // v2.8.7 (bug 1.4) — pre-load recent floating-block deletions so the
+        // detection loop below can skip the `missing_floating_block` issue
+        // entirely on days the owner deliberately cleared. Pre-fix v2.8.5's
+        // check lived only in the auto-book fix path: detection still pushed
+        // the issue, the brief still narrated it ("Thursday has no lunch
+        // block. You deleted it recently…"), owner kept seeing the same
+        // skip-message every morning. Moving the check to detection means
+        // the issue never enters issues[] — no narration, no auto-book
+        // attempt, no daily reminder.
+        let recentBlockDeletes: Array<{ blockName: string; date: string }> = [];
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { recentAuditEntries } = require('../db/client') as typeof import('../db/client');
+          const rows = recentAuditEntries({ action: 'delete_meeting', windowDays: 14 });
+          for (const row of rows) {
+            if (!row.details) continue;
+            const subject = String(row.details.subject ?? '').toLowerCase();
+            const startIso = typeof row.details.event_start_iso === 'string' ? row.details.event_start_iso : '';
+            if (!subject || !startIso) continue;
+            for (const block of floatingBlocks) {
+              if (subject.includes(block.name.toLowerCase())) {
+                recentBlockDeletes.push({ blockName: block.name.toLowerCase(), date: startIso.slice(0, 10) });
+              }
+            }
+          }
+        } catch (err) {
+          logger.warn('Calendar health: recent-delete preload failed — detection will not suppress', {
+            err: String(err).slice(0, 200),
+          });
+        }
+
         // Iterate through each day in range
         let cursor = DateTime.fromISO(startDate, { zone: timezone });
         const end = DateTime.fromISO(endDate, { zone: timezone });
@@ -371,6 +402,14 @@ Status meanings:
               );
             });
             if (!hasBlock) {
+              // v2.8.7 (bug 1.4) — skip when the owner deleted THIS block on
+              // THIS day in the last 14 days. Pre-loaded above. The issue
+              // doesn't enter issues[] at all → no brief narration, no
+              // auto-book attempt.
+              const recentlyDeleted = recentBlockDeletes.some(d =>
+                d.blockName === block.name.toLowerCase() && d.date === dayStr,
+              );
+              if (recentlyDeleted) continue;
               issues.push({
                 type: 'missing_floating_block',
                 date: dayStr,
@@ -483,8 +522,25 @@ Status meanings:
           // status counts now.
           const oofEvents = dayEvents.filter(e => e.showAs === 'oof');
           if (oofEvents.length > 0) {
+            const ownerEmailLower = profile.user.email.toLowerCase();
+            // v2.8.7 (bug 1.1) — skip owner-only events. A solo meeting on
+            // the owner's OWN OOF day is intentional personal time (e.g.
+            // "Bookcamp" during his Holiday Block), not a conflict to flag.
+            // Solo := no attendees, OR every attendee is the owner himself.
+            // Same shape downstream auto-move already filters by (state.ts
+            // returns 'no_participants' when coordParticipants is empty),
+            // but here we stop the detection from firing at all so the
+            // brief doesn't see a phantom "clash" issue either.
+            const isSoloOwnerEvent = (e: typeof nonAllDay[number]): boolean => {
+              const att = e.attendees ?? [];
+              if (att.length === 0) return true;
+              return att.every(a =>
+                (a.emailAddress?.address ?? '').toLowerCase() === ownerEmailLower
+              );
+            };
             const meetings = nonAllDay.filter(e =>
-              e.showAs === 'busy' || e.showAs === 'tentative'
+              (e.showAs === 'busy' || e.showAs === 'tentative')
+              && !isSoloOwnerEvent(e),
             );
             for (const meeting of meetings) {
               const mStart = parseGraphDt(meeting.start.dateTime, meeting.start.timeZone, timezone);
@@ -526,48 +582,69 @@ Status meanings:
                 ?? profile.meetings.free_time_per_office_day_hours);
             const freeTimeThresholdMin = freeTimeThresholdHours * 60;
 
-            // v2.8.1 — multi-window aware. Read all of today's windows;
-            // workStart = earliest window start, workEnd = latest window end,
-            // workTotal = sum of window durations (matters for split shifts).
+            // v2.8.7 (bug 1.3) — per-window aware. Pre-fix (v2.8.1 multi-
+            // window introduction) used a bounding-box approach: clip busy
+            // intervals to [first.start, last.end] then merge. On split-shift
+            // days that bounding box INCLUDES the gap between windows, so a
+            // meeting between 15:30 and 21:30 (Tuesday's mid-day off-stretch
+            // for Idan) got counted as busy AND the inter-window gap also
+            // counted as "free", producing the impossible "0 free time +
+            // 110-min gap" narration on 2026-05-19. The fix walks each
+            // window separately and aggregates.
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { getOwnerWorkHoursForDay, totalWorkMinutes } = require('../utils/workHours') as
               typeof import('../utils/workHours');
             const windows = getOwnerWorkHoursForDay(profile, dayName);
-            const workStartMin = windows.length > 0 ? windows[0].startMin : 9 * 60;
-            const workEndMin = windows.length > 0 ? windows[windows.length - 1].endMin : 18 * 60;
-            const workTotalMin = totalWorkMinutes(windows) || (workEndMin - workStartMin);
+            const fallbackWindows = windows.length > 0
+              ? windows
+              : [{ startMin: 9 * 60, endMin: 18 * 60 }];
+            const workTotalMin = totalWorkMinutes(fallbackWindows);
 
-            // Compute free time in work hours
-            const busyInWork = nonAllDay
+            // Parse busy events ONCE; per-window calc reuses these.
+            const allBusy = nonAllDay
               .filter(e => e.showAs !== 'workingElsewhere')
               .map(e => {
                 const s = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
                 const en = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
-                const sMin = Math.max(s.hour * 60 + s.minute, workStartMin);
-                const eMin = Math.min(en.hour * 60 + en.minute, workEndMin);
-                return { start: sMin, end: eMin };
+                return {
+                  start: s.hour * 60 + s.minute,
+                  end: en.hour * 60 + en.minute,
+                };
               })
-              .filter(b => b.end > b.start)
-              .sort((a, b) => a.start - b.start);
-            const merged: Array<{ start: number; end: number }> = [];
-            for (const b of busyInWork) {
-              if (merged.length > 0 && b.start <= merged[merged.length - 1].end) {
-                merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, b.end);
-              } else {
-                merged.push({ ...b });
-              }
-            }
-            const totalBusy = merged.reduce((sum, m) => sum + (m.end - m.start), 0);
-            const freeMin = Math.max(0, workTotalMin - totalBusy);
+              .filter(b => b.end > b.start);
 
-            // Longest continuous free gap (for thinking-time feasibility)
+            // Walk each window: clip busy to THIS window only, merge, compute
+            // window-local busy total and longest gap. Aggregate across windows.
+            let totalBusyInWork = 0;
             let longestGap = 0;
-            let prev = workStartMin;
-            for (const m of merged) {
-              longestGap = Math.max(longestGap, m.start - prev);
-              prev = m.end;
+            for (const w of fallbackWindows) {
+              const inWindow = allBusy
+                .map(b => ({
+                  start: Math.max(b.start, w.startMin),
+                  end: Math.min(b.end, w.endMin),
+                }))
+                .filter(b => b.end > b.start)
+                .sort((a, b) => a.start - b.start);
+
+              const merged: Array<{ start: number; end: number }> = [];
+              for (const b of inWindow) {
+                if (merged.length > 0 && b.start <= merged[merged.length - 1].end) {
+                  merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, b.end);
+                } else {
+                  merged.push({ ...b });
+                }
+              }
+              totalBusyInWork += merged.reduce((sum, m) => sum + (m.end - m.start), 0);
+
+              // Longest free segment INSIDE this window only.
+              let prev = w.startMin;
+              for (const m of merged) {
+                longestGap = Math.max(longestGap, m.start - prev);
+                prev = m.end;
+              }
+              longestGap = Math.max(longestGap, w.endMin - prev);
             }
-            longestGap = Math.max(longestGap, workEndMin - prev);
+            const freeMin = Math.max(0, workTotalMin - totalBusyInWork);
 
             // v2.5.6 (re-enabled) — busy_day flagging restored. Was removed
             // in v2.3.1 (#67) per prior owner direction; reversed in 2026-05
@@ -900,7 +977,7 @@ Status meanings:
                           }));
                         // eslint-disable-next-line @typescript-eslint/no-require-imports
                         const stateMod = require('./meetings/coord/state') as typeof import('./meetings/coord/state');
-                        await stateMod.initiateCoordination({
+                        const coordResult = await stateMod.initiateCoordination({
                           ownerUserId,
                           ownerChannel: context.channelId,
                           ownerThreadTs: context.threadTs,
@@ -919,9 +996,24 @@ Status meanings:
                             conflictReason: `${profile.user.name.split(' ')[0]} is out of office on ${issue.date}`,
                           },
                         });
-                        issue.fixed = true;
-                        issue.fix_detail = `Started a move-coord to reschedule "${conflicting.subject}" — ${profile.user.name.split(' ')[0]}'s on vacation ${issue.date}. DM'd ${coordParticipants.map(p => p.name).join(' and ')}.`;
-                        fixesApplied += 1;
+                        // v2.8.7 (bug 1.5) — honor initiateCoordination's
+                        // 'no_participants' return. Owner-only events have
+                        // coordParticipants=[] after the owner-filter above;
+                        // state.ts returns the sentinel and does nothing.
+                        // Pre-fix the calling code claimed "Started a
+                        // move-coord ... DM'd ." (empty join) as if it
+                        // succeeded, which is a straight lie in the brief
+                        // (2026-05-19 Bookcamp incident). Flag as failed
+                        // instead. Pairs with bug 1.1's solo-event filter —
+                        // belt and suspenders.
+                        if (coordResult === 'no_participants') {
+                          issue.fix_failed = true;
+                          issue.fix_error = `Can't auto-move "${conflicting.subject}" — meeting is owner-only, no one to coordinate with.`;
+                        } else {
+                          issue.fixed = true;
+                          issue.fix_detail = `Started a move-coord to reschedule "${conflicting.subject}" — ${profile.user.name.split(' ')[0]}'s on vacation ${issue.date}. DM'd ${coordParticipants.map(p => p.name).join(' and ')}.`;
+                          fixesApplied += 1;
+                        }
                       }
                     }
                   }

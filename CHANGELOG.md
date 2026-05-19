@@ -2,6 +2,55 @@
 
 ---
 
+## 2.9.0 — BookingRequest normalizer + calendar-health fixes (5 morning-brief bugs)
+
+First minor in a month. Two architectural moves plus the morning-brief bug-wave.
+
+**Phase A — `BookingRequest` normalizer**: every meeting tool's handler entry now flows through `normalizeBookingRequest()` before reaching `planMeeting`. The normalizer is the single chokepoint that validates and normalizes raw Sonnet args into a typed pre-data shape: owner always in `participants`, duration snapped to `allowed_durations`, sensitivity gated for colleague-path membership, `relaxed` gated by senderRole + owner-in-MPIM-proposes detection + deferred-replay context, cross-cutting signals pre-computed (`ownerProposedThisSlotInMpim`, `recentBlockDeletes`). Phase A wires it for `create_meeting` + `delete_meeting`; the legacy in-handler prep stays alongside as defense-in-depth (Phase B will consolidate). The owner-in-participants invariant flows into `planMeeting` — `detectCategory` updated to handle the new contract (no more "+1 for owner" math anywhere in the pipeline). `planInputFromBookingRequest()` adapter bridges to the existing `PlanMeetingInput` shape so the planMeeting internals stay untouched.
+
+**Phase A motivation**: yesterday's bug wave (v2.8.6) had to patch six different layers — Sonnet's tool args, the orchestrator's auto-stamp, the handler entry, planMeeting, the Graph layer, and parallel retry systems — because each layer had its own ad-hoc contract with Sonnet's input shape. The normalizer collapses the contract drift into one place: the day-of fix becomes one line in one file, not three patches in three files. Background reading: scripts/simulate-booking-request.ts has 9 scenarios covering owner injection, duration snap, sensitivity gate, relaxed gating, intent inference — runs offline in <2s.
+
+### Added
+
+- **`src/skills/meetings/bookingRequest.ts`** — new `BookingRequest` interface + `normalizeBookingRequest(toolName, args, context, options?)` function. Pure, idempotent, no Graph round-trips. Reads people_memory + audit_log + threadAttendees + conversationHistory; produces the typed shape every meeting tool now consumes.
+- **`planInputFromBookingRequest()`** — adapter at `src/skills/meetings/planMeeting.ts:151`. Maps the canonical BookingRequest to the legacy PlanMeetingInput shape so `planMeeting` internals don't need a refactor. Removable once Phase B flips planMeeting's signature.
+- **`scripts/simulate-booking-request.ts`** — offline test rig for normalizer scenarios. 9 scenarios, 21 assertions. Run with `npx tsx scripts/simulate-booking-request.ts`.
+
+### Changed
+
+- **`planMeeting` enforces owner-in-participants invariant.** Pre-fix the function took `participants` as "non-owner attendees" and tracked owner separately via "+1 for owner" math (four places in the file). Post-fix the function auto-injects the owner if the caller didn't (legacy coord callers, deferred-replay paths). All headcount math now reads `participants.length` directly. `nonOwnerParticipants = participants.filter(p => !p.isOwner)` for the few places that explicitly need "everyone except the owner".
+- **`detectCategory` handles owner-already-in-attendees contract.** Yesterday's v2.8.6 fix injected the owner unconditionally — under v2.9.0 the normalizer already places him there, so the unconditional injection would have double-listed. The classifier prompt now deduplicates: owner first, other attendees after, no double-counts.
+
+### Fixed (real-day bug-wave from 2026-05-19)
+
+Seven atomic bugs across the morning brief + the Yael Thursday chat. Most concentrated in `src/skills/calendarHealth.ts`; two in the approval / colleague-DM surfaces.
+
+- **`oof_conflict` no longer flags owner-only events on his own OOF day.** Bookcamp (owner-only attendee) on Thursday was flagged as conflicting with the Holiday Block. Solo personal blocks during the owner's own holiday are intentional time, not conflicts. Fix at `calendarHealth.ts:484-510` — meetings with empty attendees OR only owner-as-attendee are skipped from oof_conflict detection.
+
+- **`oof_conflict` auto-move honors `initiateCoordination` return value.** Pre-fix the OOF auto-move path called `initiateCoordination` and ignored the return; if `'no_participants'` came back (owner-only event, nobody to coordinate with), the code still marked `issue.fixed = true` and reported "Started a move-coord … DM'd ." (empty join). Maelle then told the owner she "kicked off a move" for the Bookcamp — a straight lie. Fix at `calendarHealth.ts:903-940` — when initiateCoordination returns `'no_participants'`, flip the issue to `fix_failed` with an honest reason.
+
+- **`missing_floating_block` detection respects recent owner deletes.** v2.8.5 added the recent-delete check at the auto-book step — the brief still surfaced "Thursday has no lunch block. You deleted it recently …" every morning for 3 days because the issue itself still entered `issues[]`. Fix at `calendarHealth.ts:339-360 + :373-389` — pre-load recent floating-block deletes once before the per-day detection loop, skip pushing the issue when block name + date match. The issue never enters the list → brief never sees it.
+
+- **(Y.1) `get_calendar` colleague-view annotation.** Sonnet enumerated 6 of Idan's internal meetings (subjects + companies + locations — "Bank Hapoalim in Ramat Gan") to Yael when she asked "what can move?". Root: colleague-block prompt rule's "title + time = fine" license applied per-item but never capped the LIST size. Fix tool-result-side at `src/skills/meetings/ops.ts` get_calendar handler: on colleague-path 1:1 DM, wrap events with `_colleague_view: true` + `_enumeration_rule` instructing "never list more than one specific meeting; if pushed, escalate via create_approval(kind=freeform) — don't enumerate yourself." Owner-path / MPIM-with-owner unchanged. Data stays available for Maelle's reasoning; only the OUTBOUND narration is restricted.
+
+- **(Y.2) Module D auto-resolve precondition — must have a replay path.** 2026-05-19 Yael Thursday case: Sonnet raised `create_approval(kind=freeform)` ("Move Isaac or Elan to free up 11:30?"), owner replied "Do it either in 11:30, we can move other stuff", Module D classified clean-approve and SKIPPED Sonnet, resolver posted "Hey Yael — Idan said yes. I'll take it from here." Yael got the promise; the move + book never executed (no `deferred_action` on a freeform approval, no Sonnet to interpret + act). Fix at `utils/threadBoundApprovalAutoResolve.ts`: BEFORE classifying, check if the approval has either `details.deferred_action` (replay tool) OR subkind in {`slot_pick`, `calendar_conflict`} (own replay path). If neither, return `no_replay_path` → orchestrator runs Sonnet, who reads owner's reply and executes. Generalizes 103e's lesson: deterministic auto-resolve is safe ONLY when there's something concrete to replay.
+
+- **Slack typing indicator grammar.** `status: 'typing…'` → `status: 'is typing…'`. Slack renders avatar+name above the status, so the previous value read "Maelle typing…" — incomplete. Now reads "Maelle is typing…" matching Slack's native user-typing format.
+
+- **`busy_day` math is per-window aware on multi-window days.** Pre-fix the calc used a bounding-box approach: clip busy intervals to `[firstWindow.start, lastWindow.end]`. On split-shift days that bounding box includes the gap between windows (e.g. Tuesday's 15:30–21:30 mid-day stretch), so meetings between windows got counted as "busy" while the inter-window gap counted as "free". Result: impossible `"zero free time, 110-min gap"` narration on 2026-05-19. Latent since v2.8.1's multi-window introduction; surfaced by v2.8.6's `night_shift` auto-merge into `work_hours`. Fix at `calendarHealth.ts:543-606` — iterate each window separately; aggregate `freeMin` and `longestGap` across windows. Single-window days behave identically.
+
+### Migration
+
+None. Internal refactor only. Tool schemas, prompt text, Slack interactions, Graph layer all unchanged. `npm run dev` restart picks it up.
+
+### Phase B (queued, not in 2.9.0)
+
+- Consolidate the in-handler prep: read from `req.X` downstream instead of mutating `args.X`. Removes the duplicate "auto-fill / auto-inject / gate" code from `create_meeting` / `delete_meeting` handlers.
+- Declarative rule registry: `scheduleRules.checkSlot` consumes a list of `Rule { name, check, label, isOverridable }` objects instead of the inline `if`-chain. Each rule becomes a self-contained, testable file.
+- Migrate `move_meeting`, `coordinate_meeting` booking path, and `calendarHealth.ts`'s two `planMeeting` callers onto the BookingRequest shape.
+
+---
+
 ## 2.8.6 — Real-day bug wave: cancellation replay, retry isolation, attendee-count miscategorization, sensitivity at booking, night-shift work hours, owner-in-MPIM override
 
 Bug-wave patch closing five GitHub bugs (#98, #99, #100, #101, #102) plus the Mayrav 22:30 MPIM incident (#103 — no ticket). The headline is the chain that wrecked the 2026-05-18 morning: Dirk asked for a cancel → Maelle raised an approval → owner ✅'d → nothing fired (no deferred_action wiring on freeform cancels). Three hours later Sonnet picked up the un-executed cancel during an unrelated turn, fired the right delete, but then dateVerifier produced a false-positive weekday mismatch ("Tuesday 19 May" flagged as Monday — the day-of-week was actually correct), triggered a retry with full tool access, and the retry deleted the wrong meeting (Michal's Sales Commissions). Both root causes addressed independently — the approval system now supports `delete_meeting` in the deferred-replay chain, and dateVerifier retries now run in `proseOnly` mode that strips every WRITE_TOOL before the retry executes. Plus the `detectCategory` count fix that explains why Sonnet's flow felt "out of process" all morning: Sonnet's tool description framing led her to omit the owner from `attendees`, so the classifier saw 1 attendee and tagged every booking as Logistic (personal block) → wrong location prompts, wrong rebalance, wrong everything downstream. And the Mayrav incident — owner proposed 22:30 in MPIM, Sonnet routed it back through a `policy_exception` approval that leaked "Idan said yes on policy exception needs your input" into the colleague's view. Both the wording and the wiring are fixed.

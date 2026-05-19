@@ -1,0 +1,433 @@
+/**
+ * BookingRequest (v2.9.0) — validated, normalized input to planMeeting.
+ *
+ * The booking flow used to look like:
+ *
+ *   tool handler → ~150 lines of ad-hoc prep
+ *               → (snap duration, auto-fill emails, recover thread attendees,
+ *                  gate sensitivity, gate relaxed, detect owner-in-MPIM
+ *                  proposal, pre-load audit context …)
+ *               → planMeeting(input)
+ *
+ * Every new bug was a new prep step bolted on at the handler entry. The
+ * resulting handler was ~700 lines, three handlers each had a different
+ * subset of the same checks, contract drift between Sonnet's tool input
+ * shape and downstream consumer needs (root of detectCategory's owner-
+ * undercount, the 103D/F owner-in-MPIM regression, the sensitivity gate
+ * being scattered, etc.).
+ *
+ * This module is the single normalization step. Every meeting tool's
+ * handler entry now calls `normalizeBookingRequest(toolName, args, context)`
+ * and the returned `BookingRequest` is the canonical shape that
+ * planMeeting + every downstream consumer reads.
+ *
+ * Invariants the normalizer enforces:
+ *   - `participants` ALWAYS contains the owner (with `isOwner: true`).
+ *     Downstream code that needs "external participants only" filters by
+ *     `!isOwner`. No more `+1 for owner` math.
+ *   - `slot.durationMin` is snapped to `profile.meetings.allowed_durations`.
+ *     `slot.endIso` is recomputed to match the snapped duration.
+ *   - `relaxed` is the POST-GATE value. The raw `args.relaxed` is honored
+ *     only when (a) initiator is owner, (b) owner is in an MPIM and just
+ *     proposed this exact slot, or (c) the call is a deferred-replay.
+ *   - `sensitivity` is the POST-GATE value. On colleague-path, dropped
+ *     unless the colleague's email is in `participants`.
+ *   - Emails are auto-filled from people_memory by slack_id or name match
+ *     BEFORE the request leaves the normalizer. Unresolvable entries keep
+ *     `email: ''` so the handler can refuse with `attendee_missing_email`.
+ *
+ * Phase B (rule registry) will move the inline scheduleRules.checkSlot
+ * call inside planMeeting onto a declarative rule list. This module
+ * doesn't touch rules — it only normalizes the input.
+ */
+
+import { DateTime } from 'luxon';
+import type { UserProfile } from '../../config/userProfile';
+import type { SkillContext } from '../types';
+import { getPersonMemory, searchPeopleMemory } from '../../db/people';
+import { recentAuditEntries } from '../../db/client';
+import { ownerProposedSlot } from '../../utils/ownerProposedSlot';
+import logger from '../../utils/logger';
+
+// ── Public types ────────────────────────────────────────────────────────────
+
+export type BookingIntent = 'new_booking' | 'move' | 'cancel' | 'find_slots';
+
+export interface BookingParticipant {
+  email: string;          // empty string when unresolvable (handler refuses)
+  name?: string;
+  slack_id?: string;
+  isOwner: boolean;       // exactly one participant has this set true (the owner)
+  just_invite?: boolean;  // coord-imported FYI attendee (no slot polling)
+}
+
+export interface BookingRequest {
+  intent: BookingIntent;
+  initiator: 'owner' | 'colleague';
+  initiatorSlackId: string;
+
+  // Slot — durationMin is snapped to allowed_durations, slotEndIso
+  // recomputed to match. Flat fields (matching the legacy PlanMeetingInput
+  // shape) — handlers and rule checks read them directly. Optional for
+  // find_slots / cancel paths that don't have a chosen time yet.
+  slotStartIso?: string;
+  slotEndIso?: string;
+  durationMin?: number;
+
+  participants: BookingParticipant[];
+
+  subject?: string;
+  body?: string;
+  category?: string;
+  sensitivity?: 'normal' | 'personal' | 'private' | 'confidential';
+
+  isOnlineHint?: boolean;
+  locationHint?: string;
+  isRecurring?: boolean;
+  isFloatingBlock?: boolean;
+
+  // Move/cancel — reference to the existing event being mutated.
+  existingEventId?: string;
+  existingEventCategories?: string[];
+  existingEventLocation?: string;
+  existingEventIsOnline?: boolean;
+  priorSlotStartIso?: string;
+  priorSlotEndIso?: string;
+
+  // Owner-explicit override path. Already gated for senderRole + owner-in-
+  // MPIM-proposed. Handlers should NEVER set this from raw args directly.
+  relaxed: boolean;
+  relaxedReason: 'owner_direct' | 'owner_in_mpim_proposed' | 'deferred_replay' | 'none';
+
+  // Cross-cutting signals the downstream pipeline needs. Computed once
+  // here so individual rule checks / detectors don't each re-load them.
+  context: {
+    threadTs?: string;
+    isMpim: boolean;
+    isOwnerInGroup: boolean;
+    recentBlockDeletes: Array<{ blockName: string; date: string }>;
+    ownerProposedThisSlotInMpim: boolean;
+  };
+
+  // Diagnostic-only — never used as logic. Original Sonnet args + tool name
+  // are kept so logs / claim-checker / debug paths can correlate.
+  _origin: {
+    tool: string;
+    rawArgs: Record<string, unknown>;
+  };
+}
+
+// ── Normalizer ──────────────────────────────────────────────────────────────
+
+export interface NormalizeOptions {
+  /** Optional pre-determined intent override (e.g. for find_slots called inside coord). */
+  intent?: BookingIntent;
+  /** When true, treat this call as a deferred-replay — preserves relaxed=true regardless of senderRole. */
+  isDeferredReplay?: boolean;
+}
+
+/**
+ * Build a BookingRequest from a raw tool-call args dict. Pure, idempotent,
+ * stateless — same args produce the same request. Calls into people_memory
+ * + audit_log + threadAttendees registry; no Graph round-trips here.
+ */
+export async function normalizeBookingRequest(
+  toolName: string,
+  args: Record<string, unknown>,
+  context: SkillContext,
+  options: NormalizeOptions = {},
+): Promise<BookingRequest> {
+  const profile = context.profile;
+  const ownerEmail = profile.user.email;
+  const initiator: 'owner' | 'colleague' =
+    context.senderRole === 'owner' ? 'owner' : 'colleague';
+
+  const intent: BookingIntent = options.intent ?? inferIntentFromTool(toolName);
+
+  // ── Participants — auto-fill emails, recover from threadAttendees, inject owner ──
+  const rawAttendees = (args.attendees as Array<{ name?: string; email?: string; slack_id?: string; just_invite?: boolean }> | undefined) ?? [];
+  const participants = await buildParticipants(rawAttendees, ownerEmail, context);
+
+  // ── Slot — snap duration to allowed_durations, recompute endIso ──
+  const slot = buildSlot(args, profile);
+
+  // ── Sensitivity — colleague-path gate ──
+  const sensitivity = await gateSensitivity(args, context, participants);
+
+  // ── relaxed — gated by initiator + owner-in-MPIM-proposed + deferred-replay ──
+  const { relaxed, relaxedReason } = await gateRelaxed(args, context, slot, options);
+
+  // ── Cross-cutting context ──
+  const ctx = buildContext(profile, context, slot);
+
+  return {
+    intent,
+    initiator,
+    initiatorSlackId: context.userId,
+    slotStartIso: slot?.startIso,
+    slotEndIso: slot?.endIso,
+    durationMin: slot?.durationMin,
+    participants,
+    subject: args.subject as string | undefined,
+    body: args.body as string | undefined,
+    category: args.category as string | undefined,
+    sensitivity,
+    isOnlineHint: typeof args.is_online === 'boolean' ? args.is_online as boolean : undefined,
+    locationHint: args.location as string | undefined,
+    isRecurring: typeof args.is_recurring === 'boolean' ? args.is_recurring as boolean : undefined,
+    isFloatingBlock: typeof args.is_floating_block === 'object' && args.is_floating_block !== null
+      ? true
+      : (typeof args.confirm_outside_window === 'boolean' ? !!args.confirm_outside_window : undefined),
+    existingEventId: args.meeting_id as string | undefined,
+    existingEventCategories: args.existing_categories as string[] | undefined,
+    existingEventLocation: args.existing_location as string | undefined,
+    existingEventIsOnline: typeof args.existing_is_online === 'boolean' ? args.existing_is_online as boolean : undefined,
+    priorSlotStartIso: args.prior_start as string | undefined,
+    priorSlotEndIso: args.prior_end as string | undefined,
+    relaxed,
+    relaxedReason,
+    context: ctx,
+    _origin: { tool: toolName, rawArgs: args },
+  };
+}
+
+interface InternalSlot { startIso: string; endIso: string; durationMin: number }
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function inferIntentFromTool(toolName: string): BookingIntent {
+  switch (toolName) {
+    case 'create_meeting':       return 'new_booking';
+    case 'move_meeting':         return 'move';
+    case 'delete_meeting':       return 'cancel';
+    case 'find_available_slots': return 'find_slots';
+    case 'book_floating_block':  return 'new_booking';
+    default:                     return 'new_booking';
+  }
+}
+
+async function buildParticipants(
+  raw: Array<{ name?: string; email?: string; slack_id?: string; just_invite?: boolean }>,
+  ownerEmail: string,
+  _context: SkillContext,
+): Promise<BookingParticipant[]> {
+  const out: BookingParticipant[] = [];
+  const seen = new Set<string>();
+  const ownerLower = ownerEmail.toLowerCase();
+
+  for (const a of raw) {
+    let email = (a.email ?? '').trim().toLowerCase();
+    let name = a.name?.trim();
+    const slackId = a.slack_id?.trim();
+
+    // Email auto-fill from people_memory — same chain as the legacy
+    // handler-side fill (slack_id primary, fuzzy name fallback). Only when
+    // raw email is missing or malformed.
+    if (!email || !email.includes('@')) {
+      try {
+        if (slackId) {
+          const mem = getPersonMemory(slackId);
+          if (mem?.email) {
+            email = mem.email.toLowerCase();
+            name = name ?? mem.name ?? undefined;
+          }
+        }
+        if ((!email || !email.includes('@')) && name) {
+          const matches = searchPeopleMemory(name);
+          const hit = matches.find(m => m.email && m.email.includes('@'));
+          if (hit) {
+            email = hit.email!.toLowerCase();
+          }
+        }
+      } catch (err) {
+        logger.warn('normalizeBookingRequest: email auto-fill threw', { err: String(err).slice(0, 200) });
+      }
+    }
+
+    if (email && seen.has(email)) continue;
+    if (email) seen.add(email);
+
+    out.push({
+      email: email && email.includes('@') ? email : '',
+      name,
+      slack_id: slackId,
+      isOwner: email === ownerLower,
+      just_invite: a.just_invite === true,
+    });
+  }
+
+  // Owner injection — exactly one participant has isOwner=true. If Sonnet
+  // didn't include him, add him now. detectCategory + downstream consumers
+  // read participant count off this list directly (no "+1 for owner" math
+  // anywhere — root of 2026-05-19 98A misclassification).
+  if (!out.some(p => p.isOwner)) {
+    out.unshift({
+      email: ownerEmail.toLowerCase(),
+      isOwner: true,
+    });
+  }
+
+  return out;
+}
+
+function buildSlot(args: Record<string, unknown>, profile: UserProfile): InternalSlot | undefined {
+  const start = (args.start as string | undefined) ?? (args.new_start as string | undefined);
+  const end = (args.end as string | undefined) ?? (args.new_end as string | undefined);
+  if (!start || !end) return undefined;
+
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return undefined;
+
+  const requestedMin = Math.round((endMs - startMs) / 60000);
+  const allowed = profile.meetings.allowed_durations;
+  let snappedMin = requestedMin;
+  if (Array.isArray(allowed) && allowed.length > 0 && !allowed.includes(requestedMin)) {
+    snappedMin = allowed.reduce((best, candidate) =>
+      Math.abs(candidate - requestedMin) < Math.abs(best - requestedMin) ? candidate : best,
+    allowed[0]);
+    if (snappedMin !== requestedMin) {
+      logger.info('normalizeBookingRequest: snapped duration to allowed_durations', {
+        requested: requestedMin, snappedTo: snappedMin, allowed,
+      });
+    }
+  }
+  const endIso = snappedMin === requestedMin
+    ? end
+    : new Date(startMs + snappedMin * 60000).toISOString();
+
+  return { startIso: start, endIso, durationMin: snappedMin };
+}
+
+async function gateSensitivity(
+  args: Record<string, unknown>,
+  context: SkillContext,
+  participants: BookingParticipant[],
+): Promise<BookingRequest['sensitivity']> {
+  const raw = args.sensitivity as BookingRequest['sensitivity'] | undefined;
+  if (raw === undefined || raw === 'normal') return raw;
+
+  // Owner-path: trusted, no gate.
+  if (context.senderRole === 'owner') return raw;
+
+  // Colleague-path: honor sensitivity ONLY when the colleague's email is
+  // in participants. Prevents a random colleague from marking someone
+  // else's meeting private.
+  let colleagueEmail: string | undefined;
+  try {
+    const mem = getPersonMemory(context.userId);
+    colleagueEmail = mem?.email?.toLowerCase();
+  } catch (_) { /* fall through */ }
+  const onAttendees = colleagueEmail && participants.some(p =>
+    p.email.toLowerCase() === colleagueEmail,
+  );
+  if (!onAttendees) {
+    logger.info('normalizeBookingRequest: sensitivity dropped (colleague not on attendee list)', {
+      requester: context.userId,
+      requesterEmail: colleagueEmail,
+      requestedSensitivity: raw,
+      attendeeEmails: participants.map(p => p.email),
+    });
+    return undefined;
+  }
+  return raw;
+}
+
+async function gateRelaxed(
+  args: Record<string, unknown>,
+  context: SkillContext,
+  slot: InternalSlot | undefined,
+  options: NormalizeOptions,
+): Promise<{ relaxed: boolean; relaxedReason: BookingRequest['relaxedReason'] }> {
+  const rawRelaxed = args.relaxed === true;
+
+  // Deferred replay always preserves relaxed regardless of senderRole — the
+  // approval already went through owner; the replay is the authoritative re-run.
+  if (options.isDeferredReplay && rawRelaxed) {
+    return { relaxed: true, relaxedReason: 'deferred_replay' };
+  }
+
+  // Owner-path direct: relaxed honored straight through.
+  if (context.senderRole === 'owner' && rawRelaxed) {
+    return { relaxed: true, relaxedReason: 'owner_direct' };
+  }
+
+  // Colleague-path inside an MPIM where owner is present AND just proposed
+  // this exact slot — auto-relax. Closes the Mayrav 22:30 leak (owner says
+  // "what about 10:30pm?" in MPIM → Maelle bypasses the policy_exception
+  // round-trip).
+  if (
+    context.isMpim === true
+    && context.isOwnerInGroup === true
+    && slot
+    && !rawRelaxed   // Only auto-relax when caller didn't explicitly set it
+  ) {
+    try {
+      const matched = ownerProposedSlot(
+        context.conversationHistory,
+        slot.startIso,
+        context.profile.user.name,
+        context.profile.user.timezone,
+      );
+      if (matched) {
+        return { relaxed: true, relaxedReason: 'owner_in_mpim_proposed' };
+      }
+    } catch (err) {
+      logger.warn('normalizeBookingRequest: owner-in-MPIM check threw', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
+  return { relaxed: false, relaxedReason: 'none' };
+}
+
+function buildContext(
+  profile: UserProfile,
+  context: SkillContext,
+  slot: InternalSlot | undefined,
+): BookingRequest['context'] {
+  // Recent block deletes (last 14 days) — consumed by detect-skip checks
+  // for missing_floating_block + by the brief surface filter.
+  let recentBlockDeletes: Array<{ blockName: string; date: string }> = [];
+  try {
+    const rows = recentAuditEntries({ action: 'delete_meeting', windowDays: 14 });
+    const blocks = (profile.meetings?.floating_blocks ?? []).map(b => b.name.toLowerCase());
+    for (const row of rows) {
+      if (!row.details) continue;
+      const subject = String(row.details.subject ?? '').toLowerCase();
+      const startIso = typeof row.details.event_start_iso === 'string' ? row.details.event_start_iso : '';
+      if (!subject || !startIso) continue;
+      for (const blockName of blocks) {
+        if (subject.includes(blockName)) {
+          recentBlockDeletes.push({ blockName, date: startIso.slice(0, 10) });
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn('normalizeBookingRequest: recent-delete preload threw', { err: String(err).slice(0, 200) });
+  }
+
+  // ownerProposedThisSlotInMpim — computed for downstream consumers that
+  // want to know without running the helper twice. Same gate as relaxed
+  // owner-in-MPIM path.
+  let ownerProposedThisSlotInMpim = false;
+  if (slot && context.isMpim === true && context.isOwnerInGroup === true) {
+    try {
+      ownerProposedThisSlotInMpim = ownerProposedSlot(
+        context.conversationHistory,
+        slot.startIso,
+        profile.user.name,
+        profile.user.timezone,
+      );
+    } catch (_) { /* fail open */ }
+  }
+
+  return {
+    threadTs: context.threadTs,
+    isMpim: context.isMpim === true,
+    isOwnerInGroup: context.isOwnerInGroup === true,
+    recentBlockDeletes,
+    ownerProposedThisSlotInMpim,
+  };
+}

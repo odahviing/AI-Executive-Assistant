@@ -97,6 +97,32 @@ export async function tryAutoResolveThreadBoundApproval(params: {
   const bound = findThreadBoundRequest({ ownerUserId, threadTs });
   if (!bound) return { resolved: false, reason: 'no_unique_thread_match' };
 
+  // v2.9.0 (bug Y.2) — replay-path precondition. Module D is safe ONLY when
+  // there's a concrete next-step the resolver can execute without Sonnet:
+  //   • deferred_action present → resolveRequest will replay the tool
+  //   • subkind=slot_pick / calendar_conflict → resolveSlotPickApproval has
+  //     its own auto-pick path
+  // Otherwise (freeform approval without deferred_action, etc.) the resolver
+  // falls into the legacy "close + notify" path which posts "I'll take it
+  // from here" to the requester but doesn't actually DO anything. The
+  // 2026-05-19 Yael Thursday case: Sonnet asked "Move Isaac or Elan to
+  // free up 11:30?", owner replied "Do it either in 11:30, we can move
+  // other stuff", Module D classified clean-approve and skipped Sonnet,
+  // resolver posted "I'll take it from here" to Yael but the move never
+  // executed. Generalizing the 103e lesson: deterministic auto-resolve
+  // is safe ONLY when there's something to replay. Skip otherwise → pass
+  // to Sonnet so she interprets owner's reply + executes the work.
+  const hasDeferredAction = !!(bound.details.deferred_action);
+  const hasOwnReplayPath = bound.subkind === 'slot_pick' || bound.subkind === 'calendar_conflict';
+  if (!hasDeferredAction && !hasOwnReplayPath) {
+    logger.info('autoResolveThreadBound — no replay path, passing to Sonnet so she can execute', {
+      requestId: bound.id,
+      kind: bound.kind,
+      subkind: bound.subkind ?? null,
+    });
+    return { resolved: false, reason: 'no_replay_path' };
+  }
+
   // Build the classifier prompt. Approval-kind context helps Haiku read
   // edge cases ("yes book the 11am slot" — clearly approve even though
   // it references a specific slot from the proposed list).

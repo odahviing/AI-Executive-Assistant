@@ -30,6 +30,7 @@ import { detectCategory } from './detectCategory';
 import { findMeetingOwner, type MeetingOwnerInfo } from './findMeetingOwner';
 import { getCurrentTravel, getPersonMemory, searchPeopleMemory } from '../../db/people';
 import logger from '../../utils/logger';
+import type { BookingRequest } from './bookingRequest';
 
 // ── Input shapes ────────────────────────────────────────────────────────────
 
@@ -40,6 +41,7 @@ export interface PlanParticipant {
   name?: string;
   slack_id?: string;
   just_invite?: boolean;
+  isOwner?: boolean;     // v2.9 — set true by normalizeBookingRequest for owner row
 }
 
 export interface PlanMeetingInput {
@@ -58,7 +60,10 @@ export interface PlanMeetingInput {
   body?: string;
   isRecurring?: boolean;
 
-  // Participants
+  // Participants — v2.9: handlers route through normalizeBookingRequest,
+  // which always includes the owner (with isOwner=true). Legacy coord
+  // callers that build PlanMeetingInput directly may still omit the owner
+  // — planMeeting handles both shapes.
   participants: PlanParticipant[];
 
   // Owner-explicit hints
@@ -74,19 +79,14 @@ export interface PlanMeetingInput {
   // Move-specific: prior slot for comparison (decides if category needs re-detect
   // AND drives the location preserve path)
   priorSlotStartIso?: string;
-  // v2.8.5 — prior slot END for the freebusy-overlap exclusion. When move_meeting
-  // shifts a meeting by ≤duration, the meeting's current (prior) window overlaps
-  // the new window. Graph's getSchedule API returns busy slots without event
-  // IDs, so we can't use `excludeEventIds` here (that mechanism only works on
-  // checkSlot, which reads owner's own events with IDs). Instead: the overlap
-  // loop below skips busy windows whose [start,end] equals [priorSlotStartIso,
-  // priorSlotEndIso] — i.e. the source event seen on the attendee's calendar.
-  // Without this, "move my 13:00 meeting back 15 minutes to 13:15" trips
-  // confirm_override because Onn's 13:00 (which IS the meeting being moved)
-  // shows as busy at 13:15.
+  // v2.8.5 — prior slot END for the freebusy-overlap exclusion (see v2.8.5
+  // changelog entry for the move 13:00 → 13:15 self-overlap case).
   priorSlotEndIso?: string;
 
-  // Owner-explicit override (e.g. "yes book it even though it breaks the rule")
+  // Owner-explicit override (e.g. "yes book it even though it breaks the rule").
+  // v2.9: normalizeBookingRequest gates this — handlers should NEVER set this
+  // directly from `args.relaxed`. The normalizer's `relaxed` post-gate value
+  // is the authoritative input.
   allowRelaxed?: boolean;
 
   // Floating-block booking path (lunch / focus / gym). Skips the owner_busy_collision
@@ -95,6 +95,49 @@ export interface PlanMeetingInput {
 
   // Optional pre-fetched calendar (saves a Graph call when caller already has it)
   preloadedEvents?: CalendarEvent[];
+}
+
+/**
+ * v2.9.0 — adapter: map a normalized BookingRequest into the PlanMeetingInput
+ * shape that planMeeting consumes internally. Single-call site at the top of
+ * each migrated handler. Phase B will flip planMeeting's internals to read
+ * BookingRequest directly; for now this keeps the change surgical.
+ */
+export function planInputFromBookingRequest(
+  req: BookingRequest,
+  profile: UserProfile,
+  extra?: { preloadedEvents?: CalendarEvent[] },
+): PlanMeetingInput {
+  return {
+    profile,
+    intent: req.intent,
+    initiator: req.initiator,
+    initiatorSlackId: req.initiatorSlackId,
+    slotStartIso: req.slotStartIso,
+    slotEndIso: req.slotEndIso,
+    durationMin: req.durationMin,
+    subject: req.subject,
+    body: req.body,
+    isRecurring: req.isRecurring,
+    participants: req.participants.map(p => ({
+      email: p.email || undefined,
+      name: p.name,
+      slack_id: p.slack_id,
+      just_invite: p.just_invite,
+      isOwner: p.isOwner,
+    })),
+    locationHint: req.locationHint,
+    isOnlineHint: req.isOnlineHint,
+    existingEventId: req.existingEventId,
+    existingEventCategories: req.existingEventCategories,
+    existingEventLocation: req.existingEventLocation,
+    existingEventIsOnline: req.existingEventIsOnline,
+    priorSlotStartIso: req.priorSlotStartIso,
+    priorSlotEndIso: req.priorSlotEndIso,
+    allowRelaxed: req.relaxed,
+    isFloatingBlock: req.isFloatingBlock,
+    preloadedEvents: extra?.preloadedEvents,
+  };
 }
 
 // ── Plan output ─────────────────────────────────────────────────────────────
@@ -124,6 +167,18 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   const { profile, intent, initiator } = input;
   const ownerEmail = profile.user.email;
 
+  // v2.9.0 — normalize participants invariant: owner is ALWAYS in the list
+  // with isOwner=true. Callers built via normalizeBookingRequest already
+  // satisfy this; legacy callers (coord/booking, deferred-replay paths) may
+  // not. Inject here once so downstream code can rely on the invariant
+  // without repeating the check. nonOwnerParticipants is a convenience for
+  // the few places that explicitly need "everyone except the owner".
+  const hasOwner = input.participants.some(p => p.isOwner === true || (p.email ?? '').toLowerCase() === ownerEmail.toLowerCase());
+  const participants: PlanParticipant[] = hasOwner
+    ? input.participants
+    : [{ email: ownerEmail, isOwner: true }, ...input.participants];
+  const nonOwnerParticipants = participants.filter(p => !p.isOwner);
+
   // ── Cancel / move on an existing event → ownership matters FIRST ────────
   if ((intent === 'cancel' || intent === 'move') && input.existingEventId) {
     const ownerInfo = await findMeetingOwner({
@@ -150,7 +205,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       const askerIsOwnerOfMeeting =
         (ownerInfo.requesterSlackId && input.initiatorSlackId === ownerInfo.requesterSlackId) ||
         (ownerInfo.organizerEmail && ownerEmail !== ownerInfo.organizerEmail
-          && participantEmail(input.participants, input.initiatorSlackId, profile) === ownerInfo.organizerEmail);
+          && participantEmail(participants, input.initiatorSlackId, profile) === ownerInfo.organizerEmail);
       if (askerIsOwnerOfMeeting) {
         // Just decline on owner's side — the asker owns the meeting.
         return {
@@ -177,7 +232,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // Travel state lookup
   const ownerTravel = getCurrentTravel(profile.user.slack_user_id);
   let anyParticipantRemote = !!ownerTravel;
-  for (const p of input.participants) {
+  for (const p of nonOwnerParticipants) {
     if (anyParticipantRemote) break;
     if (p.slack_id) {
       const travel = getCurrentTravel(p.slack_id);
@@ -200,7 +255,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         profile,
         subject: input.subject ?? '(no subject)',
         body: input.body,
-        attendees: input.participants,
+        attendees: participants,
         isRecurring: input.isRecurring,
       });
       category = det.category;
@@ -211,13 +266,15 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       categoryReason = 'kept existing category (move same day type)';
     }
   } else {
-    // new_booking / find_slots — always detect
-    if (input.subject || input.participants.length > 0) {
+    // new_booking / find_slots — always detect when subject is present OR
+    // there's at least one non-owner participant (a solo owner block with
+    // no subject can default through resolveLocation without category).
+    if (input.subject || nonOwnerParticipants.length > 0) {
       const det = await detectCategory({
         profile,
         subject: input.subject ?? '(no subject)',
         body: input.body,
-        attendees: input.participants,
+        attendees: participants,
         isRecurring: input.isRecurring,
       });
       category = det.category;
@@ -239,7 +296,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   if (input.slotStartIso) {
     const ownerDomain = ownerEmail.split('@')[1].toLowerCase();
     const externalEmails: string[] = [];
-    for (const p of input.participants) {
+    for (const p of nonOwnerParticipants) {
       const e = (p.email ?? '').toLowerCase();
       if (e && !e.endsWith('@' + ownerDomain)) externalEmails.push(e);
     }
@@ -271,7 +328,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       // find_slots early-returns above; by here intent is new_booking | move | cancel.
       intent: intent as 'new_booking' | 'move' | 'cancel',
       category,                              // v2.8.2 — drives Logistic / Private skip-stamp
-      participantCount: input.participants.length + 1,  // +1 for owner
+      participantCount: participants.length,  // owner is already in the list (v2.9 invariant)
       hasExternalAttendee: hasExternal,
       externalAttendeeInDifferentTz,
       anyParticipantRemote,
@@ -329,13 +386,12 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     // Colleague-initiated path is NOT checked here. Slot finder
     // (annotateSlotsWithAttendeeStatus) already annotates colleague-facing
     // results with per-attendee status — that's annotation, not a block.
-    if (initiator === 'owner' && !input.allowRelaxed && input.participants.length > 0) {
+    if (initiator === 'owner' && !input.allowRelaxed && nonOwnerParticipants.length > 0) {
       const ownerDomainLower = ownerEmail.split('@')[1].toLowerCase();
       const internalEmails: string[] = [];
-      for (const p of input.participants) {
+      for (const p of nonOwnerParticipants) {
         const e = (p.email ?? '').toLowerCase();
         if (!e) continue;
-        if (e === ownerEmail.toLowerCase()) continue;       // skip owner himself
         if (e.endsWith('@' + ownerDomainLower)) internalEmails.push(e);
       }
       if (internalEmails.length > 0) {
@@ -445,18 +501,18 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         profile,
         startIso: input.slotStartIso,
         endIso: input.slotEndIso,
-        participantCount: input.participants.length + 1,
+        participantCount: participants.length,
       });
       if (verdict.kind === 'room_busy_small_fits') {
         location = verdict.smallLabel;
         addRoomEmail = false;
         logger.info('planMeeting — meeting room busy, falling back to small room label', {
           slot: input.slotStartIso, smallLabel: verdict.smallLabel,
-          participantCount: input.participants.length + 1,
+          participantCount: participants.length,
         });
       } else if (verdict.kind === 'room_busy_too_big') {
         logger.info('planMeeting — meeting room busy + group too large for fallback', {
-          slot: input.slotStartIso, participantCount: input.participants.length + 1,
+          slot: input.slotStartIso, participantCount: participants.length,
         });
         return {
           action: 'room_unavailable_large',
