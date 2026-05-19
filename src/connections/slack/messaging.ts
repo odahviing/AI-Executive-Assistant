@@ -348,27 +348,20 @@ export async function setAssistantStatus(
   botToken: string,
   params: { channelId: string; threadTs: string; status: string },
 ): Promise<void> {
-  // v2.8.7 — surface the per-tool status as the loading_messages text itself
-  // (the TOP row). Per-tool status reads like "On it" / "Booking it" /
-  // "Looking at your calendar" — that's what the owner wants visible.
-  // Pre-fix tries:
-  //   v2.7.5 → '' (Slack rejected empty)
-  //   v2.8.4 → 'Working' (worked, but generic word on top)
-  //   v2.8.6 → zero-width space (collapsed the WHOLE indicator including the
-  //            bottom status — owner saw only the avatar+name)
-  // This version puts the meaningful per-tool string in the visible row.
-  // When params.status is empty (rare — e.g. observation-only tools), fall
-  // back to 'Working' so we don't trip Slack's min-length check.
-  const visible = params.status && params.status.trim().length > 0
-    ? params.status
-    : 'Working';
+  // v2.8.7 — back to v2.8.4 behavior ('Working' in loading_messages, per-tool
+  // string in status). Two prior attempts to surface only the per-tool text:
+  //   v2.8.6  → zero-width space → collapsed the whole indicator
+  //   v2.8.6+ → per-tool string in both → owner saw no top text, status only
+  // Slack's rendering of these two fields is inconsistent across clients;
+  // chasing it via API config isn't working. Accept "Working" / status as
+  // the stable shape. Owner can revisit when Slack ships better docs.
   try {
     await app.client.apiCall('assistant.threads.setStatus', {
       token: botToken,
       channel_id: params.channelId,
       thread_ts: params.threadTs,
       status: params.status,
-      loading_messages: [visible],
+      loading_messages: ['Working'],
     });
   } catch (err) {
     // Don't escalate — status is UX polish. If it fails (wrong thread type,

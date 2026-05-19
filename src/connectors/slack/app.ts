@@ -116,7 +116,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
   // and catch-up can race with live delivery of the same event after restart.
   // v1.8.14: shared process-global Set (processedDedup.ts) so catchUpMissedMessages
   // can mark messages it replied to — preventing live handler from replying again.
-  const { markProcessed, hasProcessed } = require('./processedDedup') as typeof import('./processedDedup');
+  const { markProcessed, hasProcessed, markContentProcessed } = require('./processedDedup') as typeof import('./processedDedup');
 
   // Bot user ID — fetched once at startup, used to detect self-mentions
   let botUserId: string | null = null;
@@ -1346,6 +1346,14 @@ export function createSlackAppForProfile(profile: UserProfile): App {
 
     // Dedup — Slack retries if we're slow; skip if already processing this message
     if (!markProcessed(ts)) { logger.debug('DM dedup — skipping retry', { ts }); return; }
+    // v2.8.7 — content-based dedup. Same shape as the MPIM handler. 1:1 DM
+    // is less prone to assistant-panel mirroring but defense-in-depth.
+    if (!markContentProcessed(message.channel as string, (message as any).user ?? '', (message as any).text ?? '')) {
+      logger.info('DM dedup — same content recently processed, skipping', {
+        ts, senderId: (message as any).user, channelId: message.channel,
+      });
+      return;
+    }
 
     // Process async — return to Bolt immediately to avoid 3s timeout
     const rawText = message.text!.trim();
@@ -1551,6 +1559,14 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     // Dedup — same ts = Slack retry OR concurrent app_mention firing. First
     // call marks ts; any second handler (this one or app_mention) skips.
     if (!markProcessed(ts)) { logger.debug('MPIM dedup — skipping retry', { ts }); return; }
+    // v2.8.7 — content-based dedup. See app_mention handler above for the
+    // root cause (Slack assistant-panel mirror = same text, different ts).
+    if (!markContentProcessed(event.channel as string, event.user as string, (event.text as string) ?? '')) {
+      logger.info('MPIM dedup — same content recently processed, skipping', {
+        ts, senderId: event.user, channelId: event.channel,
+      });
+      return;
+    }
 
     setImmediate(async () => {
       const rawText = (event.text as string).trim();
@@ -1819,6 +1835,17 @@ export function createSlackAppForProfile(profile: UserProfile): App {
 
     // Dedup — Slack retries app_mention too if we're slow
     if (!markProcessed(event.ts)) { logger.debug('mention dedup — skipping retry', { ts: event.ts }); return; }
+    // v2.8.7 — content-based dedup. Slack's assistant-panel mirror can fire
+    // a SECOND event with a different ts but the SAME text from the same
+    // sender in the same channel within ~30s. Without this guard, both
+    // events run full orchestrator turns → duplicate replies in two
+    // different thread anchors (2026-05-19 Mayrav incident).
+    if (!markContentProcessed(event.channel, event.user, event.text ?? '')) {
+      logger.info('mention dedup — same content recently processed, skipping', {
+        ts: event.ts, senderId: event.user, channelId: event.channel,
+      });
+      return;
+    }
 
     setImmediate(async () => {
       // ── Detect "channel" that is actually a group DM (MPIM) ──
