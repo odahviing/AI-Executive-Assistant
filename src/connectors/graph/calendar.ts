@@ -1334,6 +1334,11 @@ export interface UpdateMeetingParams {
   // are preserved.
   location?: string;
   isOnline?: boolean;
+  // v2.9.1 — optional full attendee list. When provided, Graph PATCH replaces
+  // the event's attendees array. Caller is responsible for assembling the
+  // FINAL list (existing - removed + added) before passing — Graph does not
+  // diff. Omit entirely to leave attendees untouched.
+  attendees?: Array<{ name?: string; email: string; optional?: boolean }>;
 }
 
 /**
@@ -1431,6 +1436,58 @@ export async function getEventOrganizer(
   }
 }
 
+/**
+ * v2.9.1 — load just enough event detail for an attendee-update flow:
+ * existing attendees (so the handler can compute the new list), start/end
+ * (so location resolution can re-evaluate day-type), categories, location,
+ * isOnline. Single GET, no calendarView pagination.
+ *
+ * Returns null when the event cannot be loaded (deleted, permission, etc.).
+ * Caller treats null as "refuse the update with a clear message."
+ */
+export async function getEventForAttendeeUpdate(
+  userEmail: string,
+  meetingId: string,
+): Promise<{
+  attendees: Array<{ name?: string; email: string; optional?: boolean }>;
+  startIso?: string;
+  endIso?: string;
+  startTimeZone?: string;
+  categories: string[];
+  location?: string;
+  isOnline?: boolean;
+} | null> {
+  try {
+    const client = getClient();
+    const event: any = await client
+      .api(`/users/${userEmail}/events/${meetingId}`)
+      .select('id,start,end,attendees,categories,location,isOnlineMeeting')
+      .get();
+    if (!event) return null;
+    const attendees = ((event.attendees as any[]) ?? [])
+      .filter(a => a?.emailAddress?.address)
+      .map(a => ({
+        name: a.emailAddress?.name as string | undefined,
+        email: String(a.emailAddress.address).toLowerCase(),
+        optional: a.type === 'optional',
+      }));
+    return {
+      attendees,
+      startIso: event.start?.dateTime,
+      endIso: event.end?.dateTime,
+      startTimeZone: event.start?.timeZone,
+      categories: (event.categories as string[]) ?? [],
+      location: event.location?.displayName as string | undefined,
+      isOnline: event.isOnlineMeeting as boolean | undefined,
+    };
+  } catch (err) {
+    logger.warn('getEventForAttendeeUpdate — failed', {
+      meetingId, err: String(err).slice(0, 200),
+    });
+    return null;
+  }
+}
+
 export async function getEventType(userEmail: string, meetingId: string): Promise<{
   type?: 'singleInstance' | 'occurrence' | 'exception' | 'seriesMaster';
   subject?: string;
@@ -1487,6 +1544,14 @@ export async function updateMeeting(params: UpdateMeetingParams): Promise<void> 
   }
   if (params.isOnline !== undefined) {
     patch.isOnlineMeeting = params.isOnline;
+  }
+  // v2.9.1 — attendees PATCH. Graph replaces the whole array. Caller built
+  // the final list (existing - removed + added) already.
+  if (params.attendees !== undefined) {
+    patch.attendees = params.attendees.map(a => ({
+      emailAddress: { name: a.name ?? a.email, address: a.email },
+      type: a.optional ? 'optional' : 'required',
+    }));
   }
 
   try {

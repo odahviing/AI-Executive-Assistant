@@ -97,12 +97,14 @@ export async function tryAutoResolveThreadBoundApproval(params: {
   const bound = findThreadBoundRequest({ ownerUserId, threadTs });
   if (!bound) return { resolved: false, reason: 'no_unique_thread_match' };
 
-  // v2.9.0 (bug Y.2) — replay-path precondition. Module D is safe ONLY when
-  // there's a concrete next-step the resolver can execute without Sonnet:
-  //   • deferred_action present → resolveRequest will replay the tool
+  // v2.9.0 / v2.9.1 (bug Y.2) — replay-path precondition. Module D is safe
+  // ONLY when there's a concrete next-step the resolver can execute without
+  // Sonnet:
+  //   • callbacks.on_approve present (or legacy deferred_action alias) →
+  //     resolveRequest will replay the tool
   //   • subkind=slot_pick / calendar_conflict → resolveSlotPickApproval has
   //     its own auto-pick path
-  // Otherwise (freeform approval without deferred_action, etc.) the resolver
+  // Otherwise (freeform approval without on_approve, etc.) the resolver
   // falls into the legacy "close + notify" path which posts "I'll take it
   // from here" to the requester but doesn't actually DO anything. The
   // 2026-05-19 Yael Thursday case: Sonnet asked "Move Isaac or Elan to
@@ -112,9 +114,17 @@ export async function tryAutoResolveThreadBoundApproval(params: {
   // executed. Generalizing the 103e lesson: deterministic auto-resolve
   // is safe ONLY when there's something to replay. Skip otherwise → pass
   // to Sonnet so she interprets owner's reply + executes the work.
-  const hasDeferredAction = !!(bound.details.deferred_action);
+  //
+  // v2.9.1 — switched from raw deferred_action read to extractCallbacks so
+  // both the new callbacks shape and the legacy deferred_action shape are
+  // detected uniformly.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { extractCallbacks } = require('../core/approvals/approvalCallbacks') as
+    typeof import('../core/approvals/approvalCallbacks');
+  const callbacks = extractCallbacks(bound.details);
+  const hasApproveCallback = !!callbacks.on_approve;
   const hasOwnReplayPath = bound.subkind === 'slot_pick' || bound.subkind === 'calendar_conflict';
-  if (!hasDeferredAction && !hasOwnReplayPath) {
+  if (!hasApproveCallback && !hasOwnReplayPath) {
     logger.info('autoResolveThreadBound — no replay path, passing to Sonnet so she can execute', {
       requestId: bound.id,
       kind: bound.kind,

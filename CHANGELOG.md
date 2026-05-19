@@ -2,6 +2,63 @@
 
 ---
 
+## 2.9.1 — Approval pipeline rebuild + humanGate audience awareness + update_meeting attendee mgmt
+
+Patch over 2.9.0. Headline is the approval pipeline rebuild: one universal callback table (`on_approve` / `on_reject` / `on_amend`) replaces the ad-hoc `deferred_action` pattern. Every approval — meeting, cancel, freeform, future non-meeting — flows through the same 3-verdict dispatch, with explicit colleague-side amend bounce-back so owner↔requester counter negotiation lives in code instead of evaporating into Sonnet promises. Plus update_meeting gains attendee add/remove, humanGate gets per-audience exemplars, `create_meeting`'s `is_online` becomes optional (defined location process runs un-corrupted), and the night-shift hours move to 20:30–00:00.
+
+### Added
+
+- **`src/core/approvals/approvalCallbacks.ts`** — new module. Universal `ApprovalCallbacks` shape: `{ on_approve, on_reject?, on_amend? }`. `extractCallbacks(details)` aliases legacy `deferred_action` → `on_approve` for back-compat. `buildConsequenceText()` renders the "If yes → I'll book/move/cancel X" line shown on the owner-facing approval DM so he knows what saying yes does. `mergeAmendIntoApprove()` merges counter payloads into `on_approve.args` (counter.slot_iso → args.start for create/book, → args.new_start for move; other keys spread). `RESOLVER_REPLAY_TOOLS` defines which tools the resolver replays autonomously.
+- **Universal verdict dispatch in resolver** — `resolveRequest` reads callbacks and routes: approve → run `on_approve.tool` with override flag (relaxed=true / confirm_outside_window=true); reject → run `on_reject` if set, else close + DM requester; amend → default `relay_to_requester` mode flips state to `awaiting_colleague` and DMs requester with owner's counter, alternative `run_with_amend` mode merges counter into on_approve and fires immediately.
+- **Amend bounce-back path** — when requester counter-amends or rejects owner's counter, state bounces back to `awaiting_owner` with a fresh DM to the owner (`notifyOwnerOfColleaguePushback`); `terminal_dm_msg_ts` is re-stamped so Module D can auto-resolve the next reply. Round cap of 5 prevents infinite ping-pong; cap hit closes as expired.
+- **`counter_history` audit trail** on every amend; `counter` holds the latest alternative regardless of who proposed it last. Approve always merges from `counter`, so owner approving after a colleague counter-amend uses the colleague's latest offer.
+- **Colleague-path AMENDING APPROVALS prompt block** — `src/core/orchestrator/systemPrompt.ts` now surfaces `awaiting_colleague` state to the requester in their thread with owner's counter visible. Teaches Sonnet to call `resolve_approval` with approve / reject / amend depending on the requester's response.
+- **`resolve_approval` accepts colleague-path calls** — when the targeted request is in `awaiting_colleague` state AND the caller is the original requester. All other colleague-path calls remain blocked.
+- **`update_meeting` accepts `add_attendees` / `remove_attendees`** — schema extension at `src/skills/meetings.ts:462`. Owner-path: full add/remove. Colleague-path: self-only (add-self / remove-self). Handler at `src/skills/meetings/ops.ts:2295` loads the existing event, merges the attendee list, detects shape-affecting changes (internal-only ↔ has-external; count crossing 4↔5), and re-runs `detectCategory` + `resolveLocation` only when shape changed. `getEventForAttendeeUpdate` helper added at `src/connectors/graph/calendar.ts:1434` for single-GET event load. Graph PATCH on `updateMeeting` now accepts the full attendee array.
+- **`update_meeting` is now replayable via `on_approve`** — added to `RESOLVER_REPLAY_TOOLS` + `deferredActionReplay`'s SchedulingSkill router.
+
+### Changed
+
+- **`humanGate` is audience-aware** (`src/utils/humanGate.ts`). New `HumanGateAudience` type with three values: `'owner'` (talking TO the owner directly — exemplars use 1st/2nd person, never name him in 3rd person), `'internal'` (same-domain colleague — "I'll flag it for Idan" is correct), `'external'` (future email path — generic "let me check and get back to you", no owner-name reference). Closes the 2026-05-19 owner-facing draft "should I flag this for Idan to sort out" where Idan WAS the addressee. New "DON'T INVENT CAPABILITY" rule guards against the gate rewriting an abdication ("you'll have to do this yourself") into a fake promise ("Let me do it now") when Maelle has no tool path. The three call sites in `postReply.ts` (owner-path, colleague-path) + `briefs.ts` pass the right audience. EmailConnection will pass `'external'` once it lands.
+- **`create_meeting.is_online` is now optional** — dropped from `required` array at `src/skills/meetings.ts:428`. Description rewritten to teach Sonnet: OMIT when no explicit conversational signal; the handler runs the defined day-type + party-shape decision (internal+home → Huddle, internal+office → Office, external → Teams). Pre-fix Sonnet defaulted `is_online: true` to satisfy the required field, which `resolveLocation` treated as an explicit owner hint and short-circuited the defined process — every internal home-day meeting yesterday landed as Teams instead of Huddle.
+- **Module D Y.2 precondition reads `extractCallbacks`** — `src/utils/threadBoundApprovalAutoResolve.ts`. The auto-resolve gate now detects both the new `callbacks.on_approve` shape and the legacy `deferred_action` shape uniformly.
+- **`create_approval` tool description rewrite** — `src/tasks/skill.ts`. Teaches Sonnet the 3-verdict callback model, the amend ping-pong flow, the difference between replayable and Sonnet-handles-it on_approve, and that the same shape works for non-meeting decisions.
+
+### Fixed
+
+- **Yesterday-night meetings booked by Maelle showed Teams instead of Huddle** — internal home-day bookings (e.g. the Mayrav 22:30 case) got `is_online=true` from Sonnet's defensive default for the required field, which corrupted the location decision tree. Fixed by making `is_online` optional + tightening the tool description. The defined process in `resolveLocation` was already correct; the bug was input contamination.
+- **Approval expiry now closes the loop to the requester** — `src/core/requests/runner.ts` `runExpiry`. Pre-fix when an approval expired with no owner response, the owner got a tombstone DM but the requester got nothing — they were left hanging indefinitely. Now the requester also gets a DM: *"I couldn't get a read from Idan on … Closing this for now; ping me when you want to try again."*
+- **Sub-bug from the Mayrav 22:30 case fixed structurally** — humanGate exemplars saying *"I'll flag it for ${ownerFirst}"* are no longer used when the audience IS the owner. Audience-blind exemplars produced robot-speak like "should I flag this for Idan" said TO Idan.
+
+### Yaml
+
+- **`config/users/idan.yaml`** — night_shift `hours_start: "21:30"` → `"20:30"`. Owner will manually block the late-21:30 windows when he needs the later start.
+
+### Migration
+
+- No DB migration. `extractCallbacks()` aliases legacy `deferred_action` to `on_approve` transparently — pre-cutover approval rows resolve correctly. New code writes `callbacks.on_approve` directly; the orchestrator's existing `_deferred_action_hint` capture path still works.
+
+### Architecture note — the universal approval object
+
+Every approval is now structurally identical regardless of trigger:
+
+- **Origin**: requester slack_id / thread, the tool that surfaced the approval, the rule that fired (if any).
+- **Question**: ask_text owner reads + auto-derived consequence text ("If yes → I'll book X").
+- **Callbacks**: `on_approve` (REQUIRED for replay path; OMIT to fall through to Sonnet-handles-it), `on_reject` (OPTIONAL — default: close + DM requester), `on_amend` (OPTIONAL — default: relay counter to requester).
+- **Lifecycle states**: `awaiting_owner` → (`awaiting_colleague` if amend) → bounces between owner and requester until approve / reject / expire / round-cap. Counter merged into on_approve.args on final approve.
+
+Meeting tools (`create_meeting`, `move_meeting`, `delete_meeting`, `update_meeting`, `book_floating_block`) are replayable today; future non-meeting tools (`delete_routine`, venue rank-down, contact updates, …) just need to be added to `RESOLVER_REPLAY_TOOLS` + the deferredActionReplay dispatch. The shape works for any of them without further changes.
+
+### Paper-trace coverage
+
+4 scenarios traced end-to-end before ship:
+1. Owner doesn't answer → midpoint reminder → expiry → owner tombstone + **new** requester loop-close.
+2. Owner says NO → reject branch → DM requester "Idan can't make that work right now".
+3. Maybe → relay → counter → maybe again → agree (ping-pong negotiation, counter accumulates in `counter_history`, latest wins on approve).
+4. Non-meeting trigger (freeform without on_approve) → Y.2 passes to Sonnet → Sonnet handles work in same turn.
+
+---
+
 ## 2.9.0 — BookingRequest normalizer + calendar-health fixes (5 morning-brief bugs)
 
 First minor in a month. Two architectural moves plus the morning-brief bug-wave.

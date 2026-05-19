@@ -371,18 +371,19 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
         name: 'create_meeting',
         description: `Create a new calendar event directly (no coord needed — use this when the owner already knows the time + attendees). Call coordinate_meeting instead when participants need to agree on a time. Follow the location / category / work-day rules in the prompt section.
 
-ONLINE vs IN-PERSON for EXTERNAL attendees (v2.6.5): the handler enforces "must be remote" cases AUTOMATICALLY — you don't have to get this right yourself, and you can't downgrade it:
-- External attendee + ${profile.user.name.split(' ')[0]}'s home day → ALWAYS booked online (Teams). The handler overrides any \`is_online: false\` you might pass.
-- Any participant currently traveling → ALWAYS booked online.
+LOCATION & ONLINE — THE HANDLER DECIDES. There's a deterministic process: day-type (office/home) × party shape (internal-only / has-external) × TZ produces the right answer. ${profile.user.name.split(' ')[0]}'s home day + internal-only → Huddle. ${profile.user.name.split(' ')[0]}'s office day + internal-only → Office. External + home → online with Teams. External + office + different TZ → online with Teams. External + office + same TZ → handler asks ${profile.user.name.split(' ')[0]} once. You don't recreate this math; you let the handler run.
 
-For the cases where the handler doesn't force online, the rule for what to PASS:
-- Conversation explicitly says online ("Zoom", "Teams", "video", "remote") → \`is_online: true\`
-- Conversation explicitly says in-person ("at our office", "in person", "they'll come over") → \`is_online: false\` (+ \`location\` if a specific venue)
-- Conversation didn't say either way → on owner-path with EXTERNAL attendee, ASK ${profile.user.name.split(' ')[0]} once: "online or in person?" Don't assume in-person — by default in-person should ONLY be used when someone said it. (Internal-only meetings can default to the day-aware behavior without asking.)
+WHEN TO PASS \`is_online\` AT ALL (v2.9.1):
+- **DEFAULT: OMIT.** No conversational signal → leave \`is_online\` unset. The handler picks per day-type + party shape. Do NOT default to \`true\` "to be safe" — that corrupts the decision (an internal home-day meeting should be Huddle, not Teams).
+- Pass \`is_online: true\` ONLY when the conversation explicitly said online ("Zoom", "Teams", "video", "remote", "let's do a call").
+- Pass \`is_online: false\` ONLY when the conversation explicitly said in-person ("at our office", "in person", "they'll come over", "let's meet").
+- When the handler asks "online or in person?" and ${profile.user.name.split(' ')[0]} answers, THAT's an explicit signal → pass the matching boolean on the retry.
+
+LOCATION FIELD:
+- Specific venue mentioned ("at Café Aroma", "at customer site") → pass \`location\` as the venue. Helper will mark in-person.
+- Otherwise OMIT \`location\` — handler stamps the right label.
 
 DON'T ASK WHEN A CLEAR SIGNAL ALREADY EXISTS (people_memory shows different TZ, prior conversation mentioned video, etc.) — reading the data is your job, not the owner's to repeat.
-
-Once mode is settled: online → \`is_online: true\`, location optional. Physical at owner's office → \`is_online: false\`, leave location blank (handler fills office address from yaml). Physical elsewhere → \`is_online: false\`, location=venue.
 
 Colleague-path (v2.3.2 + v2.6.5 + v2.6.6): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book — the requester (1:1), multi-internal (everyone in the same workspace), or owner-only-pollable (requester + externals). Externals are fine; they get the calendar invite via Outlook. The handler enforces server-side: every attendee must have an email; rule-compliant slot (work hours, work days, buffers, floating blocks, no conflicts via findAvailableSlots); then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). If an attendee has no email, the tool returns { success: false, error: 'attendee_missing_email' } — call coordinate_meeting instead (it DMs and collects email). DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
 
@@ -402,7 +403,10 @@ LANGUAGE: subject and body MUST be in English regardless of the language you're 
               },
             },
             body: { type: 'string', description: 'Optional meeting body — ENGLISH ONLY.' },
-            is_online: { type: 'boolean' },
+            is_online: {
+              type: 'boolean',
+              description: 'OPTIONAL. Pass ONLY when conversation explicitly said online (Zoom/Teams/video/call) or in-person (at office/come over/meet). When no explicit signal, OMIT — the handler picks per day-type + party shape (internal+home=Huddle, internal+office=Office, external=Teams). Defaulting to true silently corrupts the location decision.',
+            },
             location: { type: 'string' },
             category: categoryEnum ? { type: 'string', enum: categoryEnum } : { type: 'string' },
             add_room_email: { type: 'boolean' },
@@ -425,7 +429,7 @@ LANGUAGE: subject and body MUST be in English regardless of the language you're 
               description: 'OPTIONAL. Outlook sensitivity field — controls how this meeting renders on shared free/busy views. DEFAULT: omit (Outlook treats as normal). DO NOT proactively ask or set. Only pass when the owner OR an attendee on this meeting EXPLICITLY asks for it ("mark this private", "make it confidential", "hide the subject"). When an attendee asks for "private" on a meeting they\'re on, that\'s a legitimate attendee right (different from the Maelle category tagging that the owner curates). Map: "private" → \'private\', "confidential" → \'confidential\', "personal" / "off-record" → \'personal\'.',
             },
           },
-          required: ['subject', 'start', 'end', 'attendees', 'is_online', 'category'],
+          required: ['subject', 'start', 'end', 'attendees', 'category'],
         },
       },
       {
@@ -460,7 +464,14 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
       },
       {
         name: 'update_meeting',
-        description: `Update metadata on an existing meeting — category, subject, or body — without rescheduling it.`,
+        description: `Update metadata on an existing meeting WITHOUT rescheduling it — change category, subject, or the attendee list.
+
+ATTENDEES (v2.9.1):
+- Use \`add_attendees\` to bring new people onto an existing meeting (e.g. "add Dina to the 3pm").
+- Use \`remove_attendees\` to drop people (pass their emails).
+- Owner-path: full add/remove. The handler re-evaluates category + location when the attendee shape changes (e.g. crossing internal-only → has-external, or count crossing 4↔5).
+- Colleague-path: each colleague can ONLY add or remove THEMSELVES on a meeting they're already part of. Tool refuses non-self changes from colleagues.
+- Prefer this over delete+recreate — keeps the Teams link, history, and existing attendee responses intact. delete+recreate is the LAST resort.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -468,6 +479,24 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             meeting_subject: { type: 'string' },
             category:        categoryEnum ? { type: 'string', enum: categoryEnum } : { type: 'string' },
             new_subject:     { type: 'string' },
+            add_attendees: {
+              type: 'array',
+              description: 'Attendees to ADD to the existing meeting. Each must have an email. Owner-path: any people. Colleague-path: only the requesting colleague themselves.',
+              items: {
+                type: 'object',
+                properties: {
+                  name:  { type: 'string' },
+                  email: { type: 'string' },
+                  optional: { type: 'boolean', description: 'OPTIONAL. Mark as Outlook "optional" attendee. Default false (required).' },
+                },
+                required: ['email'],
+              },
+            },
+            remove_attendees: {
+              type: 'array',
+              description: 'Emails of attendees to REMOVE from the existing meeting. Owner-path: any. Colleague-path: only the requesting colleague themselves.',
+              items: { type: 'string' },
+            },
           },
           required: ['meeting_id', 'meeting_subject'],
         },

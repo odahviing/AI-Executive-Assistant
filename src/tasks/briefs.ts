@@ -585,7 +585,8 @@ export async function sendMorningBriefing(
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { runHumanGate } = require('../utils/humanGate') as typeof import('../utils/humanGate');
-    const verdict = await runHumanGate(rawText, profile);
+    // Brief always goes to the owner — audience='owner'.
+    const verdict = await runHumanGate(rawText, profile, 'owner');
     if (!verdict.ok && verdict.rewrite) {
       textToSend = verdict.rewrite;
       logger.info('briefs — humanGate rewrote the brief', { ownerUserId });

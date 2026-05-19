@@ -20,6 +20,12 @@ import { parseDetails } from './types';
 import { getFreeBusy } from '../../connectors/graph/calendar';
 import { runPostBookingHealthCheck } from '../../utils/postBookingHealthCheck';
 import { getCoordBookingHandler } from '../approvals/coordBookingHandler';
+import {
+  extractCallbacks,
+  mergeAmendIntoApprove,
+  RESOLVER_REPLAY_TOOLS,
+  type ToolCallback,
+} from '../approvals/approvalCallbacks';
 import logger from '../../utils/logger';
 
 export type ResolveVerdict =
@@ -54,15 +60,18 @@ export async function resolveRequest(
   if (!row) {
     return { ok: false, request_id: requestId, state: 'cancelled', reason: 'request not found' };
   }
-  if (row.state !== 'awaiting_owner') {
-    logger.warn('resolveRequest called on non-awaiting_owner request', {
+  // v2.9.1 — `awaiting_colleague` is the amending state (owner counter relayed
+  // to requester); requester's response resolves the request. Both states are
+  // valid entry points for resolveRequest.
+  if (row.state !== 'awaiting_owner' && row.state !== 'awaiting_colleague') {
+    logger.warn('resolveRequest called on non-pending request', {
       id: requestId, state: row.state, kind: row.kind,
     });
     return {
       ok: false,
       request_id: requestId,
       state: row.state,
-      reason: `request is in state ${row.state}; only awaiting_owner can be resolved`,
+      reason: `request is in state ${row.state}; only awaiting_owner / awaiting_colleague can be resolved`,
     };
   }
 
@@ -70,9 +79,72 @@ export async function resolveRequest(
     id: requestId, kind: row.kind, subkind: row.subkind, verdict: verdict.verdict,
   });
 
+  // v2.9.1 — universal callback table. Every approval kind reads on_approve /
+  // on_reject / on_amend from details_json.callbacks (with legacy fallback to
+  // deferred_action via extractCallbacks). Resolver dispatches uniformly.
+  const detailsAll = parseDetails<Record<string, unknown>>(row) ?? {};
+  const callbacks = extractCallbacks(detailsAll);
+
+  // v2.9.1 — direction of the resolution. When state=awaiting_owner the
+  // owner is replying; when state=awaiting_colleague the requester is
+  // replying to owner's counter (amend bounce-back path).
+  const wasAwaitingColleague = row.state === 'awaiting_colleague';
+
   // ── reject / cancel ────────────────────────────────────────────────────
   if (verdict.verdict === 'reject' || verdict.verdict === 'cancel') {
     const reason = verdict.reason ?? `owner ${verdict.verdict}ed`;
+
+    // v2.9.1 — colleague rejecting owner's counter (amending state). Don't
+    // close; bounce back to awaiting_owner so owner sees "Yael says no to
+    // 14:00 — what now?". Owner can then amend again with a different time,
+    // or reject which cascades to a real closure.
+    if (wasAwaitingColleague) {
+      const detailsAfter = parseDetails<Record<string, unknown>>(row) ?? {};
+      updateRequest(requestId, {
+        state: 'awaiting_owner',
+        details: {
+          ...detailsAfter,
+          colleague_pushback: verdict.reason ?? 'said no to counter',
+          bounced_back_at: DateTime.now().toISO(),
+        },
+      });
+      // Notify OWNER (not requester) about the pushback.
+      await notifyOwnerOfColleaguePushback(row, 'reject', verdict.reason, ctx);
+      return {
+        ok: true, request_id: requestId, state: 'awaiting_owner',
+        effect: 'colleague rejected counter — bounced back to owner',
+      };
+    }
+
+    // on_reject side-effect — fire-and-forget tool (e.g. release a hold,
+    // notify a queue). Most rejects don't define this; the default path is
+    // just close + notify requester.
+    if (callbacks.on_reject && RESOLVER_REPLAY_TOOLS.has(callbacks.on_reject.tool)) {
+      const replayArgs: Record<string, unknown> = { ...callbacks.on_reject.args };
+      logger.info('resolveRequest — on_reject side-effect firing', {
+        id: requestId, tool: callbacks.on_reject.tool,
+      });
+      const tool = callbacks.on_reject.tool;
+      setImmediate(async () => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { runDeferredAction } = require('./deferredActionReplay') as
+            typeof import('./deferredActionReplay');
+          await runDeferredAction({
+            ownerUserId: row.owner_user_id,
+            profile: ctx.profile,
+            tool,
+            args: replayArgs,
+            requestId: row.id,
+          });
+        } catch (err) {
+          logger.warn('on_reject replay threw — non-fatal', {
+            id: row.id, tool, err: String(err).slice(0, 300),
+          });
+        }
+      });
+    }
+
     closeRequest({
       id: requestId,
       state: 'cancelled',
@@ -88,106 +160,157 @@ export async function resolveRequest(
 
   // ── amend ──────────────────────────────────────────────────────────────
   if (verdict.verdict === 'amend') {
-    // Amend means owner proposed an alternative shape. The request stays
-    // alive (in_flight) — orchestrator's next turn relays the counter to
-    // the requester. Closure happens later when the counter is accepted /
-    // rejected.
+    const amendMode = callbacks.on_amend?.mode ?? 'relay_to_requester';
+    const amendRound = ((detailsAll.amend_round as number | undefined) ?? 0) + 1;
+
+    // v2.9.1 — colleague countering owner's counter (amending state). Bounce
+    // back to awaiting_owner; owner sees "Yael said: not 14:00, how about
+    // 15:30?". Owner re-decides. Same round-cap protection.
+    const MAX_AMEND_ROUNDS_BOUNCE = 5;
+    if (wasAwaitingColleague) {
+      if (amendRound > MAX_AMEND_ROUNDS_BOUNCE) {
+        logger.warn('resolveRequest — colleague-counter amend round cap hit', {
+          id: requestId, round: amendRound,
+        });
+        closeRequest({
+          id: requestId,
+          state: 'expired',
+          closureReason: `amend ping-pong exceeded ${MAX_AMEND_ROUNDS_BOUNCE} rounds`,
+          closedBy: 'expiry',
+        });
+        await notifyRequesterOfDecision(row, 'reject', null, 'too many rounds — closing', ctx);
+        return { ok: true, request_id: requestId, state: 'expired', effect: 'amend cap hit' };
+      }
+      // v2.9.1 — store latest counter in details.counter (regardless of who
+      // sent it) so the eventual approve-merge picks up the most recent
+      // alternative. counter_history tracks the full chain for audit.
+      const counterHistory = Array.isArray(detailsAll.counter_history)
+        ? (detailsAll.counter_history as Array<Record<string, unknown>>)
+        : [];
+      counterHistory.push({ by: 'colleague', counter: verdict.counter, at: DateTime.now().toISO() });
+      updateRequest(requestId, {
+        state: 'awaiting_owner',
+        details: {
+          ...detailsAll,
+          counter: verdict.counter,
+          counter_history: counterHistory,
+          amend_round: amendRound,
+          amended_at: DateTime.now().toISO(),
+          amended_by: 'colleague',
+        },
+      });
+      // Notify OWNER about the colleague's counter-counter.
+      await notifyOwnerOfColleaguePushback(row, 'amend', verdict.reason, ctx, verdict.counter);
+      return {
+        ok: true, request_id: requestId, state: 'awaiting_owner',
+        effect: `colleague counter-amend bounced back to owner (round ${amendRound})`,
+      };
+    }
+
+    // run_with_amend → counter merges into on_approve.args and fires
+    // immediately. Used when owner's amend is a simple parameter change
+    // that doesn't need requester sign-off (e.g. "yes, but make it 13:30
+    // instead of 13:00" on a meeting owner is hosting where attendees
+    // don't decide times).
+    if (amendMode === 'run_with_amend' && callbacks.on_approve) {
+      const merged = mergeAmendIntoApprove(callbacks.on_approve, verdict.counter);
+      logger.info('resolveRequest — amend run_with_amend, firing on_approve with merged args', {
+        id: requestId, tool: merged.tool, round: amendRound,
+      });
+      return runApproveCallback(row, merged, ctx, { mergedFromAmend: true, amendRound });
+    }
+
+    // relay_to_requester (default) → state flips to awaiting_colleague,
+    // Maelle DMs requester with the counter for their yes/no. When the
+    // requester responds in their thread, orchestrator picks it up via
+    // PENDING APPROVALS prompt block + Sonnet calls resolve_approval.
+    //
+    // Cap rounds to prevent infinite ping-pong (owner counters, requester
+    // counters, owner counters again, …). Default cap 5; after that the
+    // request expires.
+    const MAX_AMEND_ROUNDS = 5;
+    if (amendRound > MAX_AMEND_ROUNDS) {
+      logger.warn('resolveRequest — amend round cap hit, closing as expired', {
+        id: requestId, round: amendRound, cap: MAX_AMEND_ROUNDS,
+      });
+      closeRequest({
+        id: requestId,
+        state: 'expired',
+        closureReason: `amend ping-pong exceeded ${MAX_AMEND_ROUNDS} rounds`,
+        closedBy: 'expiry',
+      });
+      await notifyRequesterOfDecision(row, 'reject', null, 'too many rounds — closing', ctx);
+      return { ok: true, request_id: requestId, state: 'expired', effect: 'amend cap hit' };
+    }
+
+    // v2.9.1 — append to counter_history for audit; counter holds the latest.
+    const counterHistoryOwnerSide = Array.isArray(detailsAll.counter_history)
+      ? (detailsAll.counter_history as Array<Record<string, unknown>>)
+      : [];
+    counterHistoryOwnerSide.push({ by: 'owner', counter: verdict.counter, at: DateTime.now().toISO() });
     updateRequest(requestId, {
-      state: 'in_flight',
-      details: { ...(parseDetails(row) ?? {}), counter: verdict.counter, amended_at: DateTime.now().toISO() },
+      state: 'awaiting_colleague',
+      details: {
+        ...detailsAll,
+        counter: verdict.counter,
+        counter_history: counterHistoryOwnerSide,
+        amend_round: amendRound,
+        amended_at: DateTime.now().toISO(),
+        amended_by: 'owner',
+      },
     });
     await notifyRequesterOfDecision(row, 'amend', verdict.counter, verdict.reason, ctx);
     return {
-      ok: true, request_id: requestId, state: 'in_flight',
-      effect: 'owner proposed a counter — relay to requester next turn',
+      ok: true, request_id: requestId, state: 'awaiting_colleague',
+      effect: `owner counter relayed to requester (round ${amendRound})`,
     };
   }
 
   // ── approve ────────────────────────────────────────────────────────────
   const approveData = verdict.data ?? {};
 
-  // Subkind-specific side-effects on approve. Covers both:
-  //   - standalone approval requests (kind=approval) raised by create_approval
-  //   - coord requests that hit a rule (kind=coord, subkind flipped to
-  //     slot_pick/calendar_conflict by emitWaitingOwnerApproval)
+  // Slot-pick / calendar-conflict subkinds retain their bespoke booking
+  // flow (freshness re-check, coord_job lookup, idempotency guard). Those
+  // paths predate the callback model and run the booking themselves.
   if ((row.kind === 'approval' || row.kind === 'coord')
       && (row.subkind === 'slot_pick' || row.subkind === 'calendar_conflict')) {
     return resolveSlotPickApproval(row, approveData, ctx);
   }
 
-  // v2.7.2 — deferred action replay. When the approval was raised because a
-  // rule fired and the caller stamped a `deferred_action` on details_json
-  // (the "redirect URL token" pattern: tool name + args saved at the moment
-  // of the rule violation), replay the action with allowRelaxed/relaxed=true
-  // when the owner approves. Closes the long-standing gap where approving a
-  // policy_exception didn't actually do the underlying booking — Sonnet was
-  // expected to retry but often didn't (Ysrael 2026-05-12 / Yael 2026-06-17).
+  // v2.9.1 — universal approve path: read on_approve and dispatch.
+  // - If callbacks.on_approve.tool is in RESOLVER_REPLAY_TOOLS → replay it
+  //   (with relaxed=true / confirm_outside_window=true override flag).
+  // - If on_approve is absent → close + notify (Sonnet handles the implied
+  //   work next turn; Module D Y.2 should have already gated this case).
   //
-  // Shape: details_json.deferred_action = { tool: string, args: Record<string, unknown> }.
-  // tool ∈ { 'create_meeting', 'move_meeting', 'book_floating_block', 'delete_meeting' }.
-  // v2.8.6 — 'delete_meeting' added so freeform-cancel approvals actually
-  // execute the cancellation on approve (root of the 2026-05-18 Dirk
-  // incident: owner approved the "should I cancel?" DM at 09:53 but no
-  // delete fired until 12:59, in an unrelated turn).
-  const details = parseDetails<Record<string, unknown>>(row) ?? {};
-  const deferred = details.deferred_action as { tool?: string; args?: Record<string, unknown> } | undefined;
-  if (deferred && typeof deferred.tool === 'string' && deferred.args && typeof deferred.args === 'object') {
-    const supportedTools = new Set(['create_meeting', 'move_meeting', 'book_floating_block', 'delete_meeting']);
-    if (supportedTools.has(deferred.tool)) {
-      // Inject relaxed=true (or confirm_outside_window=true for book_floating_block)
-      // so the replay bypasses the same soft rule that triggered this approval.
-      // delete_meeting has no override flag — the destructive action IS the
-      // approval; no rule to bypass.
-      const replayArgs: Record<string, unknown> = { ...deferred.args };
-      if (deferred.tool === 'book_floating_block') {
-        replayArgs.confirm_outside_window = true;
-      } else if (deferred.tool !== 'delete_meeting') {
-        replayArgs.relaxed = true;
-      }
-      logger.info('resolveRequest — deferred_action replay', {
-        id: requestId, tool: deferred.tool, kind: row.kind, subkind: row.subkind,
-      });
-      // Stamp the request as resolved BEFORE the tool fires so any cascade
-      // (closeMeetingArtifacts) doesn't see a still-open row when it sweeps.
-      closeRequest({
-        id: requestId,
-        state: 'resolved',
-        closureReason: `owner approved ${row.subkind ?? row.kind} (auto-replayed ${deferred.tool})`,
-        closedBy: 'owner',
-        outcomeJson: { approved: true, data: approveData, replayed: deferred.tool },
-      });
-      // Fire-and-forget the replay so this resolver doesn't block on the
-      // Graph call. The orchestrator will narrate the booking on the next
-      // owner turn (it sees the calendar update); for now just kick the work
-      // and let the cascade close downstream artifacts.
-      setImmediate(async () => {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { runDeferredAction } = require('./deferredActionReplay') as
-            typeof import('./deferredActionReplay');
-          await runDeferredAction({
-            ownerUserId: row.owner_user_id,
-            profile: ctx.profile,
-            tool: deferred.tool!,
-            args: replayArgs,
-            requestId: row.id,
-          });
-        } catch (err) {
-          logger.warn('deferred_action replay threw — owner needs to retry manually', {
-            id: row.id, tool: deferred.tool, err: String(err).slice(0, 300),
-          });
-        }
-      });
-      await notifyRequesterOfDecision(row, 'approve', approveData, undefined, ctx);
-      return {
-        ok: true, request_id: requestId, state: 'resolved',
-        effect: `approved ${row.kind}/${row.subkind ?? '-'} — auto-replaying ${deferred.tool}`,
-      };
-    }
+  // v2.9.1 counter-merge: if details.counter is present (set by ANY amend
+  // round, owner or colleague), merge it into on_approve.args. The counter
+  // holds the LATEST alternative regardless of state — owner approving
+  // after a colleague counter-amend uses the colleague's counter; colleague
+  // accepting owner's counter uses the owner's counter. counter_history
+  // keeps the full audit chain.
+  let effectiveApprove: ToolCallback | undefined = callbacks.on_approve;
+  const latestCounter = (detailsAll.counter as Record<string, unknown> | undefined) ?? null;
+  const hasCounter = latestCounter && Object.keys(latestCounter).length > 0;
+  if (hasCounter && callbacks.on_approve) {
+    effectiveApprove = mergeAmendIntoApprove(callbacks.on_approve, latestCounter);
+    logger.info('resolveRequest — approve with prior counter, merging into on_approve', {
+      id: requestId, tool: effectiveApprove.tool,
+      counterPreview: JSON.stringify(latestCounter).slice(0, 120),
+      amendedBy: detailsAll.amended_by,
+    });
   }
 
-  // No deferred action — close + notify. Sonnet retries the underlying action
-  // next turn if needed. (Legacy path for approvals without deferred_action.)
+  if (effectiveApprove) {
+    return runApproveCallback(row, effectiveApprove, ctx, {
+      mergedFromAmend: !!hasCounter,
+      amendRound: (detailsAll.amend_round as number | undefined) ?? 0,
+    });
+  }
+
+  // No on_approve — close + notify. Sonnet handles any implied multi-step
+  // work next turn (Module D Y.2 precondition should have routed this
+  // through Sonnet, not auto-resolve, but defensively support either path).
   closeRequest({
     id: requestId,
     state: 'resolved',
@@ -198,7 +321,93 @@ export async function resolveRequest(
   await notifyRequesterOfDecision(row, 'approve', approveData, undefined, ctx);
   return {
     ok: true, request_id: requestId, state: 'resolved',
-    effect: `approved ${row.kind}/${row.subkind ?? '-'}`,
+    effect: `approved ${row.kind}/${row.subkind ?? '-'} (no callback, Sonnet handles work)`,
+  };
+}
+
+/**
+ * Shared "fire on_approve + close + notify" helper. Used by direct approve
+ * verdicts AND by amend's run_with_amend mode (which routes through this
+ * with merged args).
+ */
+async function runApproveCallback(
+  row: RequestRow,
+  approveCallback: ToolCallback,
+  ctx: ResolveContext,
+  meta: { mergedFromAmend: boolean; amendRound: number },
+): Promise<ResolveResult> {
+  const { tool, args } = approveCallback;
+
+  if (!RESOLVER_REPLAY_TOOLS.has(tool)) {
+    // Unknown tool — close as resolved but don't replay. Sonnet's next turn
+    // can pick up the resolution if needed.
+    logger.warn('resolveRequest — on_approve tool not replayable, closing without firing', {
+      id: row.id, tool,
+    });
+    closeRequest({
+      id: row.id,
+      state: 'resolved',
+      closureReason: `owner approved ${row.subkind ?? row.kind} (on_approve.tool=${tool} not replayable)`,
+      closedBy: 'owner',
+      outcomeJson: { approved: true, on_approve_tool: tool },
+    });
+    await notifyRequesterOfDecision(row, 'approve', {}, undefined, ctx);
+    return { ok: true, request_id: row.id, state: 'resolved', effect: 'approved (no replay)' };
+  }
+
+  // Inject the override flag matching the tool. Same semantics as the
+  // legacy deferred_action replay (v2.7.2 / v2.8.6).
+  const replayArgs: Record<string, unknown> = { ...args };
+  if (tool === 'book_floating_block') {
+    replayArgs.confirm_outside_window = true;
+  } else if (tool !== 'delete_meeting') {
+    replayArgs.relaxed = true;
+  }
+
+  logger.info('resolveRequest — on_approve replay', {
+    id: row.id, tool, kind: row.kind, subkind: row.subkind,
+    mergedFromAmend: meta.mergedFromAmend, amendRound: meta.amendRound,
+  });
+
+  // Close BEFORE firing the tool so any cascade (closeMeetingArtifacts) doesn't
+  // see a still-open row when it sweeps.
+  closeRequest({
+    id: row.id,
+    state: 'resolved',
+    closureReason: `owner approved ${row.subkind ?? row.kind} (auto-replayed ${tool})`,
+    closedBy: 'owner',
+    outcomeJson: {
+      approved: true,
+      replayed: tool,
+      merged_from_amend: meta.mergedFromAmend,
+      amend_round: meta.amendRound,
+    },
+  });
+
+  // Fire-and-forget the replay; this resolver doesn't block on the Graph call.
+  setImmediate(async () => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { runDeferredAction } = require('./deferredActionReplay') as
+        typeof import('./deferredActionReplay');
+      await runDeferredAction({
+        ownerUserId: row.owner_user_id,
+        profile: ctx.profile,
+        tool,
+        args: replayArgs,
+        requestId: row.id,
+      });
+    } catch (err) {
+      logger.warn('on_approve replay threw — owner may need to retry manually', {
+        id: row.id, tool, err: String(err).slice(0, 300),
+      });
+    }
+  });
+
+  await notifyRequesterOfDecision(row, 'approve', { replayed: tool }, undefined, ctx);
+  return {
+    ok: true, request_id: row.id, state: 'resolved',
+    effect: `approved ${row.kind}/${row.subkind ?? '-'} — auto-replaying ${tool}`,
   };
 }
 
@@ -454,6 +663,50 @@ async function notifyRequesterOfDecision(
     }
   } catch (err) {
     logger.warn('notifyRequesterOfDecision — threw, non-fatal', {
+      id: row.id, err: String(err).slice(0, 200),
+    });
+  }
+}
+
+/**
+ * v2.9.1 — colleague responded to owner's counter (amending state). DM owner
+ * to bring his attention back, with the colleague's pushback. The original
+ * approval is now back to awaiting_owner so the system prompt's PENDING
+ * APPROVALS block will show it next time owner messages, but a fresh DM
+ * is much more responsive.
+ */
+async function notifyOwnerOfColleaguePushback(
+  row: RequestRow,
+  verdict: 'reject' | 'amend',
+  reason: string | undefined,
+  ctx: ResolveContext,
+  colleagueCounter?: Record<string, unknown>,
+): Promise<void> {
+  const requesterName = row.requester_name?.split(' ')[0] ?? 'the colleague';
+  const subject = row.subject || 'the ask';
+  let body: string;
+  if (verdict === 'reject') {
+    const tail = reason && reason.trim() ? ` (${reason.trim()})` : '';
+    body = `${requesterName} said the counter doesn't work${tail}. Back to you on "${subject}" — want to suggest something else, or drop it?`;
+  } else {
+    const cnt = colleagueCounter ? summarizeCounter(colleagueCounter) : '';
+    body = `${requesterName} countered with ${cnt || 'an alternative'} on "${subject}". Approve, reject, or counter again?`;
+  }
+  try {
+    const { getConnection } = await import('../../connections/registry');
+    const conn = getConnection(row.owner_user_id, 'slack');
+    if (!conn) {
+      logger.warn('notifyOwnerOfColleaguePushback — no Slack connection', { id: row.id });
+      return;
+    }
+    const res = await conn.sendDirect(row.owner_user_id, body);
+    if (res.ok && res.ts) {
+      // Update terminal_dm_msg_ts so Module D can auto-resolve the bounce
+      // reply on this fresh DM thread.
+      updateRequest(row.id, { terminalDmMsgTs: res.ts });
+    }
+  } catch (err) {
+    logger.warn('notifyOwnerOfColleaguePushback — threw, non-fatal', {
       id: row.id, err: String(err).slice(0, 200),
     });
   }

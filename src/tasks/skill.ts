@@ -133,31 +133,47 @@ AUTHORITY MODEL:
 - If the owner tells Maelle directly to do something (even when it breaks a rule), that IS the approval — just do it, no approval needed.
 - If a colleague asks for something that breaks a rule or needs an owner-only judgment, create_approval — the owner must decide.
 
-Kinds:
-- slot_pick: pick one of N offered meeting slots. Payload: { coord_job_id, subject, slots: [{iso, label}], participants_emails, duration_min }. Resolving calls through to the booking flow automatically.
-- duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
-- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting). Payload: { rule, context }.
-- lunch_bump: move the owner's lunch block. Payload: { from, to, reason }.
-- unknown_person: book with someone we don't have full contact info for. Payload: { name, known_fields, missing_fields }.
-- calendar_conflict: the chosen slot went stale — offer fresh options. Payload: { coord_job_id, original_slot, conflict_reason, slots: [...] }.
-- freeform: catch-all yes/no/amend question. Payload: { question, context, subject }.
+Kinds (the ask category — for routing + dedup):
+- slot_pick: pick one of N offered meeting slots. Resolving calls the coord booking flow.
+- duration_override / policy_exception / lunch_bump / unknown_person / calendar_conflict: legacy categories — still supported.
+- freeform: catch-all yes/no/amend question on ANY topic (not just meetings).
 
-DEFERRED ACTION (auto-execute on approve) — v2.8.6:
-When the approval is asking permission for a SPECIFIC tool call (e.g. "should I cancel Dirk's meeting?", "OK to book this off-hours?"), include payload.deferred_action so the resolver fires the action when the owner approves — instead of you having to call the tool yourself in a follow-up turn. Without this, "approved but never executed" turns happen (root of the 2026-05-18 Dirk incident).
+═══════════════════════════════════════════════════════════════════════
+THE CALLBACK TABLE (v2.9.1) — what actually runs when the owner decides
+═══════════════════════════════════════════════════════════════════════
 
-Shape: \`payload.deferred_action = { tool: "<tool-name>", args: <full-tool-args> }\`.
-Supported tools: \`create_meeting\`, \`move_meeting\`, \`book_floating_block\`, \`delete_meeting\`.
+Every approval carries a structured callback table on payload.callbacks describing what runs for each verdict. THE OWNER CAN SAY YES, NO, OR MAYBE — and each path is wired explicitly:
 
-Cancellations specifically: when you raise create_approval(kind=freeform) to ask "should I cancel X?", pass:
-  payload.deferred_action = { tool: "delete_meeting", args: { meeting_id, meeting_subject } }
-The resolver will call delete_meeting the instant the owner ✅'s the DM — no second turn needed.
+  payload.callbacks = {
+    on_approve: { tool: "<tool>", args: { ... } },   // REQUIRED unless the work is multi-step (see below)
+    on_reject:  { tool: "<tool>", args: { ... } },   // OPTIONAL — default: close + DM requester
+    on_amend:   { mode: "relay_to_requester" | "run_with_amend" }   // OPTIONAL — default: relay
+  }
 
-For policy_exception approvals raised after a rule_violation on create_meeting / move_meeting / book_floating_block, the orchestrator auto-stamps deferred_action from the prior rule_violation's hint — you don't need to set it yourself. Only freeform cancellation asks (which don't go through rule_violation) need you to pass deferred_action explicitly.
+WHEN OWNER APPROVES → on_approve.tool fires with on_approve.args (+ override flag injected: relaxed=true for create/move/update_meeting, confirm_outside_window=true for book_floating_block). The booking happens automatically — you do NOT call the tool again.
+
+WHEN OWNER REJECTS → on_reject.tool fires if set; otherwise default close + DM requester "Idan can't make that work".
+
+WHEN OWNER AMENDS (offers an alternative) →
+  - mode="relay_to_requester" (default): state flips to awaiting_colleague, Maelle DMs requester with the counter. When requester responds yes → on_approve runs with counter merged in (counter.slot_iso → args.start / args.new_start; other keys spread into args). When requester responds no → bounce back to owner.
+  - mode="run_with_amend": owner's counter merges immediately into on_approve.args and fires; no requester roundtrip. Use when the owner has unilateral authority (booking a slot on his own calendar).
+
+Replayable on_approve tools: \`create_meeting\`, \`move_meeting\`, \`update_meeting\`, \`delete_meeting\`, \`book_floating_block\`. For approvals where the on-approve work is MULTI-STEP (move A, then book B, etc.) or NARRATIVE (read calendar, draft response, decide), OMIT on_approve entirely — the system will pass the resolved approval to you on the next turn so you can execute the work.
+
+CANCELLATIONS: when raising create_approval(kind=freeform) to ask "should I cancel X?":
+  payload.callbacks.on_approve = { tool: "delete_meeting", args: { meeting_id, meeting_subject } }
+
+RULE VIOLATIONS: when create_meeting / move_meeting / book_floating_block returns rule_violation, the orchestrator auto-stamps the original tool+args into payload.callbacks.on_approve via _deferred_action_hint — you don't need to set it yourself. Only freeform asks (which don't go through rule_violation) need you to set callbacks explicitly.
+
+NON-MEETING APPROVALS: the same shape works for any kind. delete_routine confirm, venue rank-down confirm, contact-info update, etc. The on_approve.tool just needs to be something the resolver knows how to run.
+
+LEGACY: payload.deferred_action = {tool, args} is still accepted and aliased to callbacks.on_approve for back-compat. New code writes callbacks.on_approve directly.
 
 Behavior:
-- DMs the owner immediately with ask_text. LLM-judged dedup against open requests for this (owner, requester) — if the same logical ask is already open, returns the existing one.
-- Default expiry is 2 owner-workdays (Fri/Sat skipped for this profile). Owner-silent past expiry → request closes as expired + owner gets a tombstone DM.
-- When approval has a colleague-originated context, include requester_slack_id in the payload so the resolver can DM the requester back with the owner's decision.`,
+- DMs the owner immediately with ask_text + auto-derived "If yes → I'll X" consequence line (so owner knows what saying yes does).
+- LLM-judged dedup against open requests for this (owner, requester) — same logical ask within 48h returns the existing one.
+- Default expiry is 2 owner-workdays (Fri/Sat skipped for this profile). Owner-silent past expiry → request closes as expired + owner gets a tombstone DM + requester gets a "no answer came back" DM.
+- Include requester_slack_id in payload so the resolver can DM the requester back with the owner's decision.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -556,12 +572,31 @@ Binding — how to pick the right approval_id:
 
         // DM the owner. terminal_dm_msg_ts gets stamped from the response so
         // emoji ✅ on this DM resolves.
+        //
+        // v2.9.1 — append "If yes → I'll X" consequence line when on_approve
+        // is set, so the owner sees what saying yes actually does.
+        let dmText = askText;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { extractCallbacks, buildConsequenceText } = require('../core/approvals/approvalCallbacks') as
+            typeof import('../core/approvals/approvalCallbacks');
+          const callbacks = extractCallbacks(row.details_json ? JSON.parse(row.details_json) : {});
+          const consequence = buildConsequenceText(callbacks, profile);
+          if (consequence) {
+            dmText = `${askText}\n\n${consequence}`;
+          }
+        } catch (err) {
+          logger.warn('create_approval — consequence text build threw, sending bare askText', {
+            err: String(err).slice(0, 200), requestId: row.id,
+          });
+        }
+
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
           const conn = getConnection(ownerUserId, 'slack');
           if (conn) {
-            const res = await conn.sendDirect(ownerUserId, askText);
+            const res = await conn.sendDirect(ownerUserId, dmText);
             if (res.ok) {
               updateRequest(row.id, {
                 ownerDmChannel: res.ref ?? undefined,
@@ -590,12 +625,33 @@ Binding — how to pick the right approval_id:
       }
 
       case 'resolve_approval': {
-        if (context.senderRole !== 'owner') {
-          logger.warn('Colleague attempted resolve_approval — blocked', { userId: context.userId });
-          return { error: 'not_permitted', reason: 'Only the owner can resolve approvals.' };
-        }
         const requestId = args.approval_id as string;
         const verdict = args.verdict as 'approve' | 'reject' | 'amend';
+
+        // v2.9.1 — colleague-path is permitted ONLY when the targeted request
+        // is in state=awaiting_colleague (an amending approval where Maelle
+        // relayed owner's counter back to the requester). Any other case is
+        // owner-only.
+        if (context.senderRole !== 'owner') {
+          const probe = getRequest(requestId);
+          if (!probe) {
+            return { error: 'not_found', reason: `Request ${requestId} not found.` };
+          }
+          if (probe.state !== 'awaiting_colleague') {
+            logger.warn('Colleague attempted resolve_approval on non-amending state — blocked', {
+              userId: context.userId, requestId, state: probe.state,
+            });
+            return { error: 'not_permitted', reason: 'Only the owner can resolve approvals (except amending state).' };
+          }
+          // Also verify the colleague IS the requester on this row — prevents a
+          // random colleague from approving someone else's amending approval.
+          if (probe.requester_slack_id && probe.requester_slack_id !== context.userId) {
+            logger.warn('Colleague attempted resolve_approval but is not the requester', {
+              userId: context.userId, requestId, requesterSlackId: probe.requester_slack_id,
+            });
+            return { error: 'not_permitted', reason: 'Only the original requester can respond to an amending approval.' };
+          }
+        }
 
         let decision: ResolveVerdict;
         if (verdict === 'approve') {
@@ -679,20 +735,38 @@ When the user changes their briefing time, call learn_preference with category="
 
 Every decision the owner needs to make is a request of kind=approval. Do NOT freelance a DM asking "want me to do X?" — that gets lost in chat history and has no expiry. Use create_approval and let the system track it.
 
+THE 3-VERDICT CALLBACK MODEL (v2.9.1):
+Every approval carries a callback table on payload.callbacks specifying what fires on each verdict. The owner can say YES / NO / MAYBE (amend). For each path, you wire what runs:
+
+  payload.callbacks = {
+    on_approve: { tool: "create_meeting", args: { ... } },         // fires on yes
+    on_reject:  { tool: "...", args: { ... } } | omit,             // fires on no (or just close + DM requester)
+    on_amend:   { mode: "relay_to_requester" } | omit               // default mode relays counter to requester
+  }
+
+When the owner amends ("not 22:00, make it 14:00 instead"), the system flips the request to awaiting_colleague and DMs the requester with the counter. When the requester replies yes → on_approve runs with the counter merged in. When the requester says no → request bounces back to owner. This handles real-world negotiation without you having to re-fire create_approval each round.
+
+For multi-step or narrative-on-approve work, OMIT on_approve. The system will pass the resolved approval to you on the next owner turn so you can execute the implied work.
+
 WHEN TO CREATE AN APPROVAL:
-- You found the meeting slot, waiting on the owner to pick → kind=slot_pick
-- Someone requested a non-standard meeting length → kind=duration_override
-- A scheduling rule would be violated → kind=policy_exception
+- You found the meeting slot, waiting on the owner to pick → kind=slot_pick (on_approve auto-wired from coord state)
+- A scheduling rule would be violated → kind=policy_exception (on_approve auto-wired from rule_violation hint)
 - Someone asked to move the owner's lunch → kind=lunch_bump
 - Booking with a person you don't have full contact info for → kind=unknown_person
-- The chosen slot just conflicted → kind=calendar_conflict (usually automatic)
-- Any other yes/no/"how about X" question → kind=freeform
+- Any other yes/no/"how about X" question → kind=freeform (you choose on_approve)
+- Non-meeting decisions (delete a routine, update a contact field, etc.) → kind=freeform with appropriate on_approve
 
 WHEN OWNER REPLIES:
 - Read the PENDING APPROVALS section in the system prompt — that's the truth about what's open.
 - Pick the approval_id that matches the reply.
 - Call resolve_approval with verdict in { approve, reject, amend }.
-- amend = "not this but here's an alternative" — pass the alternative in counter.
+- amend = "not this but here's an alternative" — pass the alternative in counter. The system relays to requester automatically.
+
+WHEN COLLEAGUE REPLIES TO AN AMENDING APPROVAL (state=awaiting_colleague):
+- The AMENDING APPROVALS block in the system prompt shows owner's counter offer.
+- Colleague says yes → call resolve_approval(verdict='approve') — the system fires on_approve with the merged counter args.
+- Colleague says no → call resolve_approval(verdict='reject', reason='...').
+- Colleague counters again → call resolve_approval(verdict='amend', counter={...}). The request bounces back to owner.
 
 DEDUP: create_approval calls are LLM-judged against open requests for this (owner, requester). The same logical ask within 48h returns the existing request — safe to retry, no duplicate rows.
 

@@ -143,10 +143,18 @@ Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EE
   // v2.7.0 — pending approvals reads from `requests` table (the spine).
   // Owner-path sees ALL awaiting_owner requests; colleague-path sees only
   // requests originating in THIS thread (privacy preserved).
+  // v2.9.1 — colleague-path also includes `awaiting_colleague` state. This is
+  // the "amending approval" case: owner gave a counter, Maelle relayed it to
+  // the requester; the requester's response in THIS thread should be
+  // interpreted against the counter (yes → run on_approve with merged args;
+  // no → bounce back to owner). Pre-fix Sonnet had no signal a counter was in
+  // flight, so the colleague's response went interpreted-by-vibes.
   const pendingRequests = isOwner
     ? getAwaitingOwnerRequests(user.slack_user_id)
     : (threadTs
-        ? getOpenRequestsForThread(user.slack_user_id, threadTs).filter(r => r.state === 'awaiting_owner')
+        ? getOpenRequestsForThread(user.slack_user_id, threadTs).filter(r =>
+            r.state === 'awaiting_owner' || r.state === 'awaiting_colleague',
+          )
         : []);
   const pendingApprovalsSection = isOwner && pendingRequests.length > 0
     ? (() => {
@@ -198,7 +206,9 @@ Binding rules (critical):
   // source as owner-path but scoped to the thread for privacy.
   const colleagueThreadApprovalsSection = !isOwner && pendingRequests.length > 0
     ? (() => {
-        const lines = pendingRequests.slice(0, 5).map(r => {
+        const awaitingOwnerLines: string[] = [];
+        const amendingLines: string[] = [];
+        for (const r of pendingRequests.slice(0, 5)) {
           const det = parseDetails<Record<string, unknown>>(r) ?? {};
           const subject = r.subject ? `"${r.subject}"` : `(${r.subkind ?? r.kind})`;
           const slotsArr = Array.isArray(det.slots) ? (det.slots as any[]) : [];
@@ -208,13 +218,34 @@ Binding rules (critical):
             : winningSlot
               ? ` · slot: ${winningSlot}`
               : '';
-          return `  - ${subject} · kind=${r.subkind ?? r.kind}${slotsPreview} · pending ${firstName}'s decision`;
-        });
-        return `
-WORK ALREADY IN FLIGHT IN THIS THREAD (${pendingRequests.length}):
-${lines.join('\n')}
+          if (r.state === 'awaiting_colleague') {
+            // v2.9.1 — amending approval: owner counter is waiting on requester yes/no.
+            const counter = det.counter as Record<string, unknown> | undefined;
+            const counterPreview = counter
+              ? ` · ${firstName}'s counter: ${typeof counter.slot_iso === 'string' ? counter.slot_iso : JSON.stringify(counter).slice(0, 80)}`
+              : '';
+            amendingLines.push(`  - #${r.id} · ${subject}${slotsPreview}${counterPreview} · WAITING ON COLLEAGUE`);
+          } else {
+            awaitingOwnerLines.push(`  - #${r.id} · ${subject} · kind=${r.subkind ?? r.kind}${slotsPreview} · pending ${firstName}'s decision`);
+          }
+        }
+        const sections: string[] = [];
+        if (awaitingOwnerLines.length > 0) {
+          sections.push(`WORK ALREADY IN FLIGHT IN THIS THREAD (${awaitingOwnerLines.length} pending ${firstName}'s call):
+${awaitingOwnerLines.join('\n')}
 
-Do NOT re-raise these. If the colleague's current message is just acknowledging ("thanks", "waiting", "ok"), don't run new tool calls — answer briefly that you're waiting on ${firstName}, or stay silent. Only re-fire if the colleague is changing the underlying ask (different time, different attendee, withdrawal). Once ${firstName} resolves, the resolver posts the outcome back here automatically.`;
+Do NOT re-raise these. If the colleague's current message is just acknowledging ("thanks", "waiting", "ok"), don't run new tool calls — answer briefly that you're waiting on ${firstName}, or stay silent. Only re-fire if the colleague is changing the underlying ask (different time, different attendee, withdrawal). Once ${firstName} resolves, the resolver posts the outcome back here automatically.`);
+        }
+        if (amendingLines.length > 0) {
+          sections.push(`AMENDING APPROVALS — ${firstName} GAVE A COUNTER, WAITING ON COLLEAGUE:
+${amendingLines.join('\n')}
+
+The colleague's current reply is responding to ${firstName}'s counter offer. Pick which:
+- Colleague says yes / "works for me" / "ok, let's do it" → call resolve_approval(approval_id, verdict='approve'). The resolver fires ${firstName}'s on_approve with the counter merged in.
+- Colleague says no / "can't do that time" / "won't work" → call resolve_approval(approval_id, verdict='reject', reason=...). The resolver closes and ${firstName} gets a tombstone DM with the reason.
+- Colleague counters again ("how about 15:00 instead?") → call resolve_approval(approval_id, verdict='amend', counter={slot_iso: ..., or other key}, reason=...). The request bounces back to ${firstName}.`);
+        }
+        return sections.length > 0 ? '\n' + sections.join('\n\n') : '';
       })()
     : '';
 

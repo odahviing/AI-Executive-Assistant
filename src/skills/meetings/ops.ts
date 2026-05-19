@@ -2259,12 +2259,172 @@ export class SchedulingSkill {
           logger.warn('update_meeting recurring-preflight failed — proceeding', { err: String(err) });
         }
 
+        // v2.9.1 — attendee add/remove path. The schema introduced
+        // `add_attendees` and `remove_attendees`; when either is non-empty
+        // we (a) gate colleague-path to self-only, (b) load the existing
+        // event, (c) compute the new attendee list, (d) re-evaluate
+        // category + location ONLY when the change is shape-affecting
+        // (internal-only ↔ has-external, or count crossing 4↔5), and
+        // (e) call updateMeeting with the merged shape.
+        const rawAdd = (args.add_attendees as Array<{ name?: string; email?: string; optional?: boolean }> | undefined) ?? [];
+        const rawRemove = (args.remove_attendees as string[] | undefined) ?? [];
+        const hasAttendeeChange = rawAdd.length > 0 || rawRemove.length > 0;
+        let mergedAttendees: Array<{ name?: string; email: string; optional?: boolean }> | undefined;
+        let newCategoryFromShape: string | undefined;
+        let newLocationFromShape: string | undefined;
+        let newIsOnlineFromShape: boolean | undefined;
+
+        if (hasAttendeeChange) {
+          const ownerFirst = context.profile.user.name.split(' ')[0];
+          const addList = rawAdd
+            .map(a => ({ name: a.name?.trim(), email: (a.email ?? '').trim().toLowerCase(), optional: a.optional === true }))
+            .filter(a => a.email.includes('@'));
+          const removeList = rawRemove
+            .map(e => (e ?? '').trim().toLowerCase())
+            .filter(e => e.includes('@'));
+
+          if (addList.length === 0 && rawAdd.length > 0) {
+            return {
+              error: 'attendee_missing_email',
+              meeting_subject: args.meeting_subject,
+              message: `Can't add attendees without emails — at least one entry in add_attendees had no email. Pass each as { email: "...", name: "..." }.`,
+            };
+          }
+
+          // Colleague-path self-only gate. Look up the colleague's email
+          // from people_memory; refuse any add/remove that isn't them.
+          if (context.senderRole === 'colleague') {
+            let colleagueEmail = '';
+            try {
+              const { getPersonMemory } = await import('../../db/people');
+              const mem = getPersonMemory(context.userId);
+              colleagueEmail = (mem?.email ?? '').toLowerCase();
+            } catch (_) { /* fall through */ }
+
+            const nonSelfAdds = addList.filter(a => a.email !== colleagueEmail);
+            const nonSelfRemoves = removeList.filter(e => e !== colleagueEmail);
+            if (!colleagueEmail || nonSelfAdds.length > 0 || nonSelfRemoves.length > 0) {
+              logger.info('update_meeting refused — colleague tried non-self attendee change', {
+                meetingId: args.meeting_id,
+                requester: context.userId,
+                requesterEmail: colleagueEmail || '(unknown)',
+                nonSelfAdds: nonSelfAdds.map(a => a.email),
+                nonSelfRemoves,
+              });
+              return {
+                error: 'colleague_self_only_attendee_change',
+                meeting_subject: args.meeting_subject,
+                message: `Only ${ownerFirst} can add or remove other people on a meeting. As a colleague you can only add/remove yourself.`,
+              };
+            }
+          }
+
+          // Load existing event for current attendees + shape signals.
+          const { getEventForAttendeeUpdate } = await import('../../connectors/graph/calendar');
+          const existing = await getEventForAttendeeUpdate(userEmail, args.meeting_id as string);
+          if (!existing) {
+            return {
+              error: 'event_load_failed',
+              meeting_subject: args.meeting_subject,
+              message: `Couldn't load "${args.meeting_subject}" to update its attendees. The event may have been cancelled or moved.`,
+            };
+          }
+
+          // Build the merged list: keep all existing not in removeList,
+          // then append adds not already present. Dedupe by lowercase email.
+          const removeSet = new Set(removeList);
+          const merged = new Map<string, { name?: string; email: string; optional?: boolean }>();
+          for (const a of existing.attendees) {
+            if (removeSet.has(a.email)) continue;
+            merged.set(a.email, a);
+          }
+          for (const a of addList) {
+            if (removeSet.has(a.email)) continue;  // a remove + add in same call: removed wins
+            if (!merged.has(a.email)) merged.set(a.email, a);
+          }
+          mergedAttendees = [...merged.values()];
+
+          // Shape change detection — same signals resolveLocation reads:
+          // (a) has-external flipped, (b) participant count crossed 4↔5.
+          const ownerEmailLc = context.profile.user.email.toLowerCase();
+          const ownerDomain = ownerEmailLc.includes('@') ? ownerEmailLc.split('@')[1] : '';
+          const wasExternal = existing.attendees.some(a =>
+            ownerDomain && a.email.endsWith('@' + ownerDomain) ? false : a.email !== ownerEmailLc
+          );
+          const isExternalNow = mergedAttendees.some(a =>
+            ownerDomain && a.email.endsWith('@' + ownerDomain) ? false : a.email !== ownerEmailLc
+          );
+          // Count includes owner (resolveLocation reads total participantCount).
+          const oldCount = existing.attendees.some(a => a.email === ownerEmailLc)
+            ? existing.attendees.length
+            : existing.attendees.length + 1;
+          const newCount = mergedAttendees.some(a => a.email === ownerEmailLc)
+            ? mergedAttendees.length
+            : mergedAttendees.length + 1;
+          const crossedThreshold = (oldCount <= 3 && newCount >= 4)
+            || (oldCount >= 4 && newCount <= 3)
+            || (oldCount <= 4 && newCount >= 5)
+            || (oldCount >= 5 && newCount <= 4);
+          const shapeChanged = (wasExternal !== isExternalNow) || crossedThreshold;
+
+          if (shapeChanged && existing.startIso) {
+            logger.info('update_meeting — attendee shape changed, re-evaluating category + location', {
+              meetingId: args.meeting_id,
+              wasExternal, isExternalNow,
+              oldCount, newCount,
+            });
+            try {
+              const { detectCategory } = await import('./detectCategory');
+              const { resolveLocation } = await import('../../utils/resolveLocation');
+              const catResult = await detectCategory({
+                profile: context.profile,
+                subject: args.meeting_subject as string,
+                attendees: mergedAttendees,
+                isRecurring: false,
+              });
+              const newCategory = catResult.category;
+              const oldCategory = existing.categories[0] ?? null;
+
+              if (newCategory && newCategory !== oldCategory) {
+                newCategoryFromShape = newCategory;
+              }
+
+              const loc = resolveLocation({
+                profile: context.profile,
+                startIso: existing.startIso,
+                intent: 'move',  // re-eval for an existing event; preserve path is fine here too
+                category: newCategory ?? oldCategory ?? undefined,
+                participantCount: newCount,
+                hasExternalAttendee: isExternalNow,
+                priorStartIso: existing.startIso,  // same start → preserve path eligible
+                existingLocation: existing.location,
+                existingIsOnline: existing.isOnline,
+              });
+              if (loc.kind === 'resolved') {
+                if (loc.location !== existing.location) newLocationFromShape = loc.location;
+                if (loc.isOnline !== existing.isOnline) newIsOnlineFromShape = loc.isOnline;
+              }
+              // preserve_existing / ask_owner / room_unavailable — leave the
+              // event's location alone. Category change still applies if any.
+            } catch (err) {
+              logger.warn('update_meeting — shape re-evaluation threw, applying attendee change without category/location update', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          }
+        }
+
         await updateMeeting({
           userEmail,
           timezone,
           meetingId:  args.meeting_id  as string,
           subject:    args.new_subject as string | undefined,  // subjects allow " - " (E1, owner direction)
-          categories: args.category ? [args.category as string] : undefined,
+          categories: args.category
+            ? [args.category as string]
+            : (newCategoryFromShape ? [newCategoryFromShape] : undefined),
+          attendees: mergedAttendees,
+          location: newLocationFromShape,
+          isOnline: newIsOnlineFromShape,
         });
         closeMeetingArtifacts({
           ownerUserId: context.profile.user.slack_user_id,
@@ -2276,17 +2436,36 @@ export class SchedulingSkill {
           source: context.channel,
           actor: context.userId,
           target: args.meeting_id as string,
-          details: { subject: args.meeting_subject, category: args.category, new_subject: args.new_subject },
+          details: {
+            subject: args.meeting_subject,
+            category: args.category,
+            new_subject: args.new_subject,
+            added_attendees: (args.add_attendees as Array<{ email?: string }> | undefined)?.map(a => a.email).filter(Boolean),
+            removed_attendees: (args.remove_attendees as string[] | undefined),
+            shape_recategorized: newCategoryFromShape ?? null,
+            shape_relocated: newLocationFromShape ?? null,
+          },
           outcome: 'success',
         });
         const updateChanges: string[] = [];
         if (args.new_subject) updateChanges.push(`renamed to '${args.new_subject}'`);
         if (args.category) updateChanges.push(`category set to ${args.category}`);
+        if (rawAdd.length > 0) {
+          const names = rawAdd.map(a => a.name || a.email).filter(Boolean) as string[];
+          updateChanges.push(`added ${names.join(', ')}`);
+        }
+        if (rawRemove.length > 0) {
+          updateChanges.push(`removed ${rawRemove.join(', ')}`);
+        }
+        if (newCategoryFromShape) updateChanges.push(`category re-tagged ${newCategoryFromShape} (attendee shape changed)`);
+        if (newLocationFromShape !== undefined) updateChanges.push(`location updated to "${newLocationFromShape}"`);
         return {
           success: true,
           updated: args.meeting_subject,
-          category: args.category ?? null,
+          category: args.category ?? newCategoryFromShape ?? null,
           new_subject: args.new_subject ?? null,
+          added_attendees: rawAdd.map(a => a.email).filter(Boolean),
+          removed_attendees: rawRemove,
           // v1.8.3 — past-tense summary for owner-visible reply. Issue #26 bug 1.
           action_summary: `Updated '${args.meeting_subject}'${updateChanges.length > 0 ? ': ' + updateChanges.join(', ') : ''}.`,
         };

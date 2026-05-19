@@ -115,6 +115,10 @@ async function dispatchHandler(
 
 /**
  * Generic expiry — close the request as expired + DM owner a tombstone.
+ *
+ * v2.9.1 — also notify the REQUESTER on approval-kind expiry (scenario A:
+ * someone asks, owner never answers → without this the requester is left
+ * hanging). Pre-fix the tombstone went only to the owner.
  */
 async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed'> {
   closeRequest({
@@ -136,6 +140,33 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
       }
     } catch (err) {
       logger.warn('runExpiry — tombstone DM failed', { requestId: row.id, err: String(err).slice(0, 200) });
+    }
+  }
+  // v2.9.1 — requester loop-close on approval expiry. Reuses the same DM
+  // path resolveRequest uses for reject; the verbiage is "couldn't get back
+  // to you on this" rather than "Idan said no".
+  if (row.kind === 'approval' && row.requester_slack_id) {
+    try {
+      const conn = getConnection(profile.user.slack_user_id, 'slack');
+      if (conn) {
+        const requesterFirst = row.requester_name?.split(' ')[0] ?? 'there';
+        const ownerFirst = profile.user.name.split(' ')[0];
+        const subject = row.subject && row.subject.toLowerCase().endsWith('needs your input')
+          ? 'that ask'
+          : (row.subject || 'that ask');
+        const body = `Hey ${requesterFirst} — I couldn't get a read from ${ownerFirst} on ${subject}. Closing this for now; ping me when you want to try again.`;
+        if (row.origin_is_mpim && row.origin_channel) {
+          await conn.postToChannel(row.origin_channel, body, {
+            threadTs: row.origin_thread_ts ?? undefined,
+          });
+        } else {
+          await conn.sendDirect(row.requester_slack_id, body);
+        }
+      }
+    } catch (err) {
+      logger.warn('runExpiry — requester loop-close DM failed', {
+        requestId: row.id, err: String(err).slice(0, 200),
+      });
     }
   }
   return 'closed';

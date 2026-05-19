@@ -165,9 +165,13 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     // are FINE — the gate only fires when she attributes infrastructure to
     // HERSELF. Sibling to claimChecker but a different concern (voice, not
     // false claims). Fails open — never blocks a draft.
+    //
+    // v2.9 — audience='owner': talking TO the owner directly. Exemplars use
+    // 1st/2nd person ("let me figure this out"); never third-person "Idan"
+    // references while addressing him.
     try {
       const { runHumanGate } = await import('../../utils/humanGate');
-      const verdict = await runHumanGate(cleanReply, profile);
+      const verdict = await runHumanGate(cleanReply, profile, 'owner');
       if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
         cleanReply = formatForSlack(verdict.rewrite);
       }
@@ -261,7 +265,10 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     // gate's prompt explicitly allows it. Fails open.
     try {
       const { runHumanGate } = await import('../../utils/humanGate');
-      const verdict = await runHumanGate(cleanReply, profile);
+      // v2.9 — Slack-side colleagues are same-domain by definition (workspace
+      // membership). audience='internal'. When EmailConnection lands, its
+      // sendReply path will pass 'external' for off-domain recipients.
+      const verdict = await runHumanGate(cleanReply, profile, 'internal');
       if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
         cleanReply = formatForSlack(verdict.rewrite);
       }
