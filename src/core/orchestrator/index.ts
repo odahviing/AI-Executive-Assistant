@@ -902,33 +902,52 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
 
     const toolBlocks = response.content.filter(b => b.type === 'tool_use');
 
-    // No tool calls — this is the final text response.
+    // v2.9.4 follow-up — ALWAYS capture text from this iteration into
+    // finalReply, regardless of whether tool calls also fired. Pre-fix
+    // (v2.2.4) only captured text on the FINAL iteration (toolBlocks empty),
+    // so when Sonnet emitted natural conversational text alongside a tool
+    // call in iteration N, the text was silently dropped — the next
+    // iteration would `end_turn` with no text (because Sonnet had already
+    // "said it" in iteration N from her POV), finalReply stayed empty, and
+    // the verbMap fallback fired "Done, handled a few things". Root of the
+    // 2026-05-20 note_about_self silent-after-teach class.
     //
-    // v2.2.4 (bug 2) — take only the LAST text block. Sonnet sometimes emits
-    // multiple text blocks in a single assistant turn when it reasons aloud
-    // ("Actually wait —", "On second thought —", "Let me ask."). Concatenating
-    // ALL of them dumps the entire deliberation chain into Slack and leaks
-    // raw slack_ids, instruction quotes, and self-correction text that the
-    // owner should never see. Sonnet's final user-facing answer is always
-    // the last text block. Multi-paragraph legitimate replies are typically
-    // a SINGLE block with newlines inside it — they're preserved. The
-    // base-prompt rule at systemPrompt.ts ("NO INTERNAL DELIBERATION IN
-    // OUTPUT TEXT") backstops this so Sonnet stops emitting deliberation
-    // blocks in the first place.
+    // Behavior: most-recent non-empty iteration wins (later iterations
+    // overwrite earlier — natural since text further along is more current).
+    // If the final iteration produces no text, finalReply keeps the most
+    // recent earlier text.
+    //
+    // v2.2.4's original concern (deliberation chain leakage —
+    // "Actually wait —", "Let me think.") is mitigated by:
+    //   (a) the existing base-prompt rule "NO INTERNAL DELIBERATION IN
+    //       OUTPUT TEXT" stops Sonnet from emitting deliberation blocks
+    //       in the first place
+    //   (b) we still take only the LAST text block from each iteration
+    //       (within-iteration deliberation still gets dropped)
+    //   (c) later iterations naturally overwrite earlier
+    // Net trade-off: previously every iter-N-with-tool text was dropped
+    // (broke owner's chat). Now occasionally a deliberation block from an
+    // early iter could leak if Sonnet doesn't follow with later text.
+    // Strictly better failure mode.
+    const textBlocks = response.content.filter(b => b.type === 'text') as Anthropic.TextBlock[];
+    const lastTextBlock = textBlocks[textBlocks.length - 1];
+    if (lastTextBlock && lastTextBlock.text.trim().length > 0) {
+      finalReply = lastTextBlock.text.trim();
+    }
+    if (textBlocks.length > 1) {
+      logger.warn('Sonnet emitted multiple text blocks — kept last only', {
+        iteration,
+        blocks: textBlocks.length,
+        droppedPreview: textBlocks
+          .slice(0, -1)
+          .map(b => b.text.slice(0, 80).replace(/\s+/g, ' '))
+          .join(' | ')
+          .slice(0, 400),
+      });
+    }
+
+    // No tool calls — this is the final iteration. finalReply already set above.
     if (toolBlocks.length === 0) {
-      const textBlocks = response.content.filter(b => b.type === 'text') as Anthropic.TextBlock[];
-      const last = textBlocks[textBlocks.length - 1];
-      finalReply = (last?.text ?? '').trim();
-      if (textBlocks.length > 1) {
-        logger.warn('Sonnet emitted multiple text blocks — kept last only', {
-          blocks: textBlocks.length,
-          droppedPreview: textBlocks
-            .slice(0, -1)
-            .map(b => b.text.slice(0, 80).replace(/\s+/g, ' '))
-            .join(' | ')
-            .slice(0, 400),
-        });
-      }
       break;
     }
 
