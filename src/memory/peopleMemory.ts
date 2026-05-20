@@ -183,6 +183,27 @@ export async function readPersonMemory(profile: UserProfile, slug: string): Prom
 }
 
 /**
+ * v2.9.3 (#103) — sync variant of readPersonMemory used by the system-
+ * prompt builder (which assembles synchronously). Same shape as the async
+ * version; never throws — fs failures return null.
+ */
+export function readPersonMemorySync(profile: UserProfile, slug: string): string | null {
+  const root = rootForProfile(profile);
+  const full = safeResolve(root, slug);
+  if (!full) return null;
+  try {
+    const stat = statSync(full);
+    if (stat.size > MAX_FILE_BYTES) {
+      logger.warn('person memory file too large — truncating read', { slug, bytes: stat.size });
+    }
+    const content = readFileSync(full, 'utf-8');
+    return content.slice(0, MAX_FILE_BYTES);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Write or replace a section in a person's md file. Creates the file from the
  * section template when it doesn't exist (first real fact — no earlier seed).
  *

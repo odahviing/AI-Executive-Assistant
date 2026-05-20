@@ -1,11 +1,11 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
 import { buildSkillsPromptSection, getActiveSkills } from '../../skills/registry';
-import { formatPreferencesCatalog, formatPeopleMemoryForPrompt, formatThreadPeopleBlock } from '../../db';
+import { formatPreferencesCatalog, formatPeopleMemoryForPrompt, formatThreadPeopleBlock, getPersonMemory } from '../../db';
 import { getAwaitingOwnerRequests, getOpenRequestsForThread } from '../../db/requests';
 import { parseDetails } from '../requests/types';
 import { formatAssistantSelfForPrompt } from '../assistantSelf';
-import { formatPeopleCatalogSync } from '../../memory/peopleMemory';
+import { formatPeopleCatalogSync, readPersonMemorySync, slugifyName } from '../../memory/peopleMemory';
 import { getEffectiveToday } from '../../utils/effectiveToday';
 
 /**
@@ -588,6 +588,29 @@ ${skillsSection}`;
     : '';
   const threadPeopleSection = threadPeopleBlock ? `\n\n${threadPeopleBlock}` : '';
 
+  // v2.9.3 (#103) — surface the SPEAKER's md file content directly into the
+  // colleague-path prompt. The .md file is the source of truth for what
+  // Maelle "remembers" about a person (capture pass keeps it in sync with
+  // structured DB state); rendering it inline saves Sonnet a tool call AND
+  // makes that memory actually shape the reply. Owner-path doesn't need
+  // this — owner's curation goes through the same .md but he's not the
+  // subject of the lookup.
+  const speakerMemoryBlock = (() => {
+    if (isOwner || !senderId) return '';
+    const personRow = getPersonMemory(senderId);
+    if (!personRow) return '';
+    const slug = slugifyName(personRow.name);
+    const md = readPersonMemorySync(profile, slug);
+    if (!md || md.trim().length === 0) return '';
+    return [
+      `MEMORY ON ${personRow.name.toUpperCase()} — what you've learned about them across past conversations.`,
+      'Use this to inform tone, language, scheduling preferences, and history. Empty sections mean "not learned yet".',
+      '',
+      md.trim(),
+    ].join('\n');
+  })();
+  const speakerMemorySection = speakerMemoryBlock ? `\n\n${speakerMemoryBlock}` : '';
+
   // ── ASSEMBLE DYNAMIC (NOT cached) ─────────────────────────────────────────
   const dynamicContent = `Now: ${now} | Timezone: ${user.timezone} | Time of day: ${timeOfDay}
 When greeting: use "good ${timeOfDay}" — never use morning/afternoon/evening/night based on anything other than this. At night (after 21:00 or before 05:00) avoid time-of-day greetings entirely, just say "hi" or "hey".
@@ -599,7 +622,7 @@ WEEK BOUNDARIES (critical — use these when interpreting "this week" / "next we
 ${weekBoundaries}
 "Next Sunday" = ${nextWeekStart.toFormat('EEE d MMM')} (${nextWeekStart.toFormat('yyyy-MM-dd')})
 When fetching "next week's calendar" use the date range listed above for Next week.
-${ownerContextSection}${colleagueThreadApprovalsSection}${threadPeopleSection}`;
+${ownerContextSection}${colleagueThreadApprovalsSection}${threadPeopleSection}${speakerMemorySection}`;
 
   return { static: staticContent, dynamic: dynamicContent };
 }

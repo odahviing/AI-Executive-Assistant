@@ -1041,74 +1041,25 @@ Status meanings:
                 && issue.kept_event_id
               ) {
                 // v2.1.1 — overlap with a clear movable side. Two paths:
-                //   (a) Movable side IS a floating block (lunch, coffee,
-                //       thinking time, etc.) → DIRECT MOVE: no coord
-                //       needed; a floating block is elastic by its own
-                //       definition. Just updateMeeting to a new aligned
-                //       slot within its window. Shadow DM fires naturally.
                 //   (b) Movable side is a regular internal-only meeting
                 //       with attendees → MOVE-COORD: DM the attendees,
                 //       propose slots, moveMeeting on their agreement.
                 //   (c) Protected (4+ / external / rule-matched) or
                 //       external-attendee on either side → skip entirely,
                 //       report to owner.
+                //
+                // v2.9.3 (#104) — Path (a) (floating-block direct move from a
+                // double_booking issue) deleted. It was unreachable: the
+                // double_booking detector excludes floating blocks from its
+                // pair-overlap scan (Exclusion 3 at the nonAllDay filter), so
+                // no issue with movable=floating-block was ever produced. The
+                // periodic rebalance sweep below the issue-loop now handles
+                // every floating-block overlap on the day, regardless of how
+                // the conflicting meeting was booked.
                 try {
                   const movable = events.find(e => e.id === issue.movable_event_id);
                   const kept = events.find(e => e.id === issue.kept_event_id);
                   if (movable && kept) {
-                    const matchedBlock = floatingBlocks.find(b =>
-                      fb.isFloatingBlockEvent(
-                        { subject: movable.subject, categories: (movable as unknown as { categories?: unknown }).categories },
-                        b,
-                      ) && fb.blockAppliesOnDay(b, DateTime.fromISO(issue.date, { zone: timezone }).toFormat('EEEE'), profile),
-                    );
-                    if (matchedBlock) {
-                      // ── Path (a): floating-block direct move ──────────
-                      const bufferMinutes = profile.meetings.buffer_minutes ?? 5;
-                      // Busy-in-window = every other event in the block's
-                      // window on this date, EXCLUDING the block event
-                      // itself (we're moving it) AND including the kept
-                      // event (whose slot the block must vacate).
-                      const wStart = fb.windowMsForDay(issue.date, matchedBlock.preferred_start, timezone);
-                      const wEnd = fb.windowMsForDay(issue.date, matchedBlock.preferred_end, timezone);
-                      const busyInWindow = events
-                        .filter(e => {
-                          if (e.id === movable.id) return false;
-                          if (e.isCancelled || e.isAllDay || e.showAs === 'free') return false;
-                          if (fb.isFloatingBlockEvent(
-                            { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
-                            matchedBlock,
-                          )) return false;  // other matching blocks don't block each other
-                          const s = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis();
-                          const en = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis();
-                          return s < wEnd && en > wStart;
-                        })
-                        .map(e => ({
-                          start: Math.max(parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis(), wStart),
-                          end: Math.min(parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(), wEnd),
-                        }));
-                      const newStartMs = fb.findAlignedSlotForBlock(
-                        matchedBlock, issue.date, timezone, busyInWindow, bufferMinutes,
-                      );
-                      if (newStartMs === null) {
-                        issue.fix_failed = true;
-                        issue.fix_error = `No aligned slot left in the ${matchedBlock.name} window after accommodating "${kept.subject}".`;
-                      } else {
-                        const newStart = DateTime.fromMillis(newStartMs).setZone(timezone);
-                        const newEnd = newStart.plus({ minutes: matchedBlock.duration_minutes });
-                        await updateMeeting({
-                          userEmail, meetingId: movable.id,
-                          start: newStart.toISO()!,
-                          end: newEnd.toISO()!,
-                          timezone,
-                        });
-                        issue.fixed = true;
-                        issue.fix_detail = `Moved ${matchedBlock.name} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} to make room for "${kept.subject}".`;
-                        fixesApplied += 1;
-                      }
-                      // This overlap is handled; skip the coord path below.
-                      continue;
-                    }
                     // ── Path (b): regular move-coord ──
                     // Gate on the MOVABLE side only — does the meeting we're
                     // about to move have any external attendees? If not, we
@@ -1269,6 +1220,47 @@ Status meanings:
           // He never asked for "rough day" alerts and they were firing
           // unsolicited. Active mode now only handles conflict / OOF /
           // missing-block / buffer issues.
+
+          // v2.9.3 (#104) — periodic floating-block rebalance sweep. The
+          // mutation-time hook (rebalanceFloatingBlocksAfterMutation in
+          // meetings/ops.ts + coord/booking.ts) only fires when Maelle
+          // herself booked or moved a meeting via her own tools. Events
+          // added in Outlook directly never trigger it, leaving lunch (or
+          // any floating block) sitting on top of a meeting until owner
+          // notices. Active-mode runs twice a day; iterating each date in
+          // the health window and calling the helper catches Outlook-direct
+          // entries before the next brief. The helper self-checks "no
+          // overlap → skip silently" so safe to call unconditionally per
+          // date. Replaces the dead Path (a) inside the double_booking
+          // branch — the detector excludes floating blocks from its
+          // pair-overlap scan (line 463-470), so Path (a) could never fire.
+          try {
+            const { rebalanceFloatingBlocksAfterMutation } = await import('../utils/rebalanceFloatingBlocks');
+            const sweepStart = DateTime.fromISO(startDate, { zone: timezone });
+            const sweepEnd = DateTime.fromISO(endDate, { zone: timezone });
+            const dayCount = Math.max(1, Math.floor(sweepEnd.diff(sweepStart, 'days').days) + 1);
+            for (let d = 0; d < dayCount; d++) {
+              const dt = sweepStart.plus({ days: d }).set({ hour: 12, minute: 0, second: 0, millisecond: 0 });
+              const affectedIso = dt.toUTC().toISO();
+              if (!affectedIso) continue;
+              const result = await rebalanceFloatingBlocksAfterMutation({
+                profile,
+                affectedSlotIso: affectedIso,
+                ownerSlackId: profile.user.slack_user_id,
+              });
+              if (result.moved > 0) {
+                internalActions.push({
+                  tool: 'rebalance_floating_blocks',
+                  detail: `Rebalanced ${result.moved} floating block(s) on ${dt.toFormat('EEE d MMM')} (sweep).`,
+                });
+                fixesApplied += result.moved;
+              }
+            }
+          } catch (err) {
+            logger.warn('Periodic rebalance sweep threw — continuing', {
+              err: String(err).slice(0, 200),
+            });
+          }
 
           logger.info('Calendar health: active mode complete', {
             ownerUserId, fixesApplied, totalIssues: issues.length,

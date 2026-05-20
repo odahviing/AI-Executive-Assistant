@@ -502,6 +502,14 @@ function initSchema(db: Database.Database): void {
   // legacy rows.
   try { db.exec(`ALTER TABLE tasks ADD COLUMN skill_origin TEXT`); } catch (_) {}
 
+  // v2.9.3 (#103) — end-of-chat capture pass tracking. The background loop
+  // scans conversation_threads for DMs where the last message landed ≥30 min
+  // ago AND captured_at is older than the last message — those threads are
+  // treated as "session complete, ready for capture". A Haiku pass extracts
+  // structured facts and writes to people_memory + the colleague's md file.
+  // NULL = never captured.
+  try { db.exec(`ALTER TABLE conversation_threads ADD COLUMN captured_at TEXT`); } catch (_) {}
+
   // Calendar issues — tracks detected calendar problems and their resolution status
   // Statuses: new (flagged, waiting for owner), approved (owner says it's fine),
   //           to_resolve (owner wants it fixed), resolved (fixed)

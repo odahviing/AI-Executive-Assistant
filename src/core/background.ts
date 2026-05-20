@@ -28,12 +28,35 @@ export function startBackgroundTimer(
   // scheduled task (outreach_send, outreach_expiry, coord_nudge, coord_abandon,
   // approval_expiry, calendar_fix, routine). Materialize first so newly inserted
   // routine tasks are visible to the runner in the same tick.
+  //
+  // v2.9.3 (#103) — end-of-chat capture pass piggybacks on the same loop.
+  // No new cron entity; the existing 5-min tick is the only scheduler. The
+  // pass is bounded (≤20 ready threads/tick), fire-and-forget, and never
+  // blocks the materializer/runner pipeline.
   setInterval(() => {
     const app = runningApps[0]?.app;
     if (!app) return;
     materializeRoutineTasks(profiles)
       .then(() => runDueTasks(app, profiles))
       .catch(err => logger.error('Routine→task pipeline error', { err: String(err) }));
+
+    // Capture pass runs independently — its errors should never affect the
+    // routine pipeline. Per-profile loop because the capture state
+    // (people_memory, .md files) is owner-scoped.
+    (async () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { runCapturePass } = require('../memory/capturePass') as typeof import('../memory/capturePass');
+      for (const profile of profiles.values()) {
+        try {
+          await runCapturePass(app, profile);
+        } catch (err) {
+          logger.warn('runCapturePass threw — continuing', {
+            ownerUserId: profile.user.slack_user_id,
+            err: String(err).slice(0, 200),
+          });
+        }
+      }
+    })();
   }, 5 * 60 * 1000);
 }
 
@@ -53,6 +76,23 @@ export async function initProfile(
   // Ensure briefing cron exists and set its DM channel
   ensureBriefingCron(profile);
   updateBriefingCronChannel(profile.user.slack_user_id, dmChannel);
+
+  // v2.9.3 (#104) — one-shot migration: bump the user-curated calendar-
+  // health routine from once-a-day (07:30) to twice-a-day (07:30,13:00).
+  // Idempotent — only fires when the row is in its untouched starting
+  // shape (schedule_time === '07:30', is_system=0, title match).
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getDb } = require('../db/client') as typeof import('../db/client');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { runV293CalendarHealthTwiceDaily } = require('../db/migrations/v2_9_3_calendar_health_twice_daily') as
+      typeof import('../db/migrations/v2_9_3_calendar_health_twice_daily');
+    runV293CalendarHealthTwiceDaily(getDb(), profile.user.timezone);
+  } catch (err) {
+    logger.warn('v2.9.3 calendar-health twice-daily migration threw — continuing', {
+      err: String(err).slice(0, 200),
+    });
+  }
 
   // #75 — repair any active routines stuck with next_run_at = NULL. Caused
   // by the materializer's `WHERE next_run_at IS NOT NULL` filter being the

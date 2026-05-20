@@ -382,33 +382,49 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
           args = { ...args, colleague_slack_id: context.userId };
         }
       }
-      // log_interaction: colleague can only log interactions involving themselves.
-      // Schema arg is `slack_id` here, distinct from note_about_person's
-      // `colleague_slack_id`.
+      // v2.9.3 — universal colleague-self rewrite (extends the v2.9.2
+      // note_about_person fix to every person-targeting tool). When a
+      // colleague calls log_interaction / confirm_gender /
+      // update_person_profile with a target that isn't themselves,
+      // silently rewrite the target to the requester instead of
+      // refusing with `not_permitted`. The prior refusal pattern killed
+      // Sonnet's response chain (the same class of bug that produced
+      // the empty-reply when Yael asked Maelle's name pre-v2.9.2). Now
+      // every colleague-side person-write is self-only by construction;
+      // Sonnet can't drift, the data lands on the right row, the chain
+      // continues. Owner direction: "everyone writes to himself."
+      //
+      // log_interaction uses `slack_id`; confirm_gender + update_person_profile
+      // use `colleague_slack_id`. Same rewrite logic, different arg name.
       if (toolName === 'log_interaction') {
         const targetId = args.slack_id as string | undefined;
         if (targetId && targetId !== context.userId) {
-          logger.warn('Colleague tried to log interaction for another person', { targetId, requesterId: context.userId });
-          return { error: 'not_permitted', reason: 'You can only log your own interactions.' };
+          logger.info('log_interaction colleague-path — rewriting target to requester', {
+            originalTarget: targetId, requesterId: context.userId,
+          });
+          args = { ...args, slack_id: context.userId };
         }
       }
-      // confirm_gender: colleague can only confirm their OWN gender
       if (toolName === 'confirm_gender') {
         const targetId = args.colleague_slack_id as string | undefined;
         if (targetId && targetId !== context.userId) {
-          logger.warn('Colleague tried to confirm another person\'s gender', { targetId, requesterId: context.userId });
-          return { error: 'not_permitted', reason: 'You can only confirm your own gender, not someone else\'s.' };
+          logger.info('confirm_gender colleague-path — rewriting target to requester', {
+            originalTarget: targetId, requesterId: context.userId,
+          });
+          args = { ...args, colleague_slack_id: context.userId };
         }
       }
-      // v2.5.2 — update_person_profile: colleague can only update operational
-      // metadata about themselves. Two checks:
-      //   1. Target self (colleague_slack_id matches context.userId)
-      //   2. Field allowlist: filter args to a self-writable subset
+      // v2.5.2 — update_person_profile: field allowlist still applies on
+      // colleague-self path (engagement_rank, role_summary, etc. are
+      // owner-curated and silently dropped). v2.9.3 — target check
+      // changed from refuse to rewrite, same shape as the other tools.
       if (toolName === 'update_person_profile') {
         const targetId = args.colleague_slack_id as string | undefined;
         if (targetId && targetId !== context.userId) {
-          logger.warn('Colleague tried to update another person\'s profile', { targetId, requesterId: context.userId });
-          return { error: 'not_permitted', reason: 'You can only update your own profile fields, not someone else\'s.' };
+          logger.info('update_person_profile colleague-path — rewriting target to requester', {
+            originalTarget: targetId, requesterId: context.userId,
+          });
+          args = { ...args, colleague_slack_id: context.userId };
         }
         const COLLEAGUE_SELF_WRITABLE_FIELDS = new Set([
           'colleague_slack_id', 'colleague_name',

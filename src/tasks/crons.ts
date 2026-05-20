@@ -20,7 +20,7 @@ export interface Routine {
   title: string;
   prompt: string;
   schedule_type: 'daily' | 'weekdays' | 'weekly' | 'monthly';
-  schedule_time: string;    // 'HH:MM' in user's timezone
+  schedule_time: string;    // 'HH:MM' in user's timezone — or comma-separated "HH:MM,HH:MM" for twice-daily (v2.9.3)
   schedule_day: string | null; // day name for weekly; day-of-month string for monthly
   status: 'active' | 'paused';
   next_run_at: string | null;
@@ -33,7 +33,39 @@ export interface Routine {
 }
 
 /**
+ * Parse a `schedule_time` string into one or more `{ hour, minute }` slots.
+ *
+ * v2.9.3 — multi-time support. The column accepts either a single "HH:MM"
+ * (legacy) or a comma-separated list of times like "07:30,13:00". Used when
+ * a single routine should fire multiple times per day — e.g. the
+ * calendar-health routine running both at the morning brief AND mid-day
+ * so Outlook-direct entries that don't trip the per-mutation rebalance
+ * hook still get caught the same day.
+ *
+ * Invalid tokens are filtered out; the result is sorted ascending. Returns
+ * an empty array only if the input has no valid times (caller falls back).
+ */
+function parseScheduleTimes(scheduleTime: string): Array<{ h: number; m: number }> {
+  const tokens = scheduleTime.split(',').map(t => t.trim()).filter(Boolean);
+  const slots: Array<{ h: number; m: number }> = [];
+  for (const tok of tokens) {
+    const [hStr, mStr] = tok.split(':');
+    const h = parseInt(hStr, 10);
+    const m = parseInt(mStr, 10);
+    if (!Number.isFinite(h) || h < 0 || h > 23) continue;
+    if (!Number.isFinite(m) || m < 0 || m > 59) continue;
+    slots.push({ h, m });
+  }
+  slots.sort((a, b) => (a.h - b.h) || (a.m - b.m));
+  return slots;
+}
+
+/**
  * Compute the next UTC ISO datetime at which a routine should run.
+ *
+ * v2.9.3 — multi-time aware. If `scheduleTime` carries multiple comma-
+ * separated times ("07:30,13:00"), we compute the next firing for each
+ * and return the earliest one. Single-time behavior is unchanged.
  */
 export function computeNextRunAt(
   scheduleType: string,
@@ -43,9 +75,39 @@ export function computeNextRunAt(
   afterTime?: DateTime,
   workDays?: string[],
 ): string {
-  const [hStr, mStr] = scheduleTime.split(':');
-  const h = parseInt(hStr, 10);
-  const m = parseInt(mStr, 10);
+  const slots = parseScheduleTimes(scheduleTime);
+  if (slots.length === 0) {
+    // Fallback for malformed input: keep the legacy single-time path so
+    // a bad write doesn't silently drop a routine.
+    return computeNextRunAtForSlot(scheduleType, 0, 0, scheduleDay, timezone, afterTime, workDays);
+  }
+
+  let earliestMs = Infinity;
+  let earliestIso = '';
+  for (const slot of slots) {
+    const iso = computeNextRunAtForSlot(scheduleType, slot.h, slot.m, scheduleDay, timezone, afterTime, workDays);
+    const ms = Date.parse(iso);
+    if (Number.isFinite(ms) && ms < earliestMs) {
+      earliestMs = ms;
+      earliestIso = iso;
+    }
+  }
+  return earliestIso;
+}
+
+/**
+ * Single-slot variant — the original computeNextRunAt body, with the
+ * (h, m) lifted to parameters so the multi-slot wrapper can call it.
+ */
+function computeNextRunAtForSlot(
+  scheduleType: string,
+  h: number,
+  m: number,
+  scheduleDay: string | null,
+  timezone: string,
+  afterTime?: DateTime,
+  workDays?: string[],
+): string {
   const base = (afterTime ?? DateTime.now()).setZone(timezone);
 
   const snap = (dt: DateTime) =>
@@ -103,10 +165,15 @@ export function getProfileWorkDays(profile: UserProfile): string[] {
 }
 
 function formatSchedule(routine: Routine, tz: string, workDays?: string[]): string {
-  const [hStr, mStr] = routine.schedule_time.split(':');
-  const time = DateTime
-    .fromObject({ hour: parseInt(hStr), minute: parseInt(mStr) }, { zone: tz })
-    .toFormat('HH:mm');
+  // v2.9.3 — multi-time aware. "07:30,13:00" renders as "07:30 + 13:00".
+  const slots = parseScheduleTimes(routine.schedule_time);
+  const time = slots.length > 0
+    ? slots
+        .map(s => DateTime
+          .fromObject({ hour: s.h, minute: s.m }, { zone: tz })
+          .toFormat('HH:mm'))
+        .join(' + ')
+    : routine.schedule_time;
 
   switch (routine.schedule_type) {
     case 'daily':    return `Daily at ${time}`;
@@ -257,7 +324,7 @@ action='list' — list all routines (active and paused). Call when asked "what r
             },
             schedule_time: {
               type: 'string',
-              description: 'create: REQUIRED. Time to run in 24h HH:MM in the user\'s local timezone, e.g. "08:30". update: optional.',
+              description: 'create: REQUIRED. Time to run in 24h HH:MM in the user\'s local timezone, e.g. "08:30". Multi-time supported: pass comma-separated values to fire the same routine more than once a day, e.g. "07:30,13:00" runs it both at 07:30 and at 13:00. update: optional.',
             },
             schedule_day: {
               type: 'string',

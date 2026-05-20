@@ -573,40 +573,6 @@ Binding — how to pick the right approval_id:
           };
         }
 
-        // v2.9.2 — completeness gate. Reads ask_text + on_approve.args +
-        // recent history; refuses the tool call if a concrete fact the
-        // requester gave is missing from both. Sonnet retries with the
-        // diagnostic. Closes the 2026-05-19 Yael "ask omitted the 11:30"
-        // class. Universal across approval kinds.
-        try {
-          const { checkApprovalCompleteness } = await import('../utils/approvalCompletenessGate');
-          const onApproveForGate = (payload.callbacks as Record<string, unknown> | undefined)?.on_approve
-            ?? payload.deferred_action;
-          const verdict = await checkApprovalCompleteness({
-            askText,
-            onApprove: onApproveForGate as { tool: string; args: Record<string, unknown> } | undefined,
-            recentHistory: context.conversationHistory ?? [],
-            requesterName,
-            profile,
-          });
-          if (!verdict.ok) {
-            logger.info('create_approval — completeness gate refused, returning error for retry', {
-              missing: verdict.missing,
-              diagnostic: verdict.diagnostic,
-            });
-            return {
-              error: 'incomplete_approval',
-              missing: verdict.missing,
-              message: verdict.diagnostic,
-              hint: 'Update ask_text to include the missing fact verbatim, OR set payload.callbacks.on_approve.args so the auto-generated consequence line surfaces it, then retry create_approval.',
-            };
-          }
-        } catch (err) {
-          logger.warn('create_approval — completeness gate threw, proceeding without check', {
-            err: String(err).slice(0, 200),
-          });
-        }
-
         // Midpoint reminder + expiry — one schedule on the request row.
         // The reminder dispatcher re-arms next_check to expiry when it fires.
         const expiresMs = Date.parse(expiresAt);
