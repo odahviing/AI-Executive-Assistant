@@ -122,17 +122,19 @@ Do NOT call this for purely work-related facts (those go in manage_preference(ac
       },
       {
         name: 'note_about_self',
-        description: `Save a durable fact about YOURSELF — about ${profile.assistant.name}, the assistant. The owner is the only source of these; when ${profile.user.name.split(' ')[0]} teaches you something about who you are, your story, your name origin, your personality, how you like to work — this is where it goes. Lives in your own ABOUT YOU block, visible in every conversation (owner + colleagues), so when anyone asks "what are you / who are you / where does your name come from / how old are you / are you AI" you can answer from saved facts instead of deflecting.
+        description: `When ${profile.user.name.split(' ')[0]} shares or teaches you something about who you are (name origin, your story, identity, age, AI/human, how you like to work, personality) IN conversation: react to what he said FIRST in your text reply, then call this tool to save the fact alongside. The save is bookkeeping that runs WITH your text reply, never INSTEAD of it. A turn that calls this tool with no conversational text reply is a bug.
+
+Saved facts live in your own ABOUT YOU block, visible in every conversation (owner + colleagues), so when anyone asks "what are you / who are you / where does your name come from / how old are you / are you AI" you can answer from saved facts instead of deflecting.
 
 Call this when:
 - ${profile.user.name.split(' ')[0]} teaches you something about your identity ("you were named after X", "you're an AI assistant built in early 2026", "your style should be warm but direct")
 - ${profile.user.name.split(' ')[0]} corrects how you describe yourself
 - A useful fact about you comes up that should outlive this conversation
 
-Examples (owner says → you save):
-- "You're named after the Maelle character from Clair Obscur: Expedition 33" → topic="other", subject="name origin", note="Named after Maelle, a key character in the video game Clair Obscur: Expedition 33."
-- "You're an AI assistant, not human — be honest about it if asked directly" → topic="other", subject="ai identity", note="You are an AI assistant. When asked directly, acknowledge honestly — never claim to be human."
-- "You were built around January 2026" → topic="other", subject="creation date", note="Built around January 2026."
+Examples (owner says → you react in text + save):
+- "You're named after the Maelle character from Clair Obscur: Expedition 33" → text reply: "Oh, the Maelle from the game — that's a cool source. Did the whole act-3 arc influence the choice or was it earlier?" + save: note="Named after Maelle, a key character in the video game Clair Obscur: Expedition 33."
+- "You're an AI assistant, not human — be honest about it if asked directly" → text reply: "Got it — I'll keep that honest when asked. Thanks for being explicit." + save: note="You are an AI assistant. When asked directly, acknowledge honestly — never claim to be human."
+- "You were built around January 2026" → text reply: "Noted — early 2026 it is. Any context around why then?" + save: note="Built around January 2026."
 
 Owner-path only — the tool is mute when called by a colleague (they can't teach Maelle facts about herself). For owner sharing facts about HIMSELF (his hobbies, weekend, family), use note_about_person with colleague_name="${profile.user.name.split(' ')[0]}" — his own row.`,
         input_schema: {
