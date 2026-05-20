@@ -49,6 +49,7 @@ import {
   type PersonProfile,
 } from '../db';
 import { readPersonMemory, writePersonSection, slugifyName } from './peopleMemory';
+import { selfSlackId } from '../core/assistantSelf';
 import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import logger from '../utils/logger';
@@ -352,9 +353,13 @@ export async function runCapturePass(app: App, profile: UserProfile): Promise<vo
         continue;
       }
       if (colleagueId === ownerSlackId) {
-        // Owner's own DM with Maelle — owner-path captures are manual
-        // ("Maelle, remember Yael is X"), not via this pass. Mark to
-        // skip on future ticks.
+        // v2.9.4 follow-up — owner's DM IS the SELF capture path. Same
+        // trigger (30 min quiet + new activity), different target (Maelle's
+        // SELF row instead of a colleague row), different Haiku prompt
+        // (facts about MAELLE herself, not about the speaker). Owner direction:
+        // "do the same we did in the memory of persons / tell haiku to keep
+        // as much as he can about maelle, but no duplicates."
+        await runSelfCapture(profile, anthropic, row.thread_ts, ownerName);
         markThreadCaptured(row.thread_ts);
         continue;
       }
@@ -425,5 +430,146 @@ export async function runCapturePass(app: App, profile: UserProfile): Promise<vo
       // the next chat will trigger again.
       try { markThreadCaptured(row.thread_ts); } catch { /* ignore */ }
     }
+  }
+}
+
+// ── SELF capture path (owner-DM threads) ────────────────────────────────────
+
+/**
+ * Haiku prompt for SELF capture. Different from the colleague prompt:
+ * we want EVERYTHING that defines who Maelle is (origin, personality,
+ * preferences, identity, communication style) — generous capture — but
+ * STRICTLY dedup against the existing notes. Same-fact-different-wording
+ * = skip.
+ */
+const SELF_SYSTEM_PROMPT = `You are extracting facts about Maelle (an AI executive assistant) from her conversation with her owner.
+
+You will be given:
+1. The notes Maelle already has saved about herself
+2. A conversation transcript between Maelle and her owner
+
+Your job: identify NEW facts about MAELLE that aren't already on file. Be generous in what counts as a Maelle-fact — capture anything that defines who she is or how she should behave:
+- Origin / name meaning / where the name came from / why she exists
+- Identity (AI/human/bot, age, when she was built, who built her)
+- Personality traits the owner described or implied
+- Communication preferences ("be more X", "always Y when Z")
+- How she should handle specific situations
+- Background / lore the owner shared about why she works the way she does
+- Things the owner wants her to remember about her own role
+
+What's NOT a Maelle-fact (skip these — they belong elsewhere):
+- The owner's own life / work / meetings / calendar / hobbies
+- Facts about colleagues mentioned in the conversation
+- Plot details of games / books / movies the owner discussed (those are facts about THAT WORK, not about Maelle — unless the owner explicitly tied it back to Maelle, like "you were named after a character")
+- Generic small-talk that didn't teach Maelle anything about herself
+
+DEDUP RULE — this is strict: compare against the existing notes. If the conversation re-confirms a fact already on file, even with new wording or additional context, output it ONLY IF the new context adds something substantive. Pure re-statements with no new info = skip. Same essential fact phrased differently = skip.
+
+Output strict JSON. No prose, no markdown fences:
+{ "notes": ["fact 1", "fact 2", ...] }
+
+Each note: 1-2 sentences, written from a third-person stance describing Maelle ("Named after...", "Owner prefers her to...", "Built around..."). Be specific. Vague notes ("seems friendly") are useless later.
+
+If nothing new was learned, output { "notes": [] }.`;
+
+interface SelfCaptureDelta {
+  notes: string[];
+}
+
+function parseSelfDelta(raw: string): SelfCaptureDelta | null {
+  try {
+    const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```\s*$/i, '');
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    const parsed = JSON.parse(match[0]);
+    const notes = Array.isArray(parsed?.notes)
+      ? parsed.notes.filter((n: unknown): n is string => typeof n === 'string' && n.trim().length > 0)
+      : [];
+    return { notes };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Process an owner-DM thread as a SELF capture turn.
+ *
+ * Loads Maelle's existing SELF row notes, runs Haiku with the conversation
+ * + existing notes as context, applies new Maelle-facts via appendPersonNote
+ * on the SELF: row. Idempotent across re-runs of the same chat: Haiku sees
+ * existing notes and emits only deltas. Pure code-side capture — Sonnet's
+ * in-turn note_about_self calls remain the primary path; this pass is a
+ * safety net that catches facts Sonnet didn't save explicitly during chat.
+ *
+ * Fire-and-forget contract: any error caught + logged, never propagates.
+ */
+async function runSelfCapture(
+  profile: UserProfile,
+  anthropic: ReturnType<typeof getAnthropicClient>,
+  threadTs: string,
+  ownerName: string,
+): Promise<void> {
+  try {
+    const selfId = selfSlackId(profile.user.slack_user_id);
+    const selfRow = getPersonMemory(selfId);
+    if (!selfRow) {
+      // No SELF row yet — startup seed should have created it. Defensive
+      // skip rather than implicit create.
+      logger.warn('runSelfCapture: SELF row missing — skipping', { selfId });
+      return;
+    }
+
+    const existingNotes: Array<{ date: string; note: string }> = (() => {
+      try { return JSON.parse(selfRow.notes || '[]'); } catch { return []; }
+    })();
+
+    const messages = getConversationHistory(threadTs);
+    if (messages.length === 0) return;
+    const transcript = chatToTranscript(messages, profile.assistant.name, ownerName);
+
+    const userMsg = [
+      'EXISTING NOTES about Maelle (do NOT re-emit any of these — same fact = skip):',
+      '```',
+      existingNotes.length === 0
+        ? '(none yet)'
+        : existingNotes.map(n => `[${n.date}] ${n.note}`).join('\n'),
+      '```',
+      '',
+      'CONVERSATION TRANSCRIPT (Maelle + owner):',
+      '```',
+      transcript,
+      '```',
+      '',
+      'What new Maelle-facts (if any) does this conversation reveal? JSON only.',
+    ].join('\n');
+
+    const resp = await anthropic.messages.create({
+      model: HAIKU_MODEL,
+      max_tokens: 1000,
+      system: SELF_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userMsg }],
+    });
+    const text = resp.content
+      .filter(b => b.type === 'text')
+      .map(b => (b as Anthropic.TextBlock).text)
+      .join('')
+      .trim();
+    const delta = parseSelfDelta(text);
+
+    if (!delta || delta.notes.length === 0) {
+      logger.info('runSelfCapture: no new Maelle-facts in this thread', { threadTs });
+      return;
+    }
+
+    for (const note of delta.notes) {
+      appendPersonNote(selfId, note);
+    }
+    logger.info('runSelfCapture: applied SELF notes', {
+      threadTs, count: delta.notes.length,
+    });
+  } catch (err) {
+    logger.warn('runSelfCapture: threw — non-fatal', {
+      threadTs, err: String(err).slice(0, 200),
+    });
   }
 }
