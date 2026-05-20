@@ -122,19 +122,19 @@ Do NOT call this for purely work-related facts (those go in manage_preference(ac
       },
       {
         name: 'note_about_self',
-        description: `Same as note_about_person but for the OWNER (yourself's principal). Convenience wrapper — you don't need to pass slack_id, it's the owner's by definition.
+        description: `Save a durable fact about YOURSELF — about ${profile.assistant.name}, the assistant. The owner is the only source of these; when ${profile.user.name.split(' ')[0]} teaches you something about who you are, your story, your name origin, your personality, how you like to work — this is where it goes. Lives in your own ABOUT YOU block, visible in every conversation (owner + colleagues), so when anyone asks "what are you / who are you / where does your name come from / how old are you / are you AI" you can answer from saved facts instead of deflecting.
 
 Call this when:
-- The OWNER shares something personal in conversation (a hobby, family thing, sport, weekend plans, mood, what they were working on, etc.)
-- You asked them a social question and they answered
-- They volunteer something about themselves worth remembering for richer future chat
+- ${profile.user.name.split(' ')[0]} teaches you something about your identity ("you were named after X", "you're an AI assistant built in early 2026", "your style should be warm but direct")
+- ${profile.user.name.split(' ')[0]} corrects how you describe yourself
+- A useful fact about you comes up that should outlive this conversation
 
-Examples:
-- After "I was building you all day" → topic="hobby", subject="building ${profile.assistant.name}", note="Spent the day developing ${profile.assistant.name} — clearly enjoying the AI/dev work."
-- After "Just got back from skiing in Italy" → topic="travel", subject="ski trip italy", note="Just back from skiing in Italy — sounded relaxed."
-- After "My daughter started first grade today" → topic="family", subject="daughter first grade", note="Daughter started first grade today."
+Examples (owner says → you save):
+- "You're named after the Maelle character from Clair Obscur: Expedition 33" → topic="other", subject="name origin", note="Named after Maelle, a key character in the video game Clair Obscur: Expedition 33."
+- "You're an AI assistant, not human — be honest about it if asked directly" → topic="other", subject="ai identity", note="You are an AI assistant. When asked directly, acknowledge honestly — never claim to be human."
+- "You were built around January 2026" → topic="other", subject="creation date", note="Built around January 2026."
 
-Owner-only. Do NOT use this for colleagues (use note_about_person for them).`,
+Owner-path only — the tool is mute when called by a colleague (they can't teach Maelle facts about herself). For owner sharing facts about HIMSELF (his hobbies, weekend, family), use note_about_person with colleague_name="${profile.user.name.split(' ')[0]}" — his own row.`,
         input_schema: {
           type: 'object' as const,
           properties: {
@@ -208,22 +208,34 @@ Owner-only. Do NOT use this for colleagues (use note_about_person for them).`,
       }
 
       case 'note_about_self': {
-        // v2.5.2 — note_about_self is implicitly self-only: it writes to the
-        // CALLER's row (owner's row when senderRole==='owner'; the colleague's
-        // own row when senderRole==='colleague'). The prior owner-only reject
-        // blocked colleagues from saving anything they volunteered about
-        // themselves — exactly what the people-memory + social-engagement
-        // systems exist for. Letting Yael save "skiing in Italy" about herself
-        // is the whole point. No cross-write surface here, since slackId is
-        // resolved from context, never an arg.
+        // v2.9.4 (#105) — REPURPOSED. Owner direction: "note about self"
+        // means a fact about MAELLE herself, not about the owner.
+        //
+        // Owner-path → writes to SELF:<ownerSlackId> (Maelle's own people_memory
+        //   row). The ABOUT YOU block reads from this row and renders in
+        //   both owner and colleague prompts, so the saved fact becomes
+        //   visible in every conversation Maelle has. This is the only path
+        //   that fixes #105 (Maelle didn't know her own name origin because
+        //   the SELF row stayed empty).
+        // Colleague-path → unchanged from v2.5.2. Writes to the colleague's
+        //   OWN row. A colleague saving "skiing in Italy" about themselves is
+        //   still the right behavior — only the owner-path semantics shift.
+        //   Colleagues cannot teach Maelle facts about herself.
+        //
+        // For the OWNER's own hobbies / weekend / family / etc. (what the
+        // v2.5.2 owner-path used to capture here), use note_about_person
+        // with colleague_name="<owner first name>" — his own row resolves
+        // via people_memory name search.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getPersonMemory } = require('../db') as typeof import('../db');
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { selfSlackId } = require('../core/assistantSelf') as typeof import('../core/assistantSelf');
         let slackId: string;
         let name: string;
         if (context.senderRole === 'owner') {
-          slackId = context.profile.user.slack_user_id;
-          name    = context.profile.user.name;
+          slackId = selfSlackId(context.profile.user.slack_user_id);
+          name    = context.profile.assistant.name;
         } else {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getPersonMemory } = require('../db') as typeof import('../db');
           slackId = context.userId;
           const row = getPersonMemory(slackId);
           name = row?.name ?? slackId;  // fall back to slack id if no row yet
@@ -234,16 +246,14 @@ Owner-only. Do NOT use this for colleagues (use note_about_person for them).`,
         const quality     = (args.topic_quality as SocialTopicQuality | undefined) ?? 'neutral';
         const initiatedBy = (args.initiated_by as 'maelle' | 'person' | undefined) ?? 'person';
 
-        // v2.5.2 — only seed email/timezone from profile when this is the
-        // owner's row. Colleague-self path doesn't have those values from
-        // context (they live on the colleague's people_memory row already
-        // via earlier inbound enrichment); passing the owner's values would
-        // clobber the colleague's row.
+        // Seed identity fields when creating the SELF row for the first
+        // time. For colleague-self path: don't clobber an existing row
+        // with bare seed.
         if (context.senderRole === 'owner') {
           upsertPersonMemory({
             slackId,
             name,
-            email:    context.profile.user.email,
+            email:    context.profile.assistant.email,
             timezone: context.profile.user.timezone,
           });
         } else {
@@ -257,8 +267,16 @@ Owner-only. Do NOT use this for colleagues (use note_about_person for them).`,
         });
         recordSocialMoment(slackId, topic, quality, initiatedBy, subject);
 
-        logger.info('Self-note saved', { slackId, scope: context.senderRole, topic, subject, quality, initiatedBy });
-        return { saved: true, scope: context.senderRole, topic, subject, quality };
+        logger.info('Self-note saved', {
+          slackId,
+          scope: context.senderRole === 'owner' ? 'assistant-self' : 'colleague-self',
+          topic, subject, quality, initiatedBy,
+        });
+        return {
+          saved: true,
+          scope: context.senderRole === 'owner' ? 'assistant-self' : 'colleague-self',
+          topic, subject, quality,
+        };
       }
     }
 

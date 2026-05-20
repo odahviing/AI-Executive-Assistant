@@ -136,7 +136,7 @@ AUTHORITY MODEL:
 Kinds:
 - slot_pick: pick one of N offered meeting slots. Payload: { coord_job_id, subject, slots: [{iso, label}], participants_emails, duration_min }. Resolving calls through to the booking flow automatically.
 - duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
-- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting). Payload: { rule, context }.
+- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. Once payload is complete, the handler auto-stamps \`payload.deferred_action = { tool: 'create_meeting', args: <those fields> }\` so the resolver books the meeting deterministically on owner approve (no separate booking turn needed). If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE creating the approval.
 - lunch_bump: move the owner's lunch block. Payload: { from, to, reason }.
 - unknown_person: book with someone we don't have full contact info for. Payload: { name, known_fields, missing_fields }.
 - calendar_conflict: the chosen slot went stale — offer fresh options. Payload: { coord_job_id, original_slot, conflict_reason, slots: [...] }.
@@ -452,11 +452,105 @@ Binding — how to pick the right approval_id:
 
         const requesterSlackId = (typeof payload.requester_slack_id === 'string' ? payload.requester_slack_id : undefined)
           ?? (context.senderRole === 'colleague' ? context.userId : undefined);
-        const requesterName = typeof payload.requester_name === 'string' ? payload.requester_name : undefined;
+        // v2.9.4 (#107d) — when Sonnet doesn't pass requester_name, auto-populate
+        // it from people_memory using requester_slack_id. Pre-fix the row stored
+        // requester_name=null, and `notifyRequesterOfDecision` rendered "Hey"
+        // instead of "Hey Yael" — the relay was technically delivered but
+        // looked generic and got missed (root of the 2026-05-20 Yael case
+        // where she didn't recognize the approval confirmation).
+        let requesterName: string | undefined = typeof payload.requester_name === 'string'
+          ? payload.requester_name
+          : undefined;
+        if (!requesterName && requesterSlackId) {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getPersonMemory } = require('../db/people') as typeof import('../db/people');
+          const personRow = getPersonMemory(requesterSlackId);
+          if (personRow?.name) {
+            requesterName = personRow.name;
+            logger.info('create_approval — auto-populated requester_name from people_memory', {
+              requesterSlackId, requesterName,
+            });
+          }
+        }
         const subject =
           (typeof payload.subject === 'string' && payload.subject) ||
           (typeof payload.question === 'string' && payload.question.slice(0, 80)) ||
           `${subkind.replace(/_/g, ' ')} needs your input`;
+
+        // v2.9.4 (#107b) — booking-kind payload enforcement. Reuses the
+        // create_meeting required-field contract (subject, start, end,
+        // attendees) — same object, no new type. `policy_exception` is the
+        // only booking-class kind that today carries a loose payload; the
+        // other booking-class kinds (slot_pick, calendar_conflict,
+        // duration_override) already have purpose-built typed payloads with
+        // their own resolver flows. Non-booking kinds (freeform, etc.) stay
+        // loose per owner direction.
+        //
+        // When the required fields are present: validate, then auto-stamp
+        // payload.deferred_action with { tool: 'create_meeting', args: ... }
+        // so the resolver's on_approve replay books the meeting deterministically
+        // (no separate Sonnet turn needed after owner approve, no thin-context
+        // booking).
+        //
+        // When missing: return an error listing what's needed — Sonnet asks
+        // the requester before retrying. Same trust model as create_meeting's
+        // schema-level `required:` (which today is the canonical enforcement
+        // point for booking input shape).
+        if (subkind === 'policy_exception') {
+          const hasSubject = typeof payload.subject === 'string' && payload.subject.trim().length > 0;
+          const hasStart = typeof payload.start === 'string' && payload.start.trim().length > 0;
+          const hasEnd = typeof payload.end === 'string' && payload.end.trim().length > 0;
+          const attendees = payload.attendees as Array<{ email?: string; name?: string }> | undefined;
+          const hasAttendees = Array.isArray(attendees) && attendees.length > 0;
+
+          const missing: string[] = [];
+          if (!hasSubject) missing.push('subject');
+          if (!hasStart) missing.push('start');
+          if (!hasEnd) missing.push('end');
+          if (!hasAttendees) missing.push('attendees');
+
+          if (missing.length > 0) {
+            logger.info('create_approval — booking-kind payload missing required fields', {
+              kind: subkind, missing,
+            });
+            return {
+              error: 'missing_required_field',
+              missing,
+              message: `policy_exception is a meeting-booking approval — payload must include the same fields create_meeting requires: ${missing.join(', ')}. Ask the requester for what's missing (e.g. "how long do you need?" for duration) before retrying. Same shape as a regular booking — owner will approve the exact booking that fires on yes.`,
+            };
+          }
+
+          // Auto-stamp on_approve. Pre-fix this required either Sonnet to set
+          // payload.deferred_action explicitly OR the orchestrator's
+          // _deferred_action_hint to capture from a rule_violation tool
+          // result earlier in the turn. When Sonnet went straight to
+          // create_approval without firing find_available_slots/create_meeting
+          // first (the Yael 13:01 case), no hint was captured → approval
+          // landed bare → resolver's on_approve was null → owner's "yes"
+          // resolved the request but didn't book → Sonnet had to book in a
+          // separate turn. Now we construct deferred_action directly from
+          // the payload Sonnet already provided. Skip when Sonnet (or the
+          // orchestrator hint pass) already set deferred_action.
+          if (!payload.deferred_action) {
+            payload.deferred_action = {
+              tool: 'create_meeting',
+              args: {
+                subject: payload.subject,
+                start: payload.start,
+                end: payload.end,
+                attendees: payload.attendees,
+                ...(payload.category ? { category: payload.category } : {}),
+                ...(payload.is_online !== undefined ? { is_online: payload.is_online } : {}),
+                ...(payload.location ? { location: payload.location } : {}),
+                ...(payload.body ? { body: payload.body } : {}),
+                relaxed: true,
+              },
+            };
+            logger.info('create_approval — auto-stamped deferred_action for policy_exception', {
+              subject: payload.subject, start: payload.start,
+            });
+          }
+        }
 
         // ── Dedup via LLM judge ──────────────────────────────────────────────
         // Check open requests for this (owner, requester) before inserting.
@@ -583,29 +677,68 @@ Binding — how to pick the right approval_id:
         const nextCheckAt = midIso ?? expiresAt;
         const nextCheckHandler = midIso ? 'approval_reminder' : 'expiry';
 
-        const row = createRequest({
-          ownerUserId,
-          initiatedBy: context.userId,
-          initiatedByRole: context.senderRole === 'owner' ? 'owner' : 'colleague',
-          kind: 'approval',
-          subkind,
-          subject,
-          description: askText,
-          state: 'awaiting_owner',
-          requesterSlackId,
-          requesterName,
-          originChannel: channelId,
-          originThreadTs: threadTs,
-          originIsMpim: !!context.isMpim,
-          expiresAt,
-          nextCheckAt,
-          nextCheckHandler,
-          idempotencyKey,
-          details: {
-            ...payload,
-            coord_job_id: (args.skill_ref as string | undefined) ?? payload.coord_job_id,
-          },
-        });
+        // v2.9.4 (#106) — graceful UNIQUE collision handling. The
+        // idempotency_key is `hash(ownerUserId, requesterSlackId, kind, subject)`.
+        // When Sonnet retries create_approval with the same logical ask
+        // (e.g. Yael adding duration after the initial escalation), the
+        // insert hits the unique constraint. Pre-fix the SqliteError
+        // propagated up, the orchestrator's tool dispatch threw, and
+        // Sonnet got no useful result → went silent on the requester.
+        // Now: catch the constraint error, look up the existing row by
+        // idempotency_key (same path the LLM-judged dedup uses), and
+        // return `reused_existing: true` so Sonnet's chain continues
+        // and she can surface honestly to both parties.
+        let row;
+        try {
+          row = createRequest({
+            ownerUserId,
+            initiatedBy: context.userId,
+            initiatedByRole: context.senderRole === 'owner' ? 'owner' : 'colleague',
+            kind: 'approval',
+            subkind,
+            subject,
+            description: askText,
+            state: 'awaiting_owner',
+            requesterSlackId,
+            requesterName,
+            originChannel: channelId,
+            originThreadTs: threadTs,
+            originIsMpim: !!context.isMpim,
+            expiresAt,
+            nextCheckAt,
+            nextCheckHandler,
+            idempotencyKey,
+            details: {
+              ...payload,
+              coord_job_id: (args.skill_ref as string | undefined) ?? payload.coord_job_id,
+            },
+          });
+        } catch (err) {
+          const errMsg = String(err);
+          const isUniqueViolation = errMsg.includes('UNIQUE constraint failed')
+            && errMsg.includes('idempotency_key');
+          if (!isUniqueViolation) throw err;  // unrelated error — propagate
+
+          const existing = getRequestByIdempotencyKey(idempotencyKey);
+          if (!existing) {
+            // Shouldn't happen — UNIQUE fired but lookup misses. Re-throw
+            // so we don't silently swallow a real bug.
+            throw err;
+          }
+          logger.info('create_approval — UNIQUE collision, returning existing row', {
+            existingId: existing.id, requesterSlackId, subject,
+          });
+          await maybeRevive(existing);
+          return {
+            ok: true,
+            approval_id: existing.id,
+            created: false,
+            expires_at: existing.expires_at,
+            kind: subkind,
+            reused_existing: true,
+            hint: 'This requester already has an open approval for this ask. They may be following up — the original is still awaiting decision.',
+          };
+        }
 
         // DM the owner. terminal_dm_msg_ts gets stamped from the response so
         // emoji ✅ on this DM resolves.

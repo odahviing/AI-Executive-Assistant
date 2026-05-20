@@ -260,11 +260,25 @@ export function processCalendarEvents(
       eventType = 'colleague_info';
     }
 
-    // Private/personal events: mask the subject
+    // Private/personal events: mask the subject. v2.9.4 (#107a) — checks
+    // BOTH paths via the central displaySubject helper:
+    //   (1) Outlook sensitivity is 'private' / 'personal'
+    //   (2) any of the event's categories matches a yaml category with
+    //       sets_sensitivity_private:true (e.g. Idan's `Personal` category)
+    // Pre-fix only path (1) was masked here — category-based privacy was
+    // silently bypassed, so Sonnet saw raw subjects for category-private
+    // events and could narrate them verbatim (root of #107a). The lower-
+    // level getCalendarEvents still returns raw subjects; the internal
+    // classifier flows (autoCategorize / detectCategory) read those directly
+    // and stay unaffected.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { displaySubject } = require('../../utils/displaySubject') as
+      typeof import('../../utils/displaySubject');
     const sensitivity = ev.sensitivity ?? 'normal';
-    const subject = (sensitivity === 'private' || sensitivity === 'personal')
-      ? '[Private]'
-      : ev.subject;
+    const subject = displaySubject(
+      { subject: ev.subject, sensitivity, categories: ev.categories },
+      profile,
+    );
 
     const attendeeNames = (ev.attendees ?? [])
       .map(a => a.emailAddress.name)

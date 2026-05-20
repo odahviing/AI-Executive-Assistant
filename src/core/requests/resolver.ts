@@ -613,15 +613,62 @@ async function notifyRequesterOfDecision(
   // Pre-fix this fell straight to row.subject, leaking the auto-generated
   // "<subkind> needs your input" phrase into MPIM resolution messages.
   const deferred = details.deferred_action as { args?: Record<string, unknown> } | undefined;
+  // Pull subject + start time + location from the on_approve callback when
+  // present. v2.9.4 (#107d) — pre-fix the relay body said "I'll take it from
+  // here, will let you know once it's sorted" even though the booked time +
+  // subject were sitting in deferred.args. Now: when start is known, render
+  // the concrete time so the requester knows exactly what was booked.
   const deferredSubject = typeof deferred?.args?.subject === 'string'
     ? deferred.args.subject as string
     : (typeof deferred?.args?.meeting_subject === 'string' ? deferred.args.meeting_subject as string : undefined);
+  const deferredStart = typeof deferred?.args?.start === 'string'
+    ? deferred.args.start as string
+    : (typeof deferred?.args?.new_start === 'string' ? deferred.args.new_start as string : undefined);
   const subject =
     (deferredSubject && deferredSubject.trim()) ||
     (typeof details.subject === 'string' && details.subject) ||
     (typeof details.question === 'string' && details.question) ||
     (row.subject && !looksLikeApprovalMeta(row.subject) ? row.subject : undefined) ||
     'that ask';
+
+  // v2.9.4 (#107d) — language-aware relay body. Renders Hebrew when the
+  // requester's profile_json.language_preference is set to Hebrew; falls back
+  // to English. Pre-fix the relay was always English even for Hebrew-speaking
+  // requesters (Yael), so the "Idan said yes" DM didn't read as a recognizable
+  // confirmation. profile_json is best-effort — null/undefined → English.
+  let requesterLang: 'he' | 'en' = 'en';
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getPersonMemory } = require('../../db/people') as typeof import('../../db/people');
+    const personRow = getPersonMemory(requesterSlackId);
+    if (personRow?.profile_json) {
+      const pj = JSON.parse(personRow.profile_json);
+      const pref = (pj?.language_preference as string | undefined ?? '').toLowerCase();
+      if (pref.includes('hebrew') || pref.includes('עברית') || pref.includes('he')) {
+        // Conservative substring match — only flip to Hebrew on explicit signal.
+        // Catches "Hebrew", "Hebrew preferred", "עברית", "he-IL" variants.
+        if (pref === 'he' || pref === 'hebrew' || pref.startsWith('hebrew') || pref.includes('עברית')) {
+          requesterLang = 'he';
+        }
+      }
+    }
+  } catch { /* fail-open to English */ }
+
+  // Format start time in the requester's timezone if known, else owner's.
+  const formatStart = (iso: string): string => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getPersonMemory } = require('../../db/people') as typeof import('../../db/people');
+      const personRow = getPersonMemory(requesterSlackId);
+      const tz = personRow?.timezone || ctx.profile.user.timezone;
+      const dt = DateTime.fromISO(iso, { zone: tz });
+      if (!dt.isValid) return '';
+      return requesterLang === 'he'
+        ? dt.setLocale('he').toFormat('cccc d MMMM, HH:mm')
+        : dt.toFormat('cccc d MMM, HH:mm');
+    } catch { return ''; }
+  };
+  const startFormatted = deferredStart ? formatStart(deferredStart) : '';
 
   const { getConnection } = await import('../../connections/registry');
   const conn = getConnection(row.owner_user_id, 'slack');
@@ -631,13 +678,27 @@ async function notifyRequesterOfDecision(
   }
 
   const ownerFirst = ctx.profile.user.name.split(' ')[0];
-  const hi = requesterName ? `Hey ${requesterName.split(' ')[0]}` : 'Hey';
+  const requesterFirst = requesterName ? requesterName.split(' ')[0] : undefined;
+  const hi = requesterFirst
+    ? (requesterLang === 'he' ? `היי ${requesterFirst}` : `Hey ${requesterFirst}`)
+    : (requesterLang === 'he' ? 'היי' : 'Hey');
   let body: string;
   if (verdict === 'approve') {
-    body = `${hi} — ${ownerFirst} said yes on ${subject}. I'll take it from here, will let you know once it's sorted.`;
+    // Concrete-time form when we know the booked slot; vague form otherwise.
+    if (startFormatted) {
+      body = requesterLang === 'he'
+        ? `${hi} — ${ownerFirst} אישר. אני קובעת את "${subject}" ל${startFormatted}. הזימון בדרך.`
+        : `${hi} — ${ownerFirst} said yes. Booking "${subject}" for ${startFormatted}. Calendar invite incoming.`;
+    } else {
+      body = requesterLang === 'he'
+        ? `${hi} — ${ownerFirst} אישר את ${subject}. אני לוקחת מכאן, אעדכן אותך כשזה מסודר.`
+        : `${hi} — ${ownerFirst} said yes on ${subject}. I'll take it from here, will let you know once it's sorted.`;
+    }
   } else if (verdict === 'reject') {
     const reasonTail = reason && reason.trim() ? ` (${reason.trim()})` : '';
-    body = `${hi} — ${ownerFirst} can't make that work right now${reasonTail}. Sorry about that — happy to find another path if you want.`;
+    body = requesterLang === 'he'
+      ? `${hi} — ${ownerFirst} לא יכול לעשות את זה כרגע${reasonTail}. סליחה — אם תרצי שאחפש משהו אחר, רק תגידי.`
+      : `${hi} — ${ownerFirst} can't make that work right now${reasonTail}. Sorry about that — happy to find another path if you want.`;
   } else {
     // v2.9.2 — question-shape counter: when counter.text is a clarifying
     // question from the owner ("what time?", "where?", "who else?"), render
@@ -653,10 +714,14 @@ async function notifyRequesterOfDecision(
         || /^(מה|מתי|איפה|מי|למה|איך|איזה|האם)\b/.test(counterText)  // Hebrew question-words
       );
     if (isQuestion) {
-      body = `${hi} — ${ownerFirst} asked: ${counterText}`;
+      body = requesterLang === 'he'
+        ? `${hi} — ${ownerFirst} שאל: ${counterText}`
+        : `${hi} — ${ownerFirst} asked: ${counterText}`;
     } else {
       const counterSummary = summarizeCounter(data);
-      body = `${hi} — ${ownerFirst} suggested a different approach${counterSummary ? ': ' + counterSummary : ''}. Does that work for you?`;
+      body = requesterLang === 'he'
+        ? `${hi} — ${ownerFirst} הציע משהו אחר${counterSummary ? ': ' + counterSummary : ''}. זה עובד לך?`
+        : `${hi} — ${ownerFirst} suggested a different approach${counterSummary ? ': ' + counterSummary : ''}. Does that work for you?`;
     }
   }
 
@@ -672,7 +737,18 @@ async function notifyRequesterOfDecision(
         id: row.id, reason: res.reason,
       });
     }
-    const res = await conn.sendDirect(requesterSlackId, body);
+    // v2.9.4 (#107ef) — thread the relay DM into the ORIGINAL conversation
+    // when known. Pre-fix sendDirect was called without opts, so the message
+    // landed as a NEW top-level in the requester's DM (new thread_ts). When
+    // the requester then replied to that DM ("ok waiting"), her reply lived
+    // in the new thread with no booking-history context — Sonnet ran the
+    // turn with historyLength=1 and hallucinated (2026-05-20 Yael case at
+    // 10:04:17 UTC, thread `1779271297.491389`). Passing origin_thread_ts
+    // keeps the relay inside the original thread; the requester's reply
+    // continues the same thread; Sonnet sees the full booking conversation.
+    const res = await conn.sendDirect(requesterSlackId, body, {
+      threadTs: row.origin_thread_ts ?? undefined,
+    });
     if (!res.ok) {
       logger.warn('notifyRequesterOfDecision — direct DM failed', {
         id: row.id, requesterSlackId, reason: res.reason,
