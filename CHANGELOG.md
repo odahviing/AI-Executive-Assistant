@@ -2,6 +2,69 @@
 
 ---
 
+## 2.9.2 — Approval rebuild stabilizers, tool-cache, completeness gate, movable yaml flag, cleanup cascade — heavy bug bundle, regressions surfaced
+
+Patch over 2.9.1. A long live-use session exposed many regressions in the approval rebuild we shipped yesterday plus several pre-existing weaknesses. Most of the day was patching v2.9.1 to actually work under real load; new architectural primitives were added selectively where pattern-class fixes were warranted. **Two known regressions remain open as GitHub issues for the next session** — [#103 person memory](https://github.com/odahviing/AI-Executive-Assistant/issues/103) and [#104 floating block rebalance](https://github.com/odahviing/AI-Executive-Assistant/issues/104).
+
+### Added
+
+- **`src/utils/approvalCompletenessGate.ts`** — output-pass Haiku gate on `create_approval`. Reads ask_text + `on_approve.args` + recent conversation history; refuses the tool call with `error: 'incomplete_approval'` when a concrete fact the requester gave (specific time, venue, post text, etc.) is missing from both ask_text and callbacks. Universal across approval kinds — no per-kind code. Closes the morning Yael flow where Sonnet created an approval with no time in ask_text and no on_approve callback; owner read the DM and had to reply "what time?".
+- **`src/utils/toolCallCache.ts`** — universal in-process tool-call cache keyed by `(owner, threadTs, tool, canonical_args_hash)`. TTL 60s for writes, 5s for reads. Wired into the orchestrator's tool-dispatch loop in `orchestrator/index.ts`. Caches the prior result without re-firing the tool. Closes the buffered-follow-up double-fire class for ALL present and future write tools (`create_meeting`, `move_meeting`, `delete_meeting`, `update_meeting`, `book_floating_block`, `coordinate_meeting`, `create_approval`, `resolve_approval`, `message_colleague`, `create_task`, etc.) — tool-agnostic, owner direction was "don't add per-tool guards, build it once in the agent loop".
+- **Approval-bound thread tool-lock** (`orchestrator/index.ts`) — when an owner reply matches a pending approval's `terminal_dm_msg_ts`, Sonnet's tool list is filtered to `resolve_approval` + `list_pending_approvals` only. Forces engagement with the approval; no drift into morphing flows. Closes the 1:35 PM Yael case where Sonnet abandoned the approval and started a fresh booking conversation.
+- **`preferred_slot` param on `find_available_slots`** (`meetings.ts`) — when the requester names a specific time, the tool guarantees that slot in the result if it passes all rules. Bypasses `pickSpreadSlots`'s `MIN_GAP_HOURS=1` filter (which was dropping the requester's exact asked time from the offered set, leading Sonnet to narrate "X isn't clean" by absence-inference). Force-include in `meetings/ops.ts` after spread-picking.
+- **Re-ask revival** in `create_approval` handler (`tasks/skill.ts`) — when dedup matches an existing approval AND `last_surfaced_at` was >2 hours ago, Maelle re-DMs the owner with the original ask + re-stamps `terminal_dm_msg_ts` so Module D + the tool-lock bind to the fresh thread. Closes the "Yael keeps asking, owner buried in old thread" pattern.
+- **`movable: boolean` on `profile.meetings.protected[]`** (`userProfile.ts`) — explicit per-event yaml flag. Default `true`. When `false`, active-mode skips both (a) picking the event as the movable side in `double_booking` resolution AND (b) flagging it as `oof_conflict`. Owner-curated authoritative source — supersedes attendee-count / external-attendee heuristics for the cases owner has labeled. New helper `isYamlLockedUnmovable(event, profile)` in `meetingProtection.ts`; wired into `calendarHealth.ts` OOF detection filter. Closes the Bookcamp/Holiday Block recurring flag.
+- **Universal callback cascade to legacy `coord_jobs` / `outreach_jobs`** (`closeRequest.ts`) — when ANY request closes, the cascade now also flips the linked legacy row to terminal (`coord_jobs.status='abandoned'`, `outreach_jobs.status='cancelled'`). Closes the root cause of the new-DM-to-Yael bug where a cancelled-on-spine coord kept processing colleague replies via the legacy state machine and posted hardcoded English templated DMs that bypass humanGate/Sonnet entirely.
+- **In-flight artifact cleanup on `create_meeting` success** (`meetings/ops.ts`) — `create_meeting` was the ONE mutation type that never called `closeMeetingArtifacts` despite the cascade's contract claiming "every meeting mutation calls this". Now wires the call with `subject` threaded for the new subject-fallback path in the cascade. Closes #11.2 — in_flight_action rows whose `details.meeting_id` was undefined (because the create spilled mid-turn) now match by subject and close cleanly.
+- **Subject-fallback in `closeMeetingArtifacts`** (`closeMeetingArtifacts.ts`) — `payloadReferencesMeeting` plus a scoped subject-match for `in_flight_action` subkind rows. When the meeting_id-based match fails, fall back to matching `details.subject` against `params.subject` (when provided). Same `closeMeetingArtifacts(params)` API gained an optional `subject?: string` field; all four existing callers in `meetings/ops.ts` updated to pass it.
+
+### Changed
+
+- **`humanGate` is audience-aware (v2.9.1 work, kept).** This shipped in 2.9.1; the prompt revert (below) keeps it.
+- **`create_approval` tool description + APPROVALS system-prompt section reverted to v2.9.0 verbatim** (`tasks/skill.ts`). The v2.9.1 rewrite roughly doubled both, which appears to have drowned the global LANGUAGE-OF-ARTIFACTS rule and produced Hebrew leakage on owner-facing approval DMs (1:35 PM Yael case). The callback infrastructure still works under the legacy `deferred_action` field name via `extractCallbacks` alias — Sonnet doesn't need to know about the rename for it to work. Owner direction: "no more prompts. find the problem and revert it."
+- **Colleague-path `note_about_person` always rewrites target to the requester** (`assistant.ts:362-380`). Per owner direction: "only the owner can write notes about other people. Even if Yael says 'Shayan is X', it goes on Yael's notes, not Shayan's." Pre-fix the guard REFUSED with `not_permitted` when target ≠ requester; that broke Sonnet's response chain entirely (empty-reply, Maelle silent) — root of the Shayan name-question bug where she ignored "what does your name mean?". Now: silent rewrite, response chain continues uninterrupted.
+- **Module D Y.2 precondition reads `extractCallbacks`** (`utils/threadBoundApprovalAutoResolve.ts`) — picks up both the new `callbacks.on_approve` shape and the legacy `deferred_action` shape uniformly. Y.2 itself was already in v2.9.0; this is a small consistency tweak.
+- **Night-shift prompt line corrected** (`meetings.ts:1870`) — replaced *"only when Idan explicitly offers this for AU/Pacific clients"* with *"Idan's standard work time on Tuesday (already merged into work_hours). Also useful for AU/Pacific overlap on other days when he offers it."* The data layer (work_hours synthesis) treats night_shift as standard work time per v2.8.6; the prompt line contradicted it and Sonnet narrated *"work meetings typically don't go there"* even when they should.
+- **`is_online` dropped from `required` array** on `create_meeting` (`meetings.ts:428`). Sonnet was defaulting to `true` to satisfy the required field; `resolveLocation` then treated it as an explicit owner hint and short-circuited the day-type + party-shape decision — so internal home-day meetings landed on Teams instead of Huddle. Schema fix + tightened description: only pass when there's an explicit conversational signal. The defined location process runs un-corrupted.
+- **Yaml category `Private` → `Personal`** (`config/users/idan.yaml`). Plus description tightening: removed "Personal" from cue list (now redundant with name), added explicit *"the word 'private' alone is NOT a cue — it refers to the Outlook sensitivity field"*. Sonnet was conflating the sensitivity enum value `'private'` with the category name `Private` and tagging meetings as both. Renaming the category disambiguates at the data source.
+
+### Fixed
+
+- **Yael 1:35 PM approval skipped the time** — completeness gate now refuses approval calls missing concrete facts the requester gave.
+- **Yael "I'll check with Idan and never come back" pattern** — combined with v2.9.0 Y.2 (Module D pass-to-Sonnet on no-replay-path), the approval-bound tool-lock now forces Sonnet to engage with the approval rather than drift into morphing flows.
+- **Yael got templated English "Got it — I'll find some other options and come back to you"** in a fresh thread — legacy `coord_jobs` row was still alive after the requests-spine row was cancelled; the new cascade now closes both atomically.
+- **Sonnet ignored "what does your name mean?"** — `note_about_person` colleague-path no longer refuses with `not_permitted` when target ≠ requester; silent rewrite preserves Sonnet's response chain.
+- **Mike booking from 13:35 yesterday still showed as "in flight" in today's brief** — `create_meeting` success now calls `closeMeetingArtifacts` (the contract said it should, the code never did). Subject-fallback in the cascade catches in_flight rows whose `meeting_id` was undefined.
+- **Same fix benefits "Driving back from Modiin" auto-categorized today** — same class of stuck in_flight_action row, same cleanup.
+
+### Manual cleanup applied (data-only, not committed)
+
+- Cancelled `coord_1779187206948_bolz` in legacy `coord_jobs` (the Yael coord that was posting templated English).
+- Cancelled `req_1779187206948_7e87k` + `req_1779187206953_7nbpn` (stale Yael coord requests).
+- Closure-reason updated on `req_1779177922877_pd33h` + `req_1779186925572_s71gb` to reflect "never executed".
+- Closed 2 stuck `in_flight_action` rows (Mike + Driving) by subject-matching against successful audit_log entries.
+
+### Migration
+
+- No DB schema migration. The `request_id` columns on `coord_jobs` / `outreach_jobs` already existed (v2.7.1). The new cascade just uses them.
+
+### Known regressions (open as GitHub issues for next session)
+
+- **[#103 Person memory — colleague-self path mute, volunteered hints never captured](https://github.com/odahviing/AI-Executive-Assistant/issues/103)** — High. Shayan said "4-6pm Sydney" yesterday during booking; the hint went into `interaction_log` as narrative but never to `profile_json.working_hours_structured`, so the next conversation won't honor it. Full audit + entry points in the issue.
+- **[#104 Floating block rebalance regression](https://github.com/odahviing/AI-Executive-Assistant/issues/104)** — High. Lunch (12:15-12:40) overlapping a 12:00-13:00 WordPress meeting should auto-rebalance to 13:00-13:25 (the clean slot inside the 11:30-13:30 lunch window). Today's brief surfaced "no action needed unless you want me to clear the block" — wrong both ways: rebalance didn't run and the wording suggests deletion rather than movement. Hypotheses in the issue.
+
+### What we're seeing — meta
+
+The v2.9.1 approval rebuild was structurally sound but missed several safety nets that became obvious only under live load:
+- The completeness gate (added in v2.9.2) prevents sparse approval asks
+- The tool-lock prevents Sonnet drift mid-approval
+- The tool-call cache prevents buffered-follow-up double-fires
+- The cleanup cascade prevents legacy state machines from emitting after their spine row closed
+
+Each of these was a "should have shipped with the rebuild" rather than "new capability." v2.9.2 is the result of catching those gaps in production and patching them. Two known regressions remain (above). Next chat focuses on stabilization + closing these issues + general live feedback.
+
+---
+
 ## 2.9.1 — Approval pipeline rebuild + humanGate audience awareness + update_meeting attendee mgmt
 
 Patch over 2.9.0. Headline is the approval pipeline rebuild: one universal callback table (`on_approve` / `on_reject` / `on_amend`) replaces the ad-hoc `deferred_action` pattern. Every approval — meeting, cancel, freeform, future non-meeting — flows through the same 3-verdict dispatch, with explicit colleague-side amend bounce-back so owner↔requester counter negotiation lives in code instead of evaporating into Sonnet promises. Plus update_meeting gains attendee add/remove, humanGate gets per-audience exemplars, `create_meeting`'s `is_online` becomes optional (defined location process runs un-corrupted), and the night-shift hours move to 20:30–00:00.

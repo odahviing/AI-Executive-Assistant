@@ -223,7 +223,15 @@ const UserProfileSchema = z.object({
     protected: z.array(z.object({
       name: z.string().optional(),
       category: z.string().optional(),
-      rule: z.enum(['never_move', 'never_override']),
+      // v2.9.2 — `rule` deprecated in favor of `movable`. Keeping rule
+      // optional for back-compat; new entries use `movable: false`.
+      rule: z.enum(['never_move', 'never_override']).optional(),
+      // v2.9.2 — explicit per-event movability flag. When false, active-mode
+      // never tries to move/coord this event regardless of attendee count.
+      // Also suppresses oof_conflict flagging (owner-intentional placement,
+      // e.g. "Bookcamp" during Holiday Block). Default true (any meeting is
+      // movable unless explicitly locked here).
+      movable: z.boolean().optional().default(true),
       recurring: z.boolean().optional(),
     }).refine(p => !!p.name || !!p.category, {
       message: 'protected entry must have either `name` or `category`',

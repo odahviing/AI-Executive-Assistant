@@ -1095,6 +1095,39 @@ export class SchedulingSkill {
             // 2h focus block — want it anyway?"
             const candidateSet = relaxedRecoverySlots.length > 0 ? relaxedRecoverySlots : rawSlots;
             const chosenStarts = new Set(pickSpreadSlots(candidateSet, timezone, 3, anchorDay));
+
+            // v2.9.2 — preferred_slot guarantee. When the requester named a
+            // specific time ("preferably 11:30"), pickSpreadSlots' MIN_GAP
+            // rule could filter it (e.g. 11:00 picked first → 11:30 within
+            // 1h gap → dropped). Sonnet would then narrate "11:30 isn't
+            // clean" by absence-inference even though 11:30 passed all
+            // rules. Force-include the preferred slot when it's in the
+            // candidate set but missing from picks.
+            const preferredSlot = typeof args.preferred_slot === 'string' && args.preferred_slot.trim().length > 0
+              ? args.preferred_slot.trim()
+              : null;
+            if (preferredSlot) {
+              const matchingCandidate = candidateSet.find(s => {
+                try {
+                  // Match by absolute time, tolerate format drift (offset suffix, etc.)
+                  return Math.abs(
+                    DateTime.fromISO(s.start).toMillis() - DateTime.fromISO(preferredSlot).toMillis()
+                  ) <= 60_000;
+                } catch { return false; }
+              });
+              if (matchingCandidate && !chosenStarts.has(matchingCandidate.start)) {
+                chosenStarts.add(matchingCandidate.start);
+                logger.info('find_available_slots — preferred_slot force-included (would have been spread-filtered)', {
+                  preferredSlot,
+                  candidateStart: matchingCandidate.start,
+                });
+              } else if (!matchingCandidate) {
+                logger.info('find_available_slots — preferred_slot not in candidate set (rule violation or outside window)', {
+                  preferredSlot,
+                });
+              }
+            }
+
             const slots = candidateSet.filter(s => chosenStarts.has(s.start));
 
             // v2.7.0 — initiator-aware annotation. Owner-path already pre-
@@ -2090,6 +2123,21 @@ export class SchedulingSkill {
             logger.warn('rebalance after create_meeting threw — continuing', { err: String(err).slice(0, 200) });
           }
 
+          // v2.9.2 — close in-flight artifacts. Per closeMeetingArtifacts'
+          // own contract (v1.8.8 / v2.4.2 comments): "Every meeting mutation
+          // — create / move / update / delete — can leave stale artifacts."
+          // Pre-fix this path was the one mutation type that DIDN'T call the
+          // cascade, so in_flight_action follow_ups opened during a spilled
+          // create attempt (#11.2) never closed on the successful retry.
+          // Subject is passed so the subject-fallback match catches rows
+          // whose details.meeting_id is undefined.
+          closeMeetingArtifacts({
+            ownerUserId: context.profile.user.slack_user_id,
+            meetingId,
+            reason: 'created',
+            subject: args.subject as string | undefined,
+          });
+
           // v2.3.2 — colleague-path booking: shadow-DM the owner so he
           // sees the book happen even when he wasn't in the loop. Mirrors the
           // v2.2.1 move_meeting shadow on inbound reschedule. Threaded under
@@ -2430,6 +2478,7 @@ export class SchedulingSkill {
           ownerUserId: context.profile.user.slack_user_id,
           meetingId: args.meeting_id as string,
           reason: 'updated',
+          subject: (args.new_subject as string | undefined) ?? (args.meeting_subject as string | undefined),
         });
         auditLog({
           action: 'update_meeting',
@@ -2710,6 +2759,7 @@ export class SchedulingSkill {
                     ownerUserId: context.profile.user.slack_user_id,
                     meetingId: args.meeting_id as string,
                     reason: 'moved',
+                    subject: args.meeting_subject as string | undefined,
                   });
                   return {
                     success: true,
@@ -2954,6 +3004,7 @@ export class SchedulingSkill {
           ownerUserId: context.profile.user.slack_user_id,
           meetingId: args.meeting_id as string,
           reason: 'moved',
+          subject: args.meeting_subject as string | undefined,
         });
         auditLog({
           action: 'move_meeting',
@@ -3169,6 +3220,7 @@ export class SchedulingSkill {
           ownerUserId: context.profile.user.slack_user_id,
           meetingId: args.meeting_id as string,
           reason: 'deleted',
+          subject: args.meeting_subject as string | undefined,
         });
         auditLog({
           action: 'delete_meeting',

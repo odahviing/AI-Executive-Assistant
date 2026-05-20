@@ -538,9 +538,19 @@ Status meanings:
                 (a.emailAddress?.address ?? '').toLowerCase() === ownerEmailLower
               );
             };
+            // v2.9.2 — also skip events the owner has explicitly locked as
+            // unmovable in yaml (`profile.meetings.protected[]` with
+            // `movable: false`). When the owner has marked something as
+            // never-move (e.g. "Bookcamp" — solo-but-intentional during
+            // Holiday Block), the oof_conflict flag is noise — he placed it
+            // there on purpose.
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { isYamlLockedUnmovable } = require('../utils/meetingProtection') as
+              typeof import('../utils/meetingProtection');
             const meetings = nonAllDay.filter(e =>
               (e.showAs === 'busy' || e.showAs === 'tentative')
-              && !isSoloOwnerEvent(e),
+              && !isSoloOwnerEvent(e)
+              && !isYamlLockedUnmovable(e, profile),
             );
             for (const meeting of meetings) {
               const mStart = parseGraphDt(meeting.start.dateTime, meeting.start.timeZone, timezone);

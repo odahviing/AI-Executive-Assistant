@@ -324,7 +324,9 @@ EXPLAINING WHY A DAY ISN'T OFFERED. The tool returns a \`day_summary\` array wit
 
 NEVER fabricate a reason. Don't say "day off" / "not a workday" unless \`top_reasons\` is \`['wrong_day_type']\`. The data has the truth — use it.
 
-The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
+The search window auto-expands up to 21 days if fewer than 3 slots are found.
+
+PREFERRED SLOT (v2.9.2): when the requester names a SPECIFIC preferred time ("preferably 11:30", "around 14:00", "if 10:00 works"), pass that exact ISO datetime as \`preferred_slot\`. The tool will check that slot specifically and include it in the result if it's free — even when the spread-picker (1h gap rule, 2/day cap) would have filtered it out. Without this, the requester's asked time can vanish from the offered options and you end up narrating "X isn't clean" when X is actually free.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -362,6 +364,10 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.`,
             category: {
               type: 'string',
               description: 'OPTIONAL. The category this meeting will be booked under. When set, slot-finder applies the category rules — daily / weekly limits and day-type constraints (office-only, home-only). Slots that would violate the category get filtered out before returning. Omit ONLY when there is no category context (e.g. owner is asking "when am I free?" with no specific meeting in mind). When you have a category context, ALWAYS pass it — otherwise the slots returned ignore category rules and you may propose a time that breaks them. The value must match one of the names from the CATEGORIES list in the prompt.',
+            },
+            preferred_slot: {
+              type: 'string',
+              description: 'OPTIONAL. ISO datetime of the requester\'s specifically asked time ("preferably 11:30", "around 14:00", "if 10:00 works"). The tool guarantees this slot is in the result if it passes all rules (free, in work hours, no category violation, etc.), even when the spread-picker would have filtered it. Use when the requester named an exact time — closes the "asked slot vanishes" narration bug.',
             },
           },
           required: ['duration_minutes', 'attendee_emails', 'search_from', 'search_to', 'meeting_mode'],
@@ -1867,7 +1873,7 @@ ${(() => {
     if (tp.note) lines.push(`- Note from ${firstName}: "${tp.note}"`);
   }
   if (ns) {
-    lines.push(`- Night-shift window: ${ns.hours_start}–${ns.hours_end}${ns.typical_day ? ` (typically ${ns.typical_day})` : ''} — only when ${firstName} explicitly offers this for AU/Pacific clients.`);
+    lines.push(`- Night-shift window: ${ns.hours_start}–${ns.hours_end} — ${firstName}'s standard work time${ns.typical_day ? ` on ${ns.typical_day}` : ''} (already merged into work_hours). Also useful for AU/Pacific overlap on other days when he offers it.`);
   }
   lines.push('');
   lines.push('How to apply these:');

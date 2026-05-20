@@ -84,12 +84,70 @@ export function closeRequest(input: CloseRequestInput): CloseResult {
     }
   }
 
+  // v2.9.2 — legacy-table cascade. The v2.7.1 bridge created paired legacy
+  // rows in `coord_jobs` / `outreach_jobs` for every new request and stored
+  // `request_id` on them. closeRequest didn't propagate terminal state back
+  // to those legacy rows — so a cancelled coord could leave its legacy
+  // counterpart `status='waiting_owner'`, and the LEGACY coord state machine
+  // would happily process incoming colleague replies + post templated
+  // English DMs that bypass Sonnet/humanGate entirely (root of the 2026-05-19
+  // Yael 'Got it — I'll find some other options' bug).
+  //
+  // Find any legacy row pointing at this request and flip it to terminal.
+  // Mirrors the in-flight terminal sentinels each table already supports:
+  //   coord_jobs: 'abandoned'  (siblings: 'booked', 'cancelled')
+  //   outreach_jobs: 'cancelled' (siblings: 'replied', 'expired', 'done', 'failed')
+  let legacyCascaded = 0;
+  try {
+    const db = getDb();
+    const coordRow = db.prepare(
+      `SELECT id, status FROM coord_jobs WHERE request_id = ?`
+    ).get(input.id) as { id: string; status: string } | undefined;
+    if (coordRow && !['booked', 'cancelled', 'abandoned'].includes(coordRow.status)) {
+      db.prepare(`
+        UPDATE coord_jobs
+        SET status = 'abandoned',
+            abandoned_at = datetime('now'),
+            notes = COALESCE(notes, '') || ' | cascade from request ' || ? || ': ' || ?,
+            updated_at = datetime('now')
+        WHERE id = ?
+      `).run(input.id, input.closureReason ?? input.state, coordRow.id);
+      legacyCascaded++;
+      logger.info('closeRequest — cascaded to legacy coord_jobs', {
+        requestId: input.id, coordJobId: coordRow.id, priorStatus: coordRow.status,
+      });
+    }
+
+    const outreachRow = db.prepare(
+      `SELECT id, status FROM outreach_jobs WHERE request_id = ?`
+    ).get(input.id) as { id: string; status: string } | undefined;
+    if (outreachRow && !['replied', 'expired', 'done', 'failed', 'cancelled'].includes(outreachRow.status)) {
+      db.prepare(`
+        UPDATE outreach_jobs
+        SET status = 'cancelled',
+            updated_at = datetime('now')
+        WHERE id = ?
+      `).run(outreachRow.id);
+      legacyCascaded++;
+      logger.info('closeRequest — cascaded to legacy outreach_jobs', {
+        requestId: input.id, outreachJobId: outreachRow.id, priorStatus: outreachRow.status,
+      });
+    }
+  } catch (err) {
+    // Cascade failure is non-fatal — the requests-spine closure already
+    // happened. Log so we can spot patterns.
+    logger.warn('closeRequest — legacy cascade threw, primary closure stands', {
+      requestId: input.id, err: String(err).slice(0, 200),
+    });
+  }
+
   logger.info('closeRequest', {
     id: input.id,
     state: input.state,
     closureReason: input.closureReason,
     closedBy: input.closedBy,
     childrenClosed,
+    legacyCascaded,
     outcomeExternalEventId: input.outcomeExternalEventId,
   });
 

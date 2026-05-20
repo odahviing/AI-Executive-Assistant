@@ -359,16 +359,27 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
         logger.warn('Colleague attempted owner-only tool', { tool: toolName, userId: context.userId });
         return { error: 'not_permitted', reason: 'This action can only be performed by the owner.' };
       }
-      // note_about_person: colleague can only add a note about themselves.
-      // v2.5.2 — fixed stale arg name: schema uses `colleague_slack_id`, the
-      // prior check read `args.slack_id` and would have allowed any colleague
-      // to write notes about anyone IF the tool became visible to them. The
-      // tool is now in COLLEAGUE_ALLOWED_TOOLS, so this guard goes live.
+      // note_about_person on colleague-path: ALWAYS rewrite the target to
+      // be the requester. v2.9.2 — owner direction: only the owner writes
+      // notes about other people. When a colleague says "Shayan is X", that
+      // observation lands on YAEL's notes (the requester said it), not on
+      // Shayan's. Closes the empty-reply bug where Sonnet tried writing a
+      // note about Maelle herself when a colleague asked about her name,
+      // the prior guard refused with not_permitted, and the response chain
+      // died with no text reply.
+      //
+      // Behavior change: instead of refusing the call when target ≠
+      // requester, silently rewrite colleague_slack_id to context.userId.
+      // Sonnet's response chain continues uninterrupted, the note lands on
+      // the right person, and any "Sonnet picked the wrong target" drift
+      // resolves transparently.
       if (toolName === 'note_about_person') {
         const targetId = args.colleague_slack_id as string | undefined;
         if (targetId && targetId !== context.userId) {
-          logger.warn('Colleague tried to write note about another person', { targetId, requesterId: context.userId });
-          return { error: 'not_permitted', reason: 'You can only add notes about yourself, not other people.' };
+          logger.info('note_about_person colleague-path — rewriting target to requester', {
+            originalTarget: targetId, requesterId: context.userId,
+          });
+          args = { ...args, colleague_slack_id: context.userId };
         }
       }
       // log_interaction: colleague can only log interactions involving themselves.

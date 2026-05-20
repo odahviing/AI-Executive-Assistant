@@ -52,19 +52,48 @@ export function isProtected(event: CalendarEvent, profile: UserProfile): Protect
     : [];
   for (const entry of profile.meetings.protected ?? []) {
     const name = (entry as { name?: string }).name;
-    if (name && subject.includes(name.toLowerCase())) {
-      reasons.push(`matches protected name "${name}"`);
-    }
-    // Rule 4 — category match (new in v2.1.1; forward-compat — owner can add
-    // `{category: "Protected", rule: "never_move"}` to yaml when he creates
-    // the Outlook category).
     const cat = (entry as { category?: string }).category;
-    if (cat && categoriesOnEvent.includes(cat)) {
-      reasons.push(`matches protected category "${cat}"`);
+    const movable = (entry as { movable?: boolean }).movable;
+    const matchesName = name && subject.includes(name.toLowerCase());
+    const matchesCat = cat && categoriesOnEvent.includes(cat);
+    if (!matchesName && !matchesCat) continue;
+    // v2.9.2 — explicit `movable: false` is owner-curated protection
+    // regardless of attendee count / external status.
+    if (movable === false) {
+      if (matchesName) reasons.push(`yaml-locked (name "${name}", movable:false)`);
+      if (matchesCat) reasons.push(`yaml-locked (category "${cat}", movable:false)`);
+    } else {
+      // Legacy `rule` field path — same effect, kept for back-compat with
+      // existing yaml entries that haven't been migrated to `movable`.
+      if (matchesName) reasons.push(`matches protected name "${name}"`);
+      if (matchesCat) reasons.push(`matches protected category "${cat}"`);
     }
   }
 
   return { protected: reasons.length > 0, reasons };
+}
+
+/**
+ * v2.9.2 — does this event have an explicit `movable: false` flag in the
+ * owner's yaml? Distinct from isProtected (which includes attendee-count /
+ * external-attendee rules). Used by oof_conflict detection to suppress
+ * FLAGGING entirely — owner-intentional placement during OOF (e.g. "Bookcamp"
+ * during Holiday Block) shouldn't even surface as an issue.
+ */
+export function isYamlLockedUnmovable(event: CalendarEvent, profile: UserProfile): boolean {
+  const subject = (event.subject ?? '').toLowerCase();
+  const categoriesOnEvent = Array.isArray((event as unknown as { categories?: unknown }).categories)
+    ? ((event as unknown as { categories: string[] }).categories)
+    : [];
+  for (const entry of profile.meetings.protected ?? []) {
+    if ((entry as { movable?: boolean }).movable === false) {
+      const name = (entry as { name?: string }).name;
+      const cat = (entry as { category?: string }).category;
+      if (name && subject.includes(name.toLowerCase())) return true;
+      if (cat && categoriesOnEvent.includes(cat)) return true;
+    }
+  }
+  return false;
 }
 
 /**

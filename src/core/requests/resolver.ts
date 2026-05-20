@@ -639,8 +639,25 @@ async function notifyRequesterOfDecision(
     const reasonTail = reason && reason.trim() ? ` (${reason.trim()})` : '';
     body = `${hi} — ${ownerFirst} can't make that work right now${reasonTail}. Sorry about that — happy to find another path if you want.`;
   } else {
-    const counterSummary = summarizeCounter(data);
-    body = `${hi} — ${ownerFirst} suggested a different approach${counterSummary ? ': ' + counterSummary : ''}. Does that work for you?`;
+    // v2.9.2 — question-shape counter: when counter.text is a clarifying
+    // question from the owner ("what time?", "where?", "who else?"), render
+    // it as a question relay instead of "suggested a different approach".
+    // Detection: counter.text ends in `?` (any language) or starts with a
+    // common question-word in EN/HE.
+    const counterText = typeof data?.text === 'string' ? data.text.trim() : '';
+    const isQuestion =
+      counterText.length > 0
+      && (
+        /[?؟]\s*$/.test(counterText)  // any-language question mark
+        || /^(what|when|where|who|why|how|which|can|could|would|should|do|does|did|is|are|was|were)\b/i.test(counterText)
+        || /^(מה|מתי|איפה|מי|למה|איך|איזה|האם)\b/.test(counterText)  // Hebrew question-words
+      );
+    if (isQuestion) {
+      body = `${hi} — ${ownerFirst} asked: ${counterText}`;
+    } else {
+      const counterSummary = summarizeCounter(data);
+      body = `${hi} — ${ownerFirst} suggested a different approach${counterSummary ? ': ' + counterSummary : ''}. Does that work for you?`;
+    }
   }
 
   // MPIM origin → post back in MPIM thread; else 1:1 DM.

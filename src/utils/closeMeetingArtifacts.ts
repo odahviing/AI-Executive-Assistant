@@ -56,6 +56,15 @@ export function closeMeetingArtifacts(params: {
   ownerUserId: string;
   meetingId: string;
   reason: MeetingArtifactReason;
+  /**
+   * v2.9.2 — meeting subject. Used by the in_flight_action fallback cascade:
+   * when an in_flight follow_up row was opened mid-turn (e.g. create_meeting
+   * spilled) without a meeting_id in details, the meeting_id-based match
+   * misses it. The subject-based fallback catches those. Optional — when
+   * absent, the in_flight_action subject fallback is skipped (callers that
+   * have subject in scope should pass it).
+   */
+  subject?: string;
 }): CloseMeetingArtifactsResult {
   const result: CloseMeetingArtifactsResult = {
     approvalsResolved: 0,
@@ -210,10 +219,33 @@ export function closeMeetingArtifacts(params: {
       // Fallback — sweep open top-level requests whose details_json references
       // this meetingId (catches coords still in-flight whose outcome was never
       // stamped). Bounded to open state so closed rows aren't disturbed.
+      //
+      // v2.9.2 — also include a SUBJECT-based fallback for in_flight_action
+      // rows. Those get created mid-turn by maybeOpenInFlightMeetingRequest
+      // when create_meeting spills; the row stores subject in details but the
+      // meeting_id is undefined (the new event id isn't known yet). When the
+      // create eventually succeeds, the meeting_id-based match never finds
+      // these rows. Subject-match catches them. Scoped to subkind=
+      // 'in_flight_action' to avoid false-positive matches with other request
+      // kinds that happen to share a subject string.
       const open = getOpenRequestsForOwner(params.ownerUserId);
+      const subjectLower = (params.subject ?? '').trim().toLowerCase();
       for (const r of open) {
         if (directMatches.some(d => d.id === r.id)) continue;
-        if (payloadReferencesMeeting(r.details_json, params.meetingId)) {
+        let matched = payloadReferencesMeeting(r.details_json, params.meetingId);
+        if (!matched && subjectLower && r.subkind === 'in_flight_action' && r.details_json) {
+          try {
+            const det = JSON.parse(r.details_json) as Record<string, unknown>;
+            const detSubject = typeof det.subject === 'string' ? det.subject.toLowerCase() : '';
+            if (detSubject && detSubject === subjectLower) {
+              matched = true;
+              logger.info('closeMeetingArtifacts — in_flight_action subject-match fallback fired', {
+                requestId: r.id, subject: params.subject, meetingId: params.meetingId,
+              });
+            }
+          } catch (_) { /* malformed details — skip */ }
+        }
+        if (matched) {
           closeRequest({
             id: r.id,
             state: 'cancelled',

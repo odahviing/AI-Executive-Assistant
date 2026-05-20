@@ -1,6 +1,16 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v2.9.0** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v2.9.2** — check `package.json` if unsure; it is the source of truth.
+
+## Right now — known regressions, stabilization phase
+
+The 2026-05-19 / 2026-05-20 sessions shipped a major approval-pipeline rebuild (v2.9.1) and then spent most of v2.9.2 patching regressions that surfaced under live load. **Two known issues remain open and unstable.** Next chat focus: **stabilize Maelle + fix open bugs + general live feedback on the changes**.
+
+Open issues:
+- **[#103 Person memory — colleague-self path mute, volunteered hints never captured](https://github.com/odahviing/AI-Executive-Assistant/issues/103)** (High). When a colleague volunteers a preference ("I prefer 4-6pm Sydney"), it lands in `interaction_log` as narrative but never reaches `profile_json.working_hours_structured`. Next conversation won't honor it. Full audit + entry points in the issue. Treat as a structural rewrite, not a patch.
+- **[#104 Floating block rebalance regression](https://github.com/odahviing/AI-Executive-Assistant/issues/104)** (High). Lunch overlapping a meeting in its own window should auto-rebalance to a clean slot inside the window — instead the brief surfaces it as a question to the owner. The direct-move path for floating blocks (per v2.1.0/v2.1.1 design intent) isn't firing.
+
+When opening this project: read these two issues first, then this SESSION_STARTER, then start digging.
 
 Read these two memory files at session start:
 - `C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/project_overview.md`
@@ -80,6 +90,61 @@ Procedures the owner runs frequently are wired as skills under `.claude/skills/`
 - **`wrap`** — finish the session. Triggers on "wrap" / "ship it" / "close the patch" / etc. Runs the full WRAP_UP.md checklist.
 - **`scenario`** — paper-trace a numbered test scenario from `.claude/test-scenarios.md`. STRICT paper exercise — no live DMs, no calendar writes, no tool calls against the running system.
 - **`bugs`** — analyze bugs the owner describes directly in chat. Propose-only; ships everything in one commit + version bump at the end via `wrap`.
+
+---
+
+## Where we are — v2.9.2 shipped, approval pipeline rebuild stabilizers, regressions outstanding
+
+**Current phase**: stabilization. The 2026-05-19 minor (v2.9.1) shipped a structural rebuild of the approval pipeline + several adjacent changes. The 2026-05-20 patch (v2.9.2) spent most of the day fixing regressions from that rebuild as they surfaced under live load. **Two known regressions remain open** ([#103](https://github.com/odahviing/AI-Executive-Assistant/issues/103) person memory, [#104](https://github.com/odahviing/AI-Executive-Assistant/issues/104) floating block rebalance).
+
+### Approval mechanism — what was rebuilt + what was patched
+
+**Architecture (v2.9.1)**: Every approval is a structured callback table living in `request.details_json`:
+
+```
+callbacks = {
+  on_approve: { tool, args },       // REQUIRED for replay path. Resolver runs this on yes.
+  on_reject:  { tool, args } | null, // Default: close + DM requester "Idan said no".
+  on_amend:   { mode: 'relay_to_requester' | 'run_with_amend' } | null
+}
+```
+
+Three verdicts (approve / reject / amend) flow through ONE resolver. `amend` with `relay_to_requester` mode is the ping-pong: state flips to `awaiting_colleague`, Maelle DMs requester with the owner's counter; requester answers → bounces back to owner. `counter_history` tracks rounds. Round cap = 5.
+
+`on_approve` is universal — works for ANY tool the resolver knows how to replay (`RESOLVER_REPLAY_TOOLS` set in `src/core/approvals/approvalCallbacks.ts`). Currently includes meeting tools; future non-meeting tools (delete_routine, contact updates, etc.) plug in by adding to that set + `deferredActionReplay.ts` dispatch.
+
+**Legacy bridge**: the v2.7.1 era `deferred_action` field on payloads still works — `extractCallbacks()` aliases it to `on_approve` transparently. The `create_approval` tool description was reverted in v2.9.2 to the v2.9.0 wording (the v2.9.1 expansion drowned out the LANGUAGE-OF-ARTIFACTS rule and produced Hebrew leakage on owner-facing DMs). Sonnet doesn't need to know about the callback model for it to work.
+
+**v2.9.2 stabilizers layered on top**:
+- **Completeness gate** at `src/utils/approvalCompletenessGate.ts` — Haiku output-pass refuses `create_approval` calls whose ask_text doesn't carry concrete facts the requester gave (specific time, venue, post text, etc.) AND has no on_approve callback to fire those facts. Universal across approval kinds; no per-kind code.
+- **Approval-bound thread tool-lock** in `orchestrator/index.ts` — when an owner reply matches a pending approval's `terminal_dm_msg_ts`, Sonnet's tool list is filtered to `resolve_approval` + `list_pending_approvals` only. Forces engagement; no drift into morphing flows.
+- **Re-ask revival** in `tasks/skill.ts` `create_approval` handler — when dedup matches an existing open approval AND `last_surfaced_at` was >2 hours ago, Maelle re-DMs the owner + re-stamps `terminal_dm_msg_ts`. Closes "owner buried in old thread" pattern.
+- **Universal cleanup cascade** in `closeRequest.ts` — closing ANY request also cancels the linked legacy `coord_jobs` / `outreach_jobs` rows (`request_id` column from v2.7.1 bridge). Closes the root cause of templated-English-DM-from-legacy-state-machine bugs.
+
+**Owner's model (important for the next session)**:
+- `on_approve` is ALWAYS a single tool call — book the requested meeting at the requested time, with `relaxed: true` to bypass collisions.
+- "Move conflicts to make room" is **separate follow-up work**, not part of the approval. Maelle can double-book; the active-mode calendar-health flow detects the conflict later and offers to resolve.
+- Owner-clarifying questions ("what time?") are AMEND with text-shape `counter`. The amend ping-pong relays the question to the requester.
+- The morning calendar-health flow handles all double-bookings as a separate concern — disconnected from the approval that created them.
+
+### Request meeting config — what changed
+
+**`find_available_slots` gained `preferred_slot` param** (`src/skills/meetings.ts`). Sonnet passes the requester's specific asked time as ISO. The tool guarantees that slot in the result if it passes all rules — even when `pickSpreadSlots`'s `MIN_GAP_HOURS=1` filter would have dropped it. Closes the "asked time vanishes from offered set" narration bug.
+
+**`is_online` is now optional on `create_meeting`** — dropped from `required` array. Sonnet was defaulting to `true` to satisfy the field; `resolveLocation` treated it as an explicit owner hint and short-circuited the defined day-type + party-shape decision. Now: only pass when there's an explicit conversational signal. The defined location process (Home + internal → Huddle, Office + internal → Office, External → Teams) runs un-corrupted.
+
+**`update_meeting` gained `add_attendees` / `remove_attendees`** (v2.9.1). Owner-path: full add/remove. Colleague-path: self-only. Handler routes through `planMeeting` when shape changes (internal-only ↔ has-external, count crossing 4↔5) so category + location re-resolve correctly. Graph PATCH on `updateMeeting` accepts attendee arrays.
+
+**`movable: boolean` on `profile.meetings.protected[]`** (v2.9.2, `src/config/userProfile.ts`). Owner-curated authoritative flag. When `false`, active-mode skips both picking-as-movable in `double_booking` resolution AND flagging as `oof_conflict`. Supersedes attendee-count / external-attendee heuristics for explicit yaml entries. Use case: "Bookcamp during Holiday Block" — solo personal block placed intentionally during OOF day, shouldn't be flagged.
+
+**Universal tool-call cache** in `src/utils/toolCallCache.ts`. Hashes `(owner, threadTs, tool, canonical_args)`; cached results returned without re-firing. TTL 60s for writes, 5s for reads. Tool-agnostic — covers all present and future write tools without per-handler guards. Owner direction: "don't add per-tool checks, build it once in the agent loop."
+
+**Yaml category `Private` → `Personal`** (`config/users/idan.yaml`). Owner action required: rename the actual Outlook category to match so color labels stay applied. Disambiguates from the sensitivity field value `'private'`.
+
+### Two architectural moves still on the roadmap
+
+- **Phase 3 of v2.7.x cutover-finish**: drop the legacy `coord_jobs` / `outreach_jobs` tables entirely. The state machine logic still lives there; Phase 1+2 wired writers + state mirrors. Phase 3 migrates the state machines to pure requests-spine logic. Estimated 3-5 days focused work. The v2.9.2 cleanup cascade is the band-aid that keeps legacy tables honest while we wait.
+- **Phase B of `BookingRequest` normalizer** (per v2.9.0 work): consolidate handler-side duplicate prep, move move_meeting / coord / calendarHealth's two planMeeting callers onto the normalizer. Currently Phase A wired only `create_meeting` + `delete_meeting`.
 
 ---
 

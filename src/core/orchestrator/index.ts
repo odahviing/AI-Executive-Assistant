@@ -767,6 +767,45 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     });
   }
 
+  // v2.9.2 — approval-bound thread lock. When the owner is replying in a
+  // thread that's the terminal DM of a pending approval, restrict Sonnet's
+  // tools to resolve_approval + list_pending_approvals only. Forces engagement
+  // with the approval — she can't drift into find_available_slots, create_meeting,
+  // get_calendar, etc. Closes the 2026-05-19 1:35 PM Yael case where Sonnet
+  // turned an approval thread into a fresh booking conversation, abandoning
+  // the open approval row. The amend ping-pong rails (text-shape counter) can
+  // carry clarifying questions like "what time?" through this constraint.
+  if (
+    isOwnerTurn
+    && input.threadTs
+    && input.proseOnly !== true  // proseOnly already handled above
+  ) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getAwaitingOwnerRequests } = require('../../db/requests') as
+        typeof import('../../db/requests');
+      const pending = getAwaitingOwnerRequests(profile.user.slack_user_id);
+      const boundApprovals = pending.filter(r =>
+        r.kind === 'approval' && r.terminal_dm_msg_ts === input.threadTs,
+      );
+      if (boundApprovals.length >= 1) {
+        const APPROVAL_BOUND_TOOLS = new Set(['resolve_approval', 'list_pending_approvals']);
+        const before = tools.length;
+        tools = tools.filter(t => APPROVAL_BOUND_TOOLS.has(t.name));
+        logger.info('Orchestrator — approval-bound thread, locked tool scope', {
+          threadTs: input.threadTs,
+          boundApprovalIds: boundApprovals.map(r => r.id),
+          toolsBefore: before,
+          toolsAfter: tools.length,
+        });
+      }
+    } catch (err) {
+      logger.warn('Orchestrator — approval-bound-thread filter threw, leaving tools unchanged', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
   // Diagnostic: log the scope decision + the tool-count effect so we can
   // see Module G hits vs misses in production logs. Cheap; only on owner
   // turns when the flag is on.
@@ -1333,11 +1372,56 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         } catch (_) { /* helper failure is non-fatal */ }
       }
 
-      const result = await executeSkillTool(
-        toolUse.name,
-        toolInputForCall,
-        skillContext,
-      );
+      // v2.9.2 — universal tool-call cache. Before executing the tool, check
+      // if an identical call (same owner+thread+tool+args) fired recently.
+      // Writes: 60s TTL — same write within a minute is almost always a bug
+      // (buffered follow-up that confused Sonnet, claim-checker retry, etc.).
+      // Reads: 5s TTL — same-turn duplicate reads return cached; cross-turn
+      // fresh reads aren't masked. Returns prior result verbatim so Sonnet's
+      // narration is consistent. Closes the 8.2 double-fire class universally
+      // — works for every present and future write tool without per-handler
+      // changes.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { lookupRecentToolCall, recordToolCall } = require('../../utils/toolCallCache') as
+        typeof import('../../utils/toolCallCache');
+      const cached = lookupRecentToolCall({
+        ownerUserId: profile.user.slack_user_id,
+        threadTs: input.threadTs,
+        toolName: toolUse.name,
+        args: toolInputForCall,
+      });
+      let result: unknown;
+      if (cached) {
+        logger.info('Orchestrator — tool-call cache hit, returning prior result without re-firing', {
+          tool: toolUse.name,
+          ageMs: cached.ageMs,
+          threadTs: input.threadTs,
+        });
+        result = cached.cachedResult;
+      } else {
+        result = await executeSkillTool(
+          toolUse.name,
+          toolInputForCall,
+          skillContext,
+        );
+        // Cache the successful result. Errors are NOT cached — a transient
+        // failure shouldn't lock out the retry path. Recognize an error by
+        // either an Error throw (already bubbled up — we don't reach here)
+        // or a `{ error: ... }` shape on the result.
+        const isErrorResult = result
+          && typeof result === 'object'
+          && 'error' in (result as Record<string, unknown>)
+          && typeof (result as Record<string, unknown>).error === 'string';
+        if (!isErrorResult) {
+          recordToolCall({
+            ownerUserId: profile.user.slack_user_id,
+            threadTs: input.threadTs,
+            toolName: toolUse.name,
+            args: toolInputForCall,
+            result,
+          });
+        }
+      }
 
       // Check if any skill signalled approval required
       if (
