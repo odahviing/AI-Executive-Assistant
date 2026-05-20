@@ -85,7 +85,7 @@ export function formatAssistantSelfForPrompt(
     prof.working_hours || prof.role_summary || prof.collaboration_notes;
   if (notes.length === 0 && !anyProfile && log.length === 0) {
     return includeMutationHint
-      ? `ABOUT YOU (${profile.assistant.name}): nothing saved yet. When ${profile.user.name.split(' ')[0]} teaches you something about yourself (your name, your story, how you like to work), call note_about_person with slack_id="${slackId}" to remember it.`
+      ? `ABOUT YOU (${profile.assistant.name}): nothing saved yet. When ${profile.user.name.split(' ')[0]} teaches you something about yourself (your name, your story, how you like to work, whether you're AI/human, your age), call note_about_self to remember it — that's the tool for facts about ${profile.assistant.name} herself.`
       : '';
   }
 
@@ -101,7 +101,7 @@ export function formatAssistantSelfForPrompt(
     lines.push(`  ↳ [${d}] ${i.type}: ${i.summary}`);
   }
   if (includeMutationHint) {
-    lines.push(`  (To save a new fact about yourself: note_about_person slack_id="${slackId}" note="...")`);
+    lines.push(`  (To save a NEW fact about yourself when ${profile.user.name.split(' ')[0]} teaches you: call note_about_self. Keep adding — these facts make you knowable.)`);
   }
   return lines.join('\n');
 }

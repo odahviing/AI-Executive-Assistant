@@ -1626,8 +1626,14 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         // bug at the prompt layer). Until that's also fixed, this prevents
         // tool POV leaking to the user. List intentionally narrow — only
         // tools whose user-facing impact is zero.
+        // v2.9.4 follow-up — `note_about_self` removed from this list. Pre-
+        // v2.9.4 it was a side-effect (saving an owner-self fact); silence was
+        // honest. v2.9.4 repurposed it: owner-path now saves a fact ABOUT
+        // MAELLE that the owner just taught her — a deliberate teaching
+        // moment. Going silent there reads as ignoring the user. Falls
+        // through to the verbMap fallback when Sonnet doesn't generate text
+        // naturally; the fallback acknowledges the save.
         const SILENCE_ELIGIBLE = new Set([
-          'note_about_self',
           'note_about_person',
           'log_interaction',
           'learn_preference',
@@ -1664,7 +1670,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           recall_preferences: 'looked up your preferences',
           recall_interactions: 'checked past interactions',
           note_about_person: 'made a note',
-          note_about_self: 'made a note about myself',
+          note_about_self: 'got it, saved that for next time',
           update_person_profile: 'updated contact info',
           log_interaction: 'logged the interaction',
           confirm_gender: 'confirmed the pronouns',
