@@ -68,9 +68,20 @@ export function applyRaiseFeedbackSignal(params: {
       reason = 'raised_match_engaged';
     }
   } else {
-    // Any pivot (task / different subject / bare ack / no social signal at all) = -1.
-    delta = -1;
-    reason = `raised_pivot_${classification.kind}`;
+    // Pivot path — owner/colleague moved on without addressing the raised
+    // subject this turn. Owner direction (option C): DO NOT apply a -1.
+    // The prior implementation's blanket -1-on-pivot misclassified
+    // legitimate task interruptions ("book the gym at 5pm" after yesterday's
+    // marathon-training raise) as social rejection, dragging the topic
+    // score down and clearing the raise so a delayed answer counted as
+    // organic instead of resolving the raise.
+    //
+    // New behavior: no score change AND no marker clear. The raise stays
+    // alive — if a later inbound matches the raised subject, it still
+    // produces +1. Raises age naturally via the weekly social_decay
+    // dispatcher (−1/week to active subjects untouched 7+ days).
+    delta = 0;
+    reason = `raised_pivot_no_signal_${classification.kind}`;
   }
 
   let updated: SocialSubject | null = null;
@@ -78,9 +89,10 @@ export function applyRaiseFeedbackSignal(params: {
     updated = applyScoreDelta(raised.id, delta, 'assistant');
     if (sentiment === 'positive') incrementCategorySignals(raised.category_id, 'positive');
     if (sentiment === 'negative') incrementCategorySignals(raised.category_id, 'negative');
+    // Clear the raise marker only when a real signal was applied. Pivot
+    // path leaves it so a delayed response still counts.
+    clearSubjectRaisedMarker(raised.id);
   }
-  // Clear the raise marker — signal has been processed for this person.
-  clearSubjectRaisedMarker(raised.id);
 
   logger.info('Engagement signal applied (raised)', {
     raisedId: raised.id, raisedLabel: raised.label, delta, reason,

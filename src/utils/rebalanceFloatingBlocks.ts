@@ -119,6 +119,26 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         zone: blockEvent.end.timeZone ?? 'utc',
       }).setZone(tz).toMillis();
 
+      // Owner-pinned detection (option A): if the block currently sits
+      // OUTSIDE its preferred window, presume owner placed it there
+      // deliberately (via confirm_outside_window or manual Outlook edit)
+      // and DO NOT auto-rebalance. The sweep would otherwise undo an
+      // intentional override every time it runs. The original-time-free
+      // detection that could safely return it is future work.
+      const ownerPinWinStart = fb.windowMsForDay(dateStr, block.preferred_start, tz);
+      const ownerPinWinEnd = fb.windowMsForDay(dateStr, block.preferred_end, tz);
+      if (
+        Number.isFinite(ownerPinWinStart) && Number.isFinite(ownerPinWinEnd)
+        && (blockStartMs < ownerPinWinStart || blockEndMs > ownerPinWinEnd)
+      ) {
+        logger.info('rebalanceFloatingBlocks: block skipped — outside preferred window (owner-pinned)', {
+          block: block.name, date: dateStr,
+          currentPlacement: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm')}`,
+          preferredWindow: `${block.preferred_start}-${block.preferred_end}`,
+        });
+        continue;
+      }
+
       // Does any non-block event overlap the block right now?
       const overlapping = realEvents.find(e => {
         if (e.id === blockEvent.id) return false;
@@ -160,7 +180,14 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         }
       }
 
-      const aligned = fb.findAlignedSlotForBlock(block, dateStr, tz, busyInWindow, bufferMin);
+      // Honor block.prefer_position: 'latest_in_window' picks the latest
+      // aligned gap (via the existing findLatestAlignedSlotForBlock) so a
+      // "lunch at end-of-window" preference survives rebalance instead of
+      // silently resetting to earliest. Default (no prefer_position) →
+      // earliest aligned slot, existing behavior.
+      const aligned = block.prefer_position === 'latest_in_window'
+        ? fb.findLatestAlignedSlotForBlock(block, dateStr, tz, busyInWindow, bufferMin)
+        : fb.findAlignedSlotForBlock(block, dateStr, tz, busyInWindow, bufferMin);
       if (aligned !== null) {
         const newStart = DateTime.fromMillis(aligned, { zone: tz });
         const newEnd = newStart.plus({ minutes: block.duration_minutes });

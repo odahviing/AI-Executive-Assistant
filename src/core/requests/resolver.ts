@@ -670,13 +670,14 @@ async function notifyRequesterOfDecision(
     const personRow = getPersonMemory(requesterSlackId);
     if (personRow?.profile_json) {
       const pj = JSON.parse(personRow.profile_json);
-      const pref = (pj?.language_preference as string | undefined ?? '').toLowerCase();
-      if (pref.includes('hebrew') || pref.includes('עברית') || pref.includes('he')) {
-        // Conservative substring match — only flip to Hebrew on explicit signal.
-        // Catches "Hebrew", "Hebrew preferred", "עברית", "he-IL" variants.
-        if (pref === 'he' || pref === 'hebrew' || pref.startsWith('hebrew') || pref.includes('עברית')) {
-          requesterLang = 'he';
-        }
+      const pref = (pj?.language_preference as string | undefined ?? '').toLowerCase().trim();
+      // Explicit whitelist only — the prior outer `pref.includes('he')` guard
+      // accepted any string containing the substring 'he' (e.g. 'they', 'shes',
+      // random pref values), and only the inner whitelist kept things sane.
+      // Dropping the outer guard removes the fragile fail-open and keeps a
+      // single source of truth.
+      if (pref === 'he' || pref === 'hebrew' || pref === 'he-il' || pref.startsWith('hebrew') || pref.includes('עברית')) {
+        requesterLang = 'he';
       }
     }
   } catch { /* fail-open to English */ }
@@ -826,6 +827,33 @@ async function notifyOwnerOfColleaguePushback(
   } else {
     const cnt = colleagueCounter ? summarizeCounter(colleagueCounter) : '';
     body = `${requesterName} countered with ${cnt || 'an alternative'} on "${subject}". Approve, reject, or counter again?`;
+    // Append the REBUILT consequence line so the owner sees what saying yes
+    // actually does NOW (after the counter merges into on_approve.args).
+    // Pre-fix the only consequence line the owner saw was the one from the
+    // original create_approval DM, which reflected the ORIGINAL slot — but
+    // approving here would replay the MERGED args (new slot). The fresh
+    // line eliminates the "I thought yes meant 14:00, got 16:00" confusion.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { extractCallbacks, mergeAmendIntoApprove, buildConsequenceText } =
+        require('../approvals/approvalCallbacks') as
+          typeof import('../approvals/approvalCallbacks');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { parseDetails } = require('./types') as typeof import('./types');
+      const details = parseDetails<Record<string, unknown>>(row) ?? {};
+      const callbacks = extractCallbacks(details);
+      if (callbacks.on_approve && colleagueCounter) {
+        const merged = mergeAmendIntoApprove(callbacks.on_approve, colleagueCounter);
+        const consequence = buildConsequenceText({ on_approve: merged }, ctx.profile);
+        if (consequence) {
+          body = `${body}\n\n${consequence}`;
+        }
+      }
+    } catch (err) {
+      logger.warn('notifyOwnerOfColleaguePushback — consequence rebuild threw, sending bare body', {
+        id: row.id, err: String(err).slice(0, 200),
+      });
+    }
   }
   try {
     const { getConnection } = await import('../../connections/registry');

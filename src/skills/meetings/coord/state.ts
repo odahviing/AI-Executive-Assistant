@@ -922,20 +922,44 @@ export async function triggerRoundTwo(
     ...profile.schedule.home_days.days,
   ] as string[];
 
+  // Round 2 widening + annotation. Three coordinated fixes:
+  //   - extendedHours=true: actually widens the search. Pre-fix the
+  //     workHoursStart/End strings were ineffective without this flag, so
+  //     round 2 didn't widen at all. Post-wave-4 (#8) extendedHours UNIONS
+  //     widened + native windows instead of collapsing, so split-shift
+  //     days survive.
+  //   - attendeeAvailability (work-hours clip via loadAttendeeAvailabilityForEmails):
+  //     don't propose 22:00 to someone who works 09:00-17:00.
+  //   - NO attendeeBusyEmails: per owner direction, when a colleague is the
+  //     poll target, busy time is ANNOTATION (let them decide via DM-poll
+  //     in the next round), not blocking. Pre-fix round 2 also passed [] for
+  //     attendeeEmails so even work-hours clip was skipped — propose slots
+  //     colleagues couldn't make.
   let newSlots: Array<{ start: string; end: string }> = [];
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { loadAttendeeAvailabilityForEmails } = require('../../../utils/attendeeAvailability') as
+      typeof import('../../../utils/attendeeAvailability');
+    const participantEmails = allParticipants
+      .map(p => p.email)
+      .filter((e): e is string => !!e);
+    const attendeeAvailability = loadAttendeeAvailabilityForEmails(
+      participantEmails,
+      profile.user.email,
+    );
     newSlots = await findAvailableSlots({
       userEmail: profile.user.email,
       timezone: profile.user.timezone,
       durationMinutes: job.duration_min,
-      attendeeEmails: [],
+      attendeeEmails: participantEmails,
+      attendeeAvailability,
       searchFrom: `${searchFrom}T${hoursStart}:00`,
       searchTo: `${searchTo}T${hoursEnd}:00`,
       workDays: allWorkDays,
-      workHoursStart: hoursStart,
-      workHoursEnd: hoursEnd,
+      extendedHours: true,
       meetingMode: 'either',
       autoExpand: false,
+      profile,
     });
   } catch (err) {
     logger.error('Failed to find slots for round 2', { err });

@@ -507,12 +507,23 @@ async function runSelfCapture(
 ): Promise<void> {
   try {
     const selfId = selfSlackId(profile.user.slack_user_id);
-    const selfRow = getPersonMemory(selfId);
+    let selfRow = getPersonMemory(selfId);
     if (!selfRow) {
-      // No SELF row yet — startup seed should have created it. Defensive
-      // skip rather than implicit create.
-      logger.warn('runSelfCapture: SELF row missing — skipping', { selfId });
-      return;
+      // No SELF row — startup seed should have created it, but if a
+      // migration / manual DB edit / race wiped it, re-seed now rather
+      // than silently dropping the capture. seedAssistantSelf is
+      // idempotent (only upserts when missing or assistant name
+      // changes), so calling it here is safe.
+      logger.warn('runSelfCapture: SELF row missing — re-seeding', { selfId });
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { seedAssistantSelf } = require('../core/assistantSelf') as
+        typeof import('../core/assistantSelf');
+      seedAssistantSelf(profile);
+      selfRow = getPersonMemory(selfId);
+      if (!selfRow) {
+        logger.warn('runSelfCapture: re-seed failed — skipping capture', { selfId });
+        return;
+      }
     }
 
     const existingNotes: Array<{ date: string; note: string }> = (() => {

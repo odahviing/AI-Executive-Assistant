@@ -274,6 +274,10 @@ const UserProfileSchema = z.object({
       // Optional defaults when BOOKING a new instance of this block
       default_subject: z.string().optional(),
       default_category: z.string().optional(),
+      // Default placement preference inside the preferred window. Honored
+      // by rebalance + book_floating_block when no explicit prefer_position
+      // arg is passed. Omitting → 'earliest_in_window'.
+      prefer_position: z.enum(['earliest_in_window', 'latest_in_window']).optional(),
     })).optional(),
   }),
 

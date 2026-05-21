@@ -504,15 +504,10 @@ export function analyzeCalendar(
           suggestedFix: 'Move one of the meetings or drop out of one.',
         });
       }
-      // Back-to-back check (adjacent, <bufferMin gap)
-      if (prevEndMin > workStartMin && evStart < prevEndMin + bufferMin && evStart >= prevEndMin) {
-        issues.push({
-          type: 'back_to_back',
-          severity: 'low',
-          detail: `${ev.subject} at ${ev._localStartTime} starts immediately after the previous meeting (< ${bufferMin} min gap)`,
-        });
-      }
-
+      // back_to_back emit retired. The scheduler removed buffer-between-
+      // meetings enforcement in v2.7.1 ("Connected back-to-backs are fine
+      // by design"), so flagging them as analyzer issues had no fix path
+      // and just produced morning-brief noise.
       totalMeetingMin += evDur;
       prevEndMin = Math.max(prevEndMin, evEnd);
     }

@@ -45,6 +45,13 @@ export interface FloatingBlock {
   match_category?: string;
   default_subject?: string;
   default_category?: string;
+  /**
+   * Default placement preference within the preferred window. Honored by
+   * the rebalance sweep when overlap forces a re-placement, and by the
+   * initial book_floating_block call when no explicit prefer_position arg
+   * is passed. Omitting → 'earliest_in_window'.
+   */
+  prefer_position?: 'earliest_in_window' | 'latest_in_window';
 }
 
 /**

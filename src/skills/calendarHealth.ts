@@ -392,31 +392,44 @@ Status meanings:
           // checked independently. Only the ones that apply on this day-of-week
           // are in scope. A block is "missing" when no event on the calendar
           // matches it (subject regex OR category match, via the helper).
-          for (const block of floatingBlocks) {
-            if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
-            const hasBlock = dayEvents.some(e => {
-              if (e.isAllDay) return false;
-              return fb.isFloatingBlockEvent(
-                { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
-                block,
-              );
-            });
-            if (!hasBlock) {
-              // v2.8.7 (bug 1.4) — skip when the owner deleted THIS block on
-              // THIS day in the last 14 days. Pre-loaded above. The issue
-              // doesn't enter issues[] at all → no brief narration, no
-              // auto-book attempt.
-              const recentlyDeleted = recentBlockDeletes.some(d =>
-                d.blockName === block.name.toLowerCase() && d.date === dayStr,
-              );
-              if (recentlyDeleted) continue;
-              issues.push({
-                type: 'missing_floating_block',
-                date: dayStr,
-                description: `No ${block.name.replace(/_/g, ' ')} on ${dayName} ${dayStr}`,
-                suggestion: `Book a ${block.duration_minutes}-minute ${block.name.replace(/_/g, ' ')} between ${block.preferred_start} and ${block.preferred_end}`,
-                block_name: block.name,
+          // Scope missing_floating_block to TODAY + TOMORROW. Future days'
+          // blocks are placed by the daily check_calendar_health routine on
+          // the day of, not pre-seeded across the week. Pre-fix the
+          // analyzer flagged every workday in the window as "lunch missing"
+          // because future days legitimately had no lunch yet — owner saw
+          // "lunch missing today + Sun + Mon + Wed + next Thu" when really
+          // only today was actionable. The deleted-today suppressor
+          // (recentBlockDeletes) only helps for the day the delete happened;
+          // it doesn't suppress the false positives 2-7 days out.
+          const todayStr = DateTime.now().setZone(timezone).toFormat('yyyy-MM-dd');
+          const tomorrowStr = DateTime.now().setZone(timezone).plus({ days: 1 }).toFormat('yyyy-MM-dd');
+          const isWithinFloatingBlockHorizon = dayStr === todayStr || dayStr === tomorrowStr;
+          if (isWithinFloatingBlockHorizon) {
+            for (const block of floatingBlocks) {
+              if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
+              const hasBlock = dayEvents.some(e => {
+                if (e.isAllDay) return false;
+                return fb.isFloatingBlockEvent(
+                  { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+                  block,
+                );
               });
+              if (!hasBlock) {
+                // Skip when the owner deleted THIS block on THIS day in the
+                // last 14 days. The issue doesn't enter issues[] at all → no
+                // brief narration, no auto-book attempt.
+                const recentlyDeleted = recentBlockDeletes.some(d =>
+                  d.blockName === block.name.toLowerCase() && d.date === dayStr,
+                );
+                if (recentlyDeleted) continue;
+                issues.push({
+                  type: 'missing_floating_block',
+                  date: dayStr,
+                  description: `No ${block.name.replace(/_/g, ' ')} on ${dayName} ${dayStr}`,
+                  suggestion: `Book a ${block.duration_minutes}-minute ${block.name.replace(/_/g, ' ')} between ${block.preferred_start} and ${block.preferred_end}`,
+                  block_name: block.name,
+                });
+              }
             }
           }
 
@@ -453,6 +466,17 @@ Status meanings:
           const dayWorkEnd = DateTime.fromISO(`${dayStr}T${dayHoursEnd}`, { zone: timezone });
           const nightShiftMarker = profile.schedule.night_shift?.blocking_event?.toLowerCase() ?? null;
 
+          // Categories whose yaml entry sets sensitivity_private (today:
+          // "Personal") are owner-life events, not work meetings. Overlap
+          // detection over them produced morning-brief noise (same
+          // Bootcamp-vs-Holiday-Block pair re-flagged every week even
+          // after dismissal because recurring occurrences carry fresh
+          // event_ids — see seriesMaster anchoring fix below).
+          const privateCategoryNames = new Set(
+            (profile.categories ?? [])
+              .filter(c => c.sets_sensitivity_private === true)
+              .map(c => c.name.toLowerCase()),
+          );
           const nonAllDay = dayEvents.filter(e => {
             if (e.isAllDay) return false;
             if (e.showAs === 'free' || e.showAs === 'workingElsewhere') return false;
@@ -472,6 +496,15 @@ Status meanings:
             const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
             const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
             if (eStart >= dayWorkEnd || eEnd <= dayWorkStart) return false;
+            // Exclusion 5: events tagged with a private-sensitivity
+            // category. Owner direction: personal events aren't relevant
+            // for overlap detection. Match is case-insensitive against the
+            // event's Outlook categories.
+            if (privateCategoryNames.size > 0) {
+              const evCats = ((e as unknown as { categories?: string[] }).categories ?? [])
+                .map(c => c.toLowerCase());
+              if (evCats.some(c => privateCategoryNames.has(c))) return false;
+            }
             return true;
           });
           for (let i = 0; i < nonAllDay.length; i++) {
@@ -495,11 +528,20 @@ Status meanings:
                 // brief / coord DMs / shadow notes don't leak.
                 const aDisp = displaySubject(a, profile);
                 const bDisp = displaySubject(b, profile);
+                // Use seriesMasterId when present for the dismissal fingerprint
+                // anchor — recurring events get a fresh occurrence_id every
+                // cycle, so dismissing one occurrence didn't suppress the next
+                // week's pair-flagging. The eventIds field on issues feeds
+                // buildIssueKey; movable_event_id / kept_event_id keep the
+                // occurrence id for active-mode fixes that need to actually
+                // move the specific occurrence.
+                const aAnchor = (a as unknown as { seriesMasterId?: string }).seriesMasterId ?? a.id;
+                const bAnchor = (b as unknown as { seriesMasterId?: string }).seriesMasterId ?? b.id;
                 issues.push({
                   type: 'double_booking',
                   date: dayStr,
                   description: `"${aDisp}" (${aStart.toFormat('HH:mm')}-${aEnd.toFormat('HH:mm')}) overlaps with "${bDisp}" (${bStart.toFormat('HH:mm')}-${bEnd.toFormat('HH:mm')})`,
-                  eventIds: [a.id, b.id],
+                  eventIds: [aAnchor, bAnchor],
                   suggestion: pick
                     ? `Propose moving "${displaySubject(pick.movable, profile)}" — the less-protected side. The other meeting is protected (${(pick.movable === a ? bProt : aProt).reasons.join(', ')}).`
                     : 'Both sides are protected — the owner needs to decide which to move.',
