@@ -200,7 +200,27 @@ export function directiveForProactiveSlot(params: {
   // Pick a random active category.
   const pickedCategory = activeCategories[Math.floor(Math.random() * activeCategories.length)];
   // Within category: highest engagement_score, then least-recently-assistant-initiated.
-  const subjects = getActiveSubjectsForPersonCategory(personSlackId, pickedCategory.category_id);
+  const allSubjects = getActiveSubjectsForPersonCategory(personSlackId, pickedCategory.category_id);
+  // Deprioritize subjects raised in the last 72h that the person hasn't
+  // responded to yet. Per #25, the raise marker (last_assistant_initiated_at)
+  // stays alive on pivot — score doesn't decay, so the same subject could
+  // otherwise re-fire on the next initiation. Scenario 1 ("friendship over
+  // weeks") expects a clean topic rotation post-silence: if soccer was
+  // raised yesterday with no reply, today should pick a different subject,
+  // not double-back on soccer. A subject is "still pending response" when
+  // last_assistant_initiated_at > last_touched_at (person engagement bumps
+  // last_touched_at).
+  const RAISE_PENDING_WINDOW_MS = 72 * 60 * 60 * 1000;
+  const nowMs = Date.now();
+  const subjects = allSubjects.filter(s => {
+    const raisedAt = s.last_assistant_initiated_at ? new Date(s.last_assistant_initiated_at).getTime() : 0;
+    if (!raisedAt) return true;  // never raised → eligible
+    const touchedAt = s.last_touched_at ? new Date(s.last_touched_at).getTime() : 0;
+    const isPending = touchedAt <= raisedAt;
+    const withinWindow = (nowMs - raisedAt) < RAISE_PENDING_WINDOW_MS;
+    // Pending + recent → defer this subject; fall back to others or raise_new.
+    return !(isPending && withinWindow);
+  });
   if (subjects.length === 0) {
     return withLegacyShape({
       mode: 'raise_new',

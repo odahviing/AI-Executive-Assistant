@@ -392,44 +392,39 @@ Status meanings:
           // checked independently. Only the ones that apply on this day-of-week
           // are in scope. A block is "missing" when no event on the calendar
           // matches it (subject regex OR category match, via the helper).
-          // Scope missing_floating_block to TODAY + TOMORROW. Future days'
-          // blocks are placed by the daily check_calendar_health routine on
-          // the day of, not pre-seeded across the week. Pre-fix the
-          // analyzer flagged every workday in the window as "lunch missing"
-          // because future days legitimately had no lunch yet — owner saw
-          // "lunch missing today + Sun + Mon + Wed + next Thu" when really
-          // only today was actionable. The deleted-today suppressor
-          // (recentBlockDeletes) only helps for the day the delete happened;
-          // it doesn't suppress the false positives 2-7 days out.
-          const todayStr = DateTime.now().setZone(timezone).toFormat('yyyy-MM-dd');
-          const tomorrowStr = DateTime.now().setZone(timezone).plus({ days: 1 }).toFormat('yyyy-MM-dd');
-          const isWithinFloatingBlockHorizon = dayStr === todayStr || dayStr === tomorrowStr;
-          if (isWithinFloatingBlockHorizon) {
-            for (const block of floatingBlocks) {
-              if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
-              const hasBlock = dayEvents.some(e => {
-                if (e.isAllDay) return false;
-                return fb.isFloatingBlockEvent(
-                  { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
-                  block,
-                );
+          // missing_floating_block scope follows the analyzer's overall
+          // window (computeHealthCheckWindow — day-of-week aware: Mon-Wed
+          // sees through end-of-this-week, Thursday sees Thursday + next
+          // week). Owner direction: scope matches calendarHealth, not
+          // today+tomorrow. The recentlyDeleted suppressor catches the
+          // "owner just deleted this block on this day" case so a fresh
+          // delete doesn't re-fire; future days where the block genuinely
+          // hasn't been placed surface for the active-mode auto-book on
+          // the day of.
+          for (const block of floatingBlocks) {
+            if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
+            const hasBlock = dayEvents.some(e => {
+              if (e.isAllDay) return false;
+              return fb.isFloatingBlockEvent(
+                { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+                block,
+              );
+            });
+            if (!hasBlock) {
+              // Skip when the owner deleted THIS block on THIS day in the
+              // last 14 days. The issue doesn't enter issues[] at all → no
+              // brief narration, no auto-book attempt.
+              const recentlyDeleted = recentBlockDeletes.some(d =>
+                d.blockName === block.name.toLowerCase() && d.date === dayStr,
+              );
+              if (recentlyDeleted) continue;
+              issues.push({
+                type: 'missing_floating_block',
+                date: dayStr,
+                description: `No ${block.name.replace(/_/g, ' ')} on ${dayName} ${dayStr}`,
+                suggestion: `Book a ${block.duration_minutes}-minute ${block.name.replace(/_/g, ' ')} between ${block.preferred_start} and ${block.preferred_end}`,
+                block_name: block.name,
               });
-              if (!hasBlock) {
-                // Skip when the owner deleted THIS block on THIS day in the
-                // last 14 days. The issue doesn't enter issues[] at all → no
-                // brief narration, no auto-book attempt.
-                const recentlyDeleted = recentBlockDeletes.some(d =>
-                  d.blockName === block.name.toLowerCase() && d.date === dayStr,
-                );
-                if (recentlyDeleted) continue;
-                issues.push({
-                  type: 'missing_floating_block',
-                  date: dayStr,
-                  description: `No ${block.name.replace(/_/g, ' ')} on ${dayName} ${dayStr}`,
-                  suggestion: `Book a ${block.duration_minutes}-minute ${block.name.replace(/_/g, ' ')} between ${block.preferred_start} and ${block.preferred_end}`,
-                  block_name: block.name,
-                });
-              }
             }
           }
 

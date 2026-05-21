@@ -290,7 +290,12 @@ GUIDANCE:
 - action=merge when the content UPDATES or EXPANDS an existing section on the same topic.
 - action=sibling when it's related-but-distinct (existing "investors/fulcrum" + a DIFFERENT investor → sibling named differently).
 - action=create when no existing section is close enough.
-- confidence=low when content is ambiguous — caller asks the owner rather than misfile.`;
+- confidence=low when content is ambiguous — caller asks the owner rather than misfile.
+
+TASK-INPUT VS KNOWLEDGE — read the OWNER SAID caption carefully:
+- If the caption gives an instruction that consumes the file's content (verbs like "schedule these", "book these", "set up these", "find time for", "remind me to", "use this to ...", "send to X", "draft a reply"), the file is TASK INPUT for a specific action — NOT durable knowledge. Return kind=other with reason="task_input — caption directs an action that consumes the file".
+- Knowledge captions look different: "save this", "for the next time we talk about X", "background on Y", silence (no caption), or descriptive labels like "the Q3 board deck".
+- When in doubt between task_input and knowledge_doc, prefer task_input — owner can re-upload with a different caption if they want it filed. The cost of mis-filing a one-shot action input is higher than the cost of skipping a knowledge ingest the owner can repeat.`;
 
   // Stage 1: classify + propose metadata. Small tool_use payload — no big
   // markdown strings, so no risk of the SDK hitting malformed JSON in the

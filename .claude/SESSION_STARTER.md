@@ -90,6 +90,7 @@ Procedures the owner runs frequently are wired as skills under `.claude/skills/`
 - **`wrap`** — finish the session. Triggers on "wrap" / "ship it" / "close the patch" / etc. Runs the full WRAP_UP.md checklist.
 - **`scenario`** — paper-trace a numbered test scenario from `.claude/test-scenarios.md`. STRICT paper exercise — no live DMs, no calendar writes, no tool calls against the running system.
 - **`bugs`** — analyze bugs the owner describes directly in chat. Propose-only; ships everything in one commit + version bump at the end via `wrap`.
+- **`audit`** — deep parallel project audit. Triggers on "audit" / "full audit" / "full workout" / "bug sweep" / "find all the bugs" / etc. Spawns parallel subagents per subsystem (booking pipeline, approval pipeline, social engine, persona memory, venue, floating blocks, working hours, cross-cutting). Each paper-traces realistic scenarios + reads source thoroughly. Returns an atomic-bug list with `file:line` citations, ranked by severity (production / dead code / config leak / bad description / stale comment). STRICT propose-only — never auto-fixes. Saves a handoff file for follow-up fix sessions.
 
 ---
 
