@@ -417,12 +417,20 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
       // owner-curated and silently dropped). v2.9.3 — target check
       // changed from refuse to rewrite, same shape as the other tools.
       if (toolName === 'update_person_profile') {
+        // Clone before mutation. update_person_profile is handled BY
+        // AssistantSkill (this same file's switch below), so unlike
+        // note_about_person (#2) we don't need the shared-ref propagation —
+        // and we DO want isolation from the orchestrator's cached args
+        // object. The field-drop loop below removes owner-curated fields;
+        // mutating the caller's object would dirty the cache and cause
+        // retries to see a partial args shape.
+        args = { ...args };
         const targetId = args.colleague_slack_id as string | undefined;
         if (targetId && targetId !== context.userId) {
           logger.info('update_person_profile colleague-path — rewriting target to requester', {
             originalTarget: targetId, requesterId: context.userId,
           });
-          (args as Record<string, unknown>).colleague_slack_id = context.userId;
+          args.colleague_slack_id = context.userId;
         }
         const COLLEAGUE_SELF_WRITABLE_FIELDS = new Set([
           'colleague_slack_id', 'colleague_name',
@@ -433,7 +441,7 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
         for (const k of Object.keys(args)) {
           if (!COLLEAGUE_SELF_WRITABLE_FIELDS.has(k)) {
             droppedFields.push(k);
-            delete (args as Record<string, unknown>)[k];
+            delete args[k];
           }
         }
         if (droppedFields.length > 0) {

@@ -474,6 +474,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         personSlackId: turnPersonSlackId,
         classification: socialClassification,
         reconciled,
+        ownerTimezone: profile.user.timezone,
       });
     } catch (err) {
       logger.warn('Social pre-pass threw — continuing without directive', { err: String(err).slice(0, 300) });
@@ -1977,7 +1978,10 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { directiveForProactiveSlot } = require('../social/stateMachine') as typeof import('../social/stateMachine');
-        const codaDirective = directiveForProactiveSlot({ personSlackId: turnPersonSlackId });
+        const codaDirective = directiveForProactiveSlot({
+          personSlackId: turnPersonSlackId,
+          ownerTimezone: profile.user.timezone,
+        });
         if (codaDirective.mode === 'continue' || codaDirective.mode === 'raise_new') {
           // v2.2.4 (bug 1A) — pass conversation language so the coda matches.
           // Detect from the inbound user message — Hebrew chars present → 'he',

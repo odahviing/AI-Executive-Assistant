@@ -32,8 +32,16 @@ function parseRange(rangeStr: string): WorkHourRange | null {
   const m = rangeStr.match(/^(\d{2}:\d{2})-(\d{2}:\d{2})$/);
   if (!m) return null;
   const startMin = parseHHMM(m[1]);
-  const endMin = parseHHMM(m[2]);
+  let endMin = parseHHMM(m[2]);
   if (endMin <= startMin) return null;
+  // Normalize "23:59" (last expressible minute in HH:MM) to 1440 (end-of-
+  // day, exclusive). Yaml authors use 23:59 to mean "work runs through
+  // the end of the day" — but the literal endMin=1439 left a 1-minute
+  // dead zone at the boundary where isWithinOwnerWorkHours returned false
+  // at 23:59:00 while isSlotInWorkHours accepted a slot ending at 23:59.
+  // With endMin=1440, both functions agree the boundary minute is
+  // in-window (1439 < 1440, 1439 <= 1440).
+  if (endMin === 1439) endMin = 1440;
   return { startMin, endMin };
 }
 

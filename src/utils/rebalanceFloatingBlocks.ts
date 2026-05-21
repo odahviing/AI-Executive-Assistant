@@ -22,6 +22,25 @@ import type { UserProfile } from '../config/userProfile';
 import * as fb from './floatingBlocks';
 import logger from './logger';
 
+// Process-lifetime dedup cache for "floating block overlap" shadows.
+// Same (date, blockName, overlappingEventId) fingerprint within the TTL
+// is collapsed to one DM so the owner doesn't get pinged twice a day,
+// every day, until they resolve the overlap. Restarts reset the cache —
+// acceptable trade-off (no persistent state, no DB schema; suppressing
+// forever would risk silencing a real recurrence).
+const OVERLAP_SHADOW_DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
+const overlapShadowDedup = new Map<string, number>();
+function shouldSkipOverlapShadow(fingerprint: string): boolean {
+  const now = Date.now();
+  // Drop expired entries on every check (cheap, bounded by TTL × call rate).
+  for (const [k, expiresAt] of overlapShadowDedup) {
+    if (expiresAt <= now) overlapShadowDedup.delete(k);
+  }
+  if ((overlapShadowDedup.get(fingerprint) ?? 0) > now) return true;
+  overlapShadowDedup.set(fingerprint, now + OVERLAP_SHADOW_DEDUP_TTL_MS);
+  return false;
+}
+
 export async function rebalanceFloatingBlocksAfterMutation(params: {
   profile: UserProfile;
   /** ISO timestamp of the new event start — used to derive the affected date. */
@@ -168,13 +187,20 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         // No in-window slot — leave overlapping. Owner can decide to bump
         // outside the window via the policy_exception approval flow.
         result.overlapping++;
-        try {
-          await shadowNotify(profile, {
-            channel: '',
-            action: 'Floating block overlap',
-            detail: `${block.name} on ${slotDt.toFormat('EEE d MMM')} overlaps another event and can't fit elsewhere in its window. Want me to bump it outside?`,
-          });
-        } catch { /* shadow failure non-fatal */ }
+        // Dedupe shadows on a stable fingerprint so the same overlap
+        // doesn't DM the owner twice a day until it resolves. Lives
+        // process-lifetime — restarts reset (acceptable; we just want
+        // to collapse same-run repeats, not suppress forever).
+        const fingerprint = `floating-overlap:${dateStr}:${block.name}:${overlapping.id}`;
+        if (!shouldSkipOverlapShadow(fingerprint)) {
+          try {
+            await shadowNotify(profile, {
+              channel: '',
+              action: 'Floating block overlap',
+              detail: `${block.name} on ${slotDt.toFormat('EEE d MMM')} overlaps another event and can't fit elsewhere in its window. Want me to bump it outside?`,
+            });
+          } catch { /* shadow failure non-fatal */ }
+        }
       }
     }
   } catch (err) {

@@ -38,6 +38,7 @@
  *   - 3 active categories per person — soft target, picker behavior (NOT enforced here).
  */
 
+import { DateTime } from 'luxon';
 import { getDb } from './client';
 import logger from '../utils/logger';
 
@@ -484,12 +485,31 @@ export function getActiveCategoryEngagementForPerson(personSlackId: string): Cat
  * How many times has the assistant initiated social with this specific person
  * today? Used for the 1-per-day-per-person gate. Counts subjects whose
  * last_assistant_initiated_at falls today.
+ *
+ * The "today" boundary is computed in the OWNER'S local timezone (when
+ * provided). For Israel (UTC+2/+3), the UTC-midnight cutoff was 2-3 hours
+ * AHEAD of the local-midnight cutoff, so an initiation at 02:00 local
+ * Israel time crossed UTC-midnight but not local-midnight — the count
+ * reset prematurely and the daily gate could re-fire. Owner-local boundary
+ * keeps the gate true to its name. Falls back to UTC when no timezone
+ * passed (back-compat).
  */
-export function countAssistantInitiationsTodayForPerson(personSlackId: string): number {
+export function countAssistantInitiationsTodayForPerson(
+  personSlackId: string,
+  ownerTimezone?: string,
+): number {
   const db = getDb();
-  const startOfDay = new Date();
-  startOfDay.setUTCHours(0, 0, 0, 0);
-  const iso = startOfDay.toISOString();
+  let iso: string;
+  if (ownerTimezone) {
+    // Compute the start of TODAY in owner's local TZ, then convert back to
+    // UTC ISO for comparison against last_assistant_initiated_at (stored UTC).
+    const startOfLocalDay = DateTime.now().setZone(ownerTimezone).startOf('day');
+    iso = startOfLocalDay.toUTC().toISO()!;
+  } else {
+    const startOfDay = new Date();
+    startOfDay.setUTCHours(0, 0, 0, 0);
+    iso = startOfDay.toISOString();
+  }
   const row = db.prepare(`
     SELECT COUNT(*) as n FROM social_subjects
     WHERE person_slack_id = ?

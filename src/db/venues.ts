@@ -271,8 +271,18 @@ export function findVenuesByCriteria(params: {
       if (!anyMatch) return false;
     }
     if (nameHintLower) {
-      const blob = `${v.name} ${v.branch_name ?? ''}`.toLowerCase();
-      if (!blob.includes(nameHintLower)) return false;
+      const name = v.name.toLowerCase();
+      const branch = (v.branch_name ?? '').toLowerCase();
+      // Tier-1: exact name OR exact branch_name match.
+      const exact = name === nameHintLower || branch === nameHintLower;
+      // Tier-2: startsWith on either field.
+      const startsWith = name.startsWith(nameHintLower) || branch.startsWith(nameHintLower);
+      // Substring fallback dropped — pre-fix "coffee" as a hint matched
+      // BOTH "Coffee Bar" AND "Coffee Landwer" (any venue with "coffee"
+      // anywhere in name) → false-positive "did you mean…" prompts.
+      // Exact-then-startsWith narrows the false-positive surface; a
+      // multi-word venue name still matches by typing its leading words.
+      if (!exact && !startsWith) return false;
     }
     return true;
   });

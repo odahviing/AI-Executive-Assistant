@@ -145,8 +145,15 @@ function raiseNewProbabilityForCount(count: number): number {
 
 export function directiveForProactiveSlot(params: {
   personSlackId: string;
+  /**
+   * Owner timezone for owner-local "today" computation. When omitted, the
+   * count helper falls back to UTC midnight (legacy behavior). Threaded
+   * from callers that have profile in scope so the per-day-per-person
+   * gate resets at owner-local midnight, not UTC.
+   */
+  ownerTimezone?: string;
 }): LegacySocialDirectiveShape {
-  const { personSlackId } = params;
+  const { personSlackId, ownerTimezone } = params;
 
   // Rank-0 = "do not engage" opt-out. Maelle never INITIATES with rank-0
   // people. Inbound replies / response handling go through other paths
@@ -160,8 +167,8 @@ export function directiveForProactiveSlot(params: {
     return withLegacyShape(noDirectiveRaw());
   }
 
-  // One-per-day-per-person gate
-  if (countAssistantInitiationsTodayForPerson(personSlackId) >= 1) {
+  // One-per-day-per-person gate (owner-local "today")
+  if (countAssistantInitiationsTodayForPerson(personSlackId, ownerTimezone) >= 1) {
     return withLegacyShape(noDirectiveRaw());
   }
   const lastInit = lastAssistantInitiatedAt(personSlackId);
@@ -243,13 +250,15 @@ export function chooseSocialDirective(params: {
   personSlackId: string;
   classification: OwnerIntentClassification;
   reconciled: ReconcileResult;
+  /** Owner timezone — threaded through to the proactive-slot daily gate. */
+  ownerTimezone?: string;
 }): LegacySocialDirectiveShape {
-  const { classification, personSlackId } = params;
+  const { classification, personSlackId, ownerTimezone } = params;
 
   if (classification.kind === 'task') return noDirective();
   if (classification.kind === 'social') return directiveForPersonSocial(params);
   if (classification.conversation_state === 'closing') return noDirective();
-  return directiveForProactiveSlot({ personSlackId });
+  return directiveForProactiveSlot({ personSlackId, ownerTimezone });
 }
 
 export function formatDirectiveForPromptBlock(directive: LegacySocialDirectiveShape): string {

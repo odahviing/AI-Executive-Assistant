@@ -22,6 +22,7 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
+import logger from './logger';
 
 export type WeekDay =
   | 'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday'
@@ -177,6 +178,20 @@ export function findAlignedSlotForBlock(
 ): number | null {
   const windowStart = windowMsForDay(dayDate, block.preferred_start, timezone);
   const windowEnd = windowMsForDay(dayDate, block.preferred_end, timezone);
+  // DST spring-forward creates an invalid local time (the clock jumps
+  // 02:00 → 03:00, so a block "02:00-04:00" has an unresolvable start).
+  // Luxon's DateTime returns invalid for such times and toMillis() yields
+  // NaN. NaN propagates silently through comparisons (every test returns
+  // false), so the loop below would produce wrong results without explicit
+  // failure. Guard up front: return null with a log so the caller surfaces
+  // "no slot" rather than booking against garbage.
+  if (!Number.isFinite(windowStart) || !Number.isFinite(windowEnd)) {
+    logger.warn('findAlignedSlotForBlock: invalid window (likely DST gap)', {
+      block: block.name, dayDate, timezone,
+      preferred_start: block.preferred_start, preferred_end: block.preferred_end,
+    });
+    return null;
+  }
   const durationMs = block.duration_minutes * 60 * 1000;
   const bufferMs = bufferMinutes * 60 * 1000;
 

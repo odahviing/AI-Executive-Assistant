@@ -125,8 +125,6 @@ function insideAnyOvernightRange(minutes: number, overnightRanges: string[]): bo
   return false;
 }
 
-const anthropic = getAnthropicClient();
-
 export async function searchVenueCandidates(params: {
   area?: string;
   type?: string;
@@ -134,9 +132,23 @@ export async function searchVenueCandidates(params: {
   partySize?: number;
   language?: 'en' | 'he';
   maxResults?: number;
+  /**
+   * Optional named-venue query. When set, dominates the search string so
+   * Case-1 (owner names a specific venue) returns rich candidate data —
+   * phone, reservation_url, hours — that the bare-name resolver path
+   * couldn't surface. Case-2 callers (area+type discovery) leave this
+   * unset.
+   */
+  nameQuery?: string;
 }): Promise<VenueCandidate[]> {
+  // Lazy client capture — re-reads getAnthropicClient() per call so a
+  // runtime LLM_PROVIDER flip (Anthropic ↔ Vertex via env var) is picked up
+  // without restart. Pre-fix the module-level `const anthropic = ...` froze
+  // the boot-time client forever.
+  const anthropic = getAnthropicClient();
   const max = Math.min(Math.max(params.maxResults ?? 3, 1), 5);
   const queryParts: string[] = [];
+  if (params.nameQuery) queryParts.push(params.nameQuery);
   if (params.type) queryParts.push(params.type);
   if (params.typeTags && params.typeTags.length > 0) queryParts.push(...params.typeTags);
   if (params.area) queryParts.push(params.area);
@@ -252,9 +264,16 @@ function countryFromTimezone(tz: string | undefined): string | undefined {
 }
 
 /**
- * Case-1: owner names a venue. Resolve to canonical address.
- * Wraps the existing resolveVenueLocation helper; adds the venue-skill output
- * shape so the find_venue tool surface stays uniform between cases.
+ * Case-1: owner names a venue. Resolve to a rich VenueCandidate.
+ *
+ * Pipeline:
+ *  1. Tavily + Sonnet via searchVenueCandidates with nameQuery=nameHint.
+ *     Returns a full VenueCandidate with phone / reservation_url / hours
+ *     when the snippets carry them — matches the find_venue tool's
+ *     promised return shape that the prior path was breaking.
+ *  2. Fallback to the lighter locationResolver if step 1 returns nothing —
+ *     guarantees at least name + address when Tavily had no hit but the
+ *     resolver could disambiguate via cityHint/countryHint.
  */
 export async function resolveVenueByName(
   nameHint: string,
@@ -262,6 +281,31 @@ export async function resolveVenueByName(
   language: 'en' | 'he' = 'en',
   ownerTimezone?: string,
 ): Promise<VenueCandidate | null> {
+  // Step 1 — focused search via Tavily+Sonnet for rich data.
+  try {
+    const candidates = await searchVenueCandidates({
+      nameQuery: nameHint,
+      area: areaHint,
+      maxResults: 1,
+      language,
+    });
+    if (candidates.length > 0) {
+      const first = candidates[0];
+      return {
+        ...first,
+        area_tags: first.area_tags && first.area_tags.length > 0
+          ? first.area_tags
+          : (areaHint ? [areaHint] : []),
+      };
+    }
+  } catch (err) {
+    logger.warn('resolveVenueByName — searchVenueCandidates threw, falling back to locationResolver', {
+      err: String(err).slice(0, 200), nameHint,
+    });
+  }
+
+  // Step 2 — fallback to the lighter resolver. Still returns name+address
+  // when the heavier path turned up empty.
   const resolved = await resolveVenueLocation(nameHint, language, {
     cityHint: areaHint,
     countryHint: countryFromTimezone(ownerTimezone),
