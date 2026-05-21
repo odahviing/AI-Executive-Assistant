@@ -461,11 +461,6 @@ function computeDayQualityFreeMinutes(
   return totalFreeMin;
 }
 
-// v2.1 — former `canLunchFitAfterBooking` retired. Replaced by the
-// generalized floating-blocks feasibility loop inside findAvailableSlots,
-// which uses `utils/floatingBlocks.findAlignedSlotForBlock` (lunch + any
-// custom block, day-scoped, quarter-aligned, buffer-compliant, elastic
-// detection of matching calendar events).
 
 /**
  * Meeting mode (v1.6.4) — steers the slot search.

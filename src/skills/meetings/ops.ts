@@ -708,16 +708,13 @@ export class SchedulingSkill {
           }
         }
 
-        // v2.9.0 (bug Y.1) — colleague-path enumeration guard. When a
-        // colleague (not in MPIM with owner present) reads the owner's
-        // calendar, wrap the events with a `_colleague_view` flag + a
-        // hard-rule note so Sonnet does NOT enumerate subjects/companies/
-        // locations back to the requester. Closes the 2026-05-19 Yael chat
-        // leak — Sonnet listed 6 items including "Bank Hapoalim in Ramat
-        // Gan" in response to "what can move?". The colleague-block
-        // prompt rule's "title + time = fine" was over-permissive for the
-        // "show me the day" pattern; this tool-side guard keeps the data
-        // available for Maelle's OWN reasoning (e.g. which slot to
+        // Colleague-path enumeration guard. When a colleague (not in MPIM
+        // with owner present) reads the owner's calendar, wrap the events
+        // with a `_colleague_view` flag + hard-rule note so Sonnet does NOT
+        // enumerate subjects/companies/locations back to the requester. The
+        // colleague-block prompt rule's "title + time = fine" is over-permissive
+        // for the "show me the day" pattern; this tool-side guard keeps the
+        // data available for Maelle's OWN reasoning (e.g. which slot to
         // propose) while telling Sonnet to summarize, not enumerate.
         const isColleaguePath = context.senderRole === 'colleague' && context.isOwnerInGroup !== true;
         if (isColleaguePath) {
@@ -887,14 +884,11 @@ export class SchedulingSkill {
             }
           }
 
-          // v2.6.6 — auto-fill from this thread's prior attendee context.
-          // When Sonnet calls find_available_slots WITHOUT attendee_emails
-          // but a previous call in this thread already established who the
-          // meeting is for, recover that list so the work-hours / availability
-          // constraint isn't silently dropped. Closes the 2026-05-10 Shayan
-          // bug where Sonnet's 2nd call (after Yael said "I'm not a factor")
-          // dropped Shayan's email and the slot finder proposed times outside
-          // his TZ work hours.
+          // Auto-fill from this thread's prior attendee context. When Sonnet
+          // calls find_available_slots WITHOUT attendee_emails but a previous
+          // call in this thread already established who the meeting is for,
+          // recover that list so the work-hours / availability constraint
+          // isn't silently dropped between turns.
           if (attendeeEmails.length === 0 && context.threadTs) {
             try {
               const { getThreadAttendees } = await import('../../utils/threadAttendees');
@@ -1351,37 +1345,13 @@ export class SchedulingSkill {
           }
         }
 
-        // v2.8.6 — temporary diagnostic for the "single-attendee Logistic"
-        // misclassification investigation (bug 98A on the 2026-05-18 wave).
-        // Logs the full args Sonnet passed so we can verify whether attendees
-        // are being dropped at the tool-call boundary or whether detectCategory
-        // is just counting non-owner attendees. Remove once the root is pinned.
-        logger.debug('create_meeting args (98A diagnostic)', {
-          subject: args.subject,
-          start: args.start,
-          end: args.end,
-          attendee_count: Array.isArray(attendees) ? attendees.length : 0,
-          attendee_emails: Array.isArray(attendees)
-            ? attendees.map(a => a?.email ?? a?.slack_id ?? a?.name ?? '?')
-            : [],
-          is_online: args.is_online,
-          category: args.category,
-          location: args.location,
-          relaxed: args.relaxed,
-          senderRole: context.senderRole,
-        });
-
-        // v2.6.6 — port of v2.0.6 coord email auto-fill to create_meeting.
-        // Sonnet sometimes drops the email field even though we have it in
-        // people_memory (the 2026-05-10 Shayan MPIM incident: email was in
-        // people_memory by 12:01 via find_slack_user upsert; at 12:04
-        // Sonnet called create_meeting with attendees=[{name:"Shayan
-        // Memari"}] — no email — and Guard A refused). Symmetric to the
-        // existing coord fill. Primary lookup: by slack_id; fallback: by
-        // fuzzy name. Only fills missing entries; pre-existing emails
-        // pass through untouched. If still missing after lookup, the
-        // downstream Guard A returns error: 'attendee_missing_email' so
-        // Sonnet asks for the email instead of papering over the gap.
+        // Coord email auto-fill on create_meeting. Sonnet sometimes drops
+        // the email field even though we have it in people_memory (it was
+        // populated by an earlier find_slack_user upsert in the same flow).
+        // Primary lookup: by slack_id; fallback: by fuzzy name. Only fills
+        // missing entries; pre-existing emails pass through untouched. If
+        // still missing after lookup, downstream Guard A returns error:
+        // 'attendee_missing_email' so Sonnet asks instead of papering over.
         try {
           const { getPersonMemory, searchPeopleMemory } = await import('../../db');
           for (const a of attendees) {
@@ -1582,19 +1552,13 @@ export class SchedulingSkill {
           // invite can actually reach them. Internal attendees and the
           // requester themselves pass trivially; externals are also allowed
           // (they get the calendar invite via Outlook — same delivery path
-          // as v2.6.5 fast-path Case B already designs for). Only refuse
+          // as the coord fast-path Case B already designs for). Only refuse
           // when an attendee has no email — that's the unclassifiable case
           // (could be an internal Maelle should DM, could be an external
-          // Sonnet hasn't fully resolved). Pre-v2.6.6 this guard refused
-          // ANY external, which contradicted the v2.6.5 fast-path Case B
-          // note that tells Sonnet "call create_meeting after the requester
-          // picks — externals get the invite via Outlook." That contradiction
-          // was the real Bug 4 in the 2026-05-10 Yael / Idan Wagner incident:
-          // fast-path Case B told Sonnet to book; Guard A refused; Sonnet
-          // fell back to create_approval(kind=slot_pick) which has no
-          // coord_job to drive the resolver, so booking succeeded only
-          // when the owner manually approved AND no requester loop-close
-          // ever fired to Yael.
+          // Sonnet hasn't fully resolved). The fast-path Case B note tells
+          // Sonnet "call create_meeting after the requester picks —
+          // externals get the invite via Outlook"; keeping this guard
+          // email-only avoids contradicting that contract.
           try {
             const unclassifiable = attendees.filter(a => !(a.email ?? '').trim());
             if (unclassifiable.length > 0) {

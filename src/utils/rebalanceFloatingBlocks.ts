@@ -1,16 +1,16 @@
 /**
- * Post-mutation floating-block rebalance (v2.2.3, scenario 8 row 7).
+ * Post-mutation floating-block rebalance.
  *
  * After a meeting is created or moved, any floating block on the affected
  * day may now overlap that meeting. This helper tries to re-place each
  * affected block inside its preferred window. If no in-window slot is
  * available, the block is left where it is and the owner is shadow-DM'd —
  * the bumping-out-of-window decision still belongs to the owner (via the
- * existing lunch_bump approval flow), not this cascade.
+ * policy_exception approval flow), not this cascade.
  *
- * Sibling to v2.1.6's `closeMeetingArtifacts` cascade: same shape (post-
- * mutation, fire-and-forget, never throws), different concern (block
- * placement rather than DB-artifact cleanup).
+ * Same shape as `closeMeetingArtifacts` (post-mutation, fire-and-forget,
+ * never throws), different concern (block placement rather than DB-artifact
+ * cleanup).
  *
  * Called from `move_meeting` and `create_meeting` handlers after the
  * underlying Graph mutation succeeds. Best-effort: a failure here must

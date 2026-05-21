@@ -1,5 +1,5 @@
 /**
- * Social weekly decay dispatcher (v2.2).
+ * Social weekly decay dispatcher.
  *
  * Runs once per week per owner. Walks every active topic for that owner and
  * subtracts 1 from topics whose `last_touched_at` is more than 7 days old.

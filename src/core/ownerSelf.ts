@@ -1,5 +1,5 @@
 /**
- * Owner self-tracking (v1.7.4).
+ * Owner self-tracking.
  *
  * The owner is treated as a regular `people_memory` row keyed on his real
  * Slack user id (NO synthetic prefix — that's reserved for SELF:<id>, which

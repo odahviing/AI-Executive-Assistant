@@ -1,5 +1,5 @@
 /**
- * Assistant self-memory (v1.6.2).
+ * Assistant self-memory.
  *
  * Maelle is a person. Her origin story, how she came by her name, facts Idan
  * has taught her about herself — these all belong in people_memory like any

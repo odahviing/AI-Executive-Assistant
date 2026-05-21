@@ -18,10 +18,10 @@ async function main(): Promise<void> {
 
   const profiles = loadAllProfiles();
 
-  // v1.6.2 — ensure each profile has a people_memory row for its assistant so
-  // notes Idan teaches her about herself land somewhere real. Idempotent.
-  // v1.7.4 — also seed an owner self-row so Maelle can track personal/social
-  // moments about the owner via note_about_self (parallel to colleagues).
+  // Ensure each profile has a people_memory row for its assistant so notes
+  // the owner teaches her about herself land somewhere real, plus an owner
+  // self-row so Maelle can track personal/social moments about the owner
+  // via note_about_self (parallel to colleagues). Both idempotent.
   for (const [, profile] of profiles) {
     try { seedAssistantSelf(profile); } catch (err) {
       logger.warn('Failed to seed assistant self-memory row', { err: String(err) });

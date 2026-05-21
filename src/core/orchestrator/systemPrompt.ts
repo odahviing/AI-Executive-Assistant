@@ -129,19 +129,17 @@ Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EE
   // Owner is just another file in the catalog (no special path).
   const peopleCatalog = isOwner ? formatPeopleCatalogSync(profile) : '';
 
-  // ── Pending approvals (v1.5, scoped on colleague-path v2.6.6) ────────────
+  // ── Pending approvals ────────────────────────────────────────────────
   // Owner-path: full list of pending approvals (Sonnet binds free-text owner
   // replies to the right approval_id and calls resolve_approval).
   // Colleague-path: scoped to approvals raised in THIS thread (so Sonnet
-  // knows "I already escalated this — don't re-fire create_approval"). The
-  // 2026-05-10 Yael / Idan Wagner duplicate-approval bug came from the
-  // colleague-path having no structured "work in flight" signal — Sonnet's
-  // prior reply ("I sent it for approval") wasn't strong enough; she fired
-  // the same flow again on Yael's "thanks waiting" ack. Privacy: scoped on
-  // task.owner_thread_ts so colleague only sees approvals from THEIR thread,
-  // not the owner's other in-flight work.
-  // v2.7.0 — pending approvals reads from `requests` table (the spine).
-  // Owner-path sees ALL awaiting_owner requests; colleague-path sees only
+  // knows "I already escalated this — don't re-fire create_approval").
+  // Without this structured "work in flight" signal, a colleague's ack of
+  // a prior "I sent it for approval" reply can trigger a duplicate flow.
+  // Privacy: scoped on task.owner_thread_ts so colleague only sees approvals
+  // from THEIR thread, not the owner's other in-flight work.
+  // Reads from `requests` table (the spine). Owner-path sees ALL
+  // awaiting_owner requests; colleague-path sees only
   // requests originating in THIS thread (privacy preserved).
   // v2.9.1 — colleague-path also includes `awaiting_colleague` state. This is
   // the "amending approval" case: owner gave a counter, Maelle relayed it to

@@ -645,15 +645,15 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // dynamic prompt so Sonnet sees it before drafting any reply.
   const priorOutboundBlock = input.priorOutboundContext ?? '';
 
-  // v2.6.5 — availability pre-check. Before the main Sonnet loop, detect
-  // specific (date, time) availability questions in the inbound message
-  // and run find_available_slots deterministically for each. Closes the
-  // get_calendar-eyeball-vs-rule-aware mismatch (Yael CISO incident:
-  // first turn said "12:30 free", second turn said "doesn't work" — same
-  // calendar data, different verdicts because different tools were used).
-  // Pinned to the top of dynamic block so Sonnet's first answer matches
-  // what the booking flow will accept later. Fails open: regex doesn't
-  // match → block empty → normal flow.
+  // Availability pre-check. Before the main Sonnet loop, detect specific
+  // (date, time) availability questions in the inbound message and run
+  // find_available_slots deterministically for each. Closes the
+  // get_calendar-eyeball-vs-rule-aware mismatch where Sonnet's first
+  // "free" verdict and the booking flow's later "doesn't work" verdict
+  // disagreed because they used different tools on the same data. Pinned
+  // to the top of dynamic block so Sonnet's first answer matches what
+  // the booking flow will accept later. Fails open: regex doesn't match
+  // → block empty → normal flow.
   let availabilityPrecheckBlock = '';
   if (input.senderRole === 'colleague' && userMessage && userMessage.trim().length > 0) {
     try {
@@ -767,14 +767,14 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     });
   }
 
-  // v2.9.2 — approval-bound thread lock. When the owner is replying in a
-  // thread that's the terminal DM of a pending approval, restrict Sonnet's
-  // tools to resolve_approval + list_pending_approvals only. Forces engagement
-  // with the approval — she can't drift into find_available_slots, create_meeting,
-  // get_calendar, etc. Closes the 2026-05-19 1:35 PM Yael case where Sonnet
-  // turned an approval thread into a fresh booking conversation, abandoning
-  // the open approval row. The amend ping-pong rails (text-shape counter) can
-  // carry clarifying questions like "what time?" through this constraint.
+  // Approval-bound thread lock. When the owner is replying in a thread
+  // that's the terminal DM of a pending approval, restrict Sonnet's tools
+  // to resolve_approval + list_pending_approvals only. Forces engagement
+  // with the approval — she can't drift into find_available_slots,
+  // create_meeting, get_calendar, etc., and turn an approval thread into
+  // a fresh booking conversation. The amend ping-pong rails (text-shape
+  // counter) can carry clarifying questions like "what time?" through
+  // this constraint.
   if (
     isOwnerTurn
     && input.threadTs
@@ -848,13 +848,13 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // makes the second call a no-op with an explicit signal; the LLM sees that
   // and can correct its narrative.
   const deletedEventIdsThisTurn = new Set<string>();
-  // v1.7.4 — track message_colleague calls per turn keyed on colleague_slack_id.
-  // The Amazia 6-second-apart bug came from the claim-checker false-positive
-  // forcing a retry with tool_choice: message_colleague — Sonnet, forced to
-  // call again, created a second outreach_jobs row. Even with the upstream
-  // fixes in claim-checker + postReply.ts, this is the deterministic backstop:
-  // any second message_colleague call this turn for the same colleague is a
-  // no-op with an explicit signal.
+  // Track message_colleague calls per turn keyed on colleague_slack_id.
+  // A claim-checker false-positive forcing a retry with tool_choice:
+  // message_colleague would otherwise create a second outreach_jobs row
+  // seconds apart. Even with the upstream fixes in claim-checker +
+  // postReply.ts, this is the deterministic backstop: any second
+  // message_colleague call this turn for the same colleague is a no-op
+  // with an explicit signal.
   const messagedColleaguesThisTurn = new Set<string>();
   // v2.7.2 — capture the most recent rule_violation deferred_action_hint
   // from a meeting tool's result this turn. When create_approval(kind=

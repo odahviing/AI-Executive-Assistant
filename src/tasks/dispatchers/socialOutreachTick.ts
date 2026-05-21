@@ -21,10 +21,8 @@
  *   - Shadow-DM the owner with a line summary
  *
  * Self-reschedules every hour on completion. Guarded behind
- * `profile.skills.social` (v2.6.2 master toggle; was `skills.persona`
- * pre-v2.6.2). The retired `behavior.proactive_colleague_social.enabled`
- * binary field is no longer consulted; window/cooldown/weekend sub-options
- * still come from `behavior.proactive_colleague_social.*`.
+ * `profile.skills.social`. Window/cooldown/weekend sub-options come from
+ * `behavior.proactive_colleague_social.*`.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -66,8 +64,7 @@ interface CandidateRow {
 }
 
 interface ProactiveConfig {
-  // v2.6.2 — `enabled` field retired; master is skills.social. This struct
-  // now only carries fine-tuning sub-options.
+  // Fine-tuning sub-options; master toggle lives on `skills.social`.
   daily_window_hours: [number, number];
   cooldown_days: number;
   skip_weekends: boolean;
@@ -107,12 +104,9 @@ function isWorkday(weekday: number, skipWeekends: boolean): boolean {
 // every candidate because most colleagues don't directly DM Maelle even
 // weekly; switch to a TZ-aware week boundary (Sun-start for Israel,
 // Mon-start elsewhere) so a reasonable conversational footprint qualifies.
-// PLUS: the recency signal is now max(last_inbound, last_topic_touch) — a
+// PLUS: the recency signal is max(last_inbound, last_topic_touch) — a
 // person Maelle has been logging topics on (in-conversation engagement)
-// counts as "active" even without a direct DM. Owner direction (option b):
-// "allow either recent inbound or recent topic touch."
-//
-// Pre-v2.6.2 constant `RECENT_CONTACT_MS = 72h` retired.
+// counts as "active" even without a direct DM.
 
 type RejectReason =
   | 'is_owner'
@@ -442,14 +436,10 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
     }
   };
 
-  // v2.3.1 (B10 / #66) — social-off check moved OUT of the try-finally block.
-  // The finally re-schedules unconditionally; before this fix, returning early
-  // from the try still ran the finally, so disabling proactive social didn't
-  // actually stop the tick — the loop re-spawned itself every hour. Now: kill
-  // the loop cleanly, complete the task so it doesn't sit in the queue.
-  // v2.6.2 — single master toggle (skills.social). The retired
-  // behavior.proactive_colleague_social.enabled field is no longer consulted —
-  // social skill on = proactive on; off = proactive off.
+  // Social-off check sits OUTSIDE the try-finally block — the finally
+  // re-schedules unconditionally, so an early return from the try still
+  // re-spawns the loop every hour. Killing it here completes the task
+  // cleanly. Master toggle is `skills.social`: on = proactive on, off = off.
   const socialActive = (profile.skills as any)?.social === true;
   if (!socialActive) {
     logger.debug('social_outreach_tick skipped — social skill off (loop terminates)', {
@@ -460,13 +450,10 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
   }
 
   try {
-    // v2.5.2 — daily cap moved into pickCandidate as per-(owner, colleague)
-    // filter (`pinged_today` reject reason). The prior early-return at this
-    // point gated the WHOLE owner from any further pings once one fired today,
-    // so Maya was blocked because Amazia had been pinged. Filtering at the
-    // candidate level keeps other people eligible while still preventing
-    // Maelle from starting two proactive social threads with the same person
-    // in the same day.
+    // Daily cap lives in pickCandidate as a per-(owner, colleague) filter
+    // (`pinged_today` reject reason). Filtering at the candidate level
+    // keeps other people eligible while preventing two proactive social
+    // threads with the same person on the same day.
     const db = getDb();
     const rows = db.prepare(`
       SELECT slack_id, name, timezone, engagement_rank, last_initiated_at, last_social_at,
