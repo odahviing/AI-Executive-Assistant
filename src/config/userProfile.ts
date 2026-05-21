@@ -303,6 +303,13 @@ const UserProfileSchema = z.object({
     // category as "personal/sensitive" without code knowing the literal
     // name. Default false.
     sets_sensitivity_private: z.boolean().optional(),
+    // When true, events tagged with this category are excluded from the
+    // calendar analyzer's overlap (double_booking) detection. Use for
+    // categories that represent owner-life time (Personal, family,
+    // off-work errands) where Maelle shouldn't flag overlaps as issues —
+    // owner curates these directly. Independent of sets_sensitivity_private
+    // (privacy is a separate concern from "skip overlap check"). Default false.
+    excludes_overlap_detection: z.boolean().optional(),
     // When true, create_meeting under this category skips the office-address
     // auto-fill. For categories that represent personal time-on-calendar
     // (focus blocks, buffer / think time, errands) where stamping the

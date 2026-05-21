@@ -466,15 +466,14 @@ Status meanings:
           const dayWorkEnd = DateTime.fromISO(`${dayStr}T${dayHoursEnd}`, { zone: timezone });
           const nightShiftMarker = profile.schedule.night_shift?.blocking_event?.toLowerCase() ?? null;
 
-          // Categories whose yaml entry sets sensitivity_private (today:
-          // "Personal") are owner-life events, not work meetings. Overlap
-          // detection over them produced morning-brief noise (same
-          // Bootcamp-vs-Holiday-Block pair re-flagged every week even
-          // after dismissal because recurring occurrences carry fresh
-          // event_ids — see seriesMaster anchoring fix below).
-          const privateCategoryNames = new Set(
+          // Categories opted out of overlap detection via the
+          // `excludes_overlap_detection` yaml flag (today: "Personal") are
+          // owner-life events, not work meetings. The flag is independent
+          // of sets_sensitivity_private — privacy is a separate concern;
+          // owner can choose either, both, or neither on any category.
+          const overlapExemptCategoryNames = new Set(
             (profile.categories ?? [])
-              .filter(c => c.sets_sensitivity_private === true)
+              .filter(c => c.excludes_overlap_detection === true)
               .map(c => c.name.toLowerCase()),
           );
           const nonAllDay = dayEvents.filter(e => {
@@ -496,14 +495,15 @@ Status meanings:
             const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
             const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
             if (eStart >= dayWorkEnd || eEnd <= dayWorkStart) return false;
-            // Exclusion 5: events tagged with a private-sensitivity
-            // category. Owner direction: personal events aren't relevant
-            // for overlap detection. Match is case-insensitive against the
-            // event's Outlook categories.
-            if (privateCategoryNames.size > 0) {
+            // Exclusion 5: events tagged with a category that opts out of
+            // overlap detection (excludes_overlap_detection: true). Owner
+            // direction: personal events aren't relevant for overlap
+            // detection — owner curates them directly. Match is
+            // case-insensitive against the event's Outlook categories.
+            if (overlapExemptCategoryNames.size > 0) {
               const evCats = ((e as unknown as { categories?: string[] }).categories ?? [])
                 .map(c => c.toLowerCase());
-              if (evCats.some(c => privateCategoryNames.has(c))) return false;
+              if (evCats.some(c => overlapExemptCategoryNames.has(c))) return false;
             }
             return true;
           });
