@@ -369,8 +369,40 @@ async function runApproveCallback(
     mergedFromAmend: meta.mergedFromAmend, amendRound: meta.amendRound,
   });
 
-  // Close BEFORE firing the tool so any cascade (closeMeetingArtifacts) doesn't
-  // see a still-open row when it sweeps.
+  // Sync-then-close: run the replay BEFORE marking the request resolved
+  // and BEFORE relaying to the requester. On replay failure the request
+  // stays awaiting_owner so the owner can retry; the requester is not
+  // told "approved" for an action that never happened.
+  //
+  // Matches the resolveSlotPickApproval pattern. closeRequest is
+  // idempotent (no-op on terminal rows) so a closeMeetingArtifacts
+  // cascade firing during replay won't conflict with the explicit close
+  // below.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { runDeferredAction } = require('./deferredActionReplay') as
+      typeof import('./deferredActionReplay');
+    await runDeferredAction({
+      ownerUserId: row.owner_user_id,
+      profile: ctx.profile,
+      tool,
+      args: replayArgs,
+      requestId: row.id,
+    });
+  } catch (err) {
+    logger.error('on_approve replay failed — leaving request awaiting_owner for retry', {
+      id: row.id, tool, err: String(err).slice(0, 300),
+    });
+    return {
+      ok: false,
+      request_id: row.id,
+      state: row.state,
+      effect: `approve_replay_failed:${tool}`,
+      reason: err instanceof Error ? err.message : String(err).slice(0, 300),
+    };
+  }
+
+  // Replay succeeded — close and relay.
   closeRequest({
     id: row.id,
     state: 'resolved',
@@ -384,30 +416,10 @@ async function runApproveCallback(
     },
   });
 
-  // Fire-and-forget the replay; this resolver doesn't block on the Graph call.
-  setImmediate(async () => {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { runDeferredAction } = require('./deferredActionReplay') as
-        typeof import('./deferredActionReplay');
-      await runDeferredAction({
-        ownerUserId: row.owner_user_id,
-        profile: ctx.profile,
-        tool,
-        args: replayArgs,
-        requestId: row.id,
-      });
-    } catch (err) {
-      logger.warn('on_approve replay threw — owner may need to retry manually', {
-        id: row.id, tool, err: String(err).slice(0, 300),
-      });
-    }
-  });
-
   await notifyRequesterOfDecision(row, 'approve', { replayed: tool }, undefined, ctx);
   return {
     ok: true, request_id: row.id, state: 'resolved',
-    effect: `approved ${row.kind}/${row.subkind ?? '-'} — auto-replaying ${tool}`,
+    effect: `approved ${row.kind}/${row.subkind ?? '-'} — replayed ${tool}`,
   };
 }
 

@@ -134,9 +134,20 @@ export function getRequest(id: string): RequestRow | null {
   return (getDb().prepare(`SELECT * FROM requests WHERE id = ?`).get(id) as RequestRow | null) ?? null;
 }
 
+/**
+ * Find ANY request by idempotency key, regardless of state. Used by the
+ * create_approval collision-recovery path: the idempotency_key UNIQUE
+ * constraint is global, so a closed row (resolved/cancelled/expired) still
+ * blocks a fresh INSERT with the same key. Without seeing closed rows here
+ * the recovery lookup would miss → caller would re-throw SqliteError →
+ * Sonnet sees a crash on a re-ask the user perceives as legitimate.
+ *
+ * Caller is expected to branch on row.state to decide between "still open,
+ * follow-up reuse" and "already closed, replay refused".
+ */
 export function getRequestByIdempotencyKey(key: string): RequestRow | null {
   return (getDb().prepare(
-    `SELECT * FROM requests WHERE idempotency_key = ? AND state NOT IN ('resolved','cancelled','expired')
+    `SELECT * FROM requests WHERE idempotency_key = ?
      ORDER BY created_at DESC LIMIT 1`
   ).get(key) as RequestRow | null) ?? null;
 }

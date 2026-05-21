@@ -727,8 +727,31 @@ Binding — how to pick the right approval_id:
             // so we don't silently swallow a real bug.
             throw err;
           }
-          logger.info('create_approval — UNIQUE collision, returning existing row', {
-            existingId: existing.id, requesterSlackId, subject,
+          const isClosed = existing.state === 'resolved'
+            || existing.state === 'cancelled'
+            || existing.state === 'expired';
+          if (isClosed) {
+            // Same ask was already decided in a previous turn (resolved /
+            // cancelled / expired). Don't re-open or re-create — return a
+            // tombstone signal so Sonnet narrates "this was already
+            // handled" instead of crashing on the UNIQUE violation.
+            logger.info('create_approval — UNIQUE collision on CLOSED row, returning tombstone', {
+              existingId: existing.id, state: existing.state, requesterSlackId, subject,
+            });
+            return {
+              ok: true,
+              approval_id: existing.id,
+              created: false,
+              expires_at: existing.expires_at,
+              kind: subkind,
+              reused_existing: true,
+              already_closed: true,
+              closed_state: existing.state,
+              hint: `This ask was already handled — original approval is ${existing.state}. Acknowledge to the requester instead of re-raising the same approval.`,
+            };
+          }
+          logger.info('create_approval — UNIQUE collision on OPEN row, returning existing', {
+            existingId: existing.id, state: existing.state, requesterSlackId, subject,
           });
           await maybeRevive(existing);
           return {
