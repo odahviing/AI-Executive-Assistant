@@ -167,24 +167,19 @@ export function computeHealthCheckWindow(profile: UserProfile): {
 
   const now = DateTime.now().setZone(tz);
 
-  // Walk forward up to 7 days to find the LAST workday of the current
-  // 7-day window ending today. More precisely: starting from today,
-  // find the furthest workday reachable within the next 6 days that
-  // has no non-work day between it and today-or-forward.
-  // Simpler approach: walk today..today+6, collect every day that's a
-  // workday, the last one wins. That gives "end of workweek" for a
-  // Sun-Thu profile when run on Sunday (→ Thursday) or on Thursday (→
-  // Thursday itself).
+  // Walk today..today+6 and take the LAST workday seen across the full
+  // 7-day window. The previous "stop at first non-workday" heuristic
+  // assumed contiguous workweeks — on a non-contiguous schedule (e.g.
+  // Sun/Mon/Wed/Thu with Tuesday off), calling this on Sunday would
+  // STOP at Tuesday and return Monday, losing Wednesday + Thursday from
+  // the coverage window. With a calendar that mixes office days through
+  // the week, just take the furthest workday inside 7 days.
   let endWorkday = now;
   for (let i = 0; i < 7; i++) {
     const d = now.plus({ days: i });
     if (workDaySet.has(d.toFormat('EEEE'))) {
       endWorkday = d;
     }
-    // Stop walking once we hit a non-workday AFTER at least one workday —
-    // that's the boundary between this workweek and next. Prevents picking
-    // next week's days.
-    if (!workDaySet.has(d.toFormat('EEEE')) && i > 0) break;
   }
 
   // Compute the end-of-work-hours timestamp for the selected endWorkday.

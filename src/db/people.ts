@@ -478,12 +478,25 @@ export function getPersonMemory(slackId: string): PersonMemory | null {
   return db.prepare('SELECT * FROM people_memory WHERE slack_id = ?').get(slackId) as PersonMemory | null;
 }
 
+/**
+ * Free-text search across people_memory by name / email.
+ *
+ * SELF rows are excluded by construction. The Maelle SELF row carries
+ * slack_id of shape `SELF:<ownerSlackId>` and name = the assistant's name;
+ * a colleague typing "Maelle" or even a fuzzy match against the assistant
+ * name must NOT resolve to the SELF row (gossip about Maelle would
+ * otherwise persist there from any colleague's input). Defense in depth —
+ * `SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/` rejects "SELF:" inputs upstream,
+ * but a regex change or a SELF re-keying would re-open the gap without
+ * this filter.
+ */
 export function searchPeopleMemory(query: string): PersonMemory[] {
   const db = getDb();
   const q = `%${query.toLowerCase()}%`;
   return db.prepare(`
     SELECT * FROM people_memory
-    WHERE lower(name) LIKE ? OR lower(email) LIKE ?
+    WHERE (lower(name) LIKE ? OR lower(email) LIKE ?)
+      AND slack_id NOT LIKE 'SELF:%'
     ORDER BY last_seen DESC
     LIMIT 10
   `).all(q, q) as PersonMemory[];

@@ -292,8 +292,15 @@ export async function bookCoordination(
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fb = require('../../../utils/floatingBlocks') as typeof import('../../../utils/floatingBlocks');
     const blocks = fb.getFloatingBlocks(profile);
+    // On move-intent coords the source event is still on the calendar at
+    // pre-booking-check time. If the new slot overlaps the old slot (a
+    // shift-by-15min, a duration-extension, etc.) the source event would
+    // flag itself as the conflict → phantom calendar_conflict approval.
+    // Exclude the moving event from the scan.
+    const movingEventId = job.intent === 'move' ? (job.existing_event_id ?? undefined) : undefined;
     const hasConflict = existingEvents.some(ev => {
       if (ev.isCancelled || ev.showAs === 'free') return false;
+      if (movingEventId && ev.id === movingEventId) return false;
       // Floating blocks are elastic — not real conflicts.
       if (blocks.some(b => fb.isFloatingBlockEvent(ev, b))) return false;
       const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone }).toMillis();

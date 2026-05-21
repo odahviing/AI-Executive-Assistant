@@ -148,6 +148,18 @@ export function directiveForProactiveSlot(params: {
 }): LegacySocialDirectiveShape {
   const { personSlackId } = params;
 
+  // Rank-0 = "do not engage" opt-out. Maelle never INITIATES with rank-0
+  // people. Inbound replies / response handling go through other paths
+  // (orchestrator's normal flow), so a rank-0 person who reaches out
+  // first still gets a normal reply and the engagement signal can lift
+  // their rank back up. This gate only blocks proactive initiation.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getEngagementRank } = require('../../db/engagementRank') as
+    typeof import('../../db/engagementRank');
+  if (getEngagementRank(personSlackId) === 0) {
+    return withLegacyShape(noDirectiveRaw());
+  }
+
   // One-per-day-per-person gate
   if (countAssistantInitiationsTodayForPerson(personSlackId) >= 1) {
     return withLegacyShape(noDirectiveRaw());

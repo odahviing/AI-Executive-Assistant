@@ -1379,15 +1379,21 @@ Status meanings:
           const overrideEnd = overrideStart.plus({ minutes: block.duration_minutes });
           const bufferMs = (profile.meetings.buffer_minutes ?? 5) * 60 * 1000;
 
-          // Idempotency — same-block on same day around explicit time → no-op
+          // Idempotency — any same-block event on this day already on the
+          // calendar (anywhere, not just near the override time). Pre-fix
+          // this only matched within ±60s of the override start, which
+          // meant a 14:00 override on a day that already had lunch booked
+          // at 11:30 would CREATE A SECOND lunch. Owner sees two lunches
+          // same day. Match the same shape the non-override branch uses
+          // at :1531 (any block event on the day → already_existed).
           const existingNearby = events.find(e => {
             if (e.isAllDay || e.isCancelled || e.showAs === 'free') return false;
             if (!fb.isFloatingBlockEvent(
               { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
               block,
             )) return false;
-            const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis();
-            return Math.abs(eStart - overrideStart.toMillis()) <= 60 * 1000;
+            const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
+            return eStart.toFormat('yyyy-MM-dd') === date;
           });
           if (existingNearby) {
             const eStart = parseGraphDt(existingNearby.start.dateTime, existingNearby.start.timeZone, timezone);
@@ -1397,7 +1403,7 @@ Status meanings:
               event_id: existingNearby.id, subject: existingNearby.subject,
               start: eStart.toFormat('HH:mm'), end: eEnd.toFormat('HH:mm'),
               date, block_name: block.name, override_used: true,
-              message: `You already booked ${blockLabel} on ${date} at ${eStart.toFormat('HH:mm')}–${eEnd.toFormat('HH:mm')} — same slot, no change.`,
+              message: `${blockLabel} is already on the calendar on ${date} at ${eStart.toFormat('HH:mm')}–${eEnd.toFormat('HH:mm')}. To move it to ${explicitStartTime}, use move_meeting with confirm_outside_window=true rather than book_floating_block.`,
             };
           }
 
