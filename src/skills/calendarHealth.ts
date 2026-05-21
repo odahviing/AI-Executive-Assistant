@@ -461,16 +461,6 @@ Status meanings:
           const dayWorkEnd = DateTime.fromISO(`${dayStr}T${dayHoursEnd}`, { zone: timezone });
           const nightShiftMarker = profile.schedule.night_shift?.blocking_event?.toLowerCase() ?? null;
 
-          // Categories opted out of overlap detection via the
-          // `excludes_overlap_detection` yaml flag (today: "Personal") are
-          // owner-life events, not work meetings. The flag is independent
-          // of sets_sensitivity_private — privacy is a separate concern;
-          // owner can choose either, both, or neither on any category.
-          const overlapExemptCategoryNames = new Set(
-            (profile.categories ?? [])
-              .filter(c => c.excludes_overlap_detection === true)
-              .map(c => c.name.toLowerCase()),
-          );
           const nonAllDay = dayEvents.filter(e => {
             if (e.isAllDay) return false;
             if (e.showAs === 'free' || e.showAs === 'workingElsewhere') return false;
@@ -490,16 +480,6 @@ Status meanings:
             const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
             const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
             if (eStart >= dayWorkEnd || eEnd <= dayWorkStart) return false;
-            // Exclusion 5: events tagged with a category that opts out of
-            // overlap detection (excludes_overlap_detection: true). Owner
-            // direction: personal events aren't relevant for overlap
-            // detection — owner curates them directly. Match is
-            // case-insensitive against the event's Outlook categories.
-            if (overlapExemptCategoryNames.size > 0) {
-              const evCats = ((e as unknown as { categories?: string[] }).categories ?? [])
-                .map(c => c.toLowerCase());
-              if (evCats.some(c => overlapExemptCategoryNames.has(c))) return false;
-            }
             return true;
           });
           for (let i = 0; i < nonAllDay.length; i++) {
