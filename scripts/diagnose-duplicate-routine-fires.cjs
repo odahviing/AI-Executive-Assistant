@@ -36,7 +36,7 @@ const HOURS = Number(flags.hours ?? 48);
 const WINDOW_MIN = Number(flags.window ?? 30);
 const ROUTINE_FILTER = typeof flags.routine === 'string' ? flags.routine.toLowerCase() : null;
 
-const DB_PATH = process.env.MAELLE_DB_PATH ?? path.join(process.cwd(), 'maelle.db');
+const DB_PATH = process.env.MAELLE_DB_PATH ?? path.resolve(__dirname, '..', 'data', 'maelle.db');
 const db = new Database(DB_PATH, { readonly: true });
 
 const cutoffIso = new Date(Date.now() - HOURS * 3600 * 1000).toISOString();

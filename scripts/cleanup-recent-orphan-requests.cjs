@@ -39,7 +39,7 @@ const HOURS = Number(flags.hours ?? 48);
 const NAME = typeof flags.name === 'string' ? flags.name.toLowerCase() : null;
 const REASON = typeof flags.reason === 'string' ? flags.reason : 'manual cleanup post buggy flow';
 
-const DB_PATH = process.env.MAELLE_DB_PATH ?? path.join(process.cwd(), 'maelle.db');
+const DB_PATH = process.env.MAELLE_DB_PATH ?? path.resolve(__dirname, '..', 'data', 'maelle.db');
 const db = new Database(DB_PATH, { readonly: MODE === 'list' });
 
 const cutoffIso = new Date(Date.now() - HOURS * 3600 * 1000).toISOString();
