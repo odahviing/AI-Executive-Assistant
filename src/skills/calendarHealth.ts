@@ -123,6 +123,11 @@ interface HealthIssue {
   fix_detail?: string;            // human-readable one-liner describing the fix applied
   fix_failed?: boolean;           // set when active-mode tried to fix and an error was thrown
   fix_error?: string;
+  // When true, the issue should NOT be rendered in the brief. Used by the
+  // active-mode fix loop for cases that the owner explicitly handled
+  // (e.g. deleted today's lunch) — the brief shouldn't keep flagging them
+  // as "skipped, want me to ..." every morning.
+  suppressed?: boolean;
 }
 
 export class CalendarHealthSkill implements Skill {
@@ -345,7 +350,13 @@ Status meanings:
         // skip-message every morning. Moving the check to detection means
         // the issue never enters issues[] — no narration, no auto-book
         // attempt, no daily reminder.
-        let recentBlockDeletes: Array<{ blockName: string; date: string }> = [];
+        // `date` can be undefined when the audit log row didn't capture
+        // event_start_iso (rare — seriesMaster probe failed, alt code path).
+        // Matches Path 2's lenient behavior: subject-only fallback. Filter
+        // below treats undefined date as "matches any day" — conservative
+        // (prefers over-suppression to over-flagging when owner just
+        // deleted something).
+        let recentBlockDeletes: Array<{ blockName: string; date: string | undefined }> = [];
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { recentAuditEntries } = require('../db/client') as typeof import('../db/client');
@@ -354,10 +365,13 @@ Status meanings:
             if (!row.details) continue;
             const subject = String(row.details.subject ?? '').toLowerCase();
             const startIso = typeof row.details.event_start_iso === 'string' ? row.details.event_start_iso : '';
-            if (!subject || !startIso) continue;
+            if (!subject) continue;  // need at least a subject to match block name
             for (const block of floatingBlocks) {
               if (subject.includes(block.name.toLowerCase())) {
-                recentBlockDeletes.push({ blockName: block.name.toLowerCase(), date: startIso.slice(0, 10) });
+                recentBlockDeletes.push({
+                  blockName: block.name.toLowerCase(),
+                  date: startIso ? startIso.slice(0, 10) : undefined,
+                });
               }
             }
           }
@@ -411,11 +425,14 @@ Status meanings:
               );
             });
             if (!hasBlock) {
-              // Skip when the owner deleted THIS block on THIS day in the
-              // last 14 days. The issue doesn't enter issues[] at all → no
-              // brief narration, no auto-book attempt.
+              // Skip when the owner deleted THIS block in the last 14 days.
+              // Match by exact day OR by no-date (when the audit row lacked
+              // event_start_iso — conservative fallback: any same-block
+              // delete suppresses). The issue doesn't enter issues[] at
+              // all → no brief narration, no auto-book attempt.
               const recentlyDeleted = recentBlockDeletes.some(d =>
-                d.blockName === block.name.toLowerCase() && d.date === dayStr,
+                d.blockName === block.name.toLowerCase()
+                && (d.date === dayStr || d.date === undefined),
               );
               if (recentlyDeleted) continue;
               issues.push({
@@ -843,8 +860,15 @@ Status meanings:
                     return startIso.slice(0, 10) === issue.date;
                   });
                   if (matchesRecentDelete) {
-                    issue.fix_detail = `Skipped re-book of ${issue.block_name ?? 'floating block'} on ${issue.date} — owner deleted it recently.`;
-                    logger.info('Calendar health: active-mode skipped re-book — recent owner delete', {
+                    // Mark for removal from issues[] — the owner deleted this
+                    // block deliberately; the brief shouldn't narrate it as
+                    // "skipped, want me to squeeze one in?" 15 mornings in a
+                    // row. Pre-fix Path 2 only set fix_detail and kept the
+                    // issue in the array, so the brief rendered it. Filter
+                    // at the end of this function drops issues with
+                    // .suppressed=true.
+                    issue.suppressed = true;
+                    logger.info('Calendar health: active-mode suppressed missing_floating_block — recent owner delete', {
                       blockName: issue.block_name, date: issue.date,
                     });
                     internalActions.push({
@@ -1283,12 +1307,26 @@ Status meanings:
           });
         }
 
-        // v2.7.4 — Route 2 narration. Build a deterministic per-issue summary
-        // text directly from the issue list + fix outcomes. The routine
-        // prompt uses this verbatim instead of asking Sonnet to "tell me
-        // what got done" (which led to fabrications when fix_failed wasn't
-        // narrated honestly). humanGate on the postReply path humanizes
-        // the deterministic template. One truth source.
+        // Drop suppressed issues before the brief sees them. Active-mode
+        // marks `.suppressed = true` for cases the owner explicitly
+        // handled (e.g. deleted today's lunch — don't keep flagging it as
+        // "skipped, want me to ..." every morning).
+        const beforeSuppress = issues.length;
+        for (let i = issues.length - 1; i >= 0; i--) {
+          if (issues[i].suppressed) issues.splice(i, 1);
+        }
+        if (beforeSuppress !== issues.length) {
+          logger.info('Calendar health: dropped suppressed issues from brief output', {
+            dropped: beforeSuppress - issues.length, remaining: issues.length,
+          });
+        }
+
+        // Route 2 narration. Build a deterministic per-issue summary text
+        // directly from the issue list + fix outcomes. The routine prompt
+        // uses this verbatim instead of asking Sonnet to "tell me what got
+        // done" (fabrications crept in when fix_failed wasn't narrated
+        // honestly). humanGate humanizes the template downstream. One
+        // truth source.
         const summaryLines: string[] = [];
         for (const i of issues) {
           if (i.fixed && i.fix_detail) {
@@ -1872,20 +1910,62 @@ Status meanings:
               error: `Analyze-calendar issues use status "dismissed" or "resolved"; got "${status}". For tracked issues with issue_id, use "approved" / "to_resolve" / "resolved".`,
             };
           }
-          const issueKey = buildIssueKey(issueType, detail);
-          dismissCalendarIssue(
-            profile.user.slack_user_id,
-            eventDate,
-            issueType,
-            issueKey,
-            detail,
-            status,
-          );
+          // Update existing active row(s) in place instead of inserting a
+          // parallel row. Pre-fix the dismiss path inserted a new row with
+          // a 2-arg buildIssueKey (no event_ids) while the active row was
+          // upserted at detection time with a 3-arg key (with event_ids).
+          // The two keys never matched, so the brief-time filter never
+          // found the dismissed row and the issue re-flagged forever. Now
+          // we update the active row's resolution column directly — same
+          // row, same key, just different state. Filter picks it up.
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getDb: _getDb } = require('../db/client') as typeof import('../db/client');
+          const db = _getDb();
+          const updated = db.prepare(`
+            UPDATE calendar_dismissed_issues
+            SET resolution = ?, resolution_notes = ?
+            WHERE owner_user_id = ?
+              AND event_date = ?
+              AND issue_type = ?
+              AND detail = ?
+              AND resolution IN ('new', 'to_resolve')
+          `).run(status, notes ?? null, profile.user.slack_user_id, eventDate, issueType, detail);
+
+          let issueKey: string;
+          if (updated.changes === 0) {
+            // No matching active row — Sonnet is dismissing an issue that
+            // wasn't tracked (free-form dismissal, or analyze_calendar
+            // didn't emit an event_ids fingerprint). Fall back to inserting
+            // a fresh row with the legacy 2-arg key. Re-detection won't
+            // suppress until a tracked row catches up, but the dismissal
+            // intent is recorded for audit.
+            issueKey = buildIssueKey(issueType, detail);
+            dismissCalendarIssue(
+              profile.user.slack_user_id,
+              eventDate,
+              issueType,
+              issueKey,
+              detail,
+              status,
+            );
+          } else {
+            // Read back the row's stored issue_key so the return value is
+            // accurate.
+            const row = db.prepare(`
+              SELECT issue_key FROM calendar_dismissed_issues
+              WHERE owner_user_id = ?
+                AND event_date = ?
+                AND issue_type = ?
+                AND detail = ?
+              ORDER BY created_at DESC LIMIT 1
+            `).get(profile.user.slack_user_id, eventDate, issueType, detail) as { issue_key: string } | undefined;
+            issueKey = row?.issue_key ?? buildIssueKey(issueType, detail);
+          }
           auditLog({
             action: 'update_calendar_issue',
             source: 'calendar_health',
             actor: profile.user.name,
-            details: { eventDate, issueType, detail, status },
+            details: { eventDate, issueType, detail, status, rows_updated: updated.changes },
             outcome: 'success',
           });
           return { dismissed: true, issue_key: issueKey, status };
