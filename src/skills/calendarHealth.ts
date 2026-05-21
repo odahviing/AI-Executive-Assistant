@@ -528,20 +528,19 @@ Status meanings:
                 // brief / coord DMs / shadow notes don't leak.
                 const aDisp = displaySubject(a, profile);
                 const bDisp = displaySubject(b, profile);
-                // Use seriesMasterId when present for the dismissal fingerprint
-                // anchor — recurring events get a fresh occurrence_id every
-                // cycle, so dismissing one occurrence didn't suppress the next
-                // week's pair-flagging. The eventIds field on issues feeds
-                // buildIssueKey; movable_event_id / kept_event_id keep the
-                // occurrence id for active-mode fixes that need to actually
-                // move the specific occurrence.
-                const aAnchor = (a as unknown as { seriesMasterId?: string }).seriesMasterId ?? a.id;
-                const bAnchor = (b as unknown as { seriesMasterId?: string }).seriesMasterId ?? b.id;
+                // Dismissal fingerprint anchors on the OCCURRENCE id, not
+                // seriesMasterId. Owner direction: when a different occurrence
+                // of the same recurring event overlaps with something new, that
+                // IS worth re-flagging — the prior dismissal was for one
+                // specific pair, not a blanket rule for the series. Personal-
+                // category events are skipped from the detector entirely
+                // (exclusion 5 above); recurring non-personal overlaps flag
+                // per occurrence as intended.
                 issues.push({
                   type: 'double_booking',
                   date: dayStr,
                   description: `"${aDisp}" (${aStart.toFormat('HH:mm')}-${aEnd.toFormat('HH:mm')}) overlaps with "${bDisp}" (${bStart.toFormat('HH:mm')}-${bEnd.toFormat('HH:mm')})`,
-                  eventIds: [aAnchor, bAnchor],
+                  eventIds: [a.id, b.id],
                   suggestion: pick
                     ? `Propose moving "${displaySubject(pick.movable, profile)}" — the less-protected side. The other meeting is protected (${(pick.movable === a ? bProt : aProt).reasons.join(', ')}).`
                     : 'Both sides are protected — the owner needs to decide which to move.',
