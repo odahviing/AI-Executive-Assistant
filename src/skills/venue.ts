@@ -225,7 +225,7 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
           ambiguity_flag: filtered.length > 1,
         };
       }
-      const fresh = await resolveVenueByName(args.name_hint!, args.area);
+      const fresh = await resolveVenueByName(args.name_hint!, args.area, 'en', context.profile.user.timezone);
       if (!fresh) {
         return {
           success: false,

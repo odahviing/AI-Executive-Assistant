@@ -48,8 +48,8 @@ Use when the user asks you to:
 - "Check in with Y and see how they are doing"
 - "Tell Z that the meeting is confirmed"
 - "Ask X if they have time this week"
-- "Post this to #product and mention Simon"
-- "Share this research in #marketing, tag Yael"
+- "Post this to #product and mention Anna"
+- "Share this research in #marketing, tag Ben"
 
 DM (default): sends privately to the colleague.
 Channel post (Slack only): when the user specifies a channel (e.g. "post on #product"), post there and mention the colleague. Call find_slack_channel first if you don't have the channel ID. await_reply is ignored for channel posts.
@@ -115,7 +115,7 @@ Only send messages the user explicitly asks for — never reach out to people on
             },
             subject_keyword: {
               type: 'string',
-              description: 'Optional, used alongside proposed_slots. A short keyword from the meeting topic ("bank visit", "Privacy GTM", "interview with Don") that will appear in the calendar event subject when it\'s booked. The verifier fuzzy-matches event subjects against this so a third party (Yael, Michal, etc.) who books on their side still gets matched back to this outreach.',
+              description: 'Optional, used alongside proposed_slots. A short keyword from the meeting topic ("bank visit", "Privacy GTM", "interview with the candidate") that will appear in the calendar event subject when it\'s booked. The verifier fuzzy-matches event subjects against this so a third party who books on their side still gets matched back to this outreach.',
             },
             attachments: {
               type: 'array',
@@ -457,7 +457,8 @@ Only send messages the user explicitly asks for — never reach out to people on
     }
   }
 
-  getSystemPromptSection(_profile: UserProfile): string {
+  getSystemPromptSection(profile: UserProfile): string {
+    const firstName = profile.user.name.split(' ')[0];
     return `## OUTREACH
 
 When the owner asks you to send someone a message, use message_colleague. Default is a DM; pass a channel_id for a Slack channel post (use find_slack_channel first to resolve the channel name). Pass send_at for scheduled future sends — those are driven by the task runner, not sent immediately.
@@ -467,8 +468,8 @@ Never reach out to people on your own. Only on explicit owner request. If the co
 ## RESCHEDULE EXISTING MEETINGS — intent + context are MANDATORY
 
 Any message_colleague that talks about MOVING / SHIFTING / RESCHEDULING / CANCELLING an event already on the calendar MUST set intent='meeting_reschedule' AND context. This includes BOTH directions:
-- Owner asks you to relay a move TO a colleague ("ask Yael if we can start our weekly 15 min earlier") — set the intent.
-- Colleague asked owner to move, owner decided, you're relaying back ("Idan agreed — let's do Wed 15:00 Boston time") — STILL set the intent.
+- Owner asks you to relay a move TO a colleague ("ask Anna if we can start our weekly 15 min earlier") — set the intent.
+- Colleague asked owner to move, owner decided, you're relaying back ("${firstName} agreed — let's do Wed 15:00 your time") — STILL set the intent.
 
 Steps:
 1. Call get_calendar to find the existing meeting — note the meeting_id and current start/end.

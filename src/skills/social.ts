@@ -85,7 +85,7 @@ Examples of good notes:
 - "Has two kids, eldest just started university"
 - "Big football fan — supports Real Madrid"
 - "Always replies in Hebrew — prefers to communicate in Hebrew"
-- "Goes by Ike, not Isaac"
+- "Goes by a nickname, not the legal first name"
 - "Said the board meeting last week was intense — seemed relieved it went well"
 - "Has a cat named Mochi"
 - "Studying for an MBA part-time"
@@ -94,7 +94,7 @@ Do NOT call this for purely work-related facts (those go in manage_preference(ac
         input_schema: {
           type: 'object' as const,
           properties: {
-            colleague_slack_id: { type: 'string', description: 'Slack user ID — opaque string like "U09P4HJ317W" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write a name-shaped invention like "U_ORAN_FRENKEL". Omit if you don\'t have the real ID — pass colleague_name only and the system resolves it.' },
+            colleague_slack_id: { type: 'string', description: 'Slack user ID — opaque string like "U09EXAMPLE9" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write a name-shaped invention like "U_ORAN_FRENKEL". Omit if you don\'t have the real ID — pass colleague_name only and the system resolves it.' },
             colleague_name:     { type: 'string', description: 'Display name of the person' },
             note:               { type: 'string', description: 'What you learned, in plain English. Be specific — vague notes are useless later.' },
             topic: {
@@ -122,14 +122,11 @@ Do NOT call this for purely work-related facts (those go in manage_preference(ac
       },
       {
         name: 'note_about_self',
-        description: `When ${profile.user.name.split(' ')[0]} shares or teaches you something about who you are (name origin, your story, identity, age, AI/human, how you like to work, personality) IN conversation: react to what he said FIRST in your text reply, then call this tool to save the fact alongside. The save is bookkeeping that runs WITH your text reply, never INSTEAD of it. A turn that calls this tool with no conversational text reply is a bug.
+        description: `When ${profile.user.name.split(' ')[0]} teaches or corrects something about who you are (name origin, story, identity, age, how you work, personality) IN conversation: react to what he said FIRST in your text reply, then call this tool to save the fact. The save is bookkeeping that runs WITH your text reply, never INSTEAD of it. A turn that calls this tool with no conversational text reply is a bug.
 
-Saved facts live in your own ABOUT YOU block, visible in every conversation (owner + colleagues), so when anyone asks "what are you / who are you / where does your name come from / how old are you / are you AI" you can answer from saved facts instead of deflecting.
+Saved facts live in your own ABOUT YOU block, visible in every conversation (owner + colleagues), so future identity questions can be answered from saved facts instead of deflecting.
 
-Call this when:
-- ${profile.user.name.split(' ')[0]} teaches you something about your identity ("you were named after X", "you're an AI assistant built in early 2026", "your style should be warm but direct")
-- ${profile.user.name.split(' ')[0]} corrects how you describe yourself
-- A useful fact about you comes up that should outlive this conversation
+Call this when ${profile.user.name.split(' ')[0]} teaches you something about your identity, corrects how you describe yourself, or shares a fact about you that should outlive this conversation.
 
 Examples (owner says → you react in text + save):
 - "You were named after a character in a book I love" → text reply: "Oh — which book? I'd like to know the source." + save: note="Named after a character from a book the owner loves."

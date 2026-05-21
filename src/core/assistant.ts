@@ -115,7 +115,7 @@ Call this after interactions — not during them. It's a background update.`,
           properties: {
             colleague_slack_id: {
               type: 'string',
-              description: 'Slack user ID — opaque random-looking string like "U09P4HJ317W" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write a name-shaped string like "U_ORAN_FRENKEL" or "U_<NAME>" — those look right but are inventions. If you don\'t have the real ID in this conversation: omit this field and pass `colleague_name` only — the system resolves the ID from people_memory. Or call `find_slack_user` first to look it up.',
+              description: 'Slack user ID — opaque random-looking string like "U09EXAMPLE9" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write a name-shaped string like "U_ORAN_FRENKEL" or "U_<NAME>" — those look right but are inventions. If you don\'t have the real ID in this conversation: omit this field and pass `colleague_name` only — the system resolves the ID from people_memory. Or call `find_slack_user` first to look it up.',
             },
             colleague_name: {
               type: 'string',
@@ -225,7 +225,7 @@ This builds a timeline that Maelle can reference later — so when someone asks 
           properties: {
             colleague_slack_id: {
               type: 'string',
-              description: 'Slack user ID — opaque random-looking string like "U09P4HJ317W" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write a name-shaped string like "U_ORAN_FRENKEL" or "U_<NAME>" — those look right but are inventions. If you don\'t have the real ID in this conversation: omit this field and pass `colleague_name` only — the system resolves the ID from people_memory. Or call `find_slack_user` first to look it up.',
+              description: 'Slack user ID — opaque random-looking string like "U09EXAMPLE9" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write a name-shaped string like "U_ORAN_FRENKEL" or "U_<NAME>" — those look right but are inventions. If you don\'t have the real ID in this conversation: omit this field and pass `colleague_name` only — the system resolves the ID from people_memory. Or call `find_slack_user` first to look it up.',
             },
             colleague_name: {
               type: 'string',
@@ -261,7 +261,7 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
           properties: {
             colleague_slack_id: {
               type: 'string',
-              description: 'Slack user ID of the person whose gender is being confirmed — opaque string like "U09P4HJ317W" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write "U_<NAME>" — looks right, is invented. Omit if you don\'t have the real ID; pass `colleague_name` and the system resolves from people_memory.',
+              description: 'Slack user ID of the person whose gender is being confirmed — opaque string like "U09EXAMPLE9" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write "U_<NAME>" — looks right, is invented. Omit if you don\'t have the real ID; pass `colleague_name` and the system resolves from people_memory.',
             },
             colleague_name: {
               type: 'string',

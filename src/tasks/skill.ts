@@ -49,9 +49,9 @@ export class TasksSkill implements Skill {
         description: `Create a task for Maelle to handle asynchronously.
 Use when asked to:
 - "Remind me about X tomorrow"
-- "Follow up with Yael in 3 days if she doesn't respond"
-- "Check back with Isaac next week"
-- "Remind Ysrael about the board prep on Tuesday"
+- "Follow up with Anna in 3 days if she doesn't respond"
+- "Check back with Ben next week"
+- "Remind Cara about the board prep on Tuesday"
 - Any future action that shouldn't happen right now
 
 Task types:

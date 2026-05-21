@@ -177,14 +177,20 @@ function lastTopicTouchMs(personSlackId: string, ownerUserId: string): number {
 // (Asia/Jerusalem) uses Sunday-start work week; everywhere else defaults to
 // Monday-start (ISO). Returns the local Sun/Mon 00:00 as UTC ms — the
 // recency signal must be ≥ this for the person to qualify.
+const SUNDAY_START_TZS = new Set<string>([
+  'Asia/Jerusalem',  // Israel
+  'Asia/Riyadh',     // Saudi Arabia
+  'Asia/Dubai',      // UAE
+  'Asia/Kuwait',
+  'Asia/Qatar',
+  'Asia/Bahrain',
+]);
 function computeLocalWeekStartMs(zone: string, nowUtc: DateTime): number {
   const local = nowUtc.setZone(zone);
   if (!local.isValid) return 0;
   // Luxon's weekday: 1=Mon..7=Sun.
   const weekday = local.weekday;
-  // Sunday-start regions. Currently Asia/Jerusalem; other Sun-start TZs
-  // (Saudi Arabia, etc.) can be added if real candidates show up.
-  const isSundayStart = zone === 'Asia/Jerusalem';
+  const isSundayStart = SUNDAY_START_TZS.has(zone);
   let daysSinceWeekStart: number;
   if (isSundayStart) {
     // Sun=7 in Luxon → 0 days back; Mon=1 → 1 day back; ...; Sat=6 → 6 days back.

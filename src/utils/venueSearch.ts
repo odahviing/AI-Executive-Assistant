@@ -239,6 +239,19 @@ ${searchResult.answer ? `Tavily summary: ${searchResult.answer}\n\n` : ''}Top re
 }
 
 /**
+ * Map common timezones to a country name for venue-search country hints.
+ * Falls back to undefined for TZs we don't recognize — search is performed
+ * without a country filter rather than guessing.
+ */
+const TZ_TO_COUNTRY: Record<string, string> = {
+  'Asia/Jerusalem': 'Israel',
+};
+function countryFromTimezone(tz: string | undefined): string | undefined {
+  if (!tz) return undefined;
+  return TZ_TO_COUNTRY[tz];
+}
+
+/**
  * Case-1: owner names a venue. Resolve to canonical address.
  * Wraps the existing resolveVenueLocation helper; adds the venue-skill output
  * shape so the find_venue tool surface stays uniform between cases.
@@ -247,10 +260,11 @@ export async function resolveVenueByName(
   nameHint: string,
   areaHint?: string,
   language: 'en' | 'he' = 'en',
+  ownerTimezone?: string,
 ): Promise<VenueCandidate | null> {
   const resolved = await resolveVenueLocation(nameHint, language, {
     cityHint: areaHint,
-    countryHint: 'Israel',
+    countryHint: countryFromTimezone(ownerTimezone),
   });
   if (!resolved.resolved) {
     return null;

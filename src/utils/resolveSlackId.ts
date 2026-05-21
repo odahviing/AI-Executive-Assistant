@@ -54,7 +54,7 @@ export interface ResolveSlackIdResult {
  * Resolve a Sonnet-supplied slack_id. Cheap and synchronous — single DB
  * query in the worst case (`searchPeopleMemory`).
  *
- * @param rawId  the value Sonnet passed (e.g. `"U09P4HJ317W"` or `"oran_frenkel"`)
+ * @param rawId  the value Sonnet passed (e.g. `"U09EXAMPLE9"` or `"oran_frenkel"`)
  * @param name   colleague name to fall back on for people_memory lookup
  */
 export function resolveSlackId(
