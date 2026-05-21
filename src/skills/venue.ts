@@ -100,7 +100,7 @@ Do NOT use when:
             },
             type: {
               type: 'string',
-              enum: ['coffee', 'restaurant', 'pub', 'park', 'bar', 'hotel', 'office', 'other'],
+              enum: ['coffee', 'restaurant', 'pub', 'park', 'bar', 'hotel', 'office'],
               description: 'Venue type for Case-2 search. Omit when using name_hint alone.',
             },
             type_tags: {

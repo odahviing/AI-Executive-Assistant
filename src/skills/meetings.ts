@@ -305,7 +305,7 @@ Before calling this tool: ASK ${profile.user.name.split(' ')[0]} TWO HUMAN QUEST
   • "In person or online?"
   • If in-person and the venue isn't ${profile.user.name.split(' ')[0]}'s office: "Where?" + "Roughly how long is the trip each way?"
 
-SMART-SKIP THE ASK: when at least one attendee is in a different timezone than ${profile.user.name.split(' ')[0]} (people_memory has the data — Brett ET, Yael NYC, Jenna EST), the meeting is remote by default. The handler will infer this and treat missing meeting_mode as 'online' automatically. Don't ask "in person or online?" when the attendee is clearly remote — it reads obtuse. Only ask when all attendees are in the same TZ as ${profile.user.name.split(' ')[0]}.
+SMART-SKIP THE ASK: when at least one attendee is in a different timezone than ${profile.user.name.split(' ')[0]} (people_memory has TZ data on each colleague), the meeting is remote by default. The handler will infer this and treat missing meeting_mode as 'online' automatically. Don't ask "in person or online?" when the attendee is clearly remote — it reads obtuse. Only ask when all attendees are in the same TZ as ${profile.user.name.split(' ')[0]}.
 
 Then YOU pick the right meeting_mode based on what they said:
   • "online" / "Teams" / "Zoom" / "call" / "video" → meeting_mode='online'

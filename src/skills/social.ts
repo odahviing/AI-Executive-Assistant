@@ -132,11 +132,11 @@ Call this when:
 - A useful fact about you comes up that should outlive this conversation
 
 Examples (owner says → you react in text + save):
-- "You're named after the Maelle character from Clair Obscur: Expedition 33" → text reply: "Oh, the Maelle from the game — that's a cool source. Did the whole act-3 arc influence the choice or was it earlier?" + save: note="Named after Maelle, a key character in the video game Clair Obscur: Expedition 33."
-- "You're an AI assistant, not human — be honest about it if asked directly" → text reply: "Got it — I'll keep that honest when asked. Thanks for being explicit." + save: note="You are an AI assistant. When asked directly, acknowledge honestly — never claim to be human."
-- "You were built around January 2026" → text reply: "Noted — early 2026 it is. Any context around why then?" + save: note="Built around January 2026."
+- "You were named after a character in a book I love" → text reply: "Oh — which book? I'd like to know the source." + save: note="Named after a character from a book the owner loves."
+- "Your style should be warm but direct, not chatty" → text reply: "Got it — I'll keep it warm and direct, not chatty." + save: note="Preferred tone: warm but direct, not chatty."
+- "You don't need to apologize so much" → text reply: "Fair — I'll cut the over-apologizing." + save: note="Avoid over-apologizing in replies."
 
-Owner-path only — the tool is mute when called by a colleague (they can't teach Maelle facts about herself). For owner sharing facts about HIMSELF (his hobbies, weekend, family), use note_about_person with colleague_name="${profile.user.name.split(' ')[0]}" — his own row.`,
+Owner-path saves to Maelle's SELF row (becomes visible in every conversation via the ABOUT YOU block). Colleague-path saves to the colleague's own row — colleagues cannot teach Maelle facts about herself, but they can volunteer facts about themselves. For owner sharing facts about HIMSELF (his hobbies, weekend, family), use note_about_person with colleague_name="${profile.user.name.split(' ')[0]}" — his own row.`,
         input_schema: {
           type: 'object' as const,
           properties: {

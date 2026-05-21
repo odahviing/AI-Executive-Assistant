@@ -146,7 +146,7 @@ DEFERRED ACTION (auto-execute on approve) — v2.8.6:
 When the approval is asking permission for a SPECIFIC tool call (e.g. "should I cancel Dirk's meeting?", "OK to book this off-hours?"), include payload.deferred_action so the resolver fires the action when the owner approves — instead of you having to call the tool yourself in a follow-up turn. Without this, "approved but never executed" turns happen (root of the 2026-05-18 Dirk incident).
 
 Shape: \`payload.deferred_action = { tool: "<tool-name>", args: <full-tool-args> }\`.
-Supported tools: \`create_meeting\`, \`move_meeting\`, \`book_floating_block\`, \`delete_meeting\`.
+Supported tools: \`create_meeting\`, \`move_meeting\`, \`update_meeting\`, \`book_floating_block\`, \`delete_meeting\`.
 
 Cancellations specifically: when you raise create_approval(kind=freeform) to ask "should I cancel X?", pass:
   payload.deferred_action = { tool: "delete_meeting", args: { meeting_id, meeting_subject } }
@@ -175,6 +175,11 @@ Behavior:
       {
         name: 'resolve_approval',
         description: `Record the owner's decision on a pending approval. Call this when the owner replies to an approval ask in DM.
+
+Owner short-acks ("yes", "go", "no", "kill it") in a thread bound to a pending approval are auto-resolved BEFORE the orchestrator runs (Module D). Call this tool only when:
+- the owner AMENDED ("not as asked, but try X"),
+- the owner referenced a specific approval id token,
+- or you need to act on an approval from a different thread.
 
 Verdicts:
 - approve: owner said yes. Provide the decision data (e.g. for slot_pick: { slot_iso: "2026-04-22T10:00:00" }).
