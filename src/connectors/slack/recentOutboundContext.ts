@@ -108,17 +108,42 @@ function findOpenOutboundForColleague(params: {
 
 /**
  * Mark an outreach_jobs row as having its conversational follow-up closed.
- * Independent of `status` (which represents task-lifecycle).
+ * When `replyText` is provided, the inbound represents a real text reply —
+ * also stamp status='replied' + reply_text so downstream consumers
+ * (notably social_ping_rank_check 48h later) can see the engagement
+ * signal and bump rank correctly. Without this stamp the rank-check
+ * reads status='sent' / reply_text=null → interprets warm engagement
+ * as "ignored" → DECREMENTS the cold-pinged colleague's rank, the
+ * opposite of intent.
+ *
+ * Omit `replyText` for non-reply closures (emoji acks, auto-expire,
+ * outbound-to-outbound matching) — those keep status untouched.
  */
-function closeFollowup(jobId: string, reason: NonNullable<OutreachJob['followup_close_reason']>): void {
+function closeFollowup(
+  jobId: string,
+  reason: NonNullable<OutreachJob['followup_close_reason']>,
+  options?: { replyText?: string },
+): void {
   const db = getDb();
-  db.prepare(`
-    UPDATE outreach_jobs
-    SET followup_closed_at = datetime('now'),
-        followup_close_reason = ?,
-        updated_at = datetime('now')
-    WHERE id = ?
-  `).run(reason, jobId);
+  if (options?.replyText !== undefined) {
+    db.prepare(`
+      UPDATE outreach_jobs
+      SET followup_closed_at = datetime('now'),
+          followup_close_reason = ?,
+          status = 'replied',
+          reply_text = ?,
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(reason, options.replyText, jobId);
+  } else {
+    db.prepare(`
+      UPDATE outreach_jobs
+      SET followup_closed_at = datetime('now'),
+          followup_close_reason = ?,
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(reason, jobId);
+  }
 }
 
 /**
@@ -232,7 +257,7 @@ export async function getRecentOutboundContext(params: {
 
   // Bucket 1 — deterministic match within 10 min.
   if (deltaMinutes <= DETERMINISTIC_WINDOW_MINUTES) {
-    closeFollowup(job.id, 'deterministic_match');
+    closeFollowup(job.id, 'deterministic_match', { replyText: params.inboundText });
     logger.info('recentOutboundContext — deterministic match', {
       jobId: job.id, colleague: params.colleagueName, deltaMinutes: Math.round(deltaMinutes * 10) / 10,
     });
@@ -263,7 +288,7 @@ export async function getRecentOutboundContext(params: {
   });
 
   if (isResponse) {
-    closeFollowup(job.id, 'llm_response_match');
+    closeFollowup(job.id, 'llm_response_match', { replyText: params.inboundText });
     logger.info('recentOutboundContext — LLM classified as RESPONSE', {
       jobId: job.id, colleague: params.colleagueName, deltaMinutes: Math.round(deltaMinutes),
     });

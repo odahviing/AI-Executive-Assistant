@@ -37,6 +37,17 @@ export type ResolveVerdict =
 export interface ResolveContext {
   app?: App;
   profile: UserProfile;
+  /**
+   * Direction-of-resolution flag set by resolveRequest from row.state at
+   * call time. True when state was 'awaiting_colleague' — i.e. the
+   * COLLEAGUE is the actor resolving (accepting / rejecting owner's
+   * counter). False (default) when the owner is the actor.
+   *
+   * Used by notifyRequesterOfDecision to pick relay phrasing: when
+   * wasAwaitingColleague=true, an 'approve' verdict means the colleague
+   * accepted the counter — "owner said yes" credits the wrong actor.
+   */
+  wasAwaitingColleague?: boolean;
 }
 
 export interface ResolveResult {
@@ -89,6 +100,10 @@ export async function resolveRequest(
   // owner is replying; when state=awaiting_colleague the requester is
   // replying to owner's counter (amend bounce-back path).
   const wasAwaitingColleague = row.state === 'awaiting_colleague';
+  // Stamp the flag on ctx so downstream helpers (notifyRequesterOfDecision)
+  // can branch relay phrasing on actor direction without each call site
+  // threading an extra param.
+  ctx.wasAwaitingColleague = wasAwaitingColleague;
 
   // ── reject / cancel ────────────────────────────────────────────────────
   if (verdict.verdict === 'reject' || verdict.verdict === 'cancel') {
@@ -696,8 +711,23 @@ async function notifyRequesterOfDecision(
     : (requesterLang === 'he' ? 'היי' : 'Hey');
   let body: string;
   if (verdict === 'approve') {
-    // Concrete-time form when we know the booked slot; vague form otherwise.
-    if (startFormatted) {
+    // wasAwaitingColleague=true → the COLLEAGUE (requester) just accepted
+    // the owner's counter. Crediting "Idan said yes" is wrong; the colleague
+    // is the actor here. Use a neutral booking-confirmation phrasing
+    // instead. The relay still goes to the requester as a confirmation
+    // they can scroll back to.
+    if (ctx.wasAwaitingColleague) {
+      if (startFormatted) {
+        body = requesterLang === 'he'
+          ? `${hi} — סגרנו על "${subject}" ל${startFormatted}. הזימון בדרך.`
+          : `${hi} — locked in "${subject}" for ${startFormatted}. Calendar invite incoming.`;
+      } else {
+        body = requesterLang === 'he'
+          ? `${hi} — סגרנו על ${subject}. אעדכן אותך כשהזימון יוצא.`
+          : `${hi} — locked in ${subject}. I'll let you know once the invite goes out.`;
+      }
+    } else if (startFormatted) {
+      // Owner-resolved: concrete-time form when we know the booked slot.
       body = requesterLang === 'he'
         ? `${hi} — ${ownerFirst} אישר. אני קובעת את "${subject}" ל${startFormatted}. הזימון בדרך.`
         : `${hi} — ${ownerFirst} said yes. Booking "${subject}" for ${startFormatted}. Calendar invite incoming.`;

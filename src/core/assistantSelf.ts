@@ -95,7 +95,11 @@ export function formatAssistantSelfForPrompt(
   if (prof.language_preference) lines.push(`  language: ${prof.language_preference}`);
   if (prof.working_hours)       lines.push(`  working hours: ${prof.working_hours}`);
   if (prof.collaboration_notes) lines.push(`  collaboration: ${prof.collaboration_notes}`);
-  for (const n of notes) lines.push(`  ★ [${n.date}] ${n.note}`);
+  // Cap rendered notes to the most recent 20. Capture-pass dedup is
+  // probabilistic (Haiku-judged), so duplicates accumulate in the DB
+  // over time; capping the render keeps the prompt block bounded even
+  // if data dedup slips.
+  for (const n of notes.slice(-20)) lines.push(`  ★ [${n.date}] ${n.note}`);
   for (const i of log.slice(-10)) {
     const d = i.date.split('T')[0];
     lines.push(`  ↳ [${d}] ${i.type}: ${i.summary}`);

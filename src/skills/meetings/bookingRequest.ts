@@ -175,9 +175,20 @@ export async function normalizeBookingRequest(
     isOnlineHint: typeof args.is_online === 'boolean' ? args.is_online as boolean : undefined,
     locationHint: args.location as string | undefined,
     isRecurring: typeof args.is_recurring === 'boolean' ? args.is_recurring as boolean : undefined,
-    isFloatingBlock: typeof args.is_floating_block === 'object' && args.is_floating_block !== null
+    // isFloatingBlock is set ONLY when the caller passed a real
+    // is_floating_block object with a name. Pre-fix, `confirm_outside_window`
+    // alone would set this true — but that flag is also valid on regular
+    // move_meeting calls (owner override on a non-floating-block move).
+    // The mis-tag tripped planMeeting / scheduleRules into bypassing rule 8
+    // owner_busy_collision (floating blocks are exempt by design), so a
+    // policy_exception approval that rode `confirm_outside_window=true`
+    // through to its deferred_action move silently slipped past the
+    // double-booking check the owner never explicitly approved.
+    isFloatingBlock: typeof args.is_floating_block === 'object'
+      && args.is_floating_block !== null
+      && typeof (args.is_floating_block as { name?: unknown }).name === 'string'
       ? true
-      : (typeof args.confirm_outside_window === 'boolean' ? !!args.confirm_outside_window : undefined),
+      : undefined,
     existingEventId: args.meeting_id as string | undefined,
     existingEventCategories: args.existing_categories as string[] | undefined,
     existingEventLocation: args.existing_location as string | undefined,

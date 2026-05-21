@@ -144,14 +144,52 @@ export function getVenueById(id: string): VenueRow | null {
   return r ? rowToVenue(r) : null;
 }
 
+/**
+ * Normalize a venue identifier so dedup matches across address-string drift.
+ *
+ * Save-on-book at meetings/ops.ts stuffs the full "Name, Street, City"
+ * resolution into the `name` column. Cross-visit Place API drift (city
+ * aliasing, abbreviation, order) means the same physical place gets saved
+ * with slightly different strings each visit → exact `lower(name)` dedup
+ * misses → catalog accumulates duplicates of the same café.
+ *
+ * Heuristic: strip after the first comma + lowercase. Matches "Café X"
+ * against "Café X, 123 Main St" against "Café X, Tel Aviv". Owner-typed
+ * bare names also match. Proper fix (Place API place_id as canonical
+ * key) tracked under issue #96; until then, this heuristic catches the
+ * common case.
+ */
+function normalizeVenueName(s: string): string {
+  const commaIdx = s.indexOf(',');
+  const head = commaIdx >= 0 ? s.slice(0, commaIdx) : s;
+  return head.trim().toLowerCase();
+}
+
 export function findVenueByNameAndOwner(ownerUserId: string, name: string): VenueRow | null {
-  const r = getDb().prepare(`
+  // Two passes: exact-name first (cheap, common case), then normalized
+  // head-only match (catches Place API drift across visits to the same
+  // venue). The normalized pass runs an in-memory filter over the
+  // owner's venues — venues per owner stay bounded (dozens to low
+  // hundreds), so the per-call cost is negligible vs adding a column.
+  const db = getDb();
+  const exact = db.prepare(`
     SELECT * FROM venues
     WHERE owner_user_id = ? AND lower(name) = lower(?)
     ORDER BY last_used_at DESC NULLS LAST
     LIMIT 1
   `).get(ownerUserId, name);
-  return r ? rowToVenue(r) : null;
+  if (exact) return rowToVenue(exact);
+  const target = normalizeVenueName(name);
+  if (!target) return null;
+  const candidates = db.prepare(`
+    SELECT * FROM venues
+    WHERE owner_user_id = ?
+    ORDER BY last_used_at DESC NULLS LAST
+  `).all(ownerUserId) as Array<{ name: string; [k: string]: unknown }>;
+  for (const c of candidates) {
+    if (normalizeVenueName(c.name) === target) return rowToVenue(c);
+  }
+  return null;
 }
 
 export function updateVenue(id: string, patch: VenueUpdate): void {

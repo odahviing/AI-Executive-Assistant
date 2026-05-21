@@ -2560,6 +2560,8 @@ export class SchedulingSkill {
                     switch (reason) {
                       case 'outside_owner_work_hours': return `outside ${ownerFirst}'s work hours`;
                       case 'outside_attendee_work_hours': return `outside the attendee's working hours`;
+                      case 'owner_busy_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
+                      // legacy label name kept as alias in case any older diagnostics path still emits it
                       case 'owner_busy_or_buffer_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
                       case 'overlaps_meeting_being_moved': return `overlaps the meeting being moved`;
                       case 'focus_time_office': return `breaks ${ownerFirst}'s focus-time protection (office day)`;
@@ -3061,7 +3063,41 @@ export class SchedulingSkill {
       }
 
       case 'delete_meeting': {
-        // v2.7.0 — track auto-relay outcome so Sonnet narrates honestly:
+        // Defense-in-depth: refuse a series-level delete if the id resolves
+        // to a seriesMaster. Mirrors the guard in update_meeting and
+        // move_meeting. get_calendar normally returns occurrence ids
+        // (Graph calendarView expands recurring series), so a master id
+        // should never reach here through the normal path — but if it
+        // ever does, a one-shot mistake would wipe an entire recurring
+        // series. This probe runs BEFORE the planMeeting / decline_and_relay
+        // path so a series-master refusal doesn't first fire an organizer
+        // DM saying "won't make it" for a meeting that ends up untouched.
+        // Also captures the event's start date so the success audit_log
+        // entry can record WHICH DAY was deleted (active-mode's
+        // missing_floating_block branch reads this).
+        let preDeleteStartIso: string | undefined;
+        let preDeleteSubject: string | undefined;
+        try {
+          const { getEventType } = await import('../../connectors/graph/calendar');
+          const probe = await getEventType(userEmail, args.meeting_id as string);
+          if (probe?.type === 'seriesMaster') {
+            logger.info('delete_meeting refused on recurring seriesMaster', {
+              meetingId: args.meeting_id,
+              subject: probe.subject,
+            });
+            return {
+              error: 'recurring_series_master',
+              meeting_subject: probe.subject,
+              message: `"${probe.subject}" is a recurring series. Deleting the series here would cancel every occurrence — that's not safe to do automatically. To cancel a single occurrence, call delete_meeting with that occurrence's meeting_id (get it from get_calendar for the specific date). To end the series itself, the owner should do that directly in Outlook.`,
+            };
+          }
+          preDeleteStartIso = probe?.startDateTime;
+          preDeleteSubject = probe?.subject;
+        } catch (err) {
+          logger.warn('delete_meeting recurring-preflight failed — proceeding', { err: String(err) });
+        }
+
+        // Track auto-relay outcome so Sonnet narrates honestly:
         //   'sent'                  → DM went out to the organizer (Slack)
         //   'skipped_no_slack_id'   → organizer is external / not in workspace;
         //                              owner-side decline still landed but the
@@ -3070,7 +3106,7 @@ export class SchedulingSkill {
         let relayStatus: 'sent' | 'skipped_no_slack_id' | 'not_attempted' = 'not_attempted';
         let relayOrganizerName: string | null = null;
         let relayOrganizerEmail: string | null = null;
-        // v2.7.0 — ownership-aware delete via planMeeting.
+        // Ownership-aware delete via planMeeting.
         // Path tree (per D3 / Q1=B / D4):
         //   - owner is organizer → proceed with delete (existing flow below)
         //   - owner is attendee + asker is the requester/organizer → decline on
@@ -3143,39 +3179,6 @@ export class SchedulingSkill {
           logger.warn('delete_meeting planMeeting threw — proceeding with raw delete', {
             err: String(err).slice(0, 200), meetingId: args.meeting_id,
           });
-        }
-
-        // Defense-in-depth: refuse a series-level delete if the id resolves to
-        // a seriesMaster. Mirrors the guard in update_meeting and move_meeting.
-        // get_calendar normally returns occurrence ids (Graph calendarView
-        // expands recurring series), so a master id should never reach here
-        // through the normal path — but if it ever does, a one-shot mistake
-        // would wipe an entire recurring series.
-        //
-        // v2.8.5 — also captures start date so the success audit_log entry
-        // below can record WHICH DAY was deleted. Active-mode's
-        // missing_floating_block branch reads this to avoid re-booking a
-        // block the owner just told us to remove.
-        let preDeleteStartIso: string | undefined;
-        let preDeleteSubject: string | undefined;
-        try {
-          const { getEventType } = await import('../../connectors/graph/calendar');
-          const probe = await getEventType(userEmail, args.meeting_id as string);
-          if (probe?.type === 'seriesMaster') {
-            logger.info('delete_meeting refused on recurring seriesMaster', {
-              meetingId: args.meeting_id,
-              subject: probe.subject,
-            });
-            return {
-              error: 'recurring_series_master',
-              meeting_subject: probe.subject,
-              message: `"${probe.subject}" is a recurring series. Deleting the series here would cancel every occurrence — that's not safe to do automatically. To cancel a single occurrence, call delete_meeting with that occurrence's meeting_id (get it from get_calendar for the specific date). To end the series itself, the owner should do that directly in Outlook.`,
-            };
-          }
-          preDeleteStartIso = probe?.startDateTime;
-          preDeleteSubject = probe?.subject;
-        } catch (err) {
-          logger.warn('delete_meeting recurring-preflight failed — proceeding', { err: String(err) });
         }
 
         await deleteMeeting(userEmail, args.meeting_id as string);

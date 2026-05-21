@@ -398,20 +398,31 @@ export function updatePersonProfile(slackId: string, updates: Partial<PersonProf
  * Keeps last 50 notes.
  */
 export function appendPersonNote(slackId: string, note: string): void {
+  // RMW guarded by BEGIN IMMEDIATE so concurrent writers serialize. Pre-fix
+  // an in-turn `note_about_self` from Sonnet could interleave with a
+  // background capture-pass write on the same row: A reads → B reads →
+  // A writes → B's write overwrites A. Lost note. With the transaction,
+  // the second writer either waits for the first commit (then sees the
+  // updated row on its own SELECT inside the txn) or fails with SQLITE_BUSY
+  // (which better-sqlite3 surfaces as an exception — caller's existing
+  // try/catch handles non-fatal logging).
   const db = getDb();
-  const row = db.prepare('SELECT notes FROM people_memory WHERE slack_id = ?').get(slackId) as any;
-  if (!row) return;
-
-  const notes: PersonNote[] = JSON.parse(row.notes || '[]');
-  const today = new Date().toISOString().split('T')[0];
-  notes.push({ date: today, note });
-  const trimmed = notes.slice(-50);   // keep last 50 — rich context, not expensive
-
-  db.prepare(`
-    UPDATE people_memory
-    SET notes = ?, updated_at = datetime('now')
-    WHERE slack_id = ?
-  `).run(JSON.stringify(trimmed), slackId);
+  const txn = db.transaction((id: string, newNote: string) => {
+    const row = db.prepare('SELECT notes FROM people_memory WHERE slack_id = ?').get(id) as
+      | { notes: string }
+      | undefined;
+    if (!row) return;
+    const notes: PersonNote[] = JSON.parse(row.notes || '[]');
+    const today = new Date().toISOString().split('T')[0];
+    notes.push({ date: today, note: newNote });
+    const trimmed = notes.slice(-50);   // keep last 50 — rich context, not expensive
+    db.prepare(`
+      UPDATE people_memory
+      SET notes = ?, updated_at = datetime('now')
+      WHERE slack_id = ?
+    `).run(JSON.stringify(trimmed), id);
+  });
+  txn.immediate(slackId, note);
 }
 
 /**
