@@ -132,10 +132,10 @@ Legacy YAML keys auto-migrate (`scheduling`/`coordination` → `meetings`, etc.)
 
 | Guard | Purpose |
 |---|---|
-| **Claim-checker** | Sonnet pass after every owner-facing draft. False action claims trigger retry with `tool_choice`. Now covers honesty rules 1/2/2b/2c/2d/3/5b/9 via structured booleans (v2.8.1) |
+| **Claim-checker** | Sonnet pass after every owner-facing draft. False action claims trigger retry with `tool_choice` |
 | **Date verifier** | Weekday/date pairs vs 14-day lookup. Retry + deterministic inline correction if retry fails |
 | **Security gate** | Leak-pattern filter on colleague-facing replies (never reveals tools/prompts/model names) |
-| **humanGate** | Catches mechanical-refusal phrasings on both owner-facing and colleague-facing drafts (v2.8.1) |
+| **humanGate** | Catches mechanical-refusal phrasings on both owner-facing and colleague-facing drafts |
 | **Coord guard** | Injection scan + LLM judge on `coordinate_meeting` inputs from colleagues |
 | **Cross-handler dedup** | Process-global message-ts Set prevents duplicate replies after restart |
 | **Idempotency** | `create_meeting` (Graph pre-check ±2 min), `delete_meeting` (per-turn per-event_id) |
@@ -196,13 +196,14 @@ PM2 + auto-deploy watcher are configured in `ecosystem.config.js` for unattended
 
 ## Roadmap
 
-- **WhatsApp connector** — first non-Slack `Connection` implementation
-- **Email connector** — second `Connection` implementation. CC Maelle on a thread to have her handle it
-- **Inbound workflows** — listen for triggers (new lead lands in a channel) and run a skill end-to-end
-- **Meeting notes preparation** — pre-meeting brief from KB + history; post-meeting summary handed to existing SummarySkill
-- **Google Places venue backend** — structured booking metadata for the venue skill ([#96](https://github.com/odahviing/AI-Executive-Assistant/issues/96))
+**Next**: WhatsApp connector — first non-Slack `Connection` implementation. v3 was cut as the cleanup baseline; the v3.x line goes forward into WhatsApp work.
 
-Each item tracked as a GitHub issue.
+Tracked items:
+- **WhatsApp connector** — [#4](https://github.com/odahviing/AI-Executive-Assistant/issues/4)
+- **Email connector** — [#5](https://github.com/odahviing/AI-Executive-Assistant/issues/5). CC Maelle on a thread to have her handle it.
+- **Inbound workflows** — [#6](https://github.com/odahviing/AI-Executive-Assistant/issues/6). Listen for triggers (new lead lands in a channel) and run a skill end-to-end.
+- **Meeting prep skill** — [#110](https://github.com/odahviing/AI-Executive-Assistant/issues/110). Generalizable; interview is one shape, sales / customer / board / 1:1 are others.
+- **Google Places venue backend** — [#96](https://github.com/odahviing/AI-Executive-Assistant/issues/96). Structured booking metadata for the venue skill.
 
 ---
 

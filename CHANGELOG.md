@@ -2,6 +2,76 @@
 
 ---
 
+## 3.0.0 — Bug-wave cleanup + 2.9 line closeout. Baseline for the WhatsApp build that follows.
+
+Two-day cleanup pass — 65 atomic fixes from a 76-bug overnight audit, plus follow-ups from the morning briefs and scenario paper-traces. No new capabilities; pure consolidation. ~1,500 lines of dead code removed, ~1,500 lines of fixes added. Typecheck clean throughout. Mark called out as the cut-line: v3 line goes forward into WhatsApp transport.
+
+### Fixed — security & privileges
+- `manage_preference` added to `ownerOnlyTools` (was an unintended privilege gap after the v2.9 tool merge).
+- `note_about_person` colleague-path target rewrite now mutates args in place (reassignment didn't propagate to SocialSkill — gossip/impersonation guard was a no-op).
+- `searchPeopleMemory` excludes SELF rows in the SQL filter (defense in depth against name-fuzzy gossip persistence).
+
+### Fixed — approval pipeline
+- `getRequestByIdempotencyKey` no longer filters out closed rows → handler can return a tombstone instead of crashing Sonnet on re-asks.
+- `runApproveCallback` runs the replay synchronously and only closes + relays on success (was: close + relay → fire async → silent gap on Graph failure).
+- Requester relay now branches on `wasAwaitingColleague` — colleague-accepted owner-counters render as "locked in" instead of "Idan said yes."
+- Calendar-issue dismissals now stick: dismiss handler updates the existing active row in place (was building a different `issue_key` than the brief-time filter — dismissals never persisted across runs).
+- `resolve_approval` colleague-path verifies `kind === 'approval'` before closing.
+
+### Fixed — booking pipeline
+- `update_meeting` attendee-shape change re-evaluates location with `intent: 'new_booking'` (was preserving the existing location even when internal-only flipped to has-external).
+- BookingRequest normalizer preserves the handler's owner-in-MPIM `relaxed: true` pre-stamp (the `!rawRelaxed` guard was dropping it).
+- `confirm_outside_window` no longer infers `isFloatingBlock=true` (was silently bypassing `owner_busy_collision` on regular `move_meeting` overrides).
+- `delete_meeting` seriesMaster guard runs BEFORE the decline-and-relay dispatch (was DMing the organizer before refusing the cancel).
+- `move_meeting` colleague-path label map gained `owner_busy_collision` (ask_text named the rule clearly).
+- `coord/booking.ts` move conflict scan excludes the moving event.
+- `notifyOwnerOfColleaguePushback` appends a rebuilt consequence line on amend bounces (was showing the original time after the counter merged).
+
+### Fixed — work hours, floating blocks, social engine
+- `relaxed`/`extendedHours` UNIONS the widened default window with native multi-window work_hours (was collapsing split-shift days).
+- Rebalance skips out-of-window blocks (owner-pinned signal) + honors `prefer_position` + dedupes shadow notifications.
+- `findAlignedSlotForBlock` guards against DST-gap NaN windows.
+- Auto-categorize threads `ownerTimezone` through to day-boundary math (Israel UTC+2/+3 no longer rolls over at UTC midnight).
+- `directiveForProactiveSlot` honors `engagement_rank=0` and deprioritizes subjects raised in the last 72h with no response (clean topic rotation after silence).
+- Cold-ping warm-reply now updates `outreach_jobs.status='replied'` so the rank-check 48h later sees engagement (signal was inverted — warm replies dragged rank DOWN).
+- Capture-pass write race fixed via `db.transaction(...).immediate()` around `appendPersonNote`. SELF row re-seeds if missing.
+- Raise-pivot signal removed entirely (option C): silence no longer punishes a raised subject; weekly decay handles aging.
+- Path 1 + Path 2 of `missing_floating_block` suppression aligned: deleted blocks suppress at detection time AND are removed from `issues[]` before the brief sees them.
+- `parseRange` normalizes endMin=1439 → 1440 so the boundary minute is in-window for both `isWithinOwnerWorkHours` and `isSlotInWorkHours`.
+
+### Removed — dead code (~1,500 lines)
+- Legacy `src/core/approvals/resolver.ts` (581 lines, fully orphaned).
+- `approvalExpiry.ts` + `approvalReminder.ts` dispatchers (no task creator).
+- `coordinate_meeting` stub case; legacy `engagement_level` from `update_person_profile`; no-op `logPersonInitiated` / `logMaelleInitiated` shims; `parseSocialTopics` stub; `lunch_bump` approval kind retired (migrated single producer to `policy_exception` + deferred-action replay); unused imports / params / exports.
+
+### Changed — config leaks + descriptions
+- All baked colleague names (Amazia, Yael, Maayan, Onn, Shayan, Maya, Brett, Jenna, etc.) replaced with generic placeholders (Anna/Ben/Cara/...) in tool descriptions and prompt rules across `meetings.ts`, `outreach.ts`, `tasks/skill.ts`, `social.ts`, `systemPrompt.ts`.
+- Real-shape Slack ID `U09P4HJ317W` swapped for `U09EXAMPLE9` in 5 sites.
+- `resolveVenueByName` derives country from `profile.user.timezone` (was hardcoded `'Israel'`); routes Case-1 through `searchVenueCandidates` so phone/url/hours come back when available.
+- `searchVenueCandidates` reads `getAnthropicClient()` lazily per-call (was captured at module load; would have frozen the boot-time provider on a runtime `LLM_PROVIDER` flip).
+- `findVenuesByCriteria` switched from substring to exact-then-startsWith on `nameHint` (no more "coffee" matching every café).
+- `findVenueByNameAndOwner` dedupes via a name-only normalized head match (collapses cross-visit Place-API drift to a single row).
+- `SUNDAY_START_TZS` Set replaces the hardcoded `'Asia/Jerusalem'` check.
+- Tool-description corrections: `deferred_action` lists `update_meeting`; `resolve_approval` documents Module D auto-resolve; `note_about_self` reworded to match handler; dropped dead `'other'` venue enum.
+- Knowledge classifier prompt detects task-input captions ("schedule these", "use this to draft") → `kind=other` instead of mis-ingesting as KB.
+- `missing_floating_block` scope follows `computeHealthCheckWindow` again (Mon-Wed → end of week, Thu → Thu + next week) — the today+tomorrow tightening reverted per owner direction.
+
+### Operational tooling
+- New script `scripts/cleanup-recent-orphan-requests.cjs` — closes open requests / outreach_jobs from buggy flows (filterable by name + hours).
+- New script `scripts/diagnose-duplicate-routine-fires.cjs` — read-only diagnostic for cron / routine duplication.
+- New script `scripts/cleanup-orphan-system-calhealth-midday.cjs` — one-shot, cancels the orphan `Calendar health check (midday)` system routine when the user routine already covers 13:00 (resolves the duplicate-brief class).
+
+### Improvement tickets filed (deferred)
+- [#108](https://github.com/odahviing/AI-Executive-Assistant/issues/108) — cross-midnight work_hours support.
+- [#109](https://github.com/odahviing/AI-Executive-Assistant/issues/109) — category per floating_block for typed detection.
+- [#110](https://github.com/odahviing/AI-Executive-Assistant/issues/110) — meeting prep skill (interview is one shape; sales / customer / board are others).
+
+### Migration / restart notes
+- Run `node scripts/cleanup-orphan-system-calhealth-midday.cjs --apply` to stop the duplicate 13:00 calendar-health DM. One-shot, then restart `npm run dev`.
+- No schema migrations. Profile yaml unchanged.
+
+---
+
 ## 2.9.4 — Approval-flow honesty: typed booking payload, requester relay enrichment, thread-routing fix, repurposed note_about_self, privacy mask completion
 
 Patch over 2.9.3. Closes three high-severity bugs ([#105](https://github.com/odahviing/coding/AI-Executive-Assistant/issues/105), [#106](https://github.com/odahviing/AI-Executive-Assistant/issues/106), [#107](https://github.com/odahviing/AI-Executive-Assistant/issues/107)) that surfaced from the 2026-05-20 Yael flow. The session paper-traced every symptom to its actual upstream cause — most were thin-context or sync-between-objects bugs the v2.9.x rebuild had left wired loosely — and tightened the request framework end-to-end without adding any new tools or new abstractions.
