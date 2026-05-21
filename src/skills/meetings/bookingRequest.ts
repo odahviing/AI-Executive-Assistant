@@ -352,30 +352,36 @@ async function gateRelaxed(
     return { relaxed: true, relaxedReason: 'owner_direct' };
   }
 
-  // Colleague-path inside an MPIM where owner is present AND just proposed
-  // this exact slot — auto-relax. Closes the Mayrav 22:30 leak (owner says
-  // "what about 10:30pm?" in MPIM → Maelle bypasses the policy_exception
-  // round-trip).
-  if (
-    context.isMpim === true
-    && context.isOwnerInGroup === true
-    && slot
-    && !rawRelaxed   // Only auto-relax when caller didn't explicitly set it
-  ) {
-    try {
-      const matched = ownerProposedSlot(
-        context.conversationHistory,
-        slot.startIso,
-        context.profile.user.name,
-        context.profile.user.timezone,
-      );
-      if (matched) {
-        return { relaxed: true, relaxedReason: 'owner_in_mpim_proposed' };
+  // Colleague-path inside an MPIM where owner is present. Two entry shapes
+  // both auto-relax (bypass the policy_exception round-trip — owner's
+  // presence in the group IS the authority):
+  //   (a) Handler already pre-stamped args.relaxed=true based on its own
+  //       owner-in-MPIM detection (create_meeting / move_meeting guard).
+  //       Preserve the flag — the !rawRelaxed guard used to live here and
+  //       silently DROPPED the pre-stamp, regressing the auto-relax path.
+  //   (b) Caller didn't pre-stamp but Sonnet quoted an owner-proposed slot
+  //       in the conversation history. Auto-relax fresh via
+  //       ownerProposedSlot.
+  if (context.isMpim === true && context.isOwnerInGroup === true) {
+    if (rawRelaxed) {
+      return { relaxed: true, relaxedReason: 'owner_in_mpim_proposed' };
+    }
+    if (slot) {
+      try {
+        const matched = ownerProposedSlot(
+          context.conversationHistory,
+          slot.startIso,
+          context.profile.user.name,
+          context.profile.user.timezone,
+        );
+        if (matched) {
+          return { relaxed: true, relaxedReason: 'owner_in_mpim_proposed' };
+        }
+      } catch (err) {
+        logger.warn('normalizeBookingRequest: owner-in-MPIM check threw', {
+          err: String(err).slice(0, 200),
+        });
       }
-    } catch (err) {
-      logger.warn('normalizeBookingRequest: owner-in-MPIM check threw', {
-        err: String(err).slice(0, 200),
-      });
     }
   }
 

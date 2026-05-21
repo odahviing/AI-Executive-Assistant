@@ -2415,14 +2415,22 @@ export class SchedulingSkill {
                 newCategoryFromShape = newCategory;
               }
 
+              // Attendee-shape change re-evaluation: intent='new_booking'
+              // (NOT 'move') and omit priorStartIso so resolveLocation
+              // doesn't take the preserve_existing path. With intent='move' +
+              // priorStartIso and an unchanged day-type, resolveLocation
+              // would short-circuit to preserve_existing and the location
+              // would never be re-stamped — which lost Teams URLs on
+              // home-day internal→has-external transitions. Existing-state
+              // fields stay populated for downstream callers but don't
+              // gate the verdict.
               const loc = resolveLocation({
                 profile: context.profile,
                 startIso: existing.startIso,
-                intent: 'move',  // re-eval for an existing event; preserve path is fine here too
+                intent: 'new_booking',
                 category: newCategory ?? oldCategory ?? undefined,
                 participantCount: newCount,
                 hasExternalAttendee: isExternalNow,
-                priorStartIso: existing.startIso,  // same start → preserve path eligible
                 existingLocation: existing.location,
                 existingIsOnline: existing.isOnline,
               });
