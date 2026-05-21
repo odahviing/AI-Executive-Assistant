@@ -832,6 +832,17 @@ Binding — how to pick the right approval_id:
           if (!probe) {
             return { error: 'not_found', reason: `Request ${requestId} not found.` };
           }
+          // Verify the row is actually an approval. If a colleague typed the
+          // approval_id of a coord_job (kind='coord') or other non-approval
+          // request, the resolver would close it under approval semantics
+          // and the owner would think the coord was still running. The
+          // colleague-path resolves only kind='approval' rows.
+          if (probe.kind !== 'approval') {
+            logger.warn('Colleague attempted resolve_approval on non-approval kind — blocked', {
+              userId: context.userId, requestId, kind: probe.kind,
+            });
+            return { error: 'not_permitted', reason: 'That id is not an approval — only approvals can be resolved through this tool.' };
+          }
           if (probe.state !== 'awaiting_colleague') {
             logger.warn('Colleague attempted resolve_approval on non-amending state — blocked', {
               userId: context.userId, requestId, state: probe.state,

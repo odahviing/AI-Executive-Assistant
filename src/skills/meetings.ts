@@ -551,17 +551,36 @@ ATTENDEES (v2.9.1):
         const missingEmails: string[] = [];
 
         for (const p of participantsIn) {
-          if (p.email && typeof p.email === 'string' && p.email.includes('@')) continue;
+          if (p.email && typeof p.email === 'string' && p.email.includes('@')) {
+            // Email already set, but slack_id might still be missing — try to
+            // fill it so the downstream demote at :595 doesn't wrongly move
+            // this person to just_invite when people_memory has the slack_id.
+            if (!p.slack_id && p.name) {
+              const matches = searchPeopleMemory(p.name);
+              const hit = matches.find(m => m.slack_id);
+              if (hit?.slack_id) p.slack_id = hit.slack_id;
+            }
+            continue;
+          }
           // Try slack_id lookup in people_memory
           if (p.slack_id) {
             const mem = getPersonMemory(p.slack_id);
             if (mem?.email) { p.email = mem.email; continue; }
           }
-          // Try fuzzy name lookup
+          // Try fuzzy name lookup. Backfill BOTH email AND slack_id so a
+          // participant who came in with `name` only doesn't get mis-classified
+          // as external at the demote step at :595 — pre-fix the lookup filled
+          // p.email but left p.slack_id empty, the demote moved them to
+          // just_invite, hasInternalPollableNonOwner returned false, and the
+          // tool refused with `no_internal_to_poll`.
           if (p.name) {
             const matches = searchPeopleMemory(p.name);
             const hit = matches.find(m => m.email && m.email.includes('@'));
-            if (hit) { p.email = hit.email; continue; }
+            if (hit) {
+              p.email = hit.email;
+              if (!p.slack_id && hit.slack_id) p.slack_id = hit.slack_id;
+              continue;
+            }
           }
           missingEmails.push(p.name ?? p.slack_id ?? '(unknown)');
         }
