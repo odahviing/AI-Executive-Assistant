@@ -2657,9 +2657,9 @@ export class SchedulingSkill {
         // chat and getting it wrong (window check, buffer, alignment). Run
         // findAlignedSlotForBlock with args.new_start as a HINT to compute
         // the correct slot; if no in-window slot fits, refuse with a clear
-        // pointer to lunch_bump approval. Owner-directed moves no longer ask
-        // permission for in-window adjustments — code computes the right
-        // answer once.
+        // pointer to policy_exception (deferred_action move_meeting). Owner-
+        // directed moves no longer ask permission for in-window adjustments
+        // — code computes the right answer once.
         let effectiveStart = args.new_start as string;
         let effectiveEnd   = args.new_end   as string;
         try {
@@ -2696,8 +2696,8 @@ export class SchedulingSkill {
               // conflict-check; for owner-explicit moves only the window
               // matters — owner overrides any conflict (it shows as a normal
               // calendar overlap she can sort separately, e.g. she said
-              // "I'll move Elan after"). Out-of-window still refuses, that's
-              // the lunch_bump approval territory.
+              // "I'll move a conflict after"). Out-of-window still refuses —
+              // that's policy_exception territory.
               const isOwnerPath = context.senderRole === 'owner' || context.isOwnerInGroup === true;
               if (isOwnerPath) {
                 const hintStartMs = newStartDt.toMillis();
@@ -2724,7 +2724,7 @@ export class SchedulingSkill {
                   return {
                     success: false,
                     error: 'out_of_window',
-                    message: `${args.new_start} is outside the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name}. To proceed anyway, retry with confirm_outside_window=true (owner override IS the approval — no separate lunch_bump needed).`,
+                    message: `${args.new_start} is outside the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name}. To proceed anyway, retry with confirm_outside_window=true (owner override IS the approval — no separate policy_exception needed).`,
                   };
                 }
                 // Skip the colleague-path findAlignedSlotForBlock branch below.
@@ -2755,7 +2755,7 @@ export class SchedulingSkill {
                 return {
                   success: false,
                   error: 'no_in_window_slot',
-                  message: `No room in the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name} after that hint. To move it OUTSIDE the window, raise create_approval(kind='lunch_bump') with the desired slot.`,
+                  message: `No room in the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name} after that hint. To move it OUTSIDE the window, raise create_approval(kind='policy_exception') with deferred_action={ tool: 'move_meeting', args: { meeting_id, new_start, confirm_outside_window: true } }.`,
                 };
               }
               const alignedDt = DateTime.fromMillis(alignedMs).setZone(timezone);
@@ -3025,7 +3025,7 @@ export class SchedulingSkill {
         // configured floating block). Try to slide the block elsewhere in its
         // window. If no in-window slot fits, leave it overlapping and ping
         // the owner (the bumping-out-of-window decision still belongs to him,
-        // via the existing lunch_bump approval flow).
+        // via the policy_exception approval flow).
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { rebalanceFloatingBlocksAfterMutation } = require('../../utils/rebalanceFloatingBlocks') as
@@ -3243,14 +3243,6 @@ export class SchedulingSkill {
 
       // v2.0.7 — legacy escalate_to_user / store_request / get_pending_requests /
       // resolve_request cases retired. See tool-declaration comment above.
-      // v2.6.4 — dead duplicate find_slack_user case removed. Live handler had
-      // moved to skills/meetings.ts long ago; that one in turn moved to
-      // SlackConnection (src/connections/slack/index.ts) in v2.6.4.
-
-      case 'coordinate_meeting': {
-        if (!context.app) return { error: 'App not available in context' };
-        return { error: 'Coordination feature initializing — please try again.' };
-      }
 
       default:
         return null; // not our tool

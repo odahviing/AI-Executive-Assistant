@@ -18,8 +18,6 @@ import { dispatchOutreachExpiry } from './outreachExpiry';
 import { dispatchOutreachDecision } from './outreachDecision';
 import { dispatchCoordNudge } from './coordNudge';
 import { dispatchCoordAbandon } from './coordAbandon';
-import { dispatchApprovalExpiry } from './approvalExpiry';
-import { dispatchApprovalReminder } from './approvalReminder';
 import { dispatchCalendarFix } from './calendarFix';
 import { dispatchSummaryActionFollowup } from './summaryActionFollowup';
 import { dispatchSocialDecay } from './socialDecay';
@@ -36,8 +34,6 @@ export const DISPATCHERS: Partial<Record<Task['type'], TaskDispatcher>> = {
   outreach_decision:        dispatchOutreachDecision,
   coord_nudge:              dispatchCoordNudge,
   coord_abandon:            dispatchCoordAbandon,
-  approval_expiry:          dispatchApprovalExpiry,
-  approval_reminder:        dispatchApprovalReminder,
   calendar_fix:             dispatchCalendarFix,
   summary_action_followup:  dispatchSummaryActionFollowup,
   social_decay:             dispatchSocialDecay,

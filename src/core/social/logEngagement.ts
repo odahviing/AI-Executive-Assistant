@@ -143,19 +143,3 @@ export function adjustRankFromColleagueResponse(params: {
   }
 }
 
-// ── Back-compat shims (orchestrator imports these names) ─────────────────────
-
-/** @deprecated v2.6.7 — use applyRaiseFeedbackSignal / applyOrganicMatchSignal. */
-export function logPersonInitiated(_params: any): void {
-  // No-op: in v2.6.7 the score deltas happen via the signal appliers above,
-  // called explicitly by the orchestrator. Kept as a name shim so existing
-  // call sites don't break during the orchestrator refactor.
-}
-
-/** @deprecated v2.6.7 — assistant raises are tracked via markSubjectRaised(). */
-export function logMaelleInitiated(_params: any): void {
-  // No-op for the same reason. The orchestrator now calls markSubjectRaised
-  // when emitting a coda, which writes last_assistant_initiated_at directly.
-}
-
-export const logOwnerInitiated = logPersonInitiated;

@@ -30,7 +30,6 @@ const APPROVAL_SUBKINDS = [
   'slot_pick',
   'duration_override',
   'policy_exception',
-  'lunch_bump',
   'unknown_person',
   'calendar_conflict',
   'freeform',
@@ -136,8 +135,7 @@ AUTHORITY MODEL:
 Kinds:
 - slot_pick: pick one of N offered meeting slots. Payload: { coord_job_id, subject, slots: [{iso, label}], participants_emails, duration_min }. Resolving calls through to the booking flow automatically.
 - duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
-- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. Once payload is complete, the handler auto-stamps \`payload.deferred_action = { tool: 'create_meeting', args: <those fields> }\` so the resolver books the meeting deterministically on owner approve (no separate booking turn needed). If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE creating the approval.
-- lunch_bump: move the owner's lunch block. Payload: { from, to, reason }.
+- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting, floating-block out-of-window move). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. Once payload is complete, the handler auto-stamps \`payload.deferred_action = { tool: 'create_meeting', args: <those fields> }\` (or \`book_floating_block\` / \`move_meeting\` for floating-block bumps) so the resolver executes the action deterministically on owner approve (no separate booking turn needed). If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE creating the approval.
 - unknown_person: book with someone we don't have full contact info for. Payload: { name, known_fields, missing_fields }.
 - calendar_conflict: the chosen slot went stale — offer fresh options. Payload: { coord_job_id, original_slot, conflict_reason, slots: [...] }.
 - freeform: catch-all yes/no/amend question. Payload: { question, context, subject }.
@@ -161,7 +159,6 @@ Behavior:
         input_schema: {
           type: 'object',
           properties: {
-            task_id: { type: 'string', description: 'Optional. Legacy field — kept for back-compat, no longer required.' },
             kind: { type: 'string', enum: [...APPROVAL_SUBKINDS] },
             payload: { type: 'object', description: 'Kind-specific payload (see tool description).' },
             skill_ref: { type: 'string', description: 'Optional. For coord-linked approvals, the coord_job_id.' },
@@ -913,8 +910,7 @@ Every decision the owner needs to make is a request of kind=approval. Do NOT fre
 WHEN TO CREATE AN APPROVAL:
 - You found the meeting slot, waiting on the owner to pick → kind=slot_pick
 - Someone requested a non-standard meeting length → kind=duration_override
-- A scheduling rule would be violated → kind=policy_exception
-- Someone asked to move the owner's lunch → kind=lunch_bump
+- A scheduling rule would be violated → kind=policy_exception (covers floating-block out-of-window moves too)
 - Booking with a person you don't have full contact info for → kind=unknown_person
 - The chosen slot just conflicted → kind=calendar_conflict (usually automatic)
 - Any other yes/no/"how about X" question → kind=freeform

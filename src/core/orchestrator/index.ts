@@ -1899,42 +1899,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     })();
   }
 
-  // v2.2.1 — Social Engine post-turn logging. Fires on owner OR colleague
-  // turns when a directive was produced. Writes engagement log row, bumps
-  // score delta on the topic, nudges category signals.
-  //
-  // For proactive-slot ('other' kind → continue/raise_new mode), the
-  // direction is maelle_initiated; logMaelleInitiated handles that. For
-  // social-kind turns (person initiated), logPersonInitiated handles it.
-  if (socialDirective.mode !== 'none' && socialClassification) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { logPersonInitiated, logMaelleInitiated } = require('../social/logEngagement') as typeof import('../social/logEngagement');
-      if (socialClassification.kind === 'social') {
-        logPersonInitiated({
-          ownerUserId: profile.user.slack_user_id,
-          personSlackId: turnPersonSlackId,
-          senderRole: turnSenderRole,
-          directive: socialDirective,
-          classification: socialClassification,
-          turnRef: threadTs ?? null,
-        });
-      } else if ((socialDirective.mode === 'continue' || socialDirective.mode === 'raise_new') && socialDirective.topic) {
-        // Proactive piggyback fired. Log as Maelle-initiated with neutral signal
-        // (the reply — if any — will be captured on the next turn via the
-        // in-conversation rank-check path, tracked separately).
-        logMaelleInitiated({
-          ownerUserId: profile.user.slack_user_id,
-          topic: socialDirective.topic,
-          signal: 'none',
-          turnRef: threadTs ?? null,
-        });
-      }
-    } catch (err) {
-      logger.warn('Social post-turn logger threw — non-fatal', { err: String(err).slice(0, 300) });
-    }
-  }
-
   // v2.2.1 — in-conversation rank adjustment for colleague social turns.
   // If this colleague replied socially AND Maelle initiated social with them
   // in the last 24h (piggyback or continuation), nudge engagement_rank based
@@ -2013,8 +1977,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { directiveForProactiveSlot } = require('../social/stateMachine') as typeof import('../social/stateMachine');
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { logMaelleInitiated } = require('../social/logEngagement') as typeof import('../social/logEngagement');
         const codaDirective = directiveForProactiveSlot({ personSlackId: turnPersonSlackId });
         if (codaDirective.mode === 'continue' || codaDirective.mode === 'raise_new') {
           // v2.2.4 (bug 1A) — pass conversation language so the coda matches.
@@ -2105,16 +2067,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
                 logger.warn('markSubjectRaised threw — continuing', { err: String(err).slice(0, 200) });
               }
             }
-            // Legacy log shim — function is a no-op in v2.6.7 but call sites stay.
-            if (codaDirective.topic) {
-              logMaelleInitiated({
-                ownerUserId: profile.user.slack_user_id,
-                topic: codaDirective.topic,
-                signal: 'none',
-                turnRef: threadTs ?? null,
-              });
-            }
-            // v2.3.2 (C1) — record the coda as a Maelle-initiated social moment
+            // Record the coda as a Maelle-initiated social moment
             // on the PERSON (not just the topic). Sets people_memory.last_initiated_at
             // so the 24h response window opens AND the rank-check below has a
             // reference. Discovery codas (raise_new without a known topic, like
@@ -2123,7 +2076,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             try {
               // eslint-disable-next-line @typescript-eslint/no-require-imports
               const { recordSocialMoment } = require('../../db') as typeof import('../../db');
-              recordSocialMoment(turnPersonSlackId, '', 'neutral', 'maelle');
+              recordSocialMoment(turnPersonSlackId, 'maelle');
             } catch (err) {
               logger.warn('coda recordSocialMoment threw — continuing', {
                 err: String(err).slice(0, 200),

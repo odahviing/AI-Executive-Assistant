@@ -28,7 +28,6 @@ type ApprovalSubkind =
   | 'slot_pick'
   | 'duration_override'
   | 'policy_exception'
-  | 'lunch_bump'
   | 'unknown_person'
   | 'calendar_conflict'
   | 'freeform';

@@ -78,7 +78,6 @@ interface CaptureDelta {
   working_hours?: string;
   communication_style?: string;
   response_speed?: 'immediate' | 'fast' | 'hours' | 'day' | 'slow' | 'unreliable';
-  engagement_level?: 'avoidant' | 'minimal' | 'neutral' | 'friendly' | 'interactive';
   role_summary?: string;
   reports_to?: string;
   collaboration_notes?: string;
@@ -102,7 +101,6 @@ What counts as a learnable fact (operational, changes how Maelle should interact
 - working_hours: when they're typically reachable, what days they work
 - communication_style: brief vs lengthy, direct vs warm, asks questions back vs not
 - response_speed: how quickly they replied (immediate/fast/hours/day/slow/unreliable)
-- engagement_level: avoidant / minimal / neutral / friendly / interactive — based on social warmth and reciprocity
 - role_summary: their role, what they focus on
 - reports_to: their manager's name
 - collaboration_notes: who they work with, what meetings they appear in
@@ -203,7 +201,6 @@ async function applyDelta(
   if (delta.working_hours) profileUpdates.working_hours = delta.working_hours;
   if (delta.communication_style) profileUpdates.communication_style = delta.communication_style;
   if (delta.response_speed) profileUpdates.response_speed = delta.response_speed;
-  if (delta.engagement_level) profileUpdates.engagement_level = delta.engagement_level;
   if (delta.role_summary) profileUpdates.role_summary = delta.role_summary;
   if (delta.reports_to) profileUpdates.reports_to = delta.reports_to;
   if (delta.collaboration_notes) profileUpdates.collaboration_notes = delta.collaboration_notes;
@@ -269,7 +266,6 @@ async function applyDelta(
   const commLines: string[] = [];
   if (delta.language_preference) commLines.push(`Prefers ${delta.language_preference}.`);
   if (delta.communication_style) commLines.push(delta.communication_style);
-  if (delta.engagement_level) commLines.push(`Engagement: ${delta.engagement_level}.`);
   if (delta.name_he) commLines.push(`Hebrew spelling: ${delta.name_he}.`);
   if (commLines.length > 0) {
     await writePersonSection({

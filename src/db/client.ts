@@ -553,7 +553,7 @@ function initSchema(db: Database.Database): void {
       updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
       task_id          TEXT NOT NULL,                     -- REQUIRED. Every approval is under a task.
       owner_user_id    TEXT NOT NULL,                     -- who must decide
-      kind             TEXT NOT NULL,                     -- slot_pick | duration_override | policy_exception | lunch_bump | unknown_person | calendar_conflict | freeform
+      kind             TEXT NOT NULL,                     -- slot_pick | duration_override | policy_exception | unknown_person | calendar_conflict | freeform
       status           TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected | expired | superseded | cancelled
       payload_json     TEXT NOT NULL DEFAULT '{}',        -- kind-specific input (e.g. slots list, override details)
       decision_json    TEXT,                              -- kind-specific output (what was decided)

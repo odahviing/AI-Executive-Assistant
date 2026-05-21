@@ -166,7 +166,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         }
       } else {
         // No in-window slot — leave overlapping. Owner can decide to bump
-        // outside the window via the existing lunch_bump approval flow.
+        // outside the window via the policy_exception approval flow.
         result.overlapping++;
         try {
           await shadowNotify(profile, {

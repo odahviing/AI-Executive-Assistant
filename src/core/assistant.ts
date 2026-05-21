@@ -98,7 +98,6 @@ Always call this before saying you haven't interacted with someone.`,
         description: `Update the structured profile for a person — call this when you've observed enough to reliably assess a dimension.
 
 You don't need explicit statements. Infer from behavior:
-- engagement_level: observe how they respond over multiple interactions. Always short and never reciprocates → "minimal". Proactively chats and asks questions back → "interactive".
 - communication_style: describe their message pattern. "Brief, direct, never asks questions back" or "Detailed, conversational, often elaborates".
 - language_preference: if they consistently reply in a different language from the one you used — save it here.
 - timezone: save as soon as you have a signal. If the person mentions a meeting in ET/PST/GMT/etc., or their email/calendar shows a US/EU/Asia location, save the IANA zone here (e.g. "America/New_York", "America/Los_Angeles", "Europe/London", "Australia/Sydney"). Don't overwrite a known timezone unless the new signal is clearly stronger.
@@ -120,11 +119,6 @@ Call this after interactions — not during them. It's a background update.`,
             colleague_name: {
               type: 'string',
               description: 'Display name of the person',
-            },
-            engagement_level: {
-              type: 'string',
-              enum: ['avoidant', 'minimal', 'neutral', 'friendly', 'interactive'],
-              description: 'avoidant=ignores/one-word always, minimal=rarely engages, neutral=normal, friendly=warm, interactive=proactively chats',
             },
             communication_style: {
               type: 'string',
@@ -732,7 +726,6 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
         }
 
         updatePersonProfile(slackId, {
-          engagement_level:    args.engagement_level    as PersonProfile['engagement_level'],
           communication_style: args.communication_style as string | undefined,
           language_preference: args.language_preference as string | undefined,
           working_hours:       args.working_hours       as string | undefined,

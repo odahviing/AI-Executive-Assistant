@@ -200,7 +200,7 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
           type: 'social_chat',
           summary: `${timelineTag} ${note}`,
         });
-        recordSocialMoment(slackId, topic, quality, initiatedBy, subject);
+        recordSocialMoment(slackId, initiatedBy);
 
         logger.info('Social note saved', { slackId, name, topic, subject, quality, initiatedBy });
         return { saved: true, name, topic, subject, quality };
@@ -264,7 +264,7 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
           type: 'social_chat',
           summary: `${timelineTag} ${note}`,
         });
-        recordSocialMoment(slackId, topic, quality, initiatedBy, subject);
+        recordSocialMoment(slackId, initiatedBy);
 
         logger.info('Self-note saved', {
           slackId,

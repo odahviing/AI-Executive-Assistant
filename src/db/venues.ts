@@ -182,10 +182,6 @@ export function updateVenue(id: string, patch: VenueUpdate): void {
   getDb().prepare(`UPDATE venues SET ${sets.join(', ')} WHERE id = @id`).run(params);
 }
 
-export function bumpVenueLastUsed(id: string): void {
-  getDb().prepare(`UPDATE venues SET last_used_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`).run(id);
-}
-
 /**
  * Find candidate venues for the owner by type and area, ranked.
  * Sort: rank=3 first, rank=2 next, NULL last; within a rank tier, most-recently-used first.

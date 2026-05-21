@@ -17,29 +17,6 @@ export type PersonSocialTopicQuality = 'neutral' | 'engaged' | 'good';
 export type SocialTopicQuality = PersonSocialTopicQuality;
 
 /**
- * Rich social topic record — tracks quality of engagement per topic
- * so Maelle knows what to revisit and what to explore further.
- *
- * Two levels of granularity:
- *   - `name`    → fixed enum category ("hobby", "family", "sport", ...).
- *                 Broad — used to catalog and group.
- *   - `subject` → optional free-form specific subject ("clair obscur game",
- *                 "marathon training", "daughter's bat mitzva").
- *                 Cooldown fires on (name + subject) pairs, so Maelle can't
- *                 re-ask about the same specific thing twice in 24h even
- *                 though the broader category ("hobby") is legal.
- *
- * Rows with the same `name` but different `subject` are separate topics.
- */
-export interface PersonSocialTopic {
-  name: string;                   // enum category: "family", "sport", "hobby", ...
-  subject?: string;               // free-form specific subject under that category
-  quality: PersonSocialTopicQuality; // neutral=brief answer, engaged=opened up, good=really connected
-  count: number;                  // how many times this topic came up
-  last_used: string;              // YYYY-MM-DD
-}
-
-/**
  * Structured person profile — built up over time from observed behavior and
  * explicit interactions. Each dimension is independent and updateable.
  */
@@ -134,7 +111,6 @@ export interface PersonMemory {
   last_seen?: string;
   last_social_at?: string;      // ISO datetime of last ANY social exchange (Maelle or person)
   last_initiated_at?: string;   // ISO datetime of last time MAELLE started social chat (24h gate)
-  social_topics: string;        // JSON: SocialTopic[]  — rich topic history
   created_at: string;
   updated_at: string;
 }
@@ -295,17 +271,6 @@ export function setPersonNameHe(slackId: string, nameHe: string): void {
   db.prepare(`
     UPDATE people_memory SET name_he = ?, updated_at = datetime('now') WHERE slack_id = ?
   `).run(nameHe, slackId);
-}
-
-/**
- * v2.2 — Social Engine retired the `people_memory.social_topics` column. This
- * function is kept as a no-op stub during the migration so legacy call sites
- * compile; all topic tracking has moved to the dedicated `social_topics_v2`
- * table managed by `src/db/socialTopics.ts` (owner-scoped) and future work
- * for per-colleague rapport.
- */
-export function parseSocialTopics(_json: string): PersonSocialTopic[] {
-  return [];
 }
 
 /**
@@ -488,16 +453,12 @@ export function appendPersonInteraction(slackId: string, interaction: Omit<Perso
  */
 export function recordSocialMoment(
   slackId: string,
-  _topic: string,
-  _quality: PersonSocialTopicQuality = 'neutral',
   initiatedBy: 'maelle' | 'person' = 'maelle',
-  _subject?: string,
 ): void {
-  // v2.2 — `social_topics` column retired; topic tracking for the owner now
-  // lives in `social_topics_v2` (owner-scoped Social Engine). For colleague
-  // rapport the cooldown-only behavior remains — we still update
-  // last_social_at and last_initiated_at so the 24h Maelle-initiation gate
-  // keeps working. Topic/quality/subject arguments accepted but ignored.
+  // Updates last_social_at + last_initiated_at on the person row so the 24h
+  // Maelle-initiation gate keeps working. Per-subject topic tracking lives
+  // in the dedicated social_subjects / social_topics tables (Social Engine);
+  // this helper covers the people_memory side only.
   const db = getDb();
   const row = db.prepare('SELECT slack_id FROM people_memory WHERE slack_id = ?').get(slackId) as any;
   if (!row) return;
@@ -618,7 +579,6 @@ export function formatPeopleMemoryForPrompt(
   const today = new Date().toISOString().split('T')[0];
   const lines = people.map(p => {
     const notes: PersonNote[] = JSON.parse(p.notes || '[]');
-    const socialTopics = parseSocialTopics(p.social_topics || '[]');
     const profile: PersonProfile = (() => {
       try { return JSON.parse(p.profile_json || '{}'); } catch { return {}; }
     })();
@@ -647,13 +607,7 @@ export function formatPeopleMemoryForPrompt(
           ? `last social: ${p.last_social_at.split('T')[0]}${p.last_social_at.startsWith(today) ? ' (today)' : ''}`
           : 'no social exchange yet')
       : '';
-    const topicStr = includeSocial && socialTopics.length
-      ? socialTopics.map(t => {
-          const label = t.subject ? `${t.name}:${t.subject}` : t.name;
-          return `${label}(${t.quality})`;
-        }).join(', ')
-      : '';
-    const socialPart = includeSocial ? `, ${socialLine}${topicStr ? `, topics: ${topicStr}` : ''}` : '';
+    const socialPart = includeSocial ? `, ${socialLine}` : '';
 
     // v2.6.5 — when state is missing but timezone is set, mark the tz line
     // explicitly so Sonnet doesn't infer a city from the IANA string.

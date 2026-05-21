@@ -225,7 +225,7 @@ When the owner explicitly says to book a floating block at a time OUTSIDE its pr
             },
             confirm_outside_window: {
               type: 'boolean',
-              description: 'OPTIONAL. Owner override flag — when true, the handler accepts a start_time that is OUTSIDE the block\'s preferred window AND/OR on a day the block is not normally scheduled. Use ONLY when the owner has explicitly said to book it there ("yes book lunch at 14:00, late is fine"). The override IS the approval — no separate lunch_bump approval needed. Buffer + conflict checks still enforced. Pair with start_time.',
+              description: 'OPTIONAL. Owner override flag — when true, the handler accepts a start_time that is OUTSIDE the block\'s preferred window AND/OR on a day the block is not normally scheduled. Use ONLY when the owner has explicitly said to book it there ("yes book lunch at 14:00, late is fine"). The override IS the approval — no separate policy_exception approval needed. Buffer + conflict checks still enforced. Pair with start_time.',
             },
             category: categoryNames.length > 0
               ? {
@@ -1653,7 +1653,7 @@ Status meanings:
             assistant_hint: slotResult.error === 'no_room' && busyDetails.length > 0
               ? `The window was fragmented by these busy blocks: ${busyDetails.map(b => `${b.start}-${b.end}`).join(', ')}. With ${bufferMinutes}-min buffers and quarter-hour alignment, no aligned ${block.duration_minutes}-min slot fit any gap. If the owner pushes back ("but I have time at HH:MM"), explain WHICH busy block conflicts — don't just say "tight".`
               : slotResult.error === 'anchor_outside_window'
-              ? `Tell the owner honestly: the requested position lands outside the block's preferred window (${block.preferred_start}-${block.preferred_end}). Don't fall back to create_meeting at the boundary time — that's the lunch_bump approval path if the owner explicitly wants to override.`
+              ? `Tell the owner honestly: the requested position lands outside the block's preferred window (${block.preferred_start}-${block.preferred_end}). Don't fall back to create_meeting at the boundary time — that's a policy_exception approval (deferred_action move_meeting with confirm_outside_window=true) if the owner explicitly wants to override.`
               : slotResult.error === 'anchor_conflicts_busy'
               ? `Tell the owner the abut slot conflicts with another meeting (named in the detail above). Either pick a different anchor or fall back to earliest position.`
               : undefined,

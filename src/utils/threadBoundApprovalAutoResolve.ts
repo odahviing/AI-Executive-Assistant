@@ -24,9 +24,7 @@
  * the flag; this module just answers the "can we shortcut?" question.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { config } from '../config';
 import type { UserProfile } from '../config/userProfile';
 import { getAwaitingOwnerRequests } from '../db/requests';
 import { resolveRequest, type ResolveContext } from '../core/requests/resolver';
