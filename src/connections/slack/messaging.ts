@@ -363,7 +363,7 @@ export async function setAssistantStatus(
       token: botToken,
       channel_id: params.channelId,
       thread_ts: params.threadTs,
-      status: 'is typing',
+      status: 'is typing...',
       loading_messages: [topText],
     });
   } catch (err) {
