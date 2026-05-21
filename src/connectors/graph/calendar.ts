@@ -857,24 +857,53 @@ export async function findAvailableSlots(params: {
       if (homeDayNames.includes(dayName)) return 'home';
       return 'other';
     };
+    // Union helper — merges overlapping/adjacent ranges so a relaxed
+    // override that widens the default window doesn't double-count free
+    // time when the widened window overlaps a native work_hours window.
+    const mergeRanges = (
+      ranges: Array<{ startMin: number; endMin: number }>,
+    ): Array<{ startMin: number; endMin: number }> => {
+      if (ranges.length === 0) return [];
+      const sorted = [...ranges].sort((a, b) => a.startMin - b.startMin);
+      const out: Array<{ startMin: number; endMin: number }> = [{ ...sorted[0] }];
+      for (let i = 1; i < sorted.length; i++) {
+        const last = out[out.length - 1];
+        const curr = sorted[i];
+        if (curr.startMin <= last.endMin) {
+          last.endMin = Math.max(last.endMin, curr.endMin);
+        } else {
+          out.push({ ...curr });
+        }
+      }
+      return out;
+    };
+
     // v2.8.1 — multi-window per-day work hours. Returns an ARRAY of ranges;
     // a slot is valid if it falls within any one of them. Splits on the
     // yaml `schedule.work_hours[dayName]` if defined; otherwise falls back
     // to legacy office_days/home_days hours.
     const getWorkHoursForDay = (dayName: string): Array<{ startMin: number; endMin: number }> => {
-      // `relaxed` mode and `extendedHours` flag widen to a single 07-22 window
-      // (or whatever defaultStart/End come from params). Bypasses multi-window
-      // so owner's "show me everything" really shows everything.
-      if (!profile || params.extendedHours || params.relaxed) {
-        return [{
-          startMin: defaultStartHour * 60 + defaultStartMin,
-          endMin: defaultEndHour * 60 + defaultEndMin,
-        }];
-      }
+      const widened = {
+        startMin: defaultStartHour * 60 + defaultStartMin,
+        endMin: defaultEndHour * 60 + defaultEndMin,
+      };
+      if (!profile) return [widened];
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getOwnerWorkHoursForDay } = require('../../utils/workHours') as
         typeof import('../../utils/workHours');
-      return getOwnerWorkHoursForDay(profile, dayName);
+      const native = getOwnerWorkHoursForDay(profile, dayName);
+      // `relaxed` / `extendedHours` override path: UNION the widened
+      // default window with the day's native work_hours instead of
+      // collapsing to the single widened window. Pre-fix the override
+      // dropped multi-window days entirely — on a night-shift Tuesday
+      // (`["09:00-15:30","21:30-23:59"]`) a 22:30 candidate was rejected
+      // as outside hours when relaxed=true, the opposite of override's
+      // intent. Union preserves split-shift windows + adds widened
+      // coverage outside them.
+      if (params.extendedHours || params.relaxed) {
+        return mergeRanges([widened, ...native]);
+      }
+      return native;
     };
 
     const minToStr = (m: number) =>
