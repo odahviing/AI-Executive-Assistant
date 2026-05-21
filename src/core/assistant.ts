@@ -348,7 +348,7 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
     // reports_to, collaboration_notes, communication_style, response_speed)
     // are silently dropped on the colleague-self path with a log line.
     if (!isOwner) {
-      const ownerOnlyTools = ['learn_preference', 'forget_preference', 'recall_preferences', 'update_person_memory', 'get_person_memory', 'finalize_coord_meeting'];
+      const ownerOnlyTools = ['manage_preference', 'update_person_memory', 'get_person_memory', 'finalize_coord_meeting'];
       if (ownerOnlyTools.includes(toolName)) {
         logger.warn('Colleague attempted owner-only tool', { tool: toolName, userId: context.userId });
         return { error: 'not_permitted', reason: 'This action can only be performed by the owner.' };
@@ -367,13 +367,17 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
       // Sonnet's response chain continues uninterrupted, the note lands on
       // the right person, and any "Sonnet picked the wrong target" drift
       // resolves transparently.
+      // IN-PLACE mutation: note_about_person's handler lives in SocialSkill,
+      // a separate skill the registry dispatches to AFTER AssistantSkill
+      // returns null. Reassigning the local `args` here would not propagate
+      // to SocialSkill — only mutating the shared object reference does.
       if (toolName === 'note_about_person') {
         const targetId = args.colleague_slack_id as string | undefined;
         if (targetId && targetId !== context.userId) {
           logger.info('note_about_person colleague-path — rewriting target to requester', {
             originalTarget: targetId, requesterId: context.userId,
           });
-          args = { ...args, colleague_slack_id: context.userId };
+          (args as Record<string, unknown>).colleague_slack_id = context.userId;
         }
       }
       // v2.9.3 — universal colleague-self rewrite (extends the v2.9.2
@@ -396,7 +400,7 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
           logger.info('log_interaction colleague-path — rewriting target to requester', {
             originalTarget: targetId, requesterId: context.userId,
           });
-          args = { ...args, slack_id: context.userId };
+          (args as Record<string, unknown>).slack_id = context.userId;
         }
       }
       if (toolName === 'confirm_gender') {
@@ -405,7 +409,7 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
           logger.info('confirm_gender colleague-path — rewriting target to requester', {
             originalTarget: targetId, requesterId: context.userId,
           });
-          args = { ...args, colleague_slack_id: context.userId };
+          (args as Record<string, unknown>).colleague_slack_id = context.userId;
         }
       }
       // v2.5.2 — update_person_profile: field allowlist still applies on
@@ -418,7 +422,7 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
           logger.info('update_person_profile colleague-path — rewriting target to requester', {
             originalTarget: targetId, requesterId: context.userId,
           });
-          args = { ...args, colleague_slack_id: context.userId };
+          (args as Record<string, unknown>).colleague_slack_id = context.userId;
         }
         const COLLEAGUE_SELF_WRITABLE_FIELDS = new Set([
           'colleague_slack_id', 'colleague_name',
