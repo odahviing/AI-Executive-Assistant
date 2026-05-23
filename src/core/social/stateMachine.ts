@@ -20,7 +20,6 @@
  */
 
 import type { OwnerIntentClassification } from './classifyOwnerIntent';
-import type { ReconcileResult } from './reconcileTopic';
 import {
   countAssistantInitiationsTodayForPerson,
   getActiveSubjectsForPerson,
@@ -73,9 +72,8 @@ function withLegacyShape(d: Omit<SocialDirective, 'topicId' | 'topicLabel' | 'to
 
 export function directiveForPersonSocial(params: {
   classification: OwnerIntentClassification;
-  reconciled: ReconcileResult;
 }): LegacySocialDirectiveShape {
-  const { classification, reconciled } = params;
+  const { classification } = params;
   const social = classification.social;
   if (!social) return withLegacyShape(noDirectiveRaw());
 
@@ -83,30 +81,21 @@ export function directiveForPersonSocial(params: {
     return withLegacyShape(noDirectiveRaw());
   }
 
-  const subject = reconciled.subject;
-  const firstMention = reconciled.action === 'created_under_category';
-
-  if (reconciled.action === 'revived_dormant') {
-    return withLegacyShape({
-      mode: 'revive_ack',
-      subjectId: subject?.id ?? null,
-      subjectLabel: subject?.label ?? null,
-      categoryLabel: reconciled.category?.label ?? null,
-      toneCue: 'acknowledge the return; pick up where it left off',
-      subject,
-      firstMention: false,
-    });
-  }
+  // v3.0 follow-up — per-turn directive no longer knows the matched subject
+  // (subject decisions moved to end-of-chat). Directive uses category + tone
+  // shape only; subject-specific modes (revive_ack, firstMention flag) are
+  // gone. End-of-chat reconciliation handles subject state separately.
+  const categoryLabel = social.category_hint ?? null;
 
   if (social.direction === 'share' && social.sentiment === 'positive') {
     return withLegacyShape({
       mode: 'celebrate',
-      subjectId: subject?.id ?? null,
-      subjectLabel: subject?.label ?? reconciled.category?.label ?? null,
-      categoryLabel: reconciled.category?.label ?? null,
+      subjectId: null,
+      subjectLabel: categoryLabel,
+      categoryLabel,
       toneCue: 'match the energy; a real congrats, not a pivot to tasks',
-      subject,
-      firstMention,
+      subject: null,
+      firstMention: false,
     });
   }
 
@@ -121,12 +110,12 @@ export function directiveForPersonSocial(params: {
 
   return withLegacyShape({
     mode: 'engage',
-    subjectId: subject?.id ?? null,
-    subjectLabel: subject?.label ?? reconciled.category?.label ?? null,
-    categoryLabel: reconciled.category?.label ?? null,
+    subjectId: null,
+    subjectLabel: categoryLabel,
+    categoryLabel,
     toneCue,
-    subject,
-    firstMention,
+    subject: null,
+    firstMention: false,
   });
 }
 
@@ -269,14 +258,13 @@ export function noDirective(): SocialDirective {
 export function chooseSocialDirective(params: {
   personSlackId: string;
   classification: OwnerIntentClassification;
-  reconciled: ReconcileResult;
   /** Owner timezone — threaded through to the proactive-slot daily gate. */
   ownerTimezone?: string;
 }): LegacySocialDirectiveShape {
   const { classification, personSlackId, ownerTimezone } = params;
 
   if (classification.kind === 'task') return noDirective();
-  if (classification.kind === 'social') return directiveForPersonSocial(params);
+  if (classification.kind === 'social') return directiveForPersonSocial({ classification });
   if (classification.conversation_state === 'closing') return noDirective();
   return directiveForProactiveSlot({ personSlackId, ownerTimezone });
 }

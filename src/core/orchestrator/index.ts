@@ -4,7 +4,6 @@ import { config } from '../../config';
 import { buildSystemPromptParts } from './systemPrompt';
 import { classifyOwnerIntent, type OwnerIntentClassification } from '../social/classifyOwnerIntent';
 import { classifyToolScope } from '../social/classifyToolScope';
-import { reconcileTopic } from '../social/reconcileTopic';
 import { chooseSocialDirective, formatDirectiveForPromptBlock, type SocialDirective, noDirective } from '../social/stateMachine';
 import { generateSocialCoda } from '../social/generateCoda';
 import { getSkillTools, executeSkillTool } from '../../skills/registry';
@@ -423,57 +422,17 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         senderRole: turnSenderRole,
         senderName: input.senderName,
         recentContext: recentContext || undefined,
-        // v2.6.7 — classifier scopes its subject-merge decision to this person.
-        personSlackId: turnPersonSlackId,
       });
 
-      // v2.6.7 — apply engagement signal BEFORE reconciling, so the
-      // raise-feedback path reads the still-pending `last_assistant_initiated_at`
-      // marker. Reconcile/persist comes after; signal is about the PRIOR turn's
-      // raised subject vs THIS message.
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { applyRaiseFeedbackSignal, applyOrganicMatchSignal } = require('../social/logEngagement') as
-          typeof import('../social/logEngagement');
-        const raiseResult = applyRaiseFeedbackSignal({
-          ownerUserId: profile.user.slack_user_id,
-          personSlackId: turnPersonSlackId,
-          classification: socialClassification,
-        });
-        // Organic-match path: person matched an existing subject AND it wasn't
-        // the raised one (raised path already handled). +1 organic engagement.
-        const matchedSubjectId = socialClassification.social?.subject_match?.existing_subject_id;
-        if (
-          matchedSubjectId
-          && socialClassification.social?.subject_match?.action === 'match_existing'
-          && (turnSenderRole === 'owner' || turnSenderRole === 'colleague')
-          && (raiseResult.subject?.id !== matchedSubjectId || raiseResult.delta === 0)
-        ) {
-          applyOrganicMatchSignal({
-            ownerUserId: profile.user.slack_user_id,
-            personSlackId: turnPersonSlackId,
-            matchedSubjectId,
-            initiator: turnSenderRole,
-            sentiment: socialClassification.social.sentiment ?? 'neutral',
-          });
-        }
-      } catch (err) {
-        logger.warn('Engagement signal apply threw — non-fatal', { err: String(err).slice(0, 200) });
-      }
-
-      const reconciled = reconcileTopic({
-        ownerUserId: profile.user.slack_user_id,
-        personSlackId: turnPersonSlackId,
-        categoryHint: socialClassification.social?.category_hint,
-        subjectMatch: socialClassification.social?.subject_match,
-        topicLabel: socialClassification.social?.topic_label,
-        initiator: turnSenderRole,
-        sentiment: socialClassification.social?.sentiment,
-      });
+      // v3.0 follow-up — subject decisions + engagement signals + topic-beat
+      // recording moved to end-of-chat (`runSubjectReconciliation` in
+      // src/memory/capturePass.ts). Per-turn classifier still produces
+      // kind/category/sentiment/direction/topic_label which drive the
+      // social directive (engage/celebrate/etc.) for THIS turn — no
+      // subject-row writes happen per turn anymore.
       socialDirective = chooseSocialDirective({
         personSlackId: turnPersonSlackId,
         classification: socialClassification,
-        reconciled,
         ownerTimezone: profile.user.timezone,
       });
     } catch (err) {

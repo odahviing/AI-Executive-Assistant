@@ -53,6 +53,14 @@ import { selfSlackId } from '../core/assistantSelf';
 import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import logger from '../utils/logger';
+import {
+  FIXED_CATEGORIES,
+  getActiveSubjectsForPerson,
+  getCategoryByLabel,
+  getRecentTopicBeats,
+  createSubject,
+  recordTopicBeat,
+} from '../db/socialSubjects';
 
 const SILENCE_MINUTES = 30;
 const MAX_THREADS_PER_TICK = 20;
@@ -356,6 +364,15 @@ export async function runCapturePass(app: App, profile: UserProfile): Promise<vo
         // "do the same we did in the memory of persons / tell haiku to keep
         // as much as he can about maelle, but no duplicates."
         await runSelfCapture(profile, anthropic, row.thread_ts, ownerName);
+        // v3.0 follow-up — subject reconciliation for OWNER's own subjects.
+        // The owner's own gaming/movies/family/etc. social subjects live in
+        // social_subjects keyed on person_slack_id = ownerSlackId. End-of-chat
+        // Haiku decides match/create with full context. Replaces the per-turn
+        // createSubject path that produced the 2026-05-22 "בידוק" duplicate.
+        await runSubjectReconciliation(
+          profile, anthropic, row.thread_ts,
+          ownerSlackId, ownerName, ownerName,
+        );
         markThreadCaptured(row.thread_ts);
         continue;
       }
@@ -414,7 +431,17 @@ export async function runCapturePass(app: App, profile: UserProfile): Promise<vo
         deltaKeys: Object.keys(delta),
       });
 
-      // 6. Stamp captured_at.
+      // 6. v3.0 follow-up — subject reconciliation for THE COLLEAGUE's
+      // own subjects. Colleagues talking with Maelle about their gaming /
+      // movies / family / etc. → end-of-chat Haiku decides match/create
+      // with full context. Same protection as the owner-DM path: ID-based
+      // matching prevents label-drift duplicates.
+      await runSubjectReconciliation(
+        profile, anthropic, row.thread_ts,
+        colleagueId, personRow.name, ownerName,
+      );
+
+      // 7. Stamp captured_at.
       markThreadCaptured(row.thread_ts);
     } catch (err) {
       logger.warn('capturePass: per-thread error, marking captured to avoid retry storm', {
@@ -576,6 +603,366 @@ async function runSelfCapture(
     });
   } catch (err) {
     logger.warn('runSelfCapture: threw — non-fatal', {
+      threadTs, err: String(err).slice(0, 200),
+    });
+  }
+}
+
+// ── Subject reconciliation (end-of-chat) ─────────────────────────────────────
+//
+// v3.0 follow-up — full LLM-driven subject decisions, deferred from per-turn
+// to end-of-chat. Per-turn classifier (`classifyOwnerIntent`) still detects
+// kind/category/sentiment/direction per message and fires engagement signals
+// against existing matched subject IDs, but no longer CREATES rows or
+// records topic beats. Those writes happen here, where Haiku sees:
+//   - the FULL conversation transcript
+//   - the person's complete active-subjects list (id, label, score,
+//     last_touched, recent topic_beats) — rich context, not just labels
+//   - the 3-level model (category > subject > topic) + the 30 fixed categories
+//   - 3 example shapes covering different category granularities
+//
+// Haiku returns ID-based decisions: `{ action: 'match', subject_id }` (must be
+// an ID from the shown list) OR `{ action: 'create', category, label }` (must
+// be one of the 30 categories). Each decision carries the topic_beats touched
+// in this chat. Code applies the writes deterministically.
+//
+// Closes the 2026-05-22 "בידוק" duplicate bug: label-drift can't fork rows
+// anymore because matching is by ID, not by label string. Same as the
+// principle in the SELF capture path — judgment-class decisions go to the
+// LLM with rich context; safety nets verify the LLM's output structurally
+// (IDs exist, categories are in the fixed list).
+
+const SUBJECT_RECONCILE_PROMPT_TEMPLATE = (categoryListCsv: string) => `You are reconciling social-subject memory for an AI executive assistant after a chat ended.
+
+## The 3-level memory model
+
+We track social interactions in three levels:
+
+  Level 1 — CATEGORY: one of 30 fixed labels (you cannot create new categories). Pick from:
+    ${categoryListCsv}
+
+  Level 2 — SUBJECT: the recurring interest under ONE category. Granularity depends on the domain:
+    - Long-running investment (a game played for weeks, a kid's school year, a job change, a side project, a relationship): each ONE is its own subject.
+    - Recurring discovery activity (movie recommendations, restaurants to try, podcasts in rotation, news topics): ONE umbrella subject for the activity; individual items track as topic-beats under it.
+    When in doubt, ask: "Will this same subject be touched repeatedly in future conversations?" — yes → subject, no → topic-beat under an umbrella.
+
+  Level 3 — TOPIC BEAT: the specific moment under a subject. Short labels (2-5 words). A beat ALWAYS belongs to ONE subject under ONE category.
+
+## Pairing invariant — CRITICAL
+
+A chat can touch MULTIPLE subjects across MULTIPLE categories. Each decision in your output is a SELF-CONTAINED unit:
+  { category + subject + this subject's topic_beats }
+
+NEVER put a beat from one category under a subject of another. If the chat covered both gaming (Clair Obscur progress) and family (kid's school project), output TWO decisions — one with category=gaming and the Clair-Obscur beats, one with category=family and the school beats. Beats stay with THEIR subject's category.
+
+## Example shapes (English-only, illustrative)
+
+  gaming:
+    Subject: "Clair Obscur Expedition 33"   (deep, multi-week investment — one subject for the whole game)
+      Topics under it: "destroyed the canvas ending", "Maelle Alice arc reveal", "act 1 inspiration moment", "party build choices"
+
+  movies:
+    Subject: "Netflix movie recommendations"   (recurring discovery — umbrella over many individual films)
+      Topics under it: "8+ rating filter", "Inspection movie", "weekend movie shortlist", "Heat watched"
+
+  family:
+    Subject: "Ophir's elementary school"   (ongoing life track — one subject for the whole school year)
+      Topics under it: "first grade adjustment", "sick last Monday", "school project due Friday"
+
+## Multi-subject example (one chat, two categories)
+
+Chat covers "wrapped up Clair Obscur last night, ending was wild" AND "Ophir had a rough school day". Output:
+
+  [
+    { category: "gaming",
+      action: "match", subject_id: "subj_abc123",  // existing Clair Obscur row
+      sentiment: "positive",
+      topic_beats: ["ending wrap-up", "wild ending reaction"] },
+    { category: "family",
+      action: "match", subject_id: "subj_def456",  // existing Ophir school row
+      sentiment: "negative",
+      topic_beats: ["rough school day"] }
+  ]
+
+Two decisions, two categories, beats stay properly scoped. Never collapse cross-category content into one decision.
+
+## Your output
+
+For each subject this chat touched:
+  - category: ALWAYS REQUIRED (one of the 30). For action="match", echo the category of the matched row. For action="create", pick the right one of the 30.
+  - action: "match" or "create"
+  - subject_id: ONLY when action="match" — must be EXACTLY one of the IDs shown in the active list (no inventing, no modifying)
+  - subject_label: ONLY when action="create" — short umbrella label (2-6 words ideally)
+  - sentiment: "positive" | "negative" | "neutral" — how the person feels about THIS subject in this chat
+  - topic_beats: short labels (2-5 words each) for the beats THIS subject was touched in this chat
+
+You may output zero decisions (if the chat had no social content), one decision (typical), or several (if the chat spanned multiple subjects across one or more categories).
+
+## Important rules
+
+  - When matching, subject_id MUST be exactly one of the IDs shown. Hallucinated IDs are dropped (we'd rather lose a signal than create a wrong-row write).
+  - When creating, category MUST be one of the 30.
+  - Granularity is judgment-class — use the shapes above as patterns.
+  - Topic-beats are always more specific than the subject. Under "Clair Obscur Expedition 33", beats are individual moments; never put the game title itself as a beat.
+  - DON'T duplicate. If an active subject already covers this content, match it — don't create a near-duplicate with slightly different wording.
+
+Output JSON only. No prose, no markdown fences.`;
+
+interface SubjectDecision {
+  category: string;           // ALWAYS — one of 30
+  action: 'match' | 'create';
+  subject_id?: string;        // when match
+  subject_label?: string;     // when create
+  sentiment: 'positive' | 'negative' | 'neutral';
+  topic_beats: string[];
+}
+
+interface ReconcileOutput {
+  decisions: SubjectDecision[];
+}
+
+function parseReconcileOutput(raw: string): ReconcileOutput | null {
+  try {
+    const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```\s*$/i, '');
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    const parsed = JSON.parse(match[0]) as { decisions?: unknown };
+    if (!Array.isArray(parsed.decisions)) return null;
+    const decisions: SubjectDecision[] = [];
+    for (const raw of parsed.decisions) {
+      if (!raw || typeof raw !== 'object') continue;
+      const r = raw as Record<string, unknown>;
+      const action = r.action;
+      if (action !== 'match' && action !== 'create') continue;
+      const category = typeof r.category === 'string' ? r.category.toLowerCase().trim() : '';
+      if (!category) continue;  // category is structurally required — drop the decision rather than guess
+      const sentimentRaw = typeof r.sentiment === 'string' ? r.sentiment.toLowerCase().trim() : 'neutral';
+      const sentiment: 'positive' | 'negative' | 'neutral' =
+        sentimentRaw === 'positive' || sentimentRaw === 'negative' ? sentimentRaw : 'neutral';
+      const topic_beats = Array.isArray(r.topic_beats)
+        ? r.topic_beats.filter((b: unknown): b is string => typeof b === 'string' && b.trim().length > 0)
+        : [];
+      decisions.push({
+        category,
+        action,
+        subject_id: typeof r.subject_id === 'string' ? r.subject_id : undefined,
+        subject_label: typeof r.subject_label === 'string' ? r.subject_label.trim() : undefined,
+        sentiment,
+        topic_beats,
+      });
+    }
+    return { decisions };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * End-of-chat subject reconciliation. Loads active subjects for `personSlackId`,
+ * runs Haiku with the 3-level model + rich context, applies match/create
+ * decisions + records topic beats. Both owner-DM and colleague-DM paths call
+ * this — `personSlackId` scopes which person's subjects are reconciled.
+ *
+ * Fire-and-forget: any error caught + logged, never propagates.
+ */
+async function runSubjectReconciliation(
+  profile: UserProfile,
+  anthropic: ReturnType<typeof getAnthropicClient>,
+  threadTs: string,
+  personSlackId: string,
+  personName: string,
+  ownerName: string,
+): Promise<void> {
+  try {
+    // 1. Active subjects with rich context (recent topic beats per subject)
+    const subjects = getActiveSubjectsForPerson(personSlackId);
+
+    // 2. Chat transcript
+    const messages = getConversationHistory(threadTs);
+    if (messages.length === 0) return;
+    const transcript = chatToTranscript(messages, personName, ownerName);
+
+    // 3. Build the active-subjects block with beats
+    const activeSubjectsBlock = (() => {
+      if (subjects.length === 0) return '(no active subjects on file yet)';
+      const lines: string[] = [];
+      for (const s of subjects) {
+        const beats = getRecentTopicBeats(s.id, 5);
+        const beatsStr = beats.length > 0
+          ? `\n      recent topics: ${beats.map(b => `"${b.label}"`).join(', ')}`
+          : '';
+        const cat = s.category_id.replace(/^cat_global_/, '');
+        lines.push(`    [${s.id}] "${s.label}" — category=${cat}, score=${s.engagement_score}, last touched ${s.last_touched_at}${beatsStr}`);
+      }
+      return lines.join('\n');
+    })();
+
+    const ownerUserId = profile.user.slack_user_id;
+    const systemPrompt = SUBJECT_RECONCILE_PROMPT_TEMPLATE(FIXED_CATEGORIES.join(', '));
+    const userMsg = [
+      `Person being reconciled: ${personName}`,
+      '',
+      'ACTIVE SUBJECTS for this person:',
+      activeSubjectsBlock,
+      '',
+      'CHAT TRANSCRIPT (just ended):',
+      '```',
+      transcript,
+      '```',
+      '',
+      'Output JSON only: { "decisions": [{...}] } — empty array if no social subjects were touched.',
+    ].join('\n');
+
+    const resp = await anthropic.messages.create({
+      model: HAIKU_MODEL,
+      max_tokens: 1500,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMsg }],
+    });
+    const text = resp.content
+      .filter(b => b.type === 'text')
+      .map(b => (b as Anthropic.TextBlock).text)
+      .join('')
+      .trim();
+    const output = parseReconcileOutput(text);
+
+    if (!output || output.decisions.length === 0) {
+      logger.info('runSubjectReconciliation: no subject decisions', { threadTs, personSlackId });
+      return;
+    }
+
+    // 4. Apply decisions
+    // Build id → category map for the category-pairing integrity check.
+    const subjectCategoryById = new Map<string, string>();
+    for (const s of subjects) {
+      subjectCategoryById.set(s.id, s.category_id.replace(/^cat_global_/, ''));
+    }
+    let matchedCount = 0;
+    let createdCount = 0;
+    let beatsRecorded = 0;
+    const matchedSubjectIds: Array<{ id: string; sentiment: 'positive'|'negative'|'neutral' }> = [];
+
+    for (const d of output.decisions) {
+      let subjectId: string | null = null;
+
+      if (d.action === 'match') {
+        // ID-based safety: Haiku must return an ID from the shown list.
+        // Hallucinated IDs get logged + skipped (don't silently create as
+        // fallback — that would re-introduce the drift-creates-duplicates
+        // pattern this whole pass exists to prevent).
+        if (!d.subject_id || !subjectCategoryById.has(d.subject_id)) {
+          logger.warn('runSubjectReconciliation: hallucinated subject_id, skipping', {
+            threadTs, claimed: d.subject_id, activeCount: subjects.length,
+          });
+          continue;
+        }
+        // Category-pairing integrity: the category Haiku declared must
+        // match the category of the matched subject. If they disagree,
+        // Haiku scrambled the pairing — drop the decision (the beats
+        // belong to a different category than this subject row).
+        const actualCategory = subjectCategoryById.get(d.subject_id)!;
+        if (d.category !== actualCategory) {
+          logger.warn('runSubjectReconciliation: category/subject mismatch — dropping decision', {
+            threadTs, claimedCategory: d.category, actualCategory, subject_id: d.subject_id,
+          });
+          continue;
+        }
+        subjectId = d.subject_id;
+        matchedCount++;
+        matchedSubjectIds.push({ id: subjectId, sentiment: d.sentiment });
+      } else if (d.action === 'create') {
+        if (!d.subject_label) {
+          logger.warn('runSubjectReconciliation: create missing subject_label, skipping', {
+            threadTs, decision: d,
+          });
+          continue;
+        }
+        const category = getCategoryByLabel(d.category);
+        if (!category) {
+          logger.warn('runSubjectReconciliation: category not in fixed set, skipping', {
+            threadTs, claimed: d.category,
+          });
+          continue;
+        }
+        const created = createSubject({
+          ownerUserId,
+          personSlackId,
+          categoryId: category.id,
+          label: d.subject_label,
+          createdBy: 'owner',
+        });
+        subjectId = created.id;
+        createdCount++;
+        logger.info('runSubjectReconciliation: created subject', {
+          threadTs, personSlackId, subjectId, category: category.label, label: d.subject_label,
+        });
+      }
+
+      // Record topic beats under whichever subject (matched or created),
+      // tagged with this decision's sentiment so the engagement signals
+      // downstream see per-subject sentiment, not a turn-level average.
+      if (subjectId && d.topic_beats.length > 0) {
+        for (const beat of d.topic_beats) {
+          try {
+            recordTopicBeat({
+              subjectId,
+              label: beat,
+              sentiment: d.sentiment,
+              createdBy: 'owner',
+            });
+            beatsRecorded++;
+          } catch (err) {
+            logger.warn('runSubjectReconciliation: recordTopicBeat threw', {
+              subjectId, beat, err: String(err).slice(0, 200),
+            });
+          }
+        }
+      }
+    }
+
+    // 5. Engagement signals — applied at end-of-chat instead of per-turn.
+    // For each MATCHED subject this chat touched:
+    //   - If it's the recently-raised subject (Maelle initiated last) → fire
+    //     raise-feedback signal (positive/negative/neutral per the decision's sentiment).
+    //   - Otherwise → fire organic-match signal (+1, capped at 5).
+    // Created subjects start at the createSubject default score; no extra
+    // signal needed.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { applyRaiseFeedbackForMatches, applyOrganicMatchSignal } = require('../core/social/logEngagement') as
+        typeof import('../core/social/logEngagement');
+      applyRaiseFeedbackForMatches({
+        ownerUserId,
+        personSlackId,
+        matchedSubjects: matchedSubjectIds,
+      });
+      // Organic match — fire per matched subject that ISN'T the raised one
+      // (raise-feedback already handled the raised case above).
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getMostRecentRaisedSubject } = require('../db/socialSubjects') as
+        typeof import('../db/socialSubjects');
+      const raised = getMostRecentRaisedSubject(ownerUserId, personSlackId);
+      for (const m of matchedSubjectIds) {
+        if (raised && m.id === raised.id) continue;  // already covered by raise-feedback
+        applyOrganicMatchSignal({
+          ownerUserId,
+          personSlackId,
+          matchedSubjectId: m.id,
+          initiator: 'owner',  // end-of-chat applies on behalf of the person; signal is "spontaneous match"
+          sentiment: m.sentiment,
+        });
+      }
+    } catch (err) {
+      logger.warn('runSubjectReconciliation: engagement signals threw — non-fatal', {
+        threadTs, err: String(err).slice(0, 200),
+      });
+    }
+
+    logger.info('runSubjectReconciliation: complete', {
+      threadTs, personSlackId, matchedCount, createdCount, beatsRecorded,
+    });
+  } catch (err) {
+    logger.warn('runSubjectReconciliation: threw — non-fatal', {
       threadTs, err: String(err).slice(0, 200),
     });
   }

@@ -30,69 +30,54 @@ import {
   type SocialSubject,
 } from '../../db/socialSubjects';
 import { adjustEngagementRank } from '../../db/engagementRank';
-import type { OwnerIntentClassification } from './classifyOwnerIntent';
 import logger from '../../utils/logger';
 
 const RANK_RESPONSE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const BRIEF_REPLY_CHAR_LIMIT = 30;
 
 /**
- * Apply the engagement signal for an inbound message that arrived AFTER the
- * assistant raised a subject. Reads the most-recently-raised subject for this
- * person and decides +1 / −1 / no-op based on whether the inbound matched.
+ * v3.0 follow-up — raise-feedback signal applied at end-of-chat (not per-turn).
  *
- * Returns the subject that was judged + the delta applied (for logging).
+ * Inputs: the matched subjects from this chat (subject_id + per-decision
+ * sentiment). Looks at the most-recently-raised subject for this person; if
+ * any matched subject equals the raised one, apply the appropriate score
+ * delta (positive sentiment → +1, negative → −1) and clear the raise marker.
+ * If the raised subject was NOT touched in this chat (pivot path), leave
+ * the marker alone — weekly decay handles aging.
+ *
+ * No classification dependency anymore (per-turn `subject_match` was
+ * stripped in v3.0 follow-up; subject decisions only happen at end-of-chat).
  */
-export function applyRaiseFeedbackSignal(params: {
+export function applyRaiseFeedbackForMatches(params: {
   ownerUserId: string;
   personSlackId: string;
-  classification: OwnerIntentClassification;
+  matchedSubjects: Array<{ id: string; sentiment: 'positive' | 'negative' | 'neutral' }>;
 }): { subject: SocialSubject | null; delta: number; reason: string } {
-  const { ownerUserId, personSlackId, classification } = params;
+  const { ownerUserId, personSlackId, matchedSubjects } = params;
 
   const raised = getMostRecentRaisedSubject(ownerUserId, personSlackId);
   if (!raised) return { subject: null, delta: 0, reason: 'no_raised_subject' };
 
-  const matchedSubjectId = classification.social?.subject_match?.existing_subject_id ?? null;
-  const sentiment = classification.social?.sentiment ?? 'neutral';
-
-  let delta = 0;
-  let reason = '';
-
-  if (matchedSubjectId === raised.id) {
-    if (sentiment === 'negative') {
-      delta = -1;
-      reason = 'raised_match_negative';
-    } else {
-      delta = +1;
-      reason = 'raised_match_engaged';
-    }
-  } else {
-    // Pivot path — owner/colleague moved on without addressing the raised
-    // subject this turn. Owner direction (option C): DO NOT apply a -1.
-    // The prior implementation's blanket -1-on-pivot misclassified
-    // legitimate task interruptions ("book the gym at 5pm" after yesterday's
-    // marathon-training raise) as social rejection, dragging the topic
-    // score down and clearing the raise so a delayed answer counted as
-    // organic instead of resolving the raise.
-    //
-    // New behavior: no score change AND no marker clear. The raise stays
-    // alive — if a later inbound matches the raised subject, it still
-    // produces +1. Raises age naturally via the weekly social_decay
-    // dispatcher (−1/week to active subjects untouched 7+ days).
-    delta = 0;
-    reason = `raised_pivot_no_signal_${classification.kind}`;
+  const raisedMatch = matchedSubjects.find(m => m.id === raised.id);
+  if (!raisedMatch) {
+    // Pivot path — chat didn't touch the raised subject. Per owner direction
+    // (v2.6.7 option C): no score change, no marker clear. The raise stays
+    // alive — if a later chat matches it, the +1 still fires. Raises age
+    // naturally via the weekly social_decay dispatcher.
+    logger.info('Engagement signal — raised pivot (no signal applied)', {
+      raisedId: raised.id, raisedLabel: raised.label,
+    });
+    return { subject: raised, delta: 0, reason: 'raised_pivot_no_signal' };
   }
 
-  let updated: SocialSubject | null = null;
-  if (delta !== 0) {
-    updated = applyScoreDelta(raised.id, delta, 'assistant');
-    if (sentiment === 'positive') incrementCategorySignals(raised.category_id, 'positive');
-    if (sentiment === 'negative') incrementCategorySignals(raised.category_id, 'negative');
-    // Clear the raise marker only when a real signal was applied. Pivot
-    // path leaves it so a delayed response still counts.
-    clearSubjectRaisedMarker(raised.id);
-  }
+  const sentiment = raisedMatch.sentiment;
+  const delta = sentiment === 'negative' ? -1 : +1;
+  const reason = sentiment === 'negative' ? 'raised_match_negative' : 'raised_match_engaged';
+
+  const updated = applyScoreDelta(raised.id, delta, 'assistant');
+  if (sentiment === 'positive') incrementCategorySignals(raised.category_id, 'positive');
+  if (sentiment === 'negative') incrementCategorySignals(raised.category_id, 'negative');
+  clearSubjectRaisedMarker(raised.id);
 
   logger.info('Engagement signal applied (raised)', {
     raisedId: raised.id, raisedLabel: raised.label, delta, reason,
@@ -103,11 +88,13 @@ export function applyRaiseFeedbackSignal(params: {
 
 /**
  * Apply the organic-match signal: person spontaneously matched an existing
- * subject (no pending assistant raise). +1, capped at 5.
+ * subject (no pending assistant raise on it). +1, capped at 5.
  *
- * Called when classification.social.subject_match.action === 'match_existing'
- * AND there was no pending assistant raise (or the raise applied to a
- * different subject — handled separately).
+ * v3.0 follow-up — called from the end-of-chat reconciliation pass for
+ * each matched subject that isn't the recently-raised one. Pre-v3.0
+ * this fired per-turn from the orchestrator based on the per-turn
+ * classifier's subject_match output; that path was stripped because it
+ * produced wrong-row writes on label drift.
  */
 export function applyOrganicMatchSignal(params: {
   ownerUserId: string;
