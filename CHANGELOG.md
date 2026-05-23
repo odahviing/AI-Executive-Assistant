@@ -2,6 +2,21 @@
 
 ---
 
+## 3.0.1 — Floating-block override + buffer cleanup, social-engine moves to end-of-chat
+
+Two days of patches over 3.0.0. The big one: subject reconciliation moves from a per-turn classifier into the end-of-chat capture pass. Per-turn cost drops ~700 tokens; subject state evolves at one well-lit chokepoint instead of every message. Plus four floating-block paths get the 5-min buffer dropped + the override-path made total.
+
+### Changed
+- **Social subject decisions move to end-of-chat** (`src/memory/capturePass.ts:runSubjectReconciliation`). Per-turn classifier no longer touches `social_subjects` — matching is by subject ID, not label string, so label drift can't fork rows anymore. Each Haiku decision is `{ category, action, subject_id|subject_label, sentiment, topic_beats[] }` with a category-pairing integrity check at apply time. Closes the 2026-05-22 בידוק duplicate-subject bug. Engagement signals + topic-beat recording move here too. `src/core/social/reconcileTopic.ts` deleted (no callers); `classifyOwnerIntent` stripped of `subject_match` + active-subjects block; `chooseSocialDirective` no longer takes `reconciled`.
+- **`book_floating_block` override is total** (`src/skills/calendarHealth.ts:1465+`). Pre-fix the override accepted out-of-window placement but the conflict check still ran with a 5-min buffer expansion → owner's "book at 13:30" with a bank meeting ending at 13:30 was refused as buffer-overlap. By the time `confirm_outside_window=true` lands, the conversational warning has fired and owner re-consented. The tool obeys: true overlap, back-to-back, off-hours all allowed.
+- **5-min buffer dropped from every floating-block code path**. scheduleRules deleted the buffer-between-meetings rule for normal meetings in v2.7.1 ("Connected back-to-backs are fine by design"); floating-block paths kept a private buffer that wasn't cleaned up then. Standard durations (10/25/40/55) already account for spacing. Defaults flipped to `?? 0` in 6 sites: book_floating_block, slot-search block feasibility, post-book verification, find_available_slots floating-block check, move_meeting on a floating block, rebalance sweep. Owner's yaml `buffer_minutes` field still works — set it if you want one back.
+- **Slack bottom-row status reads `'is working...'`** (`src/connections/slack/messaging.ts:366`). Was `'typing…'` for a few weeks; Slack renders the avatar+name above so it had to include the verb.
+
+### Migration / restart notes
+- No schema migrations. One-shot `scripts/merge-bidoq-duplicate.cjs` was already run + the duplicate row dormanted; left in `scripts/` for reference.
+
+---
+
 ## 3.0.0 — Bug-wave cleanup + 2.9 line closeout. Baseline for the WhatsApp build that follows.
 
 Two-day cleanup pass — 65 atomic fixes from a 76-bug overnight audit, plus follow-ups from the morning briefs and scenario paper-traces. No new capabilities; pure consolidation. ~1,500 lines of dead code removed, ~1,500 lines of fixes added. Typecheck clean throughout. Mark called out as the cut-line: v3 line goes forward into WhatsApp transport.
