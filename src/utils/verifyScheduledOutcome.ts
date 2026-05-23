@@ -112,7 +112,7 @@ function checkCompliance(
   //    overlaps the event window must still have a valid aligned slot.
   const blocks = getFloatingBlocks(profile);
   const dayStr = eStart.toFormat('yyyy-MM-dd');
-  const bufferMin = profile.meetings.buffer_minutes ?? 5;
+  const bufferMin = profile.meetings.buffer_minutes ?? 0;
   for (const block of blocks) {
     if (!blockAppliesOnDay(block, dayName, profile)) continue;
     const winStart = windowMsForDay(dayStr, block.preferred_start, tz);

@@ -1431,7 +1431,6 @@ Status meanings:
             return { error: 'invalid_start_time', message: `Couldn't parse ${date}T${explicitStartTime} in ${timezone}.` };
           }
           const overrideEnd = overrideStart.plus({ minutes: block.duration_minutes });
-          const bufferMs = (profile.meetings.buffer_minutes ?? 5) * 60 * 1000;
 
           // Idempotency — any same-block event on this day already on the
           // calendar (anywhere, not just near the override time). Pre-fix
@@ -1461,32 +1460,15 @@ Status meanings:
             };
           }
 
-          // Conflict + buffer check at the explicit time
-          const conflict = events.find(e => {
-            if (e.isAllDay || e.isCancelled || e.showAs === 'free') return false;
-            // Skip same-block events (about to book one; existing ones aren't conflicts)
-            if (fb.isFloatingBlockEvent(
-              { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
-              block,
-            )) return false;
-            const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis();
-            const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis();
-            const newStart = overrideStart.toMillis();
-            const newEnd = overrideEnd.toMillis();
-            // Overlap with buffer
-            return (newStart - bufferMs) < eEnd && (newEnd + bufferMs) > eStart;
-          });
-          if (conflict) {
-            const cStart = parseGraphDt(conflict.start.dateTime, conflict.start.timeZone, timezone);
-            const cEnd = parseGraphDt(conflict.end.dateTime, conflict.end.timeZone, timezone);
-            return {
-              error: 'conflict',
-              message: `${blockLabel} at ${explicitStartTime} on ${date} conflicts with "${conflict.subject}" (${cStart.toFormat('HH:mm')}–${cEnd.toFormat('HH:mm')}). Buffer: ${profile.meetings.buffer_minutes ?? 5} min.`,
-              conflicting_event: { subject: conflict.subject, start: cStart.toFormat('HH:mm'), end: cEnd.toFormat('HH:mm') },
-            };
-          }
+          // Override is TOTAL. No conflict / buffer check in this branch.
+          // Owner direction: "she can raise a flag, but if I say yes, it's
+          // yes." By the time the tool is called with confirm_outside_window
+          // = true, owner has already seen the conversational warning and
+          // re-consented. The tool obeys — true overlap, back-to-back,
+          // off-hours all allowed. Maelle can warn in the conversation
+          // (and does), but does not refuse via tool-level conflict error.
 
-          // v2.7.4 — delegate category/location/rule-check to planMeeting.
+          // Delegate category/location/rule-check to planMeeting.
           // Window-aware slot finding stays here; the booking step joins
           // the unified flow. confirm_outside_window=true → allowRelaxed=true
           // so planMeeting bypasses outside-working-hours etc., matching the
@@ -1639,7 +1621,7 @@ Status meanings:
             end: Math.min(parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(), windowEnd.toMillis()),
           }));
 
-        const bufferMinutes = profile.meetings.buffer_minutes ?? 5;
+        const bufferMinutes = profile.meetings.buffer_minutes ?? 0;
 
         // Positional intent — translate "before/after [meeting]" into a
         // deterministic slot via findPositionalSlotForBlock. Defaults to

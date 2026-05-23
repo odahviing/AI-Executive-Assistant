@@ -87,7 +87,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
     const events = await getCalendarEvents(profile.user.email, startIso, endIso, tz);
     const realEvents = events.filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free');
 
-    const bufferMin = profile.meetings.buffer_minutes ?? 15;
+    const bufferMin = profile.meetings.buffer_minutes ?? 0;
 
     for (const block of blocks) {
       if (!fb.blockAppliesOnDay(block, dayName, profile)) {

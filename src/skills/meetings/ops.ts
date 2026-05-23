@@ -2693,7 +2693,7 @@ export class SchedulingSkill {
                 }))
                 .filter(b => b.end > wStart && b.start < wEnd)
                 .map(b => ({ start: Math.max(b.start, wStart), end: Math.min(b.end, wEnd) }));
-              const buffer = context.profile.meetings.buffer_minutes ?? 5;
+              const buffer = context.profile.meetings.buffer_minutes ?? 0;
 
               // v2.3.2 (3A) — owner-explicit hint respects target as-is when
               // in-window. Don't snap to a different slot, don't refuse on

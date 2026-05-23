@@ -1524,7 +1524,7 @@ ATTENDEES (v2.9.1):
         const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
         const floatingBlocks = fb.getFloatingBlocks(profile);
         const joinDayName = DateTime.fromISO(dayStr, { zone: timezone }).toFormat('EEEE');
-        const blockBufferMin = profile.meetings.buffer_minutes ?? 5;
+        const blockBufferMin = profile.meetings.buffer_minutes ?? 0;
         let lunchViolation = false;
         const violatedBlocks: string[] = [];
         // v2.1.1 — collect which floating-block EVENTS need to be moved in
