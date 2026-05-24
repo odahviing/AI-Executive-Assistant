@@ -2,9 +2,9 @@
 
 ---
 
-## 3.0.3 — Calendar-issue algorithm redesign
+## 3.0.2 — Calendar-issue algorithm redesign + floating-block buffer kill + TZ guard + status / routine polish
 
-This was intended to land alongside 3.0.2 (owner said "build all" and the dismissed-issue redesign was part of that — agent misread and shipped the small bundle separately first). The dismissed-issue redesign is the substantive change in this version.
+The substantive change is the **calendar-issue algorithm redesign** (formerly `calendar_dismissed_issues` → `calendar_issues`, one-row-per-cluster, cluster-aware suppression and cascade, new tool surface). The supporting fixes — floating-block buffer structurally killed, strict-IANA TZ guard, Slack status indicator polish during the gate stack, Sonnet-narrated routine context — landed at the same time. (Note: this version originally shipped in two commits — small fixes in one, the dismissed redesign added a few hours later. Single version label going forward.)
 
 ### Calendar issues — complete redesign
 
@@ -52,22 +52,15 @@ Rewritten action enum: `list | approve | start_resolve | owner_will_resolve | ow
 
 Owner sets `"Home Time"` in the subjects list and `no_issue_tracking: true` on the `"Personal"` category. The hardcoded `night_shift.blocking_event` check at the overlap detector is gone; the night_shift config still exists for its other uses (work-hours computation).
 
-### Removed
+### Removed — calendar-issue legacy
 
 - Legacy `buildIssueKey` (format A / format B duality), `upsertCalendarIssue`, `dismissCalendarIssue`, `getDismissedIssueKeys` — all unreachable now
 - `dismiss_calendar_issue` legacy free-form Path B at `calendarHealth.ts:1881` — deleted
 - `calendar_fix` task dispatcher reduced to graceful no-op (legacy in-flight tasks complete cleanly; new design doesn't spawn this task type)
 
-### Migration
+### Supporting changes (small)
 
-- TRUNCATE legacy `calendar_dismissed_issues` (table dropped at boot, idempotent)
-- `npm run dev` restart required
-
----
-
-## 3.0.2 — Floating-block buffer structurally killed, IANA TZ guard, status indicator polish, routine context restored
-
-Patch over 3.0.1. The 5-min buffer on floating-block math is now structurally impossible: the `bufferMinutes` parameter is removed from `findAlignedSlotForBlock` / `findLatestAlignedSlotForBlock` / `findPositionalSlotForBlock` entirely. 3.0.1 dropped the defaults to 0 but the owner's yaml `buffer_minutes: 5` was still leaking into floating-block math at every call site that pulled it explicitly. New strict-IANA timezone validator catches ambiguous abbreviations like "IST" (luxon resolves to India, not Israel) at write time in `update_person_profile`, plus a one-shot data fix for the existing bad rows. Slack status indicator gets a "Finishing up" beat during the post-tool gate stack so the panel doesn't freeze on the last tool verb for 4-8 seconds. Routine output regains context — Sonnet now opens user-routine replies with a conversational one-liner naming what fired ("From this week's LinkedIn ideas routine: ..."), so a content brainstorm doesn't read as a context-less dump.
+The 5-min buffer on floating-block math is now structurally impossible: `bufferMinutes` parameter is removed from `findAlignedSlotForBlock` / `findLatestAlignedSlotForBlock` / `findPositionalSlotForBlock` entirely. 3.0.1 dropped defaults to 0 but the owner's yaml `buffer_minutes: 5` was still leaking into floating-block math via explicit reads at every call site. New strict-IANA timezone validator catches ambiguous abbreviations like "IST" (luxon resolves to India, not Israel) at write time in `update_person_profile`, plus a one-shot data fix for the bad rows. Slack status indicator gets a "Finishing up" beat during the post-tool gate stack so the panel doesn't freeze on the last tool verb for 4-8 seconds. Routine output regains context — Sonnet now opens user-routine replies with a conversational one-liner naming what fired ("From this week's LinkedIn ideas routine: ..."), so a content brainstorm doesn't read as a context-less dump.
 
 ### Changed
 - **`bufferMinutes` parameter removed from floating-block placement helpers** (`src/utils/floatingBlocks.ts`). Floating-block math is buffer-free at the lowest layer; standard meeting durations (10/25/40/55) carry the natural spacing. Six call sites updated to not pass it (`calendarHealth.ts`, `meetings.ts`, `meetings/ops.ts`, `connectors/graph/calendar.ts`, `rebalanceFloatingBlocks.ts`, `verifyScheduledOutcome.ts`). Closes the Sunday lunch case where 13:00-13:25 (inside the 11:30-13:30 window) was rejected as "no room" — buffer expansion pushed quarter-alignment past the window end.
