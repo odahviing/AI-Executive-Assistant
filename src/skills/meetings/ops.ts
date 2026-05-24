@@ -2693,7 +2693,7 @@ export class SchedulingSkill {
                 }))
                 .filter(b => b.end > wStart && b.start < wEnd)
                 .map(b => ({ start: Math.max(b.start, wStart), end: Math.min(b.end, wEnd) }));
-              const buffer = context.profile.meetings.buffer_minutes ?? 0;
+              // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
 
               // v2.3.2 (3A) — owner-explicit hint respects target as-is when
               // in-window. Don't snap to a different slot, don't refuse on
@@ -2752,7 +2752,7 @@ export class SchedulingSkill {
               }
 
               // Colleague-path — keep existing alignment + conflict guard.
-              const alignedMs = fb.findAlignedSlotForBlock(matchedBlock, dayStr, timezone, busy, buffer);
+              const alignedMs = fb.findAlignedSlotForBlock(matchedBlock, dayStr, timezone, busy);
               if (alignedMs === null) {
                 logger.info('move_meeting refused — no in-window slot for floating block', {
                   meetingId: args.meeting_id, block: matchedBlock.name, hint: args.new_start,

@@ -87,7 +87,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
     const events = await getCalendarEvents(profile.user.email, startIso, endIso, tz);
     const realEvents = events.filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free');
 
-    const bufferMin = profile.meetings.buffer_minutes ?? 0;
+    // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
 
     for (const block of blocks) {
       if (!fb.blockAppliesOnDay(block, dayName, profile)) {
@@ -186,8 +186,8 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
       // silently resetting to earliest. Default (no prefer_position) →
       // earliest aligned slot, existing behavior.
       const aligned = block.prefer_position === 'latest_in_window'
-        ? fb.findLatestAlignedSlotForBlock(block, dateStr, tz, busyInWindow, bufferMin)
-        : fb.findAlignedSlotForBlock(block, dateStr, tz, busyInWindow, bufferMin);
+        ? fb.findLatestAlignedSlotForBlock(block, dateStr, tz, busyInWindow)
+        : fb.findAlignedSlotForBlock(block, dateStr, tz, busyInWindow);
       if (aligned !== null) {
         const newStart = DateTime.fromMillis(aligned, { zone: tz });
         const newEnd = newStart.plus({ minutes: block.duration_minutes });

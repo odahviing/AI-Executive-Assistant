@@ -176,12 +176,18 @@ export function alignDownQuarter(ms: number, timezone: string): number {
     .toMillis();
 }
 
+// v3.0.2 — buffer parameter removed. Floating blocks are personal time,
+// not meeting-vs-meeting spacing. The 10/25/40/55 meeting durations
+// already create natural 5-min gaps when stacked, so a separate buffer
+// here was double-counting. Owner direction: "the buffer is maintained
+// by booking meeting of 10/25/40/55." Per-meeting buffer rules still
+// apply elsewhere (scheduleRules) — this is solely about whether a
+// floating block can abut a meeting. Yes, it can.
 export function findAlignedSlotForBlock(
   block: FloatingBlock,
   dayDate: string,
   timezone: string,
   busyInWindow: Array<{ start: number; end: number }>,
-  bufferMinutes: number,
 ): number | null {
   const windowStart = windowMsForDay(dayDate, block.preferred_start, timezone);
   const windowEnd = windowMsForDay(dayDate, block.preferred_end, timezone);
@@ -200,7 +206,6 @@ export function findAlignedSlotForBlock(
     return null;
   }
   const durationMs = block.duration_minutes * 60 * 1000;
-  const bufferMs = bufferMinutes * 60 * 1000;
 
   // Merge overlapping busy blocks
   const sorted = [...busyInWindow].sort((a, b) => a.start - b.start);
@@ -221,13 +226,12 @@ export function findAlignedSlotForBlock(
       if (!isTrailingGap) prev = merged[i].end;
       continue;
     }
-    const hasPrevBlock = i > 0;
-    const earliest = hasPrevBlock ? prev + bufferMs : prev;
-    const aligned = alignUpQuarter(earliest, timezone);
-    const postBuffer = isTrailingGap ? 0 : bufferMs;
+    // Buffer removed — block may start right at the end of the previous
+    // busy block (after quarter-hour alignment).
+    const aligned = alignUpQuarter(prev, timezone);
     if (
       aligned < gapEnd &&
-      aligned + durationMs + postBuffer <= gapEnd &&
+      aligned + durationMs <= gapEnd &&
       aligned + durationMs <= windowEnd
     ) {
       return aligned;
@@ -239,18 +243,17 @@ export function findAlignedSlotForBlock(
 
 /** Mirror of findAlignedSlotForBlock that scans gaps right-to-left and
  * returns the LATEST aligned slot that fits — the start of the rightmost
- * legal placement. Used by `prefer_position: 'latest_in_window'`. */
+ * legal placement. Used by `prefer_position: 'latest_in_window'`.
+ * v3.0.2 — buffer parameter removed, same rationale as findAlignedSlotForBlock. */
 export function findLatestAlignedSlotForBlock(
   block: FloatingBlock,
   dayDate: string,
   timezone: string,
   busyInWindow: Array<{ start: number; end: number }>,
-  bufferMinutes: number,
 ): number | null {
   const windowStart = windowMsForDay(dayDate, block.preferred_start, timezone);
   const windowEnd = windowMsForDay(dayDate, block.preferred_end, timezone);
   const durationMs = block.duration_minutes * 60 * 1000;
-  const bufferMs = bufferMinutes * 60 * 1000;
 
   const sorted = [...busyInWindow].sort((a, b) => a.start - b.start);
   const merged: Array<{ start: number; end: number }> = [];
@@ -264,6 +267,7 @@ export function findLatestAlignedSlotForBlock(
 
   // Scan right-to-left across gaps. Gap N is [merged[N-1].end, merged[N].start]
   // (or the trailing gap [last.end, windowEnd] when N === merged.length).
+  // v3.0.2 — buffer removed; floating blocks may abut meetings freely.
   let next = windowEnd;
   for (let i = merged.length; i >= 0; i--) {
     const isLeadingGap = i === 0;
@@ -272,15 +276,12 @@ export function findLatestAlignedSlotForBlock(
       if (!isLeadingGap) next = merged[i - 1].start;
       continue;
     }
-    const hasNextBlock = i < merged.length;
-    const latestEnd = hasNextBlock ? next - bufferMs : next;
-    const latestStart = latestEnd - durationMs;
+    const latestStart = next - durationMs;
     const aligned = alignDownQuarter(latestStart, timezone);
-    const preBuffer = isLeadingGap ? 0 : bufferMs;
     if (
-      aligned >= gapStart + preBuffer &&
+      aligned >= gapStart &&
       aligned >= windowStart &&
-      aligned + durationMs <= latestEnd
+      aligned + durationMs <= next
     ) {
       return aligned;
     }
@@ -312,28 +313,29 @@ export interface AnchorEvent {
   end: number;    // ms
 }
 
+// v3.0.2 — bufferMinutes parameter removed across the positional API. Same
+// rationale as findAlignedSlotForBlock: meeting durations (10/25/40/55) carry
+// the spacing; a separate buffer on floating-block math was double-counting.
 export function findPositionalSlotForBlock(
   block: FloatingBlock,
   dayDate: string,
   timezone: string,
   busyInWindow: Array<{ start: number; end: number }>,
-  bufferMinutes: number,
   preferPosition: PreferPosition,
   anchor?: AnchorEvent,
 ): { ms: number } | { error: string; detail: string } {
   const windowStart = windowMsForDay(dayDate, block.preferred_start, timezone);
   const windowEnd = windowMsForDay(dayDate, block.preferred_end, timezone);
   const durationMs = block.duration_minutes * 60 * 1000;
-  const bufferMs = bufferMinutes * 60 * 1000;
 
   if (preferPosition === 'earliest') {
-    const ms = findAlignedSlotForBlock(block, dayDate, timezone, busyInWindow, bufferMinutes);
+    const ms = findAlignedSlotForBlock(block, dayDate, timezone, busyInWindow);
     if (ms === null) return { error: 'no_room', detail: 'No aligned slot found in any gap (earliest scan).' };
     return { ms };
   }
 
   if (preferPosition === 'latest_in_window') {
-    const ms = findLatestAlignedSlotForBlock(block, dayDate, timezone, busyInWindow, bufferMinutes);
+    const ms = findLatestAlignedSlotForBlock(block, dayDate, timezone, busyInWindow);
     if (ms === null) return { error: 'no_room', detail: 'No aligned slot found in any gap (latest scan).' };
     return { ms };
   }
@@ -344,10 +346,9 @@ export function findPositionalSlotForBlock(
   }
 
   if (preferPosition === 'abut_before') {
-    // Lunch must end at or before (anchor.start - buffer). Snap aligned-down
-    // so the start is the latest aligned quarter-hour that still abuts.
-    const latestEnd = anchor.start - bufferMs;
-    const rawStart = latestEnd - durationMs;
+    // Block must end at or before anchor.start. Snap aligned-down so the
+    // start is the latest aligned quarter-hour that still abuts.
+    const rawStart = anchor.start - durationMs;
     const aligned = alignDownQuarter(rawStart, timezone);
     if (aligned < windowStart) {
       return {
@@ -362,16 +363,11 @@ export function findPositionalSlotForBlock(
       };
     }
     // Conflict check — the abutted slot mustn't collide with any busy block
-    // OTHER than the anchor itself. Buffer applies on the trailing side
-    // (already encoded by latestEnd subtraction); on the leading side, buffer
-    // applies if there's a busy block ending close to this slot's start.
+    // OTHER than the anchor itself.
     const conflict = busyInWindow.find(b => {
       if (b.start === anchor.start && b.end === anchor.end) return false;
-      // The slot occupies [aligned, aligned + duration]; with a leading buffer
-      // it claims [aligned - buffer, aligned + duration].
-      const claimStart = aligned - bufferMs;
       const claimEnd = aligned + durationMs;
-      return b.start < claimEnd && b.end > claimStart;
+      return b.start < claimEnd && b.end > aligned;
     });
     if (conflict) {
       return {
@@ -383,9 +379,8 @@ export function findPositionalSlotForBlock(
   }
 
   if (preferPosition === 'abut_after') {
-    // Lunch must start at or after (anchor.end + buffer). Snap aligned-up.
-    const earliestStart = anchor.end + bufferMs;
-    const aligned = alignUpQuarter(earliestStart, timezone);
+    // Block must start at or after anchor.end. Snap aligned-up.
+    const aligned = alignUpQuarter(anchor.end, timezone);
     if (aligned < windowStart) {
       return {
         error: 'anchor_outside_window',
@@ -400,9 +395,8 @@ export function findPositionalSlotForBlock(
     }
     const conflict = busyInWindow.find(b => {
       if (b.start === anchor.start && b.end === anchor.end) return false;
-      const claimStart = aligned;
-      const claimEnd = aligned + durationMs + bufferMs;
-      return b.start < claimEnd && b.end > claimStart;
+      const claimEnd = aligned + durationMs;
+      return b.start < claimEnd && b.end > aligned;
     });
     if (conflict) {
       return {

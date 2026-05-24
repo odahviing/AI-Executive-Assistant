@@ -706,7 +706,7 @@ export async function findAvailableSlots(params: {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fb = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
     const floatingBlocks = profile ? fb.getFloatingBlocks(profile) : [];
-    const blockBufferMin = profile?.meetings.buffer_minutes ?? 0;
+    // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
 
     // v2.1 — fetch owner's own events for the search range so we can tell
     // WHICH busy slots are floating-block events (lunch, coffee break, etc).
@@ -1153,7 +1153,7 @@ export async function findAvailableSlots(params: {
           });
 
           const aligned = fb.findAlignedSlotForBlock(
-            block, dayDate, params.timezone, busyInWindow, blockBufferMin,
+            block, dayDate, params.timezone, busyInWindow,
           );
           if (aligned === null && !block.can_skip) {
             blockConflict = true;

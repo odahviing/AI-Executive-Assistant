@@ -147,6 +147,26 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // Step 2 — normalize markdown → Slack mrkdwn.
   let cleanReply = formatForSlack(finalReply);
 
+  // Step 2a (v3.0.2) — surface a status in the assistant panel while the
+  // gate stack runs. Between "last tool returned" and "message lands" we
+  // burn 4-8s on humanGate + claimChecker + dateVerifier + securityGate
+  // (each a Sonnet pass; some have a retry path that re-invokes the
+  // orchestrator). Pre-v3.0.2 the panel froze on the last tool's verb
+  // ("Checking the calendar"…) or went blank if no tool fired. Single
+  // 'Finishing up' status covers the whole stack. Fire-and-forget, same
+  // pattern as the orchestrator's pre-tool and turn-start status hooks.
+  // Slack rejects non-panel calls; setAssistantStatus swallows at debug.
+  if (channelId && threadTs) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { setAssistantStatus } = require('../../connections/slack/messaging') as
+        typeof import('../../connections/slack/messaging');
+      void setAssistantStatus(app, profile.assistant.slack.bot_token, {
+        channelId, threadTs, status: 'Finishing up',
+      });
+    } catch (_) { /* helper failure is non-fatal */ }
+  }
+
   // Step 3 — owner-facing claim check (+ corrective retry).
   if (role === 'owner' || isOwnerInGroup) {
     cleanReply = await runClaimCheckAndMaybeRetry({

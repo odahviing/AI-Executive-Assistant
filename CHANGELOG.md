@@ -2,6 +2,32 @@
 
 ---
 
+## 3.0.2 — Floating-block buffer structurally killed, IANA TZ guard, status indicator polish, routine context restored
+
+Patch over 3.0.1. The 5-min buffer on floating-block math is now structurally impossible: the `bufferMinutes` parameter is removed from `findAlignedSlotForBlock` / `findLatestAlignedSlotForBlock` / `findPositionalSlotForBlock` entirely. 3.0.1 dropped the defaults to 0 but the owner's yaml `buffer_minutes: 5` was still leaking into floating-block math at every call site that pulled it explicitly. New strict-IANA timezone validator catches ambiguous abbreviations like "IST" (luxon resolves to India, not Israel) at write time in `update_person_profile`, plus a one-shot data fix for the existing bad rows. Slack status indicator gets a "Finishing up" beat during the post-tool gate stack so the panel doesn't freeze on the last tool verb for 4-8 seconds. Routine output regains context — Sonnet now opens user-routine replies with a conversational one-liner naming what fired ("From this week's LinkedIn ideas routine: ..."), so a content brainstorm doesn't read as a context-less dump.
+
+### Changed
+- **`bufferMinutes` parameter removed from floating-block placement helpers** (`src/utils/floatingBlocks.ts`). Floating-block math is buffer-free at the lowest layer; standard meeting durations (10/25/40/55) carry the natural spacing. Six call sites updated to not pass it (`calendarHealth.ts`, `meetings.ts`, `meetings/ops.ts`, `connectors/graph/calendar.ts`, `rebalanceFloatingBlocks.ts`, `verifyScheduledOutcome.ts`). Closes the Sunday lunch case where 13:00-13:25 (inside the 11:30-13:30 window) was rejected as "no room" — buffer expansion pushed quarter-alignment past the window end.
+- **Status indicator fires during the gate stack** (`src/connectors/slack/postReply.ts`). New "Finishing up" status set after `formatForSlack` runs, before `humanGate` / `claimChecker` / `dateVerifier` / `securityGate` execute their Sonnet passes. Bridges the 4-8s gap where the assistant-panel was previously frozen on the last tool's verb.
+- **Routine output gets a Sonnet-narrated opener** (`src/tasks/dispatchers/routine.ts`). User routines (non-system) now have their prompt wrapped with a one-line instruction to open the reply with a conversational context line. System routines (briefing, calendar health) unchanged — they self-narrate already.
+- **`update_person_profile` rejects non-IANA TZ strings** (`src/core/assistant.ts` + new `src/utils/timezoneValidator.ts`). Strict validator accepts Region/City form + literal `UTC`/`GMT`, rejects abbreviations like `IST` / `CST` / `PST` (luxon happily resolves `IST` to Asia/Kolkata, +5:30 — wrong for every Reflectiz contact). Returns an error message Sonnet reads + retries on. Same guard wraps the state→tz Sonnet fallback in the same handler.
+- **TIMEZONE NARRATION prompt rule** (`src/skills/meetings.ts`). Replaces the prior CROSS-TZ ATTENDEE rule with explicit guidance: times you write to a listener are in their local TZ; quote `per_attendee_local[].local_display` verbatim; only add a "his/her time" parenthetical when the other party is actually cross-TZ — same TZ means same wall-clock, no parenthetical.
+
+### Fixed
+- **`meeting_id` leak in in_flight subject line** (`src/core/requests/maybeOpenInFlightMeetingRequest.ts:69`). The `find_available_slots` spill path fell back to `Reschedule meeting ${eventId.slice(0, 12)}` when `toolInput.subject` was missing (Sonnet rarely passes one), surfacing raw Graph IDs like `AAMkADVmMjY1` into brief narration. Generic non-leak fallback now (`'a meeting'`); the real `event_id` stays in `details.meeting_id` for cascade matching but doesn't reach the brief.
+
+### Data fixes (one-off, already applied to live DB)
+- `people_memory.timezone` for Elan Hershcovitz: `"IST"` → `Asia/Jerusalem`. Root cause of the "Elan's side shows 15:15 IST" cross-TZ rendering bug.
+- `people_memory.timezone` for Michal Schwartz: `"Israel time"` → `Asia/Jerusalem`. Invalid IANA string.
+- `people_memory.timezone` for Levana Bagants: `Europe/Belgrade` → `Asia/Jerusalem` + `state` set to `Israel`. She's Israeli; prior value reflected a short trip.
+- `people_memory.state` for Alex Wiggins / Julia Rainesh / Dan Beauregard / Ayala Geni: set to `Boston` (TZ already correct at `America/New_York`).
+- All repaired rows now `set_by='owner'` to lock against future auto-overwrite.
+
+### Migration / restart notes
+- No schema migrations. `npm run dev` restart needed to pick up code changes; the DB data-fixes are already live.
+
+---
+
 ## 3.0.1 — Floating-block override + buffer cleanup, social-engine moves to end-of-chat
 
 Two days of patches over 3.0.0. The big one: subject reconciliation moves from a per-turn classifier into the end-of-chat capture pass. Per-turn cost drops ~700 tokens; subject state evolves at one well-lit chokepoint instead of every message. Plus four floating-block paths get the 5-min buffer dropped + the override-path made total.

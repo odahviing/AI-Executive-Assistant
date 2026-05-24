@@ -1621,11 +1621,10 @@ Status meanings:
             end: Math.min(parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(), windowEnd.toMillis()),
           }));
 
-        const bufferMinutes = profile.meetings.buffer_minutes ?? 0;
-
-        // Positional intent — translate "before/after [meeting]" into a
-        // deterministic slot via findPositionalSlotForBlock. Defaults to
-        // 'earliest' (current behavior) when prefer_position isn't passed.
+        // v3.0.2 — floating-block math no longer applies a buffer (meeting
+        // durations 10/25/40/55 already carry natural spacing). The previous
+        // `profile.meetings.buffer_minutes ?? 0` was a path for the owner's
+        // yaml-set buffer to leak in here and reject in-window slots.
         const preferPosition = ((args.prefer_position as string | undefined) ?? 'earliest') as PreferPosition;
         const anchorEventId = (args.anchor_event_id as string | undefined)?.trim();
         let anchor: AnchorEvent | undefined;
@@ -1644,7 +1643,7 @@ Status meanings:
         }
 
         const slotResult = fb.findPositionalSlotForBlock(
-          block, date, timezone, busyInWindow, bufferMinutes, preferPosition, anchor,
+          block, date, timezone, busyInWindow, preferPosition, anchor,
         );
 
         if ('error' in slotResult) {
@@ -1663,7 +1662,6 @@ Status meanings:
             date,
             window: `${block.preferred_start}-${block.preferred_end}`,
             duration_min: block.duration_minutes,
-            buffer_min: bufferMinutes,
             prefer_position: preferPosition,
             anchor_event_id: anchorEventId,
             error: slotResult.error,
@@ -1676,7 +1674,7 @@ Status meanings:
           // would land at 12:15-12:40, conflicting with a busy block at
           // 12:25-12:30") so we surface it directly.
           const messageByError: Record<string, string> = {
-            no_room: `No room for a ${block.duration_minutes}-minute ${blockLabel} between ${block.preferred_start} and ${block.preferred_end} on ${date} with quarter-hour alignment and ${bufferMinutes}-min buffer.`,
+            no_room: `No room for a ${block.duration_minutes}-minute ${blockLabel} between ${block.preferred_start} and ${block.preferred_end} on ${date} with quarter-hour alignment.`,
             anchor_required: slotResult.detail,
             anchor_outside_window: `${blockLabel} doesn't fit ${preferPosition === 'abut_before' ? 'before' : 'after'} the anchor inside the ${block.preferred_start}-${block.preferred_end} window: ${slotResult.detail}`,
             anchor_conflicts_busy: `${blockLabel} can't abut the anchor without conflicting: ${slotResult.detail}`,
@@ -1689,11 +1687,10 @@ Status meanings:
             detail: slotResult.detail,
             window: { start: block.preferred_start, end: block.preferred_end },
             duration_minutes: block.duration_minutes,
-            buffer_minutes: bufferMinutes,
             prefer_position: preferPosition,
             busy_blocks_in_window: busyDetails,
             assistant_hint: slotResult.error === 'no_room' && busyDetails.length > 0
-              ? `The window was fragmented by these busy blocks: ${busyDetails.map(b => `${b.start}-${b.end}`).join(', ')}. With ${bufferMinutes}-min buffers and quarter-hour alignment, no aligned ${block.duration_minutes}-min slot fit any gap. If the owner pushes back ("but I have time at HH:MM"), explain WHICH busy block conflicts — don't just say "tight".`
+              ? `The window was fragmented by these busy blocks: ${busyDetails.map(b => `${b.start}-${b.end}`).join(', ')}. With quarter-hour alignment, no aligned ${block.duration_minutes}-min slot fit any gap. If the owner pushes back ("but I have time at HH:MM"), explain WHICH busy block conflicts — don't just say "tight".`
               : slotResult.error === 'anchor_outside_window'
               ? `Tell the owner honestly: the requested position lands outside the block's preferred window (${block.preferred_start}-${block.preferred_end}). Don't fall back to create_meeting at the boundary time — that's a policy_exception approval (deferred_action move_meeting with confirm_outside_window=true) if the owner explicitly wants to override.`
               : slotResult.error === 'anchor_conflicts_busy'

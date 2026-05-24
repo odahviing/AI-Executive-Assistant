@@ -66,7 +66,14 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
     if (!Array.isArray(movingIds) || movingIds.length === 0) return;
     spilled = true;
     eventId = String(movingIds[0]);
-    subject = (toolInput as { subject?: string }).subject ?? `Reschedule meeting ${eventId.slice(0, 12)}`;
+    // v3.0.2 — was `Reschedule meeting ${eventId.slice(0, 12)}` which leaked
+    // the first 12 chars of the Graph event_id (e.g. "AAMkADVmMjY1") into the
+    // brief subject line. Sonnet quoted it verbatim → owner saw raw IDs in
+    // chat. Toolinput rarely carries `subject` on find_available_slots, so this
+    // fallback fires almost every time. Generic non-leak fallback now; the real
+    // event_id stays in `details.meeting_id` for cascade matching but doesn't
+    // surface to the brief.
+    subject = (toolInput as { subject?: string }).subject ?? 'a meeting';
   } else if (input.toolName === 'create_meeting' || input.toolName === 'move_meeting') {
     // Clean success → no row needed (work closed this turn).
     if (result.success === true) return;

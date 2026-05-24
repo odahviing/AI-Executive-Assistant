@@ -138,9 +138,24 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
   }
   const runThreadTs = placeholderTs ?? `routine_${routine.id}_${Date.now()}`;
 
+  // v3.0.2 — wrap user-routine prompts with a context preamble so Sonnet
+  // opens her reply with a short line naming what this is from. Pre-fix the
+  // owner saw long brainstorm dumps (e.g. weekly LinkedIn content ideas)
+  // with no header — couldn't tell which routine fired. v2.5.1 dropped the
+  // old bold-title prepend as machine framing; this restores context via
+  // Sonnet's own voice. System routines (briefing, calendar health) already
+  // self-narrate, so they keep their prompt unchanged.
+  const wrappedPrompt = routine.is_system
+    ? routine.prompt
+    : `[This is the scheduled firing of your "${routine.title}" routine. ` +
+      `Open your reply with one short conversational line naming what this is from ` +
+      `(e.g. "From this week's LinkedIn ideas routine:" — your phrasing, your voice), ` +
+      `then the content. Don't bold it, don't use a header — just a natural opener.]\n\n` +
+      routine.prompt;
+
   try {
     const result = await runOrchestrator({
-      userMessage: routine.prompt,
+      userMessage: wrappedPrompt,
       conversationHistory: [],
       threadTs: runThreadTs,
       channelId: routine.owner_channel,

@@ -1524,7 +1524,7 @@ ATTENDEES (v2.9.1):
         const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
         const floatingBlocks = fb.getFloatingBlocks(profile);
         const joinDayName = DateTime.fromISO(dayStr, { zone: timezone }).toFormat('EEEE');
-        const blockBufferMin = profile.meetings.buffer_minutes ?? 0;
+        // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
         let lunchViolation = false;
         const violatedBlocks: string[] = [];
         // v2.1.1 — collect which floating-block EVENTS need to be moved in
@@ -1571,7 +1571,7 @@ ATTENDEES (v2.9.1):
           });
 
           const aligned = fb.findAlignedSlotForBlock(
-            block, dayStr, timezone, busyInWindow, blockBufferMin,
+            block, dayStr, timezone, busyInWindow,
           );
           if (aligned === null && !block.can_skip) {
             lunchViolation = true;
@@ -1962,7 +1962,8 @@ The tool now returns \`broken_rule_label\` directly. Paste it verbatim into \`as
 
 VALIDATE A MOVE BEFORE PROPOSING IT — never narrate "I'll move X to make room for Y" without checking the move actually delivers Y. Call \`find_available_slots\` with \`moving_event_ids: [X.id]\` AND a window matching the requested duration. Read the result before speaking: if the requested window opens up, propose the move; if not, name the OTHER meeting still blocking it before offering anything. The "I'll move Simon to free 2 hours" → owner says yes → "actually moving Simon only opens 1 hour because lunch is next" pattern means the move was offered without validating its effect. One tool call up front replaces the staircase.
 
-CROSS-TZ ATTENDEE — when \`find_available_slots\` returns slots with a \`per_attendee_local\` array, quote each entry's \`local_display\` verbatim. Don't recompute. If \`travelers\` is also set, mention the travel context once ("Anna's working from Boston this week").
+TIMEZONE NARRATION — always from the LISTENER's local TZ.
+Times you write to ${firstName} are in HIS local TZ; times you write to a colleague are in THAT colleague's local TZ. Don't math the conversion yourself — \`find_available_slots\` returns \`per_attendee_local[].local_display\` already correctly converted; quote it verbatim. If the OTHER party is in a DIFFERENT TZ and it's relevant to mention, append once as a parenthetical ("Wednesday 12:45 works — that's 15:15 her time"). If they're in the SAME TZ as the listener, do NOT add a "his/her time" parenthetical — same wall-clock, single number, no confusion. When \`travelers\` is set, mention the travel context once ("Anna's working from Boston this week").
 
 AVAILABILITY VS BOOKING — answer the question, then OFFER to book.
 When a colleague asks "is ${firstName} free at X?" / "is X open Sunday at 14:00?" — that's an AVAILABILITY check, not a booking request. Answer the availability question first ("yes, he's free Sunday 10.5 at 14:00 for 55 min"), THEN offer the next step in the same reply: "want me to send the invite, or are you just checking?" Give them the choice. Don't assume they want it booked, don't assume they don't. The colleague might be lining up multiple options before committing, OR they might be ready to lock it in — let them tell you. ONLY call \`create_meeting\` / \`coordinate_meeting\` after they say go.

@@ -690,6 +690,26 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
         const state   = args.state as string | undefined;
         const nameHe  = args.name_he as string | undefined;
 
+        // v3.0.2 — reject ambiguous TZ strings BEFORE writing. luxon resolves
+        // "IST" to Asia/Kolkata (Indian Standard Time, +5:30) — silently wrong
+        // for Israel-based contacts. Real IANA zones use Region/City form.
+        // Returns an error Sonnet can read + retry against, instead of letting
+        // a bad write land and surface later as cross-TZ slot mis-rendering.
+        if (timezone && timezone.trim()) {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { isStrictIana } = require('../utils/timezoneValidator') as
+            typeof import('../utils/timezoneValidator');
+          if (!isStrictIana(timezone)) {
+            logger.warn('update_person_profile — rejected non-IANA timezone', {
+              slackId, colleague_name: name, attempted: timezone,
+            });
+            return {
+              error: 'invalid_timezone',
+              message: `'${timezone}' is not a valid IANA timezone. Use a Region/City form like 'Asia/Jerusalem', 'America/New_York', 'Europe/London'. Never abbreviations like 'IST', 'PST', 'CST' — those are ambiguous (IST is Indian Standard Time, +5:30).`,
+            };
+          }
+        }
+
         // v2.2.2 (#46) — owner-path tool. Anything the owner sets here is
         // owner-stated by definition; route through the provenance helper.
         // Ensure the row exists first; upsertPersonMemory tracks tz_set_by='owner'
@@ -715,9 +735,19 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const { refreshAutoWorkingHours } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
                 const tz = await inferTimezoneFromState(state.trim());
-                if (tz) {
+                // v3.0.2 — same strict-IANA gate as the direct timezone arg.
+                // inferTimezoneFromState has a Sonnet fallback that occasionally
+                // hands back ambiguous abbreviations.
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { isStrictIana } = require('../utils/timezoneValidator') as
+                  typeof import('../utils/timezoneValidator');
+                if (tz && isStrictIana(tz)) {
                   setCoreFieldWithProvenance(slackId, 'timezone', tz, 'owner');
                   refreshAutoWorkingHours(slackId);
+                } else if (tz) {
+                  logger.warn('state→tz derivation produced non-IANA value — discarded', {
+                    slackId, state, derived: tz,
+                  });
                 }
               } catch (err) {
                 logger.debug('state→tz derivation failed', { slackId, state, err: String(err).slice(0, 200) });

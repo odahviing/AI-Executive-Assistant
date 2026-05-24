@@ -112,7 +112,7 @@ function checkCompliance(
   //    overlaps the event window must still have a valid aligned slot.
   const blocks = getFloatingBlocks(profile);
   const dayStr = eStart.toFormat('yyyy-MM-dd');
-  const bufferMin = profile.meetings.buffer_minutes ?? 0;
+  // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
   for (const block of blocks) {
     if (!blockAppliesOnDay(block, dayName, profile)) continue;
     const winStart = windowMsForDay(dayStr, block.preferred_start, tz);
@@ -139,7 +139,7 @@ function checkCompliance(
       start: Math.max(eStart.toMillis(), winStart),
       end: Math.min(eEnd.toMillis(), winEnd),
     });
-    const aligned = findAlignedSlotForBlock(block, dayStr, tz, busyInWindow, bufferMin);
+    const aligned = findAlignedSlotForBlock(block, dayStr, tz, busyInWindow);
     if (aligned === null && !block.can_skip) {
       issues.push(`no room left for ${block.name} in ${block.preferred_start}–${block.preferred_end}`);
     }
