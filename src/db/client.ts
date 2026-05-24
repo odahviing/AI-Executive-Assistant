@@ -510,35 +510,66 @@ function initSchema(db: Database.Database): void {
   // NULL = never captured.
   try { db.exec(`ALTER TABLE conversation_threads ADD COLUMN captured_at TEXT`); } catch (_) {}
 
-  // Calendar issues — tracks detected calendar problems and their resolution status
-  // Statuses: new (flagged, waiting for owner), approved (owner says it's fine),
-  //           to_resolve (owner wants it fixed), resolved (fixed)
+  // Calendar issues (v3.0.3 — full redesign).
+  //
+  // One row per cluster of linked events. Clusters form via shared overlap
+  // edges: events linked by an overlap issue belong to the same cluster.
+  // Each cluster has ONE row with ONE class — the highest-priority issue
+  // detected for that cluster (the rest are dropped; moving the anchor
+  // event resolves the cluster anyway, slot finder handles the rest).
+  //
+  // Statuses:
+  //   new            — detected, not yet surfaced to owner
+  //   awaiting_owner — surfaced, waiting on owner's reply
+  //   in_progress    — owner said "fix it", a request is in flight
+  //   owner_side     — owner said "I'll handle it"
+  //   approved       — owner said "leave it"        (terminal)
+  //   dismissed      — Maelle decided to drop it    (terminal, reserved)
+  //   resolved       — issue is gone (cascade/auto) (terminal)
+  //
+  // Priority (highest→lowest):
+  //   work_on_day_off > oof_with_meetings > overlap > category_limit >
+  //   missing_floating_block > busy_day
+  //
+  // UNIQUE on (owner_user_id, event_id) — anchor event is the row's identity.
+  // Cluster membership shifts (anchor can change) so app logic merges via
+  // cluster lookup on event_id OR peer_event_id intersection.
+  //
+  // event_end_ms is the freshness anchor: rows with event_end_ms < now() are
+  // filtered out at read time (past issues vanish naturally).
   db.exec(`
-    CREATE TABLE IF NOT EXISTS calendar_dismissed_issues (
+    CREATE TABLE IF NOT EXISTS calendar_issues (
       id              TEXT PRIMARY KEY,
-      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
       owner_user_id   TEXT NOT NULL,
-      event_date      TEXT NOT NULL,          -- YYYY-MM-DD of the calendar day
-      issue_type      TEXT NOT NULL,          -- double_booking | oof_conflict | back_to_back | no_buffer | missing_floating_block | oof_with_meetings | work_on_day_off | overlap (legacy rows may still carry no_lunch / missing_lunch)
-      issue_key       TEXT NOT NULL,          -- unique key (e.g. "double_booking:16:15:Weekly Sales Ops")
-      detail          TEXT NOT NULL,          -- human-readable description
-      resolution      TEXT NOT NULL DEFAULT 'new',  -- new | approved | to_resolve | resolved | dismissed
-      resolution_notes TEXT                   -- what the owner said to do (for to_resolve)
+      event_id        TEXT NOT NULL,          -- anchor event (Graph id, or
+                                              -- floating-block synthetic
+                                              -- '{NNN}-{MMDDYYYY}-{HHMM}')
+      peer_event_id   TEXT,                   -- only when issue_class='overlap'
+      event_date      TEXT NOT NULL,          -- YYYY-MM-DD owner-local
+      event_end_ms    INTEGER NOT NULL,       -- epoch ms; max(anchor, peer)
+      issue_class     TEXT NOT NULL,          -- work_on_day_off | oof_with_meetings
+                                              -- | overlap | category_limit
+                                              -- | missing_floating_block | busy_day
+      status          TEXT NOT NULL DEFAULT 'new',
+      notes           TEXT,
+      request_id      TEXT,                   -- FK to requests.id when in_progress
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (owner_user_id, event_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_cal_dismissed_owner
-      ON calendar_dismissed_issues(owner_user_id, event_date);
+    CREATE INDEX IF NOT EXISTS idx_cal_issues_active
+      ON calendar_issues(owner_user_id, status, event_end_ms);
+    CREATE INDEX IF NOT EXISTS idx_cal_issues_peer
+      ON calendar_issues(owner_user_id, peer_event_id);
+    CREATE INDEX IF NOT EXISTS idx_cal_issues_request
+      ON calendar_issues(request_id);
   `);
 
-  // Migrate: add resolution_notes column if missing (existing DBs)
-  try { db.exec(`ALTER TABLE calendar_dismissed_issues ADD COLUMN resolution_notes TEXT`); } catch (_) {}
-  // v2.4.2 — persist event_ids JSON so closeMeetingArtifacts can cascade
-  // when a meeting moves/updates/deletes. Pre-v2.4.2 the column didn't exist
-  // even though upsertCalendarIssue accepted an eventIds param — values were
-  // silently dropped, leaving every issue row orphaned from its source events.
-  // Result: stale rows accumulated for weeks and surfaced as "carry-over from
-  // last week" in active-mode health checks long after the meetings had moved.
-  try { db.exec(`ALTER TABLE calendar_dismissed_issues ADD COLUMN event_ids TEXT`); } catch (_) {}
-  // Migrate: old 'dismissed' entries stay as-is — they map to 'approved' semantically
+  // Legacy table from pre-v3.0.3 ('calendar_dismissed_issues'). The redesign
+  // truncated all rows (owner direction: clean start) and the old API is no
+  // longer wired. Drop the table when running against an old DB so the old
+  // schema can't be accidentally written to. Idempotent (no-op if absent).
+  try { db.exec(`DROP TABLE IF EXISTS calendar_dismissed_issues`); } catch (_) {}
 
   // ── Approvals (v1.5) ────────────────────────────────────────────────────────
   // First-class structured approvals. Every decision Maelle needs from the owner

@@ -134,9 +134,8 @@ import {
 import {
   getDb,
   auditLog,
-  getDismissedIssueKeys,
+  getSuppressedEventIds,
 } from '../../db';
-import { buildIssueKey } from '../../db/calendarIssues';
 import { closeMeetingArtifacts } from '../../utils/closeMeetingArtifacts';
 
 // ── Calendar event processing ─────────────────────────────────────────────────
@@ -359,7 +358,11 @@ export function analyzeCalendar(
   startDate: string,
   endDate: string,
   profile: UserProfile,
-  dismissedKeys?: Set<string>,
+  // v3.0.3 — pre-filter parameter removed. Suppression now happens at row-
+  // write time via upsertCluster's 'suppressed' return (callers that write
+  // rows skip already-approved clusters). Read-only callers see the full
+  // detected list; Sonnet's prompt covers narration filtering.
+  _legacy?: Set<string>,
 ): DayAnalysis[] {
   const officeDays = new Set(profile.schedule.office_days.days as string[]);
   const homeDays   = new Set(profile.schedule.home_days.days   as string[]);
@@ -560,7 +563,53 @@ export function analyzeCalendar(
         const evStart = sh * 60 + sm;
         return evStart >= blockWindowStart && evStart < blockWindowEnd;
       });
-      if (blockEvent) continue;  // present, in window — nothing to flag
+      if (blockEvent) {
+        // v3.0.3 — block exists. Check whether it's STUCK on a meeting that
+        // overlaps it AND no clean alternative slot exists in the window.
+        // (rebalance handles silent moves when an alternative exists; this
+        // detects the can't-be-fixed-silently case so it surfaces to the
+        // owner via the new calendar_issues row.)
+        const [bsh, bsm] = blockEvent._localStartTime.split(':').map(Number);
+        const [beh, bem] = blockEvent._localEndTime.split(':').map(Number);
+        const bStartMin = bsh * 60 + bsm;
+        const bEndMin = beh * 60 + bem;
+        const overlapper = timedMeetings.find(other => {
+          if (other === blockEvent) return false;
+          if (other.is_floating_block) return false;  // ignore other blocks
+          const [osh, osm] = other._localStartTime.split(':').map(Number);
+          const [oeh, oem] = other._localEndTime.split(':').map(Number);
+          const oStartMin = osh * 60 + osm;
+          const oEndMin = oeh * 60 + oem;
+          return oStartMin < bEndMin && oEndMin > bStartMin;
+        });
+        if (!overlapper) continue;  // block in window, not overlapped — fine
+
+        // Does an alternative aligned slot exist in the window?
+        // Re-compute gaps minus the block itself (it's the one moving) to see
+        // if any gap can hold the block's duration.
+        let alternativeExists = false;
+        for (const gap of gaps) {
+          const overlapStart = Math.max(gap.start, blockWindowStart);
+          const overlapEnd   = Math.min(gap.end, blockWindowEnd);
+          if (overlapEnd - overlapStart >= minBlockMin) { alternativeExists = true; break; }
+        }
+        if (alternativeExists) continue;  // rebalance can fix silently
+
+        // Block is stuck. Emit under existing class so owner direction
+        // "use the current framework" is honored. Detail carries the
+        // specific story so Sonnet narrates accurately.
+        if (!block.can_skip) {
+          const blockLabel = block.name.replace(/_/g, ' ');
+          issues.push({
+            type: 'missing_floating_block',
+            severity: 'medium',
+            detail: `${blockLabel} at ${blockEvent._localStartTime} overlaps ${overlapper.subject} (${overlapper._localStartTime}-${overlapper._localEndTime}); no clean alternative in ${block.preferred_start}-${block.preferred_end}`,
+            suggestedFix: `Move ${overlapper.subject}, skip ${blockLabel} today, or override the window.`,
+            block_name: block.name,
+          });
+        }
+        continue;
+      }
 
       // Compute the best free gap inside the block's preferred window for the
       // suggestedFix narration. Same shape as the prior lunch-only logic.
@@ -594,18 +643,16 @@ export function analyzeCalendar(
 
     const sortedMy = timedMeetings.sort((a, b) => a._localStartTime.localeCompare(b._localStartTime));
 
-    // Filter out issues the user has already dismissed
-    const filteredIssues = dismissedKeys
-      ? issues.filter(issue => !dismissedKeys.has(buildIssueKey(issue.type, issue.detail)))
-      : issues;
-
+    // v3.0.3 — no pre-filter here. Suppression handled by upsertCluster at
+    // row-write time; this function is read-only and returns the full detected
+    // list. Callers that surface to the owner do so via the cluster-write path.
     results.push({
       date: dateStr,
       day: dayName,
       dayType,
       isWorkDay: true,
       events: myEvents,
-      issues: filteredIssues,
+      issues,
       stats: {
         meetingCount: timedMeetings.length,
         firstMeeting: sortedMy[0]?._localStartTime,
@@ -731,12 +778,11 @@ export class SchedulingSkill {
           timezone,
         );
         const processed = processCalendarEvents(rawEvents, userEmail, context.profile.user.name, timezone, context.profile);
-        const dismissedKeys = getDismissedIssueKeys(
-          context.profile.user.slack_user_id,
-          args.start_date as string,
-          args.end_date as string,
-        );
-        return analyzeCalendar(processed, args.start_date as string, args.end_date as string, context.profile, dismissedKeys);
+        // v3.0.3 — pre-filter removed; analyzeCalendar is read-only.
+        // Suppression handled at row-write time elsewhere.
+        const _suppressed = getSuppressedEventIds(context.profile.user.slack_user_id);
+        void _suppressed;
+        return analyzeCalendar(processed, args.start_date as string, args.end_date as string, context.profile);
       }
 
       case 'get_free_busy':

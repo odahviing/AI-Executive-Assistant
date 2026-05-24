@@ -8,7 +8,6 @@ import {
   auditLog,
   searchPeopleMemory,
   getPersonMemory,
-  getDismissedIssueKeys,
   type CoordParticipant,
 } from '../db';
 import {

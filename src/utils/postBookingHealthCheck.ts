@@ -40,19 +40,14 @@ export async function runPostBookingHealthCheck(params: {
     const { getCalendarEvents } = await import('../connectors/graph/calendar');
     const { processCalendarEvents, analyzeCalendar } = await import('../skills/meetings/ops');
     const { getConnection } = await import('../connections/registry');
-    const { getDismissedIssueKeys } = await import('../db/calendarIssues');
-
     const startIso = slotDt.startOf('day').toUTC().toISO();
     const endIso = slotDt.endOf('day').toUTC().toISO();
     if (!startIso || !endIso) return;
 
     const events = await getCalendarEvents(profile.user.email, startIso, endIso);
     const processed = processCalendarEvents(events, profile.user.email, profile.user.name, tz, profile);
-    const dismissed = (() => {
-      try { return getDismissedIssueKeys(profile.user.slack_user_id, dateStr, dateStr); }
-      catch { return new Set<string>(); }
-    })();
-    const analysis = analyzeCalendar(processed, dateStr, dateStr, profile, dismissed);
+    // v3.0.3 — pre-filter retired; analyzeCalendar is read-only.
+    const analysis = analyzeCalendar(processed, dateStr, dateStr, profile);
 
     const issues = analysis.flatMap(d => d.issues ?? []);
 

@@ -2,6 +2,69 @@
 
 ---
 
+## 3.0.3 — Calendar-issue algorithm redesign
+
+This was intended to land alongside 3.0.2 (owner said "build all" and the dismissed-issue redesign was part of that — agent misread and shipped the small bundle separately first). The dismissed-issue redesign is the substantive change in this version.
+
+### Calendar issues — complete redesign
+
+Old table `calendar_dismissed_issues` is dropped; replaced by `calendar_issues` with a fundamentally different shape. Truncated all rows (owner direction: clean start, no migration). New rules:
+
+**One row per CLUSTER.** Events linked via overlap edges form a cluster (transitive: A↔B overlap + B has OOF → both go on one row). Each cluster has ONE `issue_class` — the highest-priority issue across all its events. Other issues in the cluster are silently dropped at write time; the row's anchor event resolves them all once moved.
+
+**Priority order:** `work_on_day_off > oof_with_meetings > overlap > category_limit > missing_floating_block > busy_day`. Tiebreak: lex-min event_id.
+
+**Schema:**
+- `event_id` — anchor event (Graph id, or floating-block synthetic `{NNN}-{MMDDYYYY}-{HHMM}` for missing-block class — supports up to 999 blocks, one row per (date, block-index) without colliding)
+- `peer_event_id` — only set when `issue_class='overlap'`
+- `event_end_ms` (INTEGER epoch) — freshness anchor; rows filter out via `event_end_ms > now()` at read time, no cron expiry needed
+- `status` — one of: `new`, `awaiting_owner`, `in_progress`, `owner_side`, `approved`, `dismissed`, `resolved` (last 3 terminal)
+- `request_id` — FK to `requests.id` when status is `in_progress`
+- `UNIQUE (owner_user_id, event_id)` — anchor identity
+
+**Write path:** detection emits in-memory `DetectedIssue` objects → `buildClusters` groups via overlap edges → `upsertCluster` looks up existing rows touching the cluster's events (via `event_id IN cluster OR peer_event_id IN cluster`):
+- 0 active rows → INSERT
+- 1 active row → UPDATE in place (may re-anchor if cluster shape shifted)
+- 2+ active rows → MERGE: keep oldest, fold others in, DELETE rest (handles cluster-joining when a new overlap links two previously-separate rows)
+- Any terminal row touched → SUPPRESSED (do not surface)
+
+**Auto-stale at detection time:** after a pass, any active row in the date range not touched by the cluster batch flips to `status='resolved'` — the condition that produced it has vanished. Cleanup of old terminal rows (>30 days past `updated_at`) lives in `cleanOldResolvedIssues`.
+
+**Cascade:** `closeMeetingArtifacts(eventId, reason)` resolves any non-terminal row where `event_id = E OR peer_event_id = E`.
+
+**Detection-time exclusions (overlap path):** events skipped from issue detection if they match ANY of —
+1. all-day / showAs free / showAs workingElsewhere
+2. **NEW** subject matches anything in `meetings.issue_exclusions.subjects` yaml list (replaces hardcoded `night_shift.blocking_event` check — "Home Time" now configured here)
+3. matches a configured floating block (lunch / focus / etc.)
+4. entirely outside the day's work-hours window
+5. **NEW** any of the event's categories matches a yaml category flagged `no_issue_tracking: true` (the "Personal category" rule — owner's life, not tracked)
+
+**Floating-block stuck case:** `analyzeCalendar` now also flags `missing_floating_block` when the block event EXISTS but is overlapped by a meeting AND `findAlignedSlotForBlock` finds no clean alternative slot in the window. Owner direction: reuse the existing class rather than introduce a new one (`floating_block_overlap`). The detail field carries the specific story ("lunch at 12:00 overlaps Comsec — no clean alternative in 11:30-13:30") so Sonnet narrates accurately. Rebalance still runs and silently fixes the common case; this detector covers only the unrecoverable case.
+
+### Tool surface — `manage_calendar_issue`
+
+Rewritten action enum: `list | approve | start_resolve | owner_will_resolve | owner_done`. Replaces the prior `action='update'` + status enum. `start_resolve` opens a `follow_up` request under the row and stamps `request_id` — the row auto-resolves via cascade when the underlying event changes. No more parallel Path A / Path B with two fingerprint formats.
+
+### Yaml schema additions
+
+- `meetings.issue_exclusions.subjects: string[]` (optional) — subject silence list
+- `categories[].no_issue_tracking: boolean` (optional) — flag on category definitions to skip events tagged with this category
+
+Owner sets `"Home Time"` in the subjects list and `no_issue_tracking: true` on the `"Personal"` category. The hardcoded `night_shift.blocking_event` check at the overlap detector is gone; the night_shift config still exists for its other uses (work-hours computation).
+
+### Removed
+
+- Legacy `buildIssueKey` (format A / format B duality), `upsertCalendarIssue`, `dismissCalendarIssue`, `getDismissedIssueKeys` — all unreachable now
+- `dismiss_calendar_issue` legacy free-form Path B at `calendarHealth.ts:1881` — deleted
+- `calendar_fix` task dispatcher reduced to graceful no-op (legacy in-flight tasks complete cleanly; new design doesn't spawn this task type)
+
+### Migration
+
+- TRUNCATE legacy `calendar_dismissed_issues` (table dropped at boot, idempotent)
+- `npm run dev` restart required
+
+---
+
 ## 3.0.2 — Floating-block buffer structurally killed, IANA TZ guard, status indicator polish, routine context restored
 
 Patch over 3.0.1. The 5-min buffer on floating-block math is now structurally impossible: the `bufferMinutes` parameter is removed from `findAlignedSlotForBlock` / `findLatestAlignedSlotForBlock` / `findPositionalSlotForBlock` entirely. 3.0.1 dropped the defaults to 0 but the owner's yaml `buffer_minutes: 5` was still leaking into floating-block math at every call site that pulled it explicitly. New strict-IANA timezone validator catches ambiguous abbreviations like "IST" (luxon resolves to India, not Israel) at write time in `update_person_profile`, plus a one-shot data fix for the existing bad rows. Slack status indicator gets a "Finishing up" beat during the post-tool gate stack so the panel doesn't freeze on the last tool verb for 4-8 seconds. Routine output regains context — Sonnet now opens user-routine replies with a conversational one-liner naming what fired ("From this week's LinkedIn ideas routine: ..."), so a content brainstorm doesn't read as a context-less dump.

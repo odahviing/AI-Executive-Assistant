@@ -10,7 +10,7 @@ import {
   updateMeeting,
   findAvailableSlots,
 } from '../connectors/graph/calendar';
-import { auditLog, upsertCalendarIssue, getActiveCalendarIssues, updateCalendarIssueStatus, getDismissedIssueKeys, buildIssueKey, dismissCalendarIssue, type CalendarIssueStatus } from '../db';
+import { auditLog, getActiveCalendarIssues, updateCalendarIssueStatus, buildClusters, upsertCluster, markStaleResolved, type DetectedIssue, type IssueClass, type IssueStatus } from '../db';
 import logger from '../utils/logger';
 import { displaySubject } from '../utils/displaySubject';
 import type { PreferPosition, AnchorEvent } from '../utils/floatingBlocks';
@@ -267,29 +267,22 @@ Use the owner's own categories listed in the EVENT CATEGORIES block of your syst
       {
         // v2.9 — merged get_calendar_issues + update_calendar_issue.
         name: 'manage_calendar_issue',
-        description: `Calendar issues (double bookings, OOF conflicts, back-to-back, etc.) — list or update status. One tool, two actions.
+        description: `Calendar issues (overlaps, work-on-day-off, OOF, missing blocks, etc.) — list or transition. v3.0.3 redesign.
 
-action='list' — get all active (unresolved) calendar issues. Use to check outstanding calendar problems the owner needs to address.
+Actions:
+- list — read active rows (filtered to event_end > now).
+- approve — owner said "it's fine, leave it." Marks the row terminal (won't re-flag).
+- start_resolve — owner said "fix it." Opens a request_id under the row, transitions to in_progress. Caller MUST follow with move_meeting / coordinate_meeting / etc. as appropriate; the row auto-resolves on cascade when the underlying event changes.
+- owner_will_resolve — owner said "I'll handle it." Row sits in owner_side state until owner declares done OR the underlying event changes.
+- owner_done — owner declared he fixed it. Row transitions to resolved.
 
-action='update' — change the status of an issue. Two paths depending on source:
-A. TRACKED issues (from manage_calendar_issue(list) / check_calendar_health) — pass \`issue_id\` + new \`status\` (approved | to_resolve | resolved). Use "to_resolve" with \`resolution_notes\` when the owner wants it fixed (then call move_meeting / coordinate_meeting, then call this again with "resolved").
-B. ANALYZE-CALENDAR issues (from analyze_calendar) — no issue_id; identified by \`event_date\` + \`issue_type\` + \`detail\`. Pass those three + \`status\` (dismissed | resolved). Use this when the owner says "that's fine / leave it / I know" so it won't be flagged again.
-
-Status meanings:
-- "approved"  — tracked: owner aware, stop flagging
-- "dismissed" — analyze: owner is ok with it, stop flagging
-- "to_resolve" — tracked: owner wants it fixed
-- "resolved"  — fixed (either path)`,
+issue_id is required for everything except 'list'. Get it from a prior list / check_calendar_health call. Use \`notes\` to capture what owner said ("Sunday is travel, leave it") — surfaces on future narration.`,
         input_schema: {
           type: 'object',
           properties: {
-            action: { type: 'string', enum: ['list', 'update'], description: 'list = read, update = state change.' },
-            issue_id: { type: 'string', description: 'update (TRACKED): issue_id from list or check_calendar_health.' },
-            event_date: { type: 'string', description: 'update (ANALYZE): YYYY-MM-DD. Pair with issue_type + detail.' },
-            issue_type: { type: 'string', enum: ['back_to_back', 'no_buffer', 'missing_floating_block', 'oof_with_meetings', 'work_on_day_off', 'overlap'], description: 'update (ANALYZE): type of issue.' },
-            detail: { type: 'string', description: 'update (ANALYZE): brief description of the specific issue.' },
-            status: { type: 'string', enum: ['approved', 'dismissed', 'to_resolve', 'resolved'], description: 'update: REQUIRED. See description for which status fits which path.' },
-            resolution_notes: { type: 'string', description: 'update: optional. Owner instructions (to_resolve) or what was done (resolved).' },
+            action: { type: 'string', enum: ['list', 'approve', 'start_resolve', 'owner_will_resolve', 'owner_done'], description: 'see description.' },
+            issue_id: { type: 'string', description: 'required for approve / start_resolve / owner_will_resolve / owner_done. Get from list().' },
+            notes: { type: 'string', description: 'optional. Owner reason ("travel week"), or what got done.' },
           },
           required: ['action'],
         },
@@ -449,21 +442,21 @@ Status meanings:
           //
           // Filter to events that COUNT as work meetings for overlap purposes.
           // Anything outside that scope is the owner's life and shouldn't be
-          // surfaced as a calendar issue (#76 — first response judgment-filtered
-          // these, second response dumped them; bug was the analyzer relying on
-          // Sonnet to filter post-hoc). The four exclusions:
-          //   1. all-day / showAs free / showAs workingElsewhere — pre-existing
-          //   2. matches `profile.schedule.night_shift.blocking_event` (e.g.
-          //      "Home Time" — explicitly the night-shift marker, not a meeting)
+          // surfaced as a calendar issue. Exclusions (v3.0.3):
+          //   1. all-day / showAs free / showAs workingElsewhere
+          //   2. subject matches anything in profile.meetings.issue_exclusions.subjects
+          //      (yaml-driven; replaces the v2.x hardcoded night_shift.blocking_event
+          //       check — owner's "Home Time" now lives in this list and the same
+          //       mechanism extends to any other silent subject)
           //   3. matches a configured floating block (lunch / coffee / gym /
           //      thinking-time / etc — elastic personal time, not work)
           //   4. entirely outside the day's work-hours window (Boot Camp 20:00-
           //      21:30 on a 10:30-19:00 office day, etc.)
+          //   5. v3.0.3 — any of the event's categories matches a yaml category
+          //      flagged `no_issue_tracking: true` (e.g. "Personal" category —
+          //      owner's life, not work-tracking territory)
           // v2.8.1 — multi-window aware. workStart = earliest window start,
-          // workEnd = latest window end on this day. Used as outer bounds
-          // for the "entirely outside work-hours" exclusion below — slots
-          // that fall in a between-window gap are still in the outer range
-          // and will be processed normally (no false-exclusion).
+          // workEnd = latest window end on this day.
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { getOwnerWorkHoursForDay: _getWH } = require('../utils/workHours') as
             typeof import('../utils/workHours');
@@ -476,15 +469,20 @@ Status meanings:
             : '19:00';
           const dayWorkStart = DateTime.fromISO(`${dayStr}T${dayHoursStart}`, { zone: timezone });
           const dayWorkEnd = DateTime.fromISO(`${dayStr}T${dayHoursEnd}`, { zone: timezone });
-          const nightShiftMarker = profile.schedule.night_shift?.blocking_event?.toLowerCase() ?? null;
+          const exclSubjects = (profile.meetings.issue_exclusions?.subjects ?? [])
+            .map(s => s.toLowerCase()).filter(s => s.length > 0);
+          const noTrackCategories = new Set(
+            (profile.categories ?? [])
+              .filter(c => c.no_issue_tracking === true)
+              .map(c => c.name),
+          );
 
           const nonAllDay = dayEvents.filter(e => {
             if (e.isAllDay) return false;
             if (e.showAs === 'free' || e.showAs === 'workingElsewhere') return false;
-            // Exclusion 2: night-shift blocking event (e.g. "Home Time")
-            if (nightShiftMarker && (e.subject ?? '').toLowerCase().includes(nightShiftMarker)) {
-              return false;
-            }
+            // Exclusion 2: yaml-driven subject silence list
+            const subjLower = (e.subject ?? '').toLowerCase();
+            if (exclSubjects.some(s => subjLower.includes(s))) return false;
             // Exclusion 3: any configured floating block
             const matchesAnyBlock = floatingBlocks.some(b =>
               fb.isFloatingBlockEvent(
@@ -493,6 +491,9 @@ Status meanings:
               ),
             );
             if (matchesAnyBlock) return false;
+            // Exclusion 5: yaml category flagged no_issue_tracking
+            const eCats = (e as unknown as { categories?: string[] }).categories ?? [];
+            if (eCats.some(c => noTrackCategories.has(c))) return false;
             // Exclusion 4: entirely outside work-hours (start >= workEnd OR end <= workStart)
             const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
             const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
@@ -770,41 +771,14 @@ Status meanings:
         issues.length = 0;
         issues.push(...dedupedIssues);
 
-        // v1.5.1 fix — filter out issues the owner has already approved / dismissed.
-        // Previously `upsertCalendarIssue` skipped the DB insert for these but the
-        // `issues` array still carried them through to the briefing, so the owner
-        // got re-pinged about the same conflict every morning no matter how many
-        // times they said "it's fine". Now we drop them from the returned list.
+        // v3.0.3 — suppression + write moved AFTER the active-mode fix loop.
+        // Pre-write filtering against terminal rows is handled by upsertCluster's
+        // 'suppressed' return; legacy dismissed-key filter retired. Auto-fix
+        // success (active mode) → no row needed (audit_log carries it). Only
+        // un-fixed issues land on the table. See cluster-based write block
+        // below the fix loop.
         const ownerUserId = profile.user.slack_user_id;
-        const dismissedKeys = getDismissedIssueKeys(ownerUserId, startDate, endDate);
-        if (dismissedKeys.size > 0) {
-          const preCount = issues.length;
-          const filtered = issues.filter(i => !dismissedKeys.has(buildIssueKey(i.type, i.description, i.eventIds)));
-          if (filtered.length !== preCount) {
-            logger.info('Calendar health: suppressed already-approved issues', {
-              suppressed: preCount - filtered.length,
-              kept: filtered.length,
-              ownerUserId,
-            });
-          }
-          issues.length = 0;
-          issues.push(...filtered);
-        }
-
-        // Auto-track actionable issues (double bookings + OOF conflicts) in DB
         let newIssueCount = 0;
-        for (const issue of issues) {
-          if (issue.type === 'double_booking' || issue.type === 'oof_conflict') {
-            const created = upsertCalendarIssue(
-              ownerUserId,
-              issue.date,
-              issue.type,
-              issue.description,
-              issue.eventIds,
-            );
-            if (created) newIssueCount++;
-          }
-        }
 
         // Include any active (unresolved) issues from previous checks
         const activeIssues = getActiveCalendarIssues(ownerUserId);
@@ -1320,6 +1294,102 @@ Status meanings:
             dropped: beforeSuppress - issues.length, remaining: issues.length,
           });
         }
+
+        // v3.0.3 — cluster-based write for un-fixed issues. Maps HealthIssue
+        // shape to DetectedIssue, groups via overlap edges into clusters,
+        // upserts one row per cluster. Terminal rows suppress; active rows
+        // merge/migrate; new clusters insert. After all clusters processed,
+        // auto-stale flips any non-touched active row to 'resolved' (its
+        // condition vanished since last detection).
+        //
+        // Active-mode SUCCESS (issue.fixed) → no row write. Failure or no-fix-
+        // attempt → row gets written. Owner sees only what needs attention.
+        const eventEndMs = new Map<string, number>();
+        const eventDateByEventId = new Map<string, string>();
+        const eventSubjectByEventId = new Map<string, string>();
+        for (const e of events) {
+          if (!e?.id) continue;
+          try {
+            const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
+            eventEndMs.set(e.id, eEnd.toMillis());
+            eventDateByEventId.set(e.id, eEnd.toFormat('yyyy-MM-dd'));
+            if (e.subject) eventSubjectByEventId.set(e.id, e.subject);
+          } catch (_) { /* skip events with unparseable dates */ }
+        }
+
+        const classMap: Record<string, IssueClass> = {
+          double_booking:           'overlap',
+          oof_conflict:             'oof_with_meetings',
+          category_limit_exceeded:  'category_limit',
+          missing_floating_block:   'missing_floating_block',
+          busy_day:                 'busy_day',
+        };
+
+        const detectedForWrite: DetectedIssue[] = [];
+        const dateFallback = new Map<string, string>();
+        for (const issue of issues) {
+          if (issue.fixed) continue;  // active-mode success → no row
+          const cls = classMap[issue.type];
+          if (!cls) continue;          // missing_category / unknown — not tracked
+          const eIds = issue.eventIds ?? [];
+          let primaryId: string | undefined = eIds[0];
+          let peerId: string | undefined = eIds[1];
+          // missing_floating_block: synthesize event_id per owner direction
+          // ({NNN}-{MMDDYYYY}-{HHMM}). Index from profile.meetings.floating_blocks.
+          if (cls === 'missing_floating_block') {
+            const fbs = profile.meetings.floating_blocks ?? [];
+            const idx = Math.max(0, fbs.findIndex(b => b.name === issue.block_name));
+            const block = fbs[idx];
+            const start = block?.preferred_start ?? '00:00';
+            const dt = DateTime.fromISO(issue.date, { zone: timezone });
+            const mmddyyyy = `${String(dt.month).padStart(2,'0')}${String(dt.day).padStart(2,'0')}${dt.year}`;
+            const hhmm = start.replace(':', '');
+            primaryId = `${String(idx + 1).padStart(3, '0')}-${mmddyyyy}-${hhmm}`;
+            peerId = undefined;
+            // event_end_ms = end of the block's window
+            const end = block?.preferred_end ?? '23:59';
+            const endDt = DateTime.fromISO(`${issue.date}T${end}`, { zone: timezone });
+            eventEndMs.set(primaryId, endDt.toMillis());
+            dateFallback.set(primaryId, issue.date);
+          }
+          if (!primaryId) continue;
+          const endMs = eventEndMs.get(primaryId) ?? 0;
+          const peerEnd = peerId ? eventEndMs.get(peerId) : undefined;
+          // Use issue.date as the date fallback when we don't have it from events.
+          if (!eventDateByEventId.has(primaryId)) {
+            eventDateByEventId.set(primaryId, dateFallback.get(primaryId) ?? issue.date);
+          }
+          const detail = issue.fix_failed
+            ? `auto-fix attempted: ${issue.fix_error ?? 'unknown reason'} (${issue.description})`
+            : issue.description;
+          detectedForWrite.push({
+            class: cls,
+            event_id: primaryId,
+            event_subject: eventSubjectByEventId.get(primaryId),
+            event_end_ms: endMs,
+            peer_event_id: peerId,
+            peer_subject: peerId ? eventSubjectByEventId.get(peerId) : undefined,
+            peer_end_ms: peerEnd,
+            detail,
+          });
+        }
+
+        const touchedRowIds = new Set<string>();
+        if (detectedForWrite.length > 0) {
+          const clusters = buildClusters(detectedForWrite, eventDateByEventId);
+          for (const c of clusters) {
+            // status: 'awaiting_owner' is the post-detection landing for
+            // passive mode and for active-mode-failure. We set it
+            // unconditionally here — the caller decides whether to narrate.
+            const res = upsertCluster(ownerUserId, c, 'awaiting_owner');
+            if (res.row_id && (res.action === 'insert' || res.action === 'update' || res.action === 'merge')) {
+              touchedRowIds.add(res.row_id);
+              if (res.action === 'insert') newIssueCount += 1;
+            }
+          }
+        }
+        // Auto-stale anything not touched in this pass within the date range.
+        markStaleResolved(ownerUserId, touchedRowIds, startDate, endDate);
 
         // Route 2 narration. Build a deterministic per-issue summary text
         // directly from the issue list + fix outcomes. The routine prompt
@@ -1854,163 +1924,106 @@ Status meanings:
 
       case 'manage_calendar_issue': {
         const action = String(args.action ?? '').toLowerCase();
-        if (action === 'list') {
-          const activeIssues = getActiveCalendarIssues(profile.user.slack_user_id);
-          return {
-            issues: activeIssues,
-            count: activeIssues.length,
-            summary: activeIssues.length === 0
-              ? 'No outstanding calendar issues.'
-              : `${activeIssues.length} active issue(s) need attention.`,
-          };
-        }
-        if (action !== 'update') {
-          return { error: 'bad_action', message: `manage_calendar_issue action must be 'list' | 'update', got "${action}".` };
-        }
-        // action === 'update' — body of the former update_calendar_issue case continues below.
-        const status = args.status as string;
-        const notes = args.resolution_notes as string | undefined;
         const issueId = args.issue_id as string | undefined;
-        const eventDate = args.event_date as string | undefined;
-        const issueType = args.issue_type as string | undefined;
-        const detail = args.detail as string | undefined;
+        const notes = args.notes as string | undefined;
+        const ownerUserId = profile.user.slack_user_id;
 
-        // Path B — fingerprint dismissal for analyze-calendar issues (no issue_id).
-        // v2.7.6 — folded former dismiss_calendar_issue into this tool. Same DB
-        // write (calendar_dismissed_issues), one tool surface.
-        if (!issueId) {
-          if (!eventDate || !issueType || !detail) {
-            return {
-              error: 'Need either issue_id (for tracked issues from manage_calendar_issue(list) / check_calendar_health) OR event_date + issue_type + detail (for analyze_calendar issues).',
-            };
-          }
-          if (status !== 'dismissed' && status !== 'resolved') {
-            return {
-              error: `Analyze-calendar issues use status "dismissed" or "resolved"; got "${status}". For tracked issues with issue_id, use "approved" / "to_resolve" / "resolved".`,
-            };
-          }
-          // Update existing active row(s) in place instead of inserting a
-          // parallel row. Pre-fix the dismiss path inserted a new row with
-          // a 2-arg buildIssueKey (no event_ids) while the active row was
-          // upserted at detection time with a 3-arg key (with event_ids).
-          // The two keys never matched, so the brief-time filter never
-          // found the dismissed row and the issue re-flagged forever. Now
-          // we update the active row's resolution column directly — same
-          // row, same key, just different state. Filter picks it up.
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getDb: _getDb } = require('../db/client') as typeof import('../db/client');
-          const db = _getDb();
-          const updated = db.prepare(`
-            UPDATE calendar_dismissed_issues
-            SET resolution = ?, resolution_notes = ?
-            WHERE owner_user_id = ?
-              AND event_date = ?
-              AND issue_type = ?
-              AND detail = ?
-              AND resolution IN ('new', 'to_resolve')
-          `).run(status, notes ?? null, profile.user.slack_user_id, eventDate, issueType, detail);
-
-          let issueKey: string;
-          if (updated.changes === 0) {
-            // No matching active row — Sonnet is dismissing an issue that
-            // wasn't tracked (free-form dismissal, or analyze_calendar
-            // didn't emit an event_ids fingerprint). Fall back to inserting
-            // a fresh row with the legacy 2-arg key. Re-detection won't
-            // suppress until a tracked row catches up, but the dismissal
-            // intent is recorded for audit.
-            issueKey = buildIssueKey(issueType, detail);
-            dismissCalendarIssue(
-              profile.user.slack_user_id,
-              eventDate,
-              issueType,
-              issueKey,
-              detail,
-              status,
-            );
-          } else {
-            // Read back the row's stored issue_key so the return value is
-            // accurate.
-            const row = db.prepare(`
-              SELECT issue_key FROM calendar_dismissed_issues
-              WHERE owner_user_id = ?
-                AND event_date = ?
-                AND issue_type = ?
-                AND detail = ?
-              ORDER BY created_at DESC LIMIT 1
-            `).get(profile.user.slack_user_id, eventDate, issueType, detail) as { issue_key: string } | undefined;
-            issueKey = row?.issue_key ?? buildIssueKey(issueType, detail);
-          }
-          auditLog({
-            action: 'update_calendar_issue',
-            source: 'calendar_health',
-            actor: profile.user.name,
-            details: { eventDate, issueType, detail, status, rows_updated: updated.changes },
-            outcome: 'success',
-          });
-          return { dismissed: true, issue_key: issueKey, status };
-        }
-
-        // Path A — tracked issue (has issue_id).
-        if (status !== 'approved' && status !== 'to_resolve' && status !== 'resolved') {
+        if (action === 'list') {
+          const rows = getActiveCalendarIssues(ownerUserId);
           return {
-            error: `Tracked issues use status "approved" / "to_resolve" / "resolved"; got "${status}". For analyze_calendar issues without an issue_id, use "dismissed" / "resolved".`,
+            issues: rows,
+            count: rows.length,
+            summary: rows.length === 0
+              ? 'No outstanding calendar issues.'
+              : `${rows.length} active issue(s) need attention.`,
           };
         }
-        const updated = updateCalendarIssueStatus(issueId, status as CalendarIssueStatus, notes);
+
+        // All non-list actions need issue_id.
+        if (!issueId) {
+          return { error: 'issue_id_required', message: `${action} requires issue_id. Get it from manage_calendar_issue(list) or check_calendar_health.` };
+        }
+
+        // Map action → status. Reject unknown actions.
+        const statusByAction: Record<string, IssueStatus> = {
+          approve:            'approved',
+          start_resolve:      'in_progress',
+          owner_will_resolve: 'owner_side',
+          owner_done:         'resolved',
+        };
+        const newStatus = statusByAction[action];
+        if (!newStatus) {
+          return { error: 'bad_action', message: `manage_calendar_issue action must be 'list' | 'approve' | 'start_resolve' | 'owner_will_resolve' | 'owner_done', got "${action}".` };
+        }
+
+        // start_resolve opens a follow_up request before flipping the row
+        // so the row carries a request_id back. Other actions just update.
+        let requestId: string | undefined;
+        if (action === 'start_resolve') {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { createRequest } = require('../db/requests') as
+              typeof import('../db/requests');
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { getCalendarIssueById } = require('../db/calendarIssues') as
+              typeof import('../db/calendarIssues');
+            const row = getCalendarIssueById(issueId);
+            const subject = row
+              ? `Resolve ${row.issue_class}: ${(notes ?? '').slice(0, 60) || row.event_date}`
+              : 'Resolve calendar issue';
+            const created = createRequest({
+              ownerUserId,
+              initiatedBy: ownerUserId,
+              initiatedByRole: 'owner',
+              kind: 'follow_up',
+              subkind: 'calendar_fix',
+              subject,
+              description: `Calendar issue fix — ${row?.issue_class ?? '(unknown class)'} on ${row?.event_date ?? '?'}. ${notes ?? ''}`.trim(),
+              state: 'in_flight',
+              informed: 1,
+              outcomeExternalEventId: row?.event_id,
+              details: { calendar_issue_id: issueId, notes },
+            });
+            requestId = created.id;
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { attachRequestToIssue } = require('../db/calendarIssues') as
+              typeof import('../db/calendarIssues');
+            attachRequestToIssue(issueId, requestId);
+          } catch (err) {
+            logger.warn('start_resolve — request creation failed, falling back to status-only', {
+              issueId, err: String(err).slice(0, 200),
+            });
+          }
+        }
+
+        const updated = updateCalendarIssueStatus(issueId, newStatus, notes);
         if (!updated) {
-          return { error: `Issue "${issueId}" not found.` };
+          return { error: 'not_found', message: `Issue "${issueId}" not found.` };
         }
 
         auditLog({
-          action: 'update_calendar_issue',
+          action: 'manage_calendar_issue',
           source: 'calendar_health',
           actor: profile.user.name,
-          details: { issueId, status, notes },
+          details: { issueId, action, newStatus, notes, requestId },
           outcome: 'success',
         });
 
-        // v1.6.0 — when marked `to_resolve`, spawn a calendar_fix task due in
-        // 1 day so the issue actually gets re-checked instead of sitting with
-        // a status string. If still present after 1 day → owner gets re-pinged.
-        // If resolved → auto-close silently.
-        if (status === 'to_resolve') {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { createTask } = require('../tasks') as typeof import('../tasks');
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getCalendarIssueById } = require('../db/calendarIssues') as typeof import('../db/calendarIssues');
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { DateTime } = require('luxon');
-          const issue = getCalendarIssueById(issueId);
-          const dueAt = DateTime.now().plus({ days: 1 }).toUTC().toISO()!;
-          try {
-            createTask({
-              owner_user_id: profile.user.slack_user_id,
-              owner_channel: context.channelId,
-              owner_thread_ts: context.threadTs,
-              type: 'calendar_fix',
-              status: 'new',
-              title: issue ? `Re-check calendar issue: ${issue.detail.slice(0, 60)}` : 'Re-check calendar issue',
-              due_at: dueAt,
-              skill_ref: issueId,
-              context: JSON.stringify({ issue_id: issueId, notes }),
-              who_requested: 'system',
-              skill_origin: 'calendar_health',
-            });
-            logger.info('calendar_fix task scheduled', { issueId, dueAt });
-          } catch (err) {
-            logger.error('Failed to schedule calendar_fix task', { err: String(err), issueId });
-          }
-        }
+        const messageByAction: Record<string, string> = {
+          approve:            'Issue acknowledged — won\'t be flagged again.',
+          start_resolve:      requestId
+            ? 'Request opened. Call move_meeting / coordinate_meeting as appropriate; cascade auto-resolves the row on event change.'
+            : 'Marked for resolution. Call move_meeting / coordinate_meeting as appropriate.',
+          owner_will_resolve: 'Marked owner_side — waiting on you to handle.',
+          owner_done:         'Issue resolved.',
+        };
 
         return {
           updated: true,
           issue_id: issueId,
-          status,
-          message: status === 'approved'
-            ? 'Issue acknowledged — won\'t be flagged again.'
-            : status === 'to_resolve'
-            ? 'Issue marked for resolution. I\'ll re-check it in 1 day and re-ping you if it\'s still there.'
-            : 'Issue resolved.',
+          status: newStatus,
+          request_id: requestId,
+          message: messageByAction[action],
         };
       }
 

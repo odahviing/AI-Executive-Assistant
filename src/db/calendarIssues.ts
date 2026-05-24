@@ -1,148 +1,374 @@
+/**
+ * Calendar Issues — v3.0.3 redesign.
+ *
+ * One row per CLUSTER of linked events. Clusters form via shared overlap
+ * edges: events linked by an overlap issue belong to the same cluster.
+ * Single-event issues (work_on_day_off, missing_floating_block, etc.) each
+ * own a single-event cluster. Pair issues (overlap) merge their two events
+ * into one cluster.
+ *
+ * For each cluster, the detector finds the HIGHEST-PRIORITY issue across
+ * all its events. That issue becomes the row's `issue_class`; its event
+ * becomes the `event_id` (anchor). The other issues are silently dropped
+ * — moving the anchor event resolves the cluster anyway, and slot finder
+ * handles any remaining timing constraints on re-detection.
+ *
+ * Priority order (highest→lowest):
+ *   1. work_on_day_off
+ *   2. oof_with_meetings
+ *   3. overlap
+ *   4. category_limit
+ *   5. missing_floating_block
+ *   6. busy_day
+ *
+ * Status lifecycle:
+ *   new → awaiting_owner → (approved | in_progress | owner_side)
+ *                                       ↓               ↓
+ *                                       resolved        resolved
+ *   resolved/approved/dismissed are terminal.
+ *
+ * Suppression: at detection time, if a row exists for the cluster (matched
+ * by event_id IN cluster OR peer_event_id IN cluster) AND its status is
+ * terminal → suppress. If active → no-op (already tracked). If absent →
+ * INSERT.
+ *
+ * Auto-stale: after each detection pass, rows not re-emitted are flipped
+ * to status='resolved' (their underlying condition vanished).
+ *
+ * Cascade: on event move/delete/cancel, rows where event_id=E or
+ * peer_event_id=E are resolved.
+ *
+ * Past filter: rows with event_end_ms < now() are filtered out at read
+ * time. No need for a cron to expire them.
+ *
+ * Migration note: the legacy `calendar_dismissed_issues` table is dropped
+ * by the db/client schema init. All old rows are gone (owner direction —
+ * clean start). No data migration path.
+ */
 import { getDb } from './client';
 
-export type CalendarIssueStatus = 'new' | 'approved' | 'to_resolve' | 'resolved' | 'dismissed';
+// ── Types ────────────────────────────────────────────────────────────────────
 
-export interface CalendarIssue {
-  id: string;
-  created_at: string;
-  owner_user_id: string;
+export type IssueClass =
+  | 'work_on_day_off'
+  | 'oof_with_meetings'
+  | 'overlap'
+  | 'category_limit'
+  | 'missing_floating_block'
+  | 'busy_day';
+
+export type IssueStatus =
+  | 'new'
+  | 'awaiting_owner'
+  | 'in_progress'
+  | 'owner_side'
+  | 'approved'
+  | 'dismissed'
+  | 'resolved';
+
+/** Priority — lower number = higher priority. Used to choose the anchor
+ *  issue per cluster. Tiebreak: lex-min event_id. */
+const CLASS_PRIORITY: Record<IssueClass, number> = {
+  work_on_day_off:        1,
+  oof_with_meetings:      2,
+  overlap:                3,
+  category_limit:         4,
+  missing_floating_block: 5,
+  busy_day:               6,
+};
+
+const TERMINAL_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
+  'approved', 'dismissed', 'resolved',
+]);
+
+const ACTIVE_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
+  'new', 'awaiting_owner', 'in_progress', 'owner_side',
+]);
+
+/** Single detected issue, pre-clustering. The detector emits these in
+ *  memory; the cluster builder groups them and writes rows. */
+export interface DetectedIssue {
+  class: IssueClass;
+  event_id: string;            // the event this issue is about
+  event_subject?: string;      // for narration without re-fetch
+  event_end_ms: number;        // when this event stops mattering
+  peer_event_id?: string;      // only set when class==='overlap'
+  peer_subject?: string;
+  peer_end_ms?: number;
+  detail?: string;             // free prose for notes
+}
+
+/** A cluster — one or more detected issues sharing event_ids transitively
+ *  via overlap edges. Produced by `buildClusters`. */
+export interface IssueCluster {
+  /** Every event_id referenced by any issue in this cluster. */
+  events: Set<string>;
+  /** The issues that fell into this cluster. */
+  issues: DetectedIssue[];
+  /** Anchor: event_id of the issue with the highest priority.
+   *  Tiebreak: among same-priority issues, lex-min of their event_ids. */
+  anchor_event_id: string;
+  /** The chosen anchor issue's class. */
+  anchor_class: IssueClass;
+  /** Anchor issue's peer (only when anchor_class==='overlap'). */
+  anchor_peer_event_id?: string;
+  anchor_peer_subject?: string;
+  /** Max(end_ms) across all events in the cluster. */
+  event_end_ms: number;
+  /** Date of the anchor event (YYYY-MM-DD, owner-local). */
   event_date: string;
-  issue_type: string;
-  issue_key: string;
-  detail: string;
-  resolution: CalendarIssueStatus;
-  resolution_notes: string | null;
+  /** Anchor issue's detail string, when present. */
+  detail?: string;
 }
 
-/**
- * v2.7.4 — Issue-class normalization. Different issue types describe the
- * same underlying problem from different angles:
- *   double_booking + back_to_back + no_buffer → all are "overlap"
- *   oof_conflict → "oof"
- * The dismissal fingerprint should be class-based, not type-based, so a
- * dismissed double_booking row doesn't get re-flagged as back_to_back on
- * the next run (the May 12 Michal-Happy-Hour dismissal failure).
- */
-function normalizeIssueClass(type: string): string {
-  switch (type) {
-    case 'double_booking':
-    case 'back_to_back':
-    case 'no_buffer':
-    case 'overlap':
-      return 'overlap';
-    case 'oof_conflict':
-      return 'oof';
-    case 'missing_floating_block':
-      return 'missing_block';
-    case 'work_on_day_off':
-      return 'day_off';
-    case 'busy_day':
-      return 'busy_day';
-    case 'category_limit_exceeded':
-      return 'category_limit';
-    default:
-      return type;  // unknown types fall back to literal
+export interface CalendarIssueRow {
+  id: string;
+  owner_user_id: string;
+  event_id: string;
+  peer_event_id: string | null;
+  event_date: string;
+  event_end_ms: number;
+  issue_class: IssueClass;
+  status: IssueStatus;
+  notes: string | null;
+  request_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ── Cluster building ─────────────────────────────────────────────────────────
+
+/** Group detected issues into clusters via connected components.
+ *  Two issues land in the same cluster iff they share an event_id, or one
+ *  is an overlap that links them via peer_event_id. */
+export function buildClusters(
+  issues: DetectedIssue[],
+  eventDateByEventId: Map<string, string>,
+): IssueCluster[] {
+  if (issues.length === 0) return [];
+
+  // Union-find over event_ids.
+  const parent = new Map<string, string>();
+  const find = (x: string): string => {
+    let r = parent.get(x) ?? x;
+    while (r !== (parent.get(r) ?? r)) r = parent.get(r) ?? r;
+    return r;
+  };
+  const union = (a: string, b: string) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+
+  for (const i of issues) {
+    if (!parent.has(i.event_id)) parent.set(i.event_id, i.event_id);
+    if (i.peer_event_id) {
+      if (!parent.has(i.peer_event_id)) parent.set(i.peer_event_id, i.peer_event_id);
+      union(i.event_id, i.peer_event_id);
+    }
   }
-}
 
-/**
- * Build a unique key for a calendar issue so we can match dismissals / dedup.
- *
- * v2.7.4 — stable fingerprint via (class, sorted_event_ids) when event IDs
- * are available; falls back to (type, time-extract, prose-prefix) for legacy
- * callers that dismiss by free-form description without IDs. Same overlap
- * across runs now keys identically regardless of how the description prose
- * is phrased (Sonnet free-form vs analyzer structured).
- *
- * Format with IDs: "{class}:{id1},{id2}"     — stable
- * Format legacy:   "{type}:{time}:{prefix}"  — old behavior, used when no IDs
- */
-export function buildIssueKey(type: string, detail: string, eventIds?: string[]): string {
-  const cls = normalizeIssueClass(type);
-  if (eventIds && eventIds.length > 0) {
-    const sorted = [...eventIds].sort().join(',');
-    return `${cls}:${sorted}`;
+  // Group issues by cluster root.
+  const groups = new Map<string, DetectedIssue[]>();
+  for (const i of issues) {
+    const root = find(i.event_id);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root)!.push(i);
   }
-  // Legacy fallback — used when caller has no eventIds (older Sonnet-typed
-  // dismissals via dismiss_calendar_issue free-text). Less stable but at
-  // least carries forward for items dismissed before this version.
-  const timeMatch = detail.match(/(\d{2}:\d{2})/);
-  const time = timeMatch ? timeMatch[1] : 'unknown';
-  const fingerprint = detail.slice(0, 40).replace(/[^a-zA-Z0-9 ]/g, '').trim();
-  return `${cls}:${type}:${time}:${fingerprint}`;
+
+  const clusters: IssueCluster[] = [];
+  for (const [, items] of groups) {
+    // Anchor selection: highest priority (lowest CLASS_PRIORITY number).
+    // Tiebreak among equal-priority issues: lex-min event_id.
+    let bestIdx = 0;
+    for (let i = 1; i < items.length; i++) {
+      const a = items[bestIdx];
+      const b = items[i];
+      const pa = CLASS_PRIORITY[a.class];
+      const pb = CLASS_PRIORITY[b.class];
+      if (pb < pa || (pb === pa && b.event_id < a.event_id)) bestIdx = i;
+    }
+    const anchorIssue = items[bestIdx];
+
+    // Collect every event_id touched by any issue in this cluster.
+    const events = new Set<string>();
+    let maxEnd = 0;
+    for (const it of items) {
+      events.add(it.event_id);
+      if (it.peer_event_id) events.add(it.peer_event_id);
+      if (it.event_end_ms > maxEnd) maxEnd = it.event_end_ms;
+      if (it.peer_end_ms && it.peer_end_ms > maxEnd) maxEnd = it.peer_end_ms;
+    }
+
+    const eventDate = eventDateByEventId.get(anchorIssue.event_id) ?? '';
+
+    clusters.push({
+      events,
+      issues: items,
+      anchor_event_id: anchorIssue.event_id,
+      anchor_class: anchorIssue.class,
+      anchor_peer_event_id: anchorIssue.class === 'overlap' ? anchorIssue.peer_event_id : undefined,
+      anchor_peer_subject: anchorIssue.class === 'overlap' ? anchorIssue.peer_subject : undefined,
+      event_end_ms: maxEnd,
+      event_date: eventDate,
+      detail: anchorIssue.detail,
+    });
+  }
+  return clusters;
 }
 
+// ── Write path ───────────────────────────────────────────────────────────────
+
 /**
- * Get all dismissed/approved issue keys for a date range — used to skip re-flagging.
+ * Upsert a cluster's row. Three paths:
+ *   - 0 existing rows touched by cluster → INSERT new row
+ *   - 1 row whose event_id is in cluster.events → UPDATE in place
+ *       (also covers the migrate-anchor case: row.event_id may differ from
+ *        cluster.anchor_event_id; we re-anchor by updating event_id, class,
+ *        peer_event_id together)
+ *   - 2+ rows touched → MERGE: pick the oldest, fold into it, DELETE the
+ *       rest. Handles cluster-joining (a new overlap linking two events
+ *       that each had their own active row before).
+ *
+ * Terminal-status rows (approved/dismissed/resolved) suppress re-emission —
+ * we don't disturb them, we just no-op.
  */
-export function getDismissedIssueKeys(ownerUserId: string, startDate: string, endDate: string): Set<string> {
+export function upsertCluster(
+  ownerUserId: string,
+  cluster: IssueCluster,
+  initialStatus: IssueStatus = 'awaiting_owner',
+): { action: 'insert' | 'update' | 'merge' | 'suppressed' | 'noop'; row_id?: string } {
+  const db = getDb();
+
+  // Look up any rows whose event_id is in this cluster.
+  const eventIds = Array.from(cluster.events);
+  const placeholders = eventIds.map(() => '?').join(',');
+  const existing = db.prepare(`
+    SELECT * FROM calendar_issues
+    WHERE owner_user_id = ?
+      AND (event_id IN (${placeholders}) OR peer_event_id IN (${placeholders}))
+  `).all(ownerUserId, ...eventIds, ...eventIds) as CalendarIssueRow[];
+
+  // Any terminal row → suppressed.
+  const terminal = existing.find(r => TERMINAL_STATUSES.has(r.status));
+  if (terminal) return { action: 'suppressed', row_id: terminal.id };
+
+  const active = existing.filter(r => ACTIVE_STATUSES.has(r.status));
+
+  if (active.length === 0) {
+    // Fresh insert.
+    const id = `ci_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    db.prepare(`
+      INSERT INTO calendar_issues
+        (id, owner_user_id, event_id, peer_event_id, event_date, event_end_ms,
+         issue_class, status, notes, request_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    `).run(
+      id, ownerUserId,
+      cluster.anchor_event_id,
+      cluster.anchor_peer_event_id ?? null,
+      cluster.event_date,
+      cluster.event_end_ms,
+      cluster.anchor_class,
+      initialStatus,
+      cluster.detail ?? null,
+    );
+    return { action: 'insert', row_id: id };
+  }
+
+  if (active.length === 1) {
+    // Update in place; possibly re-anchor.
+    const row = active[0];
+    db.prepare(`
+      UPDATE calendar_issues
+      SET event_id = ?, peer_event_id = ?, event_date = ?, event_end_ms = ?,
+          issue_class = ?, notes = COALESCE(notes, ?),
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(
+      cluster.anchor_event_id,
+      cluster.anchor_peer_event_id ?? null,
+      cluster.event_date,
+      cluster.event_end_ms,
+      cluster.anchor_class,
+      cluster.detail ?? null,
+      row.id,
+    );
+    return { action: 'update', row_id: row.id };
+  }
+
+  // 2+ active rows touched → MERGE.
+  const sorted = [...active].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const canonical = sorted[0];
+  db.prepare(`
+    UPDATE calendar_issues
+    SET event_id = ?, peer_event_id = ?, event_date = ?, event_end_ms = ?,
+        issue_class = ?, notes = COALESCE(notes, ?),
+        updated_at = datetime('now')
+    WHERE id = ?
+  `).run(
+    cluster.anchor_event_id,
+    cluster.anchor_peer_event_id ?? null,
+    cluster.event_date,
+    cluster.event_end_ms,
+    cluster.anchor_class,
+    cluster.detail ?? null,
+    canonical.id,
+  );
+  for (let i = 1; i < sorted.length; i++) {
+    db.prepare(`DELETE FROM calendar_issues WHERE id = ?`).run(sorted[i].id);
+  }
+  return { action: 'merge', row_id: canonical.id };
+}
+
+// ── Auto-stale (after a detection pass) ──────────────────────────────────────
+
+/**
+ * After processing a detection batch, mark any ACTIVE row not touched in
+ * this pass as resolved — its underlying condition is gone.
+ *
+ * Called once per detection per owner. Pass the set of row IDs that were
+ * upserted in this pass; everything else with active status + event_end_ms
+ * in the date range gets flipped.
+ *
+ * Scope to the date range being analyzed so we don't touch unrelated rows
+ * for other dates that this detection pass didn't even look at.
+ */
+export function markStaleResolved(
+  ownerUserId: string,
+  touchedRowIds: Set<string>,
+  dateRangeStart: string,
+  dateRangeEnd: string,
+): number {
   const db = getDb();
   const rows = db.prepare(`
-    SELECT issue_key FROM calendar_dismissed_issues
+    SELECT id FROM calendar_issues
     WHERE owner_user_id = ?
-    AND event_date >= ? AND event_date <= ?
-    AND resolution IN ('dismissed', 'approved', 'resolved')
-  `).all(ownerUserId, startDate, endDate) as { issue_key: string }[];
-  return new Set(rows.map(r => r.issue_key));
-}
+      AND status IN ('new','awaiting_owner','in_progress','owner_side')
+      AND event_date >= ? AND event_date <= ?
+  `).all(ownerUserId, dateRangeStart, dateRangeEnd) as Array<{ id: string }>;
 
-/**
- * Create or update a calendar issue. If the same issue_key already exists
- * with status 'approved' or 'dismissed', it won't be re-created.
- * Returns true if a new issue was created, false if already tracked.
- */
-export function upsertCalendarIssue(
-  ownerUserId: string,
-  eventDate: string,
-  issueType: string,
-  detail: string,
-  eventIds?: string[],
-): boolean {
-  const db = getDb();
-  // v2.7.4 — pass eventIds through so fingerprint is stable across runs.
-  const issueKey = buildIssueKey(issueType, detail, eventIds);
-
-  // Check if already tracked
-  const existing = db.prepare(`
-    SELECT id, resolution FROM calendar_dismissed_issues
-    WHERE owner_user_id = ? AND issue_key = ?
-  `).get(ownerUserId, issueKey) as { id: string; resolution: string } | undefined;
-
-  if (existing) {
-    // Don't re-create approved/dismissed/resolved issues
-    if (['approved', 'dismissed', 'resolved'].includes(existing.resolution)) {
-      return false;
-    }
-    // Already tracked as 'new' or 'to_resolve' — skip
-    return false;
+  let changed = 0;
+  for (const r of rows) {
+    if (touchedRowIds.has(r.id)) continue;
+    db.prepare(`
+      UPDATE calendar_issues
+      SET status = 'resolved',
+          notes = COALESCE(notes, '') || ' [auto-stale: conditions vanished]',
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(r.id);
+    changed++;
   }
-
-  const id = `ci_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  // v2.4.2 — eventIds now persisted into the event_ids column (was a silent
-  // drop pre-v2.4.2 — column didn't exist). Enables closeMeetingArtifacts to
-  // cascade-resolve issue rows when their source meetings move/update/delete.
-  db.prepare(`
-    INSERT INTO calendar_dismissed_issues
-    (id, owner_user_id, event_date, issue_type, issue_key, detail, resolution, resolution_notes, event_ids)
-    VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?)
-  `).run(
-    id, ownerUserId, eventDate, issueType, issueKey, detail,
-    null,                                              // resolution_notes
-    eventIds && eventIds.length > 0 ? JSON.stringify(eventIds) : null,
-  );
-  return true;
+  return changed;
 }
 
+// ── Cascade ──────────────────────────────────────────────────────────────────
+
 /**
- * v2.4.2 — Find active calendar_issue rows whose persisted event_ids JSON
- * references this meeting and mark them resolved. Called from
- * closeMeetingArtifacts on every meeting state change. Idempotent: rows
- * already in a terminal state are not re-touched.
- *
- * Match is exact — we search the JSON column for the meeting_id substring
- * (cheap, indexed by owner_user_id). We're matching event ids which are
- * opaque Graph strings like "AAMkAG...=", so substring matching has no
- * collision risk in practice.
+ * Called from closeMeetingArtifacts on every event move/delete/cancel.
+ * Resolves any non-terminal row that references this event_id as either
+ * the anchor or the peer.
  */
 export function resolveCalendarIssuesForMeeting(
   ownerUserId: string,
@@ -150,85 +376,96 @@ export function resolveCalendarIssuesForMeeting(
 ): number {
   if (!ownerUserId || !meetingId) return 0;
   const db = getDb();
-  // SQLite LIKE on the JSON string. We also bound on owner_user_id so the
-  // LIKE only walks rows for this owner (cheap).
   const result = db.prepare(`
-    UPDATE calendar_dismissed_issues
-    SET resolution = 'resolved'
+    UPDATE calendar_issues
+    SET status = 'resolved',
+        notes = COALESCE(notes, '') || ' [cascade: anchor/peer event changed]',
+        updated_at = datetime('now')
     WHERE owner_user_id = ?
-      AND resolution IN ('new', 'to_resolve')
-      AND event_ids IS NOT NULL
-      AND event_ids LIKE ?
-  `).run(ownerUserId, `%${meetingId}%`);
+      AND status IN ('new','awaiting_owner','in_progress','owner_side')
+      AND (event_id = ? OR peer_event_id = ?)
+  `).run(ownerUserId, meetingId, meetingId);
   return result.changes;
 }
 
-/**
- * Fetch a single calendar issue by id (v1.6 — used by the calendar_fix task
- * dispatcher to re-check whether a flagged issue still exists).
- */
-export function getCalendarIssueById(id: string): CalendarIssue | null {
-  const db = getDb();
-  return (db.prepare(`SELECT * FROM calendar_dismissed_issues WHERE id = ?`).get(id) as CalendarIssue | null) ?? null;
-}
+// ── Read helpers ─────────────────────────────────────────────────────────────
 
-/**
- * Get all active calendar issues (not yet resolved/approved) for an owner.
- */
-export function getActiveCalendarIssues(ownerUserId: string): CalendarIssue[] {
+/** Active rows for an owner that haven't passed their event_end_ms yet.
+ *  Used by manage_calendar_issue(action='list') and the brief. */
+export function getActiveCalendarIssues(ownerUserId: string): CalendarIssueRow[] {
   const db = getDb();
+  const nowMs = Date.now();
   return db.prepare(`
-    SELECT * FROM calendar_dismissed_issues
+    SELECT * FROM calendar_issues
     WHERE owner_user_id = ?
-    AND resolution IN ('new', 'to_resolve')
-    ORDER BY event_date ASC
-  `).all(ownerUserId) as CalendarIssue[];
+      AND status IN ('new','awaiting_owner','in_progress','owner_side')
+      AND event_end_ms > ?
+    ORDER BY event_date ASC, event_end_ms ASC
+  `).all(ownerUserId, nowMs) as CalendarIssueRow[];
 }
 
-/**
- * Update the status of a calendar issue.
- */
+/** Fetch a single row by id. */
+export function getCalendarIssueById(id: string): CalendarIssueRow | null {
+  const db = getDb();
+  return (db.prepare(`SELECT * FROM calendar_issues WHERE id = ?`).get(id) as CalendarIssueRow | null) ?? null;
+}
+
+/** Set of event_ids referenced by TERMINAL rows (approved/dismissed/resolved
+ *  + event_end_ms still in the future). Read-only callers (analyze_calendar,
+ *  brief-pre-filter) use this to drop issues whose event_ids fall in the set,
+ *  so the owner doesn't see already-acknowledged conflicts re-narrated.
+ *  Write-path callers (upsertCluster) handle suppression independently via
+ *  the 'suppressed' return value. */
+export function getSuppressedEventIds(ownerUserId: string): Set<string> {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT event_id, peer_event_id FROM calendar_issues
+    WHERE owner_user_id = ?
+      AND status IN ('approved','dismissed','resolved')
+      AND event_end_ms > ?
+  `).all(ownerUserId, Date.now()) as Array<{ event_id: string; peer_event_id: string | null }>;
+  const out = new Set<string>();
+  for (const r of rows) {
+    out.add(r.event_id);
+    if (r.peer_event_id) out.add(r.peer_event_id);
+  }
+  return out;
+}
+
+// ── Status transitions ───────────────────────────────────────────────────────
+
 export function updateCalendarIssueStatus(
   issueId: string,
-  status: CalendarIssueStatus,
+  status: IssueStatus,
   notes?: string,
 ): boolean {
   const db = getDb();
   const result = db.prepare(`
-    UPDATE calendar_dismissed_issues
-    SET resolution = ?, resolution_notes = COALESCE(?, resolution_notes)
+    UPDATE calendar_issues
+    SET status = ?, notes = COALESCE(?, notes), updated_at = datetime('now')
     WHERE id = ?
   `).run(status, notes ?? null, issueId);
   return result.changes > 0;
 }
 
-/**
- * Dismiss a calendar issue (legacy compat + shortcut).
- */
-export function dismissCalendarIssue(
-  ownerUserId: string,
-  eventDate: string,
-  issueType: string,
-  issueKey: string,
-  detail: string,
-  resolution: 'dismissed' | 'resolved' = 'dismissed',
-): void {
+export function attachRequestToIssue(issueId: string, requestId: string): boolean {
   const db = getDb();
-  const id = `cdi_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  db.prepare(`
-    INSERT OR REPLACE INTO calendar_dismissed_issues
-    (id, owner_user_id, event_date, issue_type, issue_key, detail, resolution)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(id, ownerUserId, eventDate, issueType, issueKey, detail, resolution);
+  const result = db.prepare(`
+    UPDATE calendar_issues
+    SET request_id = ?, status = 'in_progress', updated_at = datetime('now')
+    WHERE id = ?
+  `).run(requestId, issueId);
+  return result.changes > 0;
 }
 
-/**
- * Clean up old issues (> 30 days old) to prevent table bloat.
- */
-export function cleanOldDismissedIssues(): void {
+// ── Cleanup (background sweep) ───────────────────────────────────────────────
+
+/** Drop terminal rows older than 30 days. Called from the brief routine. */
+export function cleanOldResolvedIssues(): void {
   const db = getDb();
   db.prepare(`
-    DELETE FROM calendar_dismissed_issues
-    WHERE event_date < date('now', '-30 days')
+    DELETE FROM calendar_issues
+    WHERE status IN ('approved','dismissed','resolved')
+      AND updated_at < datetime('now', '-30 days')
   `).run();
 }

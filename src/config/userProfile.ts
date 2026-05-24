@@ -279,6 +279,14 @@ const UserProfileSchema = z.object({
       // arg is passed. Omitting → 'earliest_in_window'.
       prefer_position: z.enum(['earliest_in_window', 'latest_in_window']).optional(),
     })).optional(),
+    // v3.0.3 — issue-detection exclusions. Subjects in this list are skipped
+    // by the calendar-issue detector entirely (overlap, work_on_day_off, etc.).
+    // Use for events the owner keeps on the calendar as personal markers but
+    // doesn't want flagged (e.g. "Home Time" before night_shift exclusion
+    // was generalized). Substring match, case-insensitive.
+    issue_exclusions: z.object({
+      subjects: z.array(z.string()).default([]),
+    }).optional(),
   }),
 
   priorities: z.object({
@@ -354,6 +362,11 @@ const UserProfileSchema = z.object({
     // Owner curates which categories this applies to. Typical: Weekly,
     // Cadence — categories where the meeting series exists already.
     is_recurring: z.boolean().optional(),
+    // v3.0.3 — when true, events tagged with this category are skipped by
+    // the calendar-issue detector entirely. Use for personal categories
+    // (e.g. "Personal") where overlaps / work_on_day_off / etc. shouldn't
+    // be tracked because they're owner's life, not work calendar problems.
+    no_issue_tracking: z.boolean().optional(),
   })).optional(),
 
   vip_contacts: z.array(VipContactSchema).default([]),
