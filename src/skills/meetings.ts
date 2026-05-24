@@ -331,8 +331,8 @@ PREFERRED SLOT (v2.9.2): when the requester names a SPECIFIC preferred time ("pr
           properties: {
             duration_minutes: { type: 'number', enum: profile.meetings.allowed_durations },
             attendee_emails: { type: 'array', items: { type: 'string' } },
-            search_from: { type: 'string', description: 'Start of search window in ISO 8601 format' },
-            search_to: { type: 'string', description: 'End of search window in ISO 8601 format (auto-expanded up to 21 days if fewer than 3 slots found)' },
+            search_from: { type: 'string', description: 'Start of search window. ISO 8601 — can be date-only ("2026-05-25" → searches the whole day) OR include time-of-day ("2026-05-25T07:00:00" → searches from 7:00 onwards). Use the timed form when an attendee gives a window in text ("available 7-12") so the search clips to that range.' },
+            search_to: { type: 'string', description: 'End of search window. ISO 8601 — can be date-only ("2026-05-25" → end of that day) OR include time-of-day ("2026-05-25T12:00:00" → the meeting must END by noon). Use the timed form for window constraints. Auto-expanded up to 21 days if fewer than 3 slots found.' },
             prefer_morning: { type: 'boolean', description: 'Prefer morning slots in the user timezone' },
             meeting_mode: {
               type: 'string',
@@ -956,8 +956,14 @@ ATTENDEES (v2.9.1):
         const isOwnerRequest = context.senderRole === 'owner' || context.isOwnerInGroup === true;
         const minBufferHours = isOwnerRequest ? 1 : (profile.meetings.min_slot_buffer_hours ?? 4);
         const earliestSlot = now.plus({ hours: minBufferHours });
-        const searchFromDate = args.search_from
-          ? `${args.search_from as string}T00:00:00`
+        // v3.0.3 — honor time-of-day when Sonnet passes a full ISO datetime.
+        // Pre-fix the impl always appended `T00:00:00`, silently throwing away
+        // any time component — making the tool description's "ISO 8601 format"
+        // a lie and the per-attendee time-window flow (e.g. Yossi: "free 7-12")
+        // structurally impossible to encode.
+        const searchFromArg = args.search_from as string | undefined;
+        const searchFromDate = searchFromArg
+          ? (searchFromArg.includes('T') ? searchFromArg : `${searchFromArg}T00:00:00`)
           : earliestSlot.toFormat("yyyy-MM-dd'T'HH:mm:ss");
 
         const extendedHours = args.extended_hours_ok === true;
@@ -989,8 +995,10 @@ ATTENDEES (v2.9.1):
 
         // Search in expanding windows until we have 3 spread options
         let allCandidateSlots: Array<{ start: string; end: string }> = [];
-        let searchEndDate = args.search_to
-          ? `${args.search_to as string}T23:59:59`
+        // v3.0.3 — same time-of-day honoring as search_from above.
+        const searchToArg = args.search_to as string | undefined;
+        let searchEndDate = searchToArg
+          ? (searchToArg.includes('T') ? searchToArg : `${searchToArg}T23:59:59`)
           : now.endOf('week').toFormat("yyyy-MM-dd'T'HH:mm:ss");
         const MAX_SEARCH_WEEKS = 12;
 

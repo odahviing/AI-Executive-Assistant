@@ -2,6 +2,40 @@
 
 ---
 
+## 3.0.3 — KB on colleague path (internal-only, silent) + find_available_slots honors time-of-day
+
+Two scheduling-relevant fixes that came out of a real-day Yossi / Oran chat.
+
+### `find_available_slots` honors time-of-day in `search_from` / `search_to`
+
+Pre-fix the implementation forcefully appended `T00:00:00` (search_from) or `T23:59:59` (search_to) to whatever Sonnet passed, silently stripping any time-of-day component. The tool description has always claimed "ISO 8601 format" — implementation now actually honors it. When Sonnet sees an attendee window in text ("Tmw 7-12 and 14-17") she passes `search_to: '2026-05-25T12:00:00'` and the tool clips so candidate slots fit entirely within. Date-only calls keep working (back-compat path appends start/end-of-day only when no `T` is present).
+
+This closes the bug where Yossi said available 7-12 and Maelle proposed both 11:00 AND 12:00 — the 12:00 slot was outside Yossi's window once the 25-min duration was added, but the tool had no way to enforce his window. Now the time-of-day clip in the search args is sufficient — no new params, no per-attendee complexity. Tool description updated to be explicit about the dual date / datetime input shape.
+
+### Knowledge base — colleague path, internal-only, silent use
+
+`manage_knowledge` is added to `COLLEAGUE_ALLOWED_TOOLS`. Handler-level gate enforces:
+- Sender's email domain must match owner's domain → INTERNAL → KB available
+- Different domain or unknown → EXTERNAL → returns `kb_external_blocked`
+- Even for internal colleagues, only `action='get'` is allowed; `ingest` stays owner-only
+
+The point: when Maelle is talking to an internal Reflectiz colleague, she should be smarter and more relevant by pulling KB context (product positioning, voice, recurring narratives). When she's talking to an external party, no KB content can leave the perimeter — same gate model as `attendeeScope.isInternalOnly` already uses.
+
+**Critical narration rule (new colleague-context prompt block):** KB is Maelle's background reference. She calls it silently and uses what she learns to compose a better reply. She never narrates the act of consulting it — no "let me pull from KB," no "looking at my notes," no "checking my reference material." The colleague experiences the reply as her own informed response. Explicit ❌/✅ examples in the prompt.
+
+This closes a real-day bug where Maelle told a colleague (Oran) "Let me pull some context from the KB to help draft something solid for Idan" — a narration leak of internal infrastructure that also stalled the conversation (Sonnet said "let me X" without doing X, no follow-up tool fired, turn ended with a dangling promise).
+
+### Filed for follow-up
+
+[#111 — Maelle learns from her own work](https://github.com/odahviing/AI-Executive-Assistant/issues/111) (Improvement, Medium). Today KB grows only when the owner writes markdown. With v3.0.3 Maelle reads it on the colleague path; next milestone is auto-proposing KB additions from meeting summaries / outreach exchanges / owner drafts with owner-in-loop approval before writes land.
+
+### Migration / restart notes
+
+- No schema migrations.
+- `npm run dev` restart required to pick up the tool registry + prompt changes.
+
+---
+
 ## 3.0.2 — Calendar-issue algorithm redesign + floating-block buffer kill + TZ guard + status / routine polish
 
 The substantive change is the **calendar-issue algorithm redesign** (formerly `calendar_dismissed_issues` → `calendar_issues`, one-row-per-cluster, cluster-aware suppression and cascade, new tool surface). The supporting fixes — floating-block buffer structurally killed, strict-IANA TZ guard, Slack status indicator polish during the gate stack, Sonnet-narrated routine context — landed at the same time. (Note: this version originally shipped in two commits — small fixes in one, the dismissed redesign added a few hours later. Single version label going forward.)

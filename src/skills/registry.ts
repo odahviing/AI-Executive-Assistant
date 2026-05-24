@@ -294,6 +294,11 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   'note_about_self',
   'confirm_gender',
   'log_interaction',
+  // v3.0.3 — colleague-path KB. INTERNAL colleagues only; the manage_knowledge
+  // handler gates externally (sender's email domain ≠ owner's domain → blocked).
+  // Sub-action 'get' is allowed; 'ingest' is owner-only (handler enforces). KB
+  // content makes colleague conversations smarter without leaking to externals.
+  'manage_knowledge',
 ]);
 
 /**

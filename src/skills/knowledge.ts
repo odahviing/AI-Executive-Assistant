@@ -486,6 +486,45 @@ action='ingest' — save a webpage into the KB. Required: \`url\`. Optional: \`o
     // their original logic with minimal churn.
     if (toolName === 'manage_knowledge') {
       const action = String(args.action ?? '').toLowerCase();
+
+      // v3.0.3 — colleague-path gate. KB is the owner's working memory.
+      // INTERNAL colleagues (same domain) can READ to make conversations
+      // smarter, but they can never INGEST (that's owner-curated). EXTERNAL
+      // senders (different domain / no email) get a hard block — owner's
+      // company data does not leave the perimeter.
+      const isColleaguePath =
+        context.senderRole === 'colleague' && context.isOwnerInGroup !== true;
+      if (isColleaguePath) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getOwnerDomain } = require('../utils/attendeeScope') as
+          typeof import('../utils/attendeeScope');
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getPersonMemory } = require('../db/people') as
+          typeof import('../db/people');
+        const ownerDomain = getOwnerDomain(context.profile);
+        const person = getPersonMemory(context.userId);
+        const senderEmail = person?.email ?? '';
+        const senderDomain = senderEmail.includes('@')
+          ? senderEmail.split('@')[1].toLowerCase()
+          : null;
+        const isInternal = !!(ownerDomain && senderDomain && senderDomain === ownerDomain);
+        if (!isInternal) {
+          logger.info('manage_knowledge — colleague-path external block', {
+            userId: context.userId, senderDomain, ownerDomain,
+          });
+          return {
+            error: 'kb_external_blocked',
+            message: 'Knowledge base access is internal-only; this sender is not on the owner\'s domain. Answer from general context without consulting KB.',
+          };
+        }
+        if (action !== 'get') {
+          return {
+            error: 'kb_action_owner_only',
+            message: `Colleague-path can only call manage_knowledge(action='get'). Ingest is owner-only.`,
+          };
+        }
+      }
+
       if (action === 'get')         toolName = 'get_company_knowledge';
       else if (action === 'ingest') toolName = 'ingest_knowledge_from_url';
       else return { error: 'bad_action', message: `manage_knowledge action must be 'get' | 'ingest', got "${action}".` };
