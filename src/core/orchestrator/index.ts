@@ -105,6 +105,34 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
         const events = Array.isArray(result) ? result : [];
         return `[get_calendar ${input.start_date}→${input.end_date}: ${events.length} events]`;
       }
+      case 'find_available_slots': {
+        // v3.0.3 — enrich the summary with the actual slot list returned,
+        // not just the input duration. Pre-fix the compact string was
+        // `[find_available_slots: duration_minutes=N]` — claim-checker
+        // couldn't verify specific time claims in the draft because the
+        // summary carried no slot data. Now lists up to 5 slots so the
+        // checker can audit "draft says 12:00 fits" against tool output.
+        const slots: Array<{ start?: string; end?: string }> =
+          Array.isArray(result) ? result :
+          (result && typeof result === 'object' && Array.isArray((result as any).slots)) ? (result as any).slots :
+          [];
+        const fmt = (s: { start?: string; end?: string }) => {
+          if (!s.start) return '?';
+          const t = String(s.start).slice(11, 16);  // 'HH:MM'
+          const d = String(s.start).slice(0, 10);   // 'YYYY-MM-DD'
+          return s.end ? `${d} ${t}-${String(s.end).slice(11, 16)}` : `${d} ${t}`;
+        };
+        const slotList = slots.slice(0, 5).map(fmt).join(', ');
+        const dur = (input as any).duration_minutes;
+        const from = (input as any).search_from;
+        const to = (input as any).search_to;
+        const window = from && to ? ` ${String(from).slice(0, 16)}→${String(to).slice(0, 16)}` : '';
+        if (slots.length === 0) {
+          return `[find_available_slots${window} dur=${dur}m: 0 slots]`;
+        }
+        const more = slots.length > 5 ? ` +${slots.length - 5} more` : '';
+        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}${more}]`;
+      }
       case 'coordinate_meeting':
         return `[coordinate_meeting: "${(input as any).subject}" with ${((input as any).participants as any[])?.map((p: any) => p.name).join(', ')}]`;
       case 'find_slack_user':
@@ -286,6 +314,12 @@ export interface OrchestratorOutput {
     eventId?: string;
     reason?: string;
   }>;
+  /** True when the inbound turn included one or more image attachments.
+   *  Consumed by claim-checker (v3.0.3) to soften unverified_state_review
+   *  false-positives — when an image is present, claims about a third
+   *  party's availability windows (etc.) may have come from the image
+   *  content, not from tool calls. */
+  imagesInTurn?: boolean;
 }
 
 /**
@@ -2099,6 +2133,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     bookingOccurred,
     toolSummaries: toolCallSummaries.length > 0 ? toolCallSummaries : undefined,
     mutationActions: mutationActions.length > 0 ? mutationActions : undefined,
+    imagesInTurn: hasImages,
   };
 }
 

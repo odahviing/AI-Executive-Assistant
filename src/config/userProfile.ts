@@ -186,6 +186,12 @@ const UserProfileSchema = z.object({
 
   meetings: z.object({
     allowed_durations: z.array(z.number()).min(1),
+    // v3.0.4 — default meeting duration when the conversation hasn't named
+    // one ("when can I meet X?", "list my options"). Must be one of
+    // allowed_durations. When unset, falls back to the smallest value in
+    // allowed_durations (cheapest, least-committal default). Owner-curated;
+    // different workspaces can pick different defaults (15, 30, 25, etc.).
+    default_meeting_duration: z.number().optional(),
     buffer_minutes: z.number().min(0).max(30),
     // Thinking-time protection — how much quality free time ${user} wants
     // preserved per day. Office days and home days can differ because the
@@ -287,7 +293,10 @@ const UserProfileSchema = z.object({
     issue_exclusions: z.object({
       subjects: z.array(z.string()).default([]),
     }).optional(),
-  }),
+  }).refine(
+    m => m.default_meeting_duration === undefined || m.allowed_durations.includes(m.default_meeting_duration),
+    { message: 'meetings.default_meeting_duration must be one of meetings.allowed_durations' },
+  ),
 
   priorities: z.object({
     highest: z.array(z.string()),

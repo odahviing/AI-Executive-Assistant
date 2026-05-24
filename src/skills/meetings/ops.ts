@@ -827,6 +827,27 @@ export class SchedulingSkill {
         // Do NOT pre-pass workDays from here — we let the function's own
         // mode-aware logic decide so in_person is enforced as a hard rule.
         {
+          // v3.0.3 — entry log for diagnostic visibility. Shows exactly what
+          // Sonnet passes — critical for debugging "did the time-of-day window
+          // actually clip?" and "did she pass the attendee?" cases.
+          logger.info('find_available_slots — call entry', {
+            senderRole: context.senderRole,
+            isOwnerInGroup: context.isOwnerInGroup,
+            threadTs: context.threadTs,
+            search_from: args.search_from,           // raw, as Sonnet passed
+            search_to: args.search_to,               // raw, as Sonnet passed
+            search_from_has_time: typeof args.search_from === 'string' && args.search_from.includes('T'),
+            search_to_has_time: typeof args.search_to === 'string' && args.search_to.includes('T'),
+            duration_minutes: args.duration_minutes,
+            attendee_emails: args.attendee_emails,
+            meeting_mode: args.meeting_mode,
+            relaxed: args.relaxed === true,
+            ignore_attendee_availability: args.ignore_attendee_availability === true,
+            moving_event_ids: args.moving_event_ids,
+            preferred_slot: args.preferred_slot,
+            category: args.category,
+          });
+
           const mode = (args.meeting_mode as string | undefined) ?? 'either';
           if (!['in_person', 'online', 'either', 'custom'].includes(mode)) {
             return {
@@ -1047,6 +1068,24 @@ export class SchedulingSkill {
               // / per_week limits.
               category: args.category as string | undefined,
               diagnosticsOut,
+            });
+            // v3.0.3 — strict-pass log. Shows the effective args the low-level
+            // function actually ran with, plus what came back. The crucial fields:
+            // effectiveSearchFrom / search_to (after any internal clipping) and
+            // the resulting slot count + first few. Pairs with the entry log.
+            logger.info('find_available_slots — strict pass result', {
+              effectiveSearchFrom,
+              search_to: args.search_to,
+              attendeeEmailsResolved: attendeeEmails,
+              attendeeAvailabilityCount: attendeeAvailability?.length ?? 0,
+              ignoreAttendeeBusy,
+              userNamedNarrowWindow,
+              relaxed: args.relaxed === true && context.senderRole === 'owner',
+              slotCount: rawSlots.length,
+              firstSlots: rawSlots.slice(0, 5).map(s => ({ start: s.start, end: s.end })),
+              daySummary: diagnosticsOut.daySummary?.map(d => ({
+                date: d.date, accepted: d.accepted, top_reasons: d.top_reasons,
+              })),
             });
             // v2.4.2 — narrow to 3 spread options before returning to Sonnet.
             // Owner spec: "spread 3 options as I want" — one per day where

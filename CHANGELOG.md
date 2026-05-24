@@ -29,9 +29,23 @@ This closes a real-day bug where Maelle told a colleague (Oran) "Let me pull som
 
 [#111 — Maelle learns from her own work](https://github.com/odahviing/AI-Executive-Assistant/issues/111) (Improvement, Medium). Today KB grows only when the owner writes markdown. With v3.0.3 Maelle reads it on the colleague path; next milestone is auto-proposing KB additions from meeting summaries / outreach exchanges / owner drafts with owner-in-loop approval before writes land.
 
+### Fix-up patch (same 3.0.3 — squashing the buggy first release)
+
+Initial 3.0.3 surfaced behavioral gaps in real-day Isaac/Yossi tests: Sonnet was unioning multiple attendee windows into one wide `find_available_slots` call (letting invalid slots through), the claim-checker false-positived on third-party windows quoted from images (it can't see image content), the duration default was hardcoded "25" in the tool description (broken for any profile whose `allowed_durations` doesn't include 25), and a regex-based detector built to enforce per-window calls only matched same-day patterns connected by "and"/"or" — multi-day list formats like "Mon 16-19, Tue 10-15, Wed 11-13" slipped past it.
+
+Under the same 3.0.3 label (this is the polish on the version we just shipped):
+
+- **Config-driven duration default** — new `meetings.default_meeting_duration` yaml field (validated to be in `allowed_durations`); fallback to smallest allowed when unset. Tool description renders the value dynamically. No more hardcoded "25" — any profile gets its own default.
+- **Generalized ONE-CALL-PER-TIMEFRAME prompt rule** — replaces the old DISJOINT WINDOWS rule which only covered same-day patterns. New rule explicitly covers same-day AND multi-day cases, with worked examples ("Mon 16-19, Tue 10-15, Wed 11-13" → 3 calls). Format-agnostic — newlines, commas, day-name prefixes, "and"/"or" all count as separators.
+- **Regex-based disjoint-window detector deleted** — brittle, format-dependent, missed real cases (the multi-day Isaac format). Owner direction: stop fighting LLM with regex when the prompt rule + claim-checker retry path already gets there. `src/utils/disjointWindowDetector.ts` removed; the guard call in `meetings/ops.ts` removed.
+- **`find_available_slots` toolSummaries enriched** with actual returned slots. Pre-fix the summary was `[find_available_slots: duration_minutes=N]` — claim-checker couldn't verify time claims in the draft because the summary carried no slot data. Now: `[find_available_slots 2026-05-27T11:00→13:00 dur=40m → 1 slots: 2026-05-27 12:00-12:40]`. Claim-checker can audit specific time assertions against actual tool output.
+- **Image-aware claim-checker** (`imagesInTurn: boolean` threaded through orchestrator → postReply → claimChecker). When an image was attached this turn, RULE D (`unverified_state_review`) is softened for third-party-state claims — those legitimately come from image content the checker can't see. The OWNER's own calendar / tasks / approvals stay strict; image presence doesn't excuse missing read tools for owner-side state.
+- **Entry + strict-pass result logs on `find_available_slots`** — diagnostics for debugging future per-call shape questions ("did Sonnet pass time-of-day?", "did she split per window?", "what did the tool return?"). Picked up by the bundle review and surfaced the Isaac test gaps.
+
 ### Migration / restart notes
 
 - No schema migrations.
+- Optional: add `meetings.default_meeting_duration: 25` to your yaml under `meetings:` for explicit default — without it, smallest of `allowed_durations` is used.
 - `npm run dev` restart required to pick up the tool registry + prompt changes.
 
 ---

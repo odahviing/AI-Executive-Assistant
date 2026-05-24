@@ -329,7 +329,16 @@ PREFERRED SLOT (v2.9.2): when the requester names a SPECIFIC preferred time ("pr
         input_schema: {
           type: 'object',
           properties: {
-            duration_minutes: { type: 'number', enum: profile.meetings.allowed_durations },
+            duration_minutes: (() => {
+              const allowed = profile.meetings.allowed_durations;
+              const defaultDur = profile.meetings.default_meeting_duration
+                ?? [...allowed].sort((a, b) => a - b)[0];
+              return {
+                type: 'number' as const,
+                enum: allowed,
+                description: `Meeting duration in minutes. DEFAULT TO ${defaultDur} when the conversation has not specified a duration — for "when can I meet X?" / "list my options" / "find a time" style asks, ${defaultDur} is the right default. Use longer values ONLY when the conversation explicitly names a duration ("an hour", "30 min", "let's do 45") OR clearly signals substantial discussion ("a real catch-up", "we have a lot to cover", review of a big doc). DO NOT pick the longest enum value just because it returns more options to surface — that's an anti-pattern; "all my options" still defaults to ${defaultDur}.`,
+              };
+            })(),
             attendee_emails: { type: 'array', items: { type: 'string' } },
             search_from: { type: 'string', description: 'Start of search window. ISO 8601 — can be date-only ("2026-05-25" → searches the whole day) OR include time-of-day ("2026-05-25T07:00:00" → searches from 7:00 onwards). Use the timed form when an attendee gives a window in text ("available 7-12") so the search clips to that range.' },
             search_to: { type: 'string', description: 'End of search window. ISO 8601 — can be date-only ("2026-05-25" → end of that day) OR include time-of-day ("2026-05-25T12:00:00" → the meeting must END by noon). Use the timed form for window constraints. Auto-expanded up to 21 days if fewer than 3 slots found.' },
@@ -1980,6 +1989,24 @@ When ${firstName} asks "when are WE free?" / "when can I meet with X?" / "is X f
 
 USER-NAMED DAYS — narrow the search, don't post-hoc apologize.
 When the user names specific days/dates ("Monday or Thursday", "tomorrow", "next Tuesday or Wednesday"), narrow find_available_slots' search_from / search_to to ONLY those days. Don't widen the search and then narrate around days the user didn't ask about. If the search comes back empty for the named days, say so honestly ("Nothing free on Mon or Thu — want me to widen?"); don't silently surface a Wednesday slot as a fallback because Wednesday had availability. The user's day choice is a constraint, not a suggestion.
+
+ONE CALL PER TIMEFRAME — for find_available_slots.
+When the user (or an attendee) names MULTIPLE distinct time windows — same-day ("free 7-12 AND 14-17 tomorrow") OR across days ("Monday 16-19, Tuesday 10-15, Wednesday 11-13, Thursday 15:50-18:20") — make ONE find_available_slots call PER WINDOW. Never collapse them into one wide search; the gaps between windows aren't valid availability and a wide search lets invalid slots through.
+
+Each call sets search_from / search_to to the exact ISO datetime of that one window. Merge the result sets in your reply. Format the user used (newlines, "and", "or", commas, day-name prefixes) doesn't matter — count the windows, make that many calls.
+
+Examples:
+  User: "free 7-12 and 14-17 tomorrow"
+    → 2 calls: (tomorrow 07:00→12:00) + (tomorrow 14:00→17:00)
+  User: "Mon 16-19, Tue 10-15, Wed 11-13"
+    → 3 calls: (Mon 16:00→19:00) + (Tue 10:00→15:00) + (Wed 11:00→13:00)
+  User: "Sunday afternoon or any time Tuesday"
+    → 2 calls: (Sunday 12:00→18:00) + (Tuesday 09:00→17:00)
+  User: "this week"
+    → 1 call (single contiguous span, no disjoint windows named)
+
+DURATION — don't brute-force every allowed length.
+When the conversation specifies a duration ("25 min", "half hour", "let's do an hour"), use that ONE duration. When no duration is specified, try 25 min first (the default for quick discussions). Try 40 min only if the conversation hints at substantial discussion ("let's catch up properly", "we have a lot to go over", review of a bigger doc). NEVER iterate find_available_slots through every allowed_duration (10, 25, 40, 55) just to enumerate options — that's 4× the tool cost for no gain. The owner asks once; you pick the right one.
 
 DATE CONTEXT BIAS — "that Monday" means the recently-discussed Monday.
 When ${firstName} or a colleague uses ambiguous date phrasing ("that Monday", "that day", "the meeting", "the same week") in context of a meeting just discussed/booked/mentioned in the same thread, the date refers to THAT meeting's date. Don't default to the nearest-matching weekday from today. Example: just-booked Eli meeting is on Monday May 11; ${firstName} replies "any opening that Monday before 3pm?" → "that Monday" = May 11, NOT this coming Monday. The recently-mentioned meeting wins the date-bind.

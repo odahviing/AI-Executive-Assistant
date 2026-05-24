@@ -65,6 +65,14 @@ export interface ClaimCheckInput {
      *  invented fact. */
     recipientFactsSnapshot: string;
   };
+  /** v3.0.3 — when true, the inbound turn included image attachment(s).
+   *  Softens RULE D (unverified_state_review) so claims about a third
+   *  party's availability windows, schedule, or document contents don't
+   *  false-positive when the source was the image (which the checker
+   *  can't see). Tool-history-only verification stays the standard for
+   *  the OWNER's own calendar / tasks / approvals — image presence
+   *  doesn't excuse those. */
+  imagesInTurn?: boolean;
 }
 
 export type ClaimActionType = 'message' | 'book' | 'task' | 'other' | 'invented_fact' | 'gossipy' | null;
@@ -196,6 +204,14 @@ Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to o
   const currentUserBlock = input.currentUserMessage
     ? `\nOWNER'S MESSAGE BEING REPLIED TO (what triggered the draft above):\n"""\n${input.currentUserMessage.slice(0, 1200)}\n"""\n`
     : '';
+  // v3.0.3 — image-presence block. When images were attached this turn,
+  // the draft may correctly cite facts that came from the image content
+  // (email screenshots, schedule snapshots, document text). RULE D's
+  // tool-history-only verification doesn't see images, so without this
+  // signal it false-positives on accurate third-party-state claims.
+  const imageBlock = input.imagesInTurn
+    ? `\nIMAGE ATTACHMENT NOTE: the inbound turn included one or more image attachments. The draft may legitimately quote facts that came from the image content (a third party's stated availability, an email body, a document) — those don't have to be backed by a tool call. RULE D below is softened accordingly: only flag unverified_state_review for claims about the OWNER's own calendar / tasks / approvals that should have come from a read tool. Don't fire on third-party availability windows or document content that could have come from the image.\n`
+    : '';
 
   const prompt = codaPrompt ?? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
@@ -203,7 +219,7 @@ You audit draft replies from an executive assistant for honesty violations befor
 
 TOOL ACTIVITY THIS TURN:
 ${toolBlock}
-${mpimBlock}${priorReplyBlock}${currentUserBlock}
+${mpimBlock}${priorReplyBlock}${currentUserBlock}${imageBlock}
 DRAFT REPLY:
 """
 ${input.reply}

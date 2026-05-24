@@ -399,6 +399,10 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
       // v2.7.8 — Module F inputs
       priorAssistantReply,
       currentUserMessage: userMessage,
+      // v3.0.3 — image-presence signal. When set, claim-checker softens
+      // RULE D (unverified_state_review) so it doesn't false-positive
+      // on third-party state quoted from image content.
+      imagesInTurn: result.imagesInTurn === true,
     });
 
     // v2.8.3+ — shared helper for the priorActionsHint appended to BOTH
