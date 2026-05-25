@@ -15,7 +15,8 @@
  *   2. category_day_type          — category requires office_days but slot is home day
  *   3. category_per_day           — at-limit for this category on this day
  *   4. category_per_week          — at-limit for this category this ISO week
- *   5. outside_working_hours      — slot starts before hours_start or ends after hours_end
+ *   5. outside_working_hours      — slot falls outside ALL of the day's work_hours
+ *                                   windows (multi-window aware)
  *                                   (bypassed when allow_relaxed = true)
  *   6. floating_block_overlap     — lunch / focus block conflict in profile.meetings.floating_blocks
  *                                   (bypassed when allow_relaxed = true)

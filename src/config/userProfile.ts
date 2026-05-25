@@ -345,7 +345,9 @@ const UserProfileSchema = z.object({
     no_issue_tracking: z.boolean().optional(),
   })).optional(),
 
-  behavior: z.object({
+  // v3.0.4 — preprocess null → undefined so `behavior:` with all children
+  // commented out (parses to null) falls through to the .default() below.
+  behavior: z.preprocess(v => v ?? undefined, z.object({
     // v2.6.3 — five vestigial fields removed: rescheduling_style,
     // adaptive_learning, escalate_after_days, can_contact_others_via_slack,
     // autonomous_meeting_creation. They were declared in the schema since
@@ -406,16 +408,10 @@ const UserProfileSchema = z.object({
     intent_aware_tools: false,
     deterministic_approval_resolve: false,
     proactive_colleague_social: { daily_window_hours: [13, 15], cooldown_days: 5, skip_weekends: true },
-  }),
+  })),
 
-  // v2.5.4 — `interviews` block removed. The per-day limit + interview
-  // guidance now lives in the priority-ordered category system
-  // (`categories[].limits.per_day` + the Interview category description).
-  // Verified pre-removal: no `src/` code consumed `profile.interviews`.
-
-  // v3.0.4 — every skill toggle defaults. Profile that omits `skills:` boots
-  // with sensible "meetings + calendar + search on, optional skills off".
-  skills: z.object({
+  // v3.0.4 — same null→undefined preprocess as behavior above.
+  skills: z.preprocess(v => v ?? undefined, z.object({
     meetings: z.boolean().default(true),
     summary: z.boolean().default(false),         // was meeting_summaries
     knowledge: z.boolean().default(false),       // was knowledge_base
@@ -450,7 +446,7 @@ const UserProfileSchema = z.object({
   }).default({
     meetings: true, summary: false, knowledge: false, calendar: true,
     search: true, social: false, venue: false,
-  }),
+  })),
 
   // Which communication channels the assistant is active on
   channels: z.object({

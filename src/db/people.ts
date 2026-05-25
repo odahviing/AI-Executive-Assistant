@@ -453,23 +453,17 @@ export function appendPersonInteraction(slackId: string, interaction: Omit<Perso
 /**
  * Record that a social moment happened with a person.
  *
- * @param slackId       - person's Slack ID
- * @param topic         - enum category (e.g. 'family', 'sport', 'hobby')
- * @param quality       - how engaged was the person? 'neutral' | 'engaged' | 'good'
- * @param initiatedBy   - 'maelle' | 'person' — only Maelle initiations consume the daily gate
- * @param subject       - optional free-form specific subject ('clair obscur game',
- *                        'half marathon training'). Cooldown fires at the
- *                        (topic + subject) level so Maelle doesn't re-ask about
- *                        the exact same thing within 24h.
+ * @param slackId     - person's Slack ID
+ * @param initiatedBy - 'maelle' | 'person' — only Maelle initiations consume the daily gate
  */
 export function recordSocialMoment(
   slackId: string,
   initiatedBy: 'maelle' | 'person' = 'maelle',
 ): void {
   // Updates last_social_at + last_initiated_at on the person row so the 24h
-  // Maelle-initiation gate keeps working. Per-subject topic tracking lives
-  // in the dedicated social_subjects / social_topics tables (Social Engine);
-  // this helper covers the people_memory side only.
+  // Maelle-initiation gate keeps working. Subject + topic-beat writes happen
+  // ONLY at end-of-chat in `memory/capturePass.ts:runSubjectReconciliation`
+  // (v3.0.1); this helper covers the people_memory row only.
   const db = getDb();
   const row = db.prepare('SELECT slack_id FROM people_memory WHERE slack_id = ?').get(slackId) as any;
   if (!row) return;
@@ -703,11 +697,10 @@ export function formatPeopleMemoryForPrompt(
 // the data layer so a future togglable persona skill (issue #3) can call it
 // conditionally without the orchestrator having to know.
 
-// v2.2 — SOCIAL_STALE_COUNT_THRESHOLD, SOCIAL_LONG_SILENCE_HOURS, and
-// SEED_TOPIC_AREAS retired. Owner-side topic management migrated to the
-// Social Engine (`src/core/social/` + `src/db/socialTopics.ts`). The
-// colleague context block below surfaces profile + notes + interactions
-// without the stale/cooldown machinery.
+// Owner-side topic management lives in the Social Engine
+// (`src/core/social/` + `src/db/socialSubjects.ts`). The colleague context
+// block below surfaces profile + notes + interactions without any
+// stale/cooldown machinery.
 
 /**
  * Builds a per-person social context block injected into the system prompt

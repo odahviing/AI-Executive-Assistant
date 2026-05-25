@@ -1,14 +1,23 @@
 /**
- * Approvals (v1.5) — first-class structured decisions Maelle needs from the owner.
+ * Approvals — legacy table layer.
  *
- * Every approval is attached to a parent task (task_id required). The task
- * system is the root; approvals are a typed view of the "blocked on owner"
- * moments. When an approval resolves, downstream effects (book the meeting,
- * apply the override, notify requesters) run off the `kind` and `decision_json`.
+ * NOTE: most of this module is no longer the live path. v3.0.0 moved approval
+ * creation + resolution onto the requests spine (`src/core/requests/`); the
+ * live tools (`create_approval`, `resolve_approval` in `src/tasks/skill.ts`)
+ * write to `requests` directly. `createApproval` / `setApprovalDecision` /
+ * `supersedeApproval` / `sweepExpiredApprovals` below are bridge/orphan
+ * holdovers retained until a separate cleanup pass deletes them.
  *
- * There are NO buttons. The owner replies in natural language and Sonnet
- * decides which approval is being answered. That's why `idempotency_key`
- * matters: if Sonnet misroutes and retries, we don't double-book.
+ * Background (kept for context):
+ * - Every approval was attached to a parent task; approvals were a typed
+ *   view of the "blocked on owner" moments. When an approval resolved,
+ *   downstream effects (book the meeting, apply the override, notify
+ *   requesters) ran off the `kind` and `decision_json`.
+ * - There are NO buttons. The owner replies in natural language and Sonnet
+ *   decides which approval is being answered. That's why `idempotency_key`
+ *   matters: if Sonnet misroutes and retries, we don't double-book.
+ *
+ * For new work, write against the requests spine — not this module.
  */
 
 import { getDb } from './client';

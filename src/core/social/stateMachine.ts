@@ -1,10 +1,14 @@
 /**
- * Social state machine (v2.6.7 redesign).
+ * Social state machine.
  *
- * Pure TypeScript. No LLM, no DB writes. Takes the classifier output + the
- * reconciled subject + rate-limit state and decides ONE directive for the
- * current turn. The directive is what the orchestrator injects into the
- * system prompt for Sonnet to phrase.
+ * Pure TypeScript. No LLM, no DB writes. Takes the classifier output +
+ * per-person picker state (active subjects, rate limits) and decides ONE
+ * directive for the current turn. The directive is what the orchestrator
+ * injects into the system prompt for Sonnet to phrase.
+ *
+ * Subject reconciliation happens END-OF-CHAT in capturePass.runSubjectReconciliation
+ * (v3.0.1) — not per-turn. The state machine sees subjects via the DB picker
+ * (getActiveSubjectsForPerson*) and never receives a `reconciled` param.
  *
  * Picker (proactive slot, EC6):
  *   - Count active categories for this person.

@@ -26,6 +26,7 @@ import {
   RESOLVER_REPLAY_TOOLS,
   type ToolCallback,
 } from '../approvals/approvalCallbacks';
+import { runDeferredAction } from './deferredActionReplay';
 import logger from '../../utils/logger';
 
 export type ResolveVerdict =
@@ -69,6 +70,18 @@ export async function resolveRequest(
 ): Promise<ResolveResult> {
   const row = getRequest(requestId);
   if (!row) {
+    // v3.0.5 — surface this. Pre-fix this return was completely silent:
+    // when Sonnet passed a malformed id (`#req_…`, or a hallucinated id),
+    // getRequest returned null, the resolver returned a polite "request not
+    // found" with NO log entry, and the calling tool result looked like a
+    // generic failure to the next iteration. Across a day this manifested
+    // as "approval never closes" symptoms where the only thing tracking the
+    // failure was the v2.4.2 closeLoopOnOwnerHandled scanner running hours
+    // later. Loud log here lets us catch the next instance immediately.
+    logger.warn('resolveRequest — requestId not found in DB', {
+      requestId,
+      verdict: verdict.verdict,
+    });
     return { ok: false, request_id: requestId, state: 'cancelled', reason: 'request not found' };
   }
   // v2.9.1 — `awaiting_colleague` is the amending state (owner counter relayed
@@ -142,9 +155,6 @@ export async function resolveRequest(
       const tool = callbacks.on_reject.tool;
       setImmediate(async () => {
         try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { runDeferredAction } = require('./deferredActionReplay') as
-            typeof import('./deferredActionReplay');
           await runDeferredAction({
             ownerUserId: row.owner_user_id,
             profile: ctx.profile,
@@ -394,9 +404,6 @@ async function runApproveCallback(
   // cascade firing during replay won't conflict with the explicit close
   // below.
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { runDeferredAction } = require('./deferredActionReplay') as
-      typeof import('./deferredActionReplay');
     await runDeferredAction({
       ownerUserId: row.owner_user_id,
       profile: ctx.profile,

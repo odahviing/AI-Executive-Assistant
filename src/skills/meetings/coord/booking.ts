@@ -32,7 +32,6 @@ import { createMeeting, getCalendarEvents, updateMeeting } from '../../../connec
 import { shadowNotify } from '../../../utils/shadowNotify';
 import { getConnection } from '../../../connections/registry';
 import { registerCoordBookingHandler } from '../../../core/approvals/coordBookingHandler';
-// determineSlotLocation removed v2.7.0 — replaced by resolveLocation below.
 import { emitWaitingOwnerApproval } from './approval';
 import logger from '../../../utils/logger';
 
@@ -447,6 +446,29 @@ export async function bookCoordination(
           defaultBodyAuthor: `${profile.assistant.name}, ${profile.user.name.split(' ')[0]} Assistant`,
         });
         newEventId = created.id;
+
+        // v3.0.6 — write a "Booked X" line to each non-owner attendee's
+        // person_memory md so Maelle remembers the booking next time the
+        // owner asks. Coord path is the main route for owner→colleague
+        // meetings (the Yael, Oran, etc. flow). Fire-and-forget.
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { recordBookingInPersonMemory } = require('../../../memory/recordBooking') as
+            typeof import('../../../memory/recordBooking');
+          void recordBookingInPersonMemory({
+            profile,
+            subject: job.subject,
+            startIso: slot,
+            location: location || undefined,
+            attendees: coordAttendees.map(a => ({ email: a.email, name: a.name })),
+            mutation: 'booked',
+          });
+        } catch (err) {
+          logger.warn('recordBookingInPersonMemory invocation failed (coord) — continuing', {
+            err: String(err).slice(0, 200),
+          });
+        }
+
         // v2.8.2 — coord-side Teams-URL-as-location: when the slot is online
         // and the resolved location string is empty, patch with joinUrl so
         // the invite location field shows the Teams link.

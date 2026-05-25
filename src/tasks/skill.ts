@@ -179,7 +179,7 @@ Owner short-acks ("yes", "go", "no", "kill it") in a thread bound to a pending a
 - or you need to act on an approval from a different thread.
 
 Verdicts:
-- approve: owner said yes. Provide the decision data (e.g. for slot_pick: { slot_iso: "2026-04-22T10:00:00" }).
+- approve: owner said yes. \`data\` is meaningful ONLY for slot_pick approvals — e.g. \`{ slot_iso: "2026-04-22T10:00:00" }\` to pick a specific slot from the offered list. For every OTHER approval kind, \`data\` is dropped silently. If the owner wants to change anything at approve-time (different slot, different attendees, etc.), use verdict='amend' with \`counter\` — never approve+data.
 - reject: owner said no. The linked work is cancelled.
 - amend: owner said "not as asked, but here's an alternative" (e.g. "no, but 13:30 would work"). Provide counter with the alternative.
 
@@ -820,7 +820,13 @@ Binding — how to pick the right approval_id:
       }
 
       case 'resolve_approval': {
-        const requestId = args.approval_id as string;
+        // v3.0.5 — strip leading `#` defensively. Prompt no longer prefixes
+        // ids with `#`, but Sonnet's older cached context might still have
+        // `#req_…` lines in flight, and other future callers might prepend
+        // out of habit. Pre-fix this silently no-op'd: getRequest('#req_…')
+        // returned null, resolver early-returned with no log, approval state
+        // never changed, claim-checker eventually caught the lie hours later.
+        const requestId = ((args.approval_id as string) ?? '').replace(/^#/, '');
         const verdict = args.verdict as 'approve' | 'reject' | 'amend';
 
         // v2.9.1 — colleague-path is permitted ONLY when the targeted request

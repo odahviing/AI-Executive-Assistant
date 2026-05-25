@@ -8,12 +8,11 @@
  * subsequent turn — auto-fills from this set so the slot search keeps
  * honoring known attendees' work hours.
  *
- * Why this exists: 2026-05-10 Shayan MPIM bug. First find_available_slots
- * call passed attendee_emails=[shayan.m@reflectiz.com]. Sonnet's 2nd call
- * (after Yael said "I'm not a factor") dropped attendee_emails entirely.
- * Without it, the slot finder skipped Shayan's work-hours filter and
- * proposed Wed 13 12:30pm Israel = 7:30pm Sydney — way outside Shayan's
- * stated 4-6pm window.
+ * Why this exists: cross-TZ attendee work-hours bug. A first find_available_slots
+ * call passed attendee_emails=[<cross-tz colleague>]. Sonnet's 2nd call dropped
+ * attendee_emails entirely. Without it, the slot finder skipped the attendee's
+ * work-hours filter and proposed times outside their stated window
+ * (e.g. owner-local 12:30 = attendee 19:30 in another TZ).
  *
  * The auto-fill is non-destructive: pre-existing args win. Only fills
  * when the caller passed nothing.

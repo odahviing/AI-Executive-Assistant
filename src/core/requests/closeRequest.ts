@@ -84,14 +84,14 @@ export function closeRequest(input: CloseRequestInput): CloseResult {
     }
   }
 
-  // v2.9.2 — legacy-table cascade. The v2.7.1 bridge created paired legacy
-  // rows in `coord_jobs` / `outreach_jobs` for every new request and stored
-  // `request_id` on them. closeRequest didn't propagate terminal state back
-  // to those legacy rows — so a cancelled coord could leave its legacy
-  // counterpart `status='waiting_owner'`, and the LEGACY coord state machine
-  // would happily process incoming colleague replies + post templated
-  // English DMs that bypass Sonnet/humanGate entirely (root of the 2026-05-19
-  // Yael 'Got it — I'll find some other options' bug).
+  // Legacy-table cascade — transitional. Path 2 (v3.0.4) is killing
+  // `outreach_jobs` and `coord_jobs` as standalone tables; outreach migration
+  // is partially complete (writers now go through requests; readers + table
+  // drop = stages 2-6, deferred). Until those stages land, the bridge tables
+  // still exist and the LEGACY coord state machine will happily process
+  // incoming colleague replies + post templated English DMs that bypass
+  // Sonnet/humanGate if their status isn't flipped to terminal here (root
+  // of the 2026-05-19 Yael 'Got it — I'll find some other options' bug).
   //
   // Find any legacy row pointing at this request and flip it to terminal.
   // Mirrors the in-flight terminal sentinels each table already supports:

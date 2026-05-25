@@ -143,11 +143,11 @@ Allowed durations: ${allowedDurations} min (snap rules + location auto-determina
 
 PLACEMENT MATTERS — same person can land in three different ways, you choose:
 
-1. Setting up a meeting they're attending themselves ("Maya and I want a 25-min slot with Idan") → put them in BOTH \`requester\` AND \`participants\`. They get DM-polled like any other attendee.
+1. Setting up a meeting they're attending themselves ("Maya and I want a 25-min slot with Anna") → put them in BOTH \`requester\` AND \`participants\`. They get DM-polled like any other attendee.
 
 2. Setting up a meeting between OTHERS, NOT joining themselves (HR booking an interview between owner + candidate; EA scheduling on behalf of someone else; "set this up between X and Y") → put them in \`requester\` ONLY. Don't add to participants or just_invite. Their availability is NOT factored in; they don't get a DM poll; they don't appear on the calendar invite. Maelle still treats them as the contact for the coord (replies to their thread, etc.).
 
-3. Setting up for someone else but want a calendar copy themselves ("can you set up a meeting between Idan and Mark? Add me to the invite") → put them in \`requester\` AND \`just_invite\`. They get the calendar event but no DM poll.
+3. Setting up for someone else but want a calendar copy themselves ("can you set up a meeting between Anna and Mark? Add me to the invite") → put them in \`requester\` AND \`just_invite\`. They get the calendar event but no DM poll.
 
 AUTO-FILL: on colleague-path (a colleague is the one DMing Maelle), the handler auto-fills this field from context if you omit. You can pass it explicitly for clarity, especially case 1 (also-attending) where the participants list might miss the slack_id.
 

@@ -237,8 +237,9 @@ export function workTimeBaseFromNow(profile: UserProfile): string {
 
 /**
  * Returns ISO of the next moment the owner is in work hours.
- * Walks forward day-by-day; for each candidate day, picks the relevant
- * hours_start. Caps at 14 days lookahead (defensive — should never hit).
+ * Walks forward day-by-day; picks the earliest still-future window start
+ * across the day's multi-window work_hours (split-shift aware). Caps at
+ * 14 days lookahead (defensive — should never hit).
  */
 export function nextOwnerWorkdayStart(profile: UserProfile): string {
   const cursor = DateTime.now().setZone(profile.user.timezone);

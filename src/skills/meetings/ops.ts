@@ -2298,6 +2298,30 @@ export class SchedulingSkill {
             }
           }
 
+          // v3.0.6 — write a "Booked X" line to each non-owner attendee's
+          // person_memory md so future reads have the venue/subject/date.
+          // Fire-and-forget; never blocks the response. Externals without a
+          // people_memory row are silently skipped (see recordBooking.ts).
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { recordBookingInPersonMemory } = require('../../memory/recordBooking') as
+              typeof import('../../memory/recordBooking');
+            void recordBookingInPersonMemory({
+              profile: context.profile,
+              subject: args.subject as string,
+              startIso: args.start as string,
+              location: planLocation,
+              attendees: attendees
+                .filter((a): a is typeof a & { email: string } => typeof a.email === 'string' && a.email.length > 0)
+                .map(a => ({ email: a.email, name: a.name })),
+              mutation: 'booked',
+            });
+          } catch (err) {
+            logger.warn('recordBookingInPersonMemory invocation failed (colleague-path) — continuing', {
+              err: String(err).slice(0, 200),
+            });
+          }
+
           return {
             success: true,
             meetingId,

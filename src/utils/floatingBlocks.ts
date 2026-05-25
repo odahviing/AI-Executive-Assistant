@@ -149,18 +149,6 @@ export function alignUpQuarter(ms: number, timezone: string): number {
 }
 
 /**
- * Given a set of busy blocks within a floating-block window, find the
- * earliest quarter-hour-aligned slot that fits `block.duration_minutes`
- * with `bufferMinutes` padding before (when preceded by another meeting)
- * and after (when followed by another meeting).
- *
- * Returns null if no aligned slot fits the whole duration.
- *
- * Used by book_floating_block and by findAvailableSlots' feasibility check —
- * "after putting the proposed meeting here, can THIS block still be
- * placed somewhere legal?".
- */
-/**
  * Round a millis timestamp DOWN to the previous quarter-hour in the given
  * timezone. Mirror of alignUpQuarter — used by abut_before to snap the
  * lunch start backwards to the latest aligned tick that still abuts.
@@ -302,9 +290,9 @@ export function findLatestAlignedSlotForBlock(
  *   - 'anchor_conflicts_busy'     — the abutted slot collides with another busy block
  *   - 'no_room'                   — earliest/latest scan found no fit
  *
- * Buffer rule for abut_*: the configured buffer is applied between the
- * abutted slot and the anchor (so "abut_before Yossi at 12:45" with
- * 5-min buffer + 25-min lunch lands at 12:15-12:40, not 12:20-12:45).
+ * abut_* slots abut the anchor directly — no buffer is applied (v3.0.2).
+ * Meeting durations (10/25/40/55) carry their own spacing; a separate
+ * buffer here was double-counting. Quarter-hour alignment still enforced.
  */
 export type PreferPosition = 'earliest' | 'latest_in_window' | 'abut_before' | 'abut_after';
 

@@ -305,7 +305,7 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
           properties: {
             person: {
               type: 'string',
-              description: 'Person identifier — slug, display name, or first name. For the owner use his first name (e.g. "Idan") or his slack id.',
+              description: "Person identifier — slug, display name, or first name. For the owner use his first name or his slack id.",
             },
             section: {
               type: 'string',
@@ -313,7 +313,7 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
             },
             text: {
               type: 'string',
-              description: 'The fact, in plain markdown. One or two sentences usually. Be specific — "Idan lives in Nes Ziona" beats "lives south of Tel Aviv".',
+              description: 'The fact, in plain markdown. One or two sentences usually. Be specific — "Anna lives in Nes Ziona" beats "lives south of Tel Aviv".',
             },
           },
           required: ['person', 'section', 'text'],
@@ -432,6 +432,12 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
           });
           args.colleague_slack_id = context.userId;
         }
+        // Opt-in allowlist: a colleague calling update_person_profile (on their
+        // own row, after the rewrite above) may only set operational metadata.
+        // Owner-curated fields (engagement_rank, role_summary, reports_to,
+        // collaboration_notes, communication_style, response_speed, etc.) are
+        // silently dropped. When adding a new field to `update_person_profile`,
+        // decide whether colleagues can self-set it; if yes, add it here.
         const COLLEAGUE_SELF_WRITABLE_FIELDS = new Set([
           'colleague_slack_id', 'colleague_name',
           'timezone', 'state', 'working_hours', 'working_hours_structured',

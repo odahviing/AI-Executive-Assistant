@@ -101,7 +101,7 @@ Do NOT use when:
             type: {
               type: 'string',
               enum: ['coffee', 'restaurant', 'pub', 'park', 'bar', 'hotel', 'office'],
-              description: 'Venue type for Case-2 search. Omit when using name_hint alone.',
+              description: "Venue type for Case-2 search. Omit when using name_hint alone. 'office' here means a CUSTOMER / external party's office (\"meet at Acme's office in Tel Aviv\") — never the owner's own office (that's handled separately by location resolution).",
             },
             type_tags: {
               type: 'array',

@@ -352,7 +352,11 @@ async function generatePing(params: {
       typeof import('../../db/socialSubjects');
     const rows = getActiveSubjectsForPerson(params.colleagueSlackId);
     activeTopics = rows.map(r => ({
-      category: r.category_id,
+      // Strip the `cat_global_` / `cat_<owner>_` row-id prefix so Sonnet sees
+      // a human-readable tag (e.g. "gaming"), not "cat_global_gaming". The
+      // catalog category label isn't denormalized onto social_subjects, so a
+      // light prefix-strip is the cheapest fix.
+      category: r.category_id.replace(/^cat_(global_|[^_]+_)/, ''),
       topic: r.label,
       engagement_score: r.engagement_score,
       last_touched: r.last_touched_at,

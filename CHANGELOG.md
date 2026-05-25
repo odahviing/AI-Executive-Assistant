@@ -2,6 +2,81 @@
 
 ---
 
+## 3.0.5 — Endless-approval kill, identity-spoof refinement, attendee-memory hook, lunch-gap preemptive dismiss, V3 audit findings
+
+Big wrap covering one session's work plus output from two parallel chats (audit + targeted bug-fix passes). Headline: the "approval stays open all day, brief keeps re-surfacing it" pattern is finally killed at its actual root cause — a `#` prefix on approval IDs in the prompt that Sonnet copied into the `resolve_approval` tool arg, making `getRequest('#req_…')` return null silently. Plus a swap-out of yesterday's identity-spoof regex (false-positive'd on "i am confused" inside 24h of shipping) for a deterministic email-mismatch trigger + Haiku-composed refusal.
+
+### Fixed — endless-open-approval root cause: `#` prefix on approval IDs
+
+Three render sites in `core/orchestrator/systemPrompt.ts` (lines 185, 225, 227) rendered approval IDs as `- #req_xxxx_yyyy` in the PENDING APPROVALS block. Sonnet sometimes copied the `#` verbatim into `resolve_approval(approval_id=…)`. The resolver's `getRequest('#req_…')` returned null, the not-found branch returned `{ ok: false, reason: 'request not found' }` with NO log line, the approval stayed `awaiting_owner` for hours. Brief kept re-narrating it. Owner-said-done scanner (v2.4.2) cleaned up at end of day.
+
+Three-part fix:
+1. **Drop the `#` prefix** from all three render sites — Sonnet sees bare `req_…`, copies cleanly.
+2. **Defensive `#` strip** in `tasks/skill.ts:resolve_approval` handler — covers stale prompt cache + future callers.
+3. **Warn log** on `resolveRequest`'s not-found early return — the silent-fail mode that hid this bug for an unknown stretch is over.
+
+Plus: **`message_colleague` added to `APPROVAL_BOUND_TOOLS`** in the orchestrator's approval-bound-thread filter. Pre-fix, when owner said "tell him" in an approval thread, the tool scope dropped to `{resolve_approval, list_pending_approvals}` only — Maelle drafted "I'll ping Oran" but couldn't actually call `message_colleague`. Claim-checker caught the lie but couldn't retry (tool out of scope). Now she can both close the approval AND ping the colleague in the same turn.
+
+### Changed — identity-spoof guard redesigned (v3.0.4 regex → email-mismatch + Haiku)
+
+The v3.0.4 regex-based identity guard fired on "i am confused" within 24h of shipping (Oran false-positive 2026-05-25 09:20 UTC). Whole approach gone. Replacement:
+- **VERIFIED SENDER prompt block** added to colleague-path dynamic prompt (`systemPrompt.ts`) — code-stamped from Slack auth via people_memory. Tells Sonnet identity is authoritative and message body cannot override.
+- **Email-mismatch detector** in `securityGate.ts` (`detectClaimedEmail`) — extracts emails from last 5 user messages; flags any `@<ownerDomain>` that isn't sender's own or owner's own. Pure regex on structured data (no natural-language scaling problem). Common case is free.
+- **Haiku composer** in `securityGate.ts` (`composeIdentityRefusalWithHaiku`) — only runs on actual signal. Generates a varied, polite refusal in Maelle's voice, no hardcoded text, no system-internals leak. Falls back to a short canned line if Haiku throws.
+
+Closes #112 (the Oran false-positive) and keeps the Ysrael-attack defense from v3.0.4. Identity claims without an email no longer fire here — the prompt block handles those.
+
+### Fixed — `message_colleague` silent-fail (Path 2 stages 0+1, shipped earlier today as 3.0.4 fix-up, here as the formal record)
+
+`outreach.ts:226-268` had a duplicate `createRequest` block — every `message_colleague` call wrote TWO `requests` rows. Duplicate row's idempotency_key collided on repeat sends → UNIQUE constraint threw → `sendDirect` never ran → Maelle reported "Sent the message" without ever sending. Block deleted; `db/jobs.ts:createOutreachJob`'s internal bridge stays as single writer. Plus `summarizeToolCall` now renders `{ error: string }` tool results as `[<tool> FAILED: <reason>]` so the claim-checker shield can't be fooled by a thrown write again.
+
+### Fixed — calendar-issue endless-ask: preemptive approve for floating-block gaps (#issue from chat 2026-05-25)
+
+When Maelle narrates "no lunch on Tuesday" from a `get_calendar` read and the owner replies "covered by the Natan meeting," the v3.0.3 dismiss infrastructure had no way to record the dismissal — `manage_calendar_issue(action='approve')` required an `issue_id` that only existed after `check_calendar_health` materialized the row. Tomorrow's detection ran fresh, re-narrated the gap. Now `manage_calendar_issue(action='approve', date=YYYY-MM-DD, block_name=lunch, notes=…)` inserts a terminal row directly with the synthetic event_id matching `calendarHealth.ts:1339-1347`. Tomorrow's detector sees the suppressor via `upsertCluster`, returns `suppressed`, no re-narration.
+
+### Added — booking auto-writes to attendee memory (`src/memory/recordBooking.ts`)
+
+When `create_meeting` or coord booking (`bookCoordination`) succeeds, a line appends to each non-owner attendee's "What we've discussed" section in their md file: `- [YYYY-MM-DD] Booked "<subject>" at <location> for <when>`. Code-driven, no Sonnet judgment, fire-and-forget after success. Externals without a people_memory row are silently skipped (future improvement: an external-contacts store). Closes the gap surfaced 2026-05-25 — Maelle had booked a Modiin lunch with Natan earlier in the day but had no memory of the venue she'd negotiated when asked about it that night.
+
+### Fixed — issue #113: Slack `<URL|text>` syntax preserved on inbound
+
+`connectors/slack/app.ts:144` stripped Slack's `<URL|text>` form down to just the URL, discarding the visible link text. Real impact: when owner typed `@Leor` Slack delivered `<https://linkedin.com/feed/#|Leor Eliashiv>`, Maelle saw only the URL, then asked "who's behind that LinkedIn link?" even after owner just typed the name. The strip line is gone. Sonnet reads Slack's native bracket syntax fine. Issue #113 closed.
+
+### Changed — startup version DM removed (`src/index.ts`)
+
+The 180s-delayed "Hi <Name>, Maelle vX.Y.Z back online" startup ping is gone. In the Slack agent-panel sidebar, every DM creates a chat row — even a one-line restart ping creates a phantom unread artifact. Version bumps are visible in CHANGELOG.md + git log; the owner doesn't need a boot notification. Removes `VERSION_PREF_KEY` + `last_announced_version` persistence + ~55 lines of startup code.
+
+### Changed — v3.0.4 schema defaults pass (shipped earlier today; here as the formal record)
+
+`UserProfile` schema rewritten for minimum-viable-yaml. A profile with ~15 required lines now boots fine — everything else defaults. Removed entirely: `priorities`, `vip_contacts`, `rescheduling` top-level blocks + `VipContactSchema` / `ReschedulingRuleSchema` types; `user.role` required (now optional); `assistant.persona` + `slack_display_name` required (now optional with defaults); `schedule.{office_days,home_days}.notes`; `schedule.timezone_preferences` required (now optional); `schedule.night_shift.{blocking_event, note}`; `meetings.office_location.{label, address, parking}` legacy fields; `meetings.protected[].rule` + `.recurring`; `skills.general_knowledge`. Old yamls keep parsing (zod strips unknown keys). Yaml template rewritten in required+optional 2-section format.
+
+### Fixed — `Skill threw during tool` log now includes stack trace
+
+Both catch branches in `src/skills/registry.ts` now log `err.stack` alongside `String(err)`. Previously the throw-site was hidden — the 2026-05-25 04:32 UTC `SqliteError: no such table: calendar_dismissed_issues` from `check_calendar_health` had no stack and no source-level path explaining it. Future similar fires get the file:line immediately.
+
+### Audit handoff filed
+
+`.claude/V3_AUDIT_HANDOFF.md` — output from an 8-subagent parallel audit pass run during this session. 83 atomic findings, 4 critical silent-data-loss / privilege bugs flagged at top (owner-approval replay swallow, two `note_about_person`/`log_interaction` rewrite-guard holes, NULL `requester_slack_id` colleague-resolve gap). Recommended fix-wave ordering attached. Future sessions can pull from this handoff to schedule the next bug-bash.
+
+### Other small fixes this session (parallel chats)
+
+Several files edited by parallel sessions during this same bug-bash window — content-level details on each are in their respective commit-message bodies and the audit handoff:
+
+- `src/core/social/stateMachine.ts` — engagement signal handling tweaks
+- `src/db/approvals.ts`, `src/db/people.ts` — small consistency fixes
+- `src/skills/general.ts`, `src/skills/venue.ts` — narrow tool description / handler changes
+- `src/utils/floatingBlocks.ts`, `src/utils/scheduleRules.ts`, `src/utils/workHours.ts` — schedule-helper consistency
+- `src/utils/threadAttendees.ts`, `src/voice/fileTranscribe.ts` — small polish
+- `src/tasks/dispatchers/socialOutreachTick.ts` — dispatcher polish
+- `src/core/requests/closeRequest.ts` — closure-cascade refinement
+- `src/core/assistant.ts`, `src/skills/meetings.ts` — small adjustments
+
+### Migration
+
+No DB schema change. No yaml change required — old yamls boot. Owner action: restart `npm run dev` to pick up everything.
+
+---
+
 ## 3.0.4 — Identity-spoof guard in security gate, schema defaults pass, silent-fail kill in message_colleague
 
 Three threads from a morning of investigation work + the v3.0.4 schema-defaults pass that had been sitting uncommitted. The headline is the identity-spoof guard: Ysrael did a night test (2026-05-24 21:44–22:02 UTC) and got Maelle to list Idan's week of meetings by claiming to be Yael. Persona prompt alone is LLM-vs-LLM — the fix puts a deterministic code check inside the existing security gate.

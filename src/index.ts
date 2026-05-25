@@ -2,13 +2,11 @@ import { config } from './config';
 import { App } from '@slack/bolt';
 import { createSlackAppForProfile } from './connectors/slack/app';
 import { loadAllProfiles } from './config/userProfile';
-import { getDb, getPreferences, savePreference } from './db';
+import { getDb } from './db';
 import { startBackgroundTimer, initProfile } from './core/background';
 import { seedAssistantSelf } from './core/assistantSelf';
 import { seedOwnerSelf } from './core/ownerSelf';
 import logger from './utils/logger';
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { version } = require('../package.json') as { version: string };
 
 async function main(): Promise<void> {
   logger.info('Assistant platform starting up...', { env: config.NODE_ENV });
@@ -66,60 +64,11 @@ async function main(): Promise<void> {
 
   logger.info('All assistants running in Socket Mode — no open ports', { count: runningApps.length });
 
-  // Startup notification — delayed 180s so rapid dev restarts don't spam the owner.
-  // ONLY fires when package.json version differs from the last-announced version
-  // stored per-profile. Regular restarts (same version) stay silent.
-  const VERSION_PREF_KEY = 'last_announced_version';
-  setTimeout(() => {
-    for (const [profileName, profile] of profiles) {
-      const ownerApp = runningApps.find(a => a.name === profile.assistant.name);
-      if (!ownerApp) continue;
-
-      // Check the last-announced version for this profile
-      const prefs = getPreferences(profileName);
-      const lastVersionPref = prefs.find(p => p.key === VERSION_PREF_KEY);
-      const lastVersion = lastVersionPref?.value;
-
-      if (lastVersion === version) {
-        logger.info('Startup notification skipped — version unchanged', {
-          user: profile.user.name,
-          version,
-        });
-        continue;
-      }
-
-      logger.info('Startup notification firing — version changed', {
-        user: profile.user.name,
-        previousVersion: lastVersion ?? '(none)',
-        newVersion: version,
-      });
-
-      ownerApp.app.client.conversations.open({
-        token: profile.assistant.slack.bot_token,
-        users: profile.user.slack_user_id,
-      }).then((dmResult: any) => {
-        const dmChannel = dmResult.channel?.id;
-        if (!dmChannel) return;
-        return ownerApp.app.client.chat.postMessage({
-          token: profile.assistant.slack.bot_token,
-          channel: dmChannel,
-          text: `Hi ${profile.user.name.split(' ')[0]}, ${profile.assistant.name} v${version} back online.`,
-        });
-      }).then(() => {
-        // Persist the announced version so the next restart stays quiet
-        savePreference({
-          userId: profileName,
-          category: 'system',
-          key: VERSION_PREF_KEY,
-          value: version,
-          source: 'inferred',
-        });
-        logger.info('Startup notification sent', { user: profile.user.name, version });
-      }).catch((err: unknown) => {
-        logger.warn('Could not send startup notification', { err: String(err) });
-      });
-    }
-  }, 180_000);
+  // v3.0.5 — startup-version DM removed. The Slack agent-panel surface treats
+  // every DM as a chat row in the sidebar, so even a one-line "back online"
+  // ping creates a phantom unread / empty-chat artifact every restart. Version
+  // bumps are visible via CHANGELOG.md + git log; the owner doesn't need a
+  // boot ping.
 
   // Initialise each profile: briefing cron, missed briefing check, catch-up messages
   for (const [, profile] of profiles) {

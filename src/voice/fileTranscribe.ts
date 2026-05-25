@@ -12,11 +12,14 @@ export async function transcribeAudioFile(filePath: string): Promise<string> {
   const openai = new OpenAI({ apiKey: config.OPENAI_API_KEY });
   const fileStream = fs.createReadStream(filePath);
 
-  const transcription = await openai.audio.transcriptions.create({
+  // `response_format: 'text'` makes the SDK return a bare string (per the SDK
+  // overload). Keep the literal narrow so TypeScript types `transcription` as
+  // string directly — no cast needed.
+  const transcription: string = await openai.audio.transcriptions.create({
     file: fileStream,
     model: 'whisper-1',
-    response_format: 'text',
+    response_format: 'text' as const,
   });
 
-  return (transcription as unknown as string).trim();
+  return transcription.trim();
 }

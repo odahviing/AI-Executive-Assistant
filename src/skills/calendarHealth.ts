@@ -189,10 +189,10 @@ Use this when: the owner explicitly asks to book one (e.g. "block 30 min for lun
 POSITIONAL PREFERENCE — express the owner's intent semantically, don't compute the time yourself:
 - Default (no \`prefer_position\` arg) → earliest aligned slot in the window. Use this when the owner just says "book lunch" without a time preference.
 - \`prefer_position: 'latest_in_window'\` → latest aligned slot in the window. Use when the owner says "book lunch as late as possible" / "right before lunch ends".
-- \`prefer_position: 'abut_before'\` + \`anchor_event_id\` → slot ends right before the anchor meeting (with buffer). Use when the owner says "before [meeting]" / "right before [person]" / "just before X".
-- \`prefer_position: 'abut_after'\` + \`anchor_event_id\` → slot starts right after the anchor meeting (with buffer). Use when the owner says "after [meeting]" / "right after [person]".
+- \`prefer_position: 'abut_before'\` + \`anchor_event_id\` → slot ends right before the anchor meeting (directly abuts, no buffer — standard meeting durations carry their own spacing). Use when the owner says "before [meeting]" / "right before [person]" / "just before X".
+- \`prefer_position: 'abut_after'\` + \`anchor_event_id\` → slot starts right after the anchor meeting (directly abuts, no buffer). Use when the owner says "after [meeting]" / "right after [person]".
 
-Pass anchor_event_id from get_calendar's event id field. NEVER hand-compute the start time and pass it through create_meeting — let this tool do the alignment + buffer math. Boundary times like the exact lunch_end are unbookable as lunch (the window's preferred_end is exclusive); the abut_after path will refuse honestly if math lands at/past the boundary.
+Pass anchor_event_id from get_calendar's event id field. NEVER hand-compute the start time and pass it through create_meeting — let this tool do the alignment math. Boundary times like the exact lunch_end are unbookable as lunch (the window's preferred_end is exclusive); the abut_after path will refuse honestly if math lands at/past the boundary.
 
 CATEGORIES: if the EVENT CATEGORIES block is in your system prompt, pass \`category\` with the name that fits this kind of block (typically the one whose description mentions personal time / schedule admin). Omit if no categories are defined or none fits.
 
@@ -276,12 +276,18 @@ Actions:
 - owner_will_resolve — owner said "I'll handle it." Row sits in owner_side state until owner declares done OR the underlying event changes.
 - owner_done — owner declared he fixed it. Row transitions to resolved.
 
-issue_id is required for everything except 'list'. Get it from a prior list / check_calendar_health call. Use \`notes\` to capture what owner said ("Sunday is travel, leave it") — surfaces on future narration.`,
+issue_id is required for everything except 'list'. Get it from a prior list / check_calendar_health call. Use \`notes\` to capture what owner said ("Sunday is travel, leave it") — surfaces on future narration.
+
+v3.0.6 — PREEMPTIVE APPROVE for floating-block gaps (NEW). When you mention a missing floating block ("no lunch on Tuesday") and the owner replies it's covered by another event / he'll skip it / not needed today, call \`manage_calendar_issue\` with:
+  action='approve', date='<YYYY-MM-DD>', block_name='<lunch | gym | etc.>', notes='covered by Natan meeting'
+No issue_id needed. A terminal row gets created directly so the next check_calendar_health run sees the suppressor and skips re-narrating the same gap. Use this whenever the owner waives a floating-block gap in conversation — don't wait for the daily detection to fire to dismiss it.`,
         input_schema: {
           type: 'object',
           properties: {
             action: { type: 'string', enum: ['list', 'approve', 'start_resolve', 'owner_will_resolve', 'owner_done'], description: 'see description.' },
-            issue_id: { type: 'string', description: 'required for approve / start_resolve / owner_will_resolve / owner_done. Get from list().' },
+            issue_id: { type: 'string', description: 'required for start_resolve / owner_will_resolve / owner_done. Optional for approve when you pass date + block_name instead.' },
+            date: { type: 'string', description: 'YYYY-MM-DD. Use with block_name for the preemptive-approve path (no issue_id needed). v3.0.6.' },
+            block_name: { type: 'string', description: 'Floating-block name (must match profile.meetings.floating_blocks, e.g. "lunch"). Use with date for the preemptive-approve path.' },
             notes: { type: 'string', description: 'optional. Owner reason ("travel week"), or what got done.' },
           },
           required: ['action'],
@@ -1939,7 +1945,86 @@ issue_id is required for everything except 'list'. Get it from a prior list / ch
           };
         }
 
-        // All non-list actions need issue_id.
+        // v3.0.6 — preemptive approve for floating-block gaps. When owner
+        // waives a gap in conversation ("no lunch tomorrow — Natan meeting
+        // includes it"), Maelle calls approve with date + block_name and we
+        // insert a terminal row directly. Tomorrow's check_calendar_health
+        // sees the matching synthetic event_id in upsertCluster, returns
+        // 'suppressed', and the gap doesn't re-narrate. Path closed without
+        // first having to materialize the issue row via check_calendar_health.
+        if (action === 'approve' && !issueId) {
+          const date = (args.date as string | undefined)?.trim();
+          const blockName = (args.block_name as string | undefined)?.trim();
+          if (!date || !blockName) {
+            return {
+              error: 'missing_args',
+              message: `'approve' needs either issue_id OR (date + block_name) to preemptively dismiss a floating-block gap.`,
+            };
+          }
+          const fbs = profile.meetings.floating_blocks ?? [];
+          const idx = fbs.findIndex(b => b.name === blockName);
+          if (idx === -1) {
+            return {
+              error: 'unknown_block',
+              message: `block_name="${blockName}" not in profile.meetings.floating_blocks. Known: ${fbs.map(b => b.name).join(', ') || '(none configured)'}`,
+            };
+          }
+          const block = fbs[idx];
+          const dt = DateTime.fromISO(date, { zone: timezone });
+          if (!dt.isValid) {
+            return { error: 'bad_date', message: `date="${date}" is not a valid YYYY-MM-DD.` };
+          }
+          // Synthetic event_id construction MUST match calendarHealth.ts:1339-
+          // 1347 exactly — that's where the detector mints the id for the
+          // same gap. Drift here = no suppression.
+          const mmddyyyy = `${String(dt.month).padStart(2, '0')}${String(dt.day).padStart(2, '0')}${dt.year}`;
+          const hhmm = (block.preferred_start ?? '00:00').replace(':', '');
+          const syntheticEventId = `${String(idx + 1).padStart(3, '0')}-${mmddyyyy}-${hhmm}`;
+          const endDt = DateTime.fromISO(`${date}T${block.preferred_end ?? '23:59'}`, { zone: timezone });
+          const eventEndMs = endDt.isValid ? endDt.toMillis() : dt.endOf('day').toMillis();
+
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getDb } = require('../db') as typeof import('../db');
+          const db = getDb();
+          const existing = db.prepare(
+            `SELECT id FROM calendar_issues WHERE owner_user_id = ? AND event_id = ?`,
+          ).get(ownerUserId, syntheticEventId) as { id: string } | undefined;
+
+          if (existing) {
+            db.prepare(`
+              UPDATE calendar_issues
+              SET status = 'approved',
+                  notes = COALESCE(?, notes),
+                  updated_at = datetime('now')
+              WHERE id = ?
+            `).run(notes ?? null, existing.id);
+          } else {
+            const id = `ci_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+            db.prepare(`
+              INSERT INTO calendar_issues
+                (id, owner_user_id, event_id, peer_event_id, event_date, event_end_ms,
+                 issue_class, status, notes, request_id)
+              VALUES (?, ?, ?, NULL, ?, ?, 'missing_floating_block', 'approved', ?, NULL)
+            `).run(id, ownerUserId, syntheticEventId, date, eventEndMs, notes ?? null);
+          }
+
+          auditLog({
+            action: 'manage_calendar_issue',
+            source: 'calendar_health',
+            actor: profile.user.name,
+            details: { action: 'approve', method: 'preemptive', date, block_name: blockName, synthetic_event_id: syntheticEventId, notes },
+            outcome: 'success',
+          });
+
+          return {
+            ok: true,
+            method: 'preemptive_approve',
+            synthetic_event_id: syntheticEventId,
+            message: `${blockName} gap on ${date} marked approved — future detection will suppress.`,
+          };
+        }
+
+        // All other non-list actions need issue_id.
         if (!issueId) {
           return { error: 'issue_id_required', message: `${action} requires issue_id. Get it from manage_calendar_issue(list) or check_calendar_health.` };
         }

@@ -795,7 +795,20 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         r.kind === 'approval' && r.terminal_dm_msg_ts === input.threadTs,
       );
       if (boundApprovals.length >= 1) {
-        const APPROVAL_BOUND_TOOLS = new Set(['resolve_approval', 'list_pending_approvals']);
+        // v3.0.5 — `message_colleague` added. Owner saying "tell him" /
+        // "let her know" / "give him the answer" in a thread bound to an
+        // approval should let Maelle ACT on both fronts in one turn: close
+        // the approval AND ping the colleague who's waiting on the answer.
+        // Pre-fix she'd resolve_approval but the message_colleague tool was
+        // filtered out, so her draft promised the ping with no tool call
+        // behind it — claim-checker caught the lie but couldn't retry
+        // because the tool wasn't in scope, and the colleague never heard
+        // the outcome.
+        const APPROVAL_BOUND_TOOLS = new Set([
+          'resolve_approval',
+          'list_pending_approvals',
+          'message_colleague',
+        ]);
         const before = tools.length;
         tools = tools.filter(t => APPROVAL_BOUND_TOOLS.has(t.name));
         logger.info('Orchestrator — approval-bound thread, locked tool scope', {

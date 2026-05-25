@@ -139,9 +139,14 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     // Clean mailto links: <mailto:email|email> → email
     let resolved = text.replace(/<mailto:[^|>]+\|([^>]+)>/g, '$1');
 
-    // Clean plain angle-bracket links
+    // Clean plain angle-bracket links — strip `<URL>` brackets only, no info
+    // loss. The `<URL|text>` form is left INTACT (v3.0.5, issue #113): pre-fix
+    // we stripped to just the URL and lost the link text, so when the owner
+    // typed `@Leor` Slack delivered `<linkedin.com/feed/#|Leor Eliashiv>` and
+    // Maelle saw only the URL — then asked "who's behind that LinkedIn link?"
+    // Sonnet reads Slack's native `<URL|text>` syntax fine; no normalization
+    // needed.
     resolved = resolved.replace(/<(https?:\/\/[^|>]+)>/g, '$1');
-    resolved = resolved.replace(/<(https?:\/\/[^|>]+)\|[^>]+>/g, '$1');
 
     // Resolve ALL @mentions
     const mentionPattern = /<@([A-Z0-9]+)>/g;

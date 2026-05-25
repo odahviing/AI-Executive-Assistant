@@ -4,6 +4,50 @@ import type { UserProfile } from '../config/userProfile';
 import { config } from '../config';
 import logger from '../utils/logger';
 
+// ── External web-search response shapes ──────────────────────────────────────
+// Minimal-surface interfaces — only the fields we actually read. Provider
+// shapes are owned by the vendor; a shape change at one provider degrades to
+// undefined fields rather than runtime crashes.
+interface TavilySearchResult {
+  title?: string;
+  content?: string;
+  url?: string;
+  published_date?: string;
+}
+interface TavilySearchResponse {
+  answer?: string | null;
+  results?: TavilySearchResult[];
+}
+interface BraveSearchResult {
+  title?: string;
+  description?: string;
+  url?: string;
+  age?: string;
+}
+interface BraveSearchResponse {
+  summary?: { answer?: string | null };
+  web?: { results?: BraveSearchResult[] };
+}
+interface DuckDuckGoTopic {
+  Text?: string;
+}
+interface DuckDuckGoResponse {
+  AbstractText?: string;
+  Answer?: string;
+  AbstractSource?: string;
+  AbstractURL?: string;
+  RelatedTopics?: DuckDuckGoTopic[];
+}
+interface TavilyExtractPage {
+  url?: string;
+  raw_content?: string;
+  text?: string;
+  images?: string[];
+}
+interface TavilyExtractResponse {
+  results?: TavilyExtractPage[];
+}
+
 /**
  * Search Skill
  * Quick web lookups — weather, news, exchange rates, holidays, current events.
@@ -171,12 +215,12 @@ export async function tavilySearch(
     throw new Error(`Tavily HTTP ${res.status}: ${errBody.slice(0, 200)}`);
   }
 
-  const data = await res.json() as any;
+  const data = await res.json() as TavilySearchResponse;
   logger.info('Tavily result', { query, answer: !!data.answer, count: data.results?.length ?? 0 });
 
   return {
     answer: data.answer ?? null,
-    results: (data.results ?? []).slice(0, 6).map((r: any) => ({
+    results: (data.results ?? []).slice(0, 6).map(r => ({
       title: r.title,
       content: r.content,
       url: r.url,
@@ -198,8 +242,8 @@ export async function braveSearch(query: string): Promise<object> {
 
   if (!res.ok) throw new Error(`Brave Search HTTP ${res.status}`);
 
-  const data = await res.json() as any;
-  const results = (data.web?.results ?? []).slice(0, 6).map((r: any) => ({
+  const data = await res.json() as BraveSearchResponse;
+  const results = (data.web?.results ?? []).slice(0, 6).map(r => ({
     title: r.title,
     description: r.description,
     url: r.url,
@@ -215,14 +259,14 @@ export async function duckduckgoSearch(query: string): Promise<object> {
 
   if (!res.ok) throw new Error(`DuckDuckGo HTTP ${res.status}`);
 
-  const data = await res.json() as any;
+  const data = await res.json() as DuckDuckGoResponse;
 
   return {
     abstract: data.AbstractText || null,
     answer: data.Answer || null,
     source: data.AbstractSource || null,
     url: data.AbstractURL || null,
-    related: (data.RelatedTopics ?? []).slice(0, 3).map((t: any) => t.Text).filter(Boolean),
+    related: (data.RelatedTopics ?? []).slice(0, 3).map(t => t.Text).filter(Boolean),
     note: 'Using DuckDuckGo instant answers (limited). Add TAVILY_API_KEY to .env for full web search.',
   };
 }
@@ -253,7 +297,7 @@ export async function tavilyExtract(url: string): Promise<object> {
     throw new Error(`Tavily extract HTTP ${res.status}: ${errBody.slice(0, 200)}`);
   }
 
-  const data = await res.json() as any;
+  const data = await res.json() as TavilyExtractResponse;
   const results = data.results ?? [];
 
   if (results.length === 0) {
