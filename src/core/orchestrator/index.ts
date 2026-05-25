@@ -95,6 +95,18 @@ function mutationOutcome(result: unknown): { ok: boolean; reason?: string; event
 
 function summarizeToolCall(toolName: string, input: Record<string, unknown>, result: unknown): string {
   try {
+    // v3.0.5 — generic FAILED detection. registry.ts wraps every thrown
+    // tool call in `{ error: 'Tool "X" failed: <reason>' }`, and skills also
+    // return `{ error: ... }` for non-thrown refusals. Surface both as
+    // `[<tool> FAILED: <reason>]` BEFORE the per-tool cases — otherwise a
+    // throw-from-message_colleague would render as `[message_colleague: Yael]`
+    // and the claim-checker shield treats it as success (silent-fail bug:
+    // outreach DM never sent, draft "Sent the message" sneaks past the
+    // checker because the tool is "in toolSummaries").
+    if (result && typeof result === 'object' && typeof (result as { error?: unknown }).error === 'string') {
+      const reason = String((result as { error: string }).error).replace(/\s+/g, ' ').trim().slice(0, 80);
+      return `[${toolName} FAILED: ${reason}]`;
+    }
     switch (toolName) {
       case 'analyze_calendar': {
         const days = Array.isArray(result) ? result : [];

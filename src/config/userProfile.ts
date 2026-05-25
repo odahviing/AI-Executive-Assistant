@@ -69,61 +69,46 @@ const CompanyEmailSchema = z.string().email().refine(
 
 // ── Schema ────────────────────────────────────────────────────────────────────
 
-const VipContactSchema = z.object({
-  name: z.string().min(2),
-  email: z.string().email().optional(),
-  priority: z.enum(['highest', 'high', 'medium', 'low']),
-  note: z.string().optional(),
-});
-
-// Rescheduling rule — three distinct behaviours:
-//   immutable       → cannot be moved under any circumstance (e.g. board meetings, leadership sync, or whatever the user defines)
-//   flexible   → can be moved within bounds, no approval needed
-//   approval   → requires explicit user approval before moving
-const ReschedulingRuleSchema = z.discriminatedUnion('type', [
-  z.object({
-    type: z.literal('immutable'),
-    description: z.string().optional(),
-  }),
-  z.object({
-    type: z.literal('flexible'),
-    flexibility: z.enum(['same_week', 'same_or_next_week']),
-    description: z.string().optional(),
-  }),
-  z.object({
-    type: z.literal('approval_required'),
-    description: z.string().optional(),
-  }),
-]);
+// v3.0.4 — `VipContactSchema` and `ReschedulingRuleSchema` removed alongside
+// the `vip_contacts`, `rescheduling`, and `priorities` top-level fields.
+// Audit showed each was declared in schema (and `ReschedulingRule` exported
+// as a type) but never read by any code path in src/. Old yamls with these
+// keys still boot (Zod strips unknown keys silently); the dead surface area
+// is just gone from new templates and the codebase.
 
 const UserProfileSchema = z.object({
 
+  // v3.0.4 — required fields ONLY. Everything optional has a default below
+  // so a minimal yaml (~15 lines) is enough to boot Maelle for a new user.
   user: z.object({
-    name: ProfessionalNameSchema,
-    name_he: z.string().optional(),   // Hebrew spelling of the user's name, e.g. "עידן"
-    email: CompanyEmailSchema,
-    role: z.string().min(2),
-    slack_user_id: z.string().regex(/^U[A-Z0-9]+$/, 'Slack user ID must start with U followed by uppercase letters/numbers'),
-    timezone: z.string().min(3),
+    name: ProfessionalNameSchema,                          // REQUIRED — real first + last name
+    email: CompanyEmailSchema,                             // REQUIRED — work email
+    timezone: z.string().min(3),                           // REQUIRED — IANA TZ, no default that fits everyone
+    slack_user_id: z.string().regex(/^U[A-Z0-9]+$/, 'Slack user ID must start with U followed by uppercase letters/numbers'),  // REQUIRED — owner's Slack ID
+    name_he: z.string().optional(),                        // optional — Hebrew spelling
+    role: z.string().optional(),                           // optional — defaults to '' (was required min(2) — now optional)
     language: z.string().default('en'),
     units: z.enum(['metric', 'imperial']).default('metric'),
-    company: z.string().optional(),       // company name — used in identity/persona prompts
-    company_brief: z.string().optional(), // short paragraph injected into system prompt so assistant knows the business
+    company: z.string().optional(),                        // optional — company name for prompt
+    company_brief: z.string().optional(),                  // optional — short company description
   }),
 
   assistant: z.object({
-    name: AssistantNameSchema,
-    slack_display_name: z.string().min(2).max(80),
-    email: CompanyEmailSchema.optional(),
-    persona: z.string().min(20),
-
-    // Each assistant has their own dedicated Slack app
-    // Create at https://api.slack.com/apps — one app per assistant identity
-    slack: z.object({
+    name: AssistantNameSchema,                             // REQUIRED — assistant's display name
+    slack: z.object({                                      // REQUIRED — Slack app credentials
       bot_token: z.string().startsWith('xoxb-', 'Bot token must start with xoxb-'),
       app_token: z.string().startsWith('xapp-', 'App-level token must start with xapp-'),
       signing_secret: z.string().min(10, 'Signing secret too short — check your Slack app dashboard'),
     }),
+    slack_display_name: z.string().min(2).max(80).optional(),  // optional — defaults to assistant.name (resolved at load time)
+    email: CompanyEmailSchema.optional(),                  // optional
+    // Default persona is concise + professional. Owner can override for a stronger voice.
+    persona: z.string().min(20).default(
+      `You are a sharp, warm, and direct executive assistant. ` +
+      `You communicate like a real person: natural greetings, clear and efficient, never robotic. ` +
+      `You're confident and professional, with a light touch of personality. ` +
+      `Match the user's language if they switch (e.g. Hebrew, Spanish) — keep the same tone in any language.`,
+    ),
   }),
 
   schedule: z.object({
@@ -133,7 +118,6 @@ const UserProfileSchema = z.object({
     // classification is used by category rules + location resolution.
     office_days: z.object({
       days: z.array(z.enum(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'])).min(1),
-      notes: z.string().optional(),
       // Back-compat input only — accepted on read, normalized into work_hours,
       // then stripped from the canonical profile. Don't read these anywhere.
       hours_start: z.string().regex(/^\d{2}:\d{2}$/).optional(),
@@ -141,7 +125,6 @@ const UserProfileSchema = z.object({
     }),
     home_days: z.object({
       days: z.array(z.enum(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'])).min(1),
-      notes: z.string().optional(),
       hours_start: z.string().regex(/^\d{2}:\d{2}$/).optional(),
       hours_end: z.string().regex(/^\d{2}:\d{2}$/).optional(),
     }),
@@ -163,17 +146,20 @@ const UserProfileSchema = z.object({
       z.enum(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']),
       z.array(z.string().regex(/^\d{2}:\d{2}-\d{2}:\d{2}$/)).min(1),
     ).optional(),
+    // v3.0.4 — optional. Owner-curated guidance for slot-picking preference
+    // by attendee TZ. When unset, slot finder uses default spread logic.
     timezone_preferences: z.object({
       local_participants: z.string(),
       remote_participants: z.string(),
       note: z.string().optional(),
-    }),
+    }).optional(),
+    // v3.0.4 — `note` + `blocking_event` removed. `blocking_event` was replaced
+    // by the generic `meetings.issue_exclusions.subjects` yaml list in v3.0.3;
+    // `note` was never read by any code path.
     night_shift: z.object({
       hours_start: z.string().regex(/^\d{2}:\d{2}$/),
       hours_end: z.string().regex(/^\d{2}:\d{2}$/),
       typical_day: z.string().optional(),
-      blocking_event: z.string(),
-      note: z.string().optional(),
     }).optional(),
     // Owner's mental day boundary. Local-clock hour before which "today"
     // is still treated as the previous calendar day — late-night work
@@ -184,26 +170,19 @@ const UserProfileSchema = z.object({
     day_boundary_hour: z.string().regex(/^\d{2}:\d{2}$/).default('00:00'),
   }),
 
-  meetings: z.object({
-    allowed_durations: z.array(z.number()).min(1),
-    // v3.0.4 — default meeting duration when the conversation hasn't named
-    // one ("when can I meet X?", "list my options"). Must be one of
-    // allowed_durations. When unset, falls back to the smallest value in
-    // allowed_durations (cheapest, least-committal default). Owner-curated;
-    // different workspaces can pick different defaults (15, 30, 25, etc.).
-    default_meeting_duration: z.number().optional(),
-    buffer_minutes: z.number().min(0).max(30),
-    // Thinking-time protection — how much quality free time ${user} wants
-    // preserved per day. Office days and home days can differ because the
-    // owner usually blocks more deep-work on office days.
-    free_time_per_office_day_hours: z.number().min(0).max(8),
-    // v1.6.11 — optional home-day threshold. Falls back to office value if
-    // unset (old profiles keep their previous behavior).
-    free_time_per_home_day_hours: z.number().min(0).max(8).optional(),
-    thinking_time_min_chunk_minutes: z.number().min(15).max(120).default(30),
-    min_slot_buffer_hours: z.number().min(0).max(12).default(4),
-    physical_meetings_require_office_day: z.boolean(),
-    room_email: z.string().email().optional(),   // e.g. "meeting@company.com" — used to book physical meeting rooms
+  // v3.0.4 — all meeting fields default. A profile that omits `meetings:`
+  // entirely OR has `meetings:` with no children (yaml parses to null) both
+  // boot. The preprocess coerces null → {} so the .default() below kicks in.
+  meetings: z.preprocess(v => v ?? undefined, z.object({
+    allowed_durations: z.array(z.number()).min(1).default([25, 50]),                 // Meeting lengths Maelle picks from
+    default_meeting_duration: z.number().optional(),                                  // Default when conversation doesn't name one; falls back to smallest above
+    buffer_minutes: z.number().min(0).max(30).default(0),                             // Buffer between meetings (0 = back-to-back fine)
+    free_time_per_office_day_hours: z.number().min(0).max(8).default(2),              // Protected focus time per office day
+    free_time_per_home_day_hours: z.number().min(0).max(8).optional(),                // Home-day focus target (defaults to office value)
+    thinking_time_min_chunk_minutes: z.number().min(15).max(120).default(30),         // Smallest focus block worth counting
+    min_slot_buffer_hours: z.number().min(0).max(12).default(4),                      // How far ahead colleagues can book (owner gets 1h)
+    physical_meetings_require_office_day: z.boolean().default(false),                 // Force in-person meetings to office days only
+    room_email: z.string().email().optional(),                                         // Meeting-room mailbox for room booking
     // v2.8.2 — three labels for the three output flavors of the location
     // decision tree (see src/utils/resolveLocation.ts). All optional so
     // workspaces without an office can leave them unset; the resolver falls
@@ -213,12 +192,6 @@ const UserProfileSchema = z.object({
       meeting_room_label: z.string().optional(),       // internal-only office day, ≥4 people
       small_meeting_room_label: z.string().optional(), // fallback when meeting room is busy and ≤5 people
       full_label: z.string().optional(),               // external attendee physical visit
-      // Legacy fields (pre-2.8.2). Still accepted on input so old yamls boot,
-      // but resolveLocation no longer reads them. Remove in a future patch
-      // once all workspaces are migrated.
-      label: z.string().optional(),
-      address: z.string().optional(),
-      parking: z.string().optional(),
     }).optional(),
     // v2.1.1 — each entry must supply EITHER name (subject match, existing)
     // OR category (Outlook-category match, new). This is additive-compatible:
@@ -226,22 +199,15 @@ const UserProfileSchema = z.object({
     // Outlook category (e.g. "Protected") in the future, a single yaml entry
     // `{category: "Protected", rule: "never_move"}` auto-protects every event
     // tagged with it — no code change.
+    // v3.0.4 — protected list defaults to empty. Legacy `rule` enum (replaced
+    // by `movable: false`) and never-read `recurring` flag removed.
     protected: z.array(z.object({
       name: z.string().optional(),
       category: z.string().optional(),
-      // v2.9.2 — `rule` deprecated in favor of `movable`. Keeping rule
-      // optional for back-compat; new entries use `movable: false`.
-      rule: z.enum(['never_move', 'never_override']).optional(),
-      // v2.9.2 — explicit per-event movability flag. When false, active-mode
-      // never tries to move/coord this event regardless of attendee count.
-      // Also suppresses oof_conflict flagging (owner-intentional placement,
-      // e.g. "Bookcamp" during Holiday Block). Default true (any meeting is
-      // movable unless explicitly locked here).
       movable: z.boolean().optional().default(true),
-      recurring: z.boolean().optional(),
     }).refine(p => !!p.name || !!p.category, {
       message: 'protected entry must have either `name` or `category`',
-    })),
+    })).default([]),
     // Floating blocks — protected N-minute periods that can live anywhere
     // inside a defined window (preferred_start..preferred_end). Lunch is
     // one example; coffee breaks, gym, prayer time, daily writing hour all
@@ -293,17 +259,18 @@ const UserProfileSchema = z.object({
     issue_exclusions: z.object({
       subjects: z.array(z.string()).default([]),
     }).optional(),
+  }).default({
+    allowed_durations: [25, 50],
+    buffer_minutes: 0,
+    free_time_per_office_day_hours: 2,
+    thinking_time_min_chunk_minutes: 30,
+    min_slot_buffer_hours: 4,
+    physical_meetings_require_office_day: false,
+    protected: [],
   }).refine(
     m => m.default_meeting_duration === undefined || m.allowed_durations.includes(m.default_meeting_duration),
     { message: 'meetings.default_meeting_duration must be one of meetings.allowed_durations' },
-  ),
-
-  priorities: z.object({
-    highest: z.array(z.string()),
-    high: z.array(z.string()),
-    medium: z.array(z.string()),
-    low: z.array(z.string()),
-  }),
+  )),
 
   // v1.7.8 — Owner's Outlook categories. Optional. When defined, Maelle reads
   // these and picks the right one per event (book_floating_block,
@@ -378,8 +345,6 @@ const UserProfileSchema = z.object({
     no_issue_tracking: z.boolean().optional(),
   })).optional(),
 
-  vip_contacts: z.array(VipContactSchema).default([]),
-
   behavior: z.object({
     // v2.6.3 — five vestigial fields removed: rescheduling_style,
     // adaptive_learning, escalate_after_days, can_contact_others_via_slack,
@@ -435,21 +400,22 @@ const UserProfileSchema = z.object({
       cooldown_days: 5,
       skip_weekends: true,
     }),
+  }).default({
+    v1_shadow_mode: false,
+    calendar_health_mode: 'passive',
+    intent_aware_tools: false,
+    deterministic_approval_resolve: false,
+    proactive_colleague_social: { daily_window_hours: [13, 15], cooldown_days: 5, skip_weekends: true },
   }),
-
-  // Rescheduling rules — now strongly typed with discriminated union
-  // Each key is a meeting category name
-  rescheduling: z.record(ReschedulingRuleSchema),
 
   // v2.5.4 — `interviews` block removed. The per-day limit + interview
   // guidance now lives in the priority-ordered category system
   // (`categories[].limits.per_day` + the Interview category description).
   // Verified pre-removal: no `src/` code consumed `profile.interviews`.
 
+  // v3.0.4 — every skill toggle defaults. Profile that omits `skills:` boots
+  // with sensible "meetings + calendar + search on, optional skills off".
   skills: z.object({
-    // v1.7.6 — single-word skill names. Each identifies a capability the agent
-    // can DO (search, summary, knowledge). Legacy multi-word keys still parse
-    // and auto-migrate at runtime in skills/registry.ts.
     meetings: z.boolean().default(true),
     summary: z.boolean().default(false),         // was meeting_summaries
     knowledge: z.boolean().default(false),       // was knowledge_base
@@ -481,7 +447,9 @@ const UserProfileSchema = z.object({
     meeting_summaries: z.boolean().optional(),   // → summary
     knowledge_base: z.boolean().optional(),      // → knowledge
     calendar_health: z.boolean().optional(),     // → calendar
-    general_knowledge: z.boolean().optional(),
+  }).default({
+    meetings: true, summary: false, knowledge: false, calendar: true,
+    search: true, social: false, venue: false,
   }),
 
   // Which communication channels the assistant is active on
@@ -533,8 +501,6 @@ export type UserProfile = Omit<_RawUserProfile, 'schedule'> & {
     work_hours:  Record<'Sunday'|'Monday'|'Tuesday'|'Wednesday'|'Thursday'|'Friday'|'Saturday', string[]>;
   };
 };
-export type VipContact = z.infer<typeof VipContactSchema>;
-export type ReschedulingRule = z.infer<typeof ReschedulingRuleSchema>;
 
 // ── Loader ────────────────────────────────────────────────────────────────────
 
@@ -572,6 +538,13 @@ export function loadUserProfile(profileName: string): UserProfile {
   const skillsAny = parsed.data.skills as { persona?: boolean; social: boolean };
   if (skillsAny.persona === true) {
     skillsAny.social = true;
+  }
+
+  // v3.0.4 — slack_display_name defaults to assistant.name when unset.
+  // Common case: new owners don't want to think about a separate display name.
+  const asst = parsed.data.assistant as { name: string; slack_display_name?: string };
+  if (!asst.slack_display_name) {
+    asst.slack_display_name = asst.name;
   }
 
   // v2.8.1 — normalize work_hours. If yaml uses the legacy shape
@@ -646,7 +619,6 @@ export function loadUserProfile(profileName: string): UserProfile {
     profile: profileName,
     user: parsed.data.user.name,
     assistant: parsed.data.assistant.name,
-    vips: parsed.data.vip_contacts.length,
   });
 
   return parsed.data as unknown as UserProfile;

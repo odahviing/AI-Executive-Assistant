@@ -439,7 +439,10 @@ export async function executeSkillTool(
         return result;
       }
     } catch (err) {
-      logger.error(`Skill "${alwaysSkill.name}" threw during tool "${toolName}"`, { err: String(err) });
+      logger.error(`Skill "${alwaysSkill.name}" threw during tool "${toolName}"`, {
+        err: String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
       return { error: `Tool "${toolName}" failed: ${String(err)}` };
     }
   }
@@ -452,7 +455,10 @@ export async function executeSkillTool(
         return result;
       }
     } catch (err) {
-      logger.error(`Skill "${skill.name}" threw during tool "${toolName}"`, { err: String(err) });
+      logger.error(`Skill "${skill.name}" threw during tool "${toolName}"`, {
+        err: String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
       return { error: `Tool "${toolName}" failed: ${String(err)}` };
     }
   }

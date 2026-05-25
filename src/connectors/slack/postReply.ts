@@ -264,14 +264,27 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     }
   }
 
-  // Step 4 — colleague-facing security gate (leak filter).
+  // Step 4 — colleague-facing security gate (leak filter + identity-spoof).
   if (role === 'colleague' && !isOwnerInGroup) {
+    // v3.0.5 — pull verified colleague email from people_memory (written at
+    // message-arrival in app.ts via users.info → upsertPersonMemory). Extract
+    // the last few user-role turns from history for the spoof scan. Both feed
+    // the new identity check inside filterColleagueReply.
+    const { getPersonMemory } = await import('../../db');
+    const verifiedSenderEmail = getPersonMemory(senderId)?.email ?? undefined;
+    const recentUserMessages = history
+      .filter(h => h.role === 'user')
+      .slice(-5)
+      .map(h => h.content);
     cleanReply = await runSecurityGate({
       reply: cleanReply,
       colleagueName,
       senderId,
       assistantName: assistant.name,
       ownerFirstName: profile.user.name.split(' ')[0],
+      verifiedSenderEmail,
+      ownerEmail: profile.user.email,
+      recentUserMessages,
     });
 
     // Step 4a (v2.6.5) — colleague-facing humanness gate. Same Sonnet-pass
@@ -573,6 +586,11 @@ async function runSecurityGate(opts: {
   senderId: string;
   assistantName: string;
   ownerFirstName: string;
+  // v3.0.5 — identity-spoof inputs (all optional; when absent, only leak
+  // filter runs). See detectIdentitySpoof in securityGate.ts.
+  verifiedSenderEmail?: string;
+  ownerEmail?: string;
+  recentUserMessages?: string[];
 }): Promise<string> {
   const { filterColleagueReply } = await import('../../utils/securityGate');
   const gateResult = await filterColleagueReply({
@@ -581,6 +599,9 @@ async function runSecurityGate(opts: {
     colleagueSlackId: opts.senderId,
     assistantName: opts.assistantName,
     ownerFirstName: opts.ownerFirstName,
+    verifiedSenderEmail: opts.verifiedSenderEmail,
+    ownerEmail: opts.ownerEmail,
+    recentUserMessages: opts.recentUserMessages,
   });
   if (gateResult.filtered) {
     logger.warn('⚠ Security gate rewrote colleague reply', {

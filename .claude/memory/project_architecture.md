@@ -4,7 +4,9 @@ description: Four-layer model, skills system, orchestrator loop, task pipeline, 
 type: project
 ---
 
-Architecture reference for Maelle **v2.8.3**. Living document of the four-layer model + invariants that survive across patches. Version-specific changelog is in `CHANGELOG.md`; this file describes the STRUCTURE.
+Architecture reference for Maelle **v3.0.4**. Living document of the four-layer model + invariants that survive across patches. Version-specific changelog is in `CHANGELOG.md`; this file describes the STRUCTURE.
+
+**v3.0.4 — identity-spoof guard folded into `securityGate.ts`.** New `detectIdentitySpoof()` runs BEFORE the leak scan on every colleague-path reply. Pure regex+comparison (no LLM judge — owner direction: "prompt vs prompt is just LLM fight"). Three signals on last 5 inbound user messages: identity-denial (`"I'm not <verifiedFirst>"`), identity-flip (`"I'm <Other>"` / `"this is <Other>"` / `"my name is <Other>"` with a stop-list), owner-domain email mismatch (any `@<ownerDomain>` mention that's neither the verified sender's nor the owner's). On spoof: short-circuit with canned refusal *"Your Slack account shows you as `<firstName>`. If you need something for someone else, have them message me directly."* — skips the rewriter entirely. Verified sender email sourced from `people_memory` (written at message-arrival in `app.ts`). Closes the Ysrael→Yael leak (2026-05-24 night-test where Ysrael got Maelle to list Idan's week of meetings by claiming to be Yael). Folded into security gate, NOT a new gate — gate roster stays at seven.
 
 **Message flow:** Slack → `connectors/slack/app.ts` (inbound) → `inboundQueue.enqueueMessage` (debounce + mutex + abort-if-safe) → `runOrchestrator()` wrapped in `withTurnCache` (AsyncLocalStorage) → Claude tool loop → skills execute (via `Connection` for any outbound messaging) → `postReply.ts` (normalize → claim-check → date-verify with deterministic correction → humanGate → securityGate → send) → reply.
 

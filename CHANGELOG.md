@@ -2,6 +2,59 @@
 
 ---
 
+## 3.0.4 — Identity-spoof guard in security gate, schema defaults pass, silent-fail kill in message_colleague
+
+Three threads from a morning of investigation work + the v3.0.4 schema-defaults pass that had been sitting uncommitted. The headline is the identity-spoof guard: Ysrael did a night test (2026-05-24 21:44–22:02 UTC) and got Maelle to list Idan's week of meetings by claiming to be Yael. Persona prompt alone is LLM-vs-LLM — the fix puts a deterministic code check inside the existing security gate.
+
+### Fixed — identity-spoof guard inside `securityGate.ts`
+
+New `detectIdentitySpoof()` runs BEFORE the existing leak scan on every colleague-path reply. Pure regex + comparison, no LLM judge. Three deterministic signals on the last 5 inbound user messages — any one short-circuits with a canned refusal and skips everything else (rewriter, leak scan, send):
+
+- **Identity denial** — `\bi[’']?m not <verifiedFirstName>\b` (catches "I'm not Ysrael")
+- **Identity flip** — `\b(i[’']?m|this is|my name is) <Name>\b` where `<Name>` ≠ verified first name, with a short stop-list (`sorry|fine|here|ok|done|sure|happy|busy|free|...`) so "I'm sorry" / "I'm here" don't match
+- **Owner-domain email mismatch** — any `@<ownerDomain>` email mentioned in chat that's neither the verified sender's own nor the owner's (catches Ysrael typing `yael.h@reflectiz.com` as proof-of-Yael)
+
+On spoof the canned refusal goes out: *"Your Slack account shows you as `<firstName>`. If you need something for someone else, have them message me directly."* Logged as `identity_spoof` trigger in the same warn line the existing leak filter uses. Verified sender email is sourced from `people_memory` (written at message arrival in `app.ts` via `users.info`), recent user messages from `history`.
+
+Architectural note: this is folded into security gate, NOT a new gate. Owner direction — the existing gate already runs on every colleague-path reply, so identity becomes a check it does, sibling to the leak scan. No new latency for the common case (regex-only fast path).
+
+### Fixed — `message_colleague` silent-fail (Path 2, stages 0 + 1)
+
+Two related fixes on the v2.7.0 → v2.7.1 outreach migration that had been half-done since v2.7. **Stage 1:** `outreach.ts:226-268` had a duplicate `createRequest` block — every message_colleague call wrote TWO `requests` rows. The duplicate row used a generic subject ("Waiting for reply from `<Name>`" / "Messaged `<Name>`") identical across every call to the same colleague, so its `idempotency_key` collided on the second-and-onward send to anyone Maelle had messaged before. UNIQUE constraint threw inside the tool, `sendDirect` never ran, Maelle reported "Sent the message" — silent fail. Block deleted. `db/jobs.ts:createOutreachJob`'s internal bridge stays as the single writer, using a message-preview subject that's naturally unique. **Stage 0:** `summarizeToolCall` now detects `{ error: string }` results (which is the shape `registry.ts` wraps every thrown tool call in) and renders `[<tool> FAILED: <reason>]` instead of `[<tool>: <input>]`. Pre-fix the claim-checker shield treated tool-in-toolSummaries as success — that's how the lie got past ("Sent the message to Yael. I'll let you know when she replies"). With the FAILED render, future thrown writes can't sneak past.
+
+Path 2 stages 2-6 (full `outreach_jobs` table removal) deferred to a separate session.
+
+### Changed — v3.0.4 schema defaults pass
+
+`UserProfile` schema rewritten for minimum-viable-yaml. A profile with ~15 required lines now boots fine — everything else defaults. Removed entirely from the schema (every field was either dead code or never read):
+
+- Top-level `priorities`, `vip_contacts`, `rescheduling` blocks + `VipContactSchema` and `ReschedulingRuleSchema` types
+- `user.role` (was required min(2) — now optional with no default)
+- `assistant.persona` (defaults to a built-in warm-professional EA voice — owner can override)
+- `assistant.slack_display_name` (defaults to `assistant.name`)
+- `schedule.office_days.notes` + `home_days.notes`
+- `schedule.timezone_preferences` (was required — now optional)
+- `schedule.night_shift.{blocking_event, note}` (replaced in v3.0.3 by `meetings.issue_exclusions.subjects`)
+- `meetings.office_location.{label, address, parking}` (legacy pre-2.8.2)
+- `meetings.protected[].rule` + `meetings.protected[].recurring`
+- `skills.general_knowledge`
+
+Whole `meetings` block now has defaults for every field; `meetings.protected` defaults to `[]`; `behavior` and `skills` blocks each default. Yaml template (`config/users.example/user.example.yaml`) rewritten in 2-section format — required block (~23 lines) on top, advanced/optional with defaults commented in below. Old yamls keep parsing — zod silently strips unknown keys, so existing profiles with `priorities:`/`vip_contacts:`/`rescheduling:` boot unchanged.
+
+### Fixed — stack-trace logging in `skills/registry.ts`
+
+Both `catch` branches that handled `Skill threw during tool` now log `err.stack` (when available) alongside `String(err)`. Pre-fix the throw-site was hidden — on 2026-05-25 04:32 UTC `check_calendar_health` started returning `SqliteError: no such table: calendar_dismissed_issues` and no source path in current `src/` queries that table, so the throw-site was effectively unknowable. Next reproduction will surface it directly. Restart the bot once to pick this up.
+
+### Migration
+
+No DB schema change. No yaml change required — old yamls boot. Owner action: restart `npm run dev` (the existing process predates these changes).
+
+### Filed for follow-up
+
+The `calendar_dismissed_issues` SqliteError root-cause is still unknown — static analysis turned up zero source-level references to the legacy table outside the `DROP TABLE IF EXISTS` at startup. Restarting the bot should either clear it (if it was process-state) or reproduce it with a stack trace (if it's source-level). Track the next firing.
+
+---
+
 ## 3.0.3 — KB on colleague path (internal-only, silent) + find_available_slots honors time-of-day
 
 Two scheduling-relevant fixes that came out of a real-day Yossi / Oran chat.

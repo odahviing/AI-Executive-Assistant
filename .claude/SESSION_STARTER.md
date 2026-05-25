@@ -1,12 +1,67 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.0.0** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.0.3** — check `package.json` if unsure; it is the source of truth.
 
-## Right now — v3.0 baseline, WhatsApp is next
+## Right now — Path 2: kill `outreach_jobs`, requests-spine becomes single truth
 
-v3.0 closed a 76-bug audit + scenario / morning-brief follow-ups across a two-day cleanup pass. ~1,500 lines of dead code removed, ~1,500 lines of fixes added. No new capabilities — pure consolidation.
+**Active task.** The 1M-token prior chat ended with the discovery of a critical silent-fail bug in `message_colleague` (Yael outreach never sent, Maelle still claimed "Sent the message to Yael. I'll let you know when she replies"). Root-caused to a duplicate `createRequest` and accepted as the trigger to finally finish the v2.7.0 → v2.7.1 requests-spine migration that's been half-done since v2.7.
 
-**The v3 line going forward is the WhatsApp build** — first non-Slack `Connection` implementation. Architecture is already ready (skills never import from `connectors/slack/*`; everything routes through `getConnection(ownerId, 'slack')`). WhatsApp slots in as a parallel transport.
+Owner's words: *"don't care about the past, just care of finishing with the outreach and moving to 'request'"*. Path chosen: **Path 2** — kill `outreach_jobs` as a concept entirely; all outreach state lives in `requests`.
+
+### The bug that triggered this (read once, then move on)
+
+`outreach.ts:235` and `db/jobs.ts:150` both create a paired request row per `message_colleague` call (the v2.7.0 bridge and the v2.7.1 bridge — both written, neither deleted). The two rows have different subjects:
+- `jobs.ts:150` bridge uses `subject = message.slice(0, 80)` — varies per call → idempotency_key naturally unique
+- `outreach.ts:235` uses a generic `"Waiting for reply from X"` or `"Messaged X"` — IDENTICAL every time you message the same person → idempotency_key collides with any prior row that's still in the DB
+
+For any colleague the owner has messaged before with the same `await_reply` value: first call worked, second call onward → UNIQUE constraint throws → `sendDirect()` never runs → Maelle reports "Sent" but message is lost. Claim-checker's shield treats tool-in-toolSummaries as success and skips the retry, so the lie surfaces unchecked.
+
+### Scope of Path 2 (the migration)
+
+Roughly 6-8 files, ~300 lines net:
+
+- `requests.details_json` absorbs the outreach_jobs fields: `dm_message_ts`, `dm_channel_id`, `reply_text`, `scheduled_at`, `intent`, `proposed_slots`, `subject_keyword`, `colleague_tz`, `reply_deadline`. (Several are already there from the prior bridges.)
+- `outreach.ts:message_colleague` calls `createRequest` directly. No `createOutreachJob`. One row per call.
+- `db/jobs.ts` retired. The helpers — `createOutreachJob`, `updateOutreachJob`, `linkOutreachToRequest` — are either inlined into the call site or deleted. `coord_jobs` likely follows the same pattern (separate audit).
+- `outreach_jobs` table dropped from `db/client.ts` schema. Old data discarded (owner: "don't care about the past").
+- Dispatchers that read `outreach_jobs` get rewritten to read `requests`:
+  - `tasks/dispatchers/outreachSend.ts`
+  - `tasks/dispatchers/outreachExpiry.ts`
+  - `tasks/dispatchers/outreachDecision.ts`
+  - `connectors/slack/coordinator.ts` (handleOutreachReply path)
+- The claim-checker shield needs updating too: toolSummaries should distinguish ran-and-succeeded vs ran-and-threw, so future tool-throw failures don't silently get treated as success. Tool summary should mark thrown calls as `[message_colleague FAILED: <reason>]`.
+
+### Approach
+
+This is real-refactor territory. Do it in stages, typecheck after each:
+1. **Inventory** — find every read/write of `outreach_jobs`. Should be ~10-20 sites.
+2. **Migrate writers first** — change every write to also write to requests (with the data in details_json). Keep outreach_jobs writes too as belt+suspenders during the transition.
+3. **Migrate readers** — switch each dispatcher / coordinator to read from requests. Verify behavior matches.
+4. **Drop outreach_jobs writes** — once all readers are on requests, stop writing to outreach_jobs.
+5. **Drop the table** — schema removal in `db/client.ts`.
+6. **Fix claim-checker shield** — last, in the same bundle.
+
+Propose-first per step, especially steps 2/3 where behavior change risk is real. Don't big-bang. The owner has been clear that scope creep + over-engineering are the enemy; smaller, verified moves win.
+
+### What's NOT in Path 2
+
+- WhatsApp build (deferred — was the prior "next" but the outreach migration jumped the queue)
+- `coord_jobs` migration (similar pattern, separate task)
+- Backfill of past outreach_jobs data (owner: discard)
+
+---
+
+## Prior context (v3.0.3 fix-up bundle, already shipped)
+
+Read these for what just landed:
+- CHANGELOG entry for 3.0.3 + 3.0.3 fix-up (calendar-issue redesign, find_available_slots time-of-day support, KB on colleague path internal-only, claim-checker image awareness, ONE-CALL-PER-TIMEFRAME rule, config-driven duration default, slot-search toolSummary enrichment)
+- Schema defaults pass (v3.0.4 prep): user.example.yaml rewritten in 2-section format (~23 required lines + advanced section all defaulted), dead fields removed (`priorities`, `vip_contacts`, `rescheduling`, several legacy meeting/schedule fields, `skills.general_knowledge`)
+
+The schema defaults pass + dead field removal is **uncommitted** as of the chat handoff — `git status` will show the diff. Confirm with owner whether to commit before starting Path 2 or fold in.
+
+## WhatsApp build (parked, return after Path 2)
+
+v3 was originally framed as the WhatsApp build — first non-Slack `Connection` implementation. Architecture is ready (skills never import from `connectors/slack/*`; everything routes through `getConnection(ownerId, 'slack')`). WhatsApp slots in as a parallel transport. Returns to top of the queue once the requests migration is done.
 
 Read these two memory files at session start:
 - `C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/project_overview.md`

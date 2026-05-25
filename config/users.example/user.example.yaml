@@ -1,208 +1,129 @@
-# ============================================================
+# ===================================================================
 #  Executive Assistant — User Profile Template
-#  Copy this to config/users/<your-name>.yaml and fill in.
-#  This file is safe to commit (no personal data).
-#  config/users/ is gitignored — your filled profile stays private.
-# ============================================================
-
-# ── Identity ─────────────────────────────────────────────────
-user:
-  name: "Your Full Name"            # Must be a real first + last name. No nicknames, no placeholders.
-  email: "you@yourcompany.com"      # Your real company email
-  role: "CEO"                       # Your role — used in assistant context
-  slack_user_id: "UXXXXXXXXX"       # Slack → Settings → Profile → "Copy member ID"
-  timezone: "Asia/Jerusalem"        # IANA timezone string
-  language: "en"                    # en | he | fr | etc
-
-# ── Assistant identity ────────────────────────────────────────
-# The assistant will appear as a real employee. Name and email must be real.
-assistant:
-  name: "First Last"                # Name that will appear in Slack and invites — can be a single name for AI assistants
-  slack_display_name: "First"       # How they appear in Slack messages (usually first name)
-  email: "first.l@yourcompany.com"  # Real company email following your naming scheme
-  persona: |
-    You are a warm, polite, calm, and professional executive assistant.
-    You communicate like a real human — natural greetings, clear explanations,
-    and you always guide toward a resolution. You never sound robotic or verbose.
-
-  # Slack app credentials — create a dedicated app at https://api.slack.com/apps
-  # App name should match the assistant's name
-  # Each assistant needs their own Slack app so they appear as distinct people
-  slack:
-    bot_token: "xoxb-..."           # OAuth & Permissions → Bot User OAuth Token
-    app_token: "xapp-..."           # Socket Mode → App-Level Token (scope: connections:write)
-    signing_secret: "..."           # Basic Information → App Credentials → Signing Secret
-
-# ── Work schedule ─────────────────────────────────────────────
-schedule:
-  # Day-type classification only — used by category rules ("Interview is office-only")
-  # and location auto-stamp ("internal in-person on office day → office address").
-  # NO hours here; hours live in work_hours below.
-  office_days:
-    days: ["Monday", "Wednesday", "Thursday"]
-    notes: "Best for important, multi-participant, external meetings"
-
-  home_days:
-    days: ["Sunday", "Tuesday"]
-    notes: "Better for internal, lighter, recurring meetings"
-
-  # Authoritative work-hour windows per weekday. Multiple ranges allowed for
-  # split-shift days (e.g. morning + evening overlap with a remote TZ).
-  # Absent weekdays = non-working day.
-  work_hours:
-    Sunday:    ["09:00-15:30"]
-    Monday:    ["10:30-19:00"]
-    Tuesday:   ["09:00-15:30"]
-    Wednesday: ["10:30-19:00"]
-    Thursday:  ["10:30-19:00"]
-    # Example split shift: morning + late evening
-    # Tuesday: ["09:00-15:30", "21:30-23:59"]
-
-  timezone_preferences:
-    local_participants: "morning"
-    remote_participants: "15:00-19:00"
-    note: "Strong preference, not a strict rule"
-
-# ── Meeting rules ─────────────────────────────────────────────
-meetings:
-  allowed_durations: [10, 25, 40, 55]
-  buffer_minutes: 5
-  free_time_per_office_day_hours: 2
-  free_time_per_home_day_hours: 1        # optional; if unset, home days use the office value
-  thinking_time_min_chunk_minutes: 30    # smallest block that counts as "thinking time"
-  min_slot_buffer_hours: 4               # don't offer coordination slots within this many hours from now
-  physical_meetings_require_office_day: true
-
-  protected:
-    - name: "Quarterly board meetings"
-      rule: "never_move"
-    - name: "Leadership sync"
-      rule: "never_override"
-      recurring: true
-
-  # Floating blocks — protected N-minute periods that live anywhere inside a
-  # defined window. Lunch is one example; coffee breaks, gym, prayer time,
-  # daily writing hour all use the same shape. Each block is elastic within
-  # preferred_start..preferred_end (Maelle reshuffles to make room for
-  # meetings, no approval needed). Out-of-window booking/move requires the
-  # owner-override flag (book_floating_block.confirm_outside_window /
-  # move_meeting.confirm_outside_window) — owner direct request IS the
-  # approval. Optional — omit the whole list if you don't want any.
-  floating_blocks:
-    - name: "lunch"
-      preferred_start: "11:30"
-      preferred_end: "13:30"
-      duration_minutes: 45
-      can_skip: true
-      # Optional: regex matching subjects like "lunch" / "Lunch with X" /
-      # localized variants. Defaults to /\b{name}\b/i if omitted.
-      # match_subject_regex: "\\blunch\\b"
-
-# ── Meeting priorities ────────────────────────────────────────
-priorities:
-  highest:
-    - "customers"
-    - "prospects"
-    - "partners"
-  high:
-    - "external meetings"
-    - "board meetings"
-    - "internal meetings with 2+ managers (non-recurring)"
-    - "important internal strategic discussions"
-  medium:
-    - "internal non-recurring discussions"
-  low:
-    - "weekly recurring meetings"
-    - "bi-weekly recurring meetings"
-
-# ── VIP contacts ──────────────────────────────────────────────
-vip_contacts: []
-# Example:
-# vip_contacts:
-#   - name: "John Smith"
-#     email: "john@partner.com"
-#     priority: "highest"
-#     note: "Key investor — always prioritize if available"
-
-# ── Behavior ──────────────────────────────────────────────────
-behavior:
-  rescheduling_style: "balanced"    # conservative | balanced | proactive
-  adaptive_learning: false
-  escalate_after_days: 2
-  can_contact_others_via_slack: true
-  autonomous_meeting_creation: true
-
-# ── Rescheduling rules ────────────────────────────────────────
-# Three types:
-#   type: immutable        → cannot be moved under ANY circumstance (no approval can override)
-#   type: flexible         → can be moved within window, no approval needed
-#   type: approval_required → requires explicit user approval before any change
-rescheduling:
-  board_quarterly:
-    type: "immutable"
-    description: "Quarterly board meetings — never moved under any circumstance"
-
-  leadership_sync:
-    type: "immutable"
-    description: "Leadership sync — never overridden or suggested over"
-
-  weekly_meetings:
-    type: "flexible"
-    flexibility: "same_week"
-    description: "Weekly recurring meetings — coordinate within same week"
-
-  biweekly_meetings:
-    type: "flexible"
-    flexibility: "same_or_next_week"
-    description: "Bi-weekly meetings — flexible within same or next week"
-
-  important_meetings:
-    type: "approval_required"
-    description: "Important meetings — never move without explicit approval"
-
-# ── Skills ────────────────────────────────────────────────────
-# Skill names are single-word capabilities. Each describes WHAT the agent
-# can do. Set true to enable, false to disable.
-skills:
-  meetings: true        # calendar ops + multi-party coordination
-  calendar: true        # weekly review, lunch protection, issue tracking
-  search: true          # web search + URL extraction
-  research: false       # owner-only multi-step research
-  summary: false        # meeting transcript → summary → distribute
-  knowledge: false      # owner-curated markdown knowledge base
-  email_drafting: false # (planned)
-  proactive_alerts: false # (planned)
-  whatsapp: false       # (planned)
-
-# ── Outlook categories ──────────────────────────────────────────
-# OPTIONAL. If you use Outlook categories (the colored tags on events),
-# list them here so Maelle can pick the right one when creating or
-# categorizing events. Names must match your Outlook categories EXACTLY
-# (case-sensitive on some installs). Descriptions are free-form — write
-# them so Claude can tell which one fits a given event.
+#  Copy to: config/users/<your-name>.yaml
+#  config/users/ is gitignored — filled profiles stay private.
+# ===================================================================
 #
-# Omit this block entirely if you don't use categories.
-categories:
-  - name: "Meeting"
-    description: "Standard work meetings with internal or external participants."
-  - name: "Logistic"
-    description: "Personal time-on-calendar: lunch, breaks, commute, personal time, errands. A hold on my own time, not a meeting with another person."
-    no_default_location: true
-  - name: "Focus Time"
-    description: "Protected deep work, no meetings allowed."
-    no_default_location: true
-  - name: "Interview"
-    description: "Candidate interviews only. Short, discreet titles."
-  - name: "Private"
-    description: "Personal or sensitive events whose details shouldn't be narrated in summaries."
+#  Each top-level section has a REQUIRED block (must be filled) and
+#  an OPTIONAL block (all fields default — delete the lines you don't
+#  need; Maelle still runs).
+#
+#  A profile with ONLY the REQUIRED lines (~20 lines total) boots fine.
+# ===================================================================
 
-# ── Channels ──────────────────────────────────────────────────
-# Which communication surfaces the assistant is active on
-# Each channel can be toggled independently
-channels:
-  slack:
-    enabled: true     # DMs and @mentions in Slack
-  email:
-    enabled: false    # Mailbox monitoring and replies (Phase 2)
-  whatsapp:
-    enabled: false    # WhatsApp messaging (Future)
+
+# ─── USER ───────────────────────────────────────────────────────────
+user:
+  # === Required ===
+  name:           "Your Full Name"             # Real first + last name
+  email:          "you@yourcompany.com"        # Your company email
+  timezone:       "Asia/Jerusalem"             # IANA TZ (America/New_York, Europe/London, ...)
+  slack_user_id:  "UXXXXXXXXX"                 # Slack → Profile → "Copy member ID"
+  # === Optional (defaults shown) ===
+  # role:         "CEO"                        # Used in assistant context           (default: unset)
+  # language:     "en"                         # Default reply language              (default: en)
+  # units:        "metric"                     # metric | imperial                   (default: metric)
+  # company:      "Your Company"               # Company name in identity prompts    (default: unset)
+  # company_brief: |                            # Short company description           (default: unset)
+  #   What your company does, who it serves, key product positioning.
+
+
+# ─── ASSISTANT ──────────────────────────────────────────────────────
+assistant:
+  # === Required ===
+  name: "Maelle"                               # Display name in Slack / invites
+  slack:                                        # Create at https://api.slack.com/apps
+    bot_token:      "xoxb-..."                  # Bot token
+    app_token:      "xapp-..."                  # App-level token
+    signing_secret: "..."                       # Signing secret
+  # === Optional (defaults shown) ===
+  # slack_display_name: "Maelle"                # Slack display name                 (default: same as name)
+  # email:        "maelle@yourcompany.com"      # Used on calendar invites           (default: unset)
+  # persona: |                                   # Voice + tone                        (default: warm professional EA)
+  #   You are sharp, warm, and direct — a real person who runs things.
+  #   Natural greetings, clear and efficient, never robotic.
+
+
+# ─── SCHEDULE ───────────────────────────────────────────────────────
+schedule:
+  # === Required ===
+  office_days:
+    days: ["Monday", "Wednesday", "Thursday"]   # In-office weekdays
+  home_days:
+    days: ["Sunday", "Tuesday"]                 # Remote / home-office weekdays
+  work_hours:                                    # Per-day hours; split-shift OK
+    Sunday:    ["09:00-17:30"]
+    Monday:    ["09:00-17:30"]
+    Tuesday:   ["09:00-17:30"]
+    Wednesday: ["10:30-18:30"]
+    Thursday:  ["10:30-18:30"]
+  # === Optional (defaults shown) ===
+  # day_boundary_hour: "00:00"                  # Late-night cutoff (use "05:00" if you work past midnight)  (default: 00:00)
+  # night_shift:                                # Late-night work block
+  #   hours_start:    "22:00"
+  #   hours_end:      "02:00"
+  #   typical_day:    "Tuesday"
+  #   blocking_event: "Home Time"
+
+
+# ─── MEETINGS ───────────────────────────────────────────────────────
+# All fields optional. Defaults shown for reference.
+meetings:
+  # allowed_durations: [25, 50]                 # Meeting lengths Maelle picks from  (default: [25, 50])
+  # default_meeting_duration: 25                # Default when conversation doesn't name one  (default: smallest of allowed)
+  # buffer_minutes: 0                            # Buffer between meetings; 0 = back-to-back ok  (default: 0)
+  # free_time_per_office_day_hours: 2           # Protected focus time per office day  (default: 2)
+  # free_time_per_home_day_hours:   1           # Same, for home days                 (default: same as office)
+  # thinking_time_min_chunk_minutes: 30         # Smallest focus block worth counting (default: 30)
+  # min_slot_buffer_hours: 4                    # How far ahead colleagues can book  (owner gets 1h)  (default: 4)
+  # physical_meetings_require_office_day: false # Force in-person → office days only (default: false)
+  # room_email: "meeting@yourcompany.com"       # Meeting-room mailbox for booking   (default: unset)
+
+  # Floating blocks — flexible protected time (lunch, gym, focus, etc.)
+  # Maelle reshuffles them inside the window to fit meetings — no approval needed.
+  # floating_blocks:
+  #   - name: "lunch"
+  #     preferred_start: "11:30"
+  #     preferred_end:   "13:30"
+  #     duration_minutes: 25
+
+  # Events whose subjects match this list are skipped by issue detection.
+  # issue_exclusions:
+  #   subjects: ["Home Time", "Family Block"]
+
+
+# ─── OUTLOOK CATEGORIES ─────────────────────────────────────────────
+# Define ONLY if you use Outlook categories. Order = priority (first match wins).
+# Default: no categories.
+# categories:
+#   - name: "Interview"
+#     description: "Hiring candidate interviews — internal + external candidate."
+#     limits: { per_day: 2 }
+#     sets_sensitivity_private: true            # Mark as private in Outlook
+#   - name: "Personal"
+#     description: "Personal / family events — not work."
+#     sets_sensitivity_private: true
+#     no_issue_tracking: true                   # Skip from calendar-issue detection
+
+
+# ─── BEHAVIOR ───────────────────────────────────────────────────────
+# All optional. Defaults shown.
+# behavior:
+#   calendar_health_mode: "passive"             # passive | active — auto-fix calendar issues  (default: passive)
+#   intent_aware_tools: false                   # Pre-pass to filter tools per turn (saves ~11k tokens)  (default: false)
+#   deterministic_approval_resolve: false       # Auto-resolve obvious yes/no on approvals  (default: false)
+#   v1_shadow_mode: false                       # Mirror every autonomous action to owner DM  (default: false)
+
+
+# ─── SKILLS ─────────────────────────────────────────────────────────
+# Feature toggles. Defaults shown.
+# skills:
+#   meetings:  true                              # Calendar + scheduling tools         (default: true)
+#   calendar:  true                              # Calendar health checks              (default: true)
+#   search:    true                              # Web search / extract                (default: true)
+#   summary:   false                             # Meeting transcript summarization    (default: false)
+#   knowledge: false                             # KB skill (config/users/<name>_kb/) (default: false)
+#   social:    false                             # Proactive social engagement         (default: false)
+#   venue:     false                             # External venue discovery            (default: false)
+
+
