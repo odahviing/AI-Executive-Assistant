@@ -51,6 +51,7 @@ import {
 import { readPersonMemory, writePersonSection, slugifyName } from './peopleMemory';
 import { selfSlackId } from '../core/assistantSelf';
 import { getAnthropicClient } from '../llm/client';
+import { isStrictIana } from '../utils/timezoneValidator';
 import { config } from '../config';
 import logger from '../utils/logger';
 import {
@@ -102,7 +103,7 @@ You will be given (1) a chat transcript between an EA named Maelle and a colleag
 Your ONLY job: identify what is genuinely NEW or UPDATED about the colleague based on this chat. Compare against the current state — DO NOT re-emit facts already on file.
 
 What counts as a learnable fact (operational, changes how Maelle should interact next time):
-- timezone: explicit timezone mention ("ET", "PST", "Sydney time") or strong signal
+- timezone: STRICT IANA Region/City form only — "America/New_York", "Europe/London", "Asia/Tokyo", "Australia/Sydney". When the chat names a nickname (ET, PT, BST, IST, "Sydney time"), map to IANA before emitting. SKIP the field if you can't confidently resolve to a Region/City form. Never emit bare abbreviations — they get rejected downstream.
 - state: city / country mentioned as their location ("Boston", "Tel Aviv", "Israel")
 - name_he: Hebrew spelling of their name if they wrote it or it became clear
 - language_preference: if they consistently write in a language different from Maelle's default
@@ -199,7 +200,21 @@ async function applyDelta(
 ): Promise<void> {
   // ── 1. DB writes ──────────────────────────────────────────────────────
   // Core fields (provenance-aware — auto writes lose to owner/person).
-  if (delta.timezone) setCoreFieldWithProvenance(slackId, 'timezone', delta.timezone, 'auto');
+  // Timezone is validated strictly: Haiku occasionally emits abbreviations
+  // like "EST"/"IST"/"PST" despite the prompt asking for IANA. Luxon happily
+  // resolves "IST" to Asia/Kolkata (+5:30, wrong for Israel) and the bad
+  // value silently corrupts every cross-TZ slot render that follows. Mirror
+  // the explicit-tool guard at `update_person_profile` — drop with a log
+  // when the candidate fails the IANA check.
+  if (delta.timezone) {
+    if (isStrictIana(delta.timezone)) {
+      setCoreFieldWithProvenance(slackId, 'timezone', delta.timezone, 'auto');
+    } else {
+      logger.warn('capturePass — dropped non-IANA timezone from Haiku capture', {
+        slackId, candidate: delta.timezone,
+      });
+    }
+  }
   if (delta.state) setCoreFieldWithProvenance(slackId, 'state', delta.state, 'auto');
   if (delta.name_he) setPersonNameHe(slackId, delta.name_he);
 

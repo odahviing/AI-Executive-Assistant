@@ -159,7 +159,7 @@ export function getVenueById(id: string): VenueRow | null {
  * key) tracked under issue #96; until then, this heuristic catches the
  * common case.
  */
-function normalizeVenueName(s: string): string {
+export function normalizeVenueName(s: string): string {
   const commaIdx = s.indexOf(',');
   const head = commaIdx >= 0 ? s.slice(0, commaIdx) : s;
   return head.trim().toLowerCase();
@@ -301,12 +301,14 @@ export function countHiddenVenues(params: {
   type?: string | null;
   typeTags?: string[];
   area?: string | null;
+  nameHint?: string | null;
 }): number {
   const rows = findVenuesByCriteria({
     ownerUserId: params.ownerUserId,
     type: params.type,
     typeTags: params.typeTags,
     area: params.area,
+    nameHint: params.nameHint,
     includeHidden: true,
     limit: 50,
   });

@@ -2,6 +2,103 @@
 
 ---
 
+## 3.0.6 — V3 audit bug-bash: 54 atomic fixes + claim-checker covers action-tools
+
+Wrap of the v3.0.5 audit handoff (`.claude/V3_AUDIT_HANDOFF.md`, 83 findings) plus an other-chat claim-checker addition for action-based verb tools. 54 atomic fixes across booking, approval spine, persona/memory, social engine, venue, floating blocks, work hours; ~400 LOC of dead code removed (legacy `db/approvals.ts` orphans). 9 findings ruled out on verification as already-fixed or audit-wrong; 20 deferred per owner direction. Typecheck clean throughout.
+
+### Fixed — top-priority silent-data-loss / privilege
+
+- **Phantom-confirmed bookings closed.** `core/requests/deferredActionReplay.ts` now logs + rethrows on failure (was silently swallowing) AND inspects tool results for `{error}` / `{success:false}` / `{ok:false}` shapes (many meeting tools return error sentinels instead of throwing). Resolver's outer try/catch holds the request in `awaiting_owner` for retry; requester is never told "approved" for a meeting that never landed.
+- **Self-write rewrite hardened on 4 colleague-path guards** (`core/assistant.ts`). `note_about_person` / `log_interaction` / `confirm_gender` / `update_person_profile` now force-self when `colleague_slack_id` is missing OR points away from requester. Pre-fix, omitting the field bypassed the guard — a colleague calling `confirm_gender(colleague_name="Idan", gender="female")` resolved by name and wrote to the owner's row with `'person'` provenance, locking the field.
+- **Force-book phantom `winning_slot` cleared on failure** (`skills/meetings/coord/booking.ts`). `forceBookCoordinationByOwner` pre-stamps `winning_slot=finalSlot, status='waiting_owner'` BEFORE awaiting `bookCoordination`. Inner pre-create failures (calendar-conflict, duration-approval, Graph create error) early-return without resetting; a later retry from a freeform "retry_or_abandon" approval read it as canonical. Now reset to NULL on any non-booked status after the await.
+- **Owner-approval replay freshness re-check.** New shared helper `recheckFreeBusyForBooking` in `core/requests/resolver.ts` — used by BOTH `resolveSlotPickApproval` (preexisting use, refactored) AND `runApproveCallback` (new use for `create_meeting` replays). Owner approves a 2-day-old policy_exception → attendee may have become busy in the target window → relaxed=true bypasses busy filter and double-books. `checkOwnerBusy: false` on the policy_exception path (owner already consented to his own state at approve time).
+- **Haiku capture-pass timezone validation** (`memory/capturePass.ts`). The v3.0.2 `isStrictIana` guard existed in the explicit `update_person_profile` tool but NOT in the Haiku end-of-chat extractor. Haiku regularly emitted "IST"/"ET"/"PST" because the SYSTEM_PROMPT listed them as examples. Luxon resolved "IST" to Asia/Kolkata, silently corrupting every cross-TZ slot render. Now gated by `isStrictIana`; SYSTEM_PROMPT rewritten to demand IANA Region/City with mapping instructions.
+- **`appendPersonInteraction` RMW race closed** (`db/people.ts`). Wrapped the select-parse-push-update in `db.transaction(...).immediate(...)`, mirroring `appendPersonNote`. Pre-fix, capture-pass + orchestrator concurrent writes on the same row could interleave and silently lose timeline entries.
+- **`resolve_approval` privilege gap closed** (`tasks/skill.ts`). Colleague-path now refuses outright when `requester_slack_id` is NULL on an `awaiting_colleague` request. Pre-fix the match-check only enforced when non-null; a guessable approval ID could be resolved by an unrelated colleague on an owner-internal approval.
+
+### Changed — owner override is truly total
+
+`relaxed=true` on owner-path (and explicit `ignore_attendee_availability=true`) now drops BOTH the attendee busy filter AND the attendee work-hours clip in `skills/meetings/ops.ts`. Prior direction was "force them to move meeting, not wake at 3 AM" — but attendee work-hours data is owner-curated in `people_memory`, goes stale, and silently filtered owner-valid slots with no diagnostic. New rule: first call surfaces `outside_attendee_work_hours:<email>` per-attendee in `day_summary.blocked_by` (mirrors `attendee_busy_collision:<email>` shape — `connectors/graph/calendar.ts`). Sonnet narrates "people_memory shows Brett's hours as 09:00-17:00 EST — still book?" Owner says "force it" → second call with override → tool drops both clips. "If I decide, it's on me."
+
+### Fixed — booking pipeline polish
+
+- **`book_floating_block` override snaps off-grid `start_time` to nearest quarter** (`utils/floatingBlocks.ts` + `skills/calendarHealth.ts`). New `alignNearestQuarter(ms, timezone)` helper (rounds half up). Override branch previously skipped alignment for explicit `start_time` — `book lunch at 14:13` with `confirm_outside_window=true` created an event at 14:13.
+- **Yaml `block.prefer_position` honored on initial book** (`skills/calendarHealth.ts`). Default chain: `args.prefer_position ?? block.prefer_position ?? 'earliest'`. Pre-fix the handler hardcoded `'earliest'` and ignored yaml; only rebalance consulted it.
+- **`coordinate_meeting` `searchTo` clamp** (`skills/meetings.ts`). When `search_from` is later than `now.endOf('week')` and `search_to` is absent, default `searchEndDate` now lands on `searchFromDate.endOf('week')` instead of producing an inverted window.
+- **`detectCategory` dead `hasOwner` ternary removed** (`skills/meetings/detectCategory.ts`). The filter-out + prepend-unconditional pattern is the durable shape; both branches of the ternary were identical.
+- **`BookingRequest.buildContext` dropped 2 dead context fields** (`skills/meetings/bookingRequest.ts`). `recentBlockDeletes` (audit_log query) and `ownerProposedThisSlotInMpim` (text scan over conversation history) were computed on every booking and read by zero consumers. Removed alongside the now-dead `recentAuditEntries` import.
+
+### Fixed — social engine
+
+- **`recordTopicBeat` bumps parent `social_subjects.last_touched_at`** (`db/socialSubjects.ts`). Pre-fix, beat insert only updated `social_topics.last_used_at`; a new subject's clock never moved and weekly decay punished active subjects.
+- **`socialOutreachTick` per-(owner, colleague) daily cap uses owner-local midnight** (`tasks/dispatchers/socialOutreachTick.ts`). Pre-fix used raw UTC midnight; a colleague pinged at 23:00 owner-local could be re-pinged at 02:30 owner-local after UTC rolled. Mirrors the owner-local pattern already in `countAssistantInitiationsTodayForPerson`.
+- **`note_about_person` / `note_about_self` subject descriptions rewritten** (`skills/social.ts`). Dropped the false "24h cooldown fires on (topic+subject), counter increments" wording — those handlers don't write to `social_subjects` anymore (moved to end-of-chat capture in v3.0.1). New wording reflects current behavior: subject is a tag on the interaction-log entry, end-of-chat capture reconciles.
+- **`note_about_self` subject examples are Maelle-identity-only** (`skills/social.ts`). Pre-fix examples ("ski trip italy", "daughter first grade", "marathon training") were owner-personal and trained Sonnet to mis-route owner-self facts onto Maelle's SELF row, leaking via the ABOUT YOU block to colleagues. New examples: "name origin", "warm direct tone", "hebrew gender", plus explicit ❌ rule for owner-personal subjects.
+- **`topic_quality` param dropped from both note tools** (`skills/social.ts`). Parsed but only logged — no behavior depended on it. Quiet token leak on every call.
+- **`getActiveSubjectsForPersonCategory` SQL `ORDER BY` aligned to TS picker tiebreaker** (`db/socialSubjects.ts`). Was `engagement_score DESC, last_touched_at DESC`; now matches the picker's `engagement_score DESC, last_assistant_initiated_at ASC NULLS FIRST`. Latent regression risk closed.
+
+### Fixed — venue subsystem
+
+- **Lazy `getAnthropicClient()` in `utils/locationResolver.ts`.** Module-load capture broke the v3.0.0 lazy-per-call invariant — `LLM_PROVIDER=vertex` runtime flip split-brained venue resolution between the hot path (Vertex) and the resolver fallback (boot-time Anthropic).
+- **`searchVenueCandidates` parse-criteria prompt includes `Name to resolve` line** (`utils/venueSearch.ts`). Pre-fix, name_hint flowed into Tavily query but not into Sonnet's parse rubric, letting unrelated venues in the same area beat the named target.
+- **`hidden_count` computed for name_hint-only queries** (`db/venues.ts` + `skills/venue.ts`). `countHiddenVenues` now accepts `nameHint`; owner gets the "you've ranked one low" signal even when asking by name alone. Pre-fix this only fired with area+type.
+- **Case-1 fresh-resolve returns up to 3 candidates + `ambiguity_flag`** (`utils/venueSearch.ts` + `skills/venue.ts`). `resolveVenueByName` signature changed: `VenueCandidate | null` → `VenueCandidate[]` (default `maxResults: 3`). Pre-fix, "Coffee Landwer" with no city silently committed to whichever Tavily ranked first.
+- **Catalog/fresh dedup normalizes both sides via head-only `normalizeVenueName`** (`db/venues.ts` exported + `skills/venue.ts` consumer). Pre-fix, catalog row `"Coffee Landwer, HaShayetet 4..."` didn't dedup against fresh candidate `"Coffee Landwer"` — same place shown twice.
+
+### Fixed — display / formatting
+
+- **Shared `formatMinuteOfDay` helper kills "24:00" leakage** (`utils/workHours.ts` new export, used in `skills/calendarHealth.ts` + `skills/meetings.ts`). `parseRange` normalizes 23:59 → endMin=1440; the old formatters built `"24:00"`, which luxon parses as next-day 00:00. Two surfaces hit: issue-detection bounding box (silently extended past midnight) and the HARD RULES prompt block (Sonnet narrated "you work till 24:00"). Both now clamp to `"23:59"`.
+
+### Removed — dead code (~400 LOC)
+
+- **`db/approvals.ts` gutted.** `createApproval` + 5 dead getters (`getApproval`, `getPendingApprovalByMsgTs`, `getPendingApprovalsForOwner`, `getPendingApprovalsForTask`, `getPendingApprovalsForThread`) + `supersedeApproval` + `sweepExpiredApprovals` + `cancelApprovalsForTask` + the helper trio (`canonicalJson`, `buildIdempotencyKey`, `CreateApprovalInput`) all deleted. Verified zero external callers — approval creation moved to the requests spine (`core/requests/`) in v3.0.0. Kept: `setApprovalDecision`, `mergeApprovalPayload`, `getPendingApprovalsBySkillRef` — all still used by `skills/meetings/coord/reply.ts`. `crypto` import dropped.
+- **`socialOutreachTick` `void adjustEngagementRank` hack removed** + import trimmed.
+- **`dismiss_calendar_issue` removed from `utils/toolCallCache.ts` cache-eligible list** (tool was retired in v3.0.2).
+- **3 unused imports trimmed from `core/assistant.ts`** (`recordSocialMoment`, `appendPersonNote`, `SocialTopicQuality`).
+- **Dead `isInternal` + `ownerDomain` variables removed from `coord/booking.ts`**.
+
+### Changed — claim-checker covers action-based verb tools (other-chat addition)
+
+`utils/claimChecker.ts` gains a new CRITICAL section: success claims like "done", "scheduled", "noted", "approved", "saved", "marked", "updated" are now backed by action-tool summaries — `manage_routine`, `manage_calendar_issue`, `update_task`, `update_person_memory`, `update_person_profile`, `manage_preference`, `manage_knowledge`, `update_summary_draft`. Mutating verbs are listed per tool (`approve` / `start_resolve` etc. for calendar_issue; `set` for preference; etc.); read-only actions like `list`/`get` don't back mutation claims. Closes the same gap the calendar-mutation guards cover — tool ran clean → claim honest; tool ran with `FAILED` → claim flagged; tool never ran → claim flagged.
+
+### Changed — cloneability
+
+- 4× `"Idan"` literal in tool descriptions → generic placeholder (`core/assistant.ts`, `skills/meetings.ts`).
+- `@reflectiz.com` email examples in comments → `@example.com` (`utils/securityGate.ts`, `utils/threadAttendees.ts`).
+- `cat_global_*` raw row IDs surfaced to Sonnet → human label via prefix strip (`tasks/dispatchers/socialOutreachTick.ts`).
+
+### Changed — tool descriptions
+
+- **`resolve_approval` clarifies `data` scope** — meaningful ONLY for slot_pick approvals; for other kinds use `verdict='amend'` with `counter`.
+- **`find_venue` `type='office'` enum value clarified** — means CUSTOMER / external party's office, never owner's own.
+- **`book_floating_block` abut_* bullets** — removed stale "(with buffer)" misclaim (v3.0.2 removed buffer; durations 10/25/40/55 carry their own spacing).
+
+### Changed — TypeScript hygiene
+
+- **`resolver.ts` `require()` of `deferredActionReplay` → top-level import** (no circular import confirmed).
+- **`skills/general.ts` web-search responses typed** — minimal `TavilySearchResponse` / `BraveSearchResponse` / `DuckDuckGoResponse` / `TavilyExtractResponse` interfaces replace `as any` casts at 4 sites.
+- **`voice/fileTranscribe.ts` whisper cast removed** — `response_format: 'text' as const` narrows the SDK union to `string` directly; no more `as unknown as string` lie.
+
+### Changed — comments / docs hygiene
+
+Stale-comment sweep across `floatingBlocks` (removed buffer doc), `social/stateMachine` (header dropped reference to retired "reconciled subject"), `db/people` (JSDoc on `recordSocialMoment` matches current 2-param shape; doc reference to non-existent `socialTopics.ts` → `socialSubjects.ts`), `utils/scheduleRules` (rule-5 multi-window aware), `utils/workHours` (`nextOwnerWorkdayStart` multi-window phrasing), `core/assistant.ts` (`COLLEAGUE_SELF_WRITABLE_FIELDS` reminder note + `confirm_gender` provenance comment matches silent-rewrite reality), `core/requests/closeRequest` (Path 2 transitional state noted), `db/approvals.ts` top-of-file (notes module as legacy / requests-spine is canonical), `coord/booking.ts` (tombstone deleted), `connectors/graph/calendar.ts` `relaxed` JSDoc (no longer claims widen-to-07-22 — widening lives in caller). Plus stale references to deleted `core/approvals/resolver.ts` fixed in 2 of 3 sites (third is correct historical context).
+
+### Audit findings ruled out on verification (not real bugs)
+
+- **#2** (`log_interaction` arg-name): already correct — `slack_id` per file's stated convention; audit conflated tool families.
+- **#7** (cancel-and-relay external organizer): Graph DELETE on attendee copy sends decline RSVP via Exchange automatically; audit conflated "no Slack DM" with "organizer never knows."
+- **#14** (stuck-block detection over-reports): block's own slot is always inside the overlapping meeting (precondition for the check), doesn't shrink gaps. Math doesn't trigger the claimed scenario.
+- **#16** (`runApproveCallback` discards `verdict.data`): code-level fact true, but `resolve_approval` description (shipped v3.0.5) explicitly directs Sonnet to use `amend+counter` not `approve+data` for non-slot_pick. Contract matches code behavior.
+- **#20** (`createSubject` no engagement signal): explicit design choice per `capturePass.ts:928-929` comment, not an oversight.
+- **#41** (`update_person_profile.colleague_slack_id` description): "omit field if no ID" is the first-class path per description; `find_slack_user` is the secondary suggestion. Audit misread.
+- Plus #39, #52, #55 — see audit handoff for details.
+
+### Migration
+
+No DB schema change. No yaml change required. Restart `npm run dev` to pick up everything.
+
+---
+
 ## 3.0.5 — Endless-approval kill, identity-spoof refinement, attendee-memory hook, lunch-gap preemptive dismiss, V3 audit findings
 
 Big wrap covering one session's work plus output from two parallel chats (audit + targeted bug-fix passes). Headline: the "approval stays open all day, brief keeps re-surfacing it" pattern is finally killed at its actual root cause — a `#` prefix on approval IDs in the prompt that Sonnet copied into the `resolve_approval` tool arg, making `getRequest('#req_…')` return null silently. Plus a swap-out of yesterday's identity-spoof regex (false-positive'd on "i am confused" inside 24h of shipping) for a deterministic email-mismatch trigger + Haiku-composed refusal.

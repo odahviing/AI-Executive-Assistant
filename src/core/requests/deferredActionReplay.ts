@@ -1,20 +1,25 @@
 /**
- * Deferred action replay (v2.7.2).
+ * Deferred action replay.
  *
  * The "redirect URL token" pattern for approvals: when an approval is raised
  * because a tool call hit a rule, the caller stamps the original tool +
  * args on the request's details_json.deferred_action. When the owner
  * approves, the resolver re-invokes that tool with the override flag set
  * (relaxed=true for create/move_meeting, confirm_outside_window=true for
- * book_floating_block) so the action actually executes — no more "approved
- * but never moved" gaps (root of the Ysrael BiWeekly 2026-05-12 failure).
+ * book_floating_block) so the action actually executes.
  *
- * This module is the replay engine. It re-creates the SkillContext that
- * the original tool handler expects, then calls executeToolCall on the
- * registered MeetingsSkill (the home for create_meeting / move_meeting)
- * or CalendarHealthSkill (book_floating_block). Errors are non-fatal —
- * they log and bail; the resolver already closed the request as resolved,
- * and Sonnet can retry next owner turn if needed.
+ * This module is the replay engine. It re-creates the SkillContext that the
+ * original tool handler expects, then calls executeToolCall on the registered
+ * MeetingsSkill (the home for create_meeting / move_meeting) or
+ * CalendarHealthSkill (book_floating_block).
+ *
+ * Errors PROPAGATE — they don't silently log+swallow. The resolver wraps each
+ * call in try/catch and keeps the request in `awaiting_owner` on failure so
+ * the requester is never told "approved" for an action that never happened
+ * (the phantom-confirmation class of bug). The replay also inspects the tool
+ * result for `{ error: string }` / `{ success: false }` / `{ ok: false }`
+ * shapes and throws on those — meeting tools return error sentinels rather
+ * than throwing for rule violations, busy collisions, etc.
  */
 
 import type { UserProfile } from '../../config/userProfile';
@@ -89,6 +94,28 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
       return;
     }
     const result = await skill.executeToolCall(tool, args, context);
+
+    // Inspect the result for failure-sentinel shapes. Many meeting tools
+    // return { error: string } / { success: false } / { ok: false } on
+    // rule violations or transient failures rather than throwing. Pre-fix,
+    // such failures were treated as success — the resolver closed the
+    // request resolved and DM'd the requester "Calendar invite incoming"
+    // for a meeting that never landed.
+    const r = result as Record<string, unknown> | null | undefined;
+    if (r && typeof r === 'object') {
+      if (typeof r.error === 'string' && r.error.length > 0) {
+        throw new Error(`tool returned error: ${r.error}`);
+      }
+      if (r.success === false) {
+        const reason = typeof r.reason === 'string' ? r.reason : 'unknown';
+        throw new Error(`tool returned success:false (${reason})`);
+      }
+      if (r.ok === false) {
+        const reason = typeof r.reason === 'string' ? r.reason : 'unknown';
+        throw new Error(`tool returned ok:false (${reason})`);
+      }
+    }
+
     logger.info('runDeferredAction — replay completed', {
       requestId, tool,
       resultPreview: typeof result === 'object' && result !== null
@@ -96,8 +123,11 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
         : String(result).slice(0, 240),
     });
   } catch (err) {
-    logger.warn('runDeferredAction — replay threw', {
+    // Surface to caller — the resolver's outer try/catch keeps the request
+    // in awaiting_owner so the owner can retry. Log here for visibility.
+    logger.error('runDeferredAction — replay failed', {
       requestId, tool, err: String(err).slice(0, 300),
     });
+    throw err;
   }
 }

@@ -45,7 +45,6 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
 import type { SkillContext } from '../types';
 import { getPersonMemory, searchPeopleMemory } from '../../db/people';
-import { recentAuditEntries } from '../../db/client';
 import { ownerProposedSlot } from '../../utils/ownerProposedSlot';
 import logger from '../../utils/logger';
 
@@ -105,8 +104,6 @@ export interface BookingRequest {
     threadTs?: string;
     isMpim: boolean;
     isOwnerInGroup: boolean;
-    recentBlockDeletes: Array<{ blockName: string; date: string }>;
-    ownerProposedThisSlotInMpim: boolean;
   };
 
   // Diagnostic-only — never used as logic. Original Sonnet args + tool name
@@ -400,51 +397,13 @@ async function gateRelaxed(
 }
 
 function buildContext(
-  profile: UserProfile,
+  _profile: UserProfile,
   context: SkillContext,
-  slot: InternalSlot | undefined,
+  _slot: InternalSlot | undefined,
 ): BookingRequest['context'] {
-  // Recent block deletes (last 14 days) — consumed by detect-skip checks
-  // for missing_floating_block + by the brief surface filter.
-  let recentBlockDeletes: Array<{ blockName: string; date: string }> = [];
-  try {
-    const rows = recentAuditEntries({ action: 'delete_meeting', windowDays: 14 });
-    const blocks = (profile.meetings?.floating_blocks ?? []).map(b => b.name.toLowerCase());
-    for (const row of rows) {
-      if (!row.details) continue;
-      const subject = String(row.details.subject ?? '').toLowerCase();
-      const startIso = typeof row.details.event_start_iso === 'string' ? row.details.event_start_iso : '';
-      if (!subject || !startIso) continue;
-      for (const blockName of blocks) {
-        if (subject.includes(blockName)) {
-          recentBlockDeletes.push({ blockName, date: startIso.slice(0, 10) });
-        }
-      }
-    }
-  } catch (err) {
-    logger.warn('normalizeBookingRequest: recent-delete preload threw', { err: String(err).slice(0, 200) });
-  }
-
-  // ownerProposedThisSlotInMpim — computed for downstream consumers that
-  // want to know without running the helper twice. Same gate as relaxed
-  // owner-in-MPIM path.
-  let ownerProposedThisSlotInMpim = false;
-  if (slot && context.isMpim === true && context.isOwnerInGroup === true) {
-    try {
-      ownerProposedThisSlotInMpim = ownerProposedSlot(
-        context.conversationHistory,
-        slot.startIso,
-        profile.user.name,
-        profile.user.timezone,
-      );
-    } catch (_) { /* fail open */ }
-  }
-
   return {
     threadTs: context.threadTs,
     isMpim: context.isMpim === true,
     isOwnerInGroup: context.isOwnerInGroup === true,
-    recentBlockDeletes,
-    ownerProposedThisSlotInMpim,
   };
 }

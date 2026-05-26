@@ -62,7 +62,6 @@ const WRITE_TOOLS = new Set<string>([
   'manage_preference',
   'manage_knowledge',
   'manage_calendar_issue',
-  'dismiss_calendar_issue',
 ]);
 
 const WRITE_TTL_MS = 60 * 1000;

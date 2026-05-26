@@ -29,7 +29,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
 import { DateTime } from 'luxon';
 import { completeTask, createTask } from '../index';
-import { getDb, adjustEngagementRank } from '../../db';
+import { getDb } from '../../db';
 import { getConnection } from '../../connections/registry';
 import { config } from '../../config';
 import { shadowNotify } from '../../utils/shadowNotify';
@@ -260,6 +260,7 @@ function pickCandidate(
   config: ProactiveConfig,
   ownerSlackId: string,
   nowUtc: DateTime,
+  ownerTimezone: string,
 ): PickResult {
   // Active-conversation set fetched once up-front so classifyRow stays pure.
   const db = getDb();
@@ -271,17 +272,22 @@ function pickCandidate(
   `).all(ownerSlackId) as Array<{ colleague_slack_id: string }>;
   const activeSet = new Set(activeRows.map(r => r.colleague_slack_id));
 
-  // v2.5.2 — per-(owner, colleague) daily cap. Single query gathers everyone
-  // already proactively pinged today; classifyRow filters them out individually
-  // so other colleagues remain eligible.
-  const startOfDayUtc = new Date();
-  startOfDayUtc.setUTCHours(0, 0, 0, 0);
+  // Per-(owner, colleague) daily cap. "Today" is anchored to OWNER-LOCAL
+  // midnight, not UTC midnight — without this, a colleague pinged at 23:00
+  // owner-local resets at UTC midnight (e.g. 02:00 local in Israel) and is
+  // eligible for a second ping the same evening. Mirrors the owner-local
+  // anchor that `countAssistantInitiationsTodayForPerson` already uses.
+  const startOfLocalDay = DateTime.now()
+    .setZone(ownerTimezone)
+    .startOf('day')
+    .toUTC()
+    .toISO();
   const pingedTodayRows = db.prepare(`
     SELECT DISTINCT colleague_slack_id FROM outreach_jobs
     WHERE owner_user_id = ?
       AND intent = 'proactive_social'
       AND created_at >= ?
-  `).all(ownerSlackId, startOfDayUtc.toISOString()) as Array<{ colleague_slack_id: string }>;
+  `).all(ownerSlackId, startOfLocalDay) as Array<{ colleague_slack_id: string }>;
   const pingedTodaySet = new Set(pingedTodayRows.map(r => r.colleague_slack_id));
 
   const survivors: CandidateRow[] = [];
@@ -472,7 +478,7 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
     `).all() as CandidateRow[];
 
     const nowUtc = DateTime.utc();
-    const { pick, dropped, late_drops } = pickCandidate(rows, cfg, profile.user.slack_user_id, nowUtc);
+    const { pick, dropped, late_drops } = pickCandidate(rows, cfg, profile.user.slack_user_id, nowUtc, profile.user.timezone);
     if (!pick) {
       // Hourly tick + same dropped breakdown every time = pure noise. Log
       // ONLY when the signature transitions or there are interesting late
@@ -607,8 +613,6 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
       colleague_slack_id: pick.slack_id,
       rank: pick.engagement_rank,
     });
-    // Mark a no-op rank adjustment just so the audit log has the initiation event
-    void adjustEngagementRank; // keep import in scope for future proactive-initiated signal
   } finally {
     rescheduleNextTick();
     completeTask(task.id);

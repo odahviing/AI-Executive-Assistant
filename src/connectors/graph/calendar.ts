@@ -233,7 +233,28 @@ export function pickSpreadSlots(
     }
   }
 
-  // Output chronological regardless of day walk order.
+  // v3.0.6 — single-shot fill pass. When the spread rules left us short
+  // (< count) but the candidate pool has more leftover slots, append them
+  // chronologically until we reach `count` or run out. This handles the
+  // "meeting with Lital today after 12pm" case: 4 candidates all within
+  // 75min same-day → spread filter accepts 1 (13:15) and rejects the rest
+  // for being within 1h → fill loop adds 13:45 / 14:00 → caller sees 3.
+  // STRICTLY one pass: no recursion, no second-fill, no further rule
+  // bending. If we still come up short after the fill, return what we
+  // have.
+  if (chosen.length < count) {
+    const chosenSet = new Set(chosen);
+    // Walk candidates in source order (already chronological from
+    // findAvailableSlots). Skip ones we already picked.
+    for (const s of slots) {
+      if (chosen.length >= count) break;
+      if (chosenSet.has(s.start)) continue;
+      chosen.push(s.start);
+      chosenSet.add(s.start);
+    }
+  }
+
+  // Output chronological regardless of day walk order / fill order.
   chosen.sort((a, b) => DateTime.fromISO(a).toMillis() - DateTime.fromISO(b).toMillis());
   return chosen;
 }
@@ -512,10 +533,20 @@ export async function findAvailableSlots(params: {
     hoursStart: string;        // 'HH:MM'
     hoursEnd: string;
   }>;
-  // v2.3.2 (2A) — owner-override "show me everything" mode. When true:
+  // Owner-override "show me everything" mode. When true:
   //   - skips focus-time protection (free_time_per_office/home_day_hours)
   //   - skips floating-block feasibility check (lunch/coffee/etc. windows)
-  //   - widens hours to 07-22 (same as extendedHours)
+  //   - on owner-path with attendees: drops the attendee busy filter
+  //   - on owner-path with attendees: drops the attendee work-hours clip
+  //     (caller controls both via `attendeeBusyEmails`/`attendeeAvailability`
+  //     — owner override lands by passing `undefined` for both)
+  //
+  // Does NOT inherently widen the owner's own hours. The 07:00–22:00
+  // widening comes from the CALLER passing `workHoursStart/End='07:00'/'22:00'`
+  // (currently gated on `extendedHours`, not `relaxed`). A relaxed-only
+  // call without explicit widening still reads per-day work_hours via
+  // `getOwnerWorkHoursForDay` and UNIONS them with the default 09:00–18:00
+  // widened range.
   // ALWAYS keeps the 5-min buffer between meetings (sacred).
   // Day type (work day vs day off) is also still respected.
   // Caller is expected to narrate to the owner that these slots break their
@@ -1058,8 +1089,14 @@ export async function findAvailableSlots(params: {
       // outside ANY attendee's working window in their own TZ. No Graph cost
       // (pure math against people_memory data threaded in by the caller).
       // Attendees with no availability data are skipped (no clip — back-compat).
+      //
+      // Find the FIRST attendee whose window blocks the slot (not just whether
+      // any blocks). Reporting the email lets day_summary.blocked_by attribute
+      // the rejection to a specific person — Sonnet can then narrate "Brett's
+      // working hours (17:00 EST) block this — still want me to force it?"
+      // instead of a generic "outside work hours" handwave.
       if (params.attendeeAvailability && params.attendeeAvailability.length > 0) {
-        const slotOutsideAnyAttendee = params.attendeeAvailability.some(att => {
+        const blockingAttendee = params.attendeeAvailability.find(att => {
           try {
             const attStart = DateTime.fromJSDate(cursor).setZone(att.timezone);
             const attEnd = DateTime.fromJSDate(slotEnd).setZone(att.timezone);
@@ -1079,8 +1116,8 @@ export async function findAvailableSlots(params: {
             return false;  // any parse error → don't filter on this attendee
           }
         });
-        if (slotOutsideAnyAttendee) {
-          trackReject('outside_attendee_work_hours', cursorDt.toISO()!);
+        if (blockingAttendee) {
+          trackReject(`outside_attendee_work_hours:${blockingAttendee.email}`, cursorDt.toISO()!);
           cursor = new Date(cursor.getTime() + step);
           continue;
         }
@@ -1282,9 +1319,10 @@ export async function findAvailableSlots(params: {
           if (accepted === 0) {
             const reasons = dayReasons.get(date);
             if (reasons) {
-              // Split per-attendee labels (`attendee_busy_collision:<email>`)
-              // out into the blocked_by aggregate, and collapse them to the
-              // single canonical label in top_reasons so output stays clean.
+              // Split per-attendee labels (`attendee_busy_collision:<email>`
+              // and `outside_attendee_work_hours:<email>`) out into the
+              // blocked_by aggregate, and collapse them to the single canonical
+              // label in top_reasons so output stays clean.
               const perAttendee = new Map<string, number>();
               const reasonCounts = new Map<string, number>();
               for (const [r, c] of reasons.entries()) {
@@ -1293,6 +1331,11 @@ export async function findAvailableSlots(params: {
                   perAttendee.set(email, (perAttendee.get(email) ?? 0) + c);
                   reasonCounts.set('attendee_busy_collision',
                     (reasonCounts.get('attendee_busy_collision') ?? 0) + c);
+                } else if (r.startsWith('outside_attendee_work_hours:')) {
+                  const email = r.slice('outside_attendee_work_hours:'.length);
+                  perAttendee.set(email, (perAttendee.get(email) ?? 0) + c);
+                  reasonCounts.set('outside_attendee_work_hours',
+                    (reasonCounts.get('outside_attendee_work_hours') ?? 0) + c);
                 } else {
                   reasonCounts.set(r, (reasonCounts.get(r) ?? 0) + c);
                 }

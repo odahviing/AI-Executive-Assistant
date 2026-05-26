@@ -32,6 +32,7 @@ import {
   findVenueByNameAndOwner,
   updateVenue,
   insertVenue,
+  normalizeVenueName,
   type VenueRow,
 } from '../db/venues';
 import {
@@ -202,12 +203,19 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
       limit: max,
     });
 
-    const hidden_count = hasAreaType
+    // Compute hidden_count for BOTH paths now (Case-1 name_hint AND Case-2
+    // area+type). Pre-fix, name_hint-only queries always reported 0 hidden
+    // — so an owner who had previously ranked a specific venue low ("avoid
+    // Coffee Landwer Ness Ziona") got no signal when they asked for it
+    // again by name. The hidden-count surface lets Sonnet narrate "you've
+    // ranked this one low — still want it?" Now wired for name_hint too.
+    const hidden_count = (hasAreaType || hasNameHint)
       ? countHiddenVenues({
           ownerUserId,
           area: args.area ?? null,
           type: args.type ?? null,
           typeTags: args.type_tags,
+          nameHint: args.name_hint ?? null,
         })
       : 0;
 
@@ -225,21 +233,27 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
           ambiguity_flag: filtered.length > 1,
         };
       }
-      const fresh = await resolveVenueByName(args.name_hint!, args.area, 'en', context.profile.user.timezone);
-      if (!fresh) {
+      const freshCandidates = await resolveVenueByName(args.name_hint!, args.area, 'en', context.profile.user.timezone, 3);
+      if (freshCandidates.length === 0) {
         return {
           success: false,
           error: 'no_match',
           message: `Couldn't resolve "${args.name_hint}" to a known venue. Ask the owner for the full address.`,
         };
       }
-      const filtered = applyHoursFilter([{ row: null, cand: fresh }], meetingTimeIso, tz);
+      const filtered = applyHoursFilter(
+        freshCandidates.map(c => ({ row: null, cand: c as VenueCandidate | null })),
+        meetingTimeIso,
+        tz,
+      );
       return {
         success: true,
         source: 'fresh',
         options: filtered.map(serializeFiltered),
         hidden_count,
-        ambiguity_flag: false,
+        // Multiple branches survived parse/hours filtering → ask the owner
+        // which one instead of silently committing to the first.
+        ambiguity_flag: filtered.length > 1,
       };
     }
 
@@ -272,9 +286,16 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
       });
     }
 
-    // Dedup against catalog by case-insensitive name match.
-    const catalogNames = new Set(catalogHits.map(v => v.name.toLowerCase()));
-    const freshDeduped = freshCandidates.filter(c => !catalogNames.has(c.name.toLowerCase())).slice(0, remaining);
+    // Dedup against catalog using the head-only normalizer (same one the
+    // save-on-book path uses) so a catalog row with a composite name like
+    // "Coffee Landwer, HaShayetet 4..." dedups against a fresh candidate
+    // named just "Coffee Landwer". Without normalizing both sides, the
+    // same physical place showed up twice (once as catalog rank-N, once
+    // as fresh).
+    const catalogNames = new Set(catalogHits.map(v => normalizeVenueName(v.name)));
+    const freshDeduped = freshCandidates
+      .filter(c => !catalogNames.has(normalizeVenueName(c.name)))
+      .slice(0, remaining);
 
     const merged: Array<{ row: VenueRow | null; cand: VenueCandidate | null }> = [
       ...catalogHits.map(v => ({ row: v as VenueRow | null, cand: null as VenueCandidate | null })),

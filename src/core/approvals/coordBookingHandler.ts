@@ -2,7 +2,7 @@
  * Coord booking handler registry.
  *
  * Breaks the circular core→skill import that would otherwise appear:
- *   - The resolver (core/approvals/resolver.ts) needs to book a coord when
+ *   - The resolver (core/requests/resolver.ts) needs to book a coord when
  *     the owner approves a slot_pick.
  *   - The booking logic lives in skills/meetings/coord/booking.ts.
  *   - core/ importing from skills/ would invert the layer dependency.

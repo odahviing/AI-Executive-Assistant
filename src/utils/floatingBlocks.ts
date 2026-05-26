@@ -149,6 +149,30 @@ export function alignUpQuarter(ms: number, timezone: string): number {
 }
 
 /**
+ * Round a millis timestamp to the NEAREST quarter-hour in the given timezone.
+ * Half rounds up (8 min → next quarter). Used by override paths that accept
+ * a free-form HH:MM from the owner and need to snap to the standard
+ * :00/:15/:30/:45 grid the rest of the system assumes.
+ */
+export function alignNearestQuarter(ms: number, timezone: string): number {
+  const dt = DateTime.fromMillis(ms).setZone(timezone);
+  const minute = dt.minute;
+  const remainder = minute % 15;
+  if (remainder === 0 && dt.second === 0 && dt.millisecond === 0) return ms;
+  // Round half up: remainder >= 8 → next quarter, else previous quarter.
+  if (remainder >= 8) {
+    return dt
+      .plus({ minutes: 15 - remainder })
+      .set({ second: 0, millisecond: 0 })
+      .toMillis();
+  }
+  return dt
+    .minus({ minutes: remainder })
+    .set({ second: 0, millisecond: 0 })
+    .toMillis();
+}
+
+/**
  * Round a millis timestamp DOWN to the previous quarter-hour in the given
  * timezone. Mirror of alignUpQuarter — used by abut_before to snap the
  * lunch start backwards to the latest aligned tick that still abuts.

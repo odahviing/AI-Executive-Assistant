@@ -464,14 +464,14 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
           // v2.8.1 — multi-window aware. workStart = earliest window start,
           // workEnd = latest window end on this day.
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getOwnerWorkHoursForDay: _getWH } = require('../utils/workHours') as
+          const { getOwnerWorkHoursForDay: _getWH, formatMinuteOfDay: _fmtMin } = require('../utils/workHours') as
             typeof import('../utils/workHours');
           const wins = _getWH(profile, dayName);
           const dayHoursStart = wins.length > 0
-            ? `${String(Math.floor(wins[0].startMin/60)).padStart(2,'0')}:${String(wins[0].startMin%60).padStart(2,'0')}`
+            ? _fmtMin(wins[0].startMin)
             : '09:00';
           const dayHoursEnd = wins.length > 0
-            ? `${String(Math.floor(wins[wins.length-1].endMin/60)).padStart(2,'0')}:${String(wins[wins.length-1].endMin%60).padStart(2,'0')}`
+            ? _fmtMin(wins[wins.length-1].endMin)
             : '19:00';
           const dayWorkStart = DateTime.fromISO(`${dayStr}T${dayHoursStart}`, { zone: timezone });
           const dayWorkEnd = DateTime.fromISO(`${dayStr}T${dayHoursEnd}`, { zone: timezone });
@@ -1502,10 +1502,19 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
               message: `start_time must be HH:MM (24h). Got "${explicitStartTime}".`,
             };
           }
-          const overrideStart = DateTime.fromISO(`${date}T${explicitStartTime}`, { zone: timezone });
-          if (!overrideStart.isValid) {
+          const rawOverrideStart = DateTime.fromISO(`${date}T${explicitStartTime}`, { zone: timezone });
+          if (!rawOverrideStart.isValid) {
             return { error: 'invalid_start_time', message: `Couldn't parse ${date}T${explicitStartTime} in ${timezone}.` };
           }
+          // Snap off-grid start_time to the NEAREST quarter so the standard
+          // :00/:15/:30/:45 grid the rest of the system assumes is honored.
+          // The tool description promises this; pre-fix the override branch
+          // skipped alignment entirely (positional path snapped via
+          // findAlignedSlotForBlock, but the override branch doesn't go
+          // through that helper).
+          const overrideStart = DateTime.fromMillis(
+            fb.alignNearestQuarter(rawOverrideStart.toMillis(), timezone),
+          ).setZone(timezone);
           const overrideEnd = overrideStart.plus({ minutes: block.duration_minutes });
 
           // Idempotency — any same-block event on this day already on the
@@ -1701,7 +1710,18 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
         // durations 10/25/40/55 already carry natural spacing). The previous
         // `profile.meetings.buffer_minutes ?? 0` was a path for the owner's
         // yaml-set buffer to leak in here and reject in-window slots.
-        const preferPosition = ((args.prefer_position as string | undefined) ?? 'earliest') as PreferPosition;
+        //
+        // Default chain: explicit Sonnet arg wins; otherwise the yaml-set
+        // `block.prefer_position` (interface doc on FloatingBlock promises
+        // this); else 'earliest'. Without the middle tier, an auto-book from
+        // missing_floating_block ignored an owner-set `latest_in_window` and
+        // always landed at earliest.
+        const yamlPreferPosition = block.prefer_position === 'latest_in_window'
+          ? 'latest_in_window'
+          : undefined;
+        const preferPosition = ((args.prefer_position as string | undefined)
+          ?? yamlPreferPosition
+          ?? 'earliest') as PreferPosition;
         const anchorEventId = (args.anchor_event_id as string | undefined)?.trim();
         let anchor: AnchorEvent | undefined;
         if (anchorEventId) {

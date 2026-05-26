@@ -62,14 +62,16 @@ export async function detectCategory(input: DetectCategoryInput): Promise<Detect
   const emails = input.attendees
     .map(a => (a.email ?? '').toLowerCase())
     .filter(e => !!e);
-  const hasOwner = emails.includes(ownerEmail);
+  // otherAttendees filters owner OUT and we re-prepend owner unconditionally
+  // — guarantees no double-row regardless of whether the caller pre-injected
+  // owner. The v2.8.6 fix injected unconditionally but missed that the
+  // v2.9 normalizer always pre-injects, producing the duplicate; this
+  // filter-and-prepend pattern is the durable shape.
   const otherAttendees = emails
     .filter(e => e !== ownerEmail)
     .slice(0, 7)
     .map(externalSuffixForAttendee);
-  const allAttendees = hasOwner
-    ? [ownerEmail, ...otherAttendees]
-    : [ownerEmail, ...otherAttendees];  // owner ALWAYS first
+  const allAttendees = [ownerEmail, ...otherAttendees];
   const attendeesLine = allAttendees.join(', ');
   const attendeeCount = allAttendees.length;
 

@@ -430,24 +430,34 @@ export function appendPersonNote(slackId: string, note: string): void {
  * For things like "booked meeting", "sent message", "had a conversation about X".
  * This is the activity log — separate from personal notes.
  * Keeps last 200 interactions (headlines are short, memory is cheap).
+ *
+ * RMW guarded by BEGIN IMMEDIATE so concurrent writers serialize. Same race
+ * shape as appendPersonNote: capture-pass writes a "social_chat" summary in
+ * parallel with an orchestrator-side note_about_person call on the same row;
+ * without the transaction, one entry is silently lost.
  */
 export function appendPersonInteraction(slackId: string, interaction: Omit<PersonInteraction, 'date'>): void {
   const db = getDb();
-  const row = db.prepare('SELECT interaction_log FROM people_memory WHERE slack_id = ?').get(slackId) as any;
-  if (!row) return;
+  const txn = db.transaction((id: string, entry: Omit<PersonInteraction, 'date'>) => {
+    const row = db.prepare('SELECT interaction_log FROM people_memory WHERE slack_id = ?').get(id) as
+      | { interaction_log: string }
+      | undefined;
+    if (!row) return;
 
-  const log: PersonInteraction[] = (() => {
-    try { return JSON.parse(row.interaction_log || '[]'); } catch { return []; }
-  })();
+    const log: PersonInteraction[] = (() => {
+      try { return JSON.parse(row.interaction_log || '[]'); } catch { return []; }
+    })();
 
-  log.push({ date: new Date().toISOString(), ...interaction });
-  const trimmed = log.slice(-200);
+    log.push({ date: new Date().toISOString(), ...entry });
+    const trimmed = log.slice(-200);
 
-  db.prepare(`
-    UPDATE people_memory
-    SET interaction_log = ?, updated_at = datetime('now')
-    WHERE slack_id = ?
-  `).run(JSON.stringify(trimmed), slackId);
+    db.prepare(`
+      UPDATE people_memory
+      SET interaction_log = ?, updated_at = datetime('now')
+      WHERE slack_id = ?
+    `).run(JSON.stringify(trimmed), id);
+  });
+  txn.immediate(slackId, interaction);
 }
 
 /**

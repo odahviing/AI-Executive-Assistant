@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
-import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonNote, appendPersonInteraction, recordSocialMoment, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, getPersonMemory as getPersonMemoryRow, type SocialTopicQuality, type PersonProfile, type PersonInteraction } from '../db';
+import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, getPersonMemory as getPersonMemoryRow, type PersonProfile, type PersonInteraction } from '../db';
 import {
   readPersonMemory,
   writePersonSection,
@@ -373,10 +373,16 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
       // to SocialSkill — only mutating the shared object reference does.
       if (toolName === 'note_about_person') {
         const targetId = args.colleague_slack_id as string | undefined;
-        if (targetId && targetId !== context.userId) {
-          logger.info('note_about_person colleague-path — rewriting target to requester', {
-            originalTarget: targetId, requesterId: context.userId,
-          });
+        // Force-self when target is missing OR points away from requester.
+        // Omitting the id used to bypass this guard — resolveSlackId(by name)
+        // would then resolve to whoever the colleague named (incl. owner),
+        // landing a write on the wrong row.
+        if (targetId !== context.userId) {
+          if (targetId !== undefined) {
+            logger.info('note_about_person colleague-path — rewriting target to requester', {
+              originalTarget: targetId, requesterId: context.userId,
+            });
+          }
           (args as Record<string, unknown>).colleague_slack_id = context.userId;
         }
       }
@@ -396,19 +402,25 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
       // use `colleague_slack_id`. Same rewrite logic, different arg name.
       if (toolName === 'log_interaction') {
         const targetId = args.slack_id as string | undefined;
-        if (targetId && targetId !== context.userId) {
-          logger.info('log_interaction colleague-path — rewriting target to requester', {
-            originalTarget: targetId, requesterId: context.userId,
-          });
+        // Force-self (see note_about_person above for the omit-target rationale).
+        if (targetId !== context.userId) {
+          if (targetId !== undefined) {
+            logger.info('log_interaction colleague-path — rewriting target to requester', {
+              originalTarget: targetId, requesterId: context.userId,
+            });
+          }
           (args as Record<string, unknown>).slack_id = context.userId;
         }
       }
       if (toolName === 'confirm_gender') {
         const targetId = args.colleague_slack_id as string | undefined;
-        if (targetId && targetId !== context.userId) {
-          logger.info('confirm_gender colleague-path — rewriting target to requester', {
-            originalTarget: targetId, requesterId: context.userId,
-          });
+        // Force-self (see note_about_person above for the omit-target rationale).
+        if (targetId !== context.userId) {
+          if (targetId !== undefined) {
+            logger.info('confirm_gender colleague-path — rewriting target to requester', {
+              originalTarget: targetId, requesterId: context.userId,
+            });
+          }
           (args as Record<string, unknown>).colleague_slack_id = context.userId;
         }
       }
@@ -426,10 +438,13 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
         // retries to see a partial args shape.
         args = { ...args };
         const targetId = args.colleague_slack_id as string | undefined;
-        if (targetId && targetId !== context.userId) {
-          logger.info('update_person_profile colleague-path — rewriting target to requester', {
-            originalTarget: targetId, requesterId: context.userId,
-          });
+        // Force-self (see note_about_person above for the omit-target rationale).
+        if (targetId !== context.userId) {
+          if (targetId !== undefined) {
+            logger.info('update_person_profile colleague-path — rewriting target to requester', {
+              originalTarget: targetId, requesterId: context.userId,
+            });
+          }
           args.colleague_slack_id = context.userId;
         }
         // Opt-in allowlist: a colleague calling update_person_profile (on their
@@ -594,10 +609,13 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
         // Make sure the row exists (cheap no-op if it does)
         upsertPersonMemory({ slackId, name: name || slackId });
 
-        // v2.2.2 (#46) — provenance: owner-path call → 'owner' (highest authority,
-        // can overwrite person-set values, anti-spoofing). Colleague-path call
-        // is restricted by the gate above to colleague_slack_id === context.userId
-        // (self-confirm only) — that's 'person' authority.
+        // Provenance: owner-path call → 'owner' (highest authority, can
+        // overwrite person-set values, anti-spoofing). Colleague-path call
+        // is silently REWRITTEN to self by the guard at the top of this
+        // file (the gate forces colleague_slack_id = context.userId before
+        // we get here, regardless of whether the colleague named someone
+        // else or omitted the field). So the caller IS the person being
+        // confirmed — 'person' authority is correct.
         const setBy = isOwner ? 'owner' : 'person';
         const { setCoreFieldWithProvenance } = require('../db') as typeof import('../db');
         const wrote = setCoreFieldWithProvenance(slackId, 'gender', gender, setBy);

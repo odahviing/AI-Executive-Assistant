@@ -184,9 +184,12 @@ export async function searchVenueCandidates(params: {
 For the input search results, return up to ${max} candidates that match the criteria.
 
 Criteria:
+${params.nameQuery ? `- Name to resolve: ${params.nameQuery}` : ''}
 ${params.area ? `- Area: ${params.area}` : ''}
 ${params.type ? `- Type: ${params.type}` : ''}
 ${params.typeTags && params.typeTags.length > 0 ? `- Tags: ${params.typeTags.join(', ')}` : ''}
+
+When "Name to resolve" is set, this is a name-disambiguation query (the owner already named the place). Candidates MUST plausibly match that name — reject snippets describing a different venue even if they're in the same area. Prefer branches/locations of the named place over unrelated venues nearby.
 
 Output ONLY valid JSON, no commentary:
 {
@@ -280,23 +283,29 @@ export async function resolveVenueByName(
   areaHint?: string,
   language: 'en' | 'he' = 'en',
   ownerTimezone?: string,
-): Promise<VenueCandidate | null> {
+  /**
+   * How many candidates to return. Default 3 — when a chain has multiple
+   * branches that match the name, returning more than 1 lets the caller
+   * surface an ambiguity_flag and ask the owner which branch instead of
+   * silently committing to whichever Tavily ranked first.
+   */
+  maxResults: number = 3,
+): Promise<VenueCandidate[]> {
   // Step 1 — focused search via Tavily+Sonnet for rich data.
   try {
     const candidates = await searchVenueCandidates({
       nameQuery: nameHint,
       area: areaHint,
-      maxResults: 1,
+      maxResults,
       language,
     });
     if (candidates.length > 0) {
-      const first = candidates[0];
-      return {
-        ...first,
-        area_tags: first.area_tags && first.area_tags.length > 0
-          ? first.area_tags
+      return candidates.map(c => ({
+        ...c,
+        area_tags: c.area_tags && c.area_tags.length > 0
+          ? c.area_tags
           : (areaHint ? [areaHint] : []),
-      };
+      }));
     }
   } catch (err) {
     logger.warn('resolveVenueByName — searchVenueCandidates threw, falling back to locationResolver', {
@@ -305,17 +314,17 @@ export async function resolveVenueByName(
   }
 
   // Step 2 — fallback to the lighter resolver. Still returns name+address
-  // when the heavier path turned up empty.
+  // when the heavier path turned up empty. Single-candidate by nature.
   const resolved = await resolveVenueLocation(nameHint, language, {
     cityHint: areaHint,
     countryHint: countryFromTimezone(ownerTimezone),
   });
   if (!resolved.resolved) {
-    return null;
+    return [];
   }
-  return {
+  return [{
     name: resolved.name,
     address: resolved.address,
     area_tags: areaHint ? [areaHint] : [],
-  };
+  }];
 }

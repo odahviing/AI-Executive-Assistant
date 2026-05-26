@@ -1005,10 +1005,24 @@ ATTENDEES (v2.9.1):
         // Search in expanding windows until we have 3 spread options
         let allCandidateSlots: Array<{ start: string; end: string }> = [];
         // v3.0.3 — same time-of-day honoring as search_from above.
+        // Default-derivation clamp: when Sonnet passes a search_from later
+        // than now.endOf('week') without an explicit search_to, the old
+        // `now.endOf('week')` default landed BEFORE search_from → inverted
+        // window → tool spins on auto-expand or returns zero. Anchor the
+        // default to whichever is later so the initial window is always
+        // non-inverted.
         const searchToArg = args.search_to as string | undefined;
+        const defaultSearchEnd = (() => {
+          const weekEnd = now.endOf('week');
+          const searchFromDt = DateTime.fromISO(searchFromDate, { zone: timezone });
+          const anchor = searchFromDt.isValid && searchFromDt > weekEnd
+            ? searchFromDt.endOf('week')
+            : weekEnd;
+          return anchor.toFormat("yyyy-MM-dd'T'HH:mm:ss");
+        })();
         let searchEndDate = searchToArg
           ? (searchToArg.includes('T') ? searchToArg : `${searchToArg}T23:59:59`)
-          : now.endOf('week').toFormat("yyyy-MM-dd'T'HH:mm:ss");
+          : defaultSearchEnd;
         const MAX_SEARCH_WEEKS = 12;
 
         for (let attempt = 0; attempt < MAX_SEARCH_WEEKS; attempt++) {
@@ -1762,7 +1776,7 @@ ATTENDEES (v2.9.1):
     // for each day-type group (office vs home). Multi-window days display all ranges.
     const formatHours = (days: string[]): string => {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getOwnerWorkHoursForDay } = require('../utils/workHours') as
+      const { getOwnerWorkHoursForDay, formatMinuteOfDay } = require('../utils/workHours') as
         typeof import('../utils/workHours');
       // Pick the FIRST day in the group as representative; if the group has
       // mixed hours across days, also show them per-day below.
@@ -1772,7 +1786,7 @@ ATTENDEES (v2.9.1):
         const wins = getOwnerWorkHoursForDay(profile, d);
         const fmt = wins.length === 0
           ? '(no hours)'
-          : wins.map(w => `${String(Math.floor(w.startMin/60)).padStart(2,'0')}:${String(w.startMin%60).padStart(2,'0')}–${String(Math.floor(w.endMin/60)).padStart(2,'0')}:${String(w.endMin%60).padStart(2,'0')}`).join(', ');
+          : wins.map(w => `${formatMinuteOfDay(w.startMin)}–${formatMinuteOfDay(w.endMin)}`).join(', ');
         perDay.set(d, fmt);
       }
       const uniqueRanges = new Set(perDay.values());

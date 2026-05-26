@@ -13,7 +13,6 @@
  * source-language string through.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import { tavilySearch } from '../skills/general';
@@ -31,13 +30,16 @@ interface ResolveOptions {
   countryHint?: string;    // 'Israel'
 }
 
-const anthropic = getAnthropicClient();
-
 export async function resolveVenueLocation(
   input: string,
   targetLanguage: 'en' | 'he',
   opts: ResolveOptions = {},
 ): Promise<ResolvedVenue> {
+  // Lazy per-call client — honors runtime LLM_PROVIDER flips. Pre-fix the
+  // module captured the client at boot, so a provider switch (Anthropic →
+  // Vertex) split-brained venue resolution: the venueSearch hot path picked
+  // up the new provider while THIS fallback still used the boot-time one.
+  const anthropic = getAnthropicClient();
   const fallback: ResolvedVenue = {
     resolved: false,
     name: input,

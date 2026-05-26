@@ -61,6 +61,68 @@ export interface ResolveResult {
   slot?: string;
 }
 
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Re-check freeBusy against owner + attendees for a target window. Used to
+ * catch slots that became stale while an approval sat waiting for the owner.
+ * Returns a human-readable conflict description if any non-tentative busy
+ * overlaps the window, else null.
+ *
+ * Used by both:
+ *   - resolveSlotPickApproval — checks the owner's chosen slot before booking
+ *   - runApproveCallback (create_meeting replay path) — same intent for the
+ *     deferred-action booking spine, prevents double-booking when an
+ *     approval has been sitting overnight and a new meeting now occupies
+ *     the target slot
+ *
+ * Failure to call Graph (network blip, scope error) returns null with a
+ * warn log — a freshness-API outage shouldn't block all approvals.
+ */
+async function recheckFreeBusyForBooking(args: {
+  ownerEmail: string;
+  attendeeEmails: string[];
+  startIso: string;
+  endIso: string;
+  timezone: string;
+  /**
+   * When false, owner-busy slots are ignored — used for policy_exception
+   * replays where the owner has already consented to whatever was on his
+   * calendar at approve time, and we only want to catch NEW attendee
+   * conflicts that arose in the meantime. When true (slot_pick), any
+   * non-tentative busy bounces the booking.
+   */
+  checkOwnerBusy: boolean;
+}): Promise<string | null> {
+  try {
+    const busy = await getFreeBusy(
+      args.ownerEmail,
+      args.attendeeEmails,
+      args.startIso,
+      args.endIso,
+      args.timezone,
+    );
+    const cStart = DateTime.fromISO(args.startIso).toMillis();
+    const cEnd = DateTime.fromISO(args.endIso).toMillis();
+    const ownerEmailLower = args.ownerEmail.toLowerCase();
+    for (const [email, slots] of Object.entries(busy)) {
+      if (!args.checkOwnerBusy && email.toLowerCase() === ownerEmailLower) continue;
+      const conflict = slots.find(s => {
+        if (s.status !== 'busy' && s.status !== 'tentative' && s.status !== 'oof') return false;
+        const sStart = DateTime.fromISO(s.start).toMillis();
+        const sEnd = DateTime.fromISO(s.end).toMillis();
+        return sStart < cEnd && sEnd > cStart;
+      });
+      if (conflict) return `${email} is ${conflict.status}`;
+    }
+  } catch (err) {
+    logger.warn('recheckFreeBusyForBooking — Graph call failed, proceeding', {
+      err: String(err).slice(0, 200),
+    });
+  }
+  return null;
+}
+
 // ── Entry ───────────────────────────────────────────────────────────────────
 
 export async function resolveRequest(
@@ -394,6 +456,49 @@ async function runApproveCallback(
     mergedFromAmend: meta.mergedFromAmend, amendRound: meta.amendRound,
   });
 
+  // Freshness re-check for create_meeting replays. An approval (e.g. a
+  // policy_exception) can sit awaiting_owner for days; in the meantime an
+  // attendee may have become busy in the target window. relaxed=true would
+  // otherwise bypass the busy filter at the skill layer and book on top of
+  // a now-conflicting meeting. Skip owner-busy on purpose — owner already
+  // consented to whatever was on his calendar at approve time; only catch
+  // NEW attendee conflicts.
+  if (tool === 'create_meeting'
+      && typeof replayArgs.start === 'string'
+      && typeof replayArgs.end === 'string') {
+    const attendeeEmails = Array.isArray(replayArgs.attendees)
+      ? (replayArgs.attendees as Array<{ email?: string }>)
+          .map(a => a.email)
+          .filter((e): e is string => typeof e === 'string' && e.length > 0)
+      : [];
+    if (attendeeEmails.length > 0) {
+      const staleConflict = await recheckFreeBusyForBooking({
+        ownerEmail: ctx.profile.user.email,
+        attendeeEmails,
+        startIso: replayArgs.start,
+        endIso: replayArgs.end,
+        timezone: ctx.profile.user.timezone,
+        checkOwnerBusy: false,
+      });
+      if (staleConflict) {
+        logger.warn('runApproveCallback — stale conflict, bouncing back to awaiting_owner', {
+          id: row.id, tool, staleConflict,
+        });
+        mergeRequestDetails(row.id, {
+          stale_conflict: staleConflict,
+          stale_at_iso: replayArgs.start,
+        });
+        return {
+          ok: false,
+          request_id: row.id,
+          state: row.state,
+          effect: `stale_conflict:${tool}`,
+          reason: `attendee no longer free (${staleConflict}) — request stays awaiting_owner for fresh options`,
+        };
+      }
+    }
+  }
+
   // Sync-then-close: run the replay BEFORE marking the request resolved
   // and BEFORE relaying to the requester. On replay failure the request
   // stays awaiting_owner so the owner can retry; the requester is not
@@ -492,33 +597,15 @@ async function resolveSlotPickApproval(
   const subject = details.subject ?? row.subject;
 
   // Freshness re-check — catch stale slot before we book.
-  let staleConflict: string | null = null;
-  try {
-    const endDt = chosenDt.plus({ minutes: durationMin });
-    const tz = ctx.profile.user.timezone;
-    const busy = await getFreeBusy(
-      ctx.profile.user.email,
-      participantsEmails,
-      chosenDt.toISO()!,
-      endDt.toISO()!,
-      tz,
-    );
-    for (const [email, slots] of Object.entries(busy)) {
-      const conflict = slots.find(s => {
-        if (s.status !== 'busy' && s.status !== 'tentative' && s.status !== 'oof') return false;
-        const sStart = DateTime.fromISO(s.start).toMillis();
-        const sEnd = DateTime.fromISO(s.end).toMillis();
-        const cStart = chosenDt.toMillis();
-        const cEnd = endDt.toMillis();
-        return sStart < cEnd && sEnd > cStart;
-      });
-      if (conflict) { staleConflict = `${email} is ${conflict.status}`; break; }
-    }
-  } catch (err) {
-    logger.warn('resolveSlotPickApproval — freshness re-check failed, proceeding', {
-      err: String(err).slice(0, 200),
-    });
-  }
+  const endDt = chosenDt.plus({ minutes: durationMin });
+  const staleConflict = await recheckFreeBusyForBooking({
+    ownerEmail: ctx.profile.user.email,
+    attendeeEmails: participantsEmails,
+    startIso: chosenDt.toISO()!,
+    endIso: endDt.toISO()!,
+    timezone: ctx.profile.user.timezone,
+    checkOwnerBusy: true,
+  });
 
   if (staleConflict) {
     // Stale slot — flip back to awaiting_owner with conflict_reason in details,

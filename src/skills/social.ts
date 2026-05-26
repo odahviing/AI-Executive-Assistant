@@ -38,7 +38,6 @@ import {
   appendPersonNote,
   appendPersonInteraction,
   recordSocialMoment,
-  type SocialTopicQuality,
 } from '../db';
 import logger from '../utils/logger';
 
@@ -104,12 +103,7 @@ Do NOT call this for purely work-related facts (those go in manage_preference(ac
             },
             subject: {
               type: 'string',
-              description: 'REQUIRED specific subject string — the actual thing you\'re asking/learning about. The 24h cooldown fires on (topic + subject), so be SPECIFIC: "clair obscur game" (not just "hobby"), "half marathon training", "son starting first grade", "trip to Kyoto", "tennis elbow recovery". Use 2–5 lowercased words. When the SAME subject comes up again, reuse the same subject string so the counter increments instead of creating a duplicate row.',
-            },
-            topic_quality: {
-              type: 'string',
-              description: 'How engaged was the person on this topic? neutral=gave a brief/one-word answer, engaged=opened up a bit and shared details, good=really connected and shared openly',
-              enum: ['neutral', 'engaged', 'good'],
+              description: 'REQUIRED specific subject string — the actual thing you\'re asking/learning about. Be SPECIFIC: "clair obscur game" (not just "hobby"), "half marathon training", "son starting first grade", "trip to Kyoto", "tennis elbow recovery". Use 2–5 lowercased words. The string lands as a tag on the interaction-log entry; the end-of-chat capture pass reconciles it into the colleague\'s social subjects.',
             },
             initiated_by: {
               type: 'string',
@@ -145,12 +139,7 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
             },
             subject: {
               type: 'string',
-              description: 'REQUIRED specific subject string. The 24h cooldown fires on (topic + subject), so be SPECIFIC: "building Maelle" (not just "hobby"), "ski trip italy", "daughter first grade", "marathon training". Use 2–5 lowercased words. When the SAME subject comes up again, reuse the exact string so the counter increments.',
-            },
-            topic_quality: {
-              type: 'string',
-              enum: ['neutral', 'engaged', 'good'],
-              description: 'How engaged was the owner on this topic? neutral=brief mention, engaged=opened up a bit, good=really shared openly. Default neutral.',
+              description: 'REQUIRED specific subject string — Maelle-identity ONLY. What facet of YOU is being taught here? Examples: "name origin", "warm direct tone", "narration style", "hebrew gender", "deflection rule", "owner override pattern", "no over-apologizing". Use 2–5 lowercased words. ❌ Do NOT use owner-personal subjects here (his hobbies, family, trips, work) — those belong on his row via note_about_person(colleague_name=<owner first name>), never on this tool.',
             },
             initiated_by: {
               type: 'string',
@@ -190,7 +179,6 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
         const note        = args.note as string;
         const topic       = args.topic as string;
         const subject     = (args.subject as string | undefined)?.trim() || undefined;
-        const quality     = (args.topic_quality as SocialTopicQuality | undefined) ?? 'neutral';
         const initiatedBy = (args.initiated_by as 'maelle' | 'person' | undefined) ?? 'maelle';
 
         upsertPersonMemory({ slackId, name });
@@ -202,8 +190,8 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
         });
         recordSocialMoment(slackId, initiatedBy);
 
-        logger.info('Social note saved', { slackId, name, topic, subject, quality, initiatedBy });
-        return { saved: true, name, topic, subject, quality };
+        logger.info('Social note saved', { slackId, name, topic, subject, initiatedBy });
+        return { saved: true, name, topic, subject };
       }
 
       case 'note_about_self': {
@@ -242,7 +230,6 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
         const note        = args.note as string;
         const topic       = args.topic as string;
         const subject     = (args.subject as string | undefined)?.trim() || undefined;
-        const quality     = (args.topic_quality as SocialTopicQuality | undefined) ?? 'neutral';
         const initiatedBy = (args.initiated_by as 'maelle' | 'person' | undefined) ?? 'person';
 
         // Seed identity fields when creating the SELF row for the first
@@ -269,12 +256,12 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
         logger.info('Self-note saved', {
           slackId,
           scope: context.senderRole === 'owner' ? 'assistant-self' : 'colleague-self',
-          topic, subject, quality, initiatedBy,
+          topic, subject, initiatedBy,
         });
         return {
           saved: true,
           scope: context.senderRole === 'owner' ? 'assistant-self' : 'colleague-self',
-          topic, subject, quality,
+          topic, subject,
         };
       }
     }

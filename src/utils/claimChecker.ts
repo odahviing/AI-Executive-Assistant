@@ -242,6 +242,21 @@ The whole point of these tools is to queue an action; the model is allowed to na
 CRITICAL — mutation outcome (v2.2.5):
 Mutation tool summaries carry their outcome explicitly: \`[create_meeting OK event_id=...]\`, \`[move_meeting OK ...]\`, \`[delete_meeting OK ...]\` mean the tool returned success. \`[move_meeting FAILED: <reason>]\` / \`[create_meeting FAILED: <reason>]\` mean it ran BUT did NOT succeed. A success claim ("booked", "moved", "done", "all done", "locked in", "all four moved", "calendar updated") is HONEST only when the matching tool summary contains \`OK\`. If the matching summary contains \`FAILED\`, the success claim is FALSE — flag it. Aggregate claims ("all four locked in") require EVERY relevant mutation this turn to be \`OK\`; even one \`FAILED\` makes the aggregate claim false. Tools that didn't run AT ALL also fail the check (the existing rule above covers that).
 
+CRITICAL — action-based verb tools (v3.0.6):
+Beyond the calendar-mutation tools listed above, several other tools mutate state via an \`action\` arg. Their summaries render as \`[<tool>: action=<verb>]\`. When the action is a mutating verb (NOT list/get/read), the call counts as a real mutation backing claims like "done", "changed", "scheduled", "updated", "saved", "moved", "cancelled", "noted", "approved" about the relevant subject. Treat these exactly like the calendar mutations above — the generic summary form means success, the \`[<tool> FAILED: <reason>]\` form means failure.
+
+The action-based mutation tools and their mutating actions:
+- \`manage_routine\` — create, update, cancel (action=list is a read)
+- \`manage_calendar_issue\` — approve, start_resolve, owner_will_resolve, owner_done (action=list is a read)
+- \`update_task\` — edit, cancel
+- \`update_person_memory\` — any write (no list action)
+- \`update_person_profile\` — any write
+- \`manage_preference\` — set, forget (action=get/list is a read)
+- \`manage_knowledge\` — ingest (action=get is a read)
+- \`update_summary_draft\` — any write
+
+So if the draft says "Done. Calendar health now runs at 7:00, briefing at 7:30" and TOOL ACTIVITY shows \`[manage_routine: action=update]\` twice, the claim is HONEST — don't flag. Same for "noted that" + \`[update_person_memory: ...]\`, "saved the preference" + \`[manage_preference: action=set]\`, "marked the lunch gap as fine" + \`[manage_calendar_issue: action=approve]\`, etc. Only flag if the matching action-tool didn't run, or ran with \`FAILED\` outcome.
+
 CRITICAL — specifics mismatch vs occurrence mismatch (v2.6.1, refined v2.6.5):
 Calendar mutation tools each cover DIFFERENT fields:
 - \`create_meeting\` — creates a new event with subject / time / duration / attendees.

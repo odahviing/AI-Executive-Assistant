@@ -256,10 +256,16 @@ export function getSubjectById(subjectId: string): SocialSubject | null {
 
 export function getActiveSubjectsForPersonCategory(personSlackId: string, categoryId: string): SocialSubject[] {
   const db = getDb();
+  // Tiebreaker matches the picker's TS re-sort in `stateMachine.ts` —
+  // "highest engagement_score, then least-recently-assistant-initiated."
+  // The TS layer re-sorts after fetch (so the picker stays correct even if
+  // this ORDER BY drifts), but aligning here means callers that DON'T re-sort
+  // see the canonical order and a future refactor that drops the TS sort
+  // doesn't silently regress to "most-recently-touched-first."
   return db.prepare(`
     SELECT * FROM social_subjects
     WHERE person_slack_id = ? AND category_id = ? AND status = 'active'
-    ORDER BY engagement_score DESC, last_touched_at DESC
+    ORDER BY engagement_score DESC, last_assistant_initiated_at ASC NULLS FIRST
   `).all(personSlackId, categoryId) as SocialSubject[];
 }
 
@@ -416,6 +422,20 @@ export function recordTopicBeat(params: {
     sentiment: params.sentiment,
     created_by: params.createdBy,
   });
+
+  // Bump the parent subject's last_touched_at so weekly decay doesn't punish
+  // subjects with ongoing topic-beat activity. The match path bumps via
+  // score-delta signals, but the create path didn't — a new subject would
+  // start its decay clock from creation time and stay frozen there until
+  // the next chat matched it. Recording a beat IS an activity signal.
+  db.prepare(`
+    UPDATE social_subjects
+    SET last_touched_at = datetime('now'),
+        last_touched_by = @created_by,
+        updated_at = datetime('now')
+    WHERE id = @subject_id
+  `).run({ subject_id: params.subjectId, created_by: params.createdBy });
+
   return db.prepare(`SELECT * FROM social_topics WHERE id = ?`).get(id) as SocialTopicBeat;
 }
 

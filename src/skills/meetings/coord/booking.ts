@@ -111,6 +111,13 @@ export async function forceBookCoordinationByOwner(
   if (after.status === 'booked') {
     return { ok: true, status: 'booked', subject: after.subject, slot: finalSlot };
   }
+  // Booking didn't complete. Clear the phantom `winning_slot` we pre-stamped
+  // at line 89 above — bookCoordination's pre-create failure paths
+  // (calendar-conflict, duration-approval, Graph create error) early-return
+  // without resetting the field. A later retry/resume from a freeform
+  // "retry_or_abandon" approval reads `winning_slot` as canonical and would
+  // re-book at this slot even though it was never actually booked.
+  updateCoordJob(jobId, { winning_slot: undefined });
   return {
     ok: false,
     status: after.status,
@@ -152,8 +159,6 @@ export async function bookCoordination(
   const endDt = DateTime.fromISO(slot).plus({ minutes: job.duration_min });
 
   // Determine final location based on the winning slot's day
-  const ownerDomain = profile.user.email.split('@')[1];
-  const isInternal = participants.every(p => !p.email || p.email.endsWith(`@${ownerDomain}`));
   const totalPeople = participants.length + 1;
 
   let notesObj: Record<string, unknown> = {};
@@ -640,7 +645,7 @@ export async function bookCoordination(
 }
 
 // ── Register with the core approval resolver ─────────────────────────────────
-// The resolver (core/approvals/resolver.ts) calls this handler when the owner
+// The resolver (core/requests/resolver.ts) calls this handler when the owner
 // approves a slot_pick approval. Registered at module-load time so it's
 // available as soon as MeetingsSkill is required.
 registerCoordBookingHandler(args =>

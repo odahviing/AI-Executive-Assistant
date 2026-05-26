@@ -860,6 +860,25 @@ export class SchedulingSkill {
           // Predecessor lookup via getCalendarEvents window around the
           // searchFrom date — saves a per-event-id roundtrip and is bounded.
           let effectiveSearchFrom = args.search_from as string;
+          // v3.0.6 — expand date-only search_to to end-of-that-day. The
+          // tool description (added in v3.0.3 fix-up) authorizes Sonnet to
+          // pass date-only `"2026-05-27"` for "end of Wednesday", but the
+          // downstream parser reads any date-only string as 00:00 of that
+          // day. When Sonnet passed `search_from=search_to="2026-05-27"`
+          // for "tomorrow", both sides resolved to 2026-05-27T00:00 →
+          // 0-minute window → getFreeBusy bailed → strict pass returned 0
+          // → Maelle said "nothing tomorrow" on a wide-open day (real
+          // observed bug, 2026-05-26 09:20 IL). Mirror what
+          // getCalendarEvents already does internally via
+          // `toEndOfDayLocal` — append T23:59:59 to a bare YYYY-MM-DD so
+          // the description matches reality.
+          const effectiveSearchTo = ((): string => {
+            const raw = args.search_to as string;
+            if (typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+              return `${raw}T23:59:59`;
+            }
+            return raw;
+          })();
           const mustBeAfterId = args.must_be_after_event_id as string | undefined;
           if (mustBeAfterId) {
             try {
@@ -977,14 +996,16 @@ export class SchedulingSkill {
           // Owner can opt out of attendee BUSY filtering (their other meetings)
           // when forcing a slot regardless of their existing calendar — but
           // their TIMEZONE / work-hours window is ALWAYS honored, no flag
-          // bypasses it. Owner direction (#77): "I can force them to move
-          // another meeting, not to wake up at 3 AM." So
-          // `attendeeAvailability` (work-hours clip) is unconditional;
-          // `ignore_attendee_availability` only suppresses the busy filter.
-          // Owner direction (2026-05-14): `relaxed=true` (owner override) ALSO
-          // implies ignoring attendee busy — when owner says "book it anyway,"
-          // he's overriding everyone's other meetings, not just his own. Their
-          // work hours stay enforced (no 3-AM bookings).
+          // Owner direction (2026-05-26): when owner triggers the full
+          // override (relaxed=true on owner-path, OR explicit
+          // ignore_attendee_availability=true), the override is TOTAL — drop
+          // BOTH the busy filter AND the attendee work-hours clip. Earlier
+          // direction had work-hours stay enforced ("no 3-AM bookings") but
+          // the attendee work-hours data is owner-curated in people_memory,
+          // can go stale, and silently filtered owner-valid slots. New rule:
+          // surface the work-hours rejection once (via day_summary.blocked_by
+          // attribution emitted by calendar.ts), and on owner override the
+          // tool drops the clip too. "If I decide, it's on me."
           const ignoreAttendeeBusy =
             args.ignore_attendee_availability === true
             || (args.relaxed === true && isOwnerInitiatedSearch);
@@ -992,7 +1013,14 @@ export class SchedulingSkill {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { loadAttendeeAvailabilityForEmails } = require('../../utils/attendeeAvailability') as
             typeof import('../../utils/attendeeAvailability');
-          const attendeeAvailability = loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail);
+          // Drop the work-hours clip entirely when override is active. The
+          // first call (no override) loads availability and lets calendar.ts
+          // surface `outside_attendee_work_hours:<email>` per blocked attendee
+          // so Sonnet narrates the conflict. Owner's retry with override
+          // gets unfiltered slots.
+          const attendeeAvailability = ignoreAttendeeBusy
+            ? undefined
+            : loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail);
 
           // #77 — owner-initiated path with attendees: auto-pass
           // attendeeBusyEmails so Graph free/busy filters the candidate
@@ -1043,7 +1071,7 @@ export class SchedulingSkill {
               attendeeEmails,
               attendeeBusyEmails,
               searchFrom: effectiveSearchFrom,
-              searchTo: args.search_to as string,
+              searchTo: effectiveSearchTo,
               preferMorning: args.prefer_morning as boolean | undefined,
               meetingMode: mode as import('../../connectors/graph/calendar').MeetingMode,
               travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
@@ -1126,7 +1154,7 @@ export class SchedulingSkill {
                   attendeeEmails,
                   attendeeBusyEmails,
                   searchFrom: effectiveSearchFrom,
-                  searchTo: args.search_to as string,
+                  searchTo: effectiveSearchTo,
                   preferMorning: args.prefer_morning as boolean | undefined,
                   meetingMode: mode as import('../../connectors/graph/calendar').MeetingMode,
                   travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
@@ -1359,12 +1387,10 @@ export class SchedulingSkill {
         // construction below). The normalizer is idempotent: it reads from
         // args (after the legacy in-handler prep below runs), produces a
         // strict BookingRequest with owner-in-participants invariant +
-        // snapped duration + gated sensitivity + gated relaxed + cross-
-        // cutting signals (ownerProposedThisSlotInMpim, recentBlockDeletes,
-        // …). Phase A keeps the legacy handler prep alongside; Phase B (or
-        // a follow-up commit) consolidates by reading req.X downstream and
-        // removing the duplicate handler-side blocks. Owner direction was
-        // "smaller move first" — this is that smaller move.
+        // snapped duration + gated sensitivity + gated relaxed + minimal
+        // context (threadTs / isMpim / isOwnerInGroup). Phase A keeps the
+        // legacy handler prep alongside; Phase B consolidates by reading
+        // req.X downstream and removing the duplicate handler-side blocks.
         const { normalizeBookingRequest } = await import('./bookingRequest');
         const { planInputFromBookingRequest } = await import('./planMeeting');
 

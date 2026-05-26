@@ -28,6 +28,22 @@ function parseHHMM(s: string): number {
   return h * 60 + m;
 }
 
+/**
+ * Format minute-of-day as "HH:MM". Special-cases 1440 → "23:59" to avoid
+ * producing "24:00", which luxon parses as next-day 00:00 — silently
+ * extending day-bounded ranges past midnight in any caller that round-
+ * trips the string through DateTime.fromISO. Pre-fix, both the
+ * issue-detection bounding box (calendarHealth) and the HARD RULES prompt
+ * block (meetings.ts) emitted "24:00" for any owner work_hours range
+ * ending at 23:59 (which parseRange canonicalizes to endMin=1440).
+ */
+export function formatMinuteOfDay(minOfDay: number): string {
+  const clamped = minOfDay >= 1440 ? 1439 : minOfDay;
+  const hh = String(Math.floor(clamped / 60)).padStart(2, '0');
+  const mm = String(clamped % 60).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
 function parseRange(rangeStr: string): WorkHourRange | null {
   const m = rangeStr.match(/^(\d{2}:\d{2})-(\d{2}:\d{2})$/);
   if (!m) return null;
