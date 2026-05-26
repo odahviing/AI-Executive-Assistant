@@ -1828,63 +1828,10 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // follow along in ~real time. Gated on v1_shadow_mode like every other
   // shadow path. Skipped when requiresApproval=true because the approval
   // helper already DMs the owner with the full ask.
-  if (
-    input.senderRole === 'colleague' &&
-    !input.isOwnerInGroup &&
-    !requiresApproval &&
-    finalReply &&
-    finalReply.trim().length > 0
-  ) {
-    try {
-      const { shadowNotify } = await import('../../utils/shadowNotify');
-      const who = input.senderName ?? input.userId;
-      const replyPreview = finalReply.slice(0, 200).replace(/\s+/g, ' ').trim();
-      // v2.6.1 — render the colleague's INBOUND message before Maelle's reply
-      // so the owner can follow the conversation both directions. Previously
-      // shadow only carried Maelle's reply ("I said: ...") which forced the
-      // owner to mentally reconstruct what was asked. Both shadows thread
-      // under the same conversationKey so they collapse into one owner-DM
-      // thread per colleague conversation. Inbound shadow is skipped only
-      // when the inbound text is empty (defensive; shouldn't happen for a
-      // turn that produced a reply).
-      const inboundPreview = (input.userMessage ?? '').slice(0, 200).replace(/\s+/g, ' ').trim();
-      // v2.3.2 — guard on the distinct/non-empty tool list, NOT the raw array.
-      // Previously the guard used `toolCallSummaries.length > 0` which still
-      // emitted ` (${join(', ')})` when every summary failed the regex —
-      // producing dangling " ()" / " (, )" tails on the shadow line.
-      const distinctTools = [...new Set(
-        toolCallSummaries
-          .map(s => s.match(/^\[([a-z_]+)/)?.[1] ?? '')
-          .filter(name => name.length > 0)
-      )];
-      const toolHint = distinctTools.length > 0 ? ` (${distinctTools.join(', ')})` : '';
-      // v2.3.2 — conversation-keyed shadow threading. Every shadow from THIS
-      // colleague Slack thread collapses into one owner-DM thread. Different
-      // threads (new top-level message → new threadTs) get fresh shadow
-      // threads. No timeout — the threadTs itself is the conversation
-      // boundary.
-      if (inboundPreview.length > 0) {
-        await shadowNotify(profile, {
-          channel: input.channelId,
-          threadTs,
-          action: `${who} said`,
-          detail: `"${inboundPreview}"`,
-          conversationKey: threadTs,
-          conversationHeader: `Conversation with ${who}`,
-        });
-      }
-      await shadowNotify(profile, {
-        channel: input.channelId,
-        threadTs,
-        action: `I → ${who}`,
-        detail: `"${replyPreview}"${toolHint}`,
-        conversationKey: threadTs,
-        conversationHeader: `Conversation with ${who}`,
-      });
-    } catch (err) {
-      logger.warn('Inbound-colleague shadow notify threw — continuing', { err: String(err) });
-    }
-  }
+  // v3.0.8 — shadow-notify moved to postReply.ts so it mirrors the
+  // POST-GATE text (what the colleague actually receives), not the raw
+  // draft. See postReply.ts Step 4.6.
+  void requiresApproval;  // suppress unused-var lint if it was only read here
 
   // v2.4.2 — owner-said-done scanner (deterministic version of RULE 2d).
   // Fire-and-forget after every owner turn — keyword pre-filter is cheap,

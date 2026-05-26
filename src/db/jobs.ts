@@ -16,7 +16,9 @@ export function linkCoordToRequest(coordId: string, requestId: string): void {
   getDb().prepare(`UPDATE coord_jobs SET request_id = ?, updated_at = datetime('now') WHERE id = ?`).run(requestId, coordId);
 }
 
-function getLinkedRequestIdForOutreach(outreachId: string): string | null {
+// v3.0.8 — exported for skills/outreach.ts thread-continuity hook. Lookup
+// the request_id linked to an outreach_jobs row when only jobId is in scope.
+export function getLinkedRequestIdForOutreach(outreachId: string): string | null {
   const row = getDb().prepare(`SELECT request_id FROM outreach_jobs WHERE id = ?`).get(outreachId) as { request_id: string | null } | undefined;
   return row?.request_id ?? null;
 }

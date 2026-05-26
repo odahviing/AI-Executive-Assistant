@@ -339,6 +339,57 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     }
   }
 
+  // Step 4.6 (v3.0.8) — shadow-notify the owner about the colleague-facing
+  // exchange. MOVED here from orchestrator/index.ts so the shadow reflects
+  // the POST-GATE text (what the colleague actually sees) rather than the
+  // raw pre-gate draft. Pre-fix the shadow fired from inside the orchestrator
+  // BEFORE postReply.ts ran humanGate / securityGate / claim-checker;
+  // when those gates rewrote a leaky draft (request ID in colleague reply,
+  // bot-tell phrasing, etc.) the colleague got the clean version but the
+  // shadow showed the leaky version. Confusing for the owner: he thought
+  // colleagues saw leaks they never saw. Now shadow mirrors `cleanReply`
+  // — the same string that's about to land in the colleague's DM.
+  if (
+    role === 'colleague' &&
+    !isOwnerInGroup &&
+    !result.requiresApproval &&
+    cleanReply &&
+    cleanReply.trim().length > 0
+  ) {
+    try {
+      const { shadowNotify } = await import('../../utils/shadowNotify');
+      const who = colleagueName ?? senderId;
+      const replyPreview = cleanReply.slice(0, 200).replace(/\s+/g, ' ').trim();
+      const inboundPreview = (userMessage ?? '').slice(0, 200).replace(/\s+/g, ' ').trim();
+      const distinctTools = [...new Set(
+        (result.toolSummaries ?? [])
+          .map(s => s.match(/^\[([a-z_]+)/)?.[1] ?? '')
+          .filter(name => name.length > 0)
+      )];
+      const toolHint = distinctTools.length > 0 ? ` (${distinctTools.join(', ')})` : '';
+      if (inboundPreview.length > 0) {
+        await shadowNotify(profile, {
+          channel: channelId,
+          threadTs,
+          action: `${who} said`,
+          detail: `"${inboundPreview}"`,
+          conversationKey: threadTs,
+          conversationHeader: `Conversation with ${who}`,
+        });
+      }
+      await shadowNotify(profile, {
+        channel: channelId,
+        threadTs,
+        action: `I → ${who}`,
+        detail: `"${replyPreview}"${toolHint}`,
+        conversationKey: threadTs,
+        conversationHeader: `Conversation with ${who}`,
+      });
+    } catch (err) {
+      logger.warn('Inbound-colleague shadow notify threw — continuing', { err: String(err) });
+    }
+  }
+
   // Step 5 — audio vs text.
   await sendReply({
     app, botToken: assistant.slack.bot_token,

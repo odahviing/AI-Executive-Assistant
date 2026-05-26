@@ -163,6 +163,31 @@ export function getOpenRequestsForOwner(ownerUserId: string): RequestRow[] {
 }
 
 /**
+ * v3.0.8 — open requests involving a specific colleague, as either requester
+ * or target. Used by outreach send-path thread-continuity logic: when Maelle
+ * is about to DM Dina, look up if there's an open conversation already
+ * happening with Dina (either Dina-DM'd-Maelle or Maelle-DM'd-Dina earlier
+ * and the conversation hasn't closed). If yes, the new outbound message
+ * should thread into the existing conversation rather than open a new
+ * top-level DM.
+ *
+ * Most-recently-updated first so the freshest active conversation wins
+ * when there are multiple (unusual but possible).
+ */
+export function getOpenRequestsForColleague(
+  ownerUserId: string,
+  colleagueSlackId: string,
+): RequestRow[] {
+  return getDb().prepare(`
+    SELECT * FROM requests
+    WHERE owner_user_id = ?
+      AND (target_slack_id = ? OR requester_slack_id = ?)
+      AND state IN ('awaiting_owner','awaiting_colleague','in_flight')
+    ORDER BY updated_at DESC
+  `).all(ownerUserId, colleagueSlackId, colleagueSlackId) as RequestRow[];
+}
+
+/**
  * Pending owner-decision requests — drives the system-prompt injection block.
  * Top-level rows only; awaiting_owner state.
  */
@@ -304,6 +329,12 @@ export interface UpdateRequestPatch {
   terminalDmMsgTs?: string;
   ownerDmChannel?: string;
   ownerDmThreadTs?: string;
+  // v3.0.8 — repurposed for outreach kind: anchor the request's origin to
+  // the colleague-side DM thread after the first outbound send (option A
+  // in the Dina-2-DMs thread-continuity fix). Other kinds keep origin
+  // meaning "where the user originated the ask."
+  originChannel?: string;
+  originThreadTs?: string;
   outcomeExternalEventId?: string | null;
   outcomeJson?: Record<string, unknown>;
   details?: Record<string, unknown>;
@@ -329,6 +360,8 @@ export function updateRequest(id: string, patch: UpdateRequestPatch): void {
   if (patch.nextCheckAt !== undefined) { sets.push(`next_check_at = @next_check_at`); params.next_check_at = patch.nextCheckAt; }
   if (patch.nextCheckHandler !== undefined) { sets.push(`next_check_handler = @next_check_handler`); params.next_check_handler = patch.nextCheckHandler; }
   if (patch.terminalDmMsgTs !== undefined) { sets.push(`terminal_dm_msg_ts = @terminal_dm_msg_ts`); params.terminal_dm_msg_ts = patch.terminalDmMsgTs; }
+  if (patch.originChannel !== undefined) { sets.push(`origin_channel = @origin_channel`); params.origin_channel = patch.originChannel; }
+  if (patch.originThreadTs !== undefined) { sets.push(`origin_thread_ts = @origin_thread_ts`); params.origin_thread_ts = patch.originThreadTs; }
   if (patch.ownerDmChannel !== undefined) { sets.push(`owner_dm_channel = @owner_dm_channel`); params.owner_dm_channel = patch.ownerDmChannel; }
   if (patch.ownerDmThreadTs !== undefined) { sets.push(`owner_dm_thread_ts = @owner_dm_thread_ts`); params.owner_dm_thread_ts = patch.ownerDmThreadTs; }
   if (patch.outcomeExternalEventId !== undefined) { sets.push(`outcome_external_event_id = @outcome_external_event_id`); params.outcome_external_event_id = patch.outcomeExternalEventId; }

@@ -26,8 +26,9 @@ import {
   updateOutreachJob,
   upsertPersonMemory,
 } from '../db';
+import { getLinkedRequestIdForOutreach, getCoordJobsByParticipant } from '../db/jobs';
 import { createTask } from '../tasks';
-import { updateRequest } from '../db/requests';
+import { updateRequest, getOpenRequestsForColleague } from '../db/requests';
 import { calcResponseDeadline } from '../connectors/slack/coordinator';
 import { getConnection } from '../connections/registry';
 import logger from '../utils/logger';
@@ -177,6 +178,36 @@ Only send messages the user explicitly asks for — never reach out to people on
           };
         }
         const colleagueSlackId = idResolution.slack_id;
+
+        // v3.0.8 — refuse when there's an active coord_job already DMing this
+        // colleague. Pre-fix the Eli/Isaac/Dina pattern: coordinate_meeting
+        // fires its state machine (which DMs each participant with slot
+        // options), claim-checker on the same turn flagged the draft as
+        // "I'll let you know once they confirm" → forced a message_colleague
+        // retry → participants got DOUBLE DMs (one from coord, one from
+        // message_colleague). With claim-checker now recognizing
+        // coordinate_meeting as a message-sender (above), that path stops
+        // firing — but this is the deterministic backstop in case any
+        // future caller still tries message_colleague for a participant
+        // already in coord. Refuse with a clear error so Sonnet can react.
+        try {
+          const activeCoords = getCoordJobsByParticipant(colleagueSlackId, userId);
+          if (activeCoords.length > 0) {
+            const coord = activeCoords[0];
+            logger.warn('message_colleague refused — active coord_job covers this colleague', {
+              colleagueSlackId, colleagueName: args.colleague_name,
+              coordJobId: coord.id, coordSubject: coord.subject, coordStatus: coord.status,
+            });
+            return {
+              error: 'active_coord_job',
+              message: `Active coord_job ${coord.id} ("${coord.subject}", status=${coord.status}) is already DMing ${args.colleague_name as string} via the state machine. Don't double-DM. If you need to relay something different from coord, wait for the coord to terminate (booked / cancelled / abandoned) OR cancel it via cancel_coordination first.`,
+            };
+          }
+        } catch (err) {
+          logger.warn('message_colleague — coord-overlap check threw, proceeding', {
+            err: String(err).slice(0, 200),
+          });
+        }
 
         const sendAt = args.send_at as string | undefined;
         const isFuture = sendAt ? new Date(sendAt) > new Date() : false;
@@ -378,10 +409,67 @@ Only send messages the user explicitly asks for — never reach out to people on
               filename: a.filename,
             }))
           : undefined;
+
+        // v3.0.8 — thread continuity via requests spine. If there's an OPEN
+        // request involving this colleague (as requester or target) and it
+        // has a colleague-side thread anchor on it (origin_channel +
+        // origin_thread_ts populated to the colleague's DM, not the owner's
+        // DM), reply IN that thread instead of opening a new top-level DM.
+        // Owner direction: use the request as the canonical conversation
+        // anchor, not a separate column or time-window heuristic. The
+        // request being OPEN is itself the "this conversation is still
+        // active" signal; closed requests no longer anchor continuity.
+        //
+        // Owner-initiated outreach: origin_channel/origin_thread_ts get
+        // updated post-send below to point at the colleague side, so the
+        // SECOND outreach to the same colleague (while the first is still
+        // open) threads back into the first.
+        // Colleague-initiated requests: origin is already the colleague's
+        // DM thread (set when their inbound created the request), so the
+        // first outbound from Maelle to them threads naturally.
+        // v3.0.8 — lookup the linked request_id for this outreach (created
+        // moments earlier inside createOutreachJob's bridge). Used to (a)
+        // exclude this request from the thread-anchor search, and (b) update
+        // its origin_* post-send to point at the colleague side.
+        const linkedRequestId = getLinkedRequestIdForOutreach(jobId);
+
+        let threadTsForSend: string | undefined;
+        try {
+          const openForColleague = getOpenRequestsForColleague(userId, colleagueSlackId);
+          const anchor = openForColleague.find(r =>
+            r.origin_thread_ts && r.origin_channel
+            // Avoid picking the request we're about to write to itself —
+            // the current outreach's request was created just above with
+            // origin set to the owner's channel (will be updated post-send).
+            && r.id !== linkedRequestId
+            // Sanity: the recorded origin channel should look like a DM
+            // (starts with 'D'). Owner-side origins are also 'D' so we
+            // can't fully disambiguate, but coupled with "open colleague
+            // request involving this colleague," DM-channel filter is the
+            // best cheap signal we have.
+            && /^D/.test(r.origin_channel),
+          );
+          if (anchor?.origin_thread_ts) {
+            threadTsForSend = anchor.origin_thread_ts;
+            logger.info('message_colleague — reusing open-request thread anchor', {
+              jobId, colleagueSlackId, anchorRequestId: anchor.id,
+              threadTs: anchor.origin_thread_ts,
+            });
+          }
+        } catch (err) {
+          logger.warn('message_colleague — thread-continuity lookup threw, sending top-level', {
+            err: String(err).slice(0, 200),
+          });
+        }
+
+        const sendOpts = {
+          ...(threadTsForSend ? { threadTs: threadTsForSend } : {}),
+          ...(attachmentsArg ? { attachments: attachmentsArg } : {}),
+        };
         const outcome = await connection.sendDirect(
           colleagueSlackId,
           args.message as string,
-          attachmentsArg ? { attachments: attachmentsArg } : undefined,
+          Object.keys(sendOpts).length > 0 ? sendOpts : undefined,
         );
         if (!outcome.ok) {
           updateOutreachJob(jobId, { status: 'cancelled', reply_text: `Send failed: ${outcome.reason}` });
@@ -397,6 +485,31 @@ Only send messages the user explicitly asks for — never reach out to people on
             dm_message_ts: outcome.ts,
             dm_channel_id: outcome.ref,
           });
+
+          // v3.0.8 (option A — repurpose origin_* for outreach kind).
+          // For owner-initiated outreach, the request's origin_channel /
+          // origin_thread_ts start out pointing at the OWNER's DM (where
+          // Idan typed the ask). After the outbound DM lands on the
+          // colleague's side, update them to point at the colleague side
+          // so subsequent message_colleague calls to this colleague reuse
+          // the thread. Only do this on the FIRST send to anchor the
+          // thread — the lookup above skips already-anchored requests
+          // (origin_thread_ts already populated to a 'D...' channel).
+          if (linkedRequestId && outcome.ref && outcome.ts && !threadTsForSend) {
+            try {
+              updateRequest(linkedRequestId, {
+                originChannel: outcome.ref,
+                originThreadTs: outcome.ts,
+              });
+              logger.info('message_colleague — anchored request origin to colleague-side thread', {
+                requestId: linkedRequestId, colleagueChannel: outcome.ref, threadTs: outcome.ts,
+              });
+            } catch (err) {
+              logger.warn('message_colleague — failed to anchor request origin', {
+                requestId: linkedRequestId, err: String(err).slice(0, 200),
+              });
+            }
+          }
         }
         logger.info('message_colleague — DM sent', {
           jobId,

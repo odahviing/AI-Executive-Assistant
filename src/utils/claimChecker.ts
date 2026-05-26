@@ -179,6 +179,9 @@ Paraphrase, tense, and language don't matter. Judge by meaning. Hebrew, English,
 
 CRITICAL — tool-aware honesty:
 If TOOL ACTIVITY shows the matching tool already ran this turn — e.g. \`[message_colleague: <name>]\` for a "sent X" claim about that name, \`[create_meeting: ...]\` for a booking claim, \`[create_approval: ...]\` or \`[create_task: ...]\` for a "flagged it" claim — the claim is HONEST regardless of the verb tense or phrasing used. "On its way", "sending now", "I've reached out", "sent", "the message is going out", "on it — I'll send now" are ALL valid when the matching tool ran. Do NOT flag these.
+
+CRITICAL — coordinate_meeting IS a message-sending tool (v3.0.8):
+\`coordinate_meeting\` is the multi-party coord state machine. When it runs, the state machine DMs each participant with slot options (the DMs are sent asynchronously by the coord runner, not by Sonnet directly). A draft saying "I've sent Onn, Oran, and Lital the slot options" / "I've asked them to pick" / "DM'd them with options" / "I'll let you know once everyone confirms" is HONEST when \`[coordinate_meeting: ...]\` appears in TOOL ACTIVITY this turn. The participant DMs ARE going out via the coord runner. Do NOT flag these as phantom sends — the matching mechanism for "told the participants" claims about a coord-meeting subject is \`coordinate_meeting\`, not \`message_colleague\`. Forcing a message_colleague retry creates DOUBLE DMs to each participant (one from coord, one from message_colleague) — the bug we're trying to prevent.
 The whole point of these tools is to queue an action; the model is allowed to narrate the queued action as if it's happening. ONLY flag when the claim is about an action whose matching tool did NOT run this turn.
 
 CRITICAL — mutation outcome (v2.2.5):
