@@ -1,63 +1,45 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.0.3** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.0.7** — check `package.json` if unsure; it is the source of truth.
 
-## Right now — Path 2: kill `outreach_jobs`, requests-spine becomes single truth
+## What just shipped (3.0.4 → 3.0.7)
 
-**Active task.** The 1M-token prior chat ended with the discovery of a critical silent-fail bug in `message_colleague` (Yael outreach never sent, Maelle still claimed "Sent the message to Yael. I'll let you know when she replies"). Root-caused to a duplicate `createRequest` and accepted as the trigger to finally finish the v2.7.0 → v2.7.1 requests-spine migration that's been half-done since v2.7.
+Four patch versions in two days of real-day-bug-bashing. Read CHANGELOG.md top-to-bottom for the full picture; highlights:
 
-Owner's words: *"don't care about the past, just care of finishing with the outreach and moving to 'request'"*. Path chosen: **Path 2** — kill `outreach_jobs` as a concept entirely; all outreach state lives in `requests`.
+- **3.0.4** — identity-spoof guard in security gate, v3.0.4 schema-defaults pass, `message_colleague` silent-fail kill (Path 2 stages 0+1: deleted the duplicate `createRequest` block in outreach.ts that idempotency_key-collided)
+- **3.0.5** — endless-approval root cause (`#` prefix on approval IDs in prompt → resolver silent-fail), identity-spoof redesigned (email-mismatch trigger + Haiku composer), attendee-memory write on booking, lunch-gap preemptive dismiss via `manage_calendar_issue(date, block_name)`, `<URL|text>` strip deleted (#113), startup version DM removed
+- **3.0.6** — 54-atomic-fix V3 audit bug-bash (phantom-confirmed bookings, force-book winning_slot leak, recheckFreeBusyForBooking shared helper, owner override truly total, capture-pass timezone gated by isStrictIana, ~400 LOC dead code removed) + claim-checker covers action-based verb tools (manage_routine/manage_calendar_issue/update_task/etc.)
+- **3.0.7** — slot-finder ↔ rule-engine consistency on lunch feasibility, close-loop DM to colleague-requester via requests spine (broadened subject match), `coordinate_meeting` HARD STOP when owner just picked a slot, `_slot_results_now_stale` flag on slot-relevant profile/memory writes, `find_available_slots` date-only `search_to` expansion (was collapsing to 0-minute window when search_from === search_to), `create_meeting` array guard on `args.attendees`, claim-checker pruned to RULE A + coda mode (Module F/E extended-rule plumbing removed per v2.8.5)
 
-### The bug that triggered this (read once, then move on)
+## Right now — pick from the 8 deferred items below, or WhatsApp build
 
-`outreach.ts:235` and `db/jobs.ts:150` both create a paired request row per `message_colleague` call (the v2.7.0 bridge and the v2.7.1 bridge — both written, neither deleted). The two rows have different subjects:
-- `jobs.ts:150` bridge uses `subject = message.slice(0, 80)` — varies per call → idempotency_key naturally unique
-- `outreach.ts:235` uses a generic `"Waiting for reply from X"` or `"Messaged X"` — IDENTICAL every time you message the same person → idempotency_key collides with any prior row that's still in the DB
+Each is small to mid-sized. Eight surfaced in the 3.0.7 morning session. Owner direction: propose-first per item, smaller/verified moves win.
 
-For any colleague the owner has messaged before with the same `await_reply` value: first call worked, second call onward → UNIQUE constraint throws → `sendDirect()` never runs → Maelle reports "Sent" but message is lost. Claim-checker's shield treats tool-in-toolSummaries as success and skips the retry, so the lie surfaces unchecked.
+### Deferred bug list (from 3.0.7 session — all real-day-observed)
 
-### Scope of Path 2 (the migration)
+1. **Dina 2-DMs (thread continuity)** — `message_colleague` opens a new top-level DM every call, even when there's a recent open conversation with the same colleague. Slack sidebar shows two parallel threads on the same topic. Fix is Path 2 stage 2 work: add `target_dm_channel` + `target_dm_thread_ts` to `requests` (or details_json), then in message_colleague send path: look up open colleague-initiated request for same `target_slack_id` within last N hours, post as thread reply if found.
 
-Roughly 6-8 files, ~300 lines net:
+2. **Shadow mirrors pre-gate draft** — `shadowNotify` fires from `core/orchestrator/index.ts:1867` BEFORE postReply.ts runs humanGate/securityGate/claim-checker. When humanGate rewrites a draft (e.g. scrubs a leaked `req_` ID), the shadow shows owner the LEAKY pre-gate version while the colleague gets the CLEAN post-gate version. Move shadow into `postReply.ts` after the gate stack, using the post-gate `cleanReply` variable.
 
-- `requests.details_json` absorbs the outreach_jobs fields: `dm_message_ts`, `dm_channel_id`, `reply_text`, `scheduled_at`, `intent`, `proposed_slots`, `subject_keyword`, `colleague_tz`, `reply_deadline`. (Several are already there from the prior bridges.)
-- `outreach.ts:message_colleague` calls `createRequest` directly. No `createOutreachJob`. One row per call.
-- `db/jobs.ts` retired. The helpers — `createOutreachJob`, `updateOutreachJob`, `linkOutreachToRequest` — are either inlined into the call site or deleted. `coord_jobs` likely follows the same pattern (separate audit).
-- `outreach_jobs` table dropped from `db/client.ts` schema. Old data discarded (owner: "don't care about the past").
-- Dispatchers that read `outreach_jobs` get rewritten to read `requests`:
-  - `tasks/dispatchers/outreachSend.ts`
-  - `tasks/dispatchers/outreachExpiry.ts`
-  - `tasks/dispatchers/outreachDecision.ts`
-  - `connectors/slack/coordinator.ts` (handleOutreachReply path)
-- The claim-checker shield needs updating too: toolSummaries should distinguish ran-and-succeeded vs ran-and-threw, so future tool-throw failures don't silently get treated as success. Tool summary should mark thrown calls as `[message_colleague FAILED: <reason>]`.
+3. **Multi-lang drift (L1)** — language-match rule is in the static prompt, Sonnet follows for turn 1 then drifts back to English on subsequent turns. Fix: code-side `detectMessageLanguage(text)` using Unicode-block ranges (Cyrillic/Hebrew/Arabic/Latin+diacritics), inject fresh per-turn LANGUAGE block into the dynamic prompt section.
 
-### Approach
+4. **Social coda on FYI outreach (L3)** — when colleague replies to a transactional outreach (`intent='fyi'`/`'reminder'`/`'meeting_confirmation'`/etc.), Maelle still adds chatty social codas. Fix: gate `chooseSocialDirective` on `priorOutreachIntent` from the matched outreach row; skip engagement directive entirely for transactional intents. Pure DB enum check, no regex.
 
-This is real-refactor territory. Do it in stages, typecheck after each:
-1. **Inventory** — find every read/write of `outreach_jobs`. Should be ~10-20 sites.
-2. **Migrate writers first** — change every write to also write to requests (with the data in details_json). Keep outreach_jobs writes too as belt+suspenders during the transition.
-3. **Migrate readers** — switch each dispatcher / coordinator to read from requests. Verify behavior matches.
-4. **Drop outreach_jobs writes** — once all readers are on requests, stop writing to outreach_jobs.
-5. **Drop the table** — schema removal in `db/client.ts`.
-6. **Fix claim-checker shield** — last, in the same bundle.
+5. **Request-ID securityGate backstop** — Sonnet drafted `"There's already a pending approval for this exact request (#req_1779794031248_b3w7l)…"` and humanGate caught it. If humanGate ever fails open (Sonnet timeout, non-JSON), the leak ships. Add pattern `\b#?(req|task|coord|out|ci)_[a-z0-9_]+\b` to securityGate's trigger set. Regex on structured IDs is fine (different from regex on natural language).
 
-Propose-first per step, especially steps 2/3 where behavior change risk is real. Don't big-bang. The owner has been clear that scope creep + over-engineering are the enemy; smaller, verified moves win.
+6. **Coord auto-cancel on `create_meeting` success** — when a meeting gets booked outside the coord state machine (owner-direct create_meeting) AND there's an in-flight `coord_job` for the same subject/attendees, the coord_job stays alive and keeps DMing participants for slot selection. Add to `closeMeetingArtifacts`: detect orphaned coord_jobs by subject+attendees overlap, transition them to `cancelled` with `closure_reason='superseded_by_direct_create'`.
 
-### What's NOT in Path 2
+7. **Reply routing priority (Isaac msg_colleague vs coord)** — `recentOutboundContext` LLM classifier matched Isaac's "I can only do Monday and Thursday" reply to the message_colleague outreach instead of the coord_job that had also DM'd him 12 seconds later. Classifier should prefer coord over outreach when both have open context for the same colleague.
 
-- WhatsApp build (deferred — was the prior "next" but the outreach migration jumped the queue)
-- `coord_jobs` migration (similar pattern, separate task)
-- Backfill of past outreach_jobs data (owner: discard)
+8. **planMeeting `propose_alternative` verdict for colleague-soft-rule slots** — currently when a colleague-proposed slot violates a soft rule (lunch/focus/work-hours), planMeeting returns `escalate_approval` and the colleague waits for owner approval. Owner direction: should first try to find alternatives nearby (same day, ±1 day). New verdict + handler path.
 
----
+### Path 2 outreach-jobs migration (stages 2-6 remaining)
 
-## Prior context (v3.0.3 fix-up bundle, already shipped)
+Stages 0+1 shipped in 3.0.4 (Stage 0: throw-aware tool summaries; Stage 1: duplicate `createRequest` block deleted). Remaining: stages 2-6 as originally scoped — migrate writers, migrate readers, drop outreach_jobs writes, drop the table. Deferred item #1 above (Dina thread continuity) is a natural Stage 2 hook — add the target-DM-thread fields while migrating writers.
 
-Read these for what just landed:
-- CHANGELOG entry for 3.0.3 + 3.0.3 fix-up (calendar-issue redesign, find_available_slots time-of-day support, KB on colleague path internal-only, claim-checker image awareness, ONE-CALL-PER-TIMEFRAME rule, config-driven duration default, slot-search toolSummary enrichment)
-- Schema defaults pass (v3.0.4 prep): user.example.yaml rewritten in 2-section format (~23 required lines + advanced section all defaulted), dead fields removed (`priorities`, `vip_contacts`, `rescheduling`, several legacy meeting/schedule fields, `skills.general_knowledge`)
+### WhatsApp build (parked, return after Path 2 done or deferred items)
 
-The schema defaults pass + dead field removal is **uncommitted** as of the chat handoff — `git status` will show the diff. Confirm with owner whether to commit before starting Path 2 or fold in.
+v3 was originally framed as the WhatsApp build — first non-Slack `Connection` implementation. Architecture is ready (skills never import from `connectors/slack/*`; everything routes through `getConnection(ownerId, 'slack')`). WhatsApp slots in as a parallel transport.
 
 ## WhatsApp build (parked, return after Path 2)
 
