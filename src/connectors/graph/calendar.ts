@@ -1189,10 +1189,56 @@ export async function findAvailableSlots(params: {
             end: Math.min(slotEnd.getTime(), winEnd),
           });
 
+          // v3.0.7 — stricter feasibility. `findAlignedSlotForBlock` was the
+          // legacy check: tries quarter-aligned positions, accepts if any fits.
+          // That's MORE LENIENT than scheduleRules.checkSlot (used downstream by
+          // planMeeting), which measures the longest contiguous free segment in
+          // the window and rejects if it's smaller than the block's duration.
+          // The mismatch surfaced 2026-05-26 (Eli's "Open questions and feature
+          // requests" booking): slot finder accepted Wed 12:00 because lunch
+          // could quarter-align at 11:30, but planMeeting then escalated for
+          // approval because the after-meeting free segment was only 5 min.
+          // Two layers disagreeing = slot finder offers a slot that the booking
+          // path will then refuse and prompt the owner about. Owner direction:
+          // "I'm ok to MOVE lunch if needed, but not to ignore it." Implement
+          // the same longest-contiguous-free check here so the slot finder and
+          // the booking-path rule check agree: a slot only passes if lunch can
+          // ACTUALLY fit (contiguous duration in remaining window), not just
+          // quarter-align somewhere.
+          let longestFreeMs = 0;
+          {
+            const sorted = [...busyInWindow].sort((a, b) => a.start - b.start);
+            const merged: Array<{ start: number; end: number }> = [];
+            for (const iv of sorted) {
+              const last = merged[merged.length - 1];
+              if (last && iv.start <= last.end) {
+                last.end = Math.max(last.end, iv.end);
+              } else {
+                merged.push({ ...iv });
+              }
+            }
+            let walkCursor = winStart;
+            for (const m of merged) {
+              if (m.start > walkCursor) {
+                longestFreeMs = Math.max(longestFreeMs, m.start - walkCursor);
+              }
+              walkCursor = Math.max(walkCursor, m.end);
+            }
+            if (walkCursor < winEnd) {
+              longestFreeMs = Math.max(longestFreeMs, winEnd - walkCursor);
+            }
+          }
+          const blockDurationMs = block.duration_minutes * 60 * 1000;
+          const fitsContiguous = longestFreeMs >= blockDurationMs;
+
+          // Belt-and-braces: also require the legacy quarter-aligned check to
+          // pass. (For non-quarter-aligned existing events, the contiguous
+          // check alone could pass but the aligned check would fail because
+          // the quarter-snap pushes lunch past gapEnd.)
           const aligned = fb.findAlignedSlotForBlock(
             block, dayDate, params.timezone, busyInWindow,
           );
-          if (aligned === null && !block.can_skip) {
+          if ((aligned === null || !fitsContiguous) && !block.can_skip) {
             blockConflict = true;
             break;
           }

@@ -2,6 +2,66 @@
 
 ---
 
+## 3.0.7 — Slot-finder rule consistency, close-loop via requests spine, owner-picks-slot guard
+
+Real-day-bug-bash session. Eight bug shapes consumed across booking, slot finding, person-memory hygiene, and approval lifecycle. Plus the claim-checker latency pass landing from a parallel session.
+
+### Fixed — slot finder + planMeeting now agree on lunch feasibility
+
+`src/connectors/graph/calendar.ts` — the per-slot floating-block check was MORE LENIENT than `scheduleRules.checkSlot` used downstream by planMeeting. Slot finder accepted candidates via `findAlignedSlotForBlock` (quarter-aligned, finds any aligned position); planMeeting rejected via longest-contiguous-free check (needs an actual N-min segment for the block). Mismatch surfaced 2026-05-26 in the Eli flow: slot finder offered Wed 12:00, owner saw the slot proposed to Eli, then planMeeting flagged "only 5min free after this slot" and escalated for approval. Two layers disagreeing. Now the slot finder ALSO runs the longest-contiguous-free check inline (with the same merge + walk + winEnd logic as scheduleRules). Both layers must pass. Owner direction preserved: "OK to MOVE lunch in its window, not to IGNORE lunch."
+
+### Fixed — colleague-requester close-loop DM via the requests spine
+
+`src/utils/closeMeetingArtifacts.ts` — when a meeting mutation succeeds and the cascade finds a matching open `request` with `requester_slack_id` set (colleague-initiated), the cascade now fires a `Connection.sendDirect` to that requester ("Hey \<name\>, locked in '\<subject\>' — calendar invite is on its way.") BEFORE closing the request. Close state is also corrected: positive bookings (created/moved/updated) now close as `state='resolved'` (was `cancelled` — wrong for booking-success cases). Plus the subject-match fallback was broadened from `subkind='in_flight_action'` only to ANY open colleague-initiated request whose subject matches the booking's subject. Catches the Eli case: owner amended Wed→Tue, request stayed in awaiting_colleague, owner later booked Tue 13:15 via direct `create_meeting`, and the cascade now finds + notifies + closes. Lifecycle is now consistently "owner approve → meeting booked → requester notified → request closed" — fallback for when booking lands outside the resolver's deferred-action replay.
+
+### Fixed — `coordinate_meeting` called when owner already picked a slot
+
+`src/skills/meetings.ts` — the `coordinate_meeting` tool description gets a prominent 🛑 HARD STOP block at the top: "if your most recent reply listed N proposed slot options AND owner's next message picks one, DO NOT call coordinate_meeting — call `create_meeting` directly." Concrete consequence call-out included: redundant slot-picker DMs to attendees, claim-checker retry, message_colleague spam. Closes the morning Future-of-Outbound-Automation bug where owner picked "2 June 12pm" from Maelle's proposals and Maelle still kicked off the multi-DM coord state machine.
+
+### Added — `_slot_results_now_stale` signal on slot-relevant profile/memory writes
+
+`src/core/assistant.ts` — `update_person_profile` and `update_person_memory` handlers now detect when the write touched a slot-relevant field (`timezone`, `working_hours`, `working_hours_structured`, `workdays`, `work_hours`, `currently_traveling` for profile; `hours`, `timezone`, `schedule`, `workdays`, `availability`, `travel`, `working` substrings for memory section names). On slot-relevant writes, the tool result includes `_slot_results_now_stale: true` + `_note: "...re-run find_available_slots before proposing options..."` so the next Sonnet iteration sees the freshness signal directly in the tool-result content. Closes the "Isaac is Mon-Fri" case (2026-05-26) where Maelle updated the profile then narrated stale slot options from her turn-1 memory instead of re-running the tool.
+
+### Fixed — `find_available_slots` date-only `search_to` collapse
+
+`src/skills/meetings/ops.ts` — when `search_to` is a bare `YYYY-MM-DD` (no `T`), it now expands to `T23:59:59` before calling the lower-level slot finder. Pre-fix Sonnet passed `search_from === search_to` (same date) and the parser read both as `T00:00:00`, producing a 0-minute window → `getFreeBusy — zero or inverted window, returning empty` → strict pass returned 0 → "Nothing available." The bug had ALWAYS been in the slot-finder Graph layer (since v1.7.0), but the v3.0.3 tool description update told Sonnet date-only `search_to` was valid — which kicked over the rock. Sonnet started passing date-only inputs daily ("when is Lital free tomorrow?" → `search_from='2026-05-27', search_to='2026-05-27'`), and every one returned a false-empty.
+
+### Fixed — `create_meeting` array-guard kills the `attendees.filter` crash
+
+`src/skills/meetings/ops.ts` — `case 'create_meeting'` now runtime-checks `Array.isArray(args.attendees)` before the TypeScript cast. Pre-fix the cast was a pure assertion: when Sonnet passed `attendees` as a non-array shape (single object, keyed object, null, omitted — all observed in the wild), the downstream `attendees.filter(...)` calls crashed with `TypeError`, the registry wrapped it as `unclear_result`, and Sonnet retried with the same broken shape (3× FAILED in a single turn observed 2026-05-26 08:57 IL). Now returns `{ error: 'invalid_attendees', message: '... wrap in an array ...' }` with the actual type + truncated sample logged in warn for shape-debugging.
+
+### Changed — claim-checker pruned to RULE A + coda mode
+
+`src/utils/claimChecker.ts` + `src/connectors/slack/postReply.ts` + `src/core/orchestrator/index.ts` — Module F (RULE 2b/3/9/5b honesty diagnostics) and Module E (RULE 7 re-ask checks) interface fields removed: `priorAssistantReply`, `currentUserMessage`, `imagesInTurn` inputs gone; `re_asked_known_fact`, `unrecorded_promise`, `unverified_state_review`, `invented_after_correction`, `re_asked_after_convergence`, `re_asked_own_question`, `violation_summary`, `retry_instruction` result fields gone. Per v2.8.5 cleanup the extended honesty rules live in the system prompt, not in the post-draft checker. claim-checker is now: RULE A (false action claim) + the coda subprompt only. Net latency improvement on owner-path drafts and matches the architecture intent. My v3.0.6 "CRITICAL — action-based verb tools" section stays — that fits inside RULE A as tool-result interpretation guidance.
+
+### Audit handoff items shipped this version
+
+These were among the 20 audit findings deferred from v3.0.6; they came out of real-day flows this morning so they jumped the queue:
+
+- Owner-picks-slot routing (#34-style coord overuse)
+- Slot-finder ↔ rule-engine disagreement on floating blocks (#14 was the v3.0.3 stuck-block detection; this is the inverse — feasibility check too LENIENT vs too STRICT)
+- Close-loop DM on owner-direct booking
+- Date-only `search_to` time-of-day shape (post-v3.0.3 tool description side-effect)
+
+### Filed for next session
+
+Eight bugs surfaced this session but not built. They share a theme — colleague-experience polish + Path 2 plumbing — and want a coordinated bundle:
+
+- Dina 2-DMs (thread continuity) — Path 2 stage 2: add `target_dm_thread_ts` to requests, message_colleague reuses the open thread
+- Shadow mirrors pre-gate draft — move shadowNotify call from `core/orchestrator/index.ts:1867` to `postReply.ts` after gates
+- Multi-lang drift (L1) — per-turn language detection in code + dynamic prompt injection
+- Social coda on FYI outreach (L3) — gate engagement directive on `intent` field
+- Request ID leak backstop — add `\b#?(req|task|coord|out|ci)_[a-z0-9_]+\b` to securityGate triggers
+- Coord auto-cancel on create_meeting success for same subject — lifecycle hook
+- Reply routing prefers coord over message_colleague when both have open context — `recentOutboundContext` priority
+- planMeeting `propose_alternative` verdict for colleague-suggested soft-rule slots — let Maelle offer alternatives before escalating
+
+### Migration
+
+No DB schema change. No yaml change required. Owner action: restart `npm run dev` (or `npm start` + `npm run build` if running production mode).
+
+---
+
 ## 3.0.6 — V3 audit bug-bash: 54 atomic fixes + claim-checker covers action-tools
 
 Wrap of the v3.0.5 audit handoff (`.claude/V3_AUDIT_HANDOFF.md`, 83 findings) plus an other-chat claim-checker addition for action-based verb tools. 54 atomic fixes across booking, approval spine, persona/memory, social engine, venue, floating blocks, work hours; ~400 LOC of dead code removed (legacy `db/approvals.ts` orphans). 9 findings ruled out on verification as already-fixed or audit-wrong; 20 deferred per owner direction. Typecheck clean throughout.

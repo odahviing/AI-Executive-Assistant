@@ -1378,7 +1378,35 @@ export class SchedulingSkill {
         }
 
       case 'create_meeting': {
-        const attendees = args.attendees as Array<{ name?: string; email?: string; slack_id?: string }>;
+        // v3.0.7 — runtime array guard. Pre-fix the cast `as Array<...>` was a
+        // pure-TS assertion, no runtime check. When Sonnet passed `attendees`
+        // as a non-array shape (single object, keyed object, null, omitted —
+        // all observed in the wild), the downstream `attendees.filter(...)`
+        // call at line ~1669/1864 crashed with
+        // `TypeError: attendees.filter is not a function`. The registry's
+        // generic catch wrapped it as `{ error: 'Tool ... failed: ...' }`,
+        // the summarizer rendered it as `[create_meeting FAILED ...
+        // unclear_result]`, and Sonnet retried with the same broken shape →
+        // owner saw 3 identical FAILEDs in one turn (2026-05-26 08:57 IL,
+        // Onn/Oran/Lital booking). Refuse early with a shape-explicit error
+        // message Sonnet can react to instead of the opaque TypeError.
+        const rawAttendees = args.attendees;
+        if (!Array.isArray(rawAttendees)) {
+          logger.warn('create_meeting — args.attendees not an array, refusing', {
+            actualType: rawAttendees === null ? 'null' : typeof rawAttendees,
+            sample: typeof rawAttendees === 'object' && rawAttendees !== null
+              ? JSON.stringify(rawAttendees).slice(0, 200)
+              : String(rawAttendees).slice(0, 100),
+            subject: args.subject,
+            requester: context.userId,
+          });
+          return {
+            success: false,
+            error: 'invalid_attendees',
+            message: `attendees must be an array of {name, email} objects. Got ${rawAttendees === null ? 'null' : typeof rawAttendees}. Retry with attendees=[{name, email}, ...] — even for a single attendee, wrap in an array.`,
+          };
+        }
+        const attendees = rawAttendees as Array<{ name?: string; email?: string; slack_id?: string }>;
         const assistantEmail = context.profile.assistant.email;
         const ownerEmail = context.profile.user.email;
 

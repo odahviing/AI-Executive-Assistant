@@ -245,11 +245,96 @@ export function closeMeetingArtifacts(params: {
             }
           } catch (_) { /* malformed details — skip */ }
         }
+        // v3.0.7 — broadened subject match for colleague-initiated requests.
+        // Pre-fix the subject-match fallback was scoped to `in_flight_action`
+        // subkind only. But the Eli case (2026-05-26): owner amended a
+        // policy_exception approval, then booked the new time via direct
+        // create_meeting (not via the resolver's deferred-action replay). The
+        // new meeting_id never linked back to the approval row → cascade
+        // missed it → request stayed in `awaiting_colleague` forever → Eli
+        // never got the close-loop "Idan locked it in" DM that Maelle had
+        // promised. Broaden: any OPEN colleague-initiated request
+        // (requester_slack_id set, ≠ owner) whose row subject matches the
+        // booked meeting's subject is a candidate. Scoped to ensure we don't
+        // false-match unrelated requests.
+        if (
+          !matched
+          && subjectLower
+          && r.requester_slack_id
+          && r.requester_slack_id !== params.ownerUserId
+          && r.subject
+          && r.subject.trim().toLowerCase() === subjectLower
+        ) {
+          matched = true;
+          logger.info('closeMeetingArtifacts — colleague-request subject-match fallback fired', {
+            requestId: r.id, subkind: r.subkind, subject: params.subject,
+            requesterSlackId: r.requester_slack_id, meetingId: params.meetingId,
+          });
+        }
         if (matched) {
+          // v3.0.7 — close-loop DM to colleague-requester BEFORE closing the
+          // request. Owner direction: requests are the canonical route; the
+          // lifecycle is "owner approve → notify requester → close request".
+          // Pre-fix: a colleague-initiated approval got the booking via
+          // create_meeting on owner-path (not via the resolver's deferred-
+          // action replay), so notifyRequesterOfDecision never fired and the
+          // colleague never heard back. Maelle had promised "I'll let you
+          // know once Idan responds" — broken. Fire a simple Connection DM
+          // here so the loop closes regardless of which booking path ran.
+          //
+          // Constraints:
+          //   - Only colleague-initiated requests (requester_slack_id is set
+          //     and != owner).
+          //   - Only positive booking reasons (created / moved / updated) —
+          //     deletes have their own decline-and-relay path.
+          //   - Fire-and-forget; never block the cascade or the booking.
+          const positiveBooking = params.reason === 'created' || params.reason === 'moved' || params.reason === 'updated';
+          if (
+            r.requester_slack_id
+            && r.requester_slack_id !== params.ownerUserId
+            && positiveBooking
+          ) {
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { getConnection } = require('../connections/registry') as
+                typeof import('../connections/registry');
+              const conn = getConnection(params.ownerUserId, 'slack');
+              if (conn) {
+                const requesterFirst = (r.requester_name ?? '').split(/\s+/)[0] || 'there';
+                const subjectText = params.subject || r.subject || 'the meeting';
+                // Voice mirrors notifyRequesterOfDecision but kept minimal —
+                // the full impl with time/lang/MPIM/origin-channel routing
+                // lives in core/requests/resolver.ts and runs from the
+                // resolver path. This is the fallback when booking landed
+                // outside the resolver.
+                const text = `Hey ${requesterFirst}, locked in "${subjectText}" — calendar invite is on its way.`;
+                void conn.sendDirect(r.requester_slack_id, text).catch(err => {
+                  logger.warn('closeMeetingArtifacts — requester close-loop DM failed', {
+                    requestId: r.id, requesterSlackId: r.requester_slack_id,
+                    err: String(err).slice(0, 200),
+                  });
+                });
+                logger.info('closeMeetingArtifacts — fired close-loop DM to colleague-requester', {
+                  requestId: r.id, requesterSlackId: r.requester_slack_id, subject: subjectText,
+                });
+              }
+            } catch (err) {
+              logger.warn('closeMeetingArtifacts — requester notify path threw, continuing to close', {
+                requestId: r.id, err: String(err).slice(0, 200),
+              });
+            }
+          }
+          // v3.0.7 — close state matches reality: positive booking = resolved
+          // (not cancelled). Old `cancelled` reason was wrong for create/move/
+          // update success cases; the linked work DID happen. Delete keeps
+          // 'cancelled' since the meeting itself is gone.
+          const closureState = positiveBooking ? 'resolved' : 'cancelled';
           closeRequest({
             id: r.id,
-            state: 'cancelled',
-            closureReason: `meeting_${params.reason}`,
+            state: closureState,
+            closureReason: positiveBooking
+              ? `meeting_${params.reason}_and_notified_requester`
+              : `meeting_${params.reason}`,
             closedBy: 'meeting_cascade',
           });
         }

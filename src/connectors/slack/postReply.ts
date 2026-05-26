@@ -392,13 +392,10 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
   try {
     const { checkReplyClaims } = await import('../../utils/claimChecker');
 
-    // v2.7.8 (Module F) — feed the checker prior context for the extended
-    // rules: RULE 2b reads the last assistant reply to detect re-asked
-    // known facts; RULE 5b reads the current user message to detect
-    // invented-after-correction patterns. Both optional — undefined cleanly
-    // skips the corresponding checks.
-    const priorAssistantReply = [...history].reverse().find(m => m.role === 'assistant')?.content;
-
+    // v3.0.6 — claim-checker is owner-path RULE A only (false action claim).
+    // Module F + E extended-rule inputs (priorAssistantReply, currentUserMessage,
+    // imagesInTurn) were removed in the latency pass; honesty rules 1/2/2b/2c/2d
+    // /3/5b/9 stay in the system prompt per v2.8.5.
     const verdict = await checkReplyClaims({
       reply: cleanReply,
       toolSummaries: result.toolSummaries ?? [],
@@ -409,13 +406,6 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
       mpimContext: ctx.isMpim
         ? { isMpim: true, participantSlackIds: ctx.mpimMemberIds ?? [] }
         : undefined,
-      // v2.7.8 — Module F inputs
-      priorAssistantReply,
-      currentUserMessage: userMessage,
-      // v3.0.3 — image-presence signal. When set, claim-checker softens
-      // RULE D (unverified_state_review) so it doesn't false-positive
-      // on third-party state quoted from image content.
-      imagesInTurn: result.imagesInTurn === true,
     });
 
     // v2.8.3+ — shared helper for the priorActionsHint appended to BOTH
@@ -457,16 +447,11 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
       return lines.join('\n');
     };
 
-    // v2.8.5 — Module F + E retry path REMOVED. The judge was injecting
-    // topic-switch directives into retry_instruction when conversation
-    // history showed any topic mismatch (compounded by the inboundQueue
-    // cross-thread bug), derailing replies wholesale on 2026-05-17. Owner
-    // direction: roll back. Honesty rules 1/2/2b/2c/2d/3/5b/9 were
-    // restored to the system prompt in the same patch. The Module F/E
-    // booleans STILL FIRE in the checker (telemetry preserved — we keep
-    // visibility into what they catch) but their verdict is no longer
-    // acted on. Only RULE A (`claimed_action` — the original v1.6.2
-    // false-action-claim check) drives retries from here on.
+    // v3.0.6 — Module F + E booleans were fully removed from the checker
+    // (advisory-only since v2.8.5; cost ~5s of Sonnet on every owner turn for
+    // a verdict no caller acted on). Honesty rules 1/2/2b/2c/2d/3/5b/9 stay
+    // in the system prompt. Only RULE A (claimed_action — false action claim)
+    // drives retries from here.
     if (!verdict.claimed_action) return cleanReply;
 
     // v1.7.4 — defense in depth. The claim-checker can false-positive (saw

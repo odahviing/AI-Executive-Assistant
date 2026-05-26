@@ -4,6 +4,10 @@ description: Four-layer model, skills system, orchestrator loop, task pipeline, 
 type: project
 ---
 
+Architecture reference for Maelle **v3.0.7**. Living document of the four-layer model + invariants that survive across patches. Version-specific changelog is in `CHANGELOG.md`; this file describes the STRUCTURE.
+
+**v3.0.7 — slot-finder rule consistency + close-loop via requests spine.** The slot finder's per-slot floating-block feasibility check now uses the SAME longest-contiguous-free logic as `scheduleRules.checkSlot` (the rule engine used by planMeeting). Pre-fix the slot finder used only the quarter-aligned check from `findAlignedSlotForBlock` — more lenient than the rule engine, leading to slot finder offering candidates that planMeeting then escalated. Both layers now agree at every decision point. Plus: `closeMeetingArtifacts` cascade now fires a close-loop DM to the colleague-requester (when `requester_slack_id` is set and ≠ owner) BEFORE closing the matched request, and closes positive bookings as `state='resolved'` (was `cancelled`). Subject-match fallback broadened from `subkind='in_flight_action'` only to any open colleague-initiated request — catches the "owner amends approval, books new slot via direct create_meeting" path that bypassed the resolver's notify hook.
+
 Architecture reference for Maelle **v3.0.5**. Living document of the four-layer model + invariants that survive across patches. Version-specific changelog is in `CHANGELOG.md`; this file describes the STRUCTURE.
 
 **v3.0.5 — three structural additions worth knowing here.**

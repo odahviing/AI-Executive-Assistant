@@ -326,12 +326,6 @@ export interface OrchestratorOutput {
     eventId?: string;
     reason?: string;
   }>;
-  /** True when the inbound turn included one or more image attachments.
-   *  Consumed by claim-checker (v3.0.3) to soften unverified_state_review
-   *  false-positives — when an image is present, claims about a third
-   *  party's availability windows (etc.) may have come from the image
-   *  content, not from tool calls. */
-  imagesInTurn?: boolean;
 }
 
 /**
@@ -2158,7 +2152,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     bookingOccurred,
     toolSummaries: toolCallSummaries.length > 0 ? toolCallSummaries : undefined,
     mutationActions: mutationActions.length > 0 ? mutationActions : undefined,
-    imagesInTurn: hasImages,
   };
 }
 

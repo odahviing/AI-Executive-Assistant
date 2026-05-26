@@ -63,6 +63,10 @@ export class MeetingsSkill implements Skill {
         name: 'coordinate_meeting',
         description: `Set up a NEW multi-party meeting that needs ${profile.user.name.split(' ')[0]}'s INTERNAL attendees DM'd for their availability. The tool DMs each internal participant with proposed slots, collects their responses, negotiates if needed, then books. Use ONLY when there are internal pollable non-owner attendees (slack_id in our workspace + same email domain as ${profile.user.name.split(' ')[0]}). For anything else, use the direct path: find_available_slots + create_meeting.
 
+🛑 HARD STOP — ${profile.user.name.split(' ')[0]} JUST PICKED A SLOT 🛑
+If your most recent reply to ${profile.user.name.split(' ')[0]} listed N proposed slot options AND his next message picks one ("2 June 12pm" / "Monday 11:00" / "the first one" / "option 2"), DO NOT call coordinate_meeting. Call \`create_meeting\` directly with the chosen time. The attendees' availability was already checked by find_available_slots when you proposed the options — no further DM polling is needed. coordinate_meeting in this case sends redundant slot-picker DMs to attendees AFTER you and the owner already agreed the time, then triggers the claim-checker to retry, then fires message_colleague DMs on top — three layers of noise the colleagues receive for a meeting the owner already locked. The right tool when the owner has named a specific time is ALWAYS create_meeting.
+
+
 Do NOT use to:
 - Move an existing meeting → move_meeting (or message_colleague with intent='meeting_reschedule')
 - Check if the owner can join a colleague's meeting → check_join_availability

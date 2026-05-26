@@ -690,7 +690,28 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
           logger.warn('update_person_memory failed', { slug, section, err: result.error });
           return { ok: false, error: result.error };
         }
-        return { ok: true, slug, section, created: result.created };
+
+        // v3.0.7 — stale-slot-results signal. When the md section name
+        // suggests a slot-relevant update (work hours / timezone /
+        // schedule / availability / workdays / travel), flag prior
+        // find_available_slots results as stale. Sonnet sees the note in
+        // the next iteration and re-runs the slot finder instead of
+        // memo-filtering. Section name match is fuzzy because md
+        // sections are owner-named free-text; any of these substrings
+        // (case-insensitive) trigger.
+        const SLOT_RELEVANT_SECTION_PATTERNS = [
+          'hours', 'timezone', 'time zone', 'schedule', 'workdays',
+          'availability', 'travel', 'working',
+        ];
+        const sectionLower = section.toLowerCase();
+        const slotRelevant = SLOT_RELEVANT_SECTION_PATTERNS.some(p => sectionLower.includes(p));
+
+        const base = { ok: true, slug, section, created: result.created } as Record<string, unknown>;
+        if (slotRelevant) {
+          base._slot_results_now_stale = true;
+          base._note = `You wrote to a slot-relevant section ("${section}") for ${displayName ?? query}. Any prior find_available_slots results involving them are now stale — re-run find_available_slots before proposing options to the owner. Don't mentally filter old slot candidates.`;
+        }
+        return base;
       }
 
       case 'update_person_profile': {
@@ -853,8 +874,31 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
           }
         }
 
-        logger.info('Person profile updated', { slackId, name, fields: Object.keys(args).filter(k => k !== 'colleague_slack_id' && k !== 'colleague_name') });
-        return { updated: true, name };
+        const fieldsWritten = Object.keys(args).filter(k => k !== 'colleague_slack_id' && k !== 'colleague_name');
+        logger.info('Person profile updated', { slackId, name, fields: fieldsWritten });
+
+        // v3.0.7 — stale-slot-results signal. When the write touches a
+        // field that affects find_available_slots' verdict for this person
+        // (timezone / workdays / work hours), enrich the tool result with
+        // a flag + note. The next Sonnet iteration sees the note in the
+        // raw tool result content and re-runs find_available_slots instead
+        // of mentally filtering its prior memory of slot options. Closes
+        // the 2026-05-26 morning bug: owner said "Isaac works Mon-Fri",
+        // Maelle wrote the profile, then narrated "Monday 11:00 is the
+        // clean option" from her stale turn-1 memory without re-running
+        // the tool to get an updated 3-option spread.
+        const SLOT_RELEVANT_FIELDS = new Set([
+          'timezone', 'working_hours', 'working_hours_structured',
+          'workdays', 'work_hours', 'currently_traveling',
+        ]);
+        const slotRelevant = fieldsWritten.some(f => SLOT_RELEVANT_FIELDS.has(f));
+
+        const base = { updated: true, name } as Record<string, unknown>;
+        if (slotRelevant) {
+          base._slot_results_now_stale = true;
+          base._note = `You updated slot-relevant fields for ${name}. Any prior find_available_slots results involving ${name} are now stale — the candidate set changes with the new constraint. Re-run find_available_slots before proposing options to the owner. Do not mentally filter old slot candidates; the tool's diagnostics (day_summary, attendee work-hours filter, etc.) need to re-evaluate.`;
+        }
+        return base;
       }
 
       default:
