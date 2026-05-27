@@ -1,16 +1,16 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.1.0** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.1.2** — check `package.json` if unsure; it is the source of truth.
 
-## v3.1.0 just shipped — Path 2 (requests spine owns STATUS)
+## PATH 2 IS COMPLETE (v3.1.0 → v3.1.2). Requests spine owns status, end to end.
 
-The status backbone is now the `requests` table; side tables (`coord_jobs`/`outreach_jobs`/`approvals`) hold DATA only. Killed the coord double-request ghost at root, added `requests.phase`, reconciliation + retention sweep, brief-auto-park requester notify, coord-preferred reply routing. Full plan: `.claude/PATH_2_REQUESTS_SPINE.md`. 11-scenario paper trace (0 errors): `.claude/PATH_2_PAPER_TRACES.md`.
+The `requests` table is the single source of truth for lifecycle. Side tables (`coord_jobs`/`outreach_jobs`/`approvals`) hold DATA only — their `status` columns are VESTIGIAL (transition signals to updateCoord/OutreachJob, never persisted; reads go through `getCoordLifecycle`/`getOutreachLifecycle`). `approvals.status` retained intentionally (payload lives in `approvals`; request owns `awaiting_owner`). **One timer sweep** (`sweepDueRequests`, wired at `tasks/runner.ts:39` inside `runDueTasks`) owns ALL lifecycle timing — the legacy `coord_nudge`/`coord_abandon`/`outreach_send`/`outreach_expiry`/`outreach_decision` dispatchers are DELETED. Reconciliation (`core/requests/reconcile.ts`) closes orphaned coord requests; 30-day retention prune. Architecture doc current: `project_architecture.md` (v3.1 spine section at top). Plan + traces: `.claude/PATH_2_REQUESTS_SPINE.md`, `.claude/PATH_2_PAPER_TRACES.md`.
 
-**NEXT-WORK SEQUENCE (owner direction 2026-05-27), in order:**
-1. **Bug wave** — after this work day, a normal bug-bash pass (the `bugs` / `github` skill flow). Real-day-observed issues first.
-2. **Confirm Maelle is running clean on v3.1** — owner restarts `npm run dev` (PM2 off); verify it boots, the `requests.phase` migration applies, and `reconcileOrphanedRequests` closes the known ghosts (`i3kb2`/`ti275` coord pair, stale Eli approval) on the first background tick.
-3. **Stage 6 (live-verified) — SMALLER than originally framed.** `sweepDueRequests` is ALREADY wired (`tasks/runner.ts:39`, runs each tick inside `runDueTasks`). Outreach + approval timers already fire via the spine; legacy `dispatchOutreachExpiry`/`Send` guard on `request_id` and defer (no double-fire). Remaining: (a) delete the now-redundant guarded legacy outreach dispatchers, (b) move coord `coord_nudge`/`coord_abandon` onto the spine (implement the dormant stubs in `core/requests/runner.ts`) OR keep them on legacy since they work. Verify LIVE.
-4. **Stage 7** — strip the now-redundant status columns from the side tables + delete dead status-mutation helpers. Tables keep their DATA + `request_id` link.
+- **v3.1.0** — Stages 1–5+8: spine owns status, killed the coord double-request ghost, `requests.phase`, reconcile + retention.
+- **v3.1.1** — Stages 6+7: one timer sweep (legacy dispatchers deleted), side tables data-only, #114/#115, + a scoped verification audit's closure fixes (closeFollowup orphan, coord owner_dm DMs, safeThreadTs, thread-reply).
+- **v3.1.2** — three-chat bundle: a performance pass (merged `classifyOwnerIntent` + `classifyToolScope` → single `classifyTurn`), an audit pass (12 bugs: venue / resolveSlackId / calendar / coord / deferredActionReplay / people), and a second-pass spine audit (A-1 coord-expiry-silent-to-owner, B-1 reconcile-read-vestigial-status, C-2 dead outreach_expiry task SQL).
+
+**FIRST THING NEXT SESSION:** confirm Maelle runs clean on v3.1.2 (owner restarts `npm run dev`; PM2 off). Watch the first tick: `Requests-spine maintenance` log line, no double-DMs, coord/outreach close cleanly. Then pick from the deferred items below or the WhatsApp build.
 
 ## What just shipped (3.0.4 → 3.0.7)
 
@@ -21,9 +21,11 @@ Four patch versions in two days of real-day-bug-bashing. Read CHANGELOG.md top-t
 - **3.0.6** — 54-atomic-fix V3 audit bug-bash (phantom-confirmed bookings, force-book winning_slot leak, recheckFreeBusyForBooking shared helper, owner override truly total, capture-pass timezone gated by isStrictIana, ~400 LOC dead code removed) + claim-checker covers action-based verb tools (manage_routine/manage_calendar_issue/update_task/etc.)
 - **3.0.7** — slot-finder ↔ rule-engine consistency on lunch feasibility, close-loop DM to colleague-requester via requests spine (broadened subject match), `coordinate_meeting` HARD STOP when owner just picked a slot, `_slot_results_now_stale` flag on slot-relevant profile/memory writes, `find_available_slots` date-only `search_to` expansion (was collapsing to 0-minute window when search_from === search_to), `create_meeting` array guard on `args.attendees`, claim-checker pruned to RULE A + coda mode (Module F/E extended-rule plumbing removed per v2.8.5)
 
-## Right now — pick from the 8 deferred items below, or WhatsApp build
+## Right now — pick from the remaining deferred items below, or WhatsApp build
 
-Each is small to mid-sized. Eight surfaced in the 3.0.7 morning session. Owner direction: propose-first per item, smaller/verified moves win.
+Owner direction: propose-first per item, smaller/verified moves win.
+
+**Resolved during the Path 2 work (v3.0.8–v3.1.2):** #1 Dina thread-continuity (origin anchoring + `getOpenRequestsForColleague` on the requests spine), #2 shadow-mirrors-pre-gate (moved into `postReply.ts` post-gate), #6 coord auto-cancel on direct create (handled by `reconcileOrphanedRequests` + `closeMeetingArtifacts`), #7 reply-routing priority (recentOutboundContext + handleCoordReply now prefer active coord). **Still open: #3, #4, #5, #8** (below).
 
 ### Deferred bug list (from 3.0.7 session — all real-day-observed)
 
@@ -43,9 +45,9 @@ Each is small to mid-sized. Eight surfaced in the 3.0.7 morning session. Owner d
 
 8. **planMeeting `propose_alternative` verdict for colleague-soft-rule slots** — currently when a colleague-proposed slot violates a soft rule (lunch/focus/work-hours), planMeeting returns `escalate_approval` and the colleague waits for owner approval. Owner direction: should first try to find alternatives nearby (same day, ±1 day). New verdict + handler path.
 
-### Path 2 outreach-jobs migration (stages 2-6 remaining)
+### Path 2 — DONE (no remaining stages)
 
-Stages 0+1 shipped in 3.0.4 (Stage 0: throw-aware tool summaries; Stage 1: duplicate `createRequest` block deleted). Remaining: stages 2-6 as originally scoped — migrate writers, migrate readers, drop outreach_jobs writes, drop the table. Deferred item #1 above (Dina thread continuity) is a natural Stage 2 hook — add the target-DM-thread fields while migrating writers.
+All stages shipped (v3.1.0–v3.1.2). Requests spine owns status; one timer sweep; side tables data-only. The physical `coord_jobs.status` / `outreach_jobs.status` columns are retained but vestigial (no risky table rebuild) — fully dropping the columns is the only crumb left, and it's optional (they're unread). Nothing here blocks new work.
 
 ### WhatsApp build (parked, return after Path 2 done or deferred items)
 
