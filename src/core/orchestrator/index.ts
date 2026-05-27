@@ -383,7 +383,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // Initial assistant-panel status — fires the instant the message lands so
   // the user sees "On it" instead of Slack's auto-default ("Gathering
   // information…" / "Reviewing findings…") during the ~10s pre-first-tool
-  // reasoning gap (classifyOwnerIntent + initial Sonnet pass). Per-tool
+  // reasoning gap (classifyTurn pre-pass + initial Sonnet pass). Per-tool
   // status text from the pre-tool hook below overwrites this as tools fire.
   // v2.8.5 — `isAssistantThread` gate removed. The registry was added in
   // v2.7.3 as an optimization to avoid noisy failures on non-panel threads,

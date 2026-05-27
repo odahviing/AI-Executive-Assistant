@@ -23,7 +23,7 @@
  *     topic-beat (separate concern, in generateCoda).
  */
 
-import type { OwnerIntentClassification } from './classifyOwnerIntent';
+import type { OwnerIntentClassification } from './classifyTurn';
 import {
   countAssistantInitiationsTodayForPerson,
   getActiveSubjectsForPerson,

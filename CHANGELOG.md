@@ -2,6 +2,26 @@
 
 ---
 
+## 3.1.2 — three-chat bundle: audit pass (12 fixes) + performance pass + second-pass spine fixes
+
+A coordinated wrap of three parallel workstreams over the requester framework, all bundled here (no per-chat version churn).
+
+### Performance — one turn-classifier instead of two
+
+The two per-owner-turn Haiku pre-passes — `classifyOwnerIntent` (social kind/category/sentiment) and `classifyToolScope` (Module G tool scoping) — are merged into a single `classifyTurn` (`src/core/social/classifyTurn.ts`). One LLM round-trip per turn instead of two → cuts the pre-first-tool latency gap. The old `classifyOwnerIntent.ts` / `classifyToolScope.ts` are deleted; all call sites (orchestrator, social `stateMachine`, `skills/registry` tool scoping, `capturePass`, `claimChecker` comments) rewired to the merged classifier.
+
+### Fixed — audit pass (12 bugs across the requester/booking surface)
+
+A separate deep-audit chat found and fixed 12 bugs across the venue subsystem (`skills/venue.ts`, `utils/venueSearch.ts`, `db/venues.ts`), Slack-id resolution (`utils/resolveSlackId.ts`), calendar (`connectors/graph/calendar.ts`), coordination (`connectors/slack/coordinator.ts`), deferred-action replay (`core/requests/deferredActionReplay.ts`), people memory (`db/people.ts`), and meetings (`skills/meetings.ts`, `skills/meetings/ops.ts`). See commit `3cf8bcc` for the per-file diffs; the granular bug list lives in that audit chat's record.
+
+### Fixed — second-pass spine audit (A-1 / B-1 / C-2)
+
+- **A-1** coord approvals the owner never answered expired *silently* — `runExpiry`'s owner-tombstone DM was approval-kind-only; widened to coord (which now sets `owner_dm_channel` at initiation), so the midpoint nag + expiry tombstone reach the owner. Coord-abandon "grace window" wording softened (work-hours deferral can stretch it past +4h).
+- **B-1** `reconcileOrphanedRequests` read the now-vestigial `coord_jobs.status` to decide booked-vs-cancelled → a booked-but-orphaned coord was mislabeled `cancelled` and lost its event id. Now derives booked-ness from the real `external_event_id` and carries `outcome_external_event_id` onto the request.
+- **C-2** two more dead `UPDATE tasks ... type='outreach_expiry'` blocks (`coordinator.ts`, `meetingReschedule.ts`) missed in the first sweep → replaced with clearing the linked request's `next_check` (the spine equivalent of "a reply kills the expiry timer"); fixed the stale `coordinator.ts` file-header describing the deleted task pipeline as current. Added `request_id` to the `OutreachJob` type (the real bridge column).
+
+---
+
 ## 3.1.1 — Path 2 finish: one timer sweep, side tables data-only, + #114/#115 + audit fixes
 
 Completes the requests-spine migration started in 3.1.0 (the "leftover" — same project, not a new line). Two things landed: (1) the timer/status cleanup that 3.1.0 deferred, and (2) the GitHub bug fixes for #114/#115, then a scoped verification audit of the whole requester framework that caught and fixed several real closure bugs in the migration itself.
@@ -31,9 +51,6 @@ A brief surfacing an `awaiting_colleague` approval is now narrated as "relayed t
 - **coord approval reminder/expiry DMs were silently dropped** (coord requests never set `owner_dm_channel`) → now set at initiation, so the midpoint nag + expiry tombstone reach the owner.
 - **synthetic thread-ts** from a failed-placeholder routine could make Slack reject (and drop) coord/approval DMs → `safeThreadTs` guard posts top-level instead.
 - **thread-reply orphan**: a thread reply on an outbound closed followup tracking but left the request open → now closes the linked request.
-- **(second-pass audit, A-1)** coord approvals that the owner never answered expired *silently* — `runExpiry`'s owner-tombstone DM was approval-kind-only; widened to coord (which now has `owner_dm_channel`). Soften the coord-abandon "+4h grace" wording (work-hours deferral can stretch it).
-- **(B-1)** `reconcileOrphanedRequests` read the vestigial `coord_jobs.status` to decide booked-vs-cancelled → a booked-but-orphaned coord was mislabeled `cancelled` and lost its event id. Now derives booked-ness from the real `external_event_id` and carries it onto the request.
-- **(C-2)** two more dead `UPDATE tasks ... type='outreach_expiry'` blocks (coordinator.ts, meetingReschedule.ts) missed in the first sweep → replaced with clearing the linked request's `next_check` (the spine equivalent of "a reply kills the expiry timer"); fixed the stale coordinator.ts file-header describing the deleted task pipeline as current.
 
 ### Cleanup (folded in, no leftover)
 

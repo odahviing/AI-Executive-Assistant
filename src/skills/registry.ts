@@ -105,7 +105,7 @@ const SKILL_MAP = buildSkillMap();
 /**
  * Module G (v2.7.7) — owner-side tool scoping.
  *
- * The orchestrator may pass a scope set (from classifyToolScope) to filter
+ * The orchestrator may pass a scope set (from classifyTurn) to filter
  * which tools Sonnet sees this turn. Tools listed here in ALWAYS_ON ship
  * every turn; every other tool maps to one scope and only ships when that
  * scope (or 'general') is requested.
@@ -115,7 +115,7 @@ const SKILL_MAP = buildSkillMap();
  * not consulted for colleague turns.
  *
  * "general" is the widening scope — pass it (or include it alongside others)
- * to get every owner tool back. Returned by classifyToolScope on uncertainty.
+ * to get every owner tool back. Returned by classifyTurn on uncertainty.
  *
  * Tools not in ALWAYS_ON and not in any scope map (forgotten? misnamed?) are
  * SHIPPED by default — better to over-include than to lose a tool silently.
@@ -184,7 +184,7 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
 
 /**
  * Decide which tools to ship for an owner turn given the scope set from
- * classifyToolScope. Returns the union of always-on tools + tools in any
+ * classifyTurn. Returns the union of always-on tools + tools in any
  * of the requested scopes. 'general' (or no scope) → all tools, no filter.
  */
 function filterToolsByScope(

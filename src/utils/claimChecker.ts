@@ -258,8 +258,8 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
   try {
     const response = await anthropic.messages.create({
       // v3.0.6 — Haiku, matching the rest of the project's fast structured
-      // judges (classifyOwnerIntent, classifyToolScope, securityGate,
-      // capturePass, threadBoundApprovalAutoResolve). Post-B the checker has
+      // judges (classifyTurn, securityGate, capturePass,
+      // threadBoundApprovalAutoResolve). Post-B the checker has
       // ONE job (RULE A: action claim vs tool history) — pattern matching
       // against a structured list, exactly what Haiku is for. The
       // matchingToolAlreadyRan shield in postReply already absorbs

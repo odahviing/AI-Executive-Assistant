@@ -626,7 +626,7 @@ async function runSelfCapture(
 // ── Subject reconciliation (end-of-chat) ─────────────────────────────────────
 //
 // v3.0 follow-up — full LLM-driven subject decisions, deferred from per-turn
-// to end-of-chat. Per-turn classifier (`classifyOwnerIntent`) still detects
+// to end-of-chat. Per-turn classifier (`classifyTurn`) still detects
 // kind/category/sentiment/direction per message and fires engagement signals
 // against existing matched subject IDs, but no longer CREATES rows or
 // records topic beats. Those writes happen here, where Haiku sees:
