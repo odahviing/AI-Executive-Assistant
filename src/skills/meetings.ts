@@ -1411,8 +1411,15 @@ ATTENDEES (v2.9.1):
             id: job.id,
             subject: job.subject,
             topic: job.topic,
-            // v3.1 (Path 2 Stage 7) — status from the linked request phase.
-            status: (getCoordLifecycle(job.id).phase ?? 'coord:in_flight').replace(/^coord:/, ''),
+            // v3.1 (Path 2 Stage 7) — status from the linked request. A booked
+            // coord with a future winning_slot is still surfaced here (see
+            // getActiveCoordJobs), but its phase is frozen at its last
+            // mid-flight value (e.g. waiting_owner) — report 'booked' so the
+            // owner isn't told a done meeting is still waiting on him.
+            status: (() => {
+              const lc = getCoordLifecycle(job.id);
+              return lc.booked ? 'booked' : (lc.phase ?? 'coord:in_flight').replace(/^coord:/, '');
+            })(),
             duration_min: job.duration_min,
             proposed_slots: proposedSlots.map(s =>
               DateTime.fromISO(s).setZone(profile.user.timezone).toFormat('EEE d MMM HH:mm')

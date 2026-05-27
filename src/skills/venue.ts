@@ -364,7 +364,7 @@ Use \`find_venue\` whenever a meeting needs a physical location outside ${firstN
 - \`name_hint\` alone → ${firstName} named a venue ("Coffee Landwer Ness Ziona"). Tool resolves to canonical name + address; if multiple branches match, \`ambiguity_flag\` will be true — ask which one.
 - \`area\` + \`type\` → ${firstName} asked you to find a place ("kosher restaurant in central Tel Aviv"). Tool returns up to 3 options; mix of his catalog favorites and fresh search results.
 
-The result includes \`hidden_count\` — venues at rank 1 (avoid) in this area. When > 0, mention it casually so he can ask to see them: "Three options here. You've also got 2 places ranked low in this area — want to see them?". If he says yes, re-call \`find_venue\` with \`include_hidden=true\`.
+The result includes \`hidden_count\` — matching venues at rank 1 (avoid) that were hidden from this result. When > 0, mention it casually so he can ask to see them: "Three options here. You've also got 2 places ranked low that match — want to see them?". If he says yes, re-call \`find_venue\` with \`include_hidden=true\`.
 
 Rank legend (carried on each option):
 - rank 3 → favorite — present this one first and suggest it

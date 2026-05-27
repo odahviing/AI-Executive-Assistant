@@ -122,14 +122,22 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
     closureReason: 'no_action_in_window',
     closedBy: 'expiry',
   });
-  // Tombstone DM to owner for approval-kind requests.
-  if (row.kind === 'approval' && row.owner_dm_channel) {
+  // Tombstone DM to owner for decisions he never answered. v3.1.1 (audit A-1) —
+  // widened to coord too: a coord reaching awaiting_owner ("book anyway / find a
+  // new time?") arms next_check_handler='expiry' via emitWaitingOwnerApproval and
+  // sets owner_dm_channel at initiation. Pre-fix this was approval-only, so an
+  // unanswered coord decision expired SILENTLY — owner thought it was still being
+  // worked, the meeting never booked, nobody was told.
+  if ((row.kind === 'approval' || row.kind === 'coord') && row.owner_dm_channel) {
     try {
       const conn = getConnection(profile.user.slack_user_id, 'slack');
       if (conn) {
+        const what = row.kind === 'coord'
+          ? `I never heard back on "${row.subject ?? 'that meeting'}" — I've closed it for now. Want me to pick it back up?`
+          : `I never heard back on the approval I asked about. I've closed it, let me know if you want to try again.`;
         await conn.postToChannel(
           row.owner_dm_channel,
-          `I never heard back on the approval I asked about. I've closed it, let me know if you want to try again.`,
+          what,
           { threadTs: row.owner_dm_thread_ts ?? undefined },
         );
       }
@@ -382,10 +390,13 @@ async function runCoordNudge(row: RequestRow, profile: UserProfile): Promise<'re
 
 /**
  * v3.1 (Path 2 Stage 6) — coord abandon, spine-driven (ported from
- * tasks/dispatchers/coordAbandon.ts). If still unanswered 4h after the nudge,
- * close it. updateCoordJob(status='abandoned') runs the full terminal cascade
- * (closes the linked request, cancels the coordination task, writes people
- * memory, cleans sibling outreach). Defers past owner work hours.
+ * tasks/dispatchers/coordAbandon.ts). Fires roughly a grace window after the
+ * nudge (~4h, but it can stretch — if the fire lands outside the owner's work
+ * hours it re-arms for the next workday start, so the effective grace is "≥4h,
+ * next work window"). If the coord is still unanswered when it fires, close it.
+ * updateCoordJob(status='abandoned') runs the full terminal cascade (closes the
+ * linked request, cancels the coordination task, writes people memory, cleans
+ * sibling outreach).
  */
 async function runCoordAbandon(row: RequestRow, profile: UserProfile): Promise<'closed' | 'rearmed' | 'noop'> {
   const job = getCoordJobByRequestId(row.id);
@@ -405,7 +416,7 @@ async function runCoordAbandon(row: RequestRow, profile: UserProfile): Promise<'
   updateCoordJob(job.id, {
     status: 'abandoned',
     abandoned_at: new Date().toISOString(),
-    notes: 'abandoned after 24-hour nudge + 4-hour grace period',
+    notes: 'abandoned after the nudge + grace window (≥4h, deferred past off-hours) with no response',
   });
   // v3.1 (Path 2 fix) — defensively clear THIS row's timer. The cascade above
   // closes the request via getLinkedRequestIdForCoord→closeRequest (which nulls

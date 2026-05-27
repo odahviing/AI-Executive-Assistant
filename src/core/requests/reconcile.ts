@@ -57,9 +57,14 @@ export function reconcileOrphanedRequests(ownerUserId: string): number {
     `).all(ownerUserId, `-${ORPHAN_MIN_AGE_MINUTES} minutes`) as RequestRow[];
 
     for (const req of openCoord) {
+      // v3.1.1 (audit B-1) — read REAL data, not coord_jobs.status (vestigial
+      // post-Stage-7: frozen at 'collecting', and the only writer is
+      // closeRequest's cascade which stamps 'abandoned' for ALL terminal
+      // closures incl. successful bookings). A booked coord is identified by
+      // its external_event_id, never by status.
       const coordRow = db.prepare(
-        `SELECT id, status FROM coord_jobs WHERE request_id = ?`
-      ).get(req.id) as { id: string; status: string } | undefined;
+        `SELECT id, external_event_id FROM coord_jobs WHERE request_id = ?`
+      ).get(req.id) as { id: string; external_event_id: string | null } | undefined;
 
       // (a) coord_job gone entirely → manual delete / never linked. Orphan.
       if (!coordRow) {
@@ -76,18 +81,23 @@ export function reconcileOrphanedRequests(ownerUserId: string): number {
         continue;
       }
 
-      // (b) coord_job already terminal but request still open → a close path
-      // bypassed the cascade. Mirror the terminal state onto the request.
-      if (['booked', 'cancelled', 'abandoned'].includes(coordRow.status)) {
+      // (b) coord_job has a booked Graph event but its request is still open →
+      // a booking bypassed the close cascade. Resolve as BOOKED and carry the
+      // event id onto the request. (cancel/abandon paths all route through
+      // updateCoordJob→closeRequest, so an open request whose coord was
+      // cancelled can't occur here; the only open-request orphan is a booked
+      // bypass or the missing-row case above.)
+      if (coordRow.external_event_id) {
         closeRequest({
           id: req.id,
-          state: coordRow.status === 'booked' ? 'resolved' : 'cancelled',
-          closureReason: `reconcile_coord_${coordRow.status}`,
+          state: 'resolved',
+          closureReason: 'reconcile_coord_booked',
           closedBy: 'system',
+          outcomeExternalEventId: coordRow.external_event_id,
         });
         closed++;
-        logger.info('reconcileOrphanedRequests — closed coord request (coord_job terminal)', {
-          requestId: req.id, coordJobId: coordRow.id, coordStatus: coordRow.status,
+        logger.info('reconcileOrphanedRequests — closed coord request (booked, event id present)', {
+          requestId: req.id, coordJobId: coordRow.id, eventId: coordRow.external_event_id,
         });
       }
     }

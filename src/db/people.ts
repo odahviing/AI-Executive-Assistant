@@ -780,7 +780,7 @@ export function buildSocialContextBlock(slackId: string, timezone: string, assis
   // or cancelled and Sonnet ends up narrating snapshots as if they were
   // current facts. Relational entries only.
   const interactionLog: PersonInteraction[] = (() => {
-    try { return JSON.parse((person as any).interaction_log || '[]'); } catch { return []; }
+    try { return JSON.parse((person as unknown as { interaction_log?: string }).interaction_log || '[]'); } catch { return []; }
   })();
   const relationalInteractions = interactionLog.filter(
     i => i.type !== 'meeting_booked' && i.type !== 'coordination',

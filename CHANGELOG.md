@@ -31,6 +31,9 @@ A brief surfacing an `awaiting_colleague` approval is now narrated as "relayed t
 - **coord approval reminder/expiry DMs were silently dropped** (coord requests never set `owner_dm_channel`) → now set at initiation, so the midpoint nag + expiry tombstone reach the owner.
 - **synthetic thread-ts** from a failed-placeholder routine could make Slack reject (and drop) coord/approval DMs → `safeThreadTs` guard posts top-level instead.
 - **thread-reply orphan**: a thread reply on an outbound closed followup tracking but left the request open → now closes the linked request.
+- **(second-pass audit, A-1)** coord approvals that the owner never answered expired *silently* — `runExpiry`'s owner-tombstone DM was approval-kind-only; widened to coord (which now has `owner_dm_channel`). Soften the coord-abandon "+4h grace" wording (work-hours deferral can stretch it).
+- **(B-1)** `reconcileOrphanedRequests` read the vestigial `coord_jobs.status` to decide booked-vs-cancelled → a booked-but-orphaned coord was mislabeled `cancelled` and lost its event id. Now derives booked-ness from the real `external_event_id` and carries it onto the request.
+- **(C-2)** two more dead `UPDATE tasks ... type='outreach_expiry'` blocks (coordinator.ts, meetingReschedule.ts) missed in the first sweep → replaced with clearing the linked request's `next_check` (the spine equivalent of "a reply kills the expiry timer"); fixed the stale coordinator.ts file-header describing the deleted task pipeline as current.
 
 ### Cleanup (folded in, no leftover)
 

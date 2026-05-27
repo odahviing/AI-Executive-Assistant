@@ -2,8 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
 import { config } from '../../config';
 import { buildSystemPromptParts } from './systemPrompt';
-import { classifyOwnerIntent, type OwnerIntentClassification } from '../social/classifyOwnerIntent';
-import { classifyToolScope } from '../social/classifyToolScope';
+import { classifyTurn, type OwnerIntentClassification } from '../social/classifyTurn';
 import { chooseSocialDirective, formatDirectiveForPromptBlock, type SocialDirective, noDirective } from '../social/stateMachine';
 import { generateSocialCoda } from '../social/generateCoda';
 import { getSkillTools, executeSkillTool } from '../../skills/registry';
@@ -445,40 +444,64 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // Legacy `skills.persona` already auto-migrated to `skills.social` in
   // registry.ts; reading `skills.social` here is the canonical path.
   const socialActive = (profile.skills as any)?.social === true;
-  if (socialActive && userMessage && userMessage.trim().length > 1) {
+
+  // v3.0.6 — merged per-turn classifier. The social-intent pre-pass (was
+  // classifyOwnerIntent, Sonnet) and the tool-scope pre-pass (was
+  // classifyToolScope, Haiku) were two serial LLM calls (~2.9s). They
+  // classify the SAME message with the SAME recent-context, so they're now
+  // one Haiku call (~1s) via classifyTurn. Each half is gated independently:
+  //   - needIntent: social skill on + message has substance (owner OR colleague)
+  //   - needScopes: intent_aware_tools on + owner turn (colleagues get the
+  //                 static allowlist, so scopes are unused for them)
+  // Result.scope feeds getSkillTools below (toolScopes); result.intent drives
+  // the social directive. Both fail open (intent→other, scopes→general).
+  let toolScopes: string[] | undefined;
+  const needIntent = socialActive && !!userMessage && userMessage.trim().length > 1;
+  const needScopes = profile.behavior?.intent_aware_tools === true
+    && isOwnerTurn
+    && !!userMessage
+    && userMessage.trim().length > 0;
+  if (needIntent || needScopes) {
     try {
-      // Give the classifier the last few turns so it can detect "Maelle just
-      // asked a social question and they answered" (→ conversation_state=open)
-      // vs "Maelle's last question went unanswered, now they're closing out"
-      // (→ conversation_state=closing).
+      // Last few turns of context so the classifier can read conversation
+      // state (e.g. "Maelle asked a social question and they answered" →
+      // open vs "her question went unanswered, now closing out" → closing).
       const recentContext = conversationHistory
         .slice(-4)
         .map(m => `${m.role === 'user' ? (input.senderName ?? profile.user.name.split(' ')[0]) : profile.assistant.name}: ${m.content.slice(0, 280)}`)
         .join('\n');
-      socialClassification = await classifyOwnerIntent({
+      const turnResult = await classifyTurn({
         anthropic,
-        ownerMessage: userMessage,
+        message: userMessage,
         profile,
+        needIntent,
+        needScopes,
         senderRole: turnSenderRole,
         senderName: input.senderName,
         recentContext: recentContext || undefined,
       });
 
-      // v3.0 follow-up — subject decisions + engagement signals + topic-beat
-      // recording moved to end-of-chat (`runSubjectReconciliation` in
-      // src/memory/capturePass.ts). Per-turn classifier still produces
-      // kind/category/sentiment/direction/topic_label which drive the
-      // social directive (engage/celebrate/etc.) for THIS turn — no
-      // subject-row writes happen per turn anymore.
-      socialDirective = chooseSocialDirective({
-        personSlackId: turnPersonSlackId,
-        classification: socialClassification,
-        ownerTimezone: profile.user.timezone,
-      });
+      if (needScopes) toolScopes = turnResult.scope.scopes;
+
+      if (needIntent) {
+        socialClassification = turnResult.intent;
+        // v3.0 follow-up — subject decisions + engagement signals + topic-beat
+        // recording moved to end-of-chat (`runSubjectReconciliation` in
+        // src/memory/capturePass.ts). Per-turn classifier still produces
+        // kind/category/sentiment/direction/topic_label which drive the
+        // social directive (engage/celebrate/etc.) for THIS turn — no
+        // subject-row writes happen per turn anymore.
+        socialDirective = chooseSocialDirective({
+          personSlackId: turnPersonSlackId,
+          classification: socialClassification,
+          ownerTimezone: profile.user.timezone,
+        });
+      }
     } catch (err) {
-      logger.warn('Social pre-pass threw — continuing without directive', { err: String(err).slice(0, 300) });
+      logger.warn('classifyTurn pre-pass threw — continuing without directive / scopes', { err: String(err).slice(0, 300) });
       socialDirective = noDirective();
       socialClassification = null;
+      toolScopes = undefined;  // → getSkillTools ships all tools (safe widen)
     }
   }
 
@@ -720,35 +743,12 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       ]
     : [{ type: 'text', text: systemBlocksDynamic } as Anthropic.TextBlockParam];
 
-  // v2.7.7 (Module G) — intent-aware tool scoping. Gated on
-  // profile.behavior.intent_aware_tools. Owner turns only; colleagues already
-  // use the static COLLEAGUE_ALLOWED_TOOLS allowlist. Fails open: any error
-  // returns undefined scopes → getSkillTools ships every tool as before.
-  let toolScopes: string[] | undefined;
-  if (
-    profile.behavior?.intent_aware_tools === true
-    && isOwnerTurn
-    && userMessage
-    && userMessage.trim().length > 0
-  ) {
-    try {
-      const scopeRecentContext = conversationHistory
-        .slice(-4)
-        .map(m => `${m.role === 'user' ? (input.senderName ?? profile.user.name.split(' ')[0]) : profile.assistant.name}: ${m.content.slice(0, 280)}`)
-        .join('\n');
-      const scopeResult = await classifyToolScope({
-        anthropic,
-        ownerMessage: userMessage,
-        profile,
-        recentContext: scopeRecentContext || undefined,
-      });
-      toolScopes = scopeResult.scopes;
-    } catch (err) {
-      logger.warn('classifyToolScope wrap threw — shipping all tools', {
-        err: String(err).slice(0, 200),
-      });
-    }
-  }
+  // v2.7.7 (Module G) — intent-aware tool scoping. `toolScopes` was resolved
+  // in the v3.0.6 merged classifier pre-pass above (classifyTurn), gated on
+  // profile.behavior.intent_aware_tools + owner turn. Colleagues use the
+  // static COLLEAGUE_ALLOWED_TOOLS allowlist (toolScopes stays undefined).
+  // Fails open: any classifier error left toolScopes undefined → getSkillTools
+  // ships every tool as before.
 
   // Tools are collected from active skills — filtered by sender role and
   // (when Module G is on) by the classifier-picked scope set.
@@ -1881,6 +1881,16 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         replyText: userMessage,
         sentiment: socialClassification.social.sentiment,
       });
+      // Bump last_social_at on a genuine colleague social reply. The 48h coda
+      // rank-check (socialPingRankCheck) measures engagement as
+      // `last_social_at > coda_at`, but that field is otherwise only moved by
+      // the note_about_* tools — a plain warm reply ("thanks, you too!") left
+      // it frozen at coda-send time, so engaged colleagues were scored
+      // "no response" and ranked DOWN. 'person' bumps last_social_at only
+      // (NOT last_initiated_at), so the daily-ping cadence gate is unaffected.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { recordSocialMoment } = require('../../db') as typeof import('../../db');
+      recordSocialMoment(input.userId, 'person');
     } catch (err) {
       logger.warn('In-conversation rank adjustment threw — non-fatal', { err: String(err).slice(0, 300) });
     }

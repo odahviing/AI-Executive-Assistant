@@ -25,6 +25,7 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import type { OutreachJob } from '../db/jobs';
 import { updateOutreachJob } from '../db/jobs';
+import { updateRequest } from '../db/requests';
 import { getDb } from '../db';
 import { updateMeeting, findAvailableSlots } from '../connectors/graph/calendar';
 import { appendToConversation } from '../db';
@@ -165,11 +166,11 @@ export async function handleRescheduleReply(
     counter: decision.counter_start,
   });
 
-  // Shared: cancel any outreach_expiry task for this outreach (reply arrived)
-  getDb().prepare(
-    `UPDATE tasks SET status = 'cancelled', updated_at = datetime('now')
-     WHERE skill_ref = ? AND type = 'outreach_expiry' AND status = 'new'`,
-  ).run(job.id);
+  // v3.1.1 — reply arrived → kill the expiry timer. Path 2 moved it off the
+  // deleted `outreach_expiry` TASK onto the linked request's next_check.
+  if (job.request_id) {
+    updateRequest(job.request_id, { nextCheckAt: null, nextCheckHandler: null });
+  }
 
   const conversation: Array<{ role: 'maelle' | 'colleague'; text: string }> =
     job.conversation_json ? JSON.parse(job.conversation_json) : [];

@@ -130,7 +130,6 @@ export async function searchVenueCandidates(params: {
   type?: string;
   typeTags?: string[];
   partySize?: number;
-  language?: 'en' | 'he';
   maxResults?: number;
   /**
    * Optional named-venue query. When set, dominates the search string so
@@ -297,7 +296,6 @@ export async function resolveVenueByName(
       nameQuery: nameHint,
       area: areaHint,
       maxResults,
-      language,
     });
     if (candidates.length > 0) {
       return candidates.map(c => ({

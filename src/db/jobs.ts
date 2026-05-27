@@ -117,6 +117,8 @@ export interface OutreachJob {
     | 'emoji_ack'
     | 'auto_expired_24h'
     | 'pipeline_consumed';
+  // v2.7.1 — bridge FK to the paired requests-spine row (the lifecycle owner).
+  request_id?: string | null;
 }
 
 export function createOutreachJob(

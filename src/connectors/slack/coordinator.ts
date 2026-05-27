@@ -12,9 +12,11 @@
  *   - sendCoordinationDM / handleCoordinationReply / confirmAndBook / handleDecline:
  *     single-colleague `coordination_jobs` flow (table dropped)
  *   - checkExpiredCoordinations + sendScheduledOutreach: replaced by the
- *     task-runner pipeline — outreach scheduled-send and expiry are now
- *     `type='outreach_send'` / `type='outreach_expiry'` tasks processed by
- *     `src/tasks/runner.ts`. Same goes for coord 24h nudge + abandon.
+ *     requests-spine timer. v3.1 (Path 2): outreach scheduled-send and expiry,
+ *     and coord nudge/abandon, are NOT tasks — they live on the request row as
+ *     `next_check_at` / `next_check_handler` and are swept by
+ *     `core/requests/runner.ts:sweepDueRequests`. The old `type='outreach_send'`
+ *     / `type='outreach_expiry'` task types were deleted.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -23,6 +25,7 @@ import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
+import { updateRequest } from '../../db/requests';
 import {
   updateOutreachJob,
   getOutreachJobsByColleague,
@@ -331,13 +334,14 @@ export async function handleOutreachReply(
     assistantName: params.profile.assistant.name,
   });
 
-  // v1.6 — a reply of any kind kills the outreach_expiry task for this outreach.
-  // Done inline rather than via a lifecycle observer so cancellation is atomic
-  // with the reply processing, never stale.
-  getDb().prepare(
-    `UPDATE tasks SET status = 'cancelled', updated_at = datetime('now')
-     WHERE skill_ref = ? AND type = 'outreach_expiry' AND status = 'new'`
-  ).run(job.id);
+  // v3.1.1 — a reply of any kind kills the expiry timer for this outreach.
+  // Path 2 moved that timer off the (deleted) `outreach_expiry` TASK onto the
+  // linked request's next_check; clear it here so an actively-replying colleague
+  // is never falsely marked no_response. Closing branches also close the request
+  // (which clears next_check); this covers the 'continue' branch that keeps it open.
+  if (job.request_id) {
+    updateRequest(job.request_id, { nextCheckAt: null, nextCheckHandler: null });
+  }
 
   if (decision.action === 'continue') {
     // v2.2.4 (bug 6) — preserve thread context. v2.1.5 added dm_message_ts +

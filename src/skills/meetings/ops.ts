@@ -1765,6 +1765,14 @@ export class SchedulingSkill {
                   // to create_approval with the rule name (RULE-NAMING).
                   category: args.category as string | undefined,
                   diagnosticsOut: diagnostics,
+                  // v3.0.6 — this is a single-slot yes/no validation. The
+                  // window is exactly [start, end], so findAvailableSlots
+                  // returns ≤1 slot → <3 → auto-expand would re-query the
+                  // calendar 2-3 more times at widening ranges (~5-6s on
+                  // every colleague booking), and the expanded slots are
+                  // discarded anyway (matches checks ±60s of the requested
+                  // start). Disable it.
+                  autoExpand: false,
                 });
               }
               const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
@@ -2708,6 +2716,11 @@ export class SchedulingSkill {
                     // category is set so day/week counts are accurate.
                     category: args.category as string | undefined,
                     diagnosticsOut: diagnostics,
+                    // v3.0.6 — single-slot validation; see parallel comment
+                    // in create_meeting Guard B. Auto-expand would re-query
+                    // the calendar at widening ranges for slots that get
+                    // discarded (matches checks ±60s of newStart). Disable.
+                    autoExpand: false,
                   });
                 }
                 const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);

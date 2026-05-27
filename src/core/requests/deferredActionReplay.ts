@@ -36,7 +36,12 @@ export interface RunDeferredActionInput {
 }
 
 /**
- * Replay the deferred action. Best-effort; failures log but don't throw.
+ * Replay the deferred action. THROWS on failure (the tool threw, OR returned an
+ * `{ error }` / `{ success: false }` / `{ ok: false }` sentinel) so the resolver
+ * keeps the request in `awaiting_owner` for retry — see the file header. Do NOT
+ * wrap the throw in a swallow: that resurrects the phantom-confirmed-booking bug
+ * (owner approves → replay fails silently → requester told "invite incoming" →
+ * nothing booked).
  */
 export async function runDeferredAction(input: RunDeferredActionInput): Promise<void> {
   const { ownerUserId, profile, tool, args, requestId } = input;
@@ -78,13 +83,11 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
       // SchedulingSkill is the direct-ops home for create_meeting / move_meeting /
       // delete_meeting / update_meeting. v2.9.1 added update_meeting as a
       // replayable on_approve target (attendee changes via approval flow).
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      skill = new (m as unknown as { SchedulingSkill: new () => any }).SchedulingSkill();
+      skill = new (m as unknown as { SchedulingSkill: new () => unknown }).SchedulingSkill() as typeof skill;
     } else if (tool === 'book_floating_block') {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const m = require('../../skills/calendarHealth') as typeof import('../../skills/calendarHealth');
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      skill = new (m as unknown as { CalendarHealthSkill: new () => any }).CalendarHealthSkill();
+      skill = new (m as unknown as { CalendarHealthSkill: new () => unknown }).CalendarHealthSkill() as typeof skill;
     } else {
       logger.warn('runDeferredAction — unsupported tool, skipping replay', { requestId, tool });
       return;

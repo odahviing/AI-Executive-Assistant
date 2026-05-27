@@ -275,14 +275,20 @@ export function findVenuesByCriteria(params: {
       const branch = (v.branch_name ?? '').toLowerCase();
       // Tier-1: exact name OR exact branch_name match.
       const exact = name === nameHintLower || branch === nameHintLower;
-      // Tier-2: startsWith on either field.
+      // Tier-2: startsWith on either field (owner typed the leading words).
       const startsWith = name.startsWith(nameHintLower) || branch.startsWith(nameHintLower);
-      // Substring fallback dropped — pre-fix "coffee" as a hint matched
-      // BOTH "Coffee Bar" AND "Coffee Landwer" (any venue with "coffee"
-      // anywhere in name) → false-positive "did you mean…" prompts.
-      // Exact-then-startsWith narrows the false-positive surface; a
-      // multi-word venue name still matches by typing its leading words.
-      if (!exact && !startsWith) return false;
+      // Tier-3: reverse-prefix — owner APPENDED a city/branch suffix to a
+      // known venue name ("Coffee Landwer Ness Ziona" → saved "Coffee
+      // Landwer"). Tier-2 misses this because the saved name is SHORTER than
+      // the hint. Compare against the head (before first comma — save-on-book
+      // stores composite "Name, Addr, City") and gate on ≥2 tokens + a word
+      // boundary so a 1-word entry ("Aroma") doesn't greedily match every
+      // "Aroma Espresso Bar …" string (the false-positive class the dropped
+      // substring fallback caused).
+      const nameHead = name.split(',')[0].trim();
+      const reversePrefix =
+        nameHead.split(/\s+/).length >= 2 && nameHintLower.startsWith(nameHead + ' ');
+      if (!exact && !startsWith && !reversePrefix) return false;
     }
     return true;
   });

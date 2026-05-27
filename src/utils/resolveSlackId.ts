@@ -73,10 +73,11 @@ export function resolveSlackId(
   // v2.6.5 — when no `name` was passed but `rawId` itself looks like a name
   // (Sonnet sometimes packs the colleague's name into the slack_id slot and
   // forgets the requester_name field), fall back to using rawId as the
-  // search query. Concretely fixes the create_approval requester loop-close:
-  // when a colleague's approval lands without `requester_slack_id` resolved,
-  // the resolver short-circuits and never DMs them the outcome. With this
-  // fallback the same name-shaped rawId resolves to the real slack_id and
+  // search query. Concretely fixes the colleague-approval requester loop-close
+  // (now spine-based: closeMeetingArtifacts / resolver notify the requester off
+  // the request's `requester_slack_id`): when an approval lands without that
+  // id resolved, the loop short-circuits and never DMs them the outcome. With
+  // this fallback the same name-shaped rawId resolves to the real slack_id and
   // the loop-close fires correctly.
   const lookupName = (name && name.trim().length > 0)
     ? name.trim()

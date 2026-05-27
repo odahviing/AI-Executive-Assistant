@@ -937,8 +937,16 @@ export async function findAvailableSlots(params: {
       return native;
     };
 
-    const minToStr = (m: number) =>
-      `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    // Clamp 1440 → 1439 ("23:59") before formatting. parseRange canonicalizes
+    // a 23:59-ending work window to endMin=1440; an un-clamped "24:00" string
+    // is parsed by DateTime.fromISO as NEXT-day 00:00 downstream
+    // (computeDayQualityFreeMinutes), over-counting the day's free time by a
+    // minute on split-shift/night-shift days. Mirrors formatMinuteOfDay in
+    // utils/workHours (kept inline here to avoid a connector→utils import).
+    const minToStr = (m: number) => {
+      const c = m >= 1440 ? 1439 : m;
+      return `${String(Math.floor(c / 60)).padStart(2, '0')}:${String(c % 60).padStart(2, '0')}`;
+    };
 
     // Pre-compute per-day quality free time (thinking-time check).
     // v2.8.1 — multi-window aware: sum free-minutes across all work windows

@@ -120,7 +120,7 @@ What's NOT a learnable structured fact (skip these):
 - Speculation Maelle didn't actually observe in the chat
 
 ALSO emit:
-- interaction_summary: a one-sentence headline of what this chat was about (e.g. "Asked for 30-min meeting with Idan next week, settled on Thursday 14:00 her time"). ALWAYS emit this when the chat had any substantive content.
+- interaction_summary: a one-sentence headline of what this chat was about (e.g. "Asked for 30-min meeting with the owner next week, settled on Thursday 14:00 her time"). ALWAYS emit this when the chat had any substantive content.
 - durable_note: optional — anything else worth remembering that doesn't fit a structured field. Use sparingly.
 
 IDEMPOTENCY: if the chat re-fires through the capture pass and you see the facts already in the existing profile, RETURN AN EMPTY OBJECT. The system relies on you producing no-ops on re-runs.
