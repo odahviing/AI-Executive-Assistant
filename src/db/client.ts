@@ -839,7 +839,7 @@ function initSchema(db: Database.Database): void {
           )
       WHERE target_slack_id IS NULL
         AND skill_ref IS NOT NULL
-        AND type IN ('outreach', 'outreach_send', 'outreach_expiry')
+        AND type = 'outreach'
     `).run();
     if (updated.changes > 0) {
       logger.info('Backfilled tasks.target_slack_id from outreach_jobs', { rows: updated.changes });

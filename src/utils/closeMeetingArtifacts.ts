@@ -106,16 +106,11 @@ export function closeMeetingArtifacts(params: {
             updated_at = datetime('now')
         WHERE id = @id
       `);
-      const cancelApprovalTasksStmt = db.prepare(`
-        UPDATE tasks
-        SET status = 'cancelled', updated_at = datetime('now')
-        WHERE type IN ('approval_expiry', 'approval_reminder')
-          AND skill_ref = @approval_id
-          AND status IN ('new','scheduled','in_progress','pending_owner')
-      `);
+      // v3.1.1 — removed the approval_expiry/approval_reminder TASK cancel:
+      // those task types no longer exist (approval timers are spine
+      // next_check_handlers now, cleared by closeRequest). Dead SQL gone.
       for (const approvalId of matchingApprovalIds) {
         resolveStmt.run({ id: approvalId, decision_json: decisionJson });
-        cancelApprovalTasksStmt.run({ approval_id: approvalId });
         result.approvalsResolved++;
       }
     }
@@ -136,21 +131,18 @@ export function closeMeetingArtifacts(params: {
     }
 
     if (matchingOutreachIds.length > 0) {
-      const closeOutreachStmt = db.prepare(`
-        UPDATE outreach_jobs
-        SET status = 'done', updated_at = datetime('now')
-        WHERE id = ?
-      `);
-      const cancelOutreachTasksStmt = db.prepare(`
-        UPDATE tasks
-        SET status = 'cancelled', updated_at = datetime('now')
-        WHERE type IN ('outreach_expiry', 'outreach_decision')
-          AND skill_ref = ?
-          AND status IN ('new','scheduled','in_progress','pending_owner','pending_colleague')
-      `);
+      // v3.1.1 — close the linked REQUEST for each matching meeting_reschedule
+      // outreach (the request owns lifecycle now), and drop the dead
+      // outreach_expiry/outreach_decision TASK cancel (those task types no
+      // longer exist — outreach timing is on the spine). The vestigial
+      // outreach_jobs.status write is gone too.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getLinkedRequestIdForOutreach } = require('../db/jobs') as typeof import('../db/jobs');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { closeRequest } = require('../core/requests/closeRequest') as typeof import('../core/requests/closeRequest');
       for (const outreachId of matchingOutreachIds) {
-        closeOutreachStmt.run(outreachId);
-        cancelOutreachTasksStmt.run(outreachId);
+        const reqId = getLinkedRequestIdForOutreach(outreachId);
+        if (reqId) closeRequest({ id: reqId, state: 'resolved', closureReason: `meeting_${params.reason}`, closedBy: 'meeting_cascade' });
         result.outreachClosed++;
       }
     }
@@ -324,7 +316,13 @@ export function closeMeetingArtifacts(params: {
                 });
                 // Stamp so the resolver's notify (which runs right after the
                 // replay) skips its own DM. The resolver still fires the owner
-                // shadow off this stamp (115a).
+                // shadow off this stamp (115a). v3.1.1 — this stamp is
+                // DELIBERATELY synchronous (not inside the send's .then): the
+                // resolver fresh-reads requester_notified_at immediately after
+                // the replay returns, so an async stamp would race and let the
+                // resolver double-DM. The DM is fire-and-forget; if Slack
+                // rejects it the requester still gets the calendar invite, and
+                // the resolver path (the common case) awaits + stamps-on-ok.
                 updateRequest(r.id, { requesterNotifiedAt: new Date().toISOString() });
                 logger.info('closeMeetingArtifacts — fired close-loop DM to colleague-requester', {
                   requestId: r.id, requesterSlackId: r.requester_slack_id, subject: subjectText,

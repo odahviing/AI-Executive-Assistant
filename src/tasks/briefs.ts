@@ -619,7 +619,7 @@ export async function sendMorningBriefing(
     // requests have no external party to notify. Fire-and-forget before close.
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getRequest, updateRequest } = require('../db/requests') as typeof import('../db/requests');
+      const { getRequest } = require('../db/requests') as typeof import('../db/requests');
       const r = getRequest(id);
       // v3.1 — honor the requester_notified_at dedup contract (same as the
       // resolver + closeMeetingArtifacts paths) so we never double-DM a
@@ -635,7 +635,10 @@ export async function sendMorningBriefing(
         } else {
           void conn.sendDirect(r.requester_slack_id, body).catch(() => {});
         }
-        updateRequest(id, { requesterNotifiedAt: new Date().toISOString() });
+        // v3.1.1 — no requester_notified_at stamp here: closeRequest below makes
+        // this row terminal, so nothing ever re-reads the stamp (it's moot). The
+        // `!r.requester_notified_at` guard above still prevents a double-DM if an
+        // earlier path already notified this request.
         logger.info('briefs — requester loop-close on stale auto-park', { requestId: id, requesterSlackId: r.requester_slack_id });
       }
     } catch (err) {

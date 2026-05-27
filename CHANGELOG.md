@@ -30,6 +30,11 @@ A brief surfacing an `awaiting_colleague` approval is now narrated as "relayed t
 - **runCoordAbandon** could 5-min-spam the owner if the cascade no-oped → defensive timer clear.
 - **coord approval reminder/expiry DMs were silently dropped** (coord requests never set `owner_dm_channel`) → now set at initiation, so the midpoint nag + expiry tombstone reach the owner.
 - **synthetic thread-ts** from a failed-placeholder routine could make Slack reject (and drop) coord/approval DMs → `safeThreadTs` guard posts top-level instead.
+- **thread-reply orphan**: a thread reply on an outbound closed followup tracking but left the request open → now closes the linked request.
+
+### Cleanup (folded in, no leftover)
+
+- `closeMeetingArtifacts`'s requester stamp documented as deliberately synchronous (the resolver fresh-reads it to dedup — an async stamp would race and double-DM); the rare fire-and-forget DM failure is benign because the calendar invite still goes out. Removed the moot `requester_notified_at` stamp in the brief auto-park (the request is closed on the next line; nothing re-reads it). Meeting-reschedule outreach cascade now closes the linked request instead of writing a vestigial status column. Deleted dead `UPDATE tasks WHERE type IN (...)` clauses targeting the removed timer task types (approval_expiry/reminder, outreach_expiry/decision) and trimmed the `target_slack_id` backfill to the surviving `outreach` type.
 
 ### Migration
 
