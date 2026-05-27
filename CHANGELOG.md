@@ -36,7 +36,7 @@ When the brief auto-cancels a colleague-INITIATED request the owner ignored 3× 
 
 ### Deferred (live-verified next change)
 
-Stage 6 (collapse the legacy timer dispatchers into the single `sweepDueRequests` spine sweep — currently built but unwired; legacy dispatchers still do timing) and Stage 7 (strip the now-redundant status columns from the side tables). Owner direction: cut these over with live verification rather than paper-only, since they touch the riskiest subsystem. No happy path depends on the unwired sweep; timeout paths use the working legacy dispatchers + the (now requester-notifying) brief auto-park backstop.
+Stage 6 (retire the now-redundant legacy timer dispatchers) and Stage 7 (strip the now-redundant status columns from the side tables). **Correction:** `sweepDueRequests` IS wired — it runs every tick via `tasks/runner.ts:39` inside `runDueTasks`. Outreach + approval timers already fire through the spine; the legacy `dispatchOutreachExpiry`/`Send` guard on `request_id` and defer (no double-fire). The only timing still on legacy task rows is coord `coord_nudge`/`coord_abandon` (the spine coord handlers are dormant stubs). So Stage 6 is "delete the guarded-redundant legacy outreach dispatchers + move coord nudge/abandon onto the spine (or keep them — they work)", not "wire the sweep." Owner direction: finish it live-verified.
 
 ### Migration
 

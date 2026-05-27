@@ -8,8 +8,8 @@ The status backbone is now the `requests` table; side tables (`coord_jobs`/`outr
 
 **NEXT-WORK SEQUENCE (owner direction 2026-05-27), in order:**
 1. **Bug wave** — after this work day, a normal bug-bash pass (the `bugs` / `github` skill flow). Real-day-observed issues first.
-2. **Confirm Maelle is running clean on v3.1** — owner restarts `npm run dev` (PM2 off); verify it boots, the `requests.phase` migration applies, and `reconcileOrphanedRequests` closes the known ghosts (`i3kb2`/`ti275` coord pair, stale Eli approval) on the first background tick. This is the gate before touching the timer subsystem.
-3. **Stage 6 (live-verified)** — collapse the legacy timer dispatchers into the single `sweepDueRequests` spine sweep (built at `core/requests/runner.ts` but NOT wired into `core/background.ts`). Implement the stubbed `coord_nudge`/`coord_abandon` spine handlers, wire the sweep, retire legacy dispatchers (outreach_expiry/outreach_decision/coord_nudge/coord_abandon/send_scheduled_outreach) in lockstep to avoid double-fire. Verify LIVE, not paper-only — riskiest subsystem.
+2. **Confirm Maelle is running clean on v3.1** — owner restarts `npm run dev` (PM2 off); verify it boots, the `requests.phase` migration applies, and `reconcileOrphanedRequests` closes the known ghosts (`i3kb2`/`ti275` coord pair, stale Eli approval) on the first background tick.
+3. **Stage 6 (live-verified) — SMALLER than originally framed.** `sweepDueRequests` is ALREADY wired (`tasks/runner.ts:39`, runs each tick inside `runDueTasks`). Outreach + approval timers already fire via the spine; legacy `dispatchOutreachExpiry`/`Send` guard on `request_id` and defer (no double-fire). Remaining: (a) delete the now-redundant guarded legacy outreach dispatchers, (b) move coord `coord_nudge`/`coord_abandon` onto the spine (implement the dormant stubs in `core/requests/runner.ts`) OR keep them on legacy since they work. Verify LIVE.
 4. **Stage 7** — strip the now-redundant status columns from the side tables + delete dead status-mutation helpers. Tables keep their DATA + `request_id` link.
 
 ## What just shipped (3.0.4 → 3.0.7)

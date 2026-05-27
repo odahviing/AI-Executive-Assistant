@@ -71,10 +71,17 @@ brief reads that one row. Whack-a-mole ends.
   `origin_thread_ts`, `owner_dm_channel`, `owner_dm_thread_ts`, `next_check_at`,
   `next_check_handler`, `surfaced_count`, `informed`, `details_json`, `outcome_json`
   all exist. Missing: a `phase` column.
-- **Timers are tasks today.** `coord_nudge`, `coord_abandon`, `outreach_send`,
-  `outreach_expiry`, `outreach_decision`, `approval_expiry`, `approval_reminder` are
-  `tasks` rows with dispatchers. The spine already has `next_check_at` +
-  `next_check_handler` — designed to absorb these but not yet wired as the driver.
+- **Timers: spine sweep IS wired (corrected 2026-05-27).** `sweepDueRequests`
+  (`core/requests/runner.ts`) runs every tick via `tasks/runner.ts:39` inside
+  `runDueTasks`. Outreach (`send_scheduled_outreach`/`outreach_expiry`) + approval
+  (`approval_reminder`/`expiry`) timers already fire through the spine's
+  `next_check_at`/`next_check_handler`; the legacy `dispatchOutreachExpiry`/`Send`
+  guard on `request_id` and defer to the runner (no double-fire). The ONLY timing
+  still on legacy task rows is coord `coord_nudge`/`coord_abandon` — the spine's
+  coord handlers (runner.ts:92-103) are dormant stubs (no coord request sets that
+  handler). So Stage 6 = delete the guarded-redundant legacy outreach dispatchers +
+  move coord nudge/abandon onto the spine (or leave them — they work), NOT "wire
+  the sweep."
 
 So the work is: **invert ownership, fold data into the request, collapse the timer
 tasks into one spine sweep, then drop the legacy tables.**

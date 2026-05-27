@@ -14,11 +14,12 @@ STRICT paper exercise — file reads + reasoning only, no live DMs / DB writes.
 Status source of truth post-v3.1: the `requests` spine. Coord/outreach/approval
 side tables hold DATA; the request owns lifecycle.
 
-> Deferred caveat (owner-approved): the single spine timer sweep
-> (`sweepDueRequests`) is built but unwired (Stage 6, next change). Spine-timer
-> *expiry* therefore relies on working backstops noted per-scenario: legacy task
-> dispatchers (outreach_expiry, coord_nudge/abandon) + the brief surfaced-threshold
-> auto-park (now requester-notifying). No happy path depends on the unwired sweep.
+> Timer note (corrected 2026-05-27): the spine sweep `sweepDueRequests` IS wired
+> (`tasks/runner.ts:39`, runs each tick inside `runDueTasks`). Outreach + approval
+> timers fire through the spine; legacy outreach dispatchers guard on `request_id`
+> and defer (no double-fire). Only coord `coord_nudge`/`coord_abandon` still run on
+> legacy task dispatchers (those work). Stage 6 (deferred) = delete the redundant
+> guarded legacy outreach dispatchers + move coord nudge/abandon onto the spine.
 
 ---
 
