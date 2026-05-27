@@ -6,9 +6,11 @@ We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.1
 
 The status backbone is now the `requests` table; side tables (`coord_jobs`/`outreach_jobs`/`approvals`) hold DATA only. Killed the coord double-request ghost at root, added `requests.phase`, reconciliation + retention sweep, brief-auto-park requester notify, coord-preferred reply routing. Full plan: `.claude/PATH_2_REQUESTS_SPINE.md`. 11-scenario paper trace (0 errors): `.claude/PATH_2_PAPER_TRACES.md`.
 
-**IMMEDIATE NEXT TASK (owner-approved deferral): Path 2 Stages 6 + 7, live-verified.**
-- **Stage 6** — collapse the legacy timer dispatchers into the single `sweepDueRequests` spine sweep (built at `core/requests/runner.ts` but NOT wired into `core/background.ts`). Implement the stubbed `coord_nudge`/`coord_abandon` spine handlers, wire the sweep, retire legacy dispatchers (outreach_expiry/outreach_decision/coord_nudge/coord_abandon/send_scheduled_outreach) in lockstep to avoid double-fire. Verify LIVE (not paper-only) — this is the riskiest subsystem.
-- **Stage 7** — strip the now-redundant status columns from the side tables + delete dead status-mutation helpers. Tables keep their DATA + `request_id` link.
+**NEXT-WORK SEQUENCE (owner direction 2026-05-27), in order:**
+1. **Bug wave** — after this work day, a normal bug-bash pass (the `bugs` / `github` skill flow). Real-day-observed issues first.
+2. **Confirm Maelle is running clean on v3.1** — owner restarts `npm run dev` (PM2 off); verify it boots, the `requests.phase` migration applies, and `reconcileOrphanedRequests` closes the known ghosts (`i3kb2`/`ti275` coord pair, stale Eli approval) on the first background tick. This is the gate before touching the timer subsystem.
+3. **Stage 6 (live-verified)** — collapse the legacy timer dispatchers into the single `sweepDueRequests` spine sweep (built at `core/requests/runner.ts` but NOT wired into `core/background.ts`). Implement the stubbed `coord_nudge`/`coord_abandon` spine handlers, wire the sweep, retire legacy dispatchers (outreach_expiry/outreach_decision/coord_nudge/coord_abandon/send_scheduled_outreach) in lockstep to avoid double-fire. Verify LIVE, not paper-only — riskiest subsystem.
+4. **Stage 7** — strip the now-redundant status columns from the side tables + delete dead status-mutation helpers. Tables keep their DATA + `request_id` link.
 
 ## What just shipped (3.0.4 → 3.0.7)
 
