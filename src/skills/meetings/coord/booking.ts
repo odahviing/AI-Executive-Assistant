@@ -21,6 +21,7 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../../../config/userProfile';
 import {
   getCoordJob,
+  getCoordLifecycle,
   updateCoordJob,
   cancelOrphanCoordJobs,
   logEvent,
@@ -55,8 +56,11 @@ export async function forceBookCoordinationByOwner(
   const { synchronous = false } = options;
   const job = getCoordJob(jobId);
   if (!job) return { ok: false, reason: `coord job ${jobId} not found` };
-  if (job.status === 'booked' || job.status === 'cancelled') {
-    return { ok: false, reason: `coord job ${jobId} already ${job.status}`, status: job.status, subject: job.subject };
+  // v3.1 (Path 2 Stage 7) — terminal check reads the linked request, not the
+  // retired coord_jobs.status column.
+  const lifecycle = getCoordLifecycle(jobId);
+  if (lifecycle.terminal) {
+    return { ok: false, reason: `coord job ${jobId} already ${lifecycle.requestState}`, status: lifecycle.requestState ?? undefined, subject: job.subject };
   }
 
   const participants = JSON.parse(job.participants) as CoordParticipant[];
@@ -108,24 +112,28 @@ export async function forceBookCoordinationByOwner(
 
   const after = getCoordJob(jobId);
   if (!after) return { ok: false, reason: 'coord job disappeared after booking', subject: job.subject, slot: finalSlot };
-  if (after.status === 'booked') {
+  // v3.1 (Path 2 Stage 7) — success = the linked request resolved (the terminal
+  // cascade fired via updateCoordJob({status:'booked'}) inside bookCoordination).
+  const afterLc = getCoordLifecycle(jobId);
+  if (afterLc.booked) {
     return { ok: true, status: 'booked', subject: after.subject, slot: finalSlot };
   }
   // Booking didn't complete. Clear the phantom `winning_slot` we pre-stamped
-  // at line 89 above — bookCoordination's pre-create failure paths
-  // (calendar-conflict, duration-approval, Graph create error) early-return
-  // without resetting the field. A later retry/resume from a freeform
-  // "retry_or_abandon" approval reads `winning_slot` as canonical and would
-  // re-book at this slot even though it was never actually booked.
+  // above — bookCoordination's pre-create failure paths (calendar-conflict,
+  // duration-approval, Graph create error) early-return without resetting the
+  // field. A later retry/resume from a freeform "retry_or_abandon" approval
+  // reads `winning_slot` as canonical and would re-book at this slot even
+  // though it was never actually booked.
   updateCoordJob(jobId, { winning_slot: undefined });
+  const waitingOwner = afterLc.phase === 'coord:waiting_owner';
   return {
     ok: false,
-    status: after.status,
+    status: afterLc.requestState ?? undefined,
     subject: after.subject,
     slot: finalSlot,
-    reason: after.status === 'waiting_owner'
+    reason: waitingOwner
       ? 'booking paused — calendar conflict, duration approval, or booking error; a detailed message was already posted to the owner'
-      : `booking not completed — job is now ${after.status}`,
+      : `booking not completed — job is now ${afterLc.requestState}`,
   };
 }
 

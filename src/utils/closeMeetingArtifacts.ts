@@ -293,11 +293,19 @@ export function closeMeetingArtifacts(params: {
             r.requester_slack_id
             && r.requester_slack_id !== params.ownerUserId
             && positiveBooking
+            // v3.1 (115b) — single-notification idempotency. If the request was
+            // already stamped (the resolver's notifyRequesterOfDecision, or a
+            // prior cascade), don't double-DM the requester. The request owns
+            // the "told them" fact; both paths honor it. No new gate — one
+            // field on the spine.
+            && !r.requester_notified_at
           ) {
             try {
               // eslint-disable-next-line @typescript-eslint/no-require-imports
               const { getConnection } = require('../connections/registry') as
                 typeof import('../connections/registry');
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { updateRequest } = require('../db/requests') as typeof import('../db/requests');
               const conn = getConnection(params.ownerUserId, 'slack');
               if (conn) {
                 const requesterFirst = (r.requester_name ?? '').split(/\s+/)[0] || 'there';
@@ -314,6 +322,10 @@ export function closeMeetingArtifacts(params: {
                     err: String(err).slice(0, 200),
                   });
                 });
+                // Stamp so the resolver's notify (which runs right after the
+                // replay) skips its own DM. The resolver still fires the owner
+                // shadow off this stamp (115a).
+                updateRequest(r.id, { requesterNotifiedAt: new Date().toISOString() });
                 logger.info('closeMeetingArtifacts — fired close-loop DM to colleague-requester', {
                   requestId: r.id, requesterSlackId: r.requester_slack_id, subject: subjectText,
                 });

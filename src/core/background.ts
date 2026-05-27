@@ -24,10 +24,13 @@ export function startBackgroundTimer(
   // v2.7.0 — orphan-backfill scripts deleted. The requests spine is correct
   // by construction; if it leaks we fix the leak, not patch with a sweeper.
 
-  // v1.6.0 — single-pipeline background loop. Every former sweep is now a
-  // scheduled task (outreach_send, outreach_expiry, coord_nudge, coord_abandon,
-  // approval_expiry, calendar_fix, routine). Materialize first so newly inserted
-  // routine tasks are visible to the runner in the same tick.
+  // v1.6.0 — single-pipeline background loop. v3.1 (Path 2): all LIFECYCLE
+  // timers (outreach send/expiry, coord nudge/abandon, approval expiry/reminder)
+  // moved off the tasks table onto the requests spine — they fire via
+  // sweepDueRequests (called inside runDueTasks). The tasks table now carries
+  // only non-back-and-forth work: routine, calendar_fix, social_*, reminder,
+  // follow_up, research. Materialize first so newly inserted routine tasks are
+  // visible to the runner in the same tick.
   //
   // v2.9.3 (#103) — end-of-chat capture pass piggybacks on the same loop.
   // No new cron entity; the existing 5-min tick is the only scheduler. The

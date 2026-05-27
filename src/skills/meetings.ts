@@ -4,6 +4,7 @@ import type { UserProfile } from '../config/userProfile';
 import {
   updateCoordJob,
   getActiveCoordJobs,
+  getCoordLifecycle,
   getDb,
   auditLog,
   searchPeopleMemory,
@@ -1410,7 +1411,8 @@ ATTENDEES (v2.9.1):
             id: job.id,
             subject: job.subject,
             topic: job.topic,
-            status: job.status,
+            // v3.1 (Path 2 Stage 7) — status from the linked request phase.
+            status: (getCoordLifecycle(job.id).phase ?? 'coord:in_flight').replace(/^coord:/, ''),
             duration_min: job.duration_min,
             proposed_slots: proposedSlots.map(s =>
               DateTime.fromISO(s).setZone(profile.user.timezone).toFormat('EEE d MMM HH:mm')

@@ -167,20 +167,11 @@ export const dispatchSummaryActionFollowup: TaskDispatcher = async (_app, task, 
     reply_deadline: deadline,
   });
 
-  // Queue an outreach_expiry for graceful no-reply handling (existing pattern)
-  createTask({
-    owner_user_id: task.owner_user_id,
-    owner_channel: task.owner_channel,
-    owner_thread_ts: task.owner_thread_ts,
-    type: 'outreach_expiry',
-    status: 'new',
-    title: `Check reply deadline from ${ctx.target_name}`,
-    due_at: deadline,
-    skill_ref: outreachJobId,
-    context: JSON.stringify({ outreach_id: outreachJobId, summary_session_id: ctx.summary_session_id }),
-    who_requested: 'system',
-    skill_origin: 'summary',
-  });
+  // v3.1 (Path 2 Stage 6) — no-reply handling is a spine timer now:
+  // createOutreachJob armed the paired request's outreach_expiry next_check
+  // from reply_deadline (db/jobs.ts + core/requests/runner.ts). No separate
+  // outreach_expiry task. (outreachJobId retained for the reply-routing link.)
+  void outreachJobId;
 
   logger.info('summary_action_followup dispatched', {
     taskId: task.id,

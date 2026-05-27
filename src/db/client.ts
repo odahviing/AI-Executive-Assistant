@@ -809,6 +809,14 @@ function initSchema(db: Database.Database): void {
   // Coord/outreach status reads filter by (owner, kind, state); index it.
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_requests_owner_kind_state ON requests(owner_user_id, kind, state)`); } catch (_) {}
 
+  // ── v3.1 (Path 2) — `requester_notified_at`: single-notification idempotency ──
+  // The request owns whether its colleague-requester has already been told the
+  // outcome. Two code paths can notify (the resolver's notifyRequesterOfDecision
+  // and closeMeetingArtifacts' close-loop fallback); on a resolver-driven booking
+  // both used to fire → double DM. Now: whoever notifies first stamps this; the
+  // other checks it and stays quiet. One field on the one table — no new gate.
+  try { db.exec(`ALTER TABLE requests ADD COLUMN requester_notified_at TEXT`); } catch (_) {}
+
   // ── v1.7.2 — tasks: target_slack_id / target_name ─────────────────────────
   // Lets owner ask "what's open with Brett?" and get every 1:1 task back in
   // one query. Populated for outreach tasks (1:1) and summary_action_followup

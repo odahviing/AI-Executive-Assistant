@@ -23,6 +23,18 @@
 import type { App } from '@slack/bolt';
 import logger from '../../utils/logger';
 
+/**
+ * v3.1 (audit fix LATENT-2) — only pass a `thread_ts` that looks like a real
+ * Slack message ts (`1700000000.000100`). Synthetic ids (e.g. a routine's
+ * fallback `routine_<id>_<ms>` when its placeholder DM post failed) would
+ * otherwise reach Slack as a `thread_ts`, get rejected, and DROP the message
+ * (coord/approval DMs vanished). When the ts is invalid we post top-level in
+ * the real channel instead of failing — the message still lands.
+ */
+function safeThreadTs(ts?: string): string | undefined {
+  return ts && /^\d+\.\d+$/.test(ts) ? ts : undefined;
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface SlackUserSearchResult {
@@ -67,7 +79,7 @@ export async function sendDM(
       token: botToken,
       channel: channelId,
       text,
-      ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}),
+      ...(safeThreadTs(opts.threadTs) ? { thread_ts: safeThreadTs(opts.threadTs) } : {}),
     });
 
     // v2.2.7 — attachments. Download each Slack file URL with bot-token auth,
@@ -76,7 +88,7 @@ export async function sendDM(
     // send — text already landed; we log and move on. Slack file URLs require
     // Authorization: Bearer <bot_token> to download.
     if (opts.attachments && opts.attachments.length > 0 && res.ts) {
-      const threadForAttachments = opts.threadTs ?? res.ts;
+      const threadForAttachments = safeThreadTs(opts.threadTs) ?? res.ts;
       for (const att of opts.attachments) {
         try {
           const fileResp = await fetch(att.sourceUrl, {
@@ -134,7 +146,7 @@ export async function sendMpim(
       token: botToken,
       channel: channelId,
       text,
-      ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}),
+      ...(safeThreadTs(opts.threadTs) ? { thread_ts: safeThreadTs(opts.threadTs) } : {}),
     });
     return { ok: true, channel_id: channelId, ts: res.ts };
   } catch (err: any) {

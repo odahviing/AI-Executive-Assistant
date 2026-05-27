@@ -389,6 +389,8 @@ export interface UpdateRequestPatch {
   details?: Record<string, unknown>;
   description?: string;
   subject?: string;
+  /** v3.1 — stamp when the colleague-requester has been told the outcome (idempotency). */
+  requesterNotifiedAt?: string | null;
 }
 
 export function updateRequest(id: string, patch: UpdateRequestPatch): void {
@@ -419,6 +421,7 @@ export function updateRequest(id: string, patch: UpdateRequestPatch): void {
   if (patch.details !== undefined) { sets.push(`details_json = @details_json`); params.details_json = JSON.stringify(patch.details); }
   if (patch.description !== undefined) { sets.push(`description = @description`); params.description = patch.description; }
   if (patch.subject !== undefined) { sets.push(`subject = @subject`); params.subject = patch.subject; }
+  if (patch.requesterNotifiedAt !== undefined) { sets.push(`requester_notified_at = @requester_notified_at`); params.requester_notified_at = patch.requesterNotifiedAt; }
 
   if (sets.length === 0) return;
 

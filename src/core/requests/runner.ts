@@ -18,10 +18,12 @@ import { DateTime } from 'luxon';
 import type { App } from '@slack/bolt';
 import type { UserProfile } from '../../config/userProfile';
 import { getDueRequests, updateRequest } from '../../db/requests';
+import { getCoordJobByRequestId, updateCoordJob, type CoordParticipant } from '../../db/jobs';
 import { closeRequest } from './closeRequest';
 import type { NextCheckHandler, RequestRow } from './types';
 import { parseDetails } from './types';
 import { getConnection } from '../../connections/registry';
+import { isWithinOwnerWorkHours, nextOwnerWorkdayStart } from '../../utils/workHours';
 import logger from '../../utils/logger';
 
 /**
@@ -90,17 +92,10 @@ async function dispatchHandler(
       return runSendScheduledOutreach(row, profile);
 
     case 'coord_nudge':
+      return runCoordNudge(row, profile);
+
     case 'coord_abandon':
-      // Coord state machine internals — for now, just clear the timer if
-      // the coord is no longer open. Full coord state machine integration
-      // is Phase B.
-      if (row.state === 'awaiting_owner' || row.state === 'awaiting_colleague' || row.state === 'in_flight') {
-        logger.info('coord_nudge / coord_abandon timer fired — coord state machine integration pending', {
-          requestId: row.id, handler,
-        });
-      }
-      updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
-      return 'noop';
+      return runCoordAbandon(row, profile);
 
     default:
       logger.warn('dispatchHandler — unknown handler, clearing timer', {
@@ -145,7 +140,7 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
   // v2.9.1 — requester loop-close on approval expiry. Reuses the same DM
   // path resolveRequest uses for reject; the verbiage is "couldn't get back
   // to you on this" rather than "Idan said no".
-  if (row.kind === 'approval' && row.requester_slack_id) {
+  if (row.kind === 'approval' && row.requester_slack_id && !row.requester_notified_at) {
     try {
       const conn = getConnection(profile.user.slack_user_id, 'slack');
       if (conn) {
@@ -323,4 +318,110 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     logger.warn('runSendScheduledOutreach — send threw', { requestId: row.id, err: String(err).slice(0, 200) });
     return 'rearmed';
   }
+}
+
+/**
+ * v3.1 (Path 2 Stage 6) — coord nudge, now driven by the spine timer instead of
+ * a legacy coord_nudge task. Ported from tasks/dispatchers/coordNudge.ts. The
+ * coord's STATUS is the request (phase coord:collecting/negotiating); the
+ * participant DATA is read from the linked coord_job. On fire: DM non-responders
+ * once, then re-arm next_check for coord_abandon +4h. Defers past owner work
+ * hours by re-arming for the next workday start.
+ */
+async function runCoordNudge(row: RequestRow, profile: UserProfile): Promise<'rearmed' | 'noop'> {
+  const job = getCoordJobByRequestId(row.id);
+  // Still collecting/negotiating? Phase lives on the request now.
+  const stillCollecting = row.phase === 'coord:collecting' || row.phase === 'coord:negotiating';
+  if (!job || !stillCollecting) {
+    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+    return 'noop';
+  }
+
+  // Defer past owner work hours — don't nudge in a way that lands an abandon +
+  // owner ping at 3am.
+  const ownerNow = DateTime.now().setZone(profile.user.timezone);
+  if (!isWithinOwnerWorkHours(profile, ownerNow)) {
+    updateRequest(row.id, { nextCheckAt: nextOwnerWorkdayStart(profile), nextCheckHandler: 'coord_nudge' });
+    return 'rearmed';
+  }
+
+  let participants: CoordParticipant[] = [];
+  try { participants = JSON.parse(job.participants) as CoordParticipant[]; } catch { participants = []; }
+  const nonResponders = participants.filter(p =>
+    !p.just_invite && p.dm_sent_at && (p.response === null || p.response === undefined),
+  );
+  if (nonResponders.length === 0) {
+    // Everyone keyresponded — let resolveCoordination drive; drop the timer.
+    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+    return 'noop';
+  }
+
+  const conn = getConnection(profile.user.slack_user_id, 'slack');
+  if (!conn) {
+    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+    return 'noop';
+  }
+  for (const p of nonResponders) {
+    if (!p.slack_id) continue;
+    const res = await conn.sendDirect(p.slack_id, `Hi ${p.name}, gentle nudge about "${job.subject}" — let me know when you get a chance.`);
+    if (!res.ok) {
+      logger.warn('coord_nudge (spine) — DM failed for participant', { reason: res.reason, participant: p.name });
+    }
+  }
+  updateCoordJob(job.id, { follow_up_sent_at: new Date().toISOString() });
+  // Re-arm: abandon check +4h, on the request.
+  updateRequest(row.id, {
+    nextCheckAt: DateTime.now().plus({ hours: 4 }).toUTC().toISO(),
+    nextCheckHandler: 'coord_abandon',
+  });
+  logger.info('coord_nudge (spine) — nudged + abandon armed', {
+    requestId: row.id, coordId: job.id, nudged: nonResponders.map(p => p.name),
+  });
+  return 'rearmed';
+}
+
+/**
+ * v3.1 (Path 2 Stage 6) — coord abandon, spine-driven (ported from
+ * tasks/dispatchers/coordAbandon.ts). If still unanswered 4h after the nudge,
+ * close it. updateCoordJob(status='abandoned') runs the full terminal cascade
+ * (closes the linked request, cancels the coordination task, writes people
+ * memory, cleans sibling outreach). Defers past owner work hours.
+ */
+async function runCoordAbandon(row: RequestRow, profile: UserProfile): Promise<'closed' | 'rearmed' | 'noop'> {
+  const job = getCoordJobByRequestId(row.id);
+  const stillCollecting = row.phase === 'coord:collecting' || row.phase === 'coord:negotiating';
+  if (!job || !stillCollecting) {
+    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+    return 'noop';
+  }
+
+  const ownerNow = DateTime.now().setZone(profile.user.timezone);
+  if (!isWithinOwnerWorkHours(profile, ownerNow)) {
+    updateRequest(row.id, { nextCheckAt: nextOwnerWorkdayStart(profile), nextCheckHandler: 'coord_abandon' });
+    return 'rearmed';
+  }
+
+  // Terminal cascade closes the linked request (this row) too.
+  updateCoordJob(job.id, {
+    status: 'abandoned',
+    abandoned_at: new Date().toISOString(),
+    notes: 'abandoned after 24-hour nudge + 4-hour grace period',
+  });
+  // v3.1 (Path 2 fix) — defensively clear THIS row's timer. The cascade above
+  // closes the request via getLinkedRequestIdForCoord→closeRequest (which nulls
+  // next_check), but that lookup/closeRequest is wrapped in a swallowed try in
+  // updateCoordJob. If it ever no-ops (broken forward link), the row would keep
+  // firing coord_abandon every 5-min tick — re-DMing the owner + re-writing
+  // people-memory. Clear the timer here regardless so 'closed' can't lie.
+  updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+  const conn = getConnection(profile.user.slack_user_id, 'slack');
+  if (conn) {
+    await conn.postToChannel(
+      job.owner_channel,
+      `I couldn't get a response on "${job.subject}" — I've closed it. Want me to try again later?`,
+      { threadTs: job.owner_thread_ts ?? undefined },
+    );
+  }
+  logger.info('coord_abandon (spine) — coord closed', { requestId: row.id, coordId: job.id, subject: job.subject });
+  return 'closed';
 }

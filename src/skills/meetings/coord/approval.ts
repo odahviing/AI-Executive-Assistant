@@ -52,10 +52,12 @@ export async function emitWaitingOwnerApproval(
     });
   }
 
-  // Flip the coord state machine first (regardless of request success).
-  const coordUpdates: Partial<CoordJob> = { status: 'waiting_owner' };
-  if (winningSlot) coordUpdates.winning_slot = winningSlot;
-  updateCoordJob(job.id, coordUpdates);
+  // Flip the coord lifecycle to waiting_owner (drives the linked request's
+  // phase/state via updateCoordJob; `status` here is a transition signal, not a
+  // persisted column — v3.1 Path 2 Stage 7).
+  updateCoordJob(job.id, winningSlot
+    ? { status: 'waiting_owner', winning_slot: winningSlot }
+    : { status: 'waiting_owner' });
 
   // Expiry rebased off owner work time (avoid burning the first N hours when
   // colleague replied late and the owner's off-duty).

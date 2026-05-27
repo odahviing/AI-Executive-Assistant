@@ -9,7 +9,7 @@ import { generateSocialCoda } from '../social/generateCoda';
 import { getSkillTools, executeSkillTool } from '../../skills/registry';
 import type { UserProfile } from '../../config/userProfile';
 import type { SkillContext, ChannelId } from '../../skills/types';
-import { auditLog, buildSocialContextBlock, getSummarySessionByThread } from '../../db';
+import { auditLog, buildSocialContextBlock, getSummarySessionByThread, getCoordLifecycle, getOutreachLifecycle } from '../../db';
 import { getActiveJobsForThread } from '../../tasks';
 import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
@@ -558,11 +558,13 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         const keyNames = parts.filter(p => !p.just_invite).map(p => p.name).filter(Boolean);
         if (keyNames.length > 0) participantLabel = keyNames.join(', ');
       } catch (_) {}
+      // v3.1 (Path 2 Stage 7) — coord status reads off the linked request phase.
+      const coordPhase = getCoordLifecycle(job.id).phase;
       const status =
-        job.status === 'collecting' ? 'collecting responses'
-        : job.status === 'negotiating' ? 'negotiating time'
-        : job.status === 'waiting_owner' ? 'waiting on your approval'
-        : job.status;
+        coordPhase === 'coord:collecting' ? 'collecting responses'
+        : coordPhase === 'coord:negotiating' ? 'negotiating time'
+        : coordPhase === 'coord:waiting_owner' ? 'waiting on your approval'
+        : 'in flight';
       lines.push(`• Coordination job: "${job.subject}" with ${participantLabel} — ${status}`);
     }
 
@@ -575,13 +577,15 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // "replied" and the reply preview is included alongside the original
       // message — Sonnet can see the back-and-forth in one block.
       const hasReply = typeof job.reply_text === 'string' && job.reply_text.trim().length > 0;
-      const status = job.status === 'pending_scheduled' && job.scheduled_at
+      // v3.1 (Path 2 Stage 7) — outreach status reads off the linked request.
+      const oLc = getOutreachLifecycle(job.id);
+      const status = oLc.phase === 'outreach:scheduled' && job.scheduled_at
         ? `scheduled — message goes out ${DateTime.fromISO(job.scheduled_at).setZone(profile.user.timezone).toFormat('EEEE d MMM')}`
         : hasReply
         ? `replied`
-        : job.status === 'sent'
+        : oLc.requestState === 'awaiting_colleague'
         ? `sent, waiting for reply`
-        : job.status;
+        : (oLc.requestState ?? 'in flight');
       const sentPreview = job.message ? `: "${job.message.slice(0, 80)}${job.message.length > 80 ? '…' : ''}"` : '';
       const replyPreview = hasReply
         ? `\n   ↳ reply: "${job.reply_text!.slice(0, 200)}${job.reply_text!.length > 200 ? '…' : ''}"`

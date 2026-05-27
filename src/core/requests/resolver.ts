@@ -862,12 +862,51 @@ async function notifyRequesterOfDecision(
     }
   }
 
+  // v3.1 (115a/115b) — single-notification idempotency + owner shadow.
+  // Re-read fresh: closeMeetingArtifacts may have stamped requester_notified_at
+  // during the on_approve replay that ran just before this call. If so the
+  // requester already got their DM — skip the duplicate, but STILL shadow the
+  // owner so he can see the loop closed (he was blind to it before — issue #115).
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getRequest: getReqFresh, updateRequest: stampReq } = require('../../db/requests') as typeof import('../../db/requests');
+  const alreadyNotified = (() => {
+    try { return !!getReqFresh(row.id)?.requester_notified_at; } catch { return false; }
+  })();
+  const fireOwnerShadow = async (): Promise<void> => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { shadowNotify } = require('../../utils/shadowNotify') as typeof import('../../utils/shadowNotify');
+      await shadowNotify(ctx.profile, {
+        channel: row.owner_dm_channel ?? row.origin_channel ?? '',
+        action: `I → ${requesterFirst ?? 'them'}`,
+        detail: body,
+        conversationKey: row.origin_thread_ts ?? row.id,
+        conversationHeader: requesterFirst ? `Conversation with ${requesterName ?? requesterFirst}` : undefined,
+      });
+    } catch (_) { /* shadow is best-effort */ }
+  };
+  const stampIfTerminal = (): void => {
+    // Stamp on approve/reject (terminal outcomes). NOT on amend — the request
+    // stays open and the eventual booking must still notify the requester.
+    if (verdict === 'approve' || verdict === 'reject') {
+      try { stampReq(row.id, { requesterNotifiedAt: new Date().toISOString() }); } catch (_) {}
+    }
+  };
+
+  if (alreadyNotified) {
+    logger.info('notifyRequesterOfDecision — requester already notified (cascade), shadow-only', { id: row.id });
+    await fireOwnerShadow();
+    return;
+  }
+
   // MPIM origin → post back in MPIM thread; else 1:1 DM.
   try {
     if (row.origin_is_mpim && row.origin_channel) {
       const res = await conn.postToChannel(row.origin_channel, body, { threadTs: row.origin_thread_ts ?? undefined });
       if (res.ok) {
         logger.info('notifyRequesterOfDecision — posted in MPIM origin', { id: row.id, channel: row.origin_channel });
+        stampIfTerminal();
+        await fireOwnerShadow();
         return;
       }
       logger.warn('notifyRequesterOfDecision — MPIM post failed, falling back to 1:1 DM', {
@@ -890,7 +929,10 @@ async function notifyRequesterOfDecision(
       logger.warn('notifyRequesterOfDecision — direct DM failed', {
         id: row.id, requesterSlackId, reason: res.reason,
       });
+    } else {
+      stampIfTerminal();
     }
+    await fireOwnerShadow();
   } catch (err) {
     logger.warn('notifyRequesterOfDecision — threw, non-fatal', {
       id: row.id, err: String(err).slice(0, 200),

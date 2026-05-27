@@ -147,6 +147,10 @@ export interface RequestRow {
   owner_dm_thread_ts: string | null;
   terminal_dm_msg_ts: string | null;
 
+  // v3.1 (Path 2) — set once when the colleague-requester is told the outcome.
+  // Idempotency across the two notify paths (resolver + meeting cascade).
+  requester_notified_at: string | null;
+
   // Dedup
   idempotency_key: string | null;
 

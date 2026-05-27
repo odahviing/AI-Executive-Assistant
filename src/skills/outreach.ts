@@ -26,7 +26,7 @@ import {
   updateOutreachJob,
   upsertPersonMemory,
 } from '../db';
-import { getLinkedRequestIdForOutreach, getCoordJobsByParticipant } from '../db/jobs';
+import { getLinkedRequestIdForOutreach, getCoordJobsByParticipant, getCoordLifecycle } from '../db/jobs';
 import { createTask } from '../tasks';
 import { updateRequest, getOpenRequestsForColleague } from '../db/requests';
 import { calcResponseDeadline } from '../connectors/slack/coordinator';
@@ -194,13 +194,15 @@ Only send messages the user explicitly asks for — never reach out to people on
           const activeCoords = getCoordJobsByParticipant(colleagueSlackId, userId);
           if (activeCoords.length > 0) {
             const coord = activeCoords[0];
+            // v3.1 (Path 2 Stage 7) — coord status from the linked request.
+            const coordPhase = (getCoordLifecycle(coord.id).phase ?? 'coord:in_flight').replace(/^coord:/, '');
             logger.warn('message_colleague refused — active coord_job covers this colleague', {
               colleagueSlackId, colleagueName: args.colleague_name,
-              coordJobId: coord.id, coordSubject: coord.subject, coordStatus: coord.status,
+              coordJobId: coord.id, coordSubject: coord.subject, coordStatus: coordPhase,
             });
             return {
               error: 'active_coord_job',
-              message: `Active coord_job ${coord.id} ("${coord.subject}", status=${coord.status}) is already DMing ${args.colleague_name as string} via the state machine. Don't double-DM. If you need to relay something different from coord, wait for the coord to terminate (booked / cancelled / abandoned) OR cancel it via cancel_coordination first.`,
+              message: `Active coord_job ${coord.id} ("${coord.subject}", status=${coordPhase}) is already DMing ${args.colleague_name as string} via the state machine. Don't double-DM. If you need to relay something different from coord, wait for the coord to terminate (booked / cancelled / abandoned) OR cancel it via cancel_coordination first.`,
             };
           }
         } catch (err) {
@@ -273,21 +275,12 @@ Only send messages the user explicitly asks for — never reach out to people on
 
         if (isFuture) {
           const scheduledDt = DateTime.fromISO(sendAt!).setZone(context.profile.user.timezone);
-          // Scheduled-send task drives the actual DM post — see runner.ts
-          createTask({
-            owner_user_id: userId,
-            owner_channel: context.channelId,
-            owner_thread_ts: context.threadTs,
-            type: 'outreach_send',
-            status: 'new',
-            title: `Send scheduled message to ${args.colleague_name as string}`,
-            due_at: sendAt,
-            skill_ref: jobId,
-            context: JSON.stringify({ outreach_id: jobId }),
-            who_requested: 'system',
-            skill_origin: 'outreach',
-          });
-          // Also create the user-facing tracking task so it shows in get_my_tasks
+          // v3.1 (Path 2 Stage 6) — the actual scheduled DM post is driven by
+          // the spine timer: createOutreachJob set the paired request's
+          // next_check_handler='send_scheduled_outreach' (see db/jobs.ts +
+          // core/requests/runner.ts:runSendScheduledOutreach). No separate
+          // outreach_send task. Below is just the user-facing tracking row for
+          // get_my_tasks.
           createTask({
             owner_user_id: userId,
             owner_channel: context.channelId,
@@ -345,22 +338,11 @@ Only send messages the user explicitly asks for — never reach out to people on
           skill_origin: 'outreach',
         });
 
-        // Reply-deadline task (drives the expiry check via runner.ts)
-        if (args.await_reply && deadline) {
-          createTask({
-            owner_user_id: userId,
-            owner_channel: context.channelId,
-            owner_thread_ts: context.threadTs,
-            type: 'outreach_expiry',
-            status: 'new',
-            title: `Check reply deadline from ${args.colleague_name as string}`,
-            due_at: deadline,
-            skill_ref: jobId,
-            context: JSON.stringify({ outreach_id: jobId }),
-            who_requested: 'system',
-            skill_origin: 'outreach',
-          });
-        }
+        // v3.1 (Path 2 Stage 6) — reply-deadline expiry is a spine timer:
+        // createOutreachJob armed the paired request's
+        // next_check_handler='outreach_expiry' from reply_deadline (db/jobs.ts +
+        // core/requests/runner.ts:runOutreachExpiryOrDecision). No separate
+        // outreach_expiry task.
 
         // v1.8.11 — resolve the Connection and send synchronously here, no
         // more _requires_slack_client dispatch to app.ts. Uses the owner's

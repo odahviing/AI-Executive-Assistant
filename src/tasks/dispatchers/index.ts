@@ -13,11 +13,6 @@ import { dispatchReminder } from './reminder';
 import { dispatchFollowUp } from './followUp';
 import { dispatchResearch } from './research';
 import { dispatchRoutine } from './routine';
-import { dispatchOutreachSend } from './outreachSend';
-import { dispatchOutreachExpiry } from './outreachExpiry';
-import { dispatchOutreachDecision } from './outreachDecision';
-import { dispatchCoordNudge } from './coordNudge';
-import { dispatchCoordAbandon } from './coordAbandon';
 import { dispatchCalendarFix } from './calendarFix';
 import { dispatchSummaryActionFollowup } from './summaryActionFollowup';
 import { dispatchSocialDecay } from './socialDecay';
@@ -29,11 +24,6 @@ export const DISPATCHERS: Partial<Record<Task['type'], TaskDispatcher>> = {
   follow_up:                dispatchFollowUp,
   research:                 dispatchResearch,
   routine:                  dispatchRoutine,
-  outreach_send:            dispatchOutreachSend,
-  outreach_expiry:          dispatchOutreachExpiry,
-  outreach_decision:        dispatchOutreachDecision,
-  coord_nudge:              dispatchCoordNudge,
-  coord_abandon:            dispatchCoordAbandon,
   calendar_fix:             dispatchCalendarFix,
   summary_action_followup:  dispatchSummaryActionFollowup,
   social_decay:             dispatchSocialDecay,

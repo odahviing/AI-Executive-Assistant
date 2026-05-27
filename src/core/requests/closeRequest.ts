@@ -84,17 +84,13 @@ export function closeRequest(input: CloseRequestInput): CloseResult {
     }
   }
 
-  // Legacy-table cascade — transitional. Path 2 (v3.0.4) is killing
-  // `outreach_jobs` and `coord_jobs` as standalone tables; outreach migration
-  // is partially complete (writers now go through requests; readers + table
-  // drop = stages 2-6, deferred). Until those stages land, the bridge tables
-  // still exist and the LEGACY coord state machine will happily process
-  // incoming colleague replies + post templated English DMs that bypass
-  // Sonnet/humanGate if their status isn't flipped to terminal here (root
-  // of the 2026-05-19 Yael 'Got it — I'll find some other options' bug).
-  //
-  // Find any legacy row pointing at this request and flip it to terminal.
-  // Mirrors the in-flight terminal sentinels each table already supports:
+  // Legacy-table cascade. v3.1 (Path 2 Stages 6+7 complete): coord_jobs /
+  // outreach_jobs are now DATA-only tables — their `status` columns are
+  // VESTIGIAL (defaulted, never read for lifecycle; the request owns status).
+  // We still flip those columns to a terminal sentinel here as belt-and-braces
+  // for any in-flight reply-guard that hasn't been re-pointed at the request
+  // yet, and to keep the physical rows internally consistent. This is no longer
+  // load-bearing for lifecycle — closing the request is.
   //   coord_jobs: 'abandoned'  (siblings: 'booked', 'cancelled')
   //   outreach_jobs: 'cancelled' (siblings: 'replied', 'expired', 'done', 'failed')
   let legacyCascaded = 0;

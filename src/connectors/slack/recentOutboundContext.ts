@@ -82,8 +82,10 @@ export interface RecentOutboundContextResult {
 /**
  * Look up the most recent OPEN outreach_jobs row for this colleague within
  * the last 24h (regardless of status — `status` is task-lifecycle bookkeeping
- * and gets churned by closeFireAndForgetOutreach 5min after send; we use
- * `followup_closed_at` for D4's conversational-closure tracking).
+ * status). v3.1 (Path 2): outreach_jobs.status is VESTIGIAL — lifecycle lives
+ * on the linked request. We track conversational closure via `followup_closed_at`
+ * (independent of the request's lifecycle), and on a real reply also close the
+ * linked request (see closeFollowup below).
  *
  * Returns the row, or null when nothing eligible exists.
  */
@@ -135,6 +137,26 @@ function closeFollowup(
           updated_at = datetime('now')
       WHERE id = ?
     `).run(reason, options.replyText, jobId);
+    // v3.1 (Path 2 fix) — CLOSE THE LINKED REQUEST. Post-migration the request
+    // is the source of truth; the raw status write above only touches the
+    // vestigial outreach_jobs.status. Without this, a reply matched via this
+    // fallback (when handleOutreachReply's LLM gate missed) left the request
+    // stuck awaiting_colleague forever — the brief + rate-limiter kept treating
+    // a replied-to outreach as still open (the orphan class this project kills).
+    // Only on a REAL reply (replyText present); emoji-ack / auto-expire below
+    // legitimately leave the request open.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getLinkedRequestIdForOutreach } = require('../../db/jobs') as typeof import('../../db/jobs');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { closeRequest } = require('../../core/requests/closeRequest') as typeof import('../../core/requests/closeRequest');
+      const reqId = getLinkedRequestIdForOutreach(jobId);
+      if (reqId) {
+        closeRequest({ id: reqId, state: 'resolved', closureReason: 'colleague_reply', closedBy: 'colleague_reply' });
+      }
+    } catch (err) {
+      logger.warn('closeFollowup — failed to close linked request on reply', { jobId, err: String(err).slice(0, 200) });
+    }
   } else {
     db.prepare(`
       UPDATE outreach_jobs
@@ -346,6 +368,24 @@ export function closeFollowupForMessageTs(params: {
   `).get(params.messageTs) as OutreachJob | undefined;
   if (!job) return null;
   closeFollowup(job.id, params.reason);
+  // v3.1 (audit fix) — a THREAD REPLY is a genuine reply, so also close the
+  // linked request (same orphan class as closeFollowup's reply branch — pre-fix
+  // a thread reply marked followup_closed_at but left the request
+  // awaiting_colleague forever). An EMOJI ack is NOT a substantive reply →
+  // leave the request open. We don't have the reply text here (only the ts),
+  // so close the request directly rather than stamping a fake reply_text.
+  if (params.reason === 'thread_reply') {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getLinkedRequestIdForOutreach } = require('../../db/jobs') as typeof import('../../db/jobs');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { closeRequest } = require('../../core/requests/closeRequest') as typeof import('../../core/requests/closeRequest');
+      const reqId = getLinkedRequestIdForOutreach(job.id);
+      if (reqId) closeRequest({ id: reqId, state: 'resolved', closureReason: 'colleague_thread_reply', closedBy: 'colleague_reply' });
+    } catch (err) {
+      logger.warn('closeFollowupForMessageTs — failed to close linked request on thread reply', { jobId: job.id, err: String(err).slice(0, 200) });
+    }
+  }
   logger.info('recentOutboundContext — followup closed via signal', {
     jobId: job.id, reason: params.reason, dm_message_ts: params.messageTs,
   });

@@ -19,6 +19,7 @@ import type { UserProfile } from '../../../config/userProfile';
 import { config } from '../../../config';
 import {
   updateCoordJob,
+  getCoordLifecycle,
   getCoordJobsByParticipant,
   getPendingApprovalsBySkillRef,
   mergeApprovalPayload,
@@ -197,7 +198,7 @@ export async function handleCoordReply(
   //   - confirm (just acknowledging): ack + log (prior behavior)
   //   - cancel (participant pulling out): resolve approval cancelled + notify owner
   //   - other (question / vague): ack + log (prior behavior)
-  if (job.status === 'waiting_owner' && participant.response !== null) {
+  if (getCoordLifecycle(job.id).phase === 'coord:waiting_owner' && participant.response !== null) {
     const ackInThread = participant.contacted_via === 'group' && job.owner_channel === params.channelId;
     const followupIntent = await classifyWaitingOwnerFollowup({
       text: params.text.trim(),

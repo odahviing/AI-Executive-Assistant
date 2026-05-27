@@ -26,6 +26,7 @@ import type { UserProfile } from '../../config/userProfile';
 import {
   updateOutreachJob,
   getOutreachJobsByColleague,
+  getCoordJobsByParticipant,
   logEvent,
   getDb,
   appendToConversation,
@@ -384,17 +385,20 @@ export async function handleOutreachReply(
   // already in flight in the last 24h, route as a CONTINUE relay instead —
   // owner will progress it through the existing coord/reschedule machinery.
   if (decision.action === 'schedule') {
-    const recentCoord = getDb().prepare(`
-      SELECT id, subject FROM coord_jobs
-      WHERE owner_user_id = ?
-        AND status IN ('collecting','resolving','negotiating','waiting_owner')
-        AND participants LIKE ?
-        AND datetime(created_at) >= datetime('now', '-24 hours')
-      ORDER BY created_at DESC LIMIT 1
-    `).get(
-      params.profile.user.slack_user_id,
-      `%${params.senderId}%`,
-    ) as { id: string; subject: string } | undefined;
+    // v3.1 (Path 2 fix) — "is there an active coord for this colleague?" must
+    // read the linked request's open state, NOT coord_jobs.status (now a
+    // vestigial column frozen at its 'collecting' default — it would report
+    // EVERY coord as active, including booked/cancelled ones, and wrongly skip
+    // a genuinely-needed new coord). getCoordJobsByParticipant JOINs requests
+    // for the real open-state + 24h freshness check.
+    const activeForColleague = getCoordJobsByParticipant(params.senderId, params.profile.user.slack_user_id)
+      .filter(c => {
+        const created = Date.parse(c.created_at);
+        return Number.isFinite(created) && created >= Date.now() - 24 * 60 * 60 * 1000;
+      });
+    const recentCoord = activeForColleague.length > 0
+      ? { id: activeForColleague[0].id, subject: activeForColleague[0].subject }
+      : undefined;
 
     if (recentCoord) {
       logger.info('Outreach → scheduling handoff SKIPPED (active coord exists, treating as continue)', {

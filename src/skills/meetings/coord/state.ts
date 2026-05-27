@@ -196,7 +196,6 @@ export async function initiateCoordination(
     subject: params.subject,
     topic: params.topic,
     duration_min: params.durationMin,
-    status: 'collecting',
     proposed_slots: JSON.stringify(params.proposedSlots.map(s => s.start)),
     participants: JSON.stringify(taggedParticipants),
     notes: JSON.stringify({
@@ -264,6 +263,21 @@ export async function initiateCoordination(
     outcomeExternalEventId: params.moveExistingEvent?.id,
     originChannel: params.ownerChannel,
     originThreadTs: params.ownerThreadTs,
+    // v3.1 (audit fix) — set the owner-DM target so the spine's
+    // runApprovalReminder + runExpiry (guarded on `owner_dm_channel`) actually
+    // fire the midpoint nag + expiry tombstone for coord approvals. Pre-fix
+    // these were NULL on coord requests → those DMs were silently dropped for
+    // EVERY coord approval (the initial approval DM still landed via
+    // job.owner_channel, but reminder/closure vanished). Mirrors the initial
+    // approval DM destination.
+    ownerDmChannel: params.ownerChannel,
+    ownerDmThreadTs: params.ownerThreadTs,
+    // v3.1 (Path 2 Stage 6) — the 24-work-hour nudge is now a spine timer on
+    // the request, NOT a separate coord_nudge task. The sweep's coord_nudge
+    // handler (core/requests/runner.ts) DMs non-responders then re-arms for
+    // coord_abandon. One timer system, one source of truth.
+    nextCheckAt: DateTime.now().plus({ hours: 24 }).toUTC().toISO()!,
+    nextCheckHandler: 'coord_nudge',
     details: {
       coord_job_id: jobId,
       subject: params.subject,
@@ -275,22 +289,6 @@ export async function initiateCoordination(
     },
   });
   linkCoordToRequest(jobId, requestRow.id);
-
-  // 24-work-hour nudge as a first-class task.
-  const nudgeAt = DateTime.now().plus({ hours: 24 }).toUTC().toISO()!;
-  createTask({
-    owner_user_id: params.ownerUserId,
-    owner_channel: params.ownerChannel,
-    owner_thread_ts: params.ownerThreadTs,
-    type: 'coord_nudge',
-    status: 'new',
-    title: `Nudge non-responders for "${params.subject}"`,
-    due_at: nudgeAt,
-    skill_ref: jobId,
-    context: JSON.stringify({ coord_job_id: jobId }),
-    who_requested: 'system',
-    skill_origin: 'meetings',
-  });
 
   const keyParticipants = taggedParticipants.filter(p => !p.just_invite);
   const allNames = params.participants.map(p => p.name);

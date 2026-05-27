@@ -477,6 +477,7 @@ TASK OWNERSHIP:
 - ONE-PLACE RULE — every item belongs in ONE spot in the brief. Don't narrate the same conflict / approval / status twice (once as a freestanding line and again inside a per-person paragraph, or vice versa). Pick the surface that reads most naturally and put it only there.
 - MULTI-CONFLICT AGGREGATION — bundle, don't enumerate.
 - outreach awaiting_colleague with no decision → "X hasn't replied — want me to try again or drop it?"
+- approval in state="awaiting_colleague" → ${firstName}'s counter was RELAYED to requester_name and they have NOT replied yet. Say "waiting to hear back from <name> on <subject>". NEVER state or imply the requester said something, pushed back, or rejected the counter — there is no reply on record. "Relayed your counter to Eli, no word back yet" ✅. "Eli said the counter doesn't work" ❌ (you have no message from them).
 - kind="tombstoned_colleague" → ONE passive past-tense line about the PERSON in plain human words. ✅ "I'll stop pinging Yael for now — she hasn't replied to a few of my pings, will pick it back up when she's around." ❌ "Yael is no longer active in the system" / "removed from my working list" / "deactivated her record" / any phrasing that exposes internal tracking, system state, or bot framing.
 - kind="auto_categorized":
   - For events in \`applied\` (categories Maelle figured out) → ONE informational past-tense line, NOT a question. ("Tagged 'X' as Weekly.")
@@ -618,9 +619,12 @@ export async function sendMorningBriefing(
     // requests have no external party to notify. Fire-and-forget before close.
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getRequest } = require('../db/requests') as typeof import('../db/requests');
+      const { getRequest, updateRequest } = require('../db/requests') as typeof import('../db/requests');
       const r = getRequest(id);
-      if (conn && r && r.requester_slack_id && r.requester_slack_id !== ownerUserId) {
+      // v3.1 — honor the requester_notified_at dedup contract (same as the
+      // resolver + closeMeetingArtifacts paths) so we never double-DM a
+      // requester who was already told through another path.
+      if (conn && r && r.requester_slack_id && r.requester_slack_id !== ownerUserId && !r.requester_notified_at) {
         const requesterFirst = r.requester_name?.split(' ')[0] ?? 'there';
         const ownerFirst = profile.user.name.split(' ')[0];
         const subjectText = r.subject && r.subject.toLowerCase().endsWith('needs your input')
@@ -631,6 +635,7 @@ export async function sendMorningBriefing(
         } else {
           void conn.sendDirect(r.requester_slack_id, body).catch(() => {});
         }
+        updateRequest(id, { requesterNotifiedAt: new Date().toISOString() });
         logger.info('briefs — requester loop-close on stale auto-park', { requestId: id, requesterSlackId: r.requester_slack_id });
       }
     } catch (err) {

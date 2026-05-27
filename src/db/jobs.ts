@@ -50,6 +50,17 @@ export function getPendingRequestCountForColleague(ownerUserId: string, colleagu
 
 // ── Outreach jobs ─────────────────────────────────────────────────────────────
 
+/**
+ * v3.1 (Path 2 Stage 7) — outreach lifecycle status is NO LONGER an
+ * outreach_jobs column. It lives on the linked request (state + phase).
+ * `OutreachStatus` remains only as the TRANSITION SIGNAL passed to
+ * createOutreachJob / updateOutreachJob (drives the request + terminal
+ * cascade); never persisted. The physical `outreach_jobs.status` column is
+ * vestigial (defaulted 'sent', unread).
+ */
+export type OutreachStatus =
+  | 'sent' | 'replied' | 'no_response' | 'cancelled' | 'pending_scheduled' | 'done' | 'expired' | 'failed';
+
 export interface OutreachJob {
   id: string;
   created_at: string;
@@ -63,7 +74,6 @@ export interface OutreachJob {
   message: string;
   scheduled_at?: string;  // if set, do not send until this datetime
   await_reply: number;
-  status: 'sent' | 'replied' | 'no_response' | 'cancelled' | 'pending_scheduled' | 'done' | 'expired' | 'failed';
   reply_text?: string;
   sent_at?: string;
   reply_deadline?: string;
@@ -109,7 +119,9 @@ export interface OutreachJob {
     | 'pipeline_consumed';
 }
 
-export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' | 'updated_at'>): string {
+export function createOutreachJob(
+  params: Omit<OutreachJob, 'id' | 'created_at' | 'updated_at'> & { status?: OutreachStatus },
+): string {
   const db = getDb();
   const id = `out_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
@@ -190,15 +202,18 @@ export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' 
     });
   }
 
+  // v3.1 (Path 2 Stage 7) — `status` not persisted (column defaults 'sent',
+  // vestigial). Lifecycle is the linked request; params.status above is the
+  // transition signal that set reqState/phase/next_check.
   db.prepare(`
     INSERT INTO outreach_jobs (
       id, owner_user_id, owner_channel, owner_thread_ts,
-      colleague_slack_id, colleague_name, colleague_tz, message, await_reply, status,
+      colleague_slack_id, colleague_name, colleague_tz, message, await_reply,
       sent_at, reply_deadline, scheduled_at, intent, context_json,
       proposed_slots, subject_keyword, request_id
     ) VALUES (
       @id, @owner_user_id, @owner_channel, @owner_thread_ts,
-      @colleague_slack_id, @colleague_name, @colleague_tz, @message, @await_reply, @status,
+      @colleague_slack_id, @colleague_name, @colleague_tz, @message, @await_reply,
       @sent_at, @reply_deadline, @scheduled_at, @intent, @context_json,
       @proposed_slots, @subject_keyword, @request_id
     )
@@ -212,7 +227,6 @@ export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' 
     colleague_tz: params.colleague_tz ?? null,
     message: params.message,
     await_reply: params.await_reply,
-    status: params.status,
     sent_at: params.sent_at ?? null,
     reply_deadline: params.reply_deadline ?? null,
     scheduled_at: params.scheduled_at ?? null,
@@ -225,16 +239,17 @@ export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' 
   return id;
 }
 
-export function updateOutreachJob(id: string, updates: Partial<OutreachJob>): void {
+export function updateOutreachJob(id: string, updates: Partial<OutreachJob> & { status?: OutreachStatus }): void {
   const db = getDb();
-  const fields = Object.keys(updates)
-    .filter(k => k !== 'id' && k !== 'created_at')
-    .map(k => `${k} = @${k}`)
-    .join(', ');
-  if (!fields) return;
-  const params: Record<string, unknown> = { id };
-  for (const [k, v] of Object.entries(updates)) params[k] = v ?? null;
-  db.prepare(`UPDATE outreach_jobs SET ${fields}, updated_at = datetime('now') WHERE id = @id`).run(params);
+  // v3.1 (Path 2 Stage 7) — `status` is a transition SIGNAL (drives the linked
+  // request + terminal cascade below), never persisted to outreach_jobs.
+  const dataKeys = Object.keys(updates).filter(k => k !== 'id' && k !== 'created_at' && k !== 'status');
+  if (dataKeys.length > 0) {
+    const fields = dataKeys.map(k => `${k} = @${k}`).join(', ');
+    const params: Record<string, unknown> = { id };
+    for (const k of dataKeys) params[k] = (updates as Record<string, unknown>)[k] ?? null;
+    db.prepare(`UPDATE outreach_jobs SET ${fields}, updated_at = datetime('now') WHERE id = @id`).run(params);
+  }
 
   // v2.6.1 (D4) — when status transitions to terminal via the existing
   // pipelines (handleOutreachReply, meetingReschedule, outreachExpiry,
@@ -362,27 +377,14 @@ export function updateOutreachJob(id: string, updates: Partial<OutreachJob>): vo
   }
 }
 
-export function getOutreachJobByColleague(
-  colleagueSlackId: string,
-  ownerUserId: string
-): OutreachJob | null {
-  const db = getDb();
-  // Include 'no_response' so replies that arrive after the deadline timer fires are still processed.
-  // The 7-day window prevents ancient jobs from accidentally swallowing unrelated messages.
-  return db.prepare(`
-    SELECT * FROM outreach_jobs
-    WHERE colleague_slack_id = ? AND owner_user_id = ?
-    AND await_reply = 1
-    AND status IN ('sent', 'no_response')
-    AND created_at >= datetime('now', '-7 days')
-    ORDER BY created_at DESC LIMIT 1
-  `).get(colleagueSlackId, ownerUserId) as OutreachJob | null;
-}
-
 /**
  * All active outreach jobs for a colleague — used by the bare-reply matcher
  * to decide whether a reply is about an existing outreach or a new request,
  * and to disambiguate when more than one is active.
+ *
+ * v3.1 (Path 2 Stage 7) — "active" comes from the linked request's open state
+ * (awaiting_colleague), NOT outreach_jobs.status. The job row supplies DATA;
+ * the request owns lifecycle.
  */
 export function getOutreachJobsByColleague(
   colleagueSlackId: string,
@@ -390,59 +392,36 @@ export function getOutreachJobsByColleague(
 ): OutreachJob[] {
   const db = getDb();
   return db.prepare(`
-    SELECT * FROM outreach_jobs
-    WHERE colleague_slack_id = ? AND owner_user_id = ?
-    AND await_reply = 1
-    AND status IN ('sent', 'no_response')
-    AND created_at >= datetime('now', '-7 days')
-    ORDER BY created_at DESC
+    SELECT oj.* FROM outreach_jobs oj
+    JOIN requests r ON oj.request_id = r.id
+    WHERE oj.colleague_slack_id = ? AND oj.owner_user_id = ?
+    AND oj.await_reply = 1
+    AND r.state = 'awaiting_colleague'
+    AND oj.created_at >= datetime('now', '-7 days')
+    ORDER BY oj.created_at DESC
   `).all(colleagueSlackId, ownerUserId) as OutreachJob[];
 }
 
-export function getExpiredOutreachJobs(): OutreachJob[] {
-  const db = getDb();
-  // Expire if: deadline passed OR sent more than 3 days ago with no reply
-  return db.prepare(`
-    SELECT * FROM outreach_jobs
-    WHERE status = 'sent' AND await_reply = 1
-    AND (
-      (reply_deadline IS NOT NULL AND datetime(reply_deadline) <= datetime('now'))
-      OR sent_at <= datetime('now', '-3 days')
-    )
-  `).all() as OutreachJob[];
-}
+// v3.1 (Path 2 Stage 6/7) — getExpiredOutreachJobs / closeFireAndForgetOutreach
+// / getScheduledOutreachJobs / getOutreachJobByColleague were REMOVED. Their
+// timing is now the spine sweep (send_scheduled_outreach / outreach_expiry on
+// the request); fire-and-forget closes via createOutreachJob setting the
+// request to 'resolved' on await_reply=0. No status-keyed outreach sweeps remain.
 
 /**
- * Auto-close outreach jobs that don't await a reply.
- * These are "fire and forget" — the message was sent, nothing to wait for.
- * Also marks their linked task as done.
+ * v3.1 (Path 2 Stage 7) — outreach lifecycle from its linked request (the
+ * single source of truth). Replaces reads of the retired outreach_jobs.status.
  */
-export function closeFireAndForgetOutreach(): number {
-  const db = getDb();
-  const jobs = db.prepare(`
-    SELECT id FROM outreach_jobs
-    WHERE status = 'sent' AND await_reply = 0
-    AND sent_at <= datetime('now', '-5 minutes')
-  `).all() as { id: string }[];
-
-  for (const { id } of jobs) {
-    db.prepare(`UPDATE outreach_jobs SET status = 'replied', updated_at = datetime('now') WHERE id = ?`).run(id);
-    db.prepare(
-      `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now') WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague')`
-    ).run(id);
-  }
-  return jobs.length;
-}
-
-export function getScheduledOutreachJobs(): OutreachJob[] {
-  const db = getDb();
-  return db.prepare(`
-    SELECT * FROM outreach_jobs
-    WHERE status = 'pending_scheduled'
-    AND scheduled_at IS NOT NULL
-    AND datetime(scheduled_at) <= datetime('now')
-    ORDER BY scheduled_at ASC
-  `).all() as OutreachJob[];
+export function getOutreachLifecycle(outreachJobId: string): {
+  requestState: string | null; phase: string | null; terminal: boolean;
+} {
+  const reqId = getLinkedRequestIdForOutreach(outreachJobId);
+  if (!reqId) return { requestState: null, phase: null, terminal: false };
+  const row = getDb().prepare(`SELECT state, phase FROM requests WHERE id = ?`).get(reqId) as
+    { state?: string; phase?: string } | undefined;
+  const state = row?.state ?? null;
+  const terminal = state === 'resolved' || state === 'cancelled' || state === 'expired';
+  return { requestState: state, phase: row?.phase ?? null, terminal };
 }
 
 // ── Meeting coordination ─────────────────────────────────────────────────────
@@ -468,6 +447,17 @@ export interface CoordParticipant {
   dm_thread_ts?: string;
 }
 
+/**
+ * v3.1 (Path 2 Stage 7) — coord lifecycle status is NO LONGER a coord_jobs
+ * column. It lives on the linked request (state + phase). `CoordStatus` remains
+ * only as the TRANSITION SIGNAL passed to updateCoordJob (which drives the
+ * request + the terminal cascade) — it is never persisted to coord_jobs. The
+ * physical `coord_jobs.status` column is vestigial (defaulted, unread).
+ */
+export type CoordStatus =
+  | 'collecting' | 'resolving' | 'negotiating' | 'waiting_owner'
+  | 'confirmed' | 'booked' | 'cancelled' | 'abandoned';
+
 export interface CoordJob {
   id: string;
   created_at: string;
@@ -478,7 +468,6 @@ export interface CoordJob {
   subject: string;
   topic?: string;
   duration_min: number;
-  status: 'collecting' | 'resolving' | 'negotiating' | 'waiting_owner' | 'confirmed' | 'booked' | 'cancelled' | 'abandoned';
   proposed_slots: string;   // JSON string
   participants: string;     // JSON string
   winning_slot?: string;
@@ -512,14 +501,17 @@ export function createCoordJob(params: Omit<CoordJob, 'id' | 'created_at' | 'upd
   // coord now, owned upstream. request_id starts NULL, set by the link call.
   const requestId: string | null = null;
 
+  // v3.1 (Path 2 Stage 7) — `status` no longer written; the column defaults to
+  // 'collecting' (vestigial). The coord's lifecycle is the request, whose phase
+  // is set to 'coord:collecting' by initiateCoordination right after this.
   db.prepare(`
     INSERT INTO coord_jobs (
       id, owner_user_id, owner_channel, owner_thread_ts,
-      subject, topic, duration_min, status, proposed_slots, participants, notes, last_calendar_check,
+      subject, topic, duration_min, proposed_slots, participants, notes, last_calendar_check,
       intent, existing_event_id, request_id
     ) VALUES (
       @id, @owner_user_id, @owner_channel, @owner_thread_ts,
-      @subject, @topic, @duration_min, @status, @proposed_slots, @participants, @notes, @last_calendar_check,
+      @subject, @topic, @duration_min, @proposed_slots, @participants, @notes, @last_calendar_check,
       @intent, @existing_event_id, @request_id
     )
   `).run({
@@ -530,7 +522,6 @@ export function createCoordJob(params: Omit<CoordJob, 'id' | 'created_at' | 'upd
     subject: params.subject,
     topic: params.topic ?? null,
     duration_min: params.duration_min,
-    status: params.status,
     proposed_slots: params.proposed_slots,
     participants: params.participants,
     notes: params.notes ?? null,
@@ -542,13 +533,25 @@ export function createCoordJob(params: Omit<CoordJob, 'id' | 'created_at' | 'upd
   return id;
 }
 
-export function updateCoordJob(id: string, updates: Partial<Omit<CoordJob, 'id' | 'created_at'>>): void {
+/**
+ * v3.1 (Path 2 Stage 7) — `status` is a TRANSITION SIGNAL, not a persisted
+ * column. It drives the linked request (mid-state phase/state + terminal
+ * cascade) but is filtered out of the coord_jobs write. All other keys are
+ * DATA (participants, slots, winning_slot, notes, ...) and persist normally.
+ */
+export function updateCoordJob(
+  id: string,
+  updates: Partial<Omit<CoordJob, 'id' | 'created_at'>> & { status?: CoordStatus },
+): void {
   const db = getDb();
-  const fields = Object.keys(updates).map(k => `${k} = @${k}`).join(', ');
-  if (!fields) return;
-  const params: Record<string, unknown> = { id };
-  for (const [k, v] of Object.entries(updates)) params[k] = v ?? null;
-  db.prepare(`UPDATE coord_jobs SET ${fields}, updated_at = datetime('now') WHERE id = @id`).run(params);
+  // Persist only DATA fields — never the transition signal `status`.
+  const dataEntries = Object.entries(updates).filter(([k]) => k !== 'status');
+  if (dataEntries.length > 0) {
+    const fields = dataEntries.map(([k]) => `${k} = @${k}`).join(', ');
+    const params: Record<string, unknown> = { id };
+    for (const [k, v] of dataEntries) params[k] = v ?? null;
+    db.prepare(`UPDATE coord_jobs SET ${fields}, updated_at = datetime('now') WHERE id = @id`).run(params);
+  }
 
   // v2.7.2 — mid-state cascade to the linked request. When coord_jobs.status
   // transitions WITHOUT being terminal (terminal is handled below by the
@@ -708,36 +711,33 @@ export function updateCoordJob(id: string, updates: Partial<Omit<CoordJob, 'id' 
         } catch (_) {}
         if (siblingSlackIds.length > 0) {
           const placeholders = siblingSlackIds.map(() => '?').join(',');
-          const info = db.prepare(`
-            UPDATE outreach_jobs
-            SET status = 'done',
-                updated_at = datetime('now')
-            WHERE colleague_slack_id IN (${placeholders})
-              AND status IN ('sent', 'no_response', 'replied')
-              AND datetime(created_at) >= datetime('now', '-14 days')
-          `).run(...siblingSlackIds);
-          if (info.changes > 0) {
-            // Also cancel any outreach_expiry / outreach_decision follow-up
-            // tasks still pending for these jobs so they don't DM the owner
-            // "X hasn't replied" after the coord already booked.
-            db.prepare(`
-              UPDATE tasks
-              SET status = 'cancelled',
-                  updated_at = datetime('now')
-              WHERE type IN ('outreach_expiry', 'outreach_decision')
-                AND status IN ('new', 'in_progress', 'pending_owner', 'pending_colleague')
-                AND skill_ref IN (
-                  SELECT id FROM outreach_jobs
-                  WHERE colleague_slack_id IN (${placeholders})
-                )
-            `).run(...siblingSlackIds);
+          // v3.1 (Path 2 fix) — close the sibling outreach REQUESTS, not just
+          // the vestigial outreach_jobs.status. Pre-fix this flipped a dead
+          // column and the sibling requests stayed awaiting_colleague → the
+          // brief kept re-surfacing "still waiting on X" after the coord
+          // booked (the v2.0.6 "three open Amazia threads" regression). Find
+          // the still-open sibling outreach via their linked request and close
+          // each through closeRequest (which clears its next_check timer too).
+          const siblingReqs = db.prepare(`
+            SELECT oj.request_id AS request_id FROM outreach_jobs oj
+            JOIN requests r ON oj.request_id = r.id
+            WHERE oj.colleague_slack_id IN (${placeholders})
+              AND r.state IN ('awaiting_owner', 'awaiting_colleague', 'in_flight')
+              AND datetime(oj.created_at) >= datetime('now', '-14 days')
+          `).all(...siblingSlackIds) as Array<{ request_id: string | null }>;
+          let closed = 0;
+          for (const { request_id } of siblingReqs) {
+            if (!request_id) continue;
+            try {
+              closeRequest({ id: request_id, state: 'resolved', closureReason: `sibling_coord_${terminal}`, closedBy: 'system' });
+              closed++;
+            } catch (_) { /* non-fatal */ }
+          }
+          if (closed > 0) {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const logger = require('../utils/logger').default;
-            logger.info('updateCoordJob — closed sibling outreach_jobs', {
-              coordId: id,
-              terminal,
-              closed: info.changes,
-              colleagues: siblingSlackIds,
+            logger.info('updateCoordJob — closed sibling outreach requests', {
+              coordId: id, terminal, closed, colleagues: siblingSlackIds,
             });
           }
         }
@@ -795,6 +795,33 @@ export function updateCoordJob(id: string, updates: Partial<Omit<CoordJob, 'id' 
 export function getCoordJob(id: string): CoordJob | null {
   const db = getDb();
   return db.prepare('SELECT * FROM coord_jobs WHERE id = ?').get(id) as CoordJob | null;
+}
+
+/** v3.1 (Path 2 Stage 6) — fetch a coord_job's DATA by its linked request id.
+ * Used by the spine timer handlers (coord_nudge/coord_abandon) which receive a
+ * request row and need the participant/slot data that lives in coord_jobs. */
+export function getCoordJobByRequestId(requestId: string): CoordJob | null {
+  const db = getDb();
+  return db.prepare('SELECT * FROM coord_jobs WHERE request_id = ?').get(requestId) as CoordJob | null;
+}
+
+/**
+ * v3.1 (Path 2 Stage 7) — the coord's lifecycle, read from its linked request
+ * (the single source of truth). Replaces reads of the retired coord_jobs.status
+ * column. `terminal` = the coord is done (booked→resolved or cancelled/abandoned
+ * →cancelled/expired); `phase` carries the fine sub-state (coord:waiting_owner
+ * etc.); `booked` distinguishes a successful booking from a cancel/abandon.
+ */
+export function getCoordLifecycle(coordJobId: string): {
+  requestState: string | null; phase: string | null; terminal: boolean; booked: boolean;
+} {
+  const reqId = getLinkedRequestIdForCoord(coordJobId);
+  if (!reqId) return { requestState: null, phase: null, terminal: false, booked: false };
+  const row = getDb().prepare(`SELECT state, phase FROM requests WHERE id = ?`).get(reqId) as
+    { state?: string; phase?: string } | undefined;
+  const state = row?.state ?? null;
+  const terminal = state === 'resolved' || state === 'cancelled' || state === 'expired';
+  return { requestState: state, phase: row?.phase ?? null, terminal, booked: state === 'resolved' };
 }
 
 export function getActiveCoordJobs(ownerUserId: string): CoordJob[] {

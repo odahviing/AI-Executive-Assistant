@@ -2,6 +2,41 @@
 
 ---
 
+## 3.1.1 — Path 2 finish: one timer sweep, side tables data-only, + #114/#115 + audit fixes
+
+Completes the requests-spine migration started in 3.1.0 (the "leftover" — same project, not a new line). Two things landed: (1) the timer/status cleanup that 3.1.0 deferred, and (2) the GitHub bug fixes for #114/#115, then a scoped verification audit of the whole requester framework that caught and fixed several real closure bugs in the migration itself.
+
+### Changed — one timer sweep owns all lifecycle timing
+
+The legacy task dispatchers `coord_nudge` / `coord_abandon` / `outreach_send` / `outreach_expiry` / `outreach_decision` are DELETED. All lifecycle timing now runs through the single spine sweep `sweepDueRequests` (`core/requests/runner.ts`, invoked each tick from `tasks/runner.ts`): coord nudge→abandon ported into the runner (DM non-responders, re-arm, abandon, with owner work-hours deferral), outreach send/expiry already on the spine. The `tasks` table now carries only non-back-and-forth work (routine, calendar_fix, social_*, reminder, follow_up, research). Stale rows of the removed types skip gracefully (unknown-dispatcher → mark failed, no crash/loop).
+
+### Changed — side tables are DATA-only (status decoupled)
+
+`coord_jobs.status` and `outreach_jobs.status` are now VESTIGIAL columns (NOT NULL DEFAULT, never read for lifecycle). `updateCoordJob`/`updateOutreachJob`/`createCoordJob`/`createOutreachJob` take `status` as a TRANSITION SIGNAL (drives the linked request + terminal cascade) but no longer persist it. All status reads route through new `getCoordLifecycle` / `getOutreachLifecycle` (read the linked request). `approvals.status` retained intentionally as the approval machine's internal mirror (payload stays in `approvals`; request owns `awaiting_owner`). Dead outreach helper queries removed (`getExpiredOutreachJobs`, `getScheduledOutreachJobs`, `closeFireAndForgetOutreach`, `getOutreachJobByColleague`).
+
+### Fixed — #115: requester close-loop visibility + double-DM
+
+`requester_notified_at` on the request is a single-notification idempotency stamp: the colleague-requester is DM'd exactly once across the resolver's `notifyRequesterOfDecision` and `closeMeetingArtifacts`' close-loop (first sends + stamps; the other skips the DM but still fires the owner shadow). Owner now gets a shadow line whenever the loop closes — you were blind to it before. All four notify sites (resolver, closeMeetingArtifacts, brief auto-park, runExpiry) honor the stamp.
+
+### Fixed — #114: brief no longer fabricates a colleague reply
+
+A brief surfacing an `awaiting_colleague` approval is now narrated as "relayed to X, no word back yet" — never "X said the counter doesn't work" (there's no reply on record). RULE 5 also forbids offering capabilities with no tool (e.g. "I'll pull up the past thread") and then retracting. The stale orphan approval was a pre-3.0.7 artifact; reconcile + the subject-match close-loop prevent recurrence.
+
+### Fixed — audit-caught closure bugs (scoped verification audit of the requester framework)
+
+- **closeFollowup orphan**: a colleague reply matched via the fallback path closed the (vestigial) outreach status but left the request `awaiting_colleague` forever → now closes the linked request. Same fix applied to the thread-reply path (`closeFollowupForMessageTs`).
+- **coordinator handoff guard** read the frozen `coord_jobs.status` → now request-aware via `getCoordJobsByParticipant`.
+- **sibling-outreach cleanup** (`updateCoordJob` terminal cascade) wrote a vestigial column and left sibling requests open ("3 open threads" regression) → now closes the sibling requests via `closeRequest`.
+- **runCoordAbandon** could 5-min-spam the owner if the cascade no-oped → defensive timer clear.
+- **coord approval reminder/expiry DMs were silently dropped** (coord requests never set `owner_dm_channel`) → now set at initiation, so the midpoint nag + expiry tombstone reach the owner.
+- **synthetic thread-ts** from a failed-placeholder routine could make Slack reject (and drop) coord/approval DMs → `safeThreadTs` guard posts top-level instead.
+
+### Migration
+
+`requester_notified_at` column added to `requests` (idempotent ALTER). `coord_jobs.status` / `outreach_jobs.status` columns physically retained (vestigial, defaulted) — no risky table rebuild; all code references removed.
+
+---
+
 ## 3.1.0 — Path 2: the requests spine owns status (kill the ghost class)
 
 The multi-step backbone — getting an ask, ping-ponging between Idan and others, brief status, the loop-back — now lives on ONE table, `requests`. Side tables (`coord_jobs`, `outreach_jobs`, `approvals`) keep their DATA (the ask payload, the DM text, slots/participants) but no longer own lifecycle: the request's `state` is the single source of truth for "open / who are we waiting on / closed." This kills the recurring ghost class where a coord/approval kept surfacing in the brief after it was actually done — because closure used to depend on a cascade that bypass paths (manual DB delete, double-created request) could skip. Stages 1–5 + 8 land here; the timer-sweep cutover (6) and side-table column-strip (7) are a deferred, live-verified follow-up. Validated by an 11-scenario paper trace (`.claude/PATH_2_PAPER_TRACES.md`), 0 errors, every request proven to open, manage, and close with the 3-way guarantee (DB closed / Idan knows / requester knows).

@@ -22,13 +22,11 @@ export type TaskType =
   // v1.6.0 — unified sweep model: every background check is a task with a due_at.
   // These are "system" tasks (who_requested='system'); they run when their due_at
   // fires and then self-complete. Replace the old parallel sweeps.
-  | 'outreach_send'      // scheduled outreach post time
-  | 'outreach_expiry'    // outreach reply deadline
-  | 'outreach_decision'  // v2.0.7 — 48 workhours after no_response, auto-close
-  | 'coord_nudge'        // 24-work-hour nudge to non-responders
-  | 'coord_abandon'      // +4h after nudge, close coord if still stuck
-  | 'approval_expiry'    // approval expires_at
-  | 'approval_reminder'  // v2.1.3 — halfway-point nag for an unresolved approval
+  // v3.1 (Path 2 Stage 6) — ALL lifecycle timers now live on the request via
+  // next_check_handler + the single spine sweep (core/requests/runner.ts):
+  // outreach send/expiry/decision, coord nudge/abandon, approval expiry/reminder.
+  // The legacy task-type dispatchers for these were deleted; the values are
+  // gone so nothing can re-create a parallel timer.
   | 'calendar_fix'       // re-check a calendar issue marked to_resolve
   // v1.7.2 — Summary skill action-item follow-ups. At due_at the dispatcher
   // DMs the assignee asking for a status update; the reply flows back to the
