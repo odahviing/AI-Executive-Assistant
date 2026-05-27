@@ -13,6 +13,7 @@ import { getDb } from './client';
 import type {
   CreateRequestInput,
   NextCheckHandler,
+  RequestPhase,
   RequestRow,
   RequestState,
 } from '../core/requests/types';
@@ -64,7 +65,7 @@ export function createRequest(input: CreateRequestInput): RequestRow {
     INSERT INTO requests (
       id, owner_user_id, initiated_by, initiated_by_role, parent_request_id,
       kind, subkind, subject, description,
-      state, state_changed_at,
+      state, phase, state_changed_at,
       informed, surfaced_count,
       expires_at, next_check_at, next_check_handler,
       requester_slack_id, requester_name,
@@ -77,7 +78,7 @@ export function createRequest(input: CreateRequestInput): RequestRow {
     ) VALUES (
       @id, @owner_user_id, @initiated_by, @initiated_by_role, @parent_request_id,
       @kind, @subkind, @subject, @description,
-      @state, datetime('now'),
+      @state, @phase, datetime('now'),
       @informed, 0,
       @expires_at, @next_check_at, @next_check_handler,
       @requester_slack_id, @requester_name,
@@ -99,6 +100,7 @@ export function createRequest(input: CreateRequestInput): RequestRow {
     subject: input.subject,
     description: input.description ?? null,
     state: input.state,
+    phase: input.phase ?? null,
     informed,
     expires_at: input.expiresAt ?? null,
     next_check_at: input.nextCheckAt ?? null,
@@ -313,10 +315,57 @@ export function getOpenOutreachForColleague(
   `).all(ownerUserId, colleagueSlackId) as RequestRow[];
 }
 
+// ── v3.1 (Path 2) — coord status queries off the spine ────────────────────────
+// These replace the coord_jobs.status readers (getActiveCoordJobs,
+// getCoordJobsByParticipant, getPendingRequestCountForColleague). The coord's
+// STATUS now lives on its parent request (kind='coord'); coord_jobs keeps only
+// the DATA (participants, slots), joined by request_id when content is needed.
+
+/** Open coord requests for an owner (top-level coord parents still in flight). */
+export function getOpenCoordRequests(ownerUserId: string): RequestRow[] {
+  return getDb().prepare(`
+    SELECT * FROM requests
+    WHERE owner_user_id = ?
+      AND kind = 'coord'
+      AND parent_request_id IS NULL
+      AND state IN ('awaiting_owner','in_flight')
+    ORDER BY created_at ASC
+  `).all(ownerUserId) as RequestRow[];
+}
+
+/** Set the kind-namespaced activity phase, validating the namespace matches kind. */
+export function setPhase(id: string, phase: RequestPhase): void {
+  const row = getRequest(id);
+  if (!row) return;
+  const ns = phase.split(':')[0];
+  // coord phases on coord rows; outreach phases on outreach/social_outreach.
+  const kindOk =
+    (ns === 'coord' && row.kind === 'coord') ||
+    (ns === 'outreach' && (row.kind === 'outreach' || row.kind === 'social_outreach'));
+  if (!kindOk) {
+    logger.warn('setPhase — namespace/kind mismatch, ignoring', { id, kind: row.kind, phase });
+    return;
+  }
+  getDb().prepare(`UPDATE requests SET phase = ?, updated_at = datetime('now') WHERE id = ?`).run(phase, id);
+}
+
+/** Requests due for the time-based sweep, narrowed to a specific handler. */
+export function getDueRequestsByHandler(handler: NextCheckHandler): RequestRow[] {
+  return getDb().prepare(`
+    SELECT * FROM requests
+    WHERE next_check_handler = ?
+      AND next_check_at IS NOT NULL
+      AND datetime(next_check_at) <= datetime('now')
+      AND state IN ('awaiting_owner','awaiting_colleague','in_flight')
+  `).all(handler) as RequestRow[];
+}
+
 // ── update ──────────────────────────────────────────────────────────────────
 
 export interface UpdateRequestPatch {
   state?: RequestState;
+  /** v3.1 — kind-namespaced activity sub-state. */
+  phase?: string | null;
   closureReason?: string;
   closedBy?: string;
   closedAt?: string;
@@ -350,6 +399,7 @@ export function updateRequest(id: string, patch: UpdateRequestPatch): void {
     sets.push(`state = @state`, `state_changed_at = datetime('now')`);
     params.state = patch.state;
   }
+  if (patch.phase !== undefined) { sets.push(`phase = @phase`); params.phase = patch.phase; }
   if (patch.closureReason !== undefined) { sets.push(`closure_reason = @closure_reason`); params.closure_reason = patch.closureReason; }
   if (patch.closedBy !== undefined) { sets.push(`closed_by = @closed_by`); params.closed_by = patch.closedBy; }
   if (patch.closedAt !== undefined) { sets.push(`closed_at = @closed_at`); params.closed_at = patch.closedAt; }

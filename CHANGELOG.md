@@ -2,6 +2,48 @@
 
 ---
 
+## 3.1.0 — Path 2: the requests spine owns status (kill the ghost class)
+
+The multi-step backbone — getting an ask, ping-ponging between Idan and others, brief status, the loop-back — now lives on ONE table, `requests`. Side tables (`coord_jobs`, `outreach_jobs`, `approvals`) keep their DATA (the ask payload, the DM text, slots/participants) but no longer own lifecycle: the request's `state` is the single source of truth for "open / who are we waiting on / closed." This kills the recurring ghost class where a coord/approval kept surfacing in the brief after it was actually done — because closure used to depend on a cascade that bypass paths (manual DB delete, double-created request) could skip. Stages 1–5 + 8 land here; the timer-sweep cutover (6) and side-table column-strip (7) are a deferred, live-verified follow-up. Validated by an 11-scenario paper trace (`.claude/PATH_2_PAPER_TRACES.md`), 0 errors, every request proven to open, manage, and close with the 3-way guarantee (DB closed / Idan knows / requester knows).
+
+### Added — `requests.phase`, kind-namespaced activity sub-state
+
+New `phase` column on `requests` (idempotent migration in `db/client.ts`) + index `idx_requests_owner_kind_state`. `state` is the universal lifecycle; `phase` is the finer dance for multi-step kinds (`coord:collecting|resolving|negotiating|waiting_owner`, `outreach:scheduled|awaiting_reply|nudged|no_response`). New `setPhase` (namespace-validated), `getOpenCoordRequests`, `getDueRequestsByHandler` helpers. Types in `core/requests/types.ts` (`CoordPhase`/`OutreachPhase`/`RequestPhase`).
+
+### Fixed — coord double-request (the `i3kb2` orphan), at the root
+
+`createCoordJob` used to bridge its OWN request, then `initiateCoordination` created a SECOND one and re-linked the coord_job to it — leaving the first request orphaned forever, re-surfacing every brief. `createCoordJob` is now a pure DATA insert (no bridge); `initiateCoordination` owns the single coord request (`phase='coord:collecting'`, lead participant as target). One request per coord.
+
+### Fixed — `cancelOrphanCoordJobs` bypassed the request-close cascade
+
+It wrote `coord_jobs.status='cancelled'` directly, never closing the linked request (a ghost source). Now finds orphans by the linked request's open state and routes through `updateCoordJob` so the full terminal cascade (close request + cancel tasks + clean sibling outreach) fires.
+
+### Changed — coord status reads come off the spine
+
+`getActiveCoordJobs`, `getCoordJobsByParticipant`, `getPendingRequestCountForColleague`, `getStaleCoordJobs` now derive open/closed from the linked request's `state`/`phase` (JOIN to `requests`), not `coord_jobs.status`. coord_jobs supplies participant DATA; the request supplies status. `updateCoordJob`'s mid-state cascade now also stamps `phase`.
+
+### Added — reconciliation + retention sweep (`core/requests/reconcile.ts`)
+
+Runs on the background tick. `reconcileOrphanedRequests` closes any open coord request whose backing `coord_job` went terminal OR was deleted out from under it (age-gated 15 min to avoid the create→link race) — bypass-proof closure for the exact "we deleted the orphan rows, it's still here" incident. `pruneOldTerminalRequests` deletes terminal rows (+ children) past a 30-day window so the spine stays lean.
+
+### Fixed — closing-strength guarantee #3 on the brief auto-park path
+
+When the brief auto-cancels a colleague-INITIATED request the owner ignored 3× (`closedBy='brief'`, `surfaced_threshold`), it now DMs the requester ("couldn't get a read from Idan, ping to retry") — mirroring `runExpiry`. Previously the colleague was left hanging after Maelle promised to ask. Found and fixed during the paper trace.
+
+### Changed — reply routing prefers coord (closes the Isaac mis-route, bug #7)
+
+`getRecentOutboundContext` now defers to an active coord covering the colleague (read off the spine) before attaching an outreach context — so an inbound from a coord participant can't be shadowed by a parallel outreach. Routing was already coord-first in `app.ts`; this closes the context-attach side.
+
+### Deferred (live-verified next change)
+
+Stage 6 (collapse the legacy timer dispatchers into the single `sweepDueRequests` spine sweep — currently built but unwired; legacy dispatchers still do timing) and Stage 7 (strip the now-redundant status columns from the side tables). Owner direction: cut these over with live verification rather than paper-only, since they touch the riskiest subsystem. No happy path depends on the unwired sweep; timeout paths use the working legacy dispatchers + the (now requester-notifying) brief auto-park backstop.
+
+### Migration
+
+`ALTER TABLE requests ADD COLUMN phase` + `idx_requests_owner_kind_state` — idempotent, additive, no backfill needed (NULL phase = single-step kind). Existing pre-fix ghost rows (e.g. the `i3kb2`/`ti275` coord pair, the stale Eli approval) will be closed by `reconcileOrphanedRequests` on the first tick after deploy.
+
+---
+
 ## 3.0.7 — Slot-finder rule consistency, close-loop via requests spine, owner-picks-slot guard
 
 Real-day-bug-bash session. Eight bug shapes consumed across booking, slot finding, person-memory hygiene, and approval lifecycle. Plus the claim-checker latency pass landing from a parallel session.

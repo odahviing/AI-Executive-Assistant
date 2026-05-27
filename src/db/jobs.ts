@@ -36,11 +36,14 @@ function getLinkedRequestIdForCoord(coordId: string): string | null {
 
 export function getPendingRequestCountForColleague(ownerUserId: string, colleagueSlackId: string): number {
   const db = getDb();
+  // v3.1 (Path 2) — openness comes from the linked request's state, NOT
+  // coord_jobs.status. coord_jobs is data; the request owns lifecycle.
   const coordJobCount = (db.prepare(`
-    SELECT COUNT(*) as cnt FROM coord_jobs
-    WHERE owner_user_id = ?
-    AND status IN ('collecting', 'resolving', 'negotiating', 'waiting_owner')
-    AND participants LIKE ?
+    SELECT COUNT(*) as cnt FROM coord_jobs cj
+    JOIN requests r ON cj.request_id = r.id
+    WHERE cj.owner_user_id = ?
+    AND r.state IN ('awaiting_owner', 'awaiting_colleague', 'in_flight')
+    AND cj.participants LIKE ?
   `).get(ownerUserId, `%${colleagueSlackId}%`) as any)?.cnt ?? 0;
   return coordJobCount;
 }
@@ -125,10 +128,14 @@ export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' 
     let reqState: 'in_flight' | 'awaiting_colleague' | 'resolved' | 'cancelled' = 'awaiting_colleague';
     let nextCheckAt: string | undefined;
     let nextCheckHandler: 'send_scheduled_outreach' | 'outreach_expiry' | undefined;
+    // v3.1 (Path 2) — phase carries the outreach activity sub-state ON the
+    // request, so status reads never touch outreach_jobs.status.
+    let phase: string | undefined;
     if (params.scheduled_at) {
       reqState = 'in_flight';
       nextCheckAt = params.scheduled_at;
       nextCheckHandler = 'send_scheduled_outreach';
+      phase = 'outreach:scheduled';
     } else if (params.status === 'cancelled') {
       reqState = 'cancelled';
     } else if (params.await_reply === 0) {
@@ -137,6 +144,10 @@ export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' 
       reqState = 'awaiting_colleague';
       nextCheckAt = params.reply_deadline;
       nextCheckHandler = 'outreach_expiry';
+      phase = 'outreach:awaiting_reply';
+    } else {
+      // sent, awaiting reply, no explicit deadline yet
+      phase = 'outreach:awaiting_reply';
     }
     const details: Record<string, unknown> = {
       message: params.message,
@@ -158,6 +169,7 @@ export function createOutreachJob(params: Omit<OutreachJob, 'id' | 'created_at' 
       subject: subjectPreview || `Outreach to ${params.colleague_name}`,
       description: params.message,
       state: reqState,
+      phase,
       informed: 1,  // owner-initiated outreach; he asked for it
       targetSlackId: params.colleague_slack_id,
       targetName: params.colleague_name,
@@ -491,64 +503,14 @@ export function createCoordJob(params: Omit<CoordJob, 'id' | 'created_at' | 'upd
   const db = getDb();
   const id = `coord_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
-  // v2.7.1 — bridge to requests spine. Coord = multi-party booking. State
-  // mapping from legacy coord_jobs.status:
-  //   collecting / awaiting_response → in_flight (Maelle is working it)
-  //   waiting_owner / awaiting_owner → awaiting_owner
-  //   booked → resolved (handled in updateCoordJob terminal bridge below)
-  //   cancelled / abandoned → cancelled / expired (same)
-  let requestId: string | null = null;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const requests = require('./requests') as typeof import('./requests');
-    const parsedParticipants = (() => {
-      try { return JSON.parse(params.participants) as Array<{ name?: string; slack_id?: string; email?: string }>; }
-      catch { return []; }
-    })();
-    const parsedSlots = (() => {
-      try { return JSON.parse(params.proposed_slots) as string[]; }
-      catch { return []; }
-    })();
-    const participantNames = parsedParticipants
-      .map(p => p?.name)
-      .filter((n): n is string => typeof n === 'string' && n.length > 0);
-    const firstParticipantSlack = parsedParticipants.find(p => typeof p?.slack_id === 'string')?.slack_id;
-    const reqState: 'in_flight' | 'awaiting_owner' =
-      params.status === 'waiting_owner' ? 'awaiting_owner' : 'in_flight';
-    const details: Record<string, unknown> = {
-      participant_names: participantNames,
-      participants: parsedParticipants,
-      proposed_slots: parsedSlots,
-      topic: params.topic,
-      duration_min: params.duration_min,
-      intent: params.intent ?? 'schedule',
-      existing_event_id: params.existing_event_id,
-    };
-    const row = requests.createRequest({
-      ownerUserId: params.owner_user_id,
-      initiatedBy: params.owner_user_id,
-      initiatedByRole: 'system',
-      kind: 'coord',
-      subkind: params.intent ?? 'schedule',
-      subject: params.subject,
-      description: params.topic ?? undefined,
-      state: reqState,
-      informed: 1,  // coord initiation is the owner's ask; he knows about it
-      targetSlackId: firstParticipantSlack,
-      targetName: participantNames[0],
-      originChannel: params.owner_channel,
-      originThreadTs: params.owner_thread_ts ?? undefined,
-      outcomeExternalEventId: params.existing_event_id,
-      details,
-    });
-    requestId = row.id;
-  } catch (err) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const logger = require('../utils/logger').default;
-    logger.warn('createCoordJob — requests bridge threw, legacy row only', {
-      err: String(err).slice(0, 200), subject: params.subject,
-    });
-  }
+  // v3.1 (Path 2) — coord_jobs is now a DATA table. It does NOT create a
+  // request. The orchestrating layer (initiateCoordination) owns the single
+  // coord request (kind='coord') and calls linkCoordToRequest(jobId, reqId)
+  // immediately after. Pre-v3.1 this function ALSO bridged a request, and
+  // initiateCoordination created a SECOND one and re-linked — leaving the
+  // bridge's request orphaned forever (the i3kb2 ghost). One request per
+  // coord now, owned upstream. request_id starts NULL, set by the link call.
+  const requestId: string | null = null;
 
   db.prepare(`
     INSERT INTO coord_jobs (
@@ -607,11 +569,19 @@ export function updateCoordJob(id: string, updates: Partial<Omit<CoordJob, 'id' 
         const requests = require('./requests') as typeof import('./requests');
         const reqRow = requests.getRequest(linkedRequestId);
         if (reqRow && reqRow.state !== 'resolved' && reqRow.state !== 'cancelled' && reqRow.state !== 'expired') {
-          const newState: 'awaiting_owner' | 'in_flight' =
-            updates.status === 'waiting_owner' ? 'awaiting_owner' : 'in_flight';
-          if (reqRow.state !== newState) {
-            requests.updateRequest(linkedRequestId, { state: newState });
-          }
+          // v3.1 (Path 2) — carry BOTH the lifecycle state and the coord
+          // activity phase onto the request. state drives brief/prompt/routing;
+          // phase is the finer dance. collecting/negotiating = waiting on
+          // participants (awaiting_colleague); resolving = Maelle working
+          // (in_flight); waiting_owner = owner must pick (awaiting_owner).
+          const newState: 'awaiting_owner' | 'awaiting_colleague' | 'in_flight' =
+            updates.status === 'waiting_owner' ? 'awaiting_owner'
+            : updates.status === 'resolving' ? 'in_flight'
+            : 'awaiting_colleague';  // collecting | negotiating
+          const newPhase = `coord:${updates.status}`;
+          const patch: { state?: typeof newState; phase?: string } = { phase: newPhase };
+          if (reqRow.state !== newState) patch.state = newState;
+          requests.updateRequest(linkedRequestId, patch);
         }
       } catch (_) { /* non-fatal */ }
     }
@@ -829,14 +799,19 @@ export function getCoordJob(id: string): CoordJob | null {
 
 export function getActiveCoordJobs(ownerUserId: string): CoordJob[] {
   const db = getDb();
+  // v3.1 (Path 2) — "active" = linked request still open, OR booked with a
+  // future winning_slot (request resolved but meeting hasn't happened yet —
+  // surfaced so get_active_coordinations can still show it). Status read off
+  // the request; winning_slot is coord_jobs data.
   return db.prepare(`
-    SELECT * FROM coord_jobs
-    WHERE owner_user_id = ?
+    SELECT cj.* FROM coord_jobs cj
+    JOIN requests r ON cj.request_id = r.id
+    WHERE cj.owner_user_id = ?
     AND (
-      status IN ('collecting', 'resolving', 'negotiating', 'waiting_owner')
-      OR (status = 'booked' AND winning_slot > datetime('now'))
+      r.state IN ('awaiting_owner', 'awaiting_colleague', 'in_flight')
+      OR (r.state = 'resolved' AND cj.winning_slot IS NOT NULL AND cj.winning_slot > datetime('now'))
     )
-    ORDER BY created_at DESC
+    ORDER BY cj.created_at DESC
   `).all(ownerUserId) as CoordJob[];
 }
 
@@ -846,17 +821,22 @@ export function getActiveCoordJobs(ownerUserId: string): CoordJob[] {
  */
 export function cancelOrphanCoordJobs(ownerUserId: string, subject: string, exceptJobId: string): void {
   const db = getDb();
+  // v3.1 (Path 2) — find orphans by their linked request's open state, not
+  // coord_jobs.status. Route cancellation through updateCoordJob so the FULL
+  // terminal cascade fires (closes the linked request, cancels tasks, cleans
+  // sibling outreach). Pre-v3.1 this UPDATE'd coord_jobs.status directly,
+  // bypassing the cascade and orphaning the linked request — a ghost source.
   const orphans = db.prepare(`
-    SELECT id FROM coord_jobs
-    WHERE owner_user_id = ?
-    AND subject = ?
-    AND id != ?
-    AND status IN ('collecting', 'resolving', 'negotiating', 'waiting_owner')
+    SELECT cj.id FROM coord_jobs cj
+    JOIN requests r ON cj.request_id = r.id
+    WHERE cj.owner_user_id = ?
+    AND cj.subject = ?
+    AND cj.id != ?
+    AND r.state IN ('awaiting_owner', 'awaiting_colleague', 'in_flight')
   `).all(ownerUserId, subject, exceptJobId) as { id: string }[];
 
   for (const { id } of orphans) {
-    db.prepare(`UPDATE coord_jobs SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?`).run(id);
-    db.prepare(`UPDATE tasks SET status = 'cancelled', updated_at = datetime('now') WHERE skill_ref = ?`).run(id);
+    updateCoordJob(id, { status: 'cancelled' });
   }
 }
 
@@ -866,11 +846,13 @@ export function cancelOrphanCoordJobs(ownerUserId: string, subject: string, exce
  */
 export function getCoordJobsByParticipant(slackId: string, ownerUserId: string): CoordJob[] {
   const db = getDb();
+  // v3.1 (Path 2) — open coords come from the linked request's state.
   const jobs = db.prepare(`
-    SELECT * FROM coord_jobs
-    WHERE owner_user_id = ?
-    AND status IN ('collecting', 'resolving', 'negotiating', 'waiting_owner')
-    ORDER BY created_at DESC
+    SELECT cj.* FROM coord_jobs cj
+    JOIN requests r ON cj.request_id = r.id
+    WHERE cj.owner_user_id = ?
+    AND r.state IN ('awaiting_owner', 'awaiting_colleague', 'in_flight')
+    ORDER BY cj.created_at DESC
   `).all(ownerUserId) as CoordJob[];
 
   return jobs.filter(j => {
@@ -885,10 +867,14 @@ export function getCoordJobsByParticipant(slackId: string, ownerUserId: string):
  */
 export function getStaleCoordJobs(): CoordJob[] {
   const db = getDb();
+  // v3.1 (Path 2) — "still collecting" is the request's phase, not
+  // coord_jobs.status.
   const jobs = db.prepare(`
-    SELECT * FROM coord_jobs
-    WHERE status = 'collecting'
-    AND created_at <= datetime('now', '-3 hours')
+    SELECT cj.* FROM coord_jobs cj
+    JOIN requests r ON cj.request_id = r.id
+    WHERE r.phase = 'coord:collecting'
+    AND r.state IN ('awaiting_colleague', 'in_flight')
+    AND cj.created_at <= datetime('now', '-3 hours')
   `).all() as CoordJob[];
 
   return jobs.filter(job => {

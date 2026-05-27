@@ -243,15 +243,25 @@ export async function initiateCoordination(
   // surface from requests. updateCoordJob's terminal hook closes this request
   // via linkCoordToRequest below.
   const participantNames = taggedParticipants.filter(p => !p.just_invite).map(p => p.name);
+  const firstKey = taggedParticipants.find(p => !p.just_invite && p.slack_id);
   const requestRow = createRequest({
     ownerUserId: params.ownerUserId,
     initiatedBy: params.ownerUserId,
     initiatedByRole: 'owner',
     kind: 'coord',
+    subkind: params.moveExistingEvent ? 'move' : 'schedule',
     subject: taskTitle,
     description: params.topic ?? undefined,
     state: 'awaiting_colleague',
+    // v3.1 (Path 2) — coord activity sub-state lives on the request. At
+    // initiation we're collecting votes from participants.
+    phase: 'coord:collecting',
     informed: 1,
+    // Surface the lead participant so colleague-scoped spine queries
+    // (reply routing, double-DM guard) can find this coord without a join.
+    targetSlackId: firstKey?.slack_id,
+    targetName: firstKey?.name,
+    outcomeExternalEventId: params.moveExistingEvent?.id,
     originChannel: params.ownerChannel,
     originThreadTs: params.ownerThreadTs,
     details: {

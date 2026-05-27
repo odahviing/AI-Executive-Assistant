@@ -57,6 +57,26 @@ export type ClosedBy =
   | 'system'             // internal closure (auto-fix, idempotent short-circuit)
   | 'brief';             // surfaced_threshold hit during brief generation
 
+/**
+ * v3.1 (Path 2) — kind-namespaced activity sub-state values. The string union
+ * documents the legal phases; `phase` is stored as TEXT so callers pass these
+ * literals. Never mix a coord phase onto an outreach request — setPhase
+ * validates the namespace matches the kind.
+ */
+export type CoordPhase =
+  | 'coord:collecting'    // DMs out, gathering votes
+  | 'coord:resolving'     // tallying, picking best slot
+  | 'coord:negotiating'   // ping-pong: countered, re-asking
+  | 'coord:waiting_owner';// parked for owner decision (state=awaiting_owner)
+
+export type OutreachPhase =
+  | 'outreach:scheduled'      // future send_at, not yet sent (state=in_flight)
+  | 'outreach:awaiting_reply' // sent, waiting (state=awaiting_colleague)
+  | 'outreach:nudged'         // follow-up sent once
+  | 'outreach:no_response';   // window elapsed, pending owner decision
+
+export type RequestPhase = CoordPhase | OutreachPhase;
+
 export type NextCheckHandler =
   | 'expiry'                 // generic expiry → close with state=expired
   | 'approval_reminder'      // midpoint nag DM, then re-arm for expiry
@@ -89,6 +109,12 @@ export interface RequestRow {
 
   // State
   state: RequestState;
+  // v3.1 (Path 2) — kind-namespaced activity sub-state. `state` is the
+  // universal lifecycle; `phase` is the finer dance for multi-step kinds.
+  // e.g. coord:collecting | coord:resolving | coord:negotiating |
+  // coord:waiting_owner | outreach:scheduled | outreach:awaiting_reply |
+  // outreach:nudged | outreach:no_response. NULL for single-step kinds.
+  phase: string | null;
   state_changed_at: string;
   closure_reason: string | null;
   closed_at: string | null;
@@ -144,6 +170,8 @@ export interface CreateRequestInput {
   description?: string;
 
   state: RequestState;
+  /** v3.1 — kind-namespaced activity sub-state (see RequestRow.phase). */
+  phase?: string;
 
   /** Defaults: owner-initiated → 1, colleague/system-initiated → 0 */
   informed?: number;

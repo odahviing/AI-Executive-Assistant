@@ -1,6 +1,14 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.0.7** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.1.0** — check `package.json` if unsure; it is the source of truth.
+
+## v3.1.0 just shipped — Path 2 (requests spine owns STATUS)
+
+The status backbone is now the `requests` table; side tables (`coord_jobs`/`outreach_jobs`/`approvals`) hold DATA only. Killed the coord double-request ghost at root, added `requests.phase`, reconciliation + retention sweep, brief-auto-park requester notify, coord-preferred reply routing. Full plan: `.claude/PATH_2_REQUESTS_SPINE.md`. 11-scenario paper trace (0 errors): `.claude/PATH_2_PAPER_TRACES.md`.
+
+**IMMEDIATE NEXT TASK (owner-approved deferral): Path 2 Stages 6 + 7, live-verified.**
+- **Stage 6** — collapse the legacy timer dispatchers into the single `sweepDueRequests` spine sweep (built at `core/requests/runner.ts` but NOT wired into `core/background.ts`). Implement the stubbed `coord_nudge`/`coord_abandon` spine handlers, wire the sweep, retire legacy dispatchers (outreach_expiry/outreach_decision/coord_nudge/coord_abandon/send_scheduled_outreach) in lockstep to avoid double-fire. Verify LIVE (not paper-only) — this is the riskiest subsystem.
+- **Stage 7** — strip the now-redundant status columns from the side tables + delete dead status-mutation helpers. Tables keep their DATA + `request_id` link.
 
 ## What just shipped (3.0.4 → 3.0.7)
 

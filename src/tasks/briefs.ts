@@ -610,6 +610,32 @@ export async function sendMorningBriefing(
   // narration ("I stopped working on X"), then drop.
   markRequestSurfaced(requestIdsToSurface);
   for (const id of requestIdsToStale) {
+    // v3.1 (Path 2) — closing-strength guarantee #3: when the brief auto-parks
+    // a colleague-INITIATED request the owner ignored N times, the requester
+    // must hear back too — otherwise they're left hanging ("Maelle said she'd
+    // ask Idan, then silence"). Mirrors runExpiry's requester loop-close. Only
+    // fires for colleague-initiated rows (requester set, != owner); owner-self
+    // requests have no external party to notify. Fire-and-forget before close.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getRequest } = require('../db/requests') as typeof import('../db/requests');
+      const r = getRequest(id);
+      if (conn && r && r.requester_slack_id && r.requester_slack_id !== ownerUserId) {
+        const requesterFirst = r.requester_name?.split(' ')[0] ?? 'there';
+        const ownerFirst = profile.user.name.split(' ')[0];
+        const subjectText = r.subject && r.subject.toLowerCase().endsWith('needs your input')
+          ? 'that ask' : (r.subject || 'that ask');
+        const body = `Hey ${requesterFirst} — I couldn't get a read from ${ownerFirst} on ${subjectText}. Closing this for now; ping me when you want to try again.`;
+        if (r.origin_is_mpim && r.origin_channel) {
+          void conn.postToChannel(r.origin_channel, body, { threadTs: r.origin_thread_ts ?? undefined }).catch(() => {});
+        } else {
+          void conn.sendDirect(r.requester_slack_id, body).catch(() => {});
+        }
+        logger.info('briefs — requester loop-close on stale auto-park', { requestId: id, requesterSlackId: r.requester_slack_id });
+      }
+    } catch (err) {
+      logger.warn('briefs — stale requester loop-close threw, closing anyway', { requestId: id, err: String(err).slice(0, 200) });
+    }
     closeRequest({
       id,
       state: 'cancelled',

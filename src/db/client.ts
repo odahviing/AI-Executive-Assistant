@@ -796,6 +796,19 @@ function initSchema(db: Database.Database): void {
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_outreach_jobs_request ON outreach_jobs(request_id)`); } catch (_) {}
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_coord_jobs_request ON coord_jobs(request_id)`); } catch (_) {}
 
+  // ── v3.1 (Path 2) — `phase`: kind-namespaced activity sub-state ───────────
+  // The requests spine becomes the SINGLE source of truth for status. `state`
+  // is the universal lifecycle (open/terminal + who we're blocked on). `phase`
+  // carries the finer kind-specific sub-state that used to live in
+  // coord_jobs.status / outreach_jobs.status — e.g. 'coord:collecting',
+  // 'coord:resolving', 'coord:negotiating', 'coord:waiting_owner',
+  // 'outreach:scheduled', 'outreach:awaiting_reply', 'outreach:nudged',
+  // 'outreach:no_response'. The side tables keep their DATA but no longer own
+  // status. Nullable — only multi-phase kinds (coord, outreach) populate it.
+  try { db.exec(`ALTER TABLE requests ADD COLUMN phase TEXT`); } catch (_) {}
+  // Coord/outreach status reads filter by (owner, kind, state); index it.
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_requests_owner_kind_state ON requests(owner_user_id, kind, state)`); } catch (_) {}
+
   // ── v1.7.2 — tasks: target_slack_id / target_name ─────────────────────────
   // Lets owner ask "what's open with Brett?" and get every 1:1 task back in
   // one query. Populated for outreach tasks (1:1) and summary_action_followup
