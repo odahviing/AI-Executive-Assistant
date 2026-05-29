@@ -45,6 +45,7 @@ import { getAnthropicClient } from '../llm/client';
 import type { UserProfile } from '../config/userProfile';
 import { config } from '../config';
 import logger from './logger';
+import { logLlmUsage } from './usageLog';
 
 const anthropic = getAnthropicClient();
 
@@ -295,6 +296,7 @@ export async function runHumanGate(
       system: systemPrompt,
       messages: [{ role: 'user', content: draft }],
     });
+    logLlmUsage('human_gate', 'claude-sonnet-4-6', resp, { audience });
 
     const text = resp.content
       .filter(b => b.type === 'text')

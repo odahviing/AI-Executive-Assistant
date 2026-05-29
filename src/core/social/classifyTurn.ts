@@ -34,6 +34,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { UserProfile } from '../../config/userProfile';
 import logger from '../../utils/logger';
+import { logLlmUsage } from '../../utils/usageLog';
 import { FIXED_CATEGORIES } from '../../db/socialSubjects';
 
 const MODEL = 'claude-haiku-4-5-20251001';
@@ -74,6 +75,16 @@ const INTENT_OTHER: OwnerIntentClassification = { kind: 'other', conversation_st
 export interface ClassifyTurnResult {
   intent: OwnerIntentClassification;
   scope: ToolScopeResult;
+  /**
+   * v3.1.2 (D) — true when the OWNER is asking a "do I have buffer / free
+   * time / how packed is X / am I free" question. Orchestrator uses this
+   * to deterministically run analyzeCalendar + inject real numbers BEFORE
+   * Sonnet narrates, replacing the broken prompt rule at meetings.ts:2044
+   * ("USE THE TOOL — don't math by hand") that Sonnet kept ignoring. Set
+   * only on owner-path intent classification; false on colleague turns
+   * (those go through precheckAvailability separately).
+   */
+  freeTimeInquiry: boolean;
 }
 
 /** Pure-ack short-circuit — shared by both halves. Bare ack/greeting/close-out
@@ -104,11 +115,11 @@ export async function classifyTurn(params: {
   // Nothing requested — return safe defaults (caller shouldn't get here, but
   // be defensive).
   if (!needIntent && !needScopes) {
-    return { intent: INTENT_OTHER, scope: ALL_TOOLS };
+    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false };
   }
 
   if (!message || message.trim().length === 0) {
-    return { intent: INTENT_OTHER, scope: ALL_TOOLS };
+    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false };
   }
 
   // Pure-ack short-circuit — no LLM call for either half. Intent='other'
@@ -116,7 +127,7 @@ export async function classifyTurn(params: {
   // RULE 3: cut the ack word, nothing substantive left → other), and scope
   // widens to general. Saves the whole roundtrip on "ok" / "thanks" / etc.
   if (looksLikePureAck(message)) {
-    return { intent: INTENT_OTHER, scope: ALL_TOOLS };
+    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false };
   }
 
   const ownerFirst = profile.user.name.split(' ')[0];
@@ -163,7 +174,11 @@ TASK ALWAYS WINS. Mixed messages classify as TASK.
 
 For EVERY classification set conversation_state ('open' | 'closing').
 
-For SOCIAL only, also set:
+${isOwner ? `Also set free_time_inquiry (boolean) — true when ${ownerFirst} is asking about his free time / buffer / focus protection / how packed a day is / whether he has time today.
+- TRUE examples: "do I have my buffer today?", "how packed is Thursday?", "am I free at all this afternoon?", "do I have any focus time?", "what's my buffer looking like?", "יש לי זמן היום?", "כמה עמוס היום?".
+- FALSE for specific-slot questions ("am I free at 2pm?" → use find_available_slots, not analyze_calendar) and for booking requests.
+- A general "how's my day" → false unless it specifically mentions free time / buffer / focus / how packed.
+` : ''}For SOCIAL only, also set:
 - direction: ${directionExamples}
 - sentiment: 'positive' | 'negative' | 'neutral'
 - category_hint: pick ONE from: ${categoryList}. Skip when nothing fits.
@@ -205,6 +220,15 @@ ${intentSection}${scopeSection}${recentContext ? `\nRecent conversation (classif
       },
       required: ['direction', 'sentiment'],
     };
+    // v3.1.2 (D) — owner-only field, flagging buffer/free-time inquiries so
+    // the orchestrator can deterministically run analyzeCalendar before
+    // Sonnet narrates instead of trusting the leaky prompt rule.
+    if (isOwner) {
+      properties.free_time_inquiry = {
+        type: 'boolean',
+        description: 'True when the owner is asking about his free time / buffer / focus protection / how packed a day is.',
+      };
+    }
     required.push('kind', 'conversation_state');
   }
   if (needScopes) {
@@ -230,9 +254,10 @@ ${intentSection}${scopeSection}${recentContext ? `\nRecent conversation (classif
       tool_choice: { type: 'tool', name: 'classify_turn' },
       messages: [{ role: 'user', content: message.slice(0, 4000) }],
     });
+    logLlmUsage('classify_turn', MODEL, resp);
 
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const raw = toolUse?.input as (OwnerIntentClassification & { scopes?: string[] }) | undefined;
+    const raw = toolUse?.input as (OwnerIntentClassification & { scopes?: string[]; free_time_inquiry?: boolean }) | undefined;
 
     // ── Resolve intent ──
     let intent: OwnerIntentClassification = INTENT_OTHER;
@@ -286,9 +311,11 @@ ${intentSection}${scopeSection}${recentContext ? `\nRecent conversation (classif
       preview: message.slice(0, 80),
     });
 
-    return { intent, scope };
+    const freeTimeInquiry = isOwner && needIntent && raw?.free_time_inquiry === true;
+
+    return { intent, scope, freeTimeInquiry };
   } catch (err) {
     logger.warn('classifyTurn threw — defaulting to other / general', { err: String(err).slice(0, 300) });
-    return { intent: INTENT_OTHER, scope: ALL_TOOLS };
+    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false };
   }
 }

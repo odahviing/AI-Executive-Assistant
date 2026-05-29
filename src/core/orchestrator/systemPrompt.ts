@@ -98,7 +98,7 @@ export function buildSystemPromptParts(
   const nextWeekStart = thisWeekStart.plus({ days: 7 });
   const nextWeekEnd   = nextWeekStart.plus({ days: 6 });
   const weekStartDayName = weekStartsOnSunday ? 'Sunday' : 'Monday';
-  const weekBoundaries = `Week starts on ${weekStartDayName} in ${user.timezone}.
+  const weekBoundaries = `Week starts on ${weekStartDayName} in ${firstName}'s local timezone.
 This week: ${thisWeekStart.toFormat('EEE d MMM')} – ${thisWeekStart.plus({ days: 6 }).toFormat('EEE d MMM')} [${thisWeekStart.toFormat('yyyy-MM-dd')} to ${thisWeekStart.plus({ days: 6 }).toFormat('yyyy-MM-dd')}]
 Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EEE d MMM')} [${nextWeekStart.toFormat('yyyy-MM-dd')} to ${nextWeekEnd.toFormat('yyyy-MM-dd')}]`;
 
@@ -528,7 +528,7 @@ CANNOT-REACH RULE — when no transport above can reach someone, say so honestly
 
 CALENDAR INVITES — when you create a meeting, the invite goes out automatically. Don't claim "I'll email an invite" and don't narrate the mechanism ("Outlook will send...", "the calendar will dispatch..."). Just say it's done: "Booked." / "Done." / "Set it up." Owner doesn't need to hear about the plumbing. (The split still holds: messages YOU send go through the channels above; invites handle themselves.)
 
-CALENDAR EVENT TIMES — calendar events are returned already in the user's local timezone (${user.timezone}). The time in start.dateTime is ALREADY LOCAL — display it exactly as-is. Never add or subtract hours. If an event says 18:30, it IS 18:30 in ${user.timezone}. Do not convert it. Do not adjust it. Just say 6:30 PM.
+CALENDAR EVENT TIMES — calendar events are returned already in the user's local timezone. The time in start.dateTime is ALREADY LOCAL — display it exactly as-is. Never add or subtract hours. If an event says 18:30, it IS 18:30 local time. Do not convert it. Do not adjust it. Just say 6:30 PM.
 
 DATE HANDLING — always use the exact dates from the DATE LOOKUP and WEEK BOUNDARIES tables below in the dynamic context. Never calculate dates yourself. Before writing any day name + date pair (e.g. "Thursday the 17th"), verify it matches the DATE LOOKUP. If the table says "Friday 17 Apr", it's Friday — not Thursday. Wrong day names destroy trust.
 
@@ -643,7 +643,7 @@ ${skillsSection}`;
   const verifiedSenderSection = verifiedSenderBlock ? `\n\n${verifiedSenderBlock}` : '';
 
   // ── ASSEMBLE DYNAMIC (NOT cached) ─────────────────────────────────────────
-  const dynamicContent = `Now: ${now} | Timezone: ${user.timezone} | Time of day: ${timeOfDay}
+  const dynamicContent = `Now: ${now} | Time of day: ${timeOfDay}
 When greeting: use "good ${timeOfDay}" — never use morning/afternoon/evening/night based on anything other than this. At night (after 21:00 or before 05:00) avoid time-of-day greetings entirely, just say "hi" or "hey".
 
 DATE LOOKUP (use these exactly — never calculate):

@@ -31,6 +31,7 @@ import { formatForSlack } from '../../connections/slack/formatting';
 import { config } from '../../config';
 import { textToSpeech, sendAudioMessage, shouldRespondWithAudio } from '../../voice';
 import logger from '../../utils/logger';
+import { logLlmUsage } from '../../utils/usageLog';
 
 export type SenderRole = 'owner' | 'colleague' | 'unknown';
 
@@ -367,21 +368,20 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
           .filter(name => name.length > 0)
       )];
       const toolHint = distinctTools.length > 0 ? ` (${distinctTools.join(', ')})` : '';
-      if (inboundPreview.length > 0) {
-        await shadowNotify(profile, {
-          channel: channelId,
-          threadTs,
-          action: `${who} said`,
-          detail: `"${inboundPreview}"`,
-          conversationKey: threadTs,
-          conversationHeader: `Conversation with ${who}`,
-        });
-      }
+      // v3.1.2 fix (#117) — ONE shadow per turn, not two. The v3.0.8 split
+      // ("shadow post-gate", cc1ca30) put inbound + outbound in separate
+      // shadowNotify calls, each rendering its own "Conversation with X"
+      // header — owner saw a doubled DM stream. Re-merged: one post carrying
+      // both sides under a single conversationHeader. If inbound text is
+      // empty (reaction-only event), the outbound stands alone.
+      const combinedDetail = inboundPreview.length > 0
+        ? `${who} said: "${inboundPreview}"\nI → ${who}: "${replyPreview}"${toolHint}`
+        : `I → ${who}: "${replyPreview}"${toolHint}`;
       await shadowNotify(profile, {
         channel: channelId,
         threadTs,
-        action: `I → ${who}`,
-        detail: `"${replyPreview}"${toolHint}`,
+        action: `Conversation with ${who}`,
+        detail: combinedDetail,
         conversationKey: threadTs,
         conversationHeader: `Conversation with ${who}`,
       });
@@ -902,6 +902,7 @@ Draft:
 ${trim}`,
       }],
     });
+    logLlmUsage('concision_pass', 'claude-sonnet-4-6', resp);
     const tool = resp.content.find((b: { type: string }) => b.type === 'tool_use') as { input?: { final?: string } } | undefined;
     const final = tool?.input?.final;
     if (!final || !final.trim()) return trim;

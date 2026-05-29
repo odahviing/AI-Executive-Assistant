@@ -330,7 +330,16 @@ NEVER fabricate a reason. Don't say "day off" / "not a workday" unless \`top_rea
 
 The search window auto-expands up to 21 days if fewer than 3 slots are found.
 
-PREFERRED SLOT (v2.9.2): when the requester names a SPECIFIC preferred time ("preferably 11:30", "around 14:00", "if 10:00 works"), pass that exact ISO datetime as \`preferred_slot\`. The tool will check that slot specifically and include it in the result if it's free — even when the spread-picker (1h gap rule, 2/day cap) would have filtered it out. Without this, the requester's asked time can vanish from the offered options and you end up narrating "X isn't clean" when X is actually free.`,
+PREFERRED SLOT (v2.9.2): when the requester names a SPECIFIC preferred time ("preferably 11:30", "around 14:00", "if 10:00 works"), pass that exact ISO datetime as \`preferred_slot\`. The tool will check that slot specifically and include it in the result if it's free — even when the spread-picker (1h gap rule, 2/day cap) would have filtered it out. Without this, the requester's asked time can vanish from the offered options and you end up narrating "X isn't clean" when X is actually free.
+
+CANDIDATE SLOTS — BATCH VALIDATION (v3.0.6): when you have MULTIPLE specific times to check ("can we do A, B, C, or D?" — requester or owner proposed N candidate times), pass them ALL in a single call as \`candidate_slots: [{start, end?}, ...]\` instead of N separate find_available_slots calls. The tool validates each candidate against ${profile.user.name.split(' ')[0]}'s calendar + attendee availability + your rules and returns a results array — one verdict per candidate.
+
+Return shape in this mode is DIFFERENT:
+  { mode: 'candidate_validation', results: [{ start, end, available, broken_rule_label? }, ...] }
+
+When ALL candidates are blocked: narrate WHY using each \`broken_rule_label\` verbatim ("Jun 9 7pm is outside the attendee's working hours; Jun 10 5:30pm conflicts with another meeting…") and offer to widen the search. When at least one is available: surface those.
+
+ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidates are concrete times the user named. ONE call instead of N saves real time. \`search_from\` / \`search_to\` are ignored in this mode — pass any value (the candidate range is used).`,
         input_schema: {
           type: 'object',
           properties: {
@@ -381,6 +390,18 @@ PREFERRED SLOT (v2.9.2): when the requester names a SPECIFIC preferred time ("pr
             preferred_slot: {
               type: 'string',
               description: 'OPTIONAL. ISO datetime of the requester\'s specifically asked time ("preferably 11:30", "around 14:00", "if 10:00 works"). The tool guarantees this slot is in the result if it passes all rules (free, in work hours, no category violation, etc.), even when the spread-picker would have filtered it. Use when the requester named an exact time — closes the "asked slot vanishes" narration bug.',
+            },
+            candidate_slots: {
+              type: 'array',
+              description: 'OPTIONAL. Use when checking MULTIPLE specific candidate times in one call ("can we do A, B, C, or D?"). Each item: { start: ISO datetime in user TZ, end?: ISO datetime (optional — derived from start + duration_minutes when omitted) }. The tool validates each candidate against ALL the same rules (busy collision, work hours, attendee availability, focus, category) and returns one verdict per candidate. Use this INSTEAD of N separate find_available_slots calls — much faster. See the CANDIDATE SLOTS section of the description for the result shape.',
+              items: {
+                type: 'object',
+                properties: {
+                  start: { type: 'string', description: 'ISO datetime of the candidate slot start, in user local timezone (e.g. "2026-06-09T19:00:00").' },
+                  end: { type: 'string', description: 'OPTIONAL. ISO datetime of the candidate slot end. When omitted, derived from start + duration_minutes.' },
+                },
+                required: ['start'],
+              },
             },
           },
           required: ['duration_minutes', 'attendee_emails', 'search_from', 'search_to', 'meeting_mode'],

@@ -23,6 +23,8 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import { findAvailableSlots } from '../connectors/graph/calendar';
+import { getAnthropicClient } from '../llm/client';
+import { logLlmUsage } from './usageLog';
 import logger from './logger';
 
 // ── Detection regex ────────────────────────────────────────────────────────
@@ -38,6 +40,124 @@ const DATE_PATTERN = /\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b/g;
 // Question markers — both English and Hebrew. Cheap union test.
 const QUESTION_PATTERN =
   /\b(is\s+\w+\s+(?:free|available)|works?\s+for|can\s+\w+\s+do|free\s+at|available\s+at|(?:is|are|will)\s+(?:he|she|they|you))|פנוי|פנויה|פנים|זמין|מתאים|מתאימה|יש\s+זמן|אפשר/i;
+
+// v3.1.2 (#116) — TZ-cue trigger. Only when one of these appears do we
+// pay the Haiku normalization cost; otherwise the cheap regex extraction
+// stands (and is correct, since bare "12:00" with no TZ context means
+// owner-local). The Haiku call canonicalizes a multi-TZ message ("12:00
+// Boston (your 19:00)") into one UTC-anchored instant per slot, killing
+// the dual-extraction bug that fed two contradictory verdicts to Sonnet.
+// Triggers: 3+ char TZ abbreviation, common city/country TZ words, an
+// explicit owner-local parenthetical ("(your H:MM)" / "his time" / etc.).
+const TZ_CUE_PATTERN = new RegExp(
+  [
+    // TZ abbreviations (word-bounded)
+    '\\b(PST|PDT|EST|EDT|CST|CDT|MST|MDT|AKST|AKDT|HST|HDT|UTC|GMT|BST|CET|CEST|EET|EEST|IST|IDT|JST|KST|AEST|AEDT|ACST|ACDT|AWST|NZST|NZDT|CT|ET|PT|MT)\\b',
+    // City/country TZ hints (case-insensitive). Keep this conservative to
+    // avoid false positives — only well-known time-anchor words.
+    '\\b(Boston|New\\s+York|NYC|Manhattan|Los\\s+Angeles|San\\s+Francisco|Chicago|Denver|Seattle|Atlanta|Miami|Toronto|Vancouver|London|Paris|Berlin|Madrid|Rome|Amsterdam|Dublin|Lisbon|Stockholm|Helsinki|Athens|Istanbul|Moscow|Tel\\s+Aviv|Jerusalem|Dubai|Mumbai|Delhi|Bangalore|Hong\\s+Kong|Singapore|Tokyo|Seoul|Beijing|Shanghai|Sydney|Melbourne|Auckland)\\b',
+    // Explicit owner-local parenthetical — "(your 19:00)" / "(Idan\'s 19:00)" / "his time" / "my time"
+    '\\(\\s*(your|his|her|their|my)[^)]*\\d{1,2}:\\d{2}',
+    '\\b(your|his|her|my)\\s+time\\b',
+  ].join('|'),
+  'i',
+);
+
+interface NormalizedInstant {
+  /** UTC instant ISO string with offset (or Z). */
+  instant_iso: string;
+}
+
+/**
+ * v3.1.2 (#116) — Haiku-side normalization of a multi-TZ availability message.
+ *
+ * Why: the colleague might write "12:00 Boston (your 19:00) or 13:00 Boston
+ * (20:00 your)". The cheap regex extracts every HH:MM in sight — both the
+ * Boston number AND the parenthesized owner-local number — and tests each
+ * as if it were owner-local, producing contradictory verdicts (the 12:00
+ * test is for owner-local 12:00, NOT for Boston 12:00 = owner 19:00). We
+ * push the TZ math to Haiku: feed the message + owner TZ + today's date,
+ * get back one UTC-anchored instant per slot the colleague actually
+ * proposed. Then we test the instants directly — one verdict per slot.
+ *
+ * Falls open: any throw / non-JSON / empty list → caller falls back to the
+ * regex path (still better than nothing for the no-TZ case).
+ */
+async function normalizeAvailabilityInstantsWithHaiku(
+  message: string,
+  profile: UserProfile,
+): Promise<NormalizedInstant[]> {
+  const anthropic = getAnthropicClient();
+  const ownerFirst = profile.user.name.split(' ')[0];
+  const tz = profile.user.timezone;
+  const today = DateTime.now().setZone(tz).toFormat('yyyy-MM-dd');
+  const ownerOffset = DateTime.now().setZone(tz).toFormat('ZZ');
+
+  const systemPrompt = `You normalize specific time slots from a colleague's availability question into UTC-anchored ISO instants.
+
+OWNER context:
+- Name: ${ownerFirst}
+- Timezone: ${tz} (current offset ${ownerOffset})
+- Today's date: ${today}
+
+The colleague is proposing specific meeting times. They may state each slot in their OWN timezone (e.g. "12:00 Boston") with an explicit owner-local pair in parentheses (e.g. "(your 19:00)") or without. Your job: for each distinct slot the colleague proposed, output ONE ISO instant — the canonical moment in time, with offset.
+
+RULES:
+- One entry per slot the colleague actually proposed (not one per number in the message).
+- When the message gives both a foreign time AND an explicit owner-local "(your X:Y)" pair for the SAME slot, prefer the owner-local — it's the most reliable anchor.
+- When only a foreign TZ is given, map the named place/abbreviation to the right IANA zone and compute the instant for the named date.
+- When no TZ is given for a time, treat it as ${tz} (owner-local).
+- ISO format with offset, e.g. "2026-06-09T19:00:00+03:00" — never bare wall-clock.
+- If the message contains no specific slot proposals, return an empty list.
+
+Output EXACTLY ONE call to normalize_instants.`;
+
+  try {
+    const resp = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 350,
+      system: systemPrompt,
+      tools: [{
+        name: 'normalize_instants',
+        description: 'Output one UTC-anchored ISO instant per slot the colleague proposed.',
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            instants: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  instant_iso: { type: 'string', description: 'ISO 8601 with offset, e.g. 2026-06-09T19:00:00+03:00' },
+                },
+                required: ['instant_iso'],
+              },
+            },
+          },
+          required: ['instants'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'normalize_instants' },
+      messages: [{ role: 'user', content: message.slice(0, 4000) }],
+    });
+    logLlmUsage('availability_tz_normalize', 'claude-haiku-4-5-20251001', resp);
+    const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
+    const raw = toolUse?.input as { instants?: Array<{ instant_iso?: string }> } | undefined;
+    const out: NormalizedInstant[] = [];
+    for (const entry of raw?.instants ?? []) {
+      if (typeof entry?.instant_iso !== 'string') continue;
+      const dt = DateTime.fromISO(entry.instant_iso, { setZone: true });
+      if (!dt.isValid) continue;
+      out.push({ instant_iso: dt.toISO()! });
+    }
+    return out;
+  } catch (err) {
+    logger.warn('availabilityPreCheck — Haiku normalize threw, falling back to regex', {
+      err: String(err).slice(0, 200),
+    });
+    return [];
+  }
+}
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -83,19 +203,49 @@ export async function precheckAvailability(params: {
   // it's not an availability ask.
   if (!QUESTION_PATTERN.test(params.message)) return empty;
 
-  const times = extractTimes(params.message);
-  if (times.length === 0) return empty;
-
-  // Extract dates. If none, assume "today" for all times. If multiple dates,
-  // pair each time with its nearest preceding date in the message.
-  const dateMatches = extractDates(params.message, params.profile.user.timezone);
   const tz = params.profile.user.timezone;
   const today = DateTime.now().setZone(tz).toFormat('yyyy-MM-dd');
-
-  const pairs = pairTimesWithDates(params.message, times, dateMatches, today);
-  if (pairs.length === 0) return empty;
-
   const durationMinutes = params.durationMinutes ?? params.profile.meetings.allowed_durations[1] ?? 25;
+
+  // v3.1.2 (#116) — multi-TZ path. If the message contains a TZ cue (named
+  // place / abbreviation / explicit owner-local parenthetical), Haiku
+  // canonicalizes the proposed slots into UTC-anchored instants and we
+  // test those directly. Eliminates the dual-extraction bug where regex
+  // pulled both the foreign and owner-local numbers and tested each as if
+  // it were owner-local. Empty Haiku result → fall through to the regex
+  // path (still useful for the no-TZ case).
+  let pairs: Pair[] = [];
+  if (TZ_CUE_PATTERN.test(params.message)) {
+    const instants = await normalizeAvailabilityInstantsWithHaiku(params.message, params.profile);
+    if (instants.length > 0) {
+      const seen = new Set<string>();
+      for (const inst of instants) {
+        const dt = DateTime.fromISO(inst.instant_iso).setZone(tz);
+        if (!dt.isValid) continue;
+        const date = dt.toFormat('yyyy-MM-dd');
+        const time = dt.toFormat('HH:mm');
+        const key = `${date}T${time}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pairs.push({ date, time });
+      }
+      logger.info('availabilityPreCheck — TZ-cue path, Haiku normalized instants', {
+        instant_count: instants.length, pair_count: pairs.length,
+      });
+    }
+  }
+
+  // Regex fallback path. Runs when no TZ cue OR when Haiku returned empty.
+  // The owner-local assumption is correct in the no-TZ case (a colleague
+  // writing "2pm" without TZ context means owner-local).
+  if (pairs.length === 0) {
+    const times = extractTimes(params.message);
+    if (times.length === 0) return empty;
+    const dateMatches = extractDates(params.message, tz);
+    pairs = pairTimesWithDates(params.message, times, dateMatches, today);
+    if (pairs.length === 0) return empty;
+  }
+
   const verdicts: SlotVerdict[] = [];
 
   for (const pair of pairs.slice(0, 6)) {  // cap at 6 to bound cost

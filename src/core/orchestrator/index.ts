@@ -10,6 +10,7 @@ import type { UserProfile } from '../../config/userProfile';
 import type { SkillContext, ChannelId } from '../../skills/types';
 import { auditLog, buildSocialContextBlock, getSummarySessionByThread, getCoordLifecycle, getOutreachLifecycle } from '../../db';
 import { getActiveJobsForThread } from '../../tasks';
+import { logLlmUsage } from '../../utils/usageLog';
 import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
 
@@ -24,7 +25,12 @@ async function callClaude(
   retriesLeft = 1,
 ): Promise<Anthropic.Message> {
   try {
-    return await anthropic.messages.create(params) as Anthropic.Message;
+    const resp = await anthropic.messages.create(params) as Anthropic.Message;
+    // v3.0.6 — usage logging. This wrapper is the main orchestrator loop's
+    // sole API path, so one log here captures every iteration of every turn
+    // — the dominant Sonnet cost. Tagged 'orchestrator'.
+    logLlmUsage('orchestrator', String(params.model), resp);
+    return resp;
   } catch (err: any) {
     if (err?.status === 429 && retriesLeft > 0) {
       const retryAfter = parseInt(err?.headers?.['retry-after'] ?? '30', 10);
@@ -325,6 +331,14 @@ export interface OrchestratorOutput {
     eventId?: string;
     reason?: string;
   }>;
+  /**
+   * v3.1.2 (#118) — True when `check_calendar_health` ran AND returned
+   * `vacuous: true` (no issues found, no auto-fixes applied). The routine
+   * dispatcher uses this to stay silent on auto-fired routine runs that
+   * found nothing. Chat-path calls don't go through `dispatchRoutine`, so
+   * this flag is informational for them (the reply ships normally).
+   */
+  healthCheckVacuous?: boolean;
 }
 
 /**
@@ -456,6 +470,10 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // Result.scope feeds getSkillTools below (toolScopes); result.intent drives
   // the social directive. Both fail open (intent→other, scopes→general).
   let toolScopes: string[] | undefined;
+  // v3.1.2 (D) — captured from classifyTurn so a deterministic analyzeCalendar
+  // pre-check can fire below for owner buffer/free-time questions, replacing
+  // the leaky meetings.ts:2044 prompt rule.
+  let isFreeTimeInquiry = false;
   const needIntent = socialActive && !!userMessage && userMessage.trim().length > 1;
   const needScopes = profile.behavior?.intent_aware_tools === true
     && isOwnerTurn
@@ -482,6 +500,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       });
 
       if (needScopes) toolScopes = turnResult.scope.scopes;
+      if (isOwnerTurn) isFreeTimeInquiry = turnResult.freeTimeInquiry === true;
 
       if (needIntent) {
         socialClassification = turnResult.intent;
@@ -496,6 +515,27 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           classification: socialClassification,
           ownerTimezone: profile.user.timezone,
         });
+        // Stamp the subject as raised the moment we commit to surfacing it
+        // proactively. last_assistant_initiated_at is the linchpin the picker's
+        // 72h re-raise defer, the raise→ignored decay, and the daily/24h
+        // initiation gates all key on. The old stamp site lived in the
+        // task-turn coda block, which got hard-disabled (codaEligible=false);
+        // the proactive-directive path that replaced it never picked up the
+        // marking, so every subject sat at last_assistant_initiated_at=NULL and
+        // the whole rotation/decay machinery was dead. (raise_new has no
+        // subject yet — it's stamped when reconciliation creates the subject.)
+        if (socialDirective.mode === 'continue' && socialDirective.subjectId) {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { markSubjectRaised } = require('../../db/socialSubjects') as
+              typeof import('../../db/socialSubjects');
+            markSubjectRaised(socialDirective.subjectId);
+          } catch (err) {
+            logger.warn('markSubjectRaised (proactive directive) threw — continuing', {
+              err: String(err).slice(0, 200),
+            });
+          }
+        }
       }
     } catch (err) {
       logger.warn('classifyTurn pre-pass threw — continuing without directive / scopes', { err: String(err).slice(0, 300) });
@@ -701,6 +741,116 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     }
   }
 
+  // v3.1.2 (D) — free-time pre-check. Owner-path only. When classifyTurn
+  // flagged this turn as a buffer/free-time inquiry ("do I have buffer?",
+  // "how packed is Thursday?", "am I free this afternoon?"), run
+  // analyzeCalendar for today + tomorrow deterministically and inject the
+  // real freeMin + gap structure into the prompt. Replaces the leaky
+  // meetings.ts:2044 "USE THE TOOL — don't math by hand" prompt rule that
+  // Sonnet kept ignoring, producing fabricated "2h45 free / healthy"
+  // narrations. No NL regex — the classifier's LLM pre-pass decides
+  // intent. Fails open: any error in analyze leaves the block empty and
+  // the prompt rule + Sonnet's normal flow take over.
+  let freeTimePrecheckBlock = '';
+  if (isFreeTimeInquiry && input.senderRole === 'owner') {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const ops = require('../../skills/meetings/ops') as typeof import('../../skills/meetings/ops');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const cal = require('../../connectors/graph/calendar') as typeof import('../../connectors/graph/calendar');
+      const tz = profile.user.timezone;
+      // Today + tomorrow window. Enough surface for "do I have buffer today",
+      // "how packed is tomorrow", or "this afternoon vs tomorrow morning"
+      // questions without paying for a week's worth of events.
+      const { DateTime: Lux } = require('luxon') as typeof import('luxon');
+      const todayStr = Lux.now().setZone(tz).toFormat('yyyy-MM-dd');
+      const tomorrowStr = Lux.now().setZone(tz).plus({ days: 1 }).toFormat('yyyy-MM-dd');
+      const rawEvents = await cal.getCalendarEvents(profile.user.email, todayStr, tomorrowStr, tz);
+      const processed = ops.processCalendarEvents(
+        rawEvents,
+        profile.user.email,
+        profile.user.name,
+        tz,
+        profile,
+      );
+      const days = ops.analyzeCalendar(processed, todayStr, tomorrowStr, profile);
+      if (days.length > 0) {
+        const lines: string[] = [];
+        for (const d of days) {
+          if (d.dayType === 'day_off') continue;
+          const free = d.stats?.freeMinInWorkHours ?? 0;
+          const meetings = d.stats?.meetingCount ?? 0;
+          const noBuffer = d.issues?.some(i => i.type === 'no_buffer') === true;
+          const totalMin = d.stats?.totalMeetingMin ?? 0;
+          const hh = Math.floor(free / 60);
+          const mm = free % 60;
+          const freeStr = hh > 0 ? `${hh}h${mm > 0 ? `${String(mm).padStart(2, '0')}m` : ''}` : `${mm}m`;
+          const meetingsHh = Math.floor(totalMin / 60);
+          const meetingsMm = totalMin % 60;
+          const meetingsStr = meetingsHh > 0 ? `${meetingsHh}h${meetingsMm > 0 ? `${String(meetingsMm).padStart(2, '0')}m` : ''}` : `${meetingsMm}m`;
+          lines.push(`  - ${d.date} (${d.day}, ${d.dayType}): ${freeStr} free during work hours / ${meetingsStr} in meetings across ${meetings} ${meetings === 1 ? 'meeting' : 'meetings'}${noBuffer ? ' — flagged as BUSY (below your daily focus-time floor)' : ''}`);
+        }
+        if (lines.length > 0) {
+          freeTimePrecheckBlock = `## CALENDAR HEALTH (rule-aware, deterministic — use these numbers)\n\nYou asked about your free time / buffer. I ran the analyzer; here are the real numbers — narrate from THESE, do not eyeball get_calendar and recompute:\n\n${lines.join('\n')}\n\nIf a day is flagged BUSY, say so honestly. If you have buffer, say how much. Do not invent figures.`;
+        }
+      }
+    } catch (err) {
+      logger.warn('freeTimePreCheck threw — proceeding without pre-check', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
+  // v3.1.2 (B2) — recently-surfaced calendar issues. When the calendar_health
+  // routine (or the brief) tells the owner about a duplicate / overlap /
+  // OOF-conflict and the owner replies "delete it" / "fix it" minutes later,
+  // the next-turn search-by-subject was losing the event_id the routine
+  // already had in hand — Maelle was searching get_calendar for "Video
+  // Interview" and missing the now-vanished event, replying "may have
+  // already been removed" instead of resolving against the known
+  // event_id/peer_event_id. Owner-path only. Pull calendar_issues rows
+  // touched in the last 6h (regardless of status — auto-stale-resolved
+  // rows from this morning are still candidates for "delete it" follow-ups
+  // throughout the workday), inject as a compact block. Sonnet uses the
+  // IDs to call delete_meeting / manage_calendar_issue directly instead
+  // of subject re-search.
+  let recentCalendarIssuesBlock = '';
+  if (input.senderRole === 'owner') {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getDb } = require('../../db') as typeof import('../../db');
+      const rows = getDb().prepare(`
+        SELECT id, event_id, peer_event_id, event_date, issue_class, status, notes, updated_at
+        FROM calendar_issues
+        WHERE owner_user_id = ?
+          AND datetime(updated_at) >= datetime('now', '-6 hours')
+        ORDER BY datetime(updated_at) DESC
+        LIMIT 5
+      `).all(profile.user.slack_user_id) as Array<{
+        id: string;
+        event_id: string;
+        peer_event_id: string | null;
+        event_date: string;
+        issue_class: string;
+        status: string;
+        notes: string | null;
+        updated_at: string;
+      }>;
+      if (rows.length > 0) {
+        const lines = rows.map(r => {
+          const peerPart = r.peer_event_id ? `, peer_event_id=${r.peer_event_id}` : '';
+          const noteSnip = (r.notes ?? '').slice(0, 180).replace(/\s+/g, ' ').trim();
+          return `  - issue_id=${r.id} (${r.issue_class} on ${r.event_date}, status=${r.status}): event_id=${r.event_id}${peerPart}\n    notes: ${noteSnip}`;
+        });
+        recentCalendarIssuesBlock = `## RECENT CALENDAR ISSUES (last 6h — use these IDs, do not re-search by subject)\n\nThe calendar_health routine or the brief surfaced the following issues recently. If the owner says "delete it" / "fix it" / "cancel it" referring to one of these, USE the event_id (or peer_event_id when the reference is to the second event) directly with delete_meeting / move_meeting / update_meeting. Do NOT do a fresh get_calendar subject search — the event may have already vanished externally while you still have the id from the surface.\n\n${lines.join('\n')}`;
+      }
+    } catch (err) {
+      logger.warn('recentCalendarIssues block builder threw — proceeding without it', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
   // v2.8.5 — research pre-check. Owner-path only. When the message contains
   // an explicit "explore X" / "research X" / "look into X" / "what's new
   // with X" intent, run web_search deterministically and inject the results
@@ -728,6 +878,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   const systemBlocksDynamic = [
     priorOutboundBlock,
     availabilityPrecheckBlock,
+    freeTimePrecheckBlock,
+    recentCalendarIssuesBlock,
     researchPrecheckBlock,
     promptParts.dynamic,
     threadContextBlock,
@@ -852,6 +1004,12 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // Consumed by the post-hoc hallucination backstop in app.ts — if the reply
   // claims a booking happened but this is false, the claim is rewritten.
   let bookingOccurred = false;
+  // v3.1.2 (#118) — true if check_calendar_health fired this turn AND returned
+  // vacuous=true (no issues, no auto-fixes). Routine dispatcher reads this on
+  // OrchestratorOutput to stay silent on auto-fired runs; owner-asked runs
+  // (which don't go through dispatchRoutine) ignore the flag and narrate
+  // normally so the owner sees the "all clear" verification.
+  let healthCheckVacuous = false;
   // True once coordinate_meeting has successfully queued a coord this turn.
   // Subsequent coordinate_meeting calls within the same orchestrator invocation
   // are short-circuited with an idempotent "already initiated" response. This
@@ -1468,6 +1626,18 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       ) {
         requiresApproval = true;
         approvalId = (result as Record<string, unknown>).approvalId as string;
+      }
+
+      // v3.1.2 (#118) — pick up the vacuous flag on check_calendar_health so
+      // the routine dispatcher can suppress posting on auto-fired runs that
+      // found nothing.
+      if (
+        toolUse.name === 'check_calendar_health' &&
+        result &&
+        typeof result === 'object' &&
+        (result as Record<string, unknown>).vacuous === true
+      ) {
+        healthCheckVacuous = true;
       }
 
       // Check if any skill needs Slack client execution
@@ -2113,6 +2283,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     bookingOccurred,
     toolSummaries: toolCallSummaries.length > 0 ? toolCallSummaries : undefined,
     mutationActions: mutationActions.length > 0 ? mutationActions : undefined,
+    healthCheckVacuous: healthCheckVacuous ? true : undefined,
   };
 }
 

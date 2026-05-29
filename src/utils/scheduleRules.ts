@@ -47,7 +47,68 @@ export type RuleViolationKind =
   | 'floating_block_overlap'
   | 'travel_buffer_collision'
   | 'owner_busy_collision'
-  | 'attendee_busy_collision';
+  | 'attendee_busy_collision'
+  | 'focus_time_floor';
+
+// ── v3.1.2 (C) — Shared daily-focus-time helper ─────────────────────────────
+//
+// Single source of truth for "how much quality free time does this day have."
+// "Quality" = contiguous chunks of at least `thinking_time_min_chunk_minutes`
+// (the profile setting); a 10-min gap between two meetings is breathing room,
+// not focus time, and doesn't count. This same math powers two surfaces:
+//
+//   - find_available_slots — per-slot loop rejects slots that would drop the
+//     day under the configured floor (2h office / 1h home). v2.7.0 lived
+//     inline in calendar.ts; now both callers consume this export.
+//   - checkSlot rule (9) — write-path validation. Pre-fix the floor was
+//     enforced ONLY at search time, so a named-time create_meeting /
+//     move_meeting / coord pick could book on a packed day that
+//     find_available_slots would have refused. Owner direction (3.1.2):
+//     ONE check, both surfaces. Relaxed-mode bypass preserved — explicit
+//     owner override is the approval, same as every other soft rule.
+//
+// Pure function: no DB, no profile, easy to test.
+export function computeDayQualityFreeMinutes(params: {
+  dayDate: string;           // YYYY-MM-DD
+  timezone: string;          // IANA
+  workStart: string;         // 'HH:MM'
+  workEnd: string;           // 'HH:MM'
+  busyBlocks: Array<{ start: Date; end: Date }>;
+  minChunkMinutes: number;
+}): number {
+  const { dayDate, timezone, workStart, workEnd, busyBlocks, minChunkMinutes } = params;
+  const dayStartMs = DateTime.fromISO(`${dayDate}T${workStart}`, { zone: timezone }).toMillis();
+  const dayEndMs   = DateTime.fromISO(`${dayDate}T${workEnd}`,   { zone: timezone }).toMillis();
+
+  const dayBusy = busyBlocks
+    .filter(b => b.start.getTime() < dayEndMs && b.end.getTime() > dayStartMs)
+    .map(b => ({
+      start: Math.max(b.start.getTime(), dayStartMs),
+      end:   Math.min(b.end.getTime(), dayEndMs),
+    }))
+    .sort((a, b) => a.start - b.start);
+
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const block of dayBusy) {
+    if (merged.length > 0 && block.start <= merged[merged.length - 1].end) {
+      merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, block.end);
+    } else {
+      merged.push({ ...block });
+    }
+  }
+
+  let totalFreeMin = 0;
+  let prev = dayStartMs;
+  for (const block of merged) {
+    const gapMin = (block.start - prev) / 60_000;
+    if (gapMin >= minChunkMinutes) totalFreeMin += gapMin;
+    prev = block.end;
+  }
+  const finalGapMin = (dayEndMs - prev) / 60_000;
+  if (finalGapMin >= minChunkMinutes) totalFreeMin += finalGapMin;
+
+  return totalFreeMin;
+}
 
 export interface RuleCheckInput {
   profile: UserProfile;
@@ -286,6 +347,81 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // starts (:00/:15/:30/:45). Connected back-to-backs are fine; a separate
   // collision check duplicated the work and incorrectly rejected slots like
   // 17:00 directly after a meeting ending 17:00.
+
+  // ── (9) daily focus-time floor (v3.1.2 C) ────────────────────────────────
+  // The 2h-office / 1h-home daily-free-time requirement used to live ONLY in
+  // find_available_slots — so a named-time create_meeting / move_meeting /
+  // coord pick would book on a packed day that the search path would have
+  // refused. Now enforced here too via the shared computeDayQualityFreeMinutes
+  // helper. Bypassed when allowRelaxed=true (explicit owner override IS the
+  // approval) and when isFloatingBlock=true (focus/lunch/gym blocks are
+  // signals that coexist with meetings; the math already ignores showAs=free
+  // anyway, but skip to match the rest of the relaxed semantics).
+  if (!input.allowRelaxed && !input.isFloatingBlock) {
+    const officeDays = new Set(profile.schedule.office_days.days as string[]);
+    const homeDays = new Set(profile.schedule.home_days.days as string[]);
+    const dayName = slotStart.toFormat('EEEE');
+    const isOffice = officeDays.has(dayName);
+    const isHome = homeDays.has(dayName);
+    if (isOffice || isHome) {
+      const requiredHours = isOffice
+        ? (profile.meetings.free_time_per_office_day_hours ?? 2)
+        : (profile.meetings.free_time_per_home_day_hours
+            ?? profile.meetings.free_time_per_office_day_hours ?? 1);
+      const requiredMin = requiredHours * 60;
+      if (requiredMin > 0) {
+        const minChunk = profile.meetings.thinking_time_min_chunk_minutes ?? 30;
+        // Build busyBlocks from this day's events, minus excluded ids.
+        // showAs='free' events don't block focus time; isAllDay doesn't either
+        // (vacation markers etc.). isCancelled out.
+        const busyBlocks: Array<{ start: Date; end: Date }> = [];
+        for (const ev of input.events) {
+          if (ev.isCancelled) continue;
+          if (excludeSet.has(ev.id)) continue;
+          if ((ev as any).showAs === 'free') continue;
+          if ((ev as any).isAllDay) continue;
+          busyBlocks.push({
+            start: new Date(ev.start.dateTime),
+            end: new Date(ev.end.dateTime),
+          });
+        }
+        // Add the proposed slot itself — checking what's left after booking.
+        busyBlocks.push({
+          start: slotStart.toJSDate(),
+          end: slotEnd.toJSDate(),
+        });
+        // Work-hours window for the day. Multi-window aware: union of all
+        // windows for the floor calc. For simplicity use earliest start and
+        // latest end of the day's configured windows.
+        const dayWindows = (profile.schedule.work_hours as Record<string, string[]>)[dayName] ?? [];
+        if (dayWindows.length > 0) {
+          let earliestStart = '23:59';
+          let latestEnd = '00:00';
+          for (const win of dayWindows) {
+            const [s, e] = win.split('-');
+            if (s && s < earliestStart) earliestStart = s;
+            if (e && e > latestEnd) latestEnd = e;
+          }
+          const dayDate = slotStart.toFormat('yyyy-MM-dd');
+          const dayFreeMin = computeDayQualityFreeMinutes({
+            dayDate,
+            timezone: tz,
+            workStart: earliestStart,
+            workEnd: latestEnd,
+            busyBlocks,
+            minChunkMinutes: minChunk,
+          });
+          if (dayFreeMin < requiredMin) {
+            return {
+              passes: false,
+              violation_kind: 'focus_time_floor',
+              violation_label: `Booking this leaves ${profile.user.name.split(' ')[0]} with ${Math.round(dayFreeMin)} min of focus time on ${dayName} — below his ${requiredHours}h ${isOffice ? 'office' : 'home'}-day floor.`,
+            };
+          }
+        }
+      }
+    }
+  }
 
   return { passes: true };
 }

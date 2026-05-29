@@ -39,14 +39,25 @@ export interface ResolveContext {
   app?: App;
   profile: UserProfile;
   /**
-   * Direction-of-resolution flag set by resolveRequest from row.state at
-   * call time. True when state was 'awaiting_colleague' — i.e. the
-   * COLLEAGUE is the actor resolving (accepting / rejecting owner's
-   * counter). False (default) when the owner is the actor.
+   * v3.1.3 — set by the CALLER: true only when the COLLEAGUE (requester) is the
+   * one resolving — i.e. responding to the owner's relayed counter on an
+   * amending approval (resolve_approval invoked on the colleague path,
+   * senderRole !== 'owner'). False/undefined for every owner-driven resolve
+   * (owner's resolve_approval, emoji reaction, thread-bound auto-resolve).
    *
-   * Used by notifyRequesterOfDecision to pick relay phrasing: when
-   * wasAwaitingColleague=true, an 'approve' verdict means the colleague
-   * accepted the counter — "owner said yes" credits the wrong actor.
+   * This is the ACTOR, distinct from the row's STATE. The bounce-back logic
+   * (reject/amend while awaiting_colleague) must fire ONLY when the colleague
+   * is acting — otherwise an OWNER reject on an awaiting_colleague row (e.g.
+   * "close it, already booked") gets misread as "the colleague rejected my
+   * counter" and bounced back to awaiting_owner instead of closing. That was
+   * the Eli ghost: an owner reject silently turned into a bounce.
+   */
+  resolvedByColleague?: boolean;
+  /**
+   * Derived inside resolveRequest = (row.state === 'awaiting_colleague' &&
+   * resolvedByColleague). Used by notifyRequesterOfDecision to pick relay
+   * phrasing (a colleague-accepted counter shouldn't be credited as "owner
+   * said yes").
    */
   wasAwaitingColleague?: boolean;
 }
@@ -174,7 +185,10 @@ export async function resolveRequest(
   // v2.9.1 — direction of the resolution. When state=awaiting_owner the
   // owner is replying; when state=awaiting_colleague the requester is
   // replying to owner's counter (amend bounce-back path).
-  const wasAwaitingColleague = row.state === 'awaiting_colleague';
+  // v3.1.3 — gate on the ACTOR, not just the state. Bounce-back only when the
+  // COLLEAGUE is resolving an awaiting_colleague row. An owner reject/amend on
+  // such a row (he's overriding / closing) must NOT bounce — it must resolve.
+  const wasAwaitingColleague = row.state === 'awaiting_colleague' && ctx.resolvedByColleague === true;
   // Stamp the flag on ctx so downstream helpers (notifyRequesterOfDecision)
   // can branch relay phrasing on actor direction without each call site
   // threading an extra param.

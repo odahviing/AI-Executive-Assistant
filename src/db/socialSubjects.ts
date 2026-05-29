@@ -109,6 +109,8 @@ export const DECAY_DAYS = 7;
 // Creation values per the redesign:
 //   person-initiated (owner / colleague): start at 3 (mid)
 //   assistant-initiated:                  start at 2 (lower; needs engagement to grow)
+// A subject grows toward the 5 cap on engagement and decays to 0 (dormant) on
+// neglect — 5 is the ceiling reached by repeated engagement, never a start.
 export const SCORE_ON_CREATE_PERSON = 3;
 export const SCORE_ON_CREATE_ASSISTANT = 2;
 
@@ -353,16 +355,22 @@ export function reviveSubject(subjectId: string): SocialSubject | null {
 }
 
 /**
- * Mark that the assistant just raised this subject — used for the negative-feedback
- * signal on the next inbound. Bumps last_assistant_initiated_at.
+ * Mark that the assistant just raised this subject — used for the raise-feedback
+ * signal on the next inbound + the picker's 72h re-raise defer + the daily
+ * initiation gates. Bumps ONLY last_assistant_initiated_at.
+ *
+ * A raise deliberately does NOT touch last_touched_at: "touched" means the
+ * PERSON engaged. If raising counted as a touch, an ignored-but-repeatedly-
+ * raised subject would keep refreshing its decay clock and never age — so a
+ * topic the owner keeps ignoring could live forever. Leaving last_touched_at
+ * alone lets weekly decay age an ignored raise toward dormancy (owner
+ * direction 2026-05-27).
  */
 export function markSubjectRaised(subjectId: string): void {
   const db = getDb();
   db.prepare(`
     UPDATE social_subjects
     SET last_assistant_initiated_at = datetime('now'),
-        last_touched_at = datetime('now'),
-        last_touched_by = 'assistant',
         updated_at = datetime('now')
     WHERE id = ?
   `).run(subjectId);

@@ -16,6 +16,7 @@ import { getOpenScannerItems } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
 import { parseDetails, type RequestRow } from '../core/requests/types';
 import logger from './logger';
+import { logLlmUsage } from './usageLog';
 
 interface ScannerResult {
   scanned: boolean;
@@ -78,6 +79,7 @@ export async function closeLoopOnOwnerHandled(params: {
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userPrompt }],
     });
+    logLlmUsage('close_loop', 'claude-sonnet-4-6', resp);
     const text = resp.content
       .filter(b => b.type === 'text')
       .map(b => (b as Anthropic.TextBlock).text)

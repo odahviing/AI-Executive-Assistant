@@ -72,7 +72,7 @@ function recentColleagueContext(slackId: string | null | undefined, limit = 3): 
 
 // ── Item builders by kind ────────────────────────────────────────────────────
 
-function buildApprovalItem(r: RequestRow, _timezone: string): RichItem {
+function buildApprovalItem(r: RequestRow, timezone: string): RichItem {
   const det = parseDetails<Record<string, unknown>>(r) ?? {};
   const slotsArr = Array.isArray(det.slots) ? (det.slots as any[]) : [];
   return {
@@ -92,6 +92,7 @@ function buildApprovalItem(r: RequestRow, _timezone: string): RichItem {
     payload: det,
     closure_reason: r.closure_reason,
     closed_at: r.closed_at,
+    closed_at_relative: r.closed_at ? relativeTime(r.closed_at, timezone) : null,
     recent_context: recentColleagueContext(r.requester_slack_id, 3),
   };
 }
@@ -158,6 +159,7 @@ function buildOutreachItem(
     awaitsReply,
     closure_reason: r.closure_reason,
     closed_at: r.closed_at,
+    closed_at_relative: r.closed_at ? relativeTime(r.closed_at, timezone) : null,
     recent_context: recentColleagueContext(r.target_slack_id, 3),
   };
   if (verifiedOutcome && verifiedOutcome.status !== 'none' && verifiedOutcome.event) {
@@ -224,6 +226,7 @@ function buildCoordItem(
     updatedWhen: relativeTime(r.updated_at, timezone),
     closure_reason: r.closure_reason,
     closed_at: r.closed_at,
+    closed_at_relative: r.closed_at ? relativeTime(r.closed_at, timezone) : null,
     recent_context: recentColleagueContext(firstParticipantSlackId, 3),
   };
   if (verified && verified.status !== 'none' && verified.event) {
@@ -252,6 +255,7 @@ function buildTaskItem(r: RequestRow, timezone: string): RichItem {
     target_name: r.target_name,
     closure_reason: r.closure_reason,
     closed_at: r.closed_at,
+    closed_at_relative: r.closed_at ? relativeTime(r.closed_at, timezone) : null,
     recent_context: recentColleagueContext(r.target_slack_id, 3),
   };
 }
@@ -442,9 +446,9 @@ Principle: nobody can assign ${firstName} work. Only HIS rules / HIS calendar / 
 
 APPROVAL CONTEXT RULE: when a request item has kind='approval', USE the ask_text + subject + requester_name + payload fields. NEVER ask ${firstName} what the item is about — he filed it through you. If a critical field is missing, surface the gap honestly ("I have a pending Julia approval but the context didn't come through — let me dig") rather than asking him.
 
-CLOSURE NARRATION: When a request has a closure_reason and state in (resolved / cancelled / expired), narrate it as past tense closure in the colleague's paragraph — there's nothing left to act on.
+CLOSURE NARRATION: When a request has a closure_reason and state in (resolved / cancelled / expired), narrate it as past tense closure in the colleague's paragraph — there's nothing left to act on. Use the closed_at_relative field on the item to anchor the narration in time ("Yesterday: ...", "Earlier today: ...") so ${firstName} doesn't read a stale close as today's news.
 - closure_reason='surfaced_threshold' → "I stopped working on X — let me know if you want me to revive it." (one passive line; this is auto-park after 3 surfaces with no action)
-- closure_reason starting with 'owner_' → "I told <requester> you said yes/no on X."
+- closure_reason starting with 'owner_' → YOUR own decision, not an outbound action. Narrate as "${firstName} said <closure_reason>, so I closed the X coord — nothing to do." NEVER claim "I told <requester>" / "I let <name> know" — those imply a DM you sent. Only describe an outbound DM when the item has target_slack_id set AND closure actually involved a colleague reply or relay (e.g., closure_reason='colleague_replied').
 - closure_reason='colleague_replied' → describe the reply.
 - closure_reason='meeting_cascade' / starts with 'parent_' → "the meeting got moved/cancelled, so I closed X."
 

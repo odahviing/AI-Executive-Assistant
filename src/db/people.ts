@@ -557,8 +557,15 @@ export function formatThreadPeopleBlock(
       continue;
     }
     const email = p.email || 'unknown';
+    // v3.1.2 — mirror the formatPeopleMemoryForPrompt guard. When state/city
+    // is on file, that's the location for discussion. When it's NOT, mark the
+    // tz explicitly so Sonnet doesn't infer a city from the IANA tag (the
+    // "Asia/Jerusalem → Jerusalem" leak class). A timezone is reliable for
+    // time math; it is NOT where the person is.
     const tz = p.timezone
-      ? (p.state ? `${p.timezone} (${p.state})` : p.timezone)
+      ? (p.state
+          ? `${p.timezone} (${p.state})`
+          : `${p.timezone} (city not on file — TZ is reliable for time math; only ask for city when location/venue matters)`)
       : 'unknown';
     const gender = p.gender && p.gender !== 'unknown' ? p.gender : 'unknown';
     lines.push(`- ${p.name}: email=${email}, tz=${tz}, gender=${gender}`);

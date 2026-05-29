@@ -17,6 +17,8 @@
  * orchestrator/systemPrompt.ts. Code handles verbatim, prompt handles paraphrased.
  */
 
+import { DateTime } from 'luxon';
+
 // Tool names that must never appear verbatim in user-facing text. Keep in sync
 // with `name: '...'` tool definitions across src/skills/ + src/core/assistant.ts
 // + src/tasks/*.
@@ -71,16 +73,33 @@ const SENTINEL_RE = /\b[A-Z]{2,}(?:_[A-Z0-9]+)+\b/g;
 const GRAPH_ID_RE = /`?AAMk[A-Za-z0-9+/=_-]{40,}`?/g;
 
 // v2.2.4 (bug 5b) — IANA timezone strings ("America/New_York", "Asia/Jerusalem",
-// "Europe/London") are internal data-format names. Real EAs say "Boston time"
-// or "Israel" or "London hours" — never "Asia/Jerusalem". Replace with the
-// city/region portion (the part after the last slash, with underscores → spaces).
-// Operates on common shapes: standalone tokens, in parentheses ("(Asia/Jerusalem)"),
-// or wrapped in inline-code. Conservative scope (Region/Subregion[/Sub]) avoids
-// matching non-tz path-like strings.
+// "Europe/London") are internal data-format names that should never reach a
+// user. Operates on common shapes: standalone tokens, in parentheses
+// ("(Asia/Jerusalem)"), or wrapped in inline-code. Conservative scope
+// (Region/Subregion[/Sub]) avoids matching non-tz path-like strings.
+//
+// v3.1.2 — DO NOT convert the IANA token to its trailing city segment. The
+// old behavior (`split('/').pop()`) manufactured a LOCATION from a TIMEZONE:
+// "America/New_York" → "New York" for someone actually in Boston,
+// "Asia/Jerusalem" → "Jerusalem" leaked into a colleague reply (real bug
+// 2026-05-29). A timezone is a scheduling value, NOT where someone is — the
+// person's location comes from the separate `state`/city field, never from
+// the tz tag. So when a raw IANA string slips into outbound text, replace it
+// with the timezone ABBREVIATION (e.g. "EDT", "GMT+3") — a legitimate time
+// qualifier that names no city — or strip it if the zone can't be resolved.
 const IANA_TZ_RE = /\b(?:Africa|America|Antarctica|Asia|Atlantic|Australia|Europe|Indian|Pacific|Etc)\/[A-Za-z_]+(?:\/[A-Za-z_]+)?\b/g;
 function humanizeIanaToken(match: string): string {
-  const last = match.split('/').pop() ?? match;
-  return last.replace(/_/g, ' ');
+  try {
+    const dt = DateTime.now().setZone(match);
+    if (dt.isValid) {
+      // 'ZZZ' → short offset/abbreviation: "EDT", "GMT", "GMT+3". Never a city.
+      const abbr = dt.toFormat('ZZZ');
+      if (abbr && abbr.trim().length > 0) return abbr;
+    }
+  } catch { /* fall through to strip */ }
+  // Unresolvable (not a real zone, or a non-tz path that matched the regex) —
+  // strip it rather than leak the raw internal string.
+  return '';
 }
 
 export function scrubInternalLeakage(text: string): string {

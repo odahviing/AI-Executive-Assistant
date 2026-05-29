@@ -437,6 +437,12 @@ export async function getFreeBusy(
  * Compute "quality" free time on a day — only counts free chunks ≥ minChunkMinutes.
  * Used for thinking-time protection: skip days where booking would leave the owner
  * with too little uninterrupted free time.
+ *
+ * v3.1.2 (C) — body moved to `src/utils/scheduleRules.ts` so checkSlot can
+ * apply the SAME daily-focus-floor math at write-time as findAvailableSlots
+ * applies at search-time. Owner direction: one source of truth, no
+ * divergence between search and validate. This is now a thin positional-arg
+ * adapter around the shared `computeDayQualityFreeMinutes` export.
  */
 function computeDayQualityFreeMinutes(
   dayDate: string,
@@ -446,40 +452,11 @@ function computeDayQualityFreeMinutes(
   busyBlocks: Array<{ start: Date; end: Date }>,
   minChunkMinutes: number,
 ): number {
-  const dayStartMs = DateTime.fromISO(`${dayDate}T${workStart}`, { zone: timezone }).toMillis();
-  const dayEndMs   = DateTime.fromISO(`${dayDate}T${workEnd}`,   { zone: timezone }).toMillis();
-
-  // Filter and clip busy blocks to this day's work window
-  const dayBusy = busyBlocks
-    .filter(b => b.start.getTime() < dayEndMs && b.end.getTime() > dayStartMs)
-    .map(b => ({
-      start: Math.max(b.start.getTime(), dayStartMs),
-      end:   Math.min(b.end.getTime(), dayEndMs),
-    }))
-    .sort((a, b) => a.start - b.start);
-
-  // Merge overlapping blocks
-  const merged: Array<{ start: number; end: number }> = [];
-  for (const block of dayBusy) {
-    if (merged.length > 0 && block.start <= merged[merged.length - 1].end) {
-      merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, block.end);
-    } else {
-      merged.push({ ...block });
-    }
-  }
-
-  // Sum free chunks that are ≥ minChunkMinutes
-  let totalFreeMin = 0;
-  let prev = dayStartMs;
-  for (const block of merged) {
-    const gapMin = (block.start - prev) / 60_000;
-    if (gapMin >= minChunkMinutes) totalFreeMin += gapMin;
-    prev = block.end;
-  }
-  const finalGapMin = (dayEndMs - prev) / 60_000;
-  if (finalGapMin >= minChunkMinutes) totalFreeMin += finalGapMin;
-
-  return totalFreeMin;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const sr = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
+  return sr.computeDayQualityFreeMinutes({
+    dayDate, timezone, workStart, workEnd, busyBlocks, minChunkMinutes,
+  });
 }
 
 
@@ -1675,6 +1652,27 @@ export async function updateMeeting(params: UpdateMeetingParams): Promise<void> 
     }));
   }
 
+  // v3.1.2 (B1) — capture every field this PATCH actually changed so the
+  // audit row tells us WHAT updated, not just that something did. Pre-fix
+  // the audit only carried { subject, start } — when a PATCH changed only
+  // end/categories/body/location/isOnline/attendees, the row serialized to
+  // `{}` and we couldn't tell from the audit whether the update was benign
+  // (category retag) or destructive (attendee removal, body wipe). Now the
+  // row carries a compact per-field summary. Sensitive fields (body,
+  // attendee list) are reduced to size/count metadata, not raw text.
+  const patchedFields: Record<string, unknown> = {};
+  if (params.subject !== undefined)    patchedFields.subject = params.subject;
+  if (params.start !== undefined)      patchedFields.start = params.start;
+  if (params.end !== undefined)        patchedFields.end = params.end;
+  if (params.body !== undefined)       patchedFields.body_changed = true;
+  if (params.categories !== undefined) patchedFields.categories = params.categories;
+  if (params.location !== undefined)   patchedFields.location = params.location;
+  if (params.isOnline !== undefined)   patchedFields.isOnline = params.isOnline;
+  if (params.attendees !== undefined) {
+    patchedFields.attendees_count = params.attendees.length;
+    patchedFields.attendees_emails = params.attendees.map(a => a.email);
+  }
+
   try {
     await client.api(`/users/${params.userEmail}/events/${params.meetingId}`).patch(patch);
 
@@ -1683,21 +1681,21 @@ export async function updateMeeting(params: UpdateMeetingParams): Promise<void> 
       source: 'graph_api',
       actor: 'assistant',
       target: params.meetingId,
-      details: { subject: params.subject, start: params.start },
+      details: patchedFields,
       outcome: 'success',
     });
 
-    logger.info('Meeting updated', { id: params.meetingId, subject: params.subject, start: params.start });
+    logger.info('Meeting updated', { id: params.meetingId, fields: Object.keys(patchedFields) });
   } catch (err) {
     auditLog({
       action: 'update_meeting',
       source: 'graph_api',
       actor: 'assistant',
       target: params.meetingId,
-      details: { error: String(err) },
+      details: { ...patchedFields, error: String(err) },
       outcome: 'failure',
     });
-    logger.error('Failed to update meeting', { err, meetingId: params.meetingId });
+    logger.error('Failed to update meeting', { err, meetingId: params.meetingId, fields: Object.keys(patchedFields) });
     throw err;
   }
 }

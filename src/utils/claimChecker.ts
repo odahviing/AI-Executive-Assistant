@@ -27,6 +27,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import logger from './logger';
+import { logLlmUsage } from './usageLog';
 
 const anthropic = getAnthropicClient();
 
@@ -273,6 +274,7 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
     });
+    logLlmUsage(input.mode === 'coda' ? 'claim_checker_coda' : 'claim_checker', 'claude-haiku-4-5-20251001', response);
     const raw = ((response.content[0] as Anthropic.TextBlock).text ?? '').trim();
     const elapsedMs = Date.now() - start;
 

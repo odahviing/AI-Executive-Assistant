@@ -965,6 +965,62 @@ export class SchedulingSkill {
             }
           }
 
+          // v3.1.2 (Ayala-TZ) — auto-add @-mentioned colleagues to attendeeEmails
+          // on owner-path turns. When the owner pings Maelle quoting a colleague
+          // ("@Maelle @Ayala asking if I'm free at..."), Sonnet often calls
+          // find_available_slots WITHOUT including the colleague in
+          // attendee_emails — so loadAttendeeAvailabilityForEmails below has
+          // nothing to load, work-hours clip never runs, and slots fall in the
+          // colleague's middle-of-the-night (real bug 2026-05-28: 10:30 IL =
+          // 03:30 ET offered to Boston-based Ayala). Auto-add catches this so
+          // the existing v2.8.3 per_attendee_local enrichment also kicks in,
+          // giving Sonnet the dual-TZ rendering she needs.
+          //
+          // Owner-path only. Detection is structured Slack mention syntax
+          // <@Uxxx>, not freeform NL — no scaling concern.
+          if (isOwnerInitiatedSearch && context.conversationHistory && context.conversationHistory.length > 0) {
+            try {
+              const lastUserMsg = [...context.conversationHistory]
+                .reverse()
+                .find(m => m.role === 'user');
+              const mentionRe = /<@(U[A-Z0-9]+)>/g;
+              const mentionedIds = new Set<string>();
+              if (lastUserMsg) {
+                for (const m of lastUserMsg.content.matchAll(mentionRe)) {
+                  mentionedIds.add(m[1]);
+                }
+              }
+              if (mentionedIds.size > 0) {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { getPersonMemory } = require('../../db') as typeof import('../../db');
+                const ownerLower = userEmail.toLowerCase();
+                const ownerSlackId = context.profile.user.slack_user_id;
+                const existingLower = new Set(attendeeEmails.map(e => e.toLowerCase()));
+                const added: string[] = [];
+                for (const id of mentionedIds) {
+                  if (id === ownerSlackId) continue;  // skip @Maelle/@Owner-self mentions
+                  const person = getPersonMemory(id);
+                  const email = person?.email;
+                  if (!email || email.toLowerCase() === ownerLower) continue;
+                  if (existingLower.has(email.toLowerCase())) continue;
+                  attendeeEmails.push(email);
+                  existingLower.add(email.toLowerCase());
+                  added.push(email);
+                }
+                if (added.length > 0) {
+                  logger.info('find_available_slots — auto-added @-mentioned colleagues to attendees', {
+                    threadTs: context.threadTs,
+                    added,
+                  });
+                }
+              }
+            } catch (err) {
+              logger.warn('find_available_slots — @-mention auto-add threw, proceeding without', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          }
+
           // Auto-fill from this thread's prior attendee context. When Sonnet
           // calls find_available_slots WITHOUT attendee_emails but a previous
           // call in this thread already established who the meeting is for,
@@ -1062,6 +1118,117 @@ export class SchedulingSkill {
               return spanDays <= 7;
             } catch { return false; }
           })();
+
+          // v3.0.6 — candidate-slots batch validation. When the caller has N
+          // specific times to check ("can we do A, B, C, or D?"), Sonnet
+          // passes them all as `candidate_slots`. We fire N parallel narrow
+          // findAvailableSlots calls (each autoExpand:false), collect per-
+          // candidate verdicts in ONE response.
+          //
+          // Pre-v3.0.6 Sonnet had to call find_available_slots N times
+          // sequentially — N Sonnet round-trips. Ayalla coord turn
+          // 2026-05-28T19:14 was 6 iterations + 40s + $0.31 for 4 candidates;
+          // candidate_slots collapses that to 2 iterations.
+          //
+          // Returns a DIFFERENT shape than the default branch:
+          //   { mode: 'candidate_validation', results: [{start, end,
+          //     available, broken_rule?, broken_rule_label?}, ...] }
+          // Caller (Sonnet) narrates blocked candidates by reading
+          // broken_rule_label verbatim.
+          if (Array.isArray(args.candidate_slots) && args.candidate_slots.length > 0) {
+            const ownerFirst = context.profile.user.name.split(' ')[0];
+            const durationMin = args.duration_minutes as number;
+            const candidates = args.candidate_slots as Array<{ start: string; end?: string }>;
+            const normalized = candidates
+              .filter(c => typeof c?.start === 'string' && c.start.length > 0)
+              .map(c => {
+                let endIso = c.end;
+                if (!endIso) {
+                  const s = DateTime.fromISO(c.start, { zone: timezone });
+                  if (s.isValid) endIso = s.plus({ minutes: durationMin }).toISO() ?? c.start;
+                  else endIso = c.start;
+                }
+                return { start: c.start, end: endIso as string };
+              });
+
+            // Same rule-label mapping as Guard B uses; kept in sync (extract
+            // to a shared helper next time we touch this file).
+            const labelFor = (reason: string | undefined): string => {
+              switch (reason) {
+                case 'outside_owner_work_hours': return `outside ${ownerFirst}'s work hours`;
+                case 'outside_attendee_work_hours': return `outside the attendee's working hours`;
+                case 'owner_busy_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
+                case 'owner_busy_or_buffer_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
+                case 'overlaps_meeting_being_moved': return `overlaps the meeting being moved`;
+                case 'focus_time_office': return `breaks ${ownerFirst}'s focus-time protection (office day)`;
+                case 'focus_time_home': return `breaks ${ownerFirst}'s focus-time protection (home day)`;
+                case 'floating_block_no_room': return `would leave no room for one of ${ownerFirst}'s daily blocks (lunch / break / etc.)`;
+                case 'category_day_type': return `wrong day type for this category (e.g. office-only category on a home day)`;
+                case 'category_per_day': return `over ${ownerFirst}'s per-day limit for this category`;
+                case 'category_per_week': return `over ${ownerFirst}'s per-week limit for this category`;
+                default: return 'unknown';
+              }
+            };
+
+            const results = await Promise.all(normalized.map(async (cand) => {
+              const diag: { rejectedCounts?: Record<string, number> } = {};
+              try {
+                const slots = await findAvailableSlots({
+                  userEmail,
+                  timezone,
+                  durationMinutes: durationMin,
+                  attendeeEmails,
+                  attendeeBusyEmails,
+                  attendeeAvailability,
+                  searchFrom: cand.start,
+                  searchTo: cand.end,
+                  meetingMode: mode as import('../../connectors/graph/calendar').MeetingMode,
+                  travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
+                  profile: context.profile,
+                  category: args.category as string | undefined,
+                  relaxed: args.relaxed === true && context.senderRole === 'owner',
+                  excludeEventIds: Array.isArray(args.moving_event_ids)
+                    ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
+                    : undefined,
+                  autoExpand: false,
+                  minBufferHours: (context.senderRole === 'owner' || context.isOwnerInGroup === true)
+                    ? 1
+                    : (context.profile.meetings.min_slot_buffer_hours ?? 4),
+                  diagnosticsOut: diag,
+                });
+                const startMs = DateTime.fromISO(cand.start, { zone: timezone }).toMillis();
+                const matches = slots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
+                const brokenRule = matches ? undefined : Object.keys(diag.rejectedCounts ?? {})[0];
+                return {
+                  start: cand.start,
+                  end: cand.end,
+                  available: matches,
+                  ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: labelFor(brokenRule) } : {}),
+                };
+              } catch (err) {
+                logger.warn('candidate-slot validation threw — marking unavailable', {
+                  candidateStart: cand.start,
+                  err: String(err).slice(0, 200),
+                });
+                return { start: cand.start, end: cand.end, available: false, error: 'validation_error' };
+              }
+            }));
+
+            const availableCount = results.filter(r => r.available).length;
+            logger.info('find_available_slots — candidate_slots batch', {
+              candidates: normalized.length,
+              available_count: availableCount,
+              requester: context.userId,
+              threadTs: context.threadTs,
+            });
+
+            return {
+              mode: 'candidate_validation',
+              duration_minutes: durationMin,
+              candidates_checked: normalized.length,
+              results,
+            };
+          }
 
           try {
             const rawSlots = await findAvailableSlots({
@@ -1301,14 +1468,19 @@ export class SchedulingSkill {
             // v2.5.2 — surface travelers so Sonnet renders dual-TZ on slot
             // lines. Travelers list only present when at least one attendee
             // had an active travel record at availability-load time.
+            // v3.1.2 — `location` (free text, e.g. "Boston") is the ONLY
+            // field Sonnet should narrate; it's the proper location source.
+            // The raw IANA tz fields (travelTimezone/homeTimezone) were
+            // dropped — a timezone is not a place, and leaving the IANA in
+            // the tool JSON re-opened the "America/New_York → New York" paste
+            // risk. TZ math is handled by per_attendee_local below + the
+            // slot-finder clip; Sonnet never needs the raw zone.
             const travelers = (attendeeAvailability ?? [])
               .filter(a => a.travel)
               .map(a => ({
                 email: a.email,
                 location: a.travel!.location,
                 until: a.travel!.until,
-                travelTimezone: a.timezone,
-                homeTimezone: a.travel!.homeTimezone,
               }));
 
             // v2.8.3 hotfix — when attendees live in a TZ different from
@@ -1325,9 +1497,12 @@ export class SchedulingSkill {
                 const per_attendee_local = differentTzAttendees.map(a => {
                   const dt = DateTime.fromISO(s.start, { zone: timezone }).setZone(a.timezone);
                   if (!dt.isValid) return null;
+                  // v3.1.2 — raw `timezone: a.timezone` (IANA) dropped from the
+                  // result. local_display is the pre-rendered string Sonnet
+                  // quotes; local_iso carries the offset (no city). Shipping
+                  // the IANA tag invited "America/New_York → New York" pastes.
                   return {
                     email: a.email,
-                    timezone: a.timezone,
                     local_iso: dt.toISO(),
                     local_display: dt.toFormat('EEE d MMM HH:mm'),
                   };

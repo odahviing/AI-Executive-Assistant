@@ -16,6 +16,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import logger from './logger';
+import { logLlmUsage } from './usageLog';
 
 const anthropic = getAnthropicClient();
 
@@ -207,6 +208,7 @@ Output ONLY the rewritten reply (or UNFIXABLE). No explanation, no quotes, no pr
       max_tokens: 400,
       messages: [{ role: 'user', content: prompt }],
     });
+    logLlmUsage('security_gate', 'claude-sonnet-4-6', response);
     const elapsedMs = Date.now() - start;
     const text = ((response.content[0] as Anthropic.TextBlock).text ?? '').trim();
     logger.info('Security rewriter ran', {

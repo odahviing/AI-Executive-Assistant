@@ -212,7 +212,10 @@ Bias toward pass_to_sonnet on uncertainty. Skipping Sonnet only when the reply i
   // ── Deterministic resolve ─────────────────────────────────────────────────
   // The resolver runs the per-kind downstream (booking, requester-notify,
   // closeRequest cascade). We just hand it the verdict.
-  const ctx: ResolveContext = { app, profile };
+  // v3.1.3 — owner short-form auto-resolve is always owner-driven, never the
+  // colleague responding to a counter. resolvedByColleague:false so an owner
+  // reject on an awaiting_colleague row closes it (doesn't bounce).
+  const ctx: ResolveContext = { app, profile, resolvedByColleague: false };
   try {
     let result;
     if (verdict === 'approve') {

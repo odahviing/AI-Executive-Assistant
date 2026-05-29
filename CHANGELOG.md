@@ -2,6 +2,61 @@
 
 ---
 
+## 3.1.3 — timezone-as-location regression killed + scheduling determinism, brief honesty, real-day bug wave
+
+A real-day session bundle. The headline: a regression where a **timezone got narrated as a location** ("the meeting is in Jerusalem/Tel Aviv" to an Israeli colleague) traced to a scrubber that deliberately converted IANA strings to city names — fixed at root. Around it: the cross-timezone availability flow made deterministic, the daily-free-time floor unified across search and booking, brief closure narration made honest, calendar-health autonomy made visible, plus the social-engine raise/decay wiring and two changes that arrived from parallel chats (LLM usage logging, the resolver "Eli ghost" actor-direction fix).
+
+### Fixed — timezone is for scheduling, never narrated as a place
+
+The core principle: an IANA timezone (`Asia/Jerusalem`, `America/New_York`) is a SCHEDULING value for time math; a person's location for discussion comes from the separate `state`/city field. Deriving a city from a timezone is wrong ("America/New_York" ≠ New York; the person may be in Boston).
+
+- **Root cause** — `utils/textScrubber.ts:humanizeIanaToken` ran on every owner- and colleague-facing Slack post and converted each IANA string to its trailing city segment (`Asia/Jerusalem` → "Jerusalem"). Now it emits the timezone *abbreviation* (Luxon `ZZZ` → "EDT", "GMT+3") or strips the token — never a city.
+- `db/people.ts:formatThreadParticipantsForPrompt` pasted raw `tz=Asia/Jerusalem` with no anti-inference guard (its sibling `formatPeopleMemoryForPrompt` had one); now shows `state`/city when on file, else marks "city not on file — don't infer".
+- `skills/meetings/ops.ts` — `per_attendee_local` and `travelers` slot enrichments dropped the raw `timezone`/`travelTimezone`/`homeTimezone` fields from the tool JSON; kept the pre-rendered `local_display` + free-text `location` (the correct source).
+- `core/orchestrator/systemPrompt.ts` — the three narrative-facing slots (week boundaries, calendar-event-times rule, dynamic header) no longer print the raw IANA string; Luxon still gets it for math.
+
+### Fixed — cross-timezone colleague availability (incorrect slots under pressure)
+
+When a colleague proposed times in their own TZ ("June 9 12:00 Boston (your 19:00)"), `utils/availabilityPreCheck.ts` was regex-extracting *both* numbers and testing each as owner-local → two contradictory verdicts → Maelle flip-flopped under pressure. Now, when the message carries a TZ cue (named place / abbreviation / explicit "(your H:MM)"), a Haiku pass normalizes each proposed slot to a single UTC-anchored instant before testing; bare local-time questions keep the cheap regex path. Plus owner-path `find_available_slots` now auto-adds `@`-mentioned colleagues to the attendee list so the existing work-hours clip + per-attendee TZ rendering actually fire (a Boston colleague no longer gets offered his 03:30).
+
+### Changed — daily-free-time floor enforced on the write path too
+
+The 2h-office / 1h-home focus-time floor lived only in `find_available_slots` (search). A named-time `create_meeting` / `move_meeting` / coord pick went through `checkSlot` (validation), which never applied it — so direct bookings landed on packed days the search would have refused. Extracted `computeDayQualityFreeMinutes` into `utils/scheduleRules.ts`; both the slot-finder loop and a new `checkSlot` rule (`focus_time_floor`) now call the one helper, honoring the same `allowRelaxed` owner-override bypass.
+
+### Fixed — Maelle fabricated free-time / buffer answers, and over-narrated
+
+- **Free-time questions** ("do I have my buffer today?") ran no tool — Sonnet invented "2h45 free / healthy". `classifyTurn` now flags `freeTimeInquiry` on owner turns; the orchestrator runs `analyzeCalendar` for today+tomorrow and injects the real `freeMin`/gap numbers before Sonnet answers. Replaces the prompt rule Sonnet kept ignoring.
+- **Brief closure narration** — the `owner_*` rule told Sonnet to write "I told <requester> you said yes" for owner-side closures, fabricating an outbound DM that never happened (the Lori-Weekly line). Rewritten to narrate it as the owner's own decision; a code-side `closed_at_relative` field anchors stale closures in time ("Yesterday: …") so a day-old close doesn't read as today's news.
+
+### Changed — calendar-health autonomy is visible and quieter
+
+- **Silent on clean routine runs** (#118) — `check_calendar_health` returns `vacuous: true` on zero issues + zero auto-fixes; the routine dispatcher suppresses the post (no "all clear, nothing flagged" spam). Owner-asked chat calls still reply so you can verify.
+- **Shadow on active-mode coord** — when active mode auto-initiates a move-coord (the silent Lori-Weekly trace), it now fires a shadow DM at the moment it acts, so the owner can countermand before the colleague responds. Autonomy preserved; visibility added.
+- **`event_id` carry-forward** — recently-surfaced calendar issues (last 6h) are injected into the owner prompt, so "delete it" / "fix it" follow-ups resolve against the known `event_id`/`peer_event_id` instead of a fresh subject search that misses a vanished event.
+
+### Fixed — social engine: topics that camped and never rotated
+
+`markSubjectRaised` was orphaned when the task-turn coda path was disabled — so `last_assistant_initiated_at` stayed NULL on every subject, which dead-lettered the picker's 72h re-raise defer, the ignore-decay, AND the daily initiation gates (a topic the owner kept ignoring lived forever at the score ceiling). Wired `markSubjectRaised` onto the live proactive `continue` directive; a raise no longer refreshes `last_touched_at` (so an ignored-but-raised subject still ages toward dormancy via weekly decay).
+
+### Fixed — one shadow DM per colleague turn (#117)
+
+The v3.0.8 "shadow post-gate" move split the inbound + outbound shadow into two `shadowNotify` calls, each with its own "Conversation with X" header → owner saw a doubled DM stream. Re-merged into one post carrying both sides.
+
+### Added — richer `update_meeting` audit + LLM usage logging
+
+- `connectors/graph/calendar.ts:updateMeeting` now audit-logs every field actually patched (subject/start/end/categories/location/isOnline/attendees) instead of `{}` — so "did Maelle effectively cancel this via an update?" is answerable from the audit going forward (it surfaced during the Ido-duplicate investigation, where the audit was too thin to prove either way).
+- `utils/usageLog.ts` (from a parallel chat) — one structured `LLM usage` log line per Anthropic call (label + model + token counts) for per-call-site cost attribution; instrumented across the classifier, claim-checker, human-gate, security-gate, and other LLM call sites.
+
+### Fixed — resolver "Eli ghost": owner reject on an awaiting_colleague row
+
+(from a parallel chat) `resolveRequest`'s amend-bounce-back fired on row STATE alone — so an owner reject/amend on an `awaiting_colleague` row ("close it, already booked") was misread as "the colleague rejected my counter" and bounced back to `awaiting_owner` instead of closing. Now gated on the ACTOR (`resolvedByColleague`): bounce only when the colleague is the one resolving.
+
+### Not changed — the coord double-`createRequest` ghost
+
+Investigated and confirmed already fixed at root: the orphan rows (`i3kb2` 5/26, `le7d6` 5/27) were created by the old `createCoordJob` request-bridge, deleted in 3.1.0. Both predate the 3.1.0 deploy (commit landed 5/27 morning; the orphans were the last gasp of the still-running old code before restart). Zero recurrence since; `createCoordJob` no longer bridges; the reconciler cleaned the stale rows. No code change — flagged here so the investigation isn't re-run.
+
+---
+
 ## 3.1.2 — three-chat bundle: audit pass (12 fixes) + performance pass + second-pass spine fixes
 
 A coordinated wrap of three parallel workstreams over the requester framework, all bundled here (no per-chat version churn).

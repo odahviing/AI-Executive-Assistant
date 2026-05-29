@@ -172,7 +172,20 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     // check sees the post-scrub text (a reply that was "only internal leakage"
     // becomes empty and shouldn't post a lonely "*Routine title*" header).
     const cleaned = rawReply ? scrubInternalLeakage(rawReply) : '';
-    const isSilent = cleaned.trim().length === 0;
+    // v3.1.2 (#118) — code-deterministic silence override. When the only
+    // substantive thing this routine did was a vacuous calendar-health check
+    // (no issues, no auto-fixes, no booking, no mutations), suppress the
+    // post regardless of what Sonnet wrote. The routine prompt already says
+    // "stay silent if nothing to report" but Sonnet kept narrating "all clear,
+    // nothing flagged" anyway — same prompt-drift class as bug D. Hard guard
+    // here. Owner-asked check_calendar_health calls don't reach this code
+    // path (they go through the chat dispatcher), so they keep replying so
+    // the owner can verify "all good".
+    const vacuousRoutineRun =
+      result.healthCheckVacuous === true &&
+      !result.bookingOccurred &&
+      (!result.mutationActions || result.mutationActions.length === 0);
+    const isSilent = vacuousRoutineRun || cleaned.trim().length === 0;
 
     const conn = getConnection(profile.user.slack_user_id, 'slack');
     // eslint-disable-next-line @typescript-eslint/no-require-imports

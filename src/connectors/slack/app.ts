@@ -1801,7 +1801,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         const decision = verdict === 'approve'
           ? { verdict: 'approve' as const, data: {} }
           : { verdict: 'reject' as const, reason: `Owner reacted :${reaction}:` };
-        const result = await resolveRequest(approval.id, decision, { app, profile });
+        const result = await resolveRequest(approval.id, decision, { app, profile, resolvedByColleague: false });
         logger.info('reaction_added resolved approval via emoji', {
           approvalId: approval.id, verdict, reaction, ok: result.ok,
         });

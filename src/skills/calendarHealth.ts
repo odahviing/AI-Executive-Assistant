@@ -1043,6 +1043,27 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
                           issue.fixed = true;
                           issue.fix_detail = `Started a move-coord to reschedule "${conflicting.subject}" — ${profile.user.name.split(' ')[0]}'s on vacation ${issue.date}. DM'd ${coordParticipants.map(p => p.name).join(' and ')}.`;
                           fixesApplied += 1;
+                          // v3.1.2 (A1b-fix) — shadow-notify the owner the
+                          // moment an active-mode coord fires. Active mode is
+                          // by design autonomous (no pre-approval gate), but
+                          // owner needs real-time visibility so he can
+                          // countermand BEFORE the colleague responds. Pre-fix
+                          // the owner only saw it in the next morning's
+                          // brief — too late.
+                          try {
+                            // eslint-disable-next-line @typescript-eslint/no-require-imports
+                            const { shadowNotify } = require('../utils/shadowNotify') as
+                              typeof import('../utils/shadowNotify');
+                            await shadowNotify(profile, {
+                              channel: context.channelId,
+                              action: 'Active-mode autofix — OOF conflict',
+                              detail: `${profile.user.name.split(' ')[0]} on vacation ${issue.date}; started move-coord on "${conflicting.subject}" — DMed ${coordParticipants.map(p => p.name).join(', ')}. Say "cancel" to abort.`,
+                            });
+                          } catch (err) {
+                            logger.warn('shadowNotify on active-mode coord threw — continuing', {
+                              err: String(err).slice(0, 200),
+                            });
+                          }
                         }
                       }
                     }
@@ -1214,6 +1235,28 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
                         tool: 'initiate_coordination',
                         detail: `Move-coord for "${displaySubject(movable, profile)}" — DMing ${coordParticipants.map(p => p.name).join(', ')}`,
                       });
+                      // v3.1.2 (A1b-fix) — shadow-notify owner at the moment
+                      // the autonomous coord fires (real-time, not next-day
+                      // brief). The 2026-05-27 Lori-Weekly trace showed
+                      // category-overflow autofix DMing a colleague with
+                      // zero owner visibility — he only saw the closure
+                      // narration the next morning. Active mode keeps its
+                      // autonomy; the owner gets a chance to "cancel"
+                      // before the colleague replies.
+                      try {
+                        // eslint-disable-next-line @typescript-eslint/no-require-imports
+                        const { shadowNotify } = require('../utils/shadowNotify') as
+                          typeof import('../utils/shadowNotify');
+                        await shadowNotify(profile, {
+                          channel: context.channelId,
+                          action: `Active-mode autofix — ${issue.type}`,
+                          detail: `${issue.description}. Started a move-coord on "${displaySubject(movable, profile)}" (${mStart.toFormat('HH:mm')}–${mEnd.toFormat('HH:mm')}) — DMed ${coordParticipants.map(p => p.name).join(', ')}. Say "cancel" to abort.`,
+                        });
+                      } catch (err) {
+                        logger.warn('shadowNotify on active-mode coord threw — continuing', {
+                          err: String(err).slice(0, 200),
+                        });
+                      }
                     }
                   }
                 } catch (err) {
@@ -1423,6 +1466,13 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
               ? 'Calendar looks healthy — no issues found.'
               : `Scanned ${startDate} to ${endDate} — ${issues.length} issue${issues.length === 1 ? '' : 's'} detected.`);
 
+        // v3.1.2 fix (#118) — vacuous flag: nothing found, nothing fixed.
+        // Routine dispatcher checks this to stay silent on auto-fired runs
+        // (the routine prompt already says "stay silent if nothing to report"
+        // but Sonnet ignored it). Owner-asked runs from chat don't go through
+        // dispatchRoutine, so they ignore this flag and narrate normally so
+        // the owner can verify "all good".
+        const vacuous = issues.length === 0 && fixesApplied === 0;
         return {
           issues,
           count: issues.length,
@@ -1437,6 +1487,7 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
           // narration) should pass verbatim instead of having Sonnet improvise
           // from issues[]. humanGate humanizes the template downstream.
           summary_text: summaryText,
+          vacuous,
           summary: issues.length === 0
             ? 'Calendar looks healthy — no issues found.'
             : mode === 'active'

@@ -884,6 +884,10 @@ Binding — how to pick the right approval_id:
           const result = await resolveRequest(requestId, decision, {
             app: context.app,
             profile: context.profile,
+            // v3.1.3 — the colleague-path (senderRole !== 'owner') is permitted
+            // only for amending approvals; that's the one case where a reject/
+            // amend should bounce back to the owner. An OWNER reject must close.
+            resolvedByColleague: context.senderRole !== 'owner',
           });
           // Surface as approval_id for tool-API back-compat.
           return { ...result, approval_id: result.request_id };
