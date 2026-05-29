@@ -47,6 +47,11 @@ export function buildSystemPromptParts(
   // render PEOPLE IN THIS THREAD (101a fix). Optional for back-compat.
   senderId?: string,
   mpimMemberIds?: string[],
+  // v3.x (Block 2) — the turn's tool scopes (from classifyTurn, owner-path).
+  // Threaded into buildSkillsPromptSection so a skill can lazy-load rarely-used
+  // prose (e.g. coordination ROUTE 1 details ship only when 'coord' is active).
+  // Undefined → render everything (colleague path, classifier off, non-Slack).
+  toolScopes?: string[],
 ): { static: string; dynamic: string } {
   const { user, assistant } = profile;
   const firstName = user.name.split(' ')[0];
@@ -267,17 +272,18 @@ ${pendingApprovalsSection}` : '';
 
   const activeSkills = getActiveSkills(profile);
   const skillNames = activeSkills.map(s => s.name).join(', ') || 'none';
-  const skillsSection = buildSkillsPromptSection(profile);
+  const skillsSection = buildSkillsPromptSection(profile, toolScopes);
 
   const activeChannels = Object.entries(profile.channels ?? {})
     .filter(([, v]) => v?.enabled)
     .map(([k]) => k)
     .join(', ') || 'slack';
 
-  // v1.7.8 — Owner-defined Outlook categories.
-  const categoriesBlock = profile.categories && profile.categories.length > 0
-    ? `\nEVENT CATEGORIES (${user.name.split(' ')[0]}'s own Outlook categories — use these names EXACTLY when tagging events):\n${profile.categories.map(c => `- ${c.name}: ${c.description}`).join('\n')}\n\nWhen creating or categorizing an event, pick the ONE category whose description best fits what the event is. If none fits, leave the event uncategorized rather than guessing.`
-    : '';
+  // v1.7.8 — Owner-defined Outlook categories were rendered here AND (richer,
+  // with priority order + per-day/week limits) in the MeetingsSkill prompt
+  // section. v3.x (Block 3 prompt reduction) — removed this duplicate; the
+  // MeetingsSkill copy (src/skills/meetings.ts, "CATEGORIES (ordered by
+  // priority...)") is the single source. Both render from profile.categories.
 
   const authLine = isOwnerInGroup
     ? `Speaking with: ${user.name} (your principal) IN A GROUP CONVERSATION with one or more colleagues.
@@ -493,7 +499,6 @@ HEBREW GENDERED FORMS — apply by the contact's gender field, second-person AND
 
 SKILLS & CHANNELS
 Active skills: ${skillNames} | Active channels: ${activeChannels}
-${categoriesBlock}
 
 AUTHORIZATION
 ${authLine}

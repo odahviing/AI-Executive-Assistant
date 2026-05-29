@@ -2,6 +2,26 @@
 
 ---
 
+## 3.1.4 — colleague-scheduling correctness (the Yossi wave) + tool-scope prompt reduction
+
+A real-day colleague-scheduling chat (Yossi booking with Idan) surfaced five bugs, four of which trace to one root: the direct (non-coord) scheduling path was stateless across turns — it re-derived slots and re-queried the calendar instead of carrying forward what it just established. Fixed at the root, plus the parallel prompt-reduction chat's tool-scope restructure landed here too.
+
+### Fixed — colleague scheduling (Yossi wave)
+
+- **Offered-then-retracted slot.** Maelle offered 12:30/12:45/13:00, the colleague picked 13:00, and she re-ran `find_available_slots` with the window ending *at* 13:00 — which structurally excludes a 13:00 start (a 25-min meeting ends 13:25) — then claimed "13:00 isn't free." Scoped the re-search rule ([meetings.ts](src/skills/meetings.ts)): picking a slot you offered this thread is NOT a "what about X?" question — those were already rule-checked, so book the exact slot via `create_meeting`, don't re-search. (Same class as the owner's "but didn't you just offer sunday?")
+- **Asked a colleague for a teammate's email she already had.** "add Eli Feldman" → "I need his email." The email auto-fill existed but was copy-pasted in three handlers and missing from `update_meeting`'s add path. New shared resolver `skills/meetings/resolveAttendeeEmails.ts` (slack_id → fuzzy name → directory); `update_meeting`'s add-attendee path and `normalizeBookingRequest` both call it. Name-only adds resolve silently — no asking.
+- **"Add Eli + rename" flailed then punted to the owner.** `update_meeting` wasn't in `COLLEAGUE_ALLOWED_TOOLS`, so a colleague had no tool to edit an existing meeting — Sonnet improvised `create_meeting`/`move_meeting` (both rule-failed), burned the rate limit, and punted vaguely. Implemented the owner's **requester-controls** model: whoever REQUESTED a meeting controls it (add anyone / rename / change location / move if rule-compliant); a non-requester → one clean `create_approval`. `update_meeting` added to the colleague allowlist; its self-only attendee gate replaced with a requester gate (`findMeetingOwner`); the same requester gate added to `move_meeting`'s colleague path.
+- **Just-booked event lost on the next turn.** Right after booking, `get_calendar` returned 0 events (Graph `calendarView` indexing lag), so Maelle couldn't find the meeting to edit. A colleague's direct booking now records a **requester-link** on the requests spine (`requester_slack_id` + `event_id`), and that event is injected into the colleague's next-turn context — so follow-up edits target `update_meeting`/`move_meeting` by `event_id` instead of a lagging re-read. (`findMeetingOwner` now prefers rows that name a requester, making the link timing-independent.)
+
+### Changed — tool-scope prompt reduction (Block 2, from the latency chat)
+
+Per-call-site cost data (from the 3.1.3 usage logging) showed the orchestrator's ~46K cached prefix is ~80% tool definitions. Block 2 slims what ships per turn: `ALWAYS_ON_TOOLS` cut 22 → 12 ([registry.ts](src/skills/registry.ts)); person-WRITE tools moved to a new `people` scope (reads stay always-on + backstopped by the end-of-chat capture pass), task-detail tools to `tasks`, `web_extract` to `knowledge`; the multi-party coordination tools (`coordinate_meeting` et al.) demoted to a new `coord` scope (they hadn't legitimately fired in a month and were causing wrong-tool picks on plain scheduling turns — the classifier unions `meetings` when coord genuinely fires). `classifyTurn`'s scope enum updated accordingly (`coord`/`people` added, the empty `social` scope dropped). Plan + cost findings: `.claude/PROMPT_REDUCTION_STARTER.md`; `scripts/_dump-prompts.cjs` for the tools-vs-prose token split.
+
+### Not changed
+- Y5 (duration-snap wording / "morning" label) — owner deemed it not worth fixing.
+
+---
+
 ## 3.1.3 — timezone-as-location regression killed + scheduling determinism, brief honesty, real-day bug wave
 
 A real-day session bundle. The headline: a regression where a **timezone got narrated as a location** ("the meeting is in Jerusalem/Tel Aviv" to an Israeli colleague) traced to a scrubber that deliberately converted IANA strings to city names — fixed at root. Around it: the cross-timezone availability flow made deterministic, the daily-free-time floor unified across search and booking, brief closure narration made honest, calendar-health autonomy made visible, plus the social-engine raise/decay wiring and two changes that arrived from parallel chats (LLM usage logging, the resolver "Eli ghost" actor-direction fix).

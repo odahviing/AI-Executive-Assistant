@@ -38,8 +38,13 @@ export interface Skill {
   /**
    * Additional section injected into the system prompt when this skill is active.
    * Should describe rules, capabilities, and behaviour specific to this skill.
+   *
+   * `scopes` (v3.x) — the turn's tool scopes (owner-path, from classifyTurn).
+   * A skill MAY use it to lazy-load rarely-used prose (e.g. ship coordination
+   * details only when 'coord' is active). Undefined → render everything
+   * (colleague path, classifier off, non-Slack callers).
    */
-  getSystemPromptSection(profile: UserProfile): string;
+  getSystemPromptSection(profile: UserProfile, scopes?: string[]): string;
 }
 
 /**

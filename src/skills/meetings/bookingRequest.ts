@@ -228,28 +228,16 @@ async function buildParticipants(
     let name = a.name?.trim();
     const slackId = a.slack_id?.trim();
 
-    // Email auto-fill from people_memory — same chain as the legacy
-    // handler-side fill (slack_id primary, fuzzy name fallback). Only when
-    // raw email is missing or malformed.
+    // v3.1.4 (Y2) — email auto-fill via the shared resolver (one function all
+    // booking paths use: create / move / update). Only when raw email is
+    // missing or malformed.
     if (!email || !email.includes('@')) {
-      try {
-        if (slackId) {
-          const mem = getPersonMemory(slackId);
-          if (mem?.email) {
-            email = mem.email.toLowerCase();
-            name = name ?? mem.name ?? undefined;
-          }
-        }
-        if ((!email || !email.includes('@')) && name) {
-          const matches = searchPeopleMemory(name);
-          const hit = matches.find(m => m.email && m.email.includes('@'));
-          if (hit) {
-            email = hit.email!.toLowerCase();
-          }
-        }
-      } catch (err) {
-        logger.warn('normalizeBookingRequest: email auto-fill threw', { err: String(err).slice(0, 200) });
-      }
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { resolveAttendeeEmail } = require('./resolveAttendeeEmails') as
+        typeof import('./resolveAttendeeEmails');
+      const resolved = resolveAttendeeEmail({ name, email, slack_id: slackId });
+      if (resolved.email) email = resolved.email;
+      if (!name && resolved.name) name = resolved.name;
     }
 
     if (email && seen.has(email)) continue;

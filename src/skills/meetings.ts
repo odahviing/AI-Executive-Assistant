@@ -1801,7 +1801,7 @@ ATTENDEES (v2.9.1):
     }
   }
 
-  getSystemPromptSection(profile: UserProfile): string {
+  getSystemPromptSection(profile: UserProfile, scopes?: string[]): string {
     const officeDays = profile.schedule.office_days.days.join(', ');
     const homeDays = profile.schedule.home_days.days.join(', ');
     const firstName = profile.user.name.split(' ')[0];
@@ -1841,10 +1841,17 @@ ATTENDEES (v2.9.1):
     }).join(' · ');
 
     // v2.6 — categories with rules. Yaml ORDER is priority — first match wins.
-    // Render each with its rules (if any) so Sonnet can pick the right one
-    // and pass it through to find_available_slots / create_meeting / etc.
     // Pure data render — agnostic to category names. When a profile has no
     // categories the block disappears entirely (no awkward empty section).
+    //
+    // v3.x (Block 3 prompt reduction) — render only the FIRST SENTENCE of each
+    // description as a cue, not the full multi-sentence text. The authoritative
+    // classifier is the `detectCategory` sidecar (src/skills/meetings/
+    // detectCategory.ts), which builds its OWN block from the full yaml
+    // `c.description` and runs on every booking/move — so the main prompt's
+    // copy was redundant for classification. Here it only needs to support
+    // narration ("that's an interview, capped at 2/day") and the rare manual
+    // set_event_category tag. ~1k tokens saved off every owner turn.
     const categoriesBlock = (() => {
       const cats = profile.categories ?? [];
       if (cats.length === 0) return '';
@@ -1867,7 +1874,9 @@ ATTENDEES (v2.9.1):
         // location decision; location is deterministic via day-type + party
         // shape. Don't render those fields here either.
         const rules = parts.length > 0 ? ` [${parts.join(', ')}]` : '';
-        return `  ${idx + 1}. ${c.name} — ${c.description.replace(/\n/g, ' ').trim()}${rules}`;
+        // First sentence only — the full description lives in detectCategory.
+        const cue = c.description.replace(/\s+/g, ' ').trim().split(/(?<=\.)\s+/)[0];
+        return `  ${idx + 1}. ${c.name} — ${cue}${rules}`;
       }).join('\n');
       return `
 
@@ -1888,16 +1897,7 @@ LOCATION (v2.8.2) — deterministic, decided by \`resolveLocation\`. You do NOT 
 CATEGORY-DRIVEN SKIPS:
 - Categories flagged \`no_default_location\` (e.g. Logistic — floating blocks, focus time, lunch) → tool stamps NO location. You don't need to ask; these are personal time-on-calendar with no place to be.
 - Categories flagged \`sets_sensitivity_private\` (e.g. Private — personal/family events) → tool stamps NO location. ASK ${firstName} where the event should be ("Where should this private event be?") UNLESS he already told you. Don't auto-default to Teams or Office for Private events.
-The decision tree (FYI, for your reasoning — the tool enforces it):
-- MOVE within same day-type with no new hint → existing location preserved (no overwrite).
-- Owner-explicit hint → respected as-is.
-- Office day + external + KNOWN-DIFFERENT timezone → online, Teams link as location.
-- Office day + external + SAME or UNKNOWN timezone → tool refuses with \`error: 'location_mode_unspecified'\` + \`suggested_ask_text\`. YOU ASK ${firstName} online vs physical, then re-call with \`is_online=true\` OR \`location=<office address>\`. NEVER guess.
-- Office day + internal-only, ≥4 people → "Meeting Room" + meeting room mailbox added optional + Teams in body.
-- Office day + internal-only, ≤3 people → short office label + Teams in body.
-- Home day + external → online, Teams link as location.
-- Home day + internal-only → "Huddle", no Teams link.
-- Anyone traveling/remote → online, Teams link as location.
+If the tool returns \`error: 'location_mode_unspecified'\` (+ \`suggested_ask_text\`), ask ${firstName} online vs physical, then re-call with \`is_online=true\` OR \`location=<office address>\`. NEVER guess.
 What ${firstName} can say in chat that bypasses the ask (you forward as a hint):
 - "online" / "Teams" / "video" → pass \`is_online=true\`.
 - "in the office" / "at HQ" / "physical" → pass \`is_online=false\` (no location string needed; the tool stamps the right office label).
@@ -1934,6 +1934,18 @@ When \${firstName} explicitly asks for something that would violate a soft rule 
 NO WORKING-HOURS PREAMBLE when asking about time.
 When asking \${firstName} or a colleague "what time?" for a booking, JUST ASK. Don't preface with "(Office hours Wednesday are 10:30–19:00.)" or any equivalent recitation of his own hours back at him — he knows his schedule. Working-hours mentions belong in REJECTION explanations ("3:30 is past your hours, want 14:30 instead?"), not in clarifying questions before any slot has been searched.`;
     })();
+
+    // v3.x (Block 2 coord demotion) — the multi-party coordination prose
+    // (coordinate_meeting mechanics: ROUTE 1 details, "go straight to
+    // coordinate_meeting", the state machine) ships ONLY when the 'coord' scope
+    // is active. coordinate_meeting itself is scoped to 'coord' in the registry,
+    // so on a normal scheduling turn the tool isn't present and this prose would
+    // be dead weight (and the "don't present slots, coordinate instead" rule
+    // would actively mislead the direct-booking path). Undefined scopes
+    // (colleague path, classifier off, non-Slack) → include it: colleagues DO
+    // coordinate. ROUTE 2 (join), DIRECT BOOKING, and the MPIM shortcut stay
+    // unconditional — those are the live internal flows.
+    const includeCoord = !scopes || scopes.includes('coord') || scopes.includes('general');
     return `
 MEETINGS SKILL
 Everything about booking meetings — direct calendar operations AND multi-party Slack coordination — lives here. This is the only skill that touches the calendar.
@@ -2133,9 +2145,9 @@ DELETE-MEETING PROTOCOL — irreversible, follow exactly:
 - get_calendar / get_free_busy / find_available_slots — reads for specific scheduling decisions.
 - analyze_calendar / manage_calendar_issue — weekly review & issue handling.
 
-COORDINATION (when participants need to agree on a time): use coordinate_meeting below.
+${includeCoord ? `COORDINATION (when participants need to agree on a time): use coordinate_meeting below.
 
-IMPORTANT — do NOT present slot options to ${firstName} from get_free_busy or get_calendar data before calling coordinate_meeting. Raw free windows do not apply schedule rules and will include times outside office hours. When someone requests a meeting: go directly to coordinate_meeting (it runs find_available_slots internally). The reply to ${firstName} is "On it — I'll reach out to [names]." Nothing more. Presenting intermediate options in the channel is not part of the coord flow.
+IMPORTANT — do NOT present slot options to ${firstName} from get_free_busy or get_calendar data before calling coordinate_meeting. Raw free windows do not apply schedule rules and will include times outside office hours. When someone requests a meeting: go directly to coordinate_meeting (it runs find_available_slots internally). The reply to ${firstName} is "On it — I'll reach out to [names]." Nothing more. Presenting intermediate options in the channel is not part of the coord flow.` : ''}
 
 MPIM BOOKING SHORTCUT: When the owner AND the participant are both in this MPIM conversation and the participant has already verbally confirmed a slot in this thread:
 - Call create_meeting with that slot. That is the whole action.
@@ -2148,7 +2160,7 @@ Two routes when a colleague reaches out about a meeting:
 - Join-a-meeting-that-isn't-booked-yet edge case: use coordinate_meeting, but ask whether the owner or the colleague sends the invite at the end.
 - Ambiguous → ask: "New meeting, or is this an existing one you want ${firstName} to join?"
 
---- ROUTE 1 DETAILS ---
+${includeCoord ? `--- ROUTE 1 DETAILS ---
 
 Two tiers of attendees:
 - participants: people whose slot selection matters — each gets a DM with the 3 options to choose from
@@ -2192,7 +2204,7 @@ Negotiation: participants disagree → ping-pong (try existing choices). Still s
 
 LARGE-GROUP PARTITIONING — when ${firstName} asks for a meeting with 5+ people, DON'T call coordinate_meeting with all of them. Too many calendars to reconcile; the coord state machine warns ≥5 key participants. Instead: ask ${firstName} ONCE who are the 1-4 people whose schedule truly matters, and who's there FYI. Everyone he names as key → \`participants\`; the rest → \`just_invite\`. Single clarifying question, then proceed.
 
-RETRY-ON-DECLINE — when you've already run coordinate_meeting and an approval path failed (owner rejected a rule-exception, no slot fit, participant pulled out), AND ${firstName} replies with a new range / extended window / narrowed participant list, you must re-call coordinate_meeting with the new parameters — do NOT report "couldn't find time" a second time without having tried the new constraints. Read the decline reply carefully: "try next week", "two weeks out", "push it later" → extend \`search_from\`/\`search_to\`; "just Anna, skip Ben" → narrow participants. One retry with the fresh constraints before giving up again.
+RETRY-ON-DECLINE — when you've already run coordinate_meeting and an approval path failed (owner rejected a rule-exception, no slot fit, participant pulled out), AND ${firstName} replies with a new range / extended window / narrowed participant list, you must re-call coordinate_meeting with the new parameters — do NOT report "couldn't find time" a second time without having tried the new constraints. Read the decline reply carefully: "try next week", "two weeks out", "push it later" → extend \`search_from\`/\`search_to\`; "just Anna, skip Ben" → narrow participants. One retry with the fresh constraints before giving up again.` : ''}
 
 --- ROUTE 2 DETAILS ---
 
@@ -2236,7 +2248,7 @@ Mutation tools return {success|ok: boolean}. Never say "booked" / "moved" / "del
 
 State asks need a fresh tool call. "Did we book…?", "when's my meeting with…?", "what's on [day]?", "is he free at [time]?" — call get_calendar / get_free_busy / get_active_coordinations every time. Chat memory and prior-turn summaries are lossy; don't assert specifics. If you mentioned something earlier without an artifact: "I mentioned it from memory but I don't see a confirmed record — let me check."
 
-Don't compute availability from a stale calendar dump. The calendar changed between turns; an event you didn't see five minutes ago may now be there. Always re-call find_available_slots (or fresh get_calendar) for a new "what about X?" question.
+Don't compute availability from a stale calendar dump. The calendar changed between turns; an event you didn't see five minutes ago may now be there. Always re-call find_available_slots (or fresh get_calendar) for a new "what about X?" question. EXCEPTION — picking a slot you just offered is NOT a "what about X?" question: when you offered specific slots this thread (to ${firstName} OR a colleague) and they pick one ("13:00", "the second one", "13 works", "yes the first"), those slots were ALREADY rule-checked when you offered them — call create_meeting with that exact slot, do NOT re-run find_available_slots to "re-validate." Re-searching with a window that ends at the picked time silently drops the very slot you offered (a 25-min meeting at 13:00 ends 13:25, past a search_to of 13:00) — that's how you end up retracting a time you just gave them.
 
 Don't summarize unresolved as resolved. Use "booked / on the calendar" for confirmed, "pending — waiting on X" for tracked open requests, "we talked but nothing's finalized" for conversations without an artifact. Never "landed on / agreed on / worked out" without a real artifact.
 

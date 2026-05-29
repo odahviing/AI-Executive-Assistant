@@ -59,9 +59,9 @@ export interface OwnerIntentClassification {
 }
 
 // ── Tool-scope types (formerly in classifyToolScope.ts, removed in v3.0.6) ──
-export type ToolScope = 'meetings' | 'tasks' | 'knowledge' | 'summary' | 'social' | 'venue' | 'general';
+export type ToolScope = 'meetings' | 'coord' | 'people' | 'tasks' | 'knowledge' | 'summary' | 'social' | 'venue' | 'general';
 
-export const ALL_SCOPES: ToolScope[] = ['meetings', 'tasks', 'knowledge', 'summary', 'social', 'venue', 'general'];
+export const ALL_SCOPES: ToolScope[] = ['meetings', 'coord', 'people', 'tasks', 'knowledge', 'summary', 'social', 'venue', 'general'];
 
 export interface ToolScopeResult {
   scopes: ToolScope[];
@@ -139,12 +139,13 @@ export async function classifyTurn(params: {
   // ── Scope setup (only relevant when needScopes) ──
   const summaryActive = (profile.skills as any)?.summary === true;
   const knowledgeActive = (profile.skills as any)?.knowledge === true;
-  const socialActive = (profile.skills as any)?.social === true;
   const venueActive = (profile.skills as any)?.venue === true;
-  const inPlayScopes: string[] = ['meetings', 'tasks'];
+  // v3.x (Change A) — 'people' is always in play (person-write tools moved off
+  // ALWAYS_ON). The old 'social' SCOPE was an empty no-op; person notes now
+  // route through 'people', so 'social' is no longer offered to the classifier.
+  const inPlayScopes: string[] = ['meetings', 'coord', 'people', 'tasks'];
   if (knowledgeActive) inPlayScopes.push('knowledge');
   if (summaryActive) inPlayScopes.push('summary');
-  if (socialActive) inPlayScopes.push('social');
   if (venueActive) inPlayScopes.push('venue');
   inPlayScopes.push('general');
 
@@ -187,9 +188,11 @@ ${isOwner ? `Also set free_time_inquiry (boolean) — true when ${ownerFirst} is
 
   const scopeSection = needScopes ? `
 SCOPES — pick which tool scopes are relevant (one or more):
-- meetings    — anything calendar-shaped: checking calendar, booking, moving, cancelling, finding slots, coordinating, "when am I free", "is X open", attendee availability, "do I have lunch?". Includes calendar-health.
+- meetings    — anything calendar-shaped: checking calendar, booking, moving, cancelling, finding slots, "when am I free", "is X open", attendee availability, "do I have lunch?", booking a meeting with someone. Includes calendar-health. This is the DEFAULT for almost all scheduling — direct booking lives here.
+- coord       — RARE. ONLY multi-party coordination where Maelle must reach out to SEVERAL people SEPARATELY to negotiate a time they all agree on ("coordinate a sync between Anna, Ben and me", "set up a meeting between the candidate and Idan and find a time that works for everyone"). NOT for booking a known time, NOT a 1:1, NOT when the people are already here in the conversation, NOT a direct "book X with Y". When unsure, pick 'meetings', not 'coord'. Fires alongside 'meetings'.
+- people      — saving or noting a durable fact about a PERSON (a colleague, not the owner's own prefs): where they live/work, timezone, working hours, communication style, gender, a hobby or personal detail — or any "remember / note that <X> about <someone>". Fires when the turn TEACHES you something about a person. (Just reading what you know about someone needs no scope — that tool is always available.)
 - tasks       — task list / routines / briefing: "what's pending?", "what did I miss?", "show my tasks", "set up a daily routine", "what's on my brief?".
-${knowledgeActive ? '- knowledge   — KB lookups / save a URL / research / "what do we know about X": company, product, customer, competitor, market.\n' : ''}${summaryActive ? '- summary     — post-meeting summary workflow only: classifying summary feedback, sharing a summary, updating a draft, listing speaker unknowns.\n' : ''}${socialActive ? '- social      — explicit social write asks: "remember she\'s into X", "note that he likes Y", confirming a person\'s gender. Just chatting socially is NOT this scope.\n' : ''}${venueActive ? '- venue       — external-venue management: ranking a venue ("rank Coffee Landwer 3"), or asking about saved venues. Finding a venue for a meeting fires here AND \'meetings\'.\n' : ''}- general     — pick when ambiguous, or to err toward shipping every tool. Cheap to over-include.
+${knowledgeActive ? '- knowledge   — KB lookups / save a URL / research / "what do we know about X": company, product, customer, competitor, market.\n' : ''}${summaryActive ? '- summary     — post-meeting summary workflow only: classifying summary feedback, sharing a summary, updating a draft, listing speaker unknowns.\n' : ''}${venueActive ? '- venue       — external-venue management: ranking a venue ("rank Coffee Landwer 3"), or asking about saved venues. Finding a venue for a meeting fires here AND \'meetings\'.\n' : ''}- general     — pick when ambiguous, or to err toward shipping every tool. Cheap to over-include.
 
 How to choose scopes:
 - Default to UNION when the message could touch multiple things.

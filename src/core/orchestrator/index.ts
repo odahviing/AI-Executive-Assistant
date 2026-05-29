@@ -600,7 +600,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   const focusSlackIds = input.isMpim && input.mpimMemberIds
     ? new Set(input.mpimMemberIds.filter(id => id !== profile.user.slack_user_id))
     : undefined;
-  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs, input.userId, input.mpimMemberIds);
+  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs, input.userId, input.mpimMemberIds, toolScopes);
 
   // Inject active jobs for this thread so Maelle knows what she already committed to.
   // This prevents her from treating follow-up messages as new requests.
@@ -689,6 +689,41 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     const tape = extractActionTape(input.conversationHistory);
     if (tape.length > 0) {
       actionTapeBlock = `\n\nACTIONS YOU TOOK IN THIS THREAD:\n${tape.map(t => `- ${t}`).join('\n')}\n\nWhen the owner asks about anything in this list, lead with what YOU did — not what the calendar currently shows. If he says it didn't happen or the calendar shows otherwise, do NOT insist on this list — re-check via get_calendar and reconcile honestly. The list is what the tool reported, not ground truth.`;
+    }
+  }
+
+  // v3.1.4 (Y4) — colleague-path: carry the event(s) this colleague just
+  // requested forward by event_id, from the requests spine (the requester-link
+  // row written on a colleague booking). Pre-fix, a colleague who booked then
+  // said "add Eli / rename it" sent Maelle to get_calendar, which returned 0
+  // (Graph calendarView indexing lag right after a write) — she "lost" the
+  // meeting and flailed. With the full event_id in context, the follow-up edit
+  // targets update_meeting directly. No lagging re-read.
+  let colleagueBookingBlock = '';
+  if (input.senderRole === 'colleague' && input.userId) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getDb } = require('../../db') as typeof import('../../db');
+      const rows = getDb().prepare(`
+        SELECT subject, outcome_external_event_id, created_at
+        FROM requests
+        WHERE owner_user_id = ?
+          AND requester_slack_id = ?
+          AND outcome_external_event_id IS NOT NULL
+          AND datetime(created_at) >= datetime('now', '-3 hours')
+        ORDER BY datetime(created_at) DESC
+        LIMIT 3
+      `).all(profile.user.slack_user_id, input.userId) as Array<{
+        subject: string; outcome_external_event_id: string; created_at: string;
+      }>;
+      if (rows.length > 0) {
+        const lines = rows.map(r => `  - "${r.subject}" — event_id=${r.outcome_external_event_id}`);
+        colleagueBookingBlock = `## MEETINGS YOU JUST SET UP FOR THIS PERSON (use these IDs)\n\nIf they ask to change one of these ("add someone", "rename it", "move it"), call update_meeting / move_meeting with the matching event_id below — do NOT get_calendar to re-find it (a just-booked event can lag in the calendar for a few seconds):\n\n${lines.join('\n')}`;
+      }
+    } catch (err) {
+      logger.warn('colleagueBookingBlock builder threw — proceeding without it', {
+        err: String(err).slice(0, 200),
+      });
     }
   }
 
@@ -884,6 +919,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     promptParts.dynamic,
     threadContextBlock,
     actionTapeBlock,
+    colleagueBookingBlock,
     socialBlock,
     socialDirectiveBlock,
   ].filter(Boolean).join('\n\n');

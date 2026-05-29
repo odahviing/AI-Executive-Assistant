@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
-import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, getPersonMemory as getPersonMemoryRow, type PersonProfile, type PersonInteraction } from '../db';
+import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, type PersonProfile, type PersonInteraction, type PersonNote } from '../db';
 import {
   readPersonMemory,
   writePersonSection,
@@ -272,14 +272,14 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
       },
       {
         name: 'get_person_memory',
-        description: `Load the full markdown notes you have on a person — residence, workplace, working hours, communication style, etc. The owner and colleagues each have (or can have) a file.
+        description: `Load everything you know about a person: their markdown notes (residence, workplace, working hours, communication style) PLUS your relationship history with them — past social notes (★) and recent exchanges (↳ what they reached out about, what was discussed).
 
 Call this when:
-- A person relevant to the current turn appears in the PEOPLE NOTES catalog (see system prompt) and you need the details
+- A person in WORKSPACE CONTACTS shows a "N notes on file" hint and that person is relevant to the current turn — the hint means there's history to pull
 - You want to check what you already know before asking them something you might have asked before
 - Scheduling for them, messaging them, or answering a question about them benefits from the context
 
-Keep calls narrow — one person at a time. If the person isn't in the catalog, there's no file; use update_person_memory to start one when you learn the first real fact.`,
+The contacts list shows each person's name, timezone, gender, and email inline; their notes + conversation history load through this call. Keep calls narrow — one person at a time.`,
         input_schema: {
           type: 'object' as const,
           properties: {
@@ -637,15 +637,48 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
         if (!query) return { error: 'empty_person' };
         const slug = (await resolvePersonSlug(context.profile, query)) ?? slugifyName(query);
         const content = await readPersonMemory(context.profile, slug);
-        if (content === null) {
+
+        // v3.x (Block 1 prompt reduction) — the WORKSPACE CONTACTS prompt block
+        // no longer inlines every contact's ★ notes + ↳ interaction history for
+        // all 25 contacts (it shows a "N notes on file" hint instead, to cut the
+        // fresh-every-turn dynamic cost). So this tool — the one the hint points
+        // at — must ALSO return that people_memory data, or the relational
+        // context (comms style, social-engineering flags, past asks) would be
+        // unreachable. Resolve the row by slack_id, else by name/email.
+        const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
+        const row = SLACK_ID_RE.test(query)
+          ? getPersonMemoryRow(query)
+          : (searchPeopleMemory(query)[0] ?? searchPeopleMemory(query.replace(/-/g, ' '))[0] ?? null);
+        let notes: PersonNote[] = [];
+        let recentInteractions: Array<{ date: string; type: string; summary: string }> = [];
+        if (row) {
+          try { notes = JSON.parse(row.notes || '[]'); } catch { notes = []; }
+          try {
+            const log = JSON.parse(row.interaction_log || '[]') as PersonInteraction[];
+            recentInteractions = log
+              .filter(i => i.type !== 'meeting_booked' && i.type !== 'coordination')
+              .slice(-15)
+              .map(i => ({ date: i.date.split('T')[0], type: i.type, summary: i.summary }));
+          } catch { recentInteractions = []; }
+        }
+
+        if (content === null && notes.length === 0 && recentInteractions.length === 0) {
           return {
             found: false,
             slug,
             message: `No memory file yet for "${query}" — no durable facts recorded. Use update_person_memory when you learn one.`,
           };
         }
-        logger.info('Person memory fetched', { slug, bytes: content.length });
-        return { found: true, slug, content };
+        logger.info('Person memory fetched', {
+          slug, bytes: content?.length ?? 0, notes: notes.length, interactions: recentInteractions.length,
+        });
+        return {
+          found: true,
+          slug,
+          content: content ?? '',
+          notes: notes.map(n => ({ date: n.date, note: n.note })),
+          recent_interactions: recentInteractions,
+        };
       }
 
       case 'update_person_memory': {

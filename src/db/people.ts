@@ -663,49 +663,53 @@ export function formatPeopleMemoryForPrompt(
     // still persisted for code paths that read them deterministically.
     void profile;
 
-    // Personal/relationship notes — only when persona is on (the notes are
-    // social context: hobbies, life events, relationship-building bits).
-    if (includeSocial) {
-      for (const n of notes) {
-        parts.push(`  ★ [${n.date}] ${n.note}`);
-      }
-    }
-
-    // Activity timeline. v1.6.14 — show last 30 entries ONLY for contacts
-    // who are in the current chat (MPIM participants, or explicit focus);
-    // everyone else gets the last 10. One heavy contact with 30 entries of
-    // ~100-token exchanges can add 3k tokens to every owner turn; capping
-    // non-focus at 10 saves a lot without losing context for people Maelle
-    // is actively talking to.
-    // v2.2.3 (#3) — interaction log is operational + social mixed; kept on
-    // both modes but trimmed harder when persona off (focus contacts only).
-    //
     // v2.3.4 — drop calendar-state snapshot entries (`meeting_booked`,
     // `coordination`) from the prompt-rendered list. These were lying when
-    // the underlying meeting got moved or cancelled afterwards: Lori's row
-    // had three meeting_booked snapshots — two with the original April dates
-    // and one with the May reschedule — and Sonnet narrated the older April
-    // entry as fact ("Lori onboarding isn't showing on tomorrow's
-    // calendar"). The calendar is the source of truth for meetings; memory
-    // belongs to relational facts (conversations, messages, social pings),
-    // not to point-in-time booking snapshots that go stale silently.
+    // the underlying meeting got moved or cancelled afterwards. The calendar
+    // is the source of truth for meetings; memory belongs to relational facts
+    // (conversations, messages, social pings), not stale booking snapshots.
+    const relationalLog: PersonInteraction[] = (() => {
+      try {
+        const log = JSON.parse(p.interaction_log || '[]') as PersonInteraction[];
+        return log.filter(i => i.type !== 'meeting_booked' && i.type !== 'coordination');
+      } catch { return []; }
+    })();
+
     const isFocus = focusSlackIds?.has(p.slack_id) ?? false;
-    const entryCap = includeSocial ? (isFocus ? 30 : 10) : (isFocus ? 10 : 0);
-    if (entryCap > 0) {
-      const log: PersonInteraction[] = (() => {
-        try { return JSON.parse(p.interaction_log || '[]'); } catch { return []; }
-      })();
-      const relational = log.filter(i => i.type !== 'meeting_booked' && i.type !== 'coordination');
-      for (const i of relational.slice(-entryCap)) {
-        const d = i.date.split('T')[0];
-        parts.push(`  ↳ [${d}] ${i.type}: ${i.summary}`);
+    if (isFocus) {
+      // FULL render — person is in the CURRENT chat (MPIM member / explicit
+      // focus). Worth the tokens: Maelle is actively talking with them now.
+      // Personal/relationship notes only when persona is on (hobbies, life
+      // events, relationship bits). Last 30 interactions (10 when social off).
+      if (includeSocial) {
+        for (const n of notes) parts.push(`  ★ [${n.date}] ${n.note}`);
+      }
+      const entryCap = includeSocial ? 30 : 10;
+      for (const i of relationalLog.slice(-entryCap)) {
+        parts.push(`  ↳ [${i.date.split('T')[0]}] ${i.type}: ${i.summary}`);
+      }
+    } else {
+      // COMPACT roster line — v3.x (Block 1 prompt reduction). Was: every one
+      // of the (up to 25) contacts dumped ALL ★ notes + a 10-entry ↳ tail,
+      // fresh on every owner turn (~6k tokens, billed full-rate, uncached).
+      // The note + interaction BODIES live in the DB and load on demand via
+      // get_person_memory (extended in v3.x to return them alongside the
+      // markdown file). We surface only the COUNTS so Sonnet knows there's
+      // history worth pulling for this specific person.
+      const noteCount = includeSocial ? notes.length : 0;
+      const intCount = relationalLog.length;
+      const bits: string[] = [];
+      if (noteCount > 0) bits.push(`${noteCount} note${noteCount === 1 ? '' : 's'}`);
+      if (intCount > 0) bits.push(`${intCount} past exchange${intCount === 1 ? '' : 's'}`);
+      if (bits.length > 0) {
+        parts.push(`  (${bits.join(', ')} on file — get_person_memory("${p.name}") to load)`);
       }
     }
 
     return parts.join('\n');
   });
 
-  return `WORKSPACE CONTACTS (people you have interacted with — use slack_id directly, no need to call find_slack_user):\n${lines.join('\n')}`;
+  return `WORKSPACE CONTACTS (people you have interacted with — use slack_id directly, no need to call find_slack_user). Each line shows what you know at a glance; where a line ends with "N notes / past exchanges on file", that person's relationship history and conversation notes load on demand via get_person_memory — pull it when they're relevant to the turn:\n${lines.join('\n')}`;
 }
 
 // ── Social context block (per-sender) ────────────────────────────────────────

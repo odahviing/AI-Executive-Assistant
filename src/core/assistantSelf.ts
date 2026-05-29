@@ -95,12 +95,22 @@ export function formatAssistantSelfForPrompt(
   if (prof.language_preference) lines.push(`  language: ${prof.language_preference}`);
   if (prof.working_hours)       lines.push(`  working hours: ${prof.working_hours}`);
   if (prof.collaboration_notes) lines.push(`  collaboration: ${prof.collaboration_notes}`);
-  // Cap rendered notes to the most recent 20. Capture-pass dedup is
-  // probabilistic (Haiku-judged), so duplicates accumulate in the DB
-  // over time; capping the render keeps the prompt block bounded even
-  // if data dedup slips.
-  for (const n of notes.slice(-20)) lines.push(`  ★ [${n.date}] ${n.note}`);
-  for (const i of log.slice(-10)) {
+  // v3.x (Block 3 prompt reduction) — dedup by text-prefix before rendering.
+  // Capture-pass dedup is probabilistic (Haiku-judged), so exact/near-repeats
+  // accumulate (the "named after the Expedition 33 character" story was stored
+  // 4×). A first-80-chars key collapses those variants to one. Then cap: notes
+  // carry the durable self-facts, the interaction tail is mostly redundant with
+  // them, so it's capped harder.
+  const dedup = <T>(arr: T[], key: (x: T) => string): T[] => {
+    const seen = new Set<string>();
+    return arr.filter(x => {
+      const k = key(x).trim().toLowerCase().slice(0, 80);
+      if (seen.has(k)) return false;
+      seen.add(k); return true;
+    });
+  };
+  for (const n of dedup(notes, n => n.note).slice(-15)) lines.push(`  ★ [${n.date}] ${n.note}`);
+  for (const i of dedup(log, i => i.summary).slice(-4)) {
     const d = i.date.split('T')[0];
     lines.push(`  ↳ [${d}] ${i.type}: ${i.summary}`);
   }

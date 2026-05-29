@@ -40,11 +40,17 @@ export interface MeetingOwnerInfo {
  * closed (resolved) coords too since booking sets state=resolved.
  */
 function findRequestByEventId(ownerUserId: string, eventId: string): RequestRow | null {
+  // v3.1.4 (Y3) — prefer a row that actually NAMES a requester over a bare
+  // in-flight tracking row. A single event can have both: the
+  // requester-link written on a colleague's direct booking (carries
+  // requester_slack_id) AND a maybeOpenInFlightMeetingRequest follow_up
+  // (no requester). Ordering requester-bearing rows first makes
+  // requester-control resolution timing-independent.
   return (getDb().prepare(`
     SELECT * FROM requests
     WHERE owner_user_id = ?
       AND outcome_external_event_id = ?
-    ORDER BY created_at DESC LIMIT 1
+    ORDER BY (requester_slack_id IS NOT NULL) DESC, created_at DESC LIMIT 1
   `).get(ownerUserId, eventId) as RequestRow | null) ?? null;
 }
 

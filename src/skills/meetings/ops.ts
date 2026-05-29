@@ -2559,6 +2559,41 @@ export class SchedulingSkill {
             });
           }
 
+          // v3.1.4 (Y3) — record the requester-link for a colleague's direct
+          // booking. findMeetingOwner reads the requests spine to decide
+          // "who controls this meeting"; coord bookings already record their
+          // requester, but a direct colleague create_meeting did not — so a
+          // colleague editing the meeting they just requested wasn't
+          // recognized as its requester. One terminal row keyed on the event
+          // closes that gap; the requester then controls add/rename/location
+          // via the update_meeting + move_meeting gates.
+          if (context.senderRole === 'colleague' && meetingId) {
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { createRequest } = require('../../db/requests') as typeof import('../../db/requests');
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { getPersonMemory } = require('../../db/people') as typeof import('../../db/people');
+              const requesterName = getPersonMemory(context.userId)?.name ?? undefined;
+              createRequest({
+                ownerUserId: context.profile.user.slack_user_id,
+                initiatedBy: context.userId,
+                initiatedByRole: 'colleague',
+                kind: 'follow_up',
+                subkind: 'colleague_booking_record',
+                subject: `Booking requested by ${requesterName ?? context.userId}: ${args.subject ?? 'meeting'}`,
+                state: 'resolved',
+                informed: 1,
+                requesterSlackId: context.userId,
+                requesterName,
+                outcomeExternalEventId: meetingId,
+              });
+            } catch (err) {
+              logger.warn('colleague booking requester-link write failed — continuing', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          }
+
           return {
             success: true,
             meetingId,
@@ -2643,8 +2678,19 @@ export class SchedulingSkill {
 
         if (hasAttendeeChange) {
           const ownerFirst = context.profile.user.name.split(' ')[0];
+          // v3.1.4 (Y2) — resolve name-only adds to emails from the directory
+          // BEFORE the missing-email filter, via the shared resolver every
+          // booking path uses. Pre-fix, "add Eli Feldman" (no email) was
+          // dropped here → attendee_missing_email → Maelle asked the colleague
+          // for an email she already had on file.
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { resolveAttendeeEmail } = require('./resolveAttendeeEmails') as
+            typeof import('./resolveAttendeeEmails');
           const addList = rawAdd
-            .map(a => ({ name: a.name?.trim(), email: (a.email ?? '').trim().toLowerCase(), optional: a.optional === true }))
+            .map(a => {
+              const resolved = resolveAttendeeEmail({ name: a.name, email: a.email });
+              return { name: resolved.name, email: resolved.email, optional: a.optional === true };
+            })
             .filter(a => a.email.includes('@'));
           const removeList = rawRemove
             .map(e => (e ?? '').trim().toLowerCase())
@@ -2658,30 +2704,39 @@ export class SchedulingSkill {
             };
           }
 
-          // Colleague-path self-only gate. Look up the colleague's email
-          // from people_memory; refuse any add/remove that isn't them.
+          // v3.1.4 (Y3) — requester-controls gate (replaces the old self-only
+          // gate). Owner direction: whoever REQUESTED a meeting controls it —
+          // they can add anyone, rename, change location, even if they're not
+          // on it. A non-requester colleague editing the owner's meeting →
+          // escalate to ONE approval. The requester is resolved from the
+          // requests spine via findMeetingOwner (coord bookings + the v3.1.4
+          // colleague-booking requester-link both populate it).
           if (context.senderRole === 'colleague') {
-            let colleagueEmail = '';
+            let isRequester = false;
             try {
-              const { getPersonMemory } = await import('../../db/people');
-              const mem = getPersonMemory(context.userId);
-              colleagueEmail = (mem?.email ?? '').toLowerCase();
-            } catch (_) { /* fall through */ }
-
-            const nonSelfAdds = addList.filter(a => a.email !== colleagueEmail);
-            const nonSelfRemoves = removeList.filter(e => e !== colleagueEmail);
-            if (!colleagueEmail || nonSelfAdds.length > 0 || nonSelfRemoves.length > 0) {
-              logger.info('update_meeting refused — colleague tried non-self attendee change', {
+              const { findMeetingOwner } = await import('./findMeetingOwner');
+              const ownerInfo = await findMeetingOwner({
+                ownerUserId: context.profile.user.slack_user_id,
+                ownerEmail: userEmail,
+                eventId: args.meeting_id as string,
+              });
+              isRequester = ownerInfo.requesterSlackId === context.userId;
+            } catch (err) {
+              logger.warn('update_meeting requester gate — findMeetingOwner threw, treating as non-requester', {
+                err: String(err).slice(0, 200),
+              });
+            }
+            if (!isRequester) {
+              logger.info('update_meeting — non-requester colleague attendee change → escalate', {
                 meetingId: args.meeting_id,
                 requester: context.userId,
-                requesterEmail: colleagueEmail || '(unknown)',
-                nonSelfAdds: nonSelfAdds.map(a => a.email),
-                nonSelfRemoves,
+                adds: addList.map(a => a.email),
+                removes: removeList,
               });
               return {
-                error: 'colleague_self_only_attendee_change',
+                error: 'colleague_not_requester',
                 meeting_subject: args.meeting_subject,
-                message: `Only ${ownerFirst} can add or remove other people on a meeting. As a colleague you can only add/remove yourself.`,
+                message: `Only ${ownerFirst} (or whoever requested this meeting) can change who's on "${args.meeting_subject}". Raise it with ${ownerFirst} via create_approval(kind=meeting_change) so he can decide.`,
               };
             }
           }
@@ -2856,6 +2911,36 @@ export class SchedulingSkill {
         // create_approval(kind=meeting_reschedule). Owner-path callers skip this
         // check (owner override IS the approval).
         if (context.senderRole === 'colleague') {
+          // v3.1.4 (Y3) — requester-controls gate. Only the meeting's requester
+          // gets the autonomous rule-compliant auto-move below; any other
+          // colleague → straight to owner approval. Mirrors the update_meeting
+          // gate. (Owner-path skips this whole block.)
+          try {
+            const { findMeetingOwner } = await import('./findMeetingOwner');
+            const ownerInfo = await findMeetingOwner({
+              ownerUserId: context.profile.user.slack_user_id,
+              ownerEmail: userEmail,
+              eventId: args.meeting_id as string,
+            });
+            if (ownerInfo.requesterSlackId && ownerInfo.requesterSlackId !== context.userId) {
+              const ownerFirst = context.profile.user.name.split(' ')[0];
+              logger.info('move_meeting — non-requester colleague → escalate', {
+                meetingId: args.meeting_id, requester: context.userId,
+              });
+              return {
+                needs_owner_approval: true,
+                reason: 'colleague_not_requester',
+                meeting_subject: args.meeting_subject,
+                requested_start: args.new_start,
+                requested_end: args.new_end,
+                message: `Only ${ownerFirst} (or whoever requested this meeting) can move "${args.meeting_subject}". Raise create_approval(kind=meeting_reschedule) so he can decide.`,
+              };
+            }
+          } catch (err) {
+            logger.warn('move_meeting requester gate — findMeetingOwner threw, falling through to rule check', {
+              err: String(err).slice(0, 200),
+            });
+          }
           const newStart = args.new_start as string | undefined;
           const newEnd = args.new_end as string | undefined;
           if (newStart && newEnd) {

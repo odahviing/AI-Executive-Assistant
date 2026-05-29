@@ -121,32 +121,42 @@ const SKILL_MAP = buildSkillMap();
  * SHIPPED by default — better to over-include than to lose a tool silently.
  * They'll show up in the diagnostic log line.
  */
+// v3.x (Block 2 Change A) — ALWAYS_ON slimmed from 22 → 12. The cut tools were
+// expensive-and-rare on the common scheduling turn and have a natural home scope:
+//   - person WRITES (update_person_profile 1.9k, update_person_memory,
+//     confirm_gender, note_about_person, note_about_self) → 'people' scope.
+//     READS stay always-on (get_person_memory, recall_interactions) so loading a
+//     contact is always one call away. Person writes are also backstopped by the
+//     end-of-chat capture pass, so a missed in-turn save is recovered.
+//   - task detail (update_task, get_my_tasks, get_briefing, send_briefing_now)
+//     → 'tasks' scope. create_task stays (cross-cutting; claim-checker refs it).
+//   - web_extract → 'knowledge' scope (pairs with research). web_search stays.
 const ALWAYS_ON_TOOLS = new Set<string>([
-  // Memory + people (AssistantSkill). v2.9 — three preference tools merged into manage_preference.
-  'manage_preference',
-  'recall_interactions', 'update_person_profile', 'log_interaction',
-  'confirm_gender', 'get_person_memory', 'update_person_memory',
+  // Memory + people READS + preference learning (cross-cutting, any turn).
+  'manage_preference', 'get_person_memory', 'recall_interactions', 'log_interaction',
   // Outreach
   'message_colleague',
-  // Tasks core. v2.9 — edit_task + cancel_task merged into update_task; create_task and
-  // get_my_tasks stay separate (claim-checker references create_task by name).
-  'create_task', 'update_task', 'get_my_tasks',
-  'get_briefing', 'send_briefing_now',
-  // Approvals — any turn might escalate
+  // Tasks — create is cross-cutting (claim-checker references create_task by name).
+  'create_task',
+  // Approvals — any turn might escalate or resolve.
   'create_approval', 'resolve_approval', 'list_pending_approvals',
-  // Slack directory lookups — any turn might need a slack_id
+  // Slack directory lookups — any turn might need a slack_id.
   'find_slack_user', 'find_slack_channel',
-  // Web — light research available anywhere
-  'web_search', 'web_extract',
-  // Social writes — only ship when SocialSkill is loaded (handled by
-  // toggle in registry); include here so they're owner-always when on.
-  'note_about_person', 'note_about_self',
+  // Web — light research available anywhere.
+  'web_search',
 ]);
 
 const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
   meetings: new Set<string>([
-    'coordinate_meeting', 'get_active_coordinations', 'cancel_coordination',
-    'finalize_coord_meeting', 'check_join_availability',
+    // v3.x (Block 2 coord demotion) — the multi-party coordination tools
+    // (coordinate_meeting + get_active_coordinations + cancel_coordination +
+    // finalize_coord_meeting) moved OUT to the 'coord' scope below. They
+    // hadn't legitimately fired in a month — the internal-Slack flow is direct
+    // booking (find_available_slots → create_meeting), and shipping
+    // coordinate_meeting on every scheduling turn was causing wrong-tool picks.
+    // check_join_availability stays: it's the Route-2 "colleague joins an
+    // existing meeting" flow, a live internal path distinct from coordination.
+    'check_join_availability',
     'find_available_slots', 'get_calendar', 'analyze_calendar', 'get_free_busy',
     'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
     'check_calendar_health', 'book_floating_block', 'set_event_category',
@@ -156,22 +166,42 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
     // ("book coffee with Yael"); also lives in the 'venue' scope.
     'find_venue',
   ]),
+  // v3.x (Block 2) — multi-party coordination (DM-poll several people for a
+  // shared time). Rare; the classifier unions 'meetings' when it fires so
+  // Sonnet still has the calendar reads. Kept as code for the future
+  // email-external coordination path — just no longer shipped by default.
+  coord: new Set<string>([
+    'coordinate_meeting', 'get_active_coordinations', 'cancel_coordination',
+    'finalize_coord_meeting',
+  ]),
   tasks: new Set<string>([
     // v2.9 — 4 routine tools merged into manage_routine.
     'manage_routine',
+    // v3.x (Change A) — task detail + briefing moved off ALWAYS_ON.
+    'update_task', 'get_my_tasks', 'get_briefing', 'send_briefing_now',
   ]),
   knowledge: new Set<string>([
     // v2.9 — get_company_knowledge + ingest_knowledge_from_url merged.
     'manage_knowledge', 'classify_document',
+    // v3.x (Change A) — deep URL fetch pairs with research; web_search stays always-on.
+    'web_extract',
   ]),
   summary: new Set<string>([
     'classify_summary_feedback', 'share_summary', 'update_summary_draft',
     'learn_summary_style', 'list_speaker_unknowns',
   ]),
-  // 'social' scope is currently a NO-OP: note_about_person + note_about_self
-  // are in ALWAYS_ON_TOOLS already. Kept as a recognized scope so the
-  // classifier can signal "this turn has a social-write intent" — useful
-  // for future logging / observability — without changing the shipped set.
+  // v3.x (Change A) — person WRITES live here, off the always-on set. The
+  // classifier picks 'people' when a turn teaches Maelle a durable fact about
+  // someone. Person READS (get_person_memory / recall_interactions) stay
+  // always-on; the end-of-chat capture pass backstops any missed in-turn write.
+  // note_about_* are SocialSkill tools — listed here too, but only ship when
+  // social is on (filterToolsByScope works off the actually-loaded tool list).
+  people: new Set<string>([
+    'update_person_profile', 'update_person_memory', 'confirm_gender',
+    'note_about_person', 'note_about_self',
+  ]),
+  // 'social' scope is a recognized NO-OP signal scope (person writes moved to
+  // 'people' v3.x). Kept so the enum stays stable; ships nothing extra.
   social: new Set<string>([]),
   // v2.9 — venue skill: external-venue discovery and rank curation.
   // find_venue is also useful from a meetings-shaped turn (booking a coffee
@@ -194,10 +224,17 @@ function filterToolsByScope(
   if (!scopes || scopes.length === 0 || scopes.includes('general')) {
     return allTools;
   }
+  // v3.x (Block 2) — 'coord' always implies 'meetings': coordination needs the
+  // calendar reads (find_available_slots / get_calendar) to reason about times.
+  // Expand deterministically here so a coord turn is safe even if the classifier
+  // emits ['coord'] alone instead of ['coord','meetings'].
+  const effectiveScopes = scopes.includes('coord') && !scopes.includes('meetings')
+    ? [...scopes, 'meetings']
+    : scopes;
   // Build the set of allowed tool names: always-on + every tool in any
   // requested scope.
   const allowed = new Set<string>(ALWAYS_ON_TOOLS);
-  for (const scope of scopes) {
+  for (const scope of effectiveScopes) {
     const tools = SCOPE_TO_TOOLS[scope];
     if (tools) for (const t of tools) allowed.add(t);
   }
@@ -267,6 +304,14 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   // (themselves), rule-compliant slot, English subject. Auto shadow-DMs owner.
   // Same trust pattern as v2.2.1 move_meeting — rule-compliance is the gate.
   'create_meeting',
+  // v3.1.4 (Y3) — a colleague who REQUESTED a meeting controls it: add people,
+  // rename, change location. The update_meeting handler gates this on
+  // requester-identity (findMeetingOwner): requester → allowed; non-requester
+  // → returns a clean needs-approval signal so Sonnet fires ONE create_approval.
+  // Pre-fix update_meeting was blocked here, so a colleague's "add Eli + rename"
+  // had no correct tool — Sonnet flailed through create/move (both rule-failed),
+  // burned the rate limit, and punted vaguely to the owner.
+  'update_meeting',
   // v2.5.2 — self-write reopening. Personal-knowledge tools were over-tightened
   // pre-v2.4 as a side-effect of broader colleague-path defense. The product
   // model is: people memory + travel + social engagement are FOR colleagues —
@@ -490,11 +535,11 @@ export async function executeSkillTool(
  * Each active skill contributes its own rules block.
  * Fails gracefully per skill — one bad skill doesn't blank the whole prompt.
  */
-export function buildSkillsPromptSection(profile: UserProfile): string {
+export function buildSkillsPromptSection(profile: UserProfile, scopes?: string[]): string {
   return getActiveSkills(profile)
     .map(skill => {
       try {
-        return skill.getSystemPromptSection(profile);
+        return skill.getSystemPromptSection(profile, scopes);
       } catch (err) {
         logger.warn(`Skill "${skill.name}" getSystemPromptSection() failed`, { err: String(err) });
         return '';
