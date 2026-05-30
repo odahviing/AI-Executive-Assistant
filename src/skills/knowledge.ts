@@ -605,7 +605,12 @@ action='ingest' — save a webpage into the KB. Required: \`url\`. Optional: \`o
     }
   }
 
-  getSystemPromptSection(profile: UserProfile): string {
+  getSystemPromptSection(profile: UserProfile, scopes?: string[]): string {
+    // v3.x (Block 3 — prose lazy-load). Only relevant on a knowledge-lookup
+    // turn. Ship the catalog only when 'knowledge' scope is active (owner-path);
+    // undefined/general → render. Rides the same detection as the KB tools, and
+    // skips the directory walk below on turns that don't need it.
+    if (scopes && !scopes.includes('knowledge') && !scopes.includes('general')) return '';
     // Lightweight catalog rendered inline so Sonnet sees what's available without
     // having to call list_company_knowledge first. Cheap — we re-read the dir
     // listing on every prompt build (small filesystem op, fresh as the owner edits).

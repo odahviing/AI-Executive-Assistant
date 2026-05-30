@@ -114,7 +114,7 @@ Call this after interactions — not during them. It's a background update.`,
           properties: {
             colleague_slack_id: {
               type: 'string',
-              description: 'Slack user ID — opaque random-looking string like "U09EXAMPLE9" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write a name-shaped string like "U_ORAN_FRENKEL" or "U_<NAME>" — those look right but are inventions. If you don\'t have the real ID in this conversation: omit this field and pass `colleague_name` only — the system resolves the ID from people_memory. Or call `find_slack_user` first to look it up.',
+              description: 'Slack user ID — opaque string like "U09EXAMPLE9" (U/W + 6+ alphanumerics, no underscores). NEVER invent a name-shaped id like "U_<NAME>". If you don\'t have the real ID, omit this and pass `colleague_name` (resolved from people_memory), or call `find_slack_user` first.',
             },
             colleague_name: {
               type: 'string',
@@ -219,7 +219,7 @@ This builds a timeline that Maelle can reference later — so when someone asks 
           properties: {
             colleague_slack_id: {
               type: 'string',
-              description: 'Slack user ID — opaque random-looking string like "U09EXAMPLE9" (starts with U or W, then 6+ alphanumerics, NO underscores). NEVER write a name-shaped string like "U_ORAN_FRENKEL" or "U_<NAME>" — those look right but are inventions. If you don\'t have the real ID in this conversation: omit this field and pass `colleague_name` only — the system resolves the ID from people_memory. Or call `find_slack_user` first to look it up.',
+              description: 'Slack user ID — opaque string like "U09EXAMPLE9" (U/W + 6+ alphanumerics, no underscores). NEVER invent a name-shaped id like "U_<NAME>". If you don\'t have the real ID, omit this and pass `colleague_name` (resolved from people_memory), or call `find_slack_user` first.',
             },
             colleague_name: {
               type: 'string',

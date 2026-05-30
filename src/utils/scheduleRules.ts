@@ -225,6 +225,15 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       const windowEnd = slotStart.set({ hour: peH, minute: peM, second: 0, millisecond: 0 });
       // If the proposed slot doesn't overlap the window at all, no concern.
       if (slotEnd <= windowStart || slotStart >= windowEnd) continue;
+      // v3.1.5 (Bug 1) — the proposed slot IS a floating block (book_floating_block
+      // → planMeeting with isFloatingBlock=true), and it sits inside THIS block's
+      // window → it's THIS block being booked. Don't check whether the block can
+      // "still fit elsewhere" after placing itself — that's circular
+      // self-rejection (placing 25-min lunch in the only gap, then failing
+      // because lunch can't ALSO fit). findAlignedSlotForBlock already validated
+      // the placement. Other blocks (different windows) are still checked, so
+      // booking lunch can't silently squeeze out a separate gym/coffee block.
+      if (input.isFloatingBlock && slotStart >= windowStart && slotEnd <= windowEnd) continue;
 
       const blockDurationMin = block.duration_minutes ?? 25;
 

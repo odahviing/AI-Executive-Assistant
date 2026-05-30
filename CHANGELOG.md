@@ -2,6 +2,35 @@
 
 ---
 
+## 3.1.5 — prompt reduction (prose lazy-loading + dedup) + off-grid booking fix + date-verifier/floating-block fixes
+
+Three chats bundled. The prompt-reduction pass continues on top of 3.1.4's tool-scoping: this version adds **prose lazy-loading** (rarely-used skill prose ships only when its scope is active) and a **static-prose dedup/trim** sweep, bringing the common owner scheduling turn to ~36K tokens. Plus one real correctness fix (off-grid slot alignment) and two fixes from parallel chats (date-verifier performance, floating-block self-rejection).
+
+### Changed — prompt reduction (continued from 3.1.4)
+
+- **New `calendar` scope** ([classifyTurn.ts](src/core/social/classifyTurn.ts), [registry.ts](src/skills/registry.ts)) — separates calendar **review/health** ("how's my week", "any conflicts", "do I have my buffer") from **booking** so the ~2.3K calendar-health prose ships only on review turns. The health *tools* stay in `meetings` (always present on a scheduling turn — Sonnet can always run them); only the prose is gated. `calendar` deterministically unions `meetings`, and `freeTimeInquiry` unions `calendar` ([orchestrator/index.ts](src/core/orchestrator/index.ts)) so a buffer/free-time question always loads the guidance.
+- **Prose lazy-loading** — the coordination ROUTE 1 details ([meetings.ts](src/skills/meetings.ts)), SUMMARIES ([summary.ts](src/skills/summary.ts)), KNOWLEDGE BASE ([knowledge.ts](src/skills/knowledge.ts)), EXTERNAL VENUES ([venue.ts](src/skills/venue.ts)), and CALENDAR HEALTH ([calendarHealth.ts](src/skills/calendarHealth.ts)) prose now render only when their scope is active (riding the `scopes` plumbing landed in 3.1.4). Fail-open on the colleague path / classifier-off.
+- **Static-prose dedup/trim** in the meetings skill — collapsed the dead location decision tree (`resolveLocation` owns it), category descriptions → first-sentence cues (`detectCategory` owns the full text server-side), and deduped blocks that restated each other or a tool's own contract (`RULE-NAMING`→`RULE-COMPLIANCE REFUSAL`, `OWNER OVERRIDE IS THE APPROVAL`→`OWNER-PATH OVERRIDE`, `WHEN A REQUESTED DAY HAS ZERO SLOTS`, `OVERLAP REPORTING`, `DURATION`, the `is_online`/location chat-mapping→`create_meeting` description).
+- **Tool-description dedup** — `rank_venue` rank legend (its param carries it), `create_meeting` LANGUAGE restatement (the params carry it), `colleague_slack_id` warning shortened.
+
+### Fixed
+
+- **Off-grid slot alignment (correctness).** `create_meeting` / `move_meeting` now snap an off-grid start (e.g. 14:40 from a raw calendar gap) to the `:00/:15/:30/:45` grid via `alignNearestQuarter` ([ops.ts](src/skills/meetings/ops.ts)) — the helper was previously wired only to floating blocks, so an off-grid time Sonnet proposed could reach the calendar unaligned. New `start_is_explicit` flag preserves a deliberately-named off-grid time ("book at 14:40"). The ~6-line `SLOT START TIMES` prompt rule collapses to one line.
+- **Date-correction retry no longer re-runs the whole orchestrator** ([postReply.ts](src/connectors/slack/postReply.ts), [dateVerifier.ts](src/utils/dateVerifier.ts)). When the date-verifier flags a wrong weekday/date, the fix was a full `runOrchestrator` re-invocation (re-sent the ~46K cached prefix + all tools + history, re-ran the tool loop — ~30s on a long report). Replaced with a tool-less `rewriteWithCorrectDates` Sonnet pass: sees only the draft + the corrections, ~1-2s, fewer tokens, and inherently can't refire a write (removes the old `proseOnly` write-guard from the 2026-05-18 Michal-delete incident).
+- **Floating-block circular self-rejection** ([scheduleRules.ts](src/utils/scheduleRules.ts)). Booking a floating block (e.g. a 25-min lunch) into the only remaining gap failed the rule check, because `checkSlot` tested whether the block could *also* fit elsewhere after placing itself. Now: when the proposed slot IS the floating block being booked and sits inside its own window, skip the self-fit check (other blocks' windows still checked, so lunch can't squeeze out a separate gym/coffee block).
+- **`delete_meeting` returns `deleted_start_iso`** so the reply names the deleted day+time from the tool result, not lossy chat memory (`DELETE-MEETING PROTOCOL` step 6).
+- **humanGate** scrubs "the tool is telling me / the tool returned" machine-state phrasing ([humanGate.ts](src/utils/humanGate.ts)).
+
+### Added — bug-fixing process (code-first)
+
+- `SESSION_STARTER.md` gains a "How we fix bugs — code-first, root-cause, no patch-on-patch" standing principle; the `bugs` and `github` skills updated to a **code-first fix ranking** (prompt rules last, judgment/format only), **avoid regex on natural language** (multi-lingual), build-signals-exact / reads-without-asking / no-jargon rules, and a **"verify-still-reproduces / already-fixed → close, don't patch"** guard (closed #116/#117/#118 — fixed in 3.1.4, left open by oversight).
+
+### Watch
+
+- The tool-scoping + prose lazy-loading layer is gated by `behavior.intent_aware_tools: true`. If a turn misbehaves (a tool or prose block missing where it was needed), set it to `false` to fail-open (ships every tool + all prose) — the kill-switch / A-B for any scoping-caused regression.
+
+---
+
 ## 3.1.4 — colleague-scheduling correctness (the Yossi wave) + tool-scope prompt reduction
 
 A real-day colleague-scheduling chat (Yossi booking with Idan) surfaced five bugs, four of which trace to one root: the direct (non-coord) scheduling path was stateless across turns — it re-derived slots and re-queried the calendar instead of carrying forward what it just established. Fixed at the root, plus the parallel prompt-reduction chat's tool-scope restructure landed here too.

@@ -1146,7 +1146,12 @@ Output the full updated draft JSON.`;
     }
   }
 
-  getSystemPromptSection(profile: UserProfile): string {
+  getSystemPromptSection(profile: UserProfile, scopes?: string[]): string {
+    // v3.x (Block 3 — prose lazy-load). Only relevant on a summary-workflow
+    // turn. Ship the section only when 'summary' scope is active (owner-path).
+    // Undefined/general → render (colleague path, classifier off). This rides
+    // the SAME scope detection that already gates the summary TOOLS.
+    if (scopes && !scopes.includes('summary') && !scopes.includes('general')) return '';
     const ownerFirst = profile.user.name.split(' ')[0];
     return `## SUMMARIES (meeting transcript → summary → distribute)
 

@@ -12,6 +12,18 @@ The `requests` table is the single source of truth for lifecycle. Side tables (`
 
 **FIRST THING NEXT SESSION:** confirm Maelle runs clean on v3.1.2 (owner restarts `npm run dev`; PM2 off). Watch the first tick: `Requests-spine maintenance` log line, no double-DMs, coord/outreach close cleanly. Then pick from the deferred items below or the WhatsApp build.
 
+## How we fix bugs — CODE-FIRST, root-cause, no patch-on-patch (standing principle)
+
+The prompt is a budget, not a junk drawer. We've pulled the common owner turn from ~59k → ~36k tokens by moving rules into code; **never regress that to fix a bug.** Adding a prompt rule to patch behavior is the v2.x habit that bloated the prefix and produced patch-on-patch — Sonnet ignores rules under load, and every rule is billed on every turn forever.
+
+The loop for any bug:
+1. **Reproduce / trace, don't guess.** Read `logs/maelle-YYYY-MM-DD.log` and the code. State the root cause as `file:line — what actually happens`. If you're guessing, say so.
+2. **Fix at the core, in code.** The durable fix is deterministic enforcement at the chokepoint (a handler guard, a return-value the model reacts to, a tool that owns the decision). Code fixed once stays fixed; it costs zero prompt tokens. This is the location-tree / `resolveLocation`, the slot-alignment / `alignNearestQuarter`, the `detectMessageLanguage` pattern — the rule lives in code, the prompt at most points at it.
+3. **No stacking.** Most of our bugs are well-understood by now. If a prior fix didn't stick, it patched a symptom — **remove or replace the rotting layer; never add a new layer on top** (RULE 2e v2.1.0→2.2.6 cautionary tale). Use existing systems (requests spine, approvals payload, category flags) before inventing new state.
+4. **Prefer DELETING prompt + adding code** over editing prompt. Net prompt should go down, not up.
+
+**When prompt IS the right tool:** judgment, tone, format, reasoning, audience-awareness, language/voice — things code genuinely can't decide. The prompt may *guide where* the solution is ("the tool returns `broken_rule_label` — paste it"), but it must not *be* the enforcement. If you're tempted to add an enforcement rule to the prompt, that's the signal the fix belongs in code.
+
 ## What just shipped (3.0.4 → 3.0.7)
 
 Four patch versions in two days of real-day-bug-bashing. Read CHANGELOG.md top-to-bottom for the full picture; highlights:

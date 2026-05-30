@@ -740,49 +740,31 @@ async function runDateVerifierAndMaybeRetry(ctx: DateVerifyContext): Promise<str
   let cleanReply = initialReply;
 
   try {
-    const { verifyDates, buildDateCorrectionNudge } = await import('../../utils/dateVerifier');
+    const { verifyDates, rewriteWithCorrectDates } = await import('../../utils/dateVerifier');
     const verdict = await verifyDates(cleanReply, profile, userMessage);
     if (verdict.ok || verdict.mismatches.length === 0) return cleanReply;
 
-    logger.warn('Date verifier: draft has wrong weekday/date pairs — retrying', {
+    logger.warn('Date verifier: draft has wrong weekday/date pairs — correcting', {
       senderId: ctx.senderId,
       threadTs: ctx.threadTs,
       mismatches: verdict.mismatches,
     });
 
-    const nudge = buildDateCorrectionNudge(verdict.mismatches);
+    // v3.1.5 (Bug 4) — correct via a single tool-less rewrite, NOT a full
+    // orchestrator re-run. The old path re-invoked runOrchestrator (re-sent the
+    // ~46K cached prefix + all tools + history, re-ran the tool loop → ~30s on
+    // a long report). The rewrite call sees only the draft + the corrections —
+    // no tools, no prefix, fewer tokens than the original turn, ~1-2s. It also
+    // inherently can't refire a write (no tools), which removes the need for
+    // the old proseOnly write-guard (the 2026-05-18 Michal-delete incident).
     let retriedReply: string | null = null;
     try {
-      const retry = await runOrchestrator({
-        userMessage,
-        conversationHistory: history,
-        threadTs: ctx.threadTs,
-        channelId: ctx.channelId,
-        userId: ctx.senderId,
-        senderRole: ctx.role as 'owner' | 'colleague',
-        senderName: ctx.colleagueName,
-        channel: 'slack' as ChannelId,
-        profile,
-        app,
-        isMpim: ctx.isMpim,
-        isOwnerInGroup: ctx.isOwnerInGroup,
-        mpimMemberIds: ctx.mpimMemberIds,
-        extraInstruction: nudge,
-        // v2.8.6 — date-correction retry must NOT fire writes. The original
-        // turn already executed whatever calendar mutations it was going to;
-        // this retry is for prose correction only. Without this guard, the
-        // retry's orchestrator ran with full tool access and Sonnet refired
-        // a write (root of the 2026-05-18 Michal incident: the draft said
-        // "Tuesday 19 May", dateVerifier flagged the weekday, the retry
-        // pass deleted the wrong meeting). Reads stay available so Sonnet
-        // can re-verify state while rewriting the wording.
-        proseOnly: true,
-      });
-      if (retry.reply && retry.reply.trim().length > 0) {
-        retriedReply = formatForSlack(retry.reply);
+      const rewritten = await rewriteWithCorrectDates(cleanReply, verdict.mismatches, profile);
+      if (rewritten && rewritten.trim().length > 0) {
+        retriedReply = formatForSlack(rewritten);
       }
     } catch (retryErr) {
-      logger.warn('Date verifier retry errored — falling through to deterministic correction', { err: String(retryErr) });
+      logger.warn('Date correction rewrite errored — falling through to deterministic correction', { err: String(retryErr) });
     }
 
     // v1.8.14 — re-verify retry output. If it STILL has the same mismatches,

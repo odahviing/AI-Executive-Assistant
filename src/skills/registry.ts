@@ -224,13 +224,14 @@ function filterToolsByScope(
   if (!scopes || scopes.length === 0 || scopes.includes('general')) {
     return allTools;
   }
-  // v3.x (Block 2) — 'coord' always implies 'meetings': coordination needs the
-  // calendar reads (find_available_slots / get_calendar) to reason about times.
-  // Expand deterministically here so a coord turn is safe even if the classifier
-  // emits ['coord'] alone instead of ['coord','meetings'].
-  const effectiveScopes = scopes.includes('coord') && !scopes.includes('meetings')
-    ? [...scopes, 'meetings']
-    : scopes;
+  // v3.x — 'coord' and 'calendar' both imply 'meetings': coordination needs the
+  // calendar reads to reason about times, and a calendar-review turn needs the
+  // health/read tools (which live in the meetings scope). Expand deterministically
+  // here so the turn is safe even if the classifier emits the sub-scope alone.
+  let effectiveScopes = scopes;
+  if ((scopes.includes('coord') || scopes.includes('calendar')) && !scopes.includes('meetings')) {
+    effectiveScopes = [...scopes, 'meetings'];
+  }
   // Build the set of allowed tool names: always-on + every tool in any
   // requested scope.
   const allowed = new Set<string>(ALWAYS_ON_TOOLS);

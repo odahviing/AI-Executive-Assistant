@@ -501,6 +501,14 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
 
       if (needScopes) toolScopes = turnResult.scope.scopes;
       if (isOwnerTurn) isFreeTimeInquiry = turnResult.freeTimeInquiry === true;
+      // v3.x (Block 3 — calendar prose lazy-load). A free-time / buffer / "how
+      // packed" question needs the calendar-health guidance. Deterministically
+      // union the 'calendar' scope so that prose loads even if the classifier
+      // tagged the turn 'meetings'-only. (No-op when scopes already widened to
+      // 'general'.) The tools themselves live in 'meetings' and ship regardless.
+      if (isFreeTimeInquiry && toolScopes && !toolScopes.includes('calendar') && !toolScopes.includes('general')) {
+        toolScopes = [...toolScopes, 'calendar'];
+      }
 
       if (needIntent) {
         socialClassification = turnResult.intent;

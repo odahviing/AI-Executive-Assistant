@@ -2188,7 +2188,16 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
     }
   }
 
-  getSystemPromptSection(profile: UserProfile): string {
+  getSystemPromptSection(profile: UserProfile, scopes?: string[]): string {
+    // v3.x (Block 3 — prose lazy-load, "option 1"). The calendar-health TOOLS
+    // (check_calendar_health / analyze_calendar / manage_calendar_issue) stay in
+    // the 'meetings' scope so they ALWAYS ship on a scheduling turn — Sonnet can
+    // always detect/use them when needed. Only this ~2.3k of PROSE is gated, on
+    // the 'calendar' scope (review/health/free-time turns; the classifier picks
+    // it, and freeTimeInquiry deterministically unions it). A misroute therefore
+    // soft-degrades (tools present, less written guidance) rather than failing.
+    // Undefined/general → render (colleague path, classifier off).
+    if (scopes && !scopes.includes('calendar') && !scopes.includes('general')) return '';
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
     const blocks = fb.getFloatingBlocks(profile);

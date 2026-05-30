@@ -133,12 +133,7 @@ Do NOT use when:
       },
       {
         name: 'rank_venue',
-        description: `Set the owner's rank on a venue in the catalog.
-
-Ranks:
-- 3 = favorite — always offered first
-- 2 = good    — included in normal options (default for newly-saved venues)
-- 1 = avoid   — hidden by default; still searchable via find_venue(include_hidden=true)
+        description: `Set the owner's rank on a venue in the catalog (see the \`rank\` param for the 1/2/3 legend).
 
 Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "make this my favorite", "never offer that one again", etc. The venue must already exist in the catalog — newly-found ones get saved on booking.`,
         input_schema: {
@@ -356,7 +351,14 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
     };
   }
 
-  getSystemPromptSection(profile: UserProfile): string {
+  getSystemPromptSection(profile: UserProfile, scopes?: string[]): string {
+    // v3.x (Block 3 — prose lazy-load). Ship the venue guidance only when the
+    // 'venue' scope is active (the classifier picks it for venue-resolving
+    // turns — "book coffee at a cafe" → ['meetings','venue']). On a plain
+    // online/office booking, find_venue still ships via 'meetings' scope with
+    // its own description; this extra prose just isn't needed there.
+    // Undefined/general → render (colleague path, classifier off).
+    if (scopes && !scopes.includes('venue') && !scopes.includes('general')) return '';
     const firstName = profile.user.name.split(' ')[0];
     return `EXTERNAL VENUES (venue skill) — find / resolve / rank places for non-company meetings.
 

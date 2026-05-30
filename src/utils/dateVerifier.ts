@@ -325,3 +325,57 @@ export function buildDateCorrectionNudge(mismatches: DateMismatch[]): string {
 ${lines.join('\n')}
 Use the DATE LOOKUP table at the top of your system prompt for every weekday+date pair. Rewrite the reply with correct dates.`;
 }
+
+/**
+ * v3.1.5 (Bug 4) — cheap date-correction rewrite. Replaces the old remedy of
+ * re-invoking the WHOLE orchestrator (which re-sent the ~46K cached prefix +
+ * all tool defs + history and re-ran the tool loop — ~30s on a long report).
+ *
+ * This is a single tool-less Sonnet call: it gets ONLY the draft + the exact
+ * corrections, and re-renders the prose. No tools, no orchestrator prefix, no
+ * calendar re-fetch — fewer tokens than the original turn, ~1-2s. Because it
+ * re-renders (rather than blindly swapping a weekday token), it also fixes the
+ * grouped-report case correctly: if events sat under a wrong day header, they
+ * move under the right one. Fails open (returns null) — caller keeps the
+ * deterministic token-rewrite as the final safety net.
+ */
+export async function rewriteWithCorrectDates(
+  draft: string,
+  mismatches: DateMismatch[],
+  _profile: UserProfile,
+): Promise<string | null> {
+  if (mismatches.length === 0) return null;
+  const corrections = mismatches
+    .map(m => `- "${m.writtenWeekday} ${m.writtenDate}" → ${m.date} is actually ${m.correctWeekday}.`)
+    .join('\n');
+  const prompt = `You are fixing wrong weekday/date labels in a message that was ALREADY written and sent for review. Do NOT change anything except what the corrections require.
+
+Corrections (authoritative — these dates are correct):
+${corrections}
+
+Rules:
+- Fix every wrong weekday/date pair to match the corrections.
+- Keep all other content identical: event names, times, locations, wording, structure, emoji, formatting.
+- If events are grouped under a day header that was mislabeled, keep each event under the date it actually belongs to (correct the header AND make sure the events under it are the ones for that real date — don't strand events under the wrong day).
+- Output ONLY the corrected message text. No preamble, no explanation, no code fences.
+
+Message to correct:
+${draft}`;
+
+  try {
+    const anthropic = getAnthropicClient();
+    const resp = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1500,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = (resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '';
+    const out = text.trim().replace(/^```(?:\w+)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    return out.length > 0 ? out : null;
+  } catch (err) {
+    logger.warn('rewriteWithCorrectDates threw — caller falls back to deterministic correction', {
+      err: String(err).slice(0, 200),
+    });
+    return null;
+  }
+}

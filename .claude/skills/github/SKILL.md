@@ -59,7 +59,9 @@ For every atomic bug:
 
 ### 4. Reappearance check (mandatory)
 
-Many "new" bugs are returns of previously-solved ones. For each atomic bug:
+**FIRST, the reverse direction — is this issue already FIXED and just not closed?** An open Bug issue is NOT proof the bug is live; many were fixed in a prior run and left open by oversight. Before proposing anything: confirm whether the fix is already present in current code (git log / CHANGELOG / the cited `file:line`) AND whether the reported symptom could still reproduce. If the fix is in place and the symptom can't reproduce → the output is **"already fixed — close it"** (`gh issue close N --comment …`), NOT a new proposal. Do NOT hunt for residual edge cases on a fixed bug — manufacturing a fix where none is needed is the patch-on-patch trap. The trace must be allowed to conclude "nothing to do." (Especially when delegating to a sub-agent: "find the root cause and propose a fix" makes it invent one — frame it as "verify whether this still reproduces; if fixed, say so.")
+
+Then, for bugs that DO still reproduce — many "new" bugs are returns of previously-solved ones. For each atomic bug:
 
 - Search `git log` for prior fixes addressing the same pattern.
 - Search `memory/` files (project_overview.md, project_architecture.md, feedback_*.md).
@@ -78,15 +80,14 @@ Group atomic bugs into BUNDLES by code area or shared root mechanism — never b
 
 One sentence per bundle stating the shared subject.
 
-### 6. Fix-shape preference — small over big
+### 6. Fix-shape preference — CODE-FIRST, smallest *durable* fix
 
-Default to the smallest change that does the job. Priority order:
+The prompt is a fixed budget; growing it is the LAST resort, not the first. A one-line prompt patch Sonnet may ignore is NOT "smaller" than a code guard that holds. Priority order:
 
-1. **Tool description edit** — most surgical. A one-line clarification often fixes model behavior without touching code.
-2. **Prompt rule tweak** — modify an existing rule rather than adding new ones. Delete-a-rule-don't-add-one is in the standing rules.
-3. **Small `if` condition** in code — a guard clause, a bypass, a fallback inside an existing handler.
-4. **Helper function extracted** — small piece, reused, no new abstraction.
-5. **New tool / new prompt rule** — last resort. When tempted, justify why a smaller change cannot do this.
+1. **Core code enforcement** — a chokepoint guard, a return-value the model reacts to, or a tool that owns the decision. Lives in code: fixed once, stays fixed, zero prompt cost, language-agnostic. **Default.** (location → `resolveLocation`; slot alignment → `alignNearestQuarter`; language → `detectMessageLanguage`.)
+2. **Small `if` / helper** inside an existing handler — surgical version of #1. Reuse existing systems (requests spine, approvals payload, category flags) before adding state.
+3. **Tool description edit** — only when the bug is the model MISUSING a tool. The description is the tool's contract and ships only when the tool ships (scoped) — cheaper and safer than a global rule.
+4. **Prompt rule — LAST resort, judgment / tone / format / language ONLY.** Never to enforce something code could. When you must touch the prompt, delete an old rule alongside so net prompt doesn't grow (we pulled the owner turn ~59k→~36k — don't regress it).
 
 Per atomic bug, write up:
 
@@ -110,7 +111,8 @@ Owner fixes area after area, then bundles everything into ONE final commit + ver
 - ❌ Assuming the root cause without reading code or logs. Prove it.
 - ❌ Asking permission for read-only investigation (Graph queries, DB SELECTs, log greps, yaml inspection). Just do them.
 - ❌ Using tier numbering ("tier 3 fix") in owner-facing summaries. Describe shape concretely.
-- ❌ Reaching for a new tool / new prompt rule when a small edit to existing surface would do. Small over big.
+- ❌ Proposing a fix for an issue that's already fixed-but-unclosed — verify it still reproduces against current code first; if it doesn't, close it, don't patch.
+- ❌ Patching behavior with a prompt rule when code could enforce it (the patch-on-patch / prompt-bloat trap). Code-first; the prompt is a budget.
 - ❌ Regex-based pattern matching on open-ended natural-language input as a primary mechanism. Doesn't scale to Hebrew, multi-clause sentences, indirect phrasings.
 - ❌ Stacking a new fix on top of a rotten prior fix without removing the prior one.
 - ❌ Grouping bundles by severity instead of code area.

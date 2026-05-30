@@ -1585,6 +1585,35 @@ export class SchedulingSkill {
         const assistantEmail = context.profile.assistant.email;
         const ownerEmail = context.profile.user.email;
 
+        // v3.x — grid-align an off-grid start (e.g. 14:40 from a raw calendar
+        // gap) to the :00/:15/:30/:45 grid the rest of the system assumes,
+        // UNLESS the owner named the exact time (start_is_explicit). The slot
+        // finder already returns aligned slots, so this is a no-op for
+        // tool-sourced times; it only catches off-grid times Sonnet proposes
+        // from raw calendar data. Replaces the SLOT START TIMES prompt rule
+        // (alignNearestQuarter was previously wired only to floating blocks).
+        {
+          const startStr = args.start, endStr = args.end;
+          if (!args.start_is_explicit && typeof startStr === 'string' && typeof endStr === 'string') {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { alignNearestQuarter } = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
+            const tz = context.profile.user.timezone;
+            const sDt = DateTime.fromISO(startStr, { zone: tz });
+            if (sDt.isValid) {
+              const alignedMs = alignNearestQuarter(sDt.toMillis(), tz);
+              if (alignedMs !== sDt.toMillis()) {
+                const delta = alignedMs - sDt.toMillis();
+                const eDt = DateTime.fromISO(endStr, { zone: tz });
+                args.start = DateTime.fromMillis(alignedMs, { zone: tz }).toISO() ?? startStr;
+                if (eDt.isValid) args.end = DateTime.fromMillis(eDt.toMillis() + delta, { zone: tz }).toISO() ?? endStr;
+                logger.info('create_meeting — snapped off-grid start to quarter grid', {
+                  from: sDt.toISO(), to: args.start, subject: args.subject,
+                });
+              }
+            }
+          }
+        }
+
         // v2.9.0 — BookingRequest normalization. Single validated pre-data
         // shape that planMeeting consumes (replacing ad-hoc PlanMeetingInput
         // construction below). The normalizer is idempotent: it reads from
@@ -3103,6 +3132,25 @@ export class SchedulingSkill {
         // — code computes the right answer once.
         let effectiveStart = args.new_start as string;
         let effectiveEnd   = args.new_end   as string;
+        // v3.x — grid-align an off-grid move target to the :00/:15/:30/:45 grid
+        // unless the owner named the exact time. Floating blocks are realigned
+        // by findAlignedSlotForBlock below, so this only affects the regular
+        // (non-floating) move fall-through. Replaces the SLOT START TIMES rule.
+        if (!args.start_is_explicit && typeof effectiveStart === 'string') {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { alignNearestQuarter } = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
+          const sDt = DateTime.fromISO(effectiveStart, { zone: timezone });
+          if (sDt.isValid) {
+            const alignedMs = alignNearestQuarter(sDt.toMillis(), timezone);
+            if (alignedMs !== sDt.toMillis()) {
+              const delta = alignedMs - sDt.toMillis();
+              effectiveStart = DateTime.fromMillis(alignedMs, { zone: timezone }).toISO() ?? effectiveStart;
+              const eDt = DateTime.fromISO(effectiveEnd, { zone: timezone });
+              if (eDt.isValid) effectiveEnd = DateTime.fromMillis(eDt.toMillis() + delta, { zone: timezone }).toISO() ?? effectiveEnd;
+              logger.info('move_meeting — snapped off-grid start to quarter grid', { from: sDt.toISO(), to: effectiveStart });
+            }
+          }
+        }
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const fb = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
@@ -3673,6 +3721,10 @@ export class SchedulingSkill {
         return {
           success: true,
           deleted: args.meeting_subject,
+          // v3.x — surface the deleted event's start so the reply can name the
+          // day+time FROM the tool result (DELETE-MEETING PROTOCOL step 6),
+          // instead of from lossy chat memory. Captured pre-delete at the probe.
+          deleted_start_iso: preDeleteStartIso,
           relay_status: relayStatus,
           organizer_name: relayOrganizerName ?? undefined,
           organizer_email: relayOrganizerEmail ?? undefined,

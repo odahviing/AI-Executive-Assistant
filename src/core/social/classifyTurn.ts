@@ -59,9 +59,9 @@ export interface OwnerIntentClassification {
 }
 
 // ── Tool-scope types (formerly in classifyToolScope.ts, removed in v3.0.6) ──
-export type ToolScope = 'meetings' | 'coord' | 'people' | 'tasks' | 'knowledge' | 'summary' | 'social' | 'venue' | 'general';
+export type ToolScope = 'meetings' | 'coord' | 'calendar' | 'people' | 'tasks' | 'knowledge' | 'summary' | 'social' | 'venue' | 'general';
 
-export const ALL_SCOPES: ToolScope[] = ['meetings', 'coord', 'people', 'tasks', 'knowledge', 'summary', 'social', 'venue', 'general'];
+export const ALL_SCOPES: ToolScope[] = ['meetings', 'coord', 'calendar', 'people', 'tasks', 'knowledge', 'summary', 'social', 'venue', 'general'];
 
 export interface ToolScopeResult {
   scopes: ToolScope[];
@@ -143,7 +143,7 @@ export async function classifyTurn(params: {
   // v3.x (Change A) — 'people' is always in play (person-write tools moved off
   // ALWAYS_ON). The old 'social' SCOPE was an empty no-op; person notes now
   // route through 'people', so 'social' is no longer offered to the classifier.
-  const inPlayScopes: string[] = ['meetings', 'coord', 'people', 'tasks'];
+  const inPlayScopes: string[] = ['meetings', 'coord', 'calendar', 'people', 'tasks'];
   if (knowledgeActive) inPlayScopes.push('knowledge');
   if (summaryActive) inPlayScopes.push('summary');
   if (venueActive) inPlayScopes.push('venue');
@@ -188,7 +188,8 @@ ${isOwner ? `Also set free_time_inquiry (boolean) — true when ${ownerFirst} is
 
   const scopeSection = needScopes ? `
 SCOPES — pick which tool scopes are relevant (one or more):
-- meetings    — anything calendar-shaped: checking calendar, booking, moving, cancelling, finding slots, "when am I free", "is X open", attendee availability, "do I have lunch?", booking a meeting with someone. Includes calendar-health. This is the DEFAULT for almost all scheduling — direct booking lives here.
+- meetings    — booking/scheduling: checking the calendar to book, moving, cancelling, finding slots, "when am I free", "is X open", attendee availability, "do I have lunch?", "book a meeting with someone". This is the DEFAULT for almost all scheduling — direct booking lives here.
+- calendar    — calendar REVIEW & health (not booking): "how's my calendar / next week", "any conflicts / overlaps", "what's broken", "am I double-booked", "is my week ok", weekly review, "do I have my buffer / focus time", "how packed is Thursday". Fires alongside 'meetings'.
 - coord       — RARE. ONLY multi-party coordination where Maelle must reach out to SEVERAL people SEPARATELY to negotiate a time they all agree on ("coordinate a sync between Anna, Ben and me", "set up a meeting between the candidate and Idan and find a time that works for everyone"). NOT for booking a known time, NOT a 1:1, NOT when the people are already here in the conversation, NOT a direct "book X with Y". When unsure, pick 'meetings', not 'coord'. Fires alongside 'meetings'.
 - people      — saving or noting a durable fact about a PERSON (a colleague, not the owner's own prefs): where they live/work, timezone, working hours, communication style, gender, a hobby or personal detail — or any "remember / note that <X> about <someone>". Fires when the turn TEACHES you something about a person. (Just reading what you know about someone needs no scope — that tool is always available.)
 - tasks       — task list / routines / briefing: "what's pending?", "what did I miss?", "show my tasks", "set up a daily routine", "what's on my brief?".

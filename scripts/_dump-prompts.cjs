@@ -68,10 +68,17 @@ for (const s of scopeSets) {
   console.log(`  [${s.join(',').padEnd(16)}]  ${String(ts.length).padStart(2)} tools  ${String(chars).padStart(6)} chars  ~${Math.round(chars/4)}t`);
 }
 
-console.log('\n=== Static block per scope (owner) — coord prose lazy-load ===');
-for (const s of [undefined, ['meetings'], ['coord','meetings']]) {
+console.log('\n=== Static block per scope (owner) — prose lazy-load ===');
+for (const s of [undefined, ['meetings'], ['calendar'], ['coord','meetings']]) {
   const p = buildSystemPromptParts(profile, 'owner', profile.user.name, false, undefined, false, false, undefined, undefined, undefined, s);
   const hasCoord = p.static.includes('ROUTE 1 DETAILS');
-  console.log(`  scopes=${(s||['undefined']).join(',').padEnd(16)}  static ${String(p.static.length).padStart(6)} chars ~${Math.round(p.static.length/4)}t  ROUTE1=${hasCoord ? 'YES' : 'no '}`);
+  const hasCalH = p.static.includes('CALENDAR HEALTH SKILL');
+  const hasSum = p.static.includes('## SUMMARIES');
+  console.log(`  scopes=${(s||['undefined']).join(',').padEnd(16)}  static ~${String(Math.round(p.static.length/4)).padStart(6)}t  ROUTE1=${hasCoord?'Y':'n'} CalHealth=${hasCalH?'Y':'n'} Summaries=${hasSum?'Y':'n'}`);
+}
+console.log('\n=== check_calendar_health present per scope? (must stay on meetings) ===');
+for (const s of [['meetings'], ['calendar']]) {
+  const names = getSkillTools(profile, 'owner', s).map(t=>t.name);
+  console.log(`  scopes=${s.join(',').padEnd(14)}  check_calendar_health=${names.includes('check_calendar_health')?'YES':'NO'}  manage_calendar_issue=${names.includes('manage_calendar_issue')?'YES':'NO'}`);
 }
 console.log('\nWrote static.txt, dynamic.txt, tools.json to temp.');
