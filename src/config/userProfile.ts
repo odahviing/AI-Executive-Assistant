@@ -282,6 +282,14 @@ const UserProfileSchema = z.object({
   categories: z.array(z.object({
     name: z.string().min(1),
     description: z.string().min(1),
+    // v3.1.6 — optional compact title convention, surfaced on the category cue
+    // line in the owner prompt so the booking model composes the right SUBJECT.
+    // The first-sentence category trim (Block 3) dropped multi-sentence
+    // conventions like Interview's "Title: 'Interview with <first name>', role
+    // in body, never the title" — this restores just that rule as structured
+    // data, not prose. detectCategory still reads the full `description`; this
+    // only shapes the title.
+    title_hint: z.string().optional(),
     // When true, events created under this category are stamped with
     // sensitivity='private' on the Graph side. Lets the owner mark a
     // category as "personal/sensitive" without code knowing the literal

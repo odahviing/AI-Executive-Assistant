@@ -183,6 +183,13 @@ export function pickSpreadSlots(
   timezone: string,
   count = 3,
   anchorDay?: string,
+  // v3.1.6 — when provided, the fill pass won't append a slot that OVERLAPS an
+  // already-chosen one ([start, start+duration)). Without this, the fill pass
+  // back-filled overlapping starts to hit `count` — e.g. for a 55-min meeting
+  // it offered 10:30 / 11:00 / 11:30, where 11:00 and 11:30 land inside the
+  // 10:30 slot. Omitted → no overlap guard (back-compat for callers that don't
+  // pass it).
+  durationMinutes?: number,
 ): string[] {
   const MIN_GAP_HOURS = 1;
   const MAX_PER_DAY = 2;
@@ -249,8 +256,19 @@ export function pickSpreadSlots(
     for (const s of slots) {
       if (chosen.length >= count) break;
       if (chosenSet.has(s.start)) continue;
+      // v3.1.6 — don't back-fill a slot that OVERLAPS an already-chosen one.
+      // Two slots of length D overlap iff their starts are < D apart. Offering
+      // overlapping start times (10:30 + 11:00 for a 55-min meeting) is never
+      // useful — better to return fewer, distinct options. Only enforced when
+      // the caller passed durationMinutes.
+      if (durationMinutes && durationMinutes > 0) {
+        const dt = DateTime.fromISO(s.start).setZone(timezone);
+        const overlaps = chosenDts.some(c => Math.abs(dt.diff(c, 'minutes').minutes) < durationMinutes);
+        if (overlaps) continue;
+      }
       chosen.push(s.start);
       chosenSet.add(s.start);
+      chosenDts.push(DateTime.fromISO(s.start).setZone(timezone));
     }
   }
 

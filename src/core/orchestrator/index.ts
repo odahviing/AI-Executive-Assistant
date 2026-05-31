@@ -967,6 +967,35 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     });
   }
 
+  // v3.1.6 (L3) — don't re-fire a mutation on a bare acknowledgment of a
+  // just-completed action. Real bug: "Done, renamed to X" → owner says
+  // "Perfect, thanks" → Sonnet re-ran update_meeting and DOWNGRADED the title.
+  // Guard fires only when BOTH hold:
+  //   (a) the classifier says this turn is NOT a task (a bare "thanks"/social
+  //       ack is kind 'other'/'social'; an explicit "change it to Y" is 'task'
+  //       → writes stay), AND
+  //   (b) the PREVIOUS assistant turn already executed a write (its action-tape
+  //       markers like "[update_meeting OK …]" are in the history).
+  // The (b) condition is what preserves "Want me to change X?" → "yes, thanks":
+  // that prior turn fired NO write (it only offered), so writes stay and the
+  // approval executes. Acks only get blocked when the action was already done.
+  if (input.senderRole === 'owner' && socialClassification && socialClassification.kind !== 'task') {
+    const lastAssistant = [...conversationHistory].reverse().find(m => m.role === 'assistant');
+    if (lastAssistant) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { WRITE_TOOLS } = require('../../connectors/slack/inboundQueue') as
+        typeof import('../../connectors/slack/inboundQueue');
+      const priorTurnMutated = [...WRITE_TOOLS].some(t => lastAssistant.content.includes(`[${t} OK`));
+      if (priorTurnMutated) {
+        const before = tools.length;
+        tools = tools.filter(t => !WRITE_TOOLS.has(t.name));
+        logger.info('Orchestrator — ack-after-completed-action: stripped write tools (no re-mutation on "thanks")', {
+          kind: socialClassification.kind, before, after: tools.length,
+        });
+      }
+    }
+  }
+
   // Approval-bound thread lock. When the owner is replying in a thread
   // that's the terminal DM of a pending approval, restrict Sonnet's tools
   // to resolve_approval + list_pending_approvals only. Forces engagement

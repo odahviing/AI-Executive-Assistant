@@ -425,9 +425,9 @@ async function generateBriefingText(
   peopleGender: Record<string, 'he' | 'she' | 'they'> = {},
 ): Promise<string> {
   if (items.length === 0) {
-    const h = DateTime.now().setZone(profile.user.timezone).hour;
-    const g = h >= 5 && h < 12 ? 'Morning' : h < 17 ? 'Afternoon' : 'Evening';
-    return `${g} — all clear, nothing new.`;
+    // No time-of-day greeting on line 1 — the Slack app shows the first line
+    // as the preview, so lead with the useful state, not "Morning —".
+    return `All clear — nothing new today.`;
   }
 
   const anthropic = getAnthropicClient();
@@ -437,10 +437,9 @@ async function generateBriefingText(
   const systemPrompt = `You are writing a morning briefing for ${firstName} from their AI executive assistant ${profile.assistant.name}.
 
 STRUCTURE (in this order):
-1. Time-of-day greeting ("Morning —"). Nothing else on this line.
-2. TODAY'S CALENDAR — only if a calendar_today item is present. Apply the CALENDAR LISTING FORMAT block below. Skip the section entirely when no calendar_today item exists.
-3. TOMORROW (one short line) — only if calendar_tomorrow is present AND there's something notable.
-4. The rest — per-person paragraphs for colleagues who have open or recently-changed work, plus freestanding lines for items not tied to a specific person (calendar conflicts, pending approvals, auto-categorizations, etc.). No separate "ACTION ITEMS" section — every open or notable item gets narrated ONCE in the body, in whichever spot reads most naturally.
+1. TODAY'S CALENDAR — this is the FIRST line of the message (no greeting before it — the Slack app shows line 1 as the preview, so lead with the calendar + date, not "Morning —"). Only if a calendar_today item is present; apply the CALENDAR LISTING FORMAT block below. When no calendar_today item exists, the first line is instead the first notable item (step 3). Never open with a time-of-day greeting.
+2. TOMORROW (one short line) — only if calendar_tomorrow is present AND there's something notable.
+3. The rest — per-person paragraphs for colleagues who have open or recently-changed work, plus freestanding lines for items not tied to a specific person (calendar conflicts, pending approvals, auto-categorizations, etc.). No separate "ACTION ITEMS" section — every open or notable item gets narrated ONCE in the body, in whichever spot reads most naturally.
 
 Principle: nobody can assign ${firstName} work. Only HIS rules / HIS calendar / HIS approvals deserve to be surfaced as "needs your call". Random colleague drafts, suggestions, or "what do you think?" pings stay in the per-person paragraph as conversation, not as a decision request.
 
@@ -515,10 +514,10 @@ ${Object.keys(peopleGender).length > 0
   }
 }
 
-function buildFallbackBriefing(items: RichItem[], profile: UserProfile): string {
-  const h = DateTime.now().setZone(profile.user.timezone).hour;
-  const greeting = h >= 5 && h < 12 ? 'Morning' : h < 17 ? 'Afternoon' : 'Evening';
-  const lines: string[] = [`${greeting} — here's a quick update:`];
+function buildFallbackBriefing(items: RichItem[], _profile: UserProfile): string {
+  // No time-of-day greeting header — lead straight with the items so the
+  // Slack preview (first line) carries real content, not "Morning —".
+  const lines: string[] = [];
   for (const item of items) {
     if (item.kind === 'outreach')        lines.push(`• ${item.colleague}: ${item.status}`);
     if (item.kind === 'coordination')    lines.push(`• ${item.colleague} / ${item.subject}: ${item.status}`);

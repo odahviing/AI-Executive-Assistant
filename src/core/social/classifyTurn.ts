@@ -130,6 +130,21 @@ export async function classifyTurn(params: {
     return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false };
   }
 
+  // v3.1.6 — low-signal short reply (1-3 words): "meeting", "book it",
+  // "yes do it". A reply this short carries almost no SCOPE signal, so the
+  // Haiku classifier is guessing — and a confidently-wrong narrow scope
+  // silently drops a needed tool with no recovery (the 2026-05-30 "meeting"
+  // → 'knowledge' misroute that dropped set_event_category and left Maelle
+  // unable to tag the event). Widen scope to general on short replies: a wrong
+  // guess can never drop a tool, short replies are rare so the token cost is
+  // negligible, and the continuation almost always needs the prior turn's
+  // tools anyway. Word-count is language-agnostic (not regex on meaning).
+  // Scope only — intent classification still runs when needed.
+  const isLowSignalShortReply = message.trim().split(/\s+/).length <= 3;
+  if (isLowSignalShortReply && !needIntent) {
+    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false };
+  }
+
   const ownerFirst = profile.user.name.split(' ')[0];
   const assistantName = profile.assistant.name;
   const senderRole = params.senderRole ?? 'owner';
@@ -287,8 +302,10 @@ ${intentSection}${scopeSection}${recentContext ? `\nRecent conversation (classif
     }
 
     // ── Resolve scopes ──
+    // (When isLowSignalShortReply, scope stays ALL_TOOLS — see the short-reply
+    // note above: don't trust a narrow classifier guess on a 1-3 word message.)
     let scope: ToolScopeResult = ALL_TOOLS;
-    if (needScopes) {
+    if (needScopes && !isLowSignalShortReply) {
       const rawScopes = raw?.scopes;
       if (!Array.isArray(rawScopes) || rawScopes.length === 0) {
         logger.warn('classifyTurn — no scopes returned, falling back to general');

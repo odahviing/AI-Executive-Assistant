@@ -827,6 +827,17 @@ export class SchedulingSkill {
         // Do NOT pre-pass workDays from here — we let the function's own
         // mode-aware logic decide so in_person is enforced as a hard rule.
         {
+          // v3.1.6 (L2) — duration safety default. The tool description tells
+          // Sonnet to default to default_meeting_duration when no length was
+          // stated; this is the code backstop for when she omits it entirely.
+          // (When she WRONGLY passes a longer value off a meeting-type guess —
+          // "interview" → 55 — the description tightening is what corrects that;
+          // the handler can't tell a guessed value from a stated one.)
+          if (args.duration_minutes == null) {
+            const allowed = context.profile.meetings.allowed_durations;
+            args.duration_minutes = context.profile.meetings.default_meeting_duration
+              ?? [...allowed].sort((a, b) => a - b)[0];
+          }
           // v3.0.3 — entry log for diagnostic visibility. Shows exactly what
           // Sonnet passes — critical for debugging "did the time-of-day window
           // actually clip?" and "did she pass the attendee?" cases.
@@ -1377,7 +1388,7 @@ export class SchedulingSkill {
             // trade-off explicitly: "12:30 fits everyone but eats into your
             // 2h focus block — want it anyway?"
             const candidateSet = relaxedRecoverySlots.length > 0 ? relaxedRecoverySlots : rawSlots;
-            const chosenStarts = new Set(pickSpreadSlots(candidateSet, timezone, 3, anchorDay));
+            const chosenStarts = new Set(pickSpreadSlots(candidateSet, timezone, 3, anchorDay, args.duration_minutes as number | undefined));
 
             // v2.9.2 — preferred_slot guarantee. When the requester named a
             // specific time ("preferably 11:30"), pickSpreadSlots' MIN_GAP

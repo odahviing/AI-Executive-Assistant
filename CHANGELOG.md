@@ -2,6 +2,26 @@
 
 ---
 
+## 3.1.6 — real-day fix wave: prompt-reduction regressions + scheduling-quality fixes
+
+Two chats. The first half closes regressions from the 3.1.5 prompt-reduction (a scope misroute that dropped a tool, and two over-cut category/narration rules). The second half is scheduling-quality fixes surfaced in real chats (overlapping slot options, a re-fired mutation on "thanks", duration inflation, and a noisy brief greeting).
+
+### Fixed — prompt-reduction regressions
+
+- **Short-reply scope misroute.** A 1-3 word owner reply ("meeting", "book it") carries almost no scope signal, so the Haiku scope-classifier guessed — and on 2026-05-31 it tagged "meeting" as `knowledge`, which dropped `set_event_category` (it lives in `meetings`) and left Maelle unable to tag the event ("I can't from my end"). Tool-scoping has no recovery when a needed tool is absent, so a wrong narrow guess is fatal. Fix ([classifyTurn.ts](src/core/social/classifyTurn.ts)): low-signal short replies (≤3 words) widen to `general` (ship all tools) instead of trusting a narrow guess — a wrong guess can never drop a tool, and short replies are rare. Word-count gate, language-agnostic.
+- **Bare "Interview" subject (over-cut #1).** The 3.1.5 category-description trim (first sentence only) dropped Interview's title convention, so Maelle over-redacted and booked a bare "Interview" (real case: candidate Ohad Shushan). Restored as **structured data, not prose**: a new optional `title_hint` field on categories ([userProfile.ts](src/config/userProfile.ts)) rendered as one compact line on the category cue ([meetings.ts](src/skills/meetings.ts)) — `detectCategory` still reads the full description. Plus a **general** Subject rule so it's fixed for *every* category at once: the subject must name the person/topic, never the bare category name ("Interview"/"Meeting"/"Sync") alone.
+- **Zero-slot narration (over-cut #2).** With the `WHEN A REQUESTED DAY HAS ZERO SLOTS` block trimmed, Maelle blamed the colleague ("she's pretty booked") when the tool's top reason was `owner_busy` (the owner's own packed calendar), and labeled an off-hours 09:00 slot as "focus time". Restored a sharpened line: name the real blocker from `day_summary.top_reasons` (owner-busy vs attendee-busy vs soft block) and label each override slot by its actual `broken_rule_label`.
+- **RULE-NAMING dedup tightened.** The deleted `RULE-NAMING` block's unique guard ("paste `broken_rule_label` verbatim, don't fall back to a vague 'needs your go-ahead'") was folded back into `RULE-COMPLIANCE REFUSAL` (no separate block).
+
+### Fixed — scheduling quality (parallel chat)
+
+- **Overlapping slot options.** The fill pass back-filled overlapping starts to hit the option count — e.g. 10:30 / 11:00 / 11:30 for a 55-min meeting, where 11:00 and 11:30 sit inside the 10:30 slot. `pickSpreadSlots` now takes the duration and skips a candidate that overlaps an already-chosen one ([calendar.ts](src/connectors/graph/calendar.ts), [ops.ts](src/skills/meetings/ops.ts)).
+- **Re-fired mutation on a "thanks".** "Done, renamed to X" → owner says "Perfect, thanks" → Sonnet re-ran `update_meeting` and downgraded the title. The orchestrator now strips write tools when the turn is a non-task ack AND the previous assistant turn already executed a write (action-tape markers) ([orchestrator/index.ts](src/core/orchestrator/index.ts)). "Want me to change X?" → "yes" still writes (that prior turn fired no write).
+- **Duration inflation.** Meeting length was being inferred from the meeting TYPE ("interview" → 55 min). Tightened the `find_available_slots` `duration_minutes` description (never infer length from type — only from a stated number) + a code backstop that defaults to `default_meeting_duration` when none is passed ([ops.ts](src/skills/meetings/ops.ts), [meetings.ts](src/skills/meetings.ts)).
+- **Brief greeting noise.** The morning brief led with "Morning —" on line 1, which is what Slack shows as the message preview. Dropped the time-of-day greeting so the preview carries real state (calendar/date) instead ([briefs.ts](src/tasks/briefs.ts)).
+
+---
+
 ## 3.1.5 — prompt reduction (prose lazy-loading + dedup) + off-grid booking fix + date-verifier/floating-block fixes
 
 Three chats bundled. The prompt-reduction pass continues on top of 3.1.4's tool-scoping: this version adds **prose lazy-loading** (rarely-used skill prose ships only when its scope is active) and a **static-prose dedup/trim** sweep, bringing the common owner scheduling turn to ~36K tokens. Plus one real correctness fix (off-grid slot alignment) and two fixes from parallel chats (date-verifier performance, floating-block self-rejection).
