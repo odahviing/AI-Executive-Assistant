@@ -161,37 +161,42 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
     switch (toolName) {
       case 'note_about_person': {
         const name        = args.colleague_name as string;
-        // v2.4.2 — boundary-validate slack_id (see assistant.ts log_interaction
-        // comment). Without this, note_about_person silently creates an
-        // orphan people_memory + social_topics row keyed on a hallucinated slug.
+        // v3.2.0 — resolve via the person store (ONE route). Owner-path
+        // supports a pure-email external; colleague-path is forced to the
+        // requester's slack_id by the gate, so it resolves internally. The
+        // social-moment recording below stays internal-only (Q4 — the social
+        // engine is slack-keyed for now), but the note + timeline land on the
+        // external's row.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { resolveSlackId } = require('../utils/resolveSlackId') as typeof import('../utils/resolveSlackId');
-        const idRes = resolveSlackId(args.colleague_slack_id as string | undefined, name);
-        if (idRes.was_hallucinated) {
+        const { resolvePersonTarget } = require('../utils/resolvePersonTarget') as typeof import('../utils/resolvePersonTarget');
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { appendPersonNoteById, appendPersonInteractionById } = require('../db') as typeof import('../db');
+        const isOwnerCaller = context.userId === context.profile.user.slack_user_id;
+        const ownerDomain = context.profile.user.email.split('@')[1] ?? '';
+        const target = resolvePersonTarget({ rawSlackId: args.colleague_slack_id as string | undefined, name, isOwner: isOwnerCaller, ownerDomain });
+        if (target?.hallucinated) {
           logger.warn('note_about_person — colleague_slack_id hallucinated', {
-            rejected: idRes.rejected_input, colleagueName: name, resolvedTo: idRes.slack_id ?? null,
+            rejected: (args.colleague_slack_id as string | undefined) ?? null, colleagueName: name, resolvedTo: target?.slackId ?? null,
           });
         }
-        if (!idRes.slack_id) {
-          return { error: 'unknown_colleague', message: `No slack_id resolved for "${name}". Call find_slack_user first.` };
+        if (!target) {
+          return { error: 'unknown_colleague', message: `No person resolved for "${name}". Call find_slack_user first, or include an email for an external contact.` };
         }
-        const slackId     = idRes.slack_id;
         const note        = args.note as string;
         const topic       = args.topic as string;
         const subject     = (args.subject as string | undefined)?.trim() || undefined;
         const initiatedBy = (args.initiated_by as 'maelle' | 'person' | undefined) ?? 'maelle';
 
-        upsertPersonMemory({ slackId, name });
-        appendPersonNote(slackId, note);
+        appendPersonNoteById(target.personId, note);
         const timelineTag = subject ? `[${topic}:${subject}]` : `[${topic}]`;
-        appendPersonInteraction(slackId, {
+        appendPersonInteractionById(target.personId, {
           type: 'social_chat',
           summary: `${timelineTag} ${note}`,
         });
-        recordSocialMoment(slackId, initiatedBy);
+        if (target.slackId) recordSocialMoment(target.slackId, initiatedBy);  // social engine = internal-only
 
-        logger.info('Social note saved', { slackId, name, topic, subject, initiatedBy });
-        return { saved: true, name, topic, subject };
+        logger.info('Social note saved', { personId: target.personId, name: target.name, topic, subject, initiatedBy });
+        return { saved: true, name: target.name, topic, subject };
       }
 
       case 'note_about_self': {

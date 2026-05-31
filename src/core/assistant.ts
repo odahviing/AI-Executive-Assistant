@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
-import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, type PersonProfile, type PersonInteraction, type PersonNote } from '../db';
+import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, resolvePerson, type PersonProfile, type PersonInteraction, type PersonNote } from '../db';
 import {
   readPersonMemory,
   writePersonSection,
@@ -564,79 +564,70 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
 
       case 'log_interaction': {
         const name = args.colleague_name as string;
-        // v2.4.2 — boundary-validate slack_id; resolve via people_memory if
-        // Sonnet hallucinated a slug. Without this, log_interaction would
-        // silently create an orphan people_memory row keyed on the slug.
+        // v3.2.0 — resolve identity through the person store (ONE route).
+        // Internal: hallucination-guarded slack_id → person_id. Owner-path
+        // external (no slack_id): find-or-create by name → person_id. This is
+        // what lets an interaction be logged against a pure-email external.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { resolveSlackId } = require('../utils/resolveSlackId') as typeof import('../utils/resolveSlackId');
-        const idRes = resolveSlackId(args.colleague_slack_id as string | undefined, name);
-        if (idRes.was_hallucinated) {
+        const { resolvePersonTarget } = require('../utils/resolvePersonTarget') as typeof import('../utils/resolvePersonTarget');
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { appendPersonInteractionById } = require('../db') as typeof import('../db');
+        const ownerDomain = context.profile.user.email.split('@')[1] ?? '';
+        const target = resolvePersonTarget({ rawSlackId: args.colleague_slack_id as string | undefined, name, isOwner, ownerDomain });
+        if (target?.hallucinated) {
           logger.warn('log_interaction — colleague_slack_id hallucinated', {
-            rejected: idRes.rejected_input, colleagueName: name, resolvedTo: idRes.slack_id ?? null,
+            rejected: (args.colleague_slack_id as string | undefined) ?? null, colleagueName: name, resolvedTo: target?.slackId ?? null,
           });
         }
-        if (!idRes.slack_id) {
-          return { error: 'unknown_colleague', message: `No slack_id resolved for "${name}". Call find_slack_user first.` };
+        if (!target) {
+          return { error: 'unknown_colleague', message: `No person resolved for "${name}". Call find_slack_user first, or include an email for an external contact.` };
         }
-        const slackId = idRes.slack_id;
-
-        upsertPersonMemory({ slackId, name });
-        appendPersonInteraction(slackId, {
+        appendPersonInteractionById(target.personId, {
           type: args.type as PersonInteraction['type'],
           summary: args.summary as string,
         });
-
-        logger.info('Interaction logged', { slackId, name, type: args.type, summary: args.summary });
-        return { logged: true, name };
+        logger.info('Interaction logged', { personId: target.personId, name: target.name, type: args.type });
+        return { logged: true, name: target.name };
       }
 
       case 'confirm_gender': {
         const name = (args.colleague_name as string | undefined) ?? '';
-        // v2.4.2 — boundary-validate slack_id (see log_interaction comment).
+        // v3.2.0 — resolve identity through the person store (one route).
+        // Owner-path supports a pure-email external; colleague-path is forced
+        // to the requester's slack_id by the gate above, so it always resolves
+        // internally. Provenance: owner-path → 'owner', colleague-self → 'person'.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { resolveSlackId } = require('../utils/resolveSlackId') as typeof import('../utils/resolveSlackId');
-        const idRes = resolveSlackId(args.colleague_slack_id as string | undefined, name);
-        if (idRes.was_hallucinated) {
+        const { resolvePersonTarget } = require('../utils/resolvePersonTarget') as typeof import('../utils/resolvePersonTarget');
+        const ownerDomain = context.profile.user.email.split('@')[1] ?? '';
+        const target = resolvePersonTarget({ rawSlackId: args.colleague_slack_id as string | undefined, name, isOwner, ownerDomain });
+        if (target?.hallucinated) {
           logger.warn('confirm_gender — colleague_slack_id hallucinated', {
-            rejected: idRes.rejected_input, colleagueName: name, resolvedTo: idRes.slack_id ?? null,
+            rejected: (args.colleague_slack_id as string | undefined) ?? null, colleagueName: name, resolvedTo: target?.slackId ?? null,
           });
         }
-        if (!idRes.slack_id) {
-          return { confirmed: false, reason: 'unknown_colleague', message: `No slack_id resolved for "${name}". Call find_slack_user first.` };
+        if (!target) {
+          return { confirmed: false, reason: 'unknown_colleague', message: `No person resolved for "${name}". Call find_slack_user first, or include an email for an external contact.` };
         }
-        const slackId = idRes.slack_id;
         const gender  = args.gender as 'male' | 'female';
-        // Make sure the row exists (cheap no-op if it does)
-        upsertPersonMemory({ slackId, name: name || slackId });
-
-        // Provenance: owner-path call → 'owner' (highest authority, can
-        // overwrite person-set values, anti-spoofing). Colleague-path call
-        // is silently REWRITTEN to self by the guard at the top of this
-        // file (the gate forces colleague_slack_id = context.userId before
-        // we get here, regardless of whether the colleague named someone
-        // else or omitted the field). So the caller IS the person being
-        // confirmed — 'person' authority is correct.
         const setBy = isOwner ? 'owner' : 'person';
-        const { setCoreFieldWithProvenance } = require('../db') as typeof import('../db');
-        const wrote = setCoreFieldWithProvenance(slackId, 'gender', gender, setBy);
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { setCoreFieldWithProvenanceById, confirmPersonGenderById } = require('../db') as typeof import('../db');
+        const wrote = setCoreFieldWithProvenanceById(target.personId, 'gender', gender, setBy);
         if (!wrote) {
           // Higher-rank value already locked — surface so the LLM doesn't claim it saved.
-          logger.info('confirm_gender refused — higher-rank provenance already set', { slackId, gender, setBy });
-          return { confirmed: false, reason: 'higher_authority_already_set', name };
+          logger.info('confirm_gender refused — higher-rank provenance already set', { personId: target.personId, gender, setBy });
+          return { confirmed: false, reason: 'higher_authority_already_set', name: target.name };
         }
-        // Keep legacy confirmPersonGender side-effect (gender_confirmed=1) — readers
-        // that haven't migrated still see the lock. setCoreFieldWithProvenance also
-        // sets gender_confirmed when by != 'auto', so this is belt-and-suspenders.
-        confirmPersonGender(slackId, gender);
-        logger.info('Gender confirmed (human-locked)', { slackId, name, gender, setBy, confirmedBy: context.userId });
-        return { confirmed: true, name, gender, set_by: setBy };
+        // Belt-and-suspenders: also flip gender_confirmed (setCoreFieldWithProvenance
+        // already does when by != 'auto'; kept for back-compat readers).
+        confirmPersonGenderById(target.personId, gender);
+        logger.info('Gender confirmed (human-locked)', { personId: target.personId, name: target.name, gender, setBy, confirmedBy: context.userId });
+        return { confirmed: true, name: target.name, gender, set_by: setBy };
       }
 
       case 'get_person_memory': {
         const query = (args.person as string | undefined)?.trim();
         if (!query) return { error: 'empty_person' };
-        const slug = (await resolvePersonSlug(context.profile, query)) ?? slugifyName(query);
-        const content = await readPersonMemory(context.profile, slug);
 
         // v3.x (Block 1 prompt reduction) — the WORKSPACE CONTACTS prompt block
         // no longer inlines every contact's ★ notes + ↳ interaction history for
@@ -649,6 +640,9 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
         const row = SLACK_ID_RE.test(query)
           ? getPersonMemoryRow(query)
           : (searchPeopleMemory(query)[0] ?? searchPeopleMemory(query.replace(/-/g, ' '))[0] ?? null);
+        // v3.2.0 — md keyed by person_id; legacy name-slug passed as fallback.
+        const personId = row?.person_id ?? (await resolvePersonSlug(context.profile, query));
+        const content = personId ? await readPersonMemory(context.profile, personId, row?.name ?? query) : null;
         let notes: PersonNote[] = [];
         let recentInteractions: Array<{ date: string; type: string; summary: string }> = [];
         if (row) {
@@ -665,16 +659,16 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
         if (content === null && notes.length === 0 && recentInteractions.length === 0) {
           return {
             found: false,
-            slug,
+            person: row?.name ?? query,
             message: `No memory file yet for "${query}" — no durable facts recorded. Use update_person_memory when you learn one.`,
           };
         }
         logger.info('Person memory fetched', {
-          slug, bytes: content?.length ?? 0, notes: notes.length, interactions: recentInteractions.length,
+          person: row?.name ?? query, bytes: content?.length ?? 0, notes: notes.length, interactions: recentInteractions.length,
         });
         return {
           found: true,
-          slug,
+          person: row?.name ?? query,
           content: content ?? '',
           notes: notes.map(n => ({ date: n.date, note: n.note })),
           recent_interactions: recentInteractions,
@@ -689,38 +683,29 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
         if (!section) return { error: 'empty_section' };
         if (!text || !text.trim()) return { error: 'empty_text' };
 
-        // Resolve to an existing slug if possible; otherwise create by slug of
-        // the supplied name. Display name prefers the people_memory row for
-        // colleagues, falls back to the supplied query.
-        let slug = await resolvePersonSlug(context.profile, query);
-        let displayName: string | undefined;
-
-        if (!slug) {
-          // New file — try to enrich display name from people_memory if the
-          // query looks like a slack id.
-          const row = getPersonMemoryRow(query);
-          if (row) {
-            displayName = row.name;
-            slug = slugifyName(row.name);
-          } else {
-            displayName = query;
-            slug = slugifyName(query);
-          }
-        } else {
-          // Existing file — use the listed display name
-          const existing = (await listPersonFiles(context.profile)).find(f => f.slug === slug);
-          displayName = existing?.displayName ?? query;
+        // v3.2.0 — resolve-or-create the person (internal by slack_id, else by
+        // name), then key the md file by person_id. This is also what lets an
+        // email-only / name-only person get a memory file at all.
+        const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
+        const ownerDomain = context.profile.user.email.split('@')[1] ?? '';
+        const resolved = resolvePerson(
+          SLACK_ID_RE.test(query) ? { slackId: query, ownerDomain } : { name: query, ownerDomain },
+        );
+        if (!resolved) {
+          return { error: 'unresolved_person', message: `Couldn't resolve "${query}" to a person.` };
         }
+        const personId = resolved.person_id;
+        const displayName = resolved.row.name;
 
         const result = await writePersonSection({
           profile: context.profile,
-          slug,
-          displayName: displayName ?? query,
+          personId,
+          displayName,
           section,
           text,
         });
         if (!result.ok) {
-          logger.warn('update_person_memory failed', { slug, section, err: result.error });
+          logger.warn('update_person_memory failed', { personId, section, err: result.error });
           return { ok: false, error: result.error };
         }
 
@@ -739,31 +724,35 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
         const sectionLower = section.toLowerCase();
         const slotRelevant = SLOT_RELEVANT_SECTION_PATTERNS.some(p => sectionLower.includes(p));
 
-        const base = { ok: true, slug, section, created: result.created } as Record<string, unknown>;
+        const base = { ok: true, person: displayName, section, created: result.created } as Record<string, unknown>;
         if (slotRelevant) {
           base._slot_results_now_stale = true;
-          base._note = `You wrote to a slot-relevant section ("${section}") for ${displayName ?? query}. Any prior find_available_slots results involving them are now stale — re-run find_available_slots before proposing options to the owner. Don't mentally filter old slot candidates.`;
+          base._note = `You wrote to a slot-relevant section ("${section}") for ${displayName}. Any prior find_available_slots results involving them are now stale — re-run find_available_slots before proposing options to the owner. Don't mentally filter old slot candidates.`;
         }
         return base;
       }
 
       case 'update_person_profile': {
         const name = args.colleague_name as string;
-        // v2.4.2 — boundary-validate slack_id (see log_interaction comment).
-        // Without this, update_person_profile would silently create an orphan
-        // people_memory row keyed on a slug like "oran_frenkel".
+        // v3.2.0 — resolve identity through the person store (ONE route).
+        // Internal: hallucination-guarded slack_id → person_id. Owner-path
+        // external (no slack_id): find-or-create by name → person_id. The
+        // slack-only side-effects further down (auto working-hours, engagement
+        // rank, travel) are gated on a real slack_id — they don't apply to a
+        // contact with no Slack account / calendar.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { resolveSlackId } = require('../utils/resolveSlackId') as typeof import('../utils/resolveSlackId');
-        const idRes = resolveSlackId(args.colleague_slack_id as string | undefined, name);
-        if (idRes.was_hallucinated) {
+        const { resolvePersonTarget } = require('../utils/resolvePersonTarget') as typeof import('../utils/resolvePersonTarget');
+        const ownerDomain = context.profile.user.email.split('@')[1] ?? '';
+        const target = resolvePersonTarget({ rawSlackId: args.colleague_slack_id as string | undefined, name, isOwner, ownerDomain });
+        if (target?.hallucinated) {
           logger.warn('update_person_profile — colleague_slack_id hallucinated', {
-            rejected: idRes.rejected_input, colleagueName: name, resolvedTo: idRes.slack_id ?? null,
+            rejected: (args.colleague_slack_id as string | undefined) ?? null, colleagueName: name, resolvedTo: target?.slackId ?? null,
           });
         }
-        if (!idRes.slack_id) {
-          return { error: 'unknown_colleague', message: `No slack_id resolved for "${name}". Call find_slack_user first.` };
+        if (!target) {
+          return { error: 'unknown_colleague', message: `No person resolved for "${name}". Call find_slack_user first, or include the person's email for an external contact.` };
         }
-        const slackId = idRes.slack_id;
+        const slackId = target.slackId;   // null for pure-email externals
         const timezone = args.timezone as string | undefined;
         const state   = args.state as string | undefined;
         const nameHe  = args.name_he as string | undefined;
@@ -786,6 +775,30 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
               message: `'${timezone}' is not a valid IANA timezone. Use a Region/City form like 'Asia/Jerusalem', 'America/New_York', 'Europe/London'. Never abbreviations like 'IST', 'PST', 'CST' — those are ambiguous (IST is Indian Standard Time, +5:30).`,
             };
           }
+        }
+
+        // v3.2.0 — EXTERNAL (owner-path, no slack_id): write the core profile
+        // fields by person_id, then return. The slack-only features below
+        // (auto working-hours, engagement_rank, travel) don't apply to a
+        // contact with no Slack account / calendar.
+        if (!slackId) {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { setCoreFieldWithProvenanceById, setPersonNameHeById, updatePersonProfileById } = require('../db') as typeof import('../db');
+          if (timezone && timezone.trim()) setCoreFieldWithProvenanceById(target.personId, 'timezone', timezone.trim(), 'owner');
+          if (state && state.trim()) setCoreFieldWithProvenanceById(target.personId, 'state', state.trim(), 'owner');
+          if (nameHe && nameHe.trim()) setPersonNameHeById(target.personId, nameHe.trim());
+          updatePersonProfileById(target.personId, {
+            communication_style: args.communication_style as string | undefined,
+            language_preference: args.language_preference as string | undefined,
+            working_hours:       args.working_hours       as string | undefined,
+            working_hours_structured: args.working_hours_structured as PersonProfile['working_hours_structured'],
+            role_summary:        args.role_summary        as string | undefined,
+            reports_to:          args.reports_to          as string | undefined,
+            response_speed:      args.response_speed      as PersonProfile['response_speed'],
+            collaboration_notes: args.collaboration_notes as string | undefined,
+          });
+          logger.info('Person profile updated (external)', { personId: target.personId, name: target.name });
+          return { updated: true, name: target.name, external: true };
         }
 
         // v2.2.2 (#46) — owner-path tool. Anything the owner sets here is

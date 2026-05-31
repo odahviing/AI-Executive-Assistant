@@ -250,14 +250,17 @@ async function applyDelta(
   // context, so every DB write also reflects into the matching section.
   // Section body REPLACES the prior content (latest signal wins) for
   // structural state; the discussed-history section APPENDS.
-  const slug = slugifyName(colleagueName);
+  // v3.2.0 — md files are keyed by person_id now. A known colleague always has
+  // a row (written at message arrival); fall back to the legacy name-slug only
+  // if somehow absent so a write never silently drops.
+  const personId = getPersonMemory(slackId)?.person_id ?? slugifyName(colleagueName);
 
   const residenceLines: string[] = [];
   if (delta.state) residenceLines.push(`Lives in ${delta.state}.`);
   if (delta.timezone) residenceLines.push(`Timezone: ${delta.timezone}.`);
   if (residenceLines.length > 0) {
     await writePersonSection({
-      profile, slug, displayName: colleagueName,
+      profile, personId, displayName: colleagueName,
       section: 'Residence',
       text: residenceLines.join(' '),
     });
@@ -269,7 +272,7 @@ async function applyDelta(
   if (delta.collaboration_notes) workplaceLines.push(delta.collaboration_notes);
   if (workplaceLines.length > 0) {
     await writePersonSection({
-      profile, slug, displayName: colleagueName,
+      profile, personId, displayName: colleagueName,
       section: 'Workplace',
       text: workplaceLines.join(' '),
     });
@@ -280,7 +283,7 @@ async function applyDelta(
   if (delta.response_speed) hoursLines.push(`Typical response speed: ${delta.response_speed}.`);
   if (hoursLines.length > 0) {
     await writePersonSection({
-      profile, slug, displayName: colleagueName,
+      profile, personId, displayName: colleagueName,
       section: 'Working hours',
       text: hoursLines.join(' '),
     });
@@ -292,7 +295,7 @@ async function applyDelta(
   if (delta.name_he) commLines.push(`Hebrew spelling: ${delta.name_he}.`);
   if (commLines.length > 0) {
     await writePersonSection({
-      profile, slug, displayName: colleagueName,
+      profile, personId, displayName: colleagueName,
       section: 'Communication style',
       text: commLines.join(' '),
     });
@@ -303,7 +306,7 @@ async function applyDelta(
   if (delta.interaction_summary) {
     const today = new Date().toISOString().split('T')[0];
     const newLine = `- [${today}] ${delta.interaction_summary}`;
-    const currentMd = await readPersonMemory(profile, slug);
+    const currentMd = await readPersonMemory(profile, personId, colleagueName);
     let existingDiscussedBody = '';
     if (currentMd) {
       // Extract the "What we've discussed" section body if it exists.
@@ -314,7 +317,7 @@ async function applyDelta(
       ? `${existingDiscussedBody}\n${newLine}`
       : newLine;
     await writePersonSection({
-      profile, slug, displayName: colleagueName,
+      profile, personId, displayName: colleagueName,
       section: "What we've discussed",
       text: newBody,
     });
@@ -404,8 +407,7 @@ export async function runCapturePass(app: App, profile: UserProfile): Promise<vo
       const currentProfile: PersonProfile = (() => {
         try { return JSON.parse(personRow.profile_json || '{}'); } catch { return {}; }
       })();
-      const slug = slugifyName(personRow.name);
-      const currentMd = await readPersonMemory(profile, slug) ?? '';
+      const currentMd = await readPersonMemory(profile, personRow.person_id, personRow.name) ?? '';
 
       // 3. Load chat transcript.
       const messages = getConversationHistory(row.thread_ts);

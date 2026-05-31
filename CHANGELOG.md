@@ -2,6 +2,39 @@
 
 ---
 
+## 3.1.7 — Unified Person Store: one backbone table for every person, internal and external
+
+The big one: `people_memory` evolves from a Slack-first table (PK = `slack_id`, so a pure-email external had nowhere to live) into ONE backbone table keyed by a surrogate `person_id`, holding every person Maelle knows — internal AND external — with their data and history in one place. The real bug this closes: the owner asked to book "Max Attias (gmail), who you already know" and Maelle had no record and re-asked for the email, because `recordBooking` skipped any attendee without a slack_id and the email-keyed `known_contacts` table was scaffolded but never wired. Now externals are persisted on first booking and recalled the next time. Ships alongside #119 (lunch auto-booking) and a security-gate precision pass. Kept a patch by owner direction despite the migration.
+
+### Migration (one-shot, data-safe)
+
+- `people_memory` rebuilt onto a surrogate **`person_id` PRIMARY KEY**, with `slack_id` and `email` demoted to nullable identity attributes (slack_id UNIQUE; null for pure-email externals), plus `kind` (internal|external|self), `org`, `source`. SQLite can't alter a PK in place, so it's a create-new → copy → drop → rename rebuild ([v3_2_0_person_store.ts](src/db/migrations/v3_2_0_person_store.ts)). Every column carried verbatim (incl. `interaction_log`). Safety: full JSON backup to `data/migrations/` before any destructive step + a row-count assertion that rolls back on mismatch. Idempotent. Verified live: 36/36 rows migrated clean. Dead `known_contacts` table dropped.
+
+### Added
+
+- **`resolvePerson({slackId?, email?, name?})`** ([db/people.ts](src/db/people.ts)) — the single find-or-create+merge chokepoint. Match order slack_id → email → fuzzy name; merge-by-attach when a new handle joins an existing person (Slack wins). Every booking / write path routes through it instead of bare slack-id lookups. Plus `getPersonById`, `getPersonByEmail`, `newPersonId`, and `person_id`-keyed worker variants of the write helpers (`appendPersonInteractionById`, `appendPersonNoteById`, `confirmPersonGenderById`, `setCoreFieldWithProvenanceById`, `updatePersonProfileById`, `setPersonNameHeById`); the slack-keyed functions now delegate to these.
+- **`resolvePersonTarget`** ([utils/resolvePersonTarget.ts](src/utils/resolvePersonTarget.ts)) — the write-tools' identity resolver: hallucination-guarded slack_id for internal, find-or-create by name/email for owner-path externals.
+
+### Changed
+
+- **Booking persists everyone.** `recordBooking` drops the "skip no-slack-id attendee" rule: every attendee is resolved through `resolvePerson` (creating external rows on first sight), the booking is appended to their `interaction_log` (DB-first), then the md note is written. Threads `slack_id` through as the strongest dedup handle (an existing internal colleague matches by slack_id even with no stored email / a differently-spelled name), and skips the resource-room mailbox so the room never becomes a "person".
+- **Person write-tools route through the one store.** `note_about_person` / `log_interaction` / `confirm_gender` / `update_person_profile` no longer dead-end at `unknown_colleague` when there's no slack_id — an owner can now note / profile a pure-email external. Colleague-path stays self-only and slack-keyed (the self-write gate is unchanged); social-moment recording stays internal-only.
+- **Per-person md files re-keyed from name-slug to `person_id`** ([memory/peopleMemory.ts](src/memory/peopleMemory.ts)) — fixes the collision where two people with the same first+last name shared one file. Legacy files migrate on first touch (read-fallback + rename-on-write); the catalog disambiguates duplicate display names.
+- **Capability-gating, not storage-gating.** Storage is universal; Slack-only features degrade for externals: proactive social DMs are gated to a real slack_id, and free/busy stays internal-only (an external's availability is asked, not probed). Social engine remains internal-only for now.
+
+### Fixed
+
+- **[#119](https://github.com/odahviing/AI-Executive-Assistant/issues/119): active mode never auto-books next-week lunch.** Root cause was the missing-lunch suppressor reading `delete_meeting` audit rows: one row lacking `event_start_iso` (`date === undefined`) matched *every* day, silencing all forward-week lunch detection for 14 days. Replaced the audit-log hack with the date-scoped `calendar_issues` terminal-row mechanism — deleting a floating block now writes a `dismissed` row for that exact day (won't re-book what the owner cleared), and detection skips only genuinely-waived days. Synthetic gap id consolidated into one helper ([floatingBlocks.ts](src/utils/floatingBlocks.ts)), killing the three-way drift the old code warned about. ([calendarHealth.ts](src/skills/calendarHealth.ts), [calendarIssues.ts](src/db/calendarIssues.ts))
+- **Identity-spoof gate false-positived on any coworker email a colleague mentioned** (real case: Levana adding `ysrael@reflectiz.com` to a meeting → her on-topic reply was destroyed and replaced with an off-topic English deflection). The same-domain-email regex is now a *candidate*, not a verdict: a Haiku `judgeIdentityClaim` decides impersonation vs benign reference over the multi-turn window (kept, to catch split-across-message attacks). Benign → the original reply is preserved (no longer destroyed); impersonation *or any uncertainty/parse-failure* → protective rewrite (fails safe). The refusal composer now replies in the colleague's language. ([securityGate.ts](src/utils/securityGate.ts))
+- **Interview title treated as an unbreakable rule.** The `title:` convention now reads as a default ("treat it as the default") rather than "follow it", so an explicit title request from the requester is honored (token-neutral prompt swap; honoring is already code-backed by requester-controls). ([meetings.ts](src/skills/meetings.ts))
+
+### Known limitations
+
+- A pure-email external who *later* gets a Slack account creates a second row rather than merging (the inbound upsert path doesn't route through `resolvePerson`'s merge). Left as-is — rare, since a company-domain person always arrives via Slack first.
+- Booking history lives in the md "What we've discussed", not the structured `recent_interactions` recall (which intentionally excludes `meeting_booked`/`coordination`) — by design, to keep the recall relational and avoid DB churn.
+
+---
+
 ## 3.1.6 — real-day fix wave: prompt-reduction regressions + scheduling-quality fixes
 
 Two chats. The first half closes regressions from the 3.1.5 prompt-reduction (a scope misroute that dropped a tool, and two over-cut category/narration rules). The second half is scheduling-quality fixes surfaced in real chats (overlapping slot options, a re-fired mutation on "thanks", duration inflation, and a noisy brief greeting).

@@ -87,7 +87,7 @@ export function loadAttendeeAvailabilityForEmails(
 
       let timezone = person.timezone;
       let travelMeta: AttendeeAvailabilityEntry['travel'];
-      const travel = getCurrentTravel(person.slack_id);
+      const travel = person.slack_id ? getCurrentTravel(person.slack_id) : null;
       if (travel) {
         const travelTz = inferTimezoneFromStateStatic(travel.location);
         if (travelTz && travelTz !== person.timezone) {

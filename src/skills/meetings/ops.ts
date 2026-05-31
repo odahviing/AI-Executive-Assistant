@@ -135,6 +135,7 @@ import {
   getDb,
   auditLog,
   getSuppressedEventIds,
+  dismissFloatingBlockGap,
 } from '../../db';
 import { closeMeetingArtifacts } from '../../utils/closeMeetingArtifacts';
 
@@ -2590,7 +2591,7 @@ export class SchedulingSkill {
               location: planLocation,
               attendees: attendees
                 .filter((a): a is typeof a & { email: string } => typeof a.email === 'string' && a.email.length > 0)
-                .map(a => ({ email: a.email, name: a.name })),
+                .map(a => ({ email: a.email, name: a.name, slack_id: a.slack_id })),
               mutation: 'booked',
             });
           } catch (err) {
@@ -3701,6 +3702,44 @@ export class SchedulingSkill {
           reason: 'deleted',
           subject: args.meeting_subject as string | undefined,
         });
+        // v3.1.7 / #119 — if the deleted event was a floating block (lunch,
+        // etc.), record a date-scoped dismissal so active-mode health doesn't
+        // re-book the gap the owner just cleared. Keyed to the exact day via
+        // the synthetic event_id, so only THIS day is suppressed — future
+        // same-weekday blocks still get placed. Replaces the old audit-log
+        // delete suppressor that over-suppressed the whole forward window.
+        // Subject-only match (categories aren't captured pre-delete); mirrors
+        // the prior audit approach's match basis. Non-fatal on any failure.
+        try {
+          const delStartIso = preDeleteStartIso;
+          const delSubject = (args.meeting_subject ?? preDeleteSubject ?? '') as string;
+          if (delStartIso && delSubject) {
+            const fbMod = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
+            const matchedBlock = fbMod.getFloatingBlocks(context.profile)
+              .find(b => fbMod.isFloatingBlockEvent({ subject: delSubject }, b));
+            if (matchedBlock) {
+              const synth = fbMod.floatingBlockSyntheticEventId(
+                context.profile, matchedBlock.name, delStartIso.slice(0, 10), context.profile.user.timezone,
+              );
+              if (synth) {
+                dismissFloatingBlockGap({
+                  ownerUserId: context.profile.user.slack_user_id,
+                  eventId: synth.eventId,
+                  eventDate: delStartIso.slice(0, 10),
+                  eventEndMs: synth.eventEndMs,
+                  notes: `Owner deleted ${matchedBlock.name} on ${delStartIso.slice(0, 10)} — gap waived (won't re-book).`,
+                });
+                logger.info('delete_meeting — floating-block gap dismissed', {
+                  block: matchedBlock.name, date: delStartIso.slice(0, 10), syntheticEventId: synth.eventId,
+                });
+              }
+            }
+          }
+        } catch (err) {
+          logger.warn('delete_meeting: floating-block dismissal write failed — non-fatal', {
+            err: String(err).slice(0, 200),
+          });
+        }
         auditLog({
           action: 'delete_meeting',
           source: context.channel,

@@ -558,13 +558,14 @@ async function sendCoordDM(
   if (!params.participant.slack_id && params.participant.name) {
     try {
       const matches = searchPeopleMemory(params.participant.name);
-      if (matches.length === 1 && /^U[A-Z0-9]{7,11}$/.test(matches[0].slack_id)) {
+      const m0 = matches[0];
+      if (matches.length === 1 && m0.slack_id && /^U[A-Z0-9]{7,11}$/.test(m0.slack_id)) {
         logger.info('sendCoordDM — resolved missing slack_id from people_memory', {
-          name: params.participant.name, resolved: matches[0].slack_id,
+          name: params.participant.name, resolved: m0.slack_id,
         });
-        params.participant.slack_id = matches[0].slack_id;
-        if (!params.participant.email && matches[0].email) {
-          params.participant.email = matches[0].email;
+        params.participant.slack_id = m0.slack_id;
+        if (!params.participant.email && m0.email) {
+          params.participant.email = m0.email;
         }
       }
     } catch (_) { /* fail open — original error path catches truly unknown */ }

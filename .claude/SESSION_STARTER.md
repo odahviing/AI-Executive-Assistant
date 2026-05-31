@@ -1,16 +1,28 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.1.2** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.1.7** — check `package.json` if unsure; it is the source of truth.
+
+## ✅ SHIPPED v3.1.7 — the Unified Person Store (`.claude/PERSON_STORE_PROJECT.md` = the build spec)
+
+Done, all phases, one build. `people_memory` rebuilt onto a surrogate **`person_id` PK** (migration `src/db/migrations/v3_2_0_person_store.ts` — backup + row-count assertion + idempotent; verified live 36/36); `slack_id`/`email` nullable identity attrs; `kind` internal|external|self. **`resolvePerson({slackId?,email?,name?})`** in `db/people.ts` is THE find-or-create+merge chokepoint; write helpers have `*ById` workers (slack variants delegate). `recordBooking` persists EVERY attendee (externals included, slack_id threaded as the dedup handle, room mailbox skipped) → externals recalled next booking. Write-tools (`note_about_person`/`log_interaction`/`confirm_gender`/`update_person_profile`) route through `resolvePersonTarget` so email-only externals are writable (owner-path). Md files re-keyed name-slug → `person_id` (collision fix; legacy migrates on touch). Capability-gating not storage-gating: proactive social + free/busy stay internal-only. **Known limits (owner-accepted):** external→Slack convert makes a 2nd row (no inbound merge; rare); booking history lives in md "What we've discussed", not the structured `recent_interactions` recall (by design). **Future:** opens GitHub #22.
 
 ## PATH 2 IS COMPLETE (v3.1.0 → v3.1.2). Requests spine owns status, end to end.
 
-The `requests` table is the single source of truth for lifecycle. Side tables (`coord_jobs`/`outreach_jobs`/`approvals`) hold DATA only — their `status` columns are VESTIGIAL (transition signals to updateCoord/OutreachJob, never persisted; reads go through `getCoordLifecycle`/`getOutreachLifecycle`). `approvals.status` retained intentionally (payload lives in `approvals`; request owns `awaiting_owner`). **One timer sweep** (`sweepDueRequests`, wired at `tasks/runner.ts:39` inside `runDueTasks`) owns ALL lifecycle timing — the legacy `coord_nudge`/`coord_abandon`/`outreach_send`/`outreach_expiry`/`outreach_decision` dispatchers are DELETED. Reconciliation (`core/requests/reconcile.ts`) closes orphaned coord requests; 30-day retention prune. Architecture doc current: `project_architecture.md` (v3.1 spine section at top). Plan + traces: `.claude/PATH_2_REQUESTS_SPINE.md`, `.claude/PATH_2_PAPER_TRACES.md`.
+The `requests` table is the single source of truth for lifecycle. Side tables (`coord_jobs`/`outreach_jobs`/`approvals`) hold DATA only — their `status` columns are VESTIGIAL (transition signals to updateCoord/OutreachJob, never persisted; reads go through `getCoordLifecycle`/`getOutreachLifecycle`). `approvals.status` retained intentionally (payload lives in `approvals`; request owns `awaiting_owner`). **One timer sweep** (`sweepDueRequests`, wired at `tasks/runner.ts:39` inside `runDueTasks`) owns ALL lifecycle timing. Reconciliation (`core/requests/reconcile.ts`) closes orphaned coord requests; 30-day retention prune. Architecture doc current: `project_architecture.md`.
 
-- **v3.1.0** — Stages 1–5+8: spine owns status, killed the coord double-request ghost, `requests.phase`, reconcile + retention.
-- **v3.1.1** — Stages 6+7: one timer sweep (legacy dispatchers deleted), side tables data-only, #114/#115, + a scoped verification audit's closure fixes (closeFollowup orphan, coord owner_dm DMs, safeThreadTs, thread-reply).
-- **v3.1.2** — three-chat bundle: a performance pass (merged `classifyOwnerIntent` + `classifyToolScope` → single `classifyTurn`), an audit pass (12 bugs: venue / resolveSlackId / calendar / coord / deferredActionReplay / people), and a second-pass spine audit (A-1 coord-expiry-silent-to-owner, B-1 reconcile-read-vestigial-status, C-2 dead outreach_expiry task SQL).
+## What shipped 3.1.3 → 3.1.6 (real-day bug-bash, code-first)
 
-**FIRST THING NEXT SESSION:** confirm Maelle runs clean on v3.1.2 (owner restarts `npm run dev`; PM2 off). Watch the first tick: `Requests-spine maintenance` log line, no double-DMs, coord/outreach close cleanly. Then pick from the deferred items below or the WhatsApp build.
+Read CHANGELOG.md top-to-bottom for detail. Highlights by theme:
+
+- **3.1.3 — timezone-is-never-a-location.** Root cause was `textScrubber.humanizeIanaToken` converting IANA strings → city names ("Asia/Jerusalem" → "Jerusalem") on every outbound post; now emits the TZ abbreviation, never a city. Location for narration comes from `people_memory.state`; timezone is for math only. Plus: shared daily-free-time floor (`computeDayQualityFreeMinutes` in `scheduleRules`, enforced at BOTH search + `checkSlot` write via rule `focus_time_floor`); free-time questions run `analyzeCalendar` deterministically (classifyTurn `freeTimeInquiry`); brief closure narration stopped fabricating "I told her" on owner-side closures.
+- **3.1.4 — colleague-scheduling correctness (Yossi wave) + tool-scope reduction.** Requester-controls model: whoever REQUESTED a meeting controls it (add/rename/move/location) via `findMeetingOwner`; `update_meeting` now colleague-allowed behind a requester gate; direct colleague bookings record a requester-link on the spine. Shared `resolveAttendeeEmails` helper (name→email, never ask a colleague for a teammate's email). Pick-of-offered-slot books directly (no window-collapse retract). Tool-scope Block 2: ALWAYS_ON 22→12, new `coord`/`people` scopes.
+- **3.1.5 / 3.1.6 — prompt-reduction regressions + scheduling quality.** Floating-block self-rejection on packed days (rule 6 skips the block being booked when `isFloatingBlock`); humanGate catches "the tool is telling me"; date-correction is now a cheap tool-less rewrite (`rewriteWithCorrectDates`, ~30s→~1-2s, no orchestrator re-run); `pickSpreadSlots` fill-pass won't offer overlapping slots; duration defaults to `default_meeting_duration` when unspecified (no more "interview → 55"); rename-on-thanks guard (strip write tools when a non-task ack follows a completed mutation); morning-brief no longer opens with "Morning —" (Slack preview leads with the calendar); delete-confirm no longer double-asks.
+
+**The bugs SKILL was rewritten this wave (`.claude/skills/bugs/SKILL.md`):** CODE-FIRST is now explicit — fix at the core in code (chokepoint guard / a return-value the model reacts to / a tool that owns the decision); prompt rules are a LAST resort for judgment/tone/format/language only, never enforcement; avoid regex on natural-language text (Maelle is multilingual). Same discipline lives in the "How we fix bugs" section below.
+
+**Open bug filed:** [#119](https://github.com/odahviing/AI-Executive-Assistant/issues/119) — active-mode calendar health never auto-books next-week lunch (detection doesn't fire for the forward window; deferred, not fixed).
+
+**FIRST THING NEXT SESSION:** confirm Maelle runs clean on v3.1.6 (owner restarts `npm run dev`; PM2 off). Then start the Person Store project (above) — or take whatever real-day bugs the owner brings first.
 
 ## How we fix bugs — CODE-FIRST, root-cause, no patch-on-patch (standing principle)
 
@@ -33,11 +45,11 @@ Four patch versions in two days of real-day-bug-bashing. Read CHANGELOG.md top-t
 - **3.0.6** — 54-atomic-fix V3 audit bug-bash (phantom-confirmed bookings, force-book winning_slot leak, recheckFreeBusyForBooking shared helper, owner override truly total, capture-pass timezone gated by isStrictIana, ~400 LOC dead code removed) + claim-checker covers action-based verb tools (manage_routine/manage_calendar_issue/update_task/etc.)
 - **3.0.7** — slot-finder ↔ rule-engine consistency on lunch feasibility, close-loop DM to colleague-requester via requests spine (broadened subject match), `coordinate_meeting` HARD STOP when owner just picked a slot, `_slot_results_now_stale` flag on slot-relevant profile/memory writes, `find_available_slots` date-only `search_to` expansion (was collapsing to 0-minute window when search_from === search_to), `create_meeting` array guard on `args.attendees`, claim-checker pruned to RULE A + coda mode (Module F/E extended-rule plumbing removed per v2.8.5)
 
-## Right now — pick from the remaining deferred items below, or WhatsApp build
+## Work queue — Person Store FIRST, then deferred bugs, then WhatsApp
 
-Owner direction: propose-first per item, smaller/verified moves win.
+Owner direction: propose-first per item, smaller/verified moves win. **Order: (1) Unified Person Store — see the ⭐ section at top + `.claude/PERSON_STORE_PROJECT.md`; (2) the still-open deferred bugs below (#3/#4/#5/#8); (3) WhatsApp.** Plus whatever real-day bugs the owner brings — those interrupt and get folded in.
 
-**Resolved during the Path 2 work (v3.0.8–v3.1.2):** #1 Dina thread-continuity (origin anchoring + `getOpenRequestsForColleague` on the requests spine), #2 shadow-mirrors-pre-gate (moved into `postReply.ts` post-gate), #6 coord auto-cancel on direct create (handled by `reconcileOrphanedRequests` + `closeMeetingArtifacts`), #7 reply-routing priority (recentOutboundContext + handleCoordReply now prefer active coord). **Still open: #3, #4, #5, #8** (below).
+**Resolved during Path 2 (v3.0.8–v3.1.2):** #1 Dina thread-continuity, #2 shadow-mirrors-pre-gate, #6 coord auto-cancel on direct create, #7 reply-routing priority. **Still open: #3, #4, #5, #8** (below). (#5 may be partly covered now — verify against current securityGate before building.)
 
 ### Deferred bug list (from 3.0.7 session — all real-day-observed)
 
@@ -61,13 +73,9 @@ Owner direction: propose-first per item, smaller/verified moves win.
 
 All stages shipped (v3.1.0–v3.1.2). Requests spine owns status; one timer sweep; side tables data-only. The physical `coord_jobs.status` / `outreach_jobs.status` columns are retained but vestigial (no risky table rebuild) — fully dropping the columns is the only crumb left, and it's optional (they're unread). Nothing here blocks new work.
 
-### WhatsApp build (parked, return after Path 2 done or deferred items)
+### WhatsApp build (parked — after the Person Store + open deferred bugs)
 
 v3 was originally framed as the WhatsApp build — first non-Slack `Connection` implementation. Architecture is ready (skills never import from `connectors/slack/*`; everything routes through `getConnection(ownerId, 'slack')`). WhatsApp slots in as a parallel transport.
-
-## WhatsApp build (parked, return after Path 2)
-
-v3 was originally framed as the WhatsApp build — first non-Slack `Connection` implementation. Architecture is ready (skills never import from `connectors/slack/*`; everything routes through `getConnection(ownerId, 'slack')`). WhatsApp slots in as a parallel transport. Returns to top of the queue once the requests migration is done.
 
 Read these two memory files at session start:
 - `C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/project_overview.md`

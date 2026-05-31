@@ -432,6 +432,67 @@ export function getSuppressedEventIds(ownerUserId: string): Set<string> {
   return out;
 }
 
+/** v3.1.7 / #119 — synthetic event_ids of floating-block gaps the owner has
+ *  DELIBERATELY waived: `missing_floating_block` rows that are `approved`
+ *  (preemptive dismiss) or `dismissed` (owner deleted the block on that day),
+ *  with event_end_ms still in the future. The detector skips re-flagging /
+ *  re-booking any day whose synthetic id is in this set.
+ *
+ *  Deliberately EXCLUDES `resolved` — that status means the gap auto-filled
+ *  (a block got placed), not that the owner waived it; suppressing on resolved
+ *  would block re-booking a lunch that was simply deleted after being placed.
+ *  This is the date-scoped replacement for the old audit-log delete suppressor
+ *  (which over-suppressed every day when a delete row lacked event_start_iso). */
+export function getWaivedFloatingBlockEventIds(ownerUserId: string): Set<string> {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT event_id FROM calendar_issues
+    WHERE owner_user_id = ?
+      AND issue_class = 'missing_floating_block'
+      AND status IN ('approved','dismissed')
+      AND event_end_ms > ?
+  `).all(ownerUserId, Date.now()) as Array<{ event_id: string }>;
+  const out = new Set<string>();
+  for (const r of rows) out.add(r.event_id);
+  return out;
+}
+
+/** v3.1.7 / #119 — record that the owner deleted a floating block on a
+ *  specific day, so active-mode health doesn't re-book the gap. Writes a
+ *  terminal `dismissed` row keyed to the day's synthetic event_id (date is
+ *  encoded in the id → only that exact day is suppressed; future same-weekday
+ *  blocks are untouched). Idempotent: a pre-existing `approved` waiver is left
+ *  alone; anything else is flipped to `dismissed`. */
+export function dismissFloatingBlockGap(opts: {
+  ownerUserId: string;
+  eventId: string;       // synthetic id from floatingBlockSyntheticEventId
+  eventDate: string;     // YYYY-MM-DD (owner-local)
+  eventEndMs: number;
+  notes?: string;
+}): void {
+  const db = getDb();
+  const existing = db.prepare(
+    `SELECT id, status FROM calendar_issues WHERE owner_user_id = ? AND event_id = ?`,
+  ).get(opts.ownerUserId, opts.eventId) as { id: string; status: string } | undefined;
+  if (existing) {
+    // Don't downgrade an explicit approval; otherwise ensure terminal-dismissed.
+    if (existing.status === 'approved') return;
+    db.prepare(`
+      UPDATE calendar_issues
+      SET status = 'dismissed', notes = COALESCE(?, notes), updated_at = datetime('now')
+      WHERE id = ?
+    `).run(opts.notes ?? null, existing.id);
+    return;
+  }
+  const id = `ci_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  db.prepare(`
+    INSERT INTO calendar_issues
+      (id, owner_user_id, event_id, peer_event_id, event_date, event_end_ms,
+       issue_class, status, notes, request_id)
+    VALUES (?, ?, ?, NULL, ?, ?, 'missing_floating_block', 'dismissed', ?, NULL)
+  `).run(id, opts.ownerUserId, opts.eventId, opts.eventDate, opts.eventEndMs, opts.notes ?? null);
+}
+
 // ── Status transitions ───────────────────────────────────────────────────────
 
 export function updateCalendarIssueStatus(

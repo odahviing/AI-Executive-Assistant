@@ -616,8 +616,7 @@ ${skillsSection}`;
     if (isOwner || !senderId) return '';
     const personRow = getPersonMemory(senderId);
     if (!personRow) return '';
-    const slug = slugifyName(personRow.name);
-    const md = readPersonMemorySync(profile, slug);
+    const md = readPersonMemorySync(profile, personRow.person_id, personRow.name);
     if (!md || md.trim().length === 0) return '';
     return [
       `MEMORY ON ${personRow.name.toUpperCase()} — what you've learned about them across past conversations.`,

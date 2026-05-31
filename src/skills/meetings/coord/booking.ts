@@ -473,7 +473,13 @@ export async function bookCoordination(
             subject: job.subject,
             startIso: slot,
             location: location || undefined,
-            attendees: coordAttendees.map(a => ({ email: a.email, name: a.name })),
+            // v3.2.0 — map from `participants` (humans, carry slack_id), NOT
+            // coordAttendees (which also holds the resource-room mailbox).
+            // slack_id dedups against the existing internal row; the room is
+            // excluded so it never becomes a "person".
+            attendees: participants
+              .filter(p => typeof p.email === 'string' && p.email.length > 0)
+              .map(p => ({ email: p.email as string, name: p.name, slack_id: p.slack_id })),
             mutation: 'booked',
           });
         } catch (err) {

@@ -22,7 +22,7 @@
  */
 
 import type { UserProfile } from '../config/userProfile';
-import { promises as fs, readdirSync, readFileSync, statSync } from 'fs';
+import { promises as fs, existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import path from 'path';
 import logger from '../utils/logger';
 
@@ -54,7 +54,14 @@ function rootForProfile(profile: UserProfile): string {
   return path.resolve(process.cwd(), 'config', 'users', `${firstName}_people`);
 }
 
-/** Normalize a person name into a stable filename slug. */
+/**
+ * Normalize a person name into a filename slug.
+ *
+ * v3.2.0 — this is now the LEGACY key. Md files are keyed by `person_id`
+ * (collision-proof: two people with the same first+last name get distinct
+ * files). `slugifyName` is retained only to locate a person's pre-migration
+ * file so it can be renamed on first touch (see `migrateLegacyMdIfNeeded`).
+ */
 export function slugifyName(name: string): string {
   return name
     .trim()
@@ -62,6 +69,28 @@ export function slugifyName(name: string): string {
     .replace(/[^\p{L}\p{N}\s-]/gu, '')
     .replace(/\s+/g, '-')
     .slice(0, 60) || 'unknown';
+}
+
+/**
+ * v3.2.0 — migrate a person's md file from the legacy name-slug filename to
+ * the collision-proof `person_id` filename, lazily, on first write/read. If
+ * the person_id file already exists, no-op. If only the legacy file exists,
+ * rename it so its history carries over. Non-fatal on any fs error.
+ */
+async function migrateLegacyMdIfNeeded(root: string, personId: string, displayName: string): Promise<void> {
+  try {
+    const target = path.resolve(root, `${personId}.md`);
+    if (!target.startsWith(root) || existsSync(target)) return;
+    const legacySlug = slugifyName(displayName);
+    if (!legacySlug || legacySlug === personId) return;
+    const legacy = path.resolve(root, `${legacySlug}.md`);
+    if (legacy.startsWith(root) && existsSync(legacy)) {
+      await fs.rename(legacy, target);
+      logger.info('person memory — migrated legacy md filename to person_id', {
+        from: `${legacySlug}.md`, to: `${personId}.md`,
+      });
+    }
+  } catch { /* non-fatal — write/read proceeds against person_id */ }
 }
 
 function ensureDir(dir: string): Promise<void> {
@@ -140,46 +169,64 @@ function safeResolve(root: string, slug: string): string | null {
  */
 export async function resolvePersonSlug(profile: UserProfile, query: string): Promise<string | null> {
   if (!query) return null;
+  const root = rootForProfile(profile);
+
+  // 1. The query is already a file key (person_id or a legacy slug) with a file.
+  const direct = safeResolve(root, query);
+  if (direct && existsSync(direct)) return query;
+
+  // 2. Resolve through the DB to a person_id (no create — this is a lookup).
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const db = require('../db') as typeof import('../db');
+    const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
+    let row = SLACK_ID_RE.test(query) ? db.getPersonMemory(query) : null;
+    if (!row) {
+      const matches = db.searchPeopleMemory(query);
+      const exact = matches.filter(m => m.name.toLowerCase() === query.trim().toLowerCase());
+      row = exact[0] ?? (matches.length === 1 ? matches[0] : null);
+    }
+    if (row?.person_id) return row.person_id;
+  } catch { /* fall through to file-name resolution */ }
+
+  // 3. Legacy fallback — match an existing file by name-slug / display name.
   const files = await listPersonFiles(profile);
   if (files.length === 0) return null;
-
   const q = query.trim().toLowerCase();
   const qSlug = slugifyName(query);
-
-  // Exact slug match
-  const bySlug = files.find(f => f.slug === qSlug);
-  if (bySlug) return bySlug.slug;
-
-  // Exact display name match
-  const byName = files.find(f => f.displayName.toLowerCase() === q);
-  if (byName) return byName.slug;
-
-  // Starts-with on slug or display first name
-  const byPrefix = files.find(f =>
-    f.slug.startsWith(qSlug) ||
-    f.displayName.toLowerCase().split(/\s+/)[0] === q,
+  const f = files.find(f =>
+    f.slug === qSlug
+    || f.displayName.toLowerCase() === q
+    || f.slug.startsWith(qSlug)
+    || f.displayName.toLowerCase().split(/\s+/)[0] === q,
   );
-  if (byPrefix) return byPrefix.slug;
-
-  return null;
+  return f ? f.slug : null;
 }
 
-/** Read a person's md file. Returns null when the file doesn't exist. */
-export async function readPersonMemory(profile: UserProfile, slug: string): Promise<string | null> {
+/**
+ * Read a person's md file by `person_id`. Returns null when none exists.
+ * v3.2.0 — `legacyName` enables reading a not-yet-migrated file still under
+ * its old name-slug filename (the rename happens on next write).
+ */
+export async function readPersonMemory(profile: UserProfile, personId: string, legacyName?: string): Promise<string | null> {
   const root = rootForProfile(profile);
-  const full = safeResolve(root, slug);
-  if (!full) return null;
-  try {
-    const stat = await fs.stat(full);
-    if (stat.size > MAX_FILE_BYTES) {
-      logger.warn('person memory file too large — truncating read', { slug, bytes: stat.size });
+  const candidates = [safeResolve(root, personId)];
+  if (legacyName) candidates.push(safeResolve(root, slugifyName(legacyName)));
+  for (const full of candidates) {
+    if (!full) continue;
+    try {
+      const stat = await fs.stat(full);
+      if (stat.size > MAX_FILE_BYTES) {
+        logger.warn('person memory file too large — truncating read', { personId, bytes: stat.size });
+      }
+      const content = await fs.readFile(full, 'utf-8');
+      return content.slice(0, MAX_FILE_BYTES);
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
     }
-    const content = await fs.readFile(full, 'utf-8');
-    return content.slice(0, MAX_FILE_BYTES);
-  } catch (err: any) {
-    if (err?.code === 'ENOENT') return null;
-    throw err;
   }
+  return null;
 }
 
 /**
@@ -187,20 +234,21 @@ export async function readPersonMemory(profile: UserProfile, slug: string): Prom
  * prompt builder (which assembles synchronously). Same shape as the async
  * version; never throws — fs failures return null.
  */
-export function readPersonMemorySync(profile: UserProfile, slug: string): string | null {
+export function readPersonMemorySync(profile: UserProfile, personId: string, legacyName?: string): string | null {
   const root = rootForProfile(profile);
-  const full = safeResolve(root, slug);
-  if (!full) return null;
-  try {
-    const stat = statSync(full);
-    if (stat.size > MAX_FILE_BYTES) {
-      logger.warn('person memory file too large — truncating read', { slug, bytes: stat.size });
-    }
-    const content = readFileSync(full, 'utf-8');
-    return content.slice(0, MAX_FILE_BYTES);
-  } catch {
-    return null;
+  const candidates = [safeResolve(root, personId)];
+  if (legacyName) candidates.push(safeResolve(root, slugifyName(legacyName)));
+  for (const full of candidates) {
+    if (!full) continue;
+    try {
+      const stat = statSync(full);
+      if (stat.size > MAX_FILE_BYTES) {
+        logger.warn('person memory file too large — truncating read', { personId, bytes: stat.size });
+      }
+      return readFileSync(full, 'utf-8').slice(0, MAX_FILE_BYTES);
+    } catch { /* try next candidate */ }
   }
+  return null;
 }
 
 /**
@@ -215,20 +263,22 @@ export function readPersonMemorySync(profile: UserProfile, slug: string): string
  */
 export async function writePersonSection(params: {
   profile: UserProfile;
-  slug: string;
+  personId: string;
   displayName: string;
   section: string;
   text: string;
 }): Promise<{ ok: true; created: boolean } | { ok: false; error: string }> {
-  const { profile, slug, displayName, section, text } = params;
-  if (!slug) return { ok: false, error: 'empty_slug' };
+  const { profile, personId, displayName, section, text } = params;
+  if (!personId) return { ok: false, error: 'empty_person_id' };
   if (!section.trim()) return { ok: false, error: 'empty_section' };
 
   const root = rootForProfile(profile);
-  const full = safeResolve(root, slug);
-  if (!full) return { ok: false, error: 'invalid_slug' };
+  const full = safeResolve(root, personId);
+  if (!full) return { ok: false, error: 'invalid_person_id' };
 
   await ensureDir(root);
+  // v3.2.0 — carry over a pre-migration file (named by name-slug) before writing.
+  await migrateLegacyMdIfNeeded(root, personId, displayName);
 
   let existing: string | null = null;
   try {
@@ -244,7 +294,7 @@ export async function writePersonSection(params: {
 
   const updated = upsertSection(base, section.trim(), text.trimEnd());
   await fs.writeFile(full, updated, 'utf-8');
-  logger.info('Person memory section written', { slug, section, created });
+  logger.info('Person memory section written', { personId, section, created });
   return { ok: true, created };
 }
 
@@ -313,18 +363,28 @@ export function formatPeopleCatalogSync(profile: UserProfile): string {
     } catch { /* skip */ }
   }
   if (files.length === 0) return '';
-  files.sort((a, b) => a.slug.localeCompare(b.slug));
+  files.sort((a, b) => a.displayName.localeCompare(b.displayName));
 
-  const ownerSlugs = new Set([slugifyName(profile.user.name), slugifyName(profile.user.name.split(' ')[0])]);
+  // v3.2.0 — files are keyed by person_id now; surface the human display name
+  // as the handle (get_person_memory resolves name → person_id via the DB).
+  // When two people share a display name, disambiguate with a short id suffix
+  // so the handle stays unique.
+  const nameCounts = new Map<string, number>();
+  for (const f of files) {
+    const k = f.displayName.toLowerCase();
+    nameCounts.set(k, (nameCounts.get(k) ?? 0) + 1);
+  }
+  const ownerName = profile.user.name.toLowerCase();
   const lines = files.map(f => {
-    const ownerTag = ownerSlugs.has(f.slug) ? ' — you' : '';
+    const ownerTag = f.displayName.toLowerCase() === ownerName ? ' — you' : '';
+    const dupTag = (nameCounts.get(f.displayName.toLowerCase()) ?? 0) > 1 ? ` #${f.slug.slice(-4)}` : '';
     const sectionHint = f.sections.length > 0 ? ` [${f.sections.join(', ')}]` : ' [empty]';
-    return `- ${f.slug} (${f.displayName}${ownerTag})${sectionHint}`;
+    return `- ${f.displayName}${dupTag}${ownerTag}${sectionHint}`;
   });
   return [
-    'PEOPLE NOTES (markdown files, one per person — call get_person_memory(<slug-or-name>) to load full content):',
+    'PEOPLE NOTES (markdown files, one per person — call get_person_memory(<name>) to load full content):',
     ...lines,
     '',
-    'Use update_person_memory(<slug-or-name>, <section>, <text>) whenever you learn a durable fact about someone — where they live, where they work, working hours, communication style, anything that helps you be a better assistant to them. One-off social moments go through note_about_person / note_about_self as before. Empty-until-real-fact — no file exists until you write the first real fact.',
+    'Use update_person_memory(<name>, <section>, <text>) whenever you learn a durable fact about someone — where they live, where they work, working hours, communication style, anything that helps you be a better assistant to them. One-off social moments go through note_about_person / note_about_self as before. Empty-until-real-fact — no file exists until you write the first real fact.',
   ].join('\n');
 }

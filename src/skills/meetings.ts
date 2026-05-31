@@ -896,8 +896,9 @@ ATTENDEES (v2.9.1):
           const isValid = /^U[A-Z0-9]{7,11}$/.test(sid);
           if (isValid) return p;
           const matches = searchPeopleMemory(p.name as string);
-          if (matches.length === 1 && /^U[A-Z0-9]{7,11}$/.test(matches[0].slack_id)) {
-            return { ...p, slack_id: matches[0].slack_id, tz: matches[0].timezone ?? p.tz };
+          const m0 = matches[0];
+          if (matches.length === 1 && m0.slack_id && /^U[A-Z0-9]{7,11}$/.test(m0.slack_id)) {
+            return { ...p, slack_id: m0.slack_id, tz: m0.timezone ?? p.tz };
           }
           return { ...p, _invalid_id: true };
         });
@@ -2246,7 +2247,7 @@ Don't pre-refuse a move / cancel / update based on what you think the organizer 
 - create_meeting / move_meeting on events ${firstName} DOES organize: tool runs planMeeting → location/category/rules/attendee-freebusy all decided inside. If rules fail, the tool returns error: 'rule_violation' with a suggested_ask_text. Owner-path: surface for confirmation in-thread; if he says yes, RETRY THE SAME TOOL with relaxed=true. NEVER call create_approval for owner-path after he answered in-thread. Colleague-path: call create_approval(kind=policy_exception) with that text.
 TRUST THE TOOL'S DECISION. Don't second-guess the organizer or hallucinate a wall — call it and let the verdict speak.
 
-Subject: USE WHAT THE OWNER STATED. If his message names the meeting in any form — "Kickoff with Daniel", "review Q3 pricing with Anna", "1:1 with Ben", "sync about onboarding with Eli", "intro call with Sam", "demo for Acme", "interview with Sarah", "weekly with Lior" — that IS the subject. Pass it as-is to create_meeting / coordinate_meeting. Don't second-guess and don't ask "what's the meeting about?" — the topic word is right there. ONLY ask when the message is purely transactional ("book 30 mins with Anna tomorrow" with no topic word anywhere in the thread, no recent context). Once you've asked the subject in a thread and got an answer, NEVER re-ask in the same thread — the answer is recorded; carry it forward. Either way the subject must be SPECIFIC — name the person and/or topic ("Interview with Ohad", "Pricing sync with Anna"); NEVER book the bare category name ("Interview", "Meeting", "Sync") on its own. If a category in the list above shows a \`title:\` convention, follow it (e.g. interview discretion — first name only, role in the body).
+Subject: USE WHAT THE OWNER STATED. If his message names the meeting in any form — "Kickoff with Daniel", "review Q3 pricing with Anna", "1:1 with Ben", "sync about onboarding with Eli", "intro call with Sam", "demo for Acme", "interview with Sarah", "weekly with Lior" — that IS the subject. Pass it as-is to create_meeting / coordinate_meeting. Don't second-guess and don't ask "what's the meeting about?" — the topic word is right there. ONLY ask when the message is purely transactional ("book 30 mins with Anna tomorrow" with no topic word anywhere in the thread, no recent context). Once you've asked the subject in a thread and got an answer, NEVER re-ask in the same thread — the answer is recorded; carry it forward. Either way the subject must be SPECIFIC — name the person and/or topic ("Interview with Ohad", "Pricing sync with Anna"); NEVER book the bare category name ("Interview", "Meeting", "Sync") on its own. If a category shows a \`title:\` convention, treat it as the default (e.g. interview discretion — first name only, role in the body).
 
 Work week: ${firstName}'s work days are ${profile.schedule.office_days.days.join(', ')} + ${profile.schedule.home_days.days.join(', ')}. "Next week" means HIS work week. Don't pass search_from/search_to that exclude valid work days; if in doubt, omit search_to and let the search expand.
 

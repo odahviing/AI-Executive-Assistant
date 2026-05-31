@@ -12,10 +12,14 @@
  *   Section: "What we've discussed"
  *   Line:    "- [YYYY-MM-DD] Booked '<subject>' at <location> for <when>"
  *
- * Where it's keyed:
- *   By Slack ID (via people_memory). Externals without a slack_id are
- *   silently skipped — they don't have a md file in the current model.
- *   Future improvement: a parallel `external_contacts` store.
+ * Where it's keyed (v3.2.0 — Unified Person Store):
+ *   Every attendee is resolved through `resolvePerson({email, name})`, which
+ *   FINDS-OR-CREATES the person row — internal AND external. Pure-email
+ *   externals (gmail candidates, customers) are NO LONGER skipped: they get a
+ *   person row on first booking, the booking is appended to their structured
+ *   `interaction_log` (DB-first), and the md "What we've discussed" note is
+ *   written after (keyed by person_id). Next time the owner books them, the
+ *   history is already on file.
  *
  * Never throws. A failure here must never undo a successful booking.
  */
@@ -28,8 +32,13 @@ export interface RecordBookingParams {
   subject: string;
   startIso: string;
   location?: string;
-  /** Attendees from the booking call. Each entry: email + optional name. */
-  attendees: Array<{ email: string; name?: string }>;
+  /**
+   * Attendees from the booking call. `slack_id`, when the flow already knows
+   * it, is the STRONGEST dedup handle — resolvePerson matches an existing
+   * internal colleague by slack_id even if their row has no email on file or a
+   * differently-spelled name (closes the duplicate-row edge).
+   */
+  attendees: Array<{ email: string; name?: string; slack_id?: string }>;
   /** Kind of mutation — drives the verb in the line. */
   mutation: 'booked' | 'moved' | 'updated';
 }
@@ -47,12 +56,17 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
     // Lazy-load DB + memory writer to avoid circular-import risk from
     // skills/meetings/ops.ts → here → db → ... back into skills.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { searchPeopleMemory } = require('../db') as typeof import('../db');
+    const { resolvePerson, appendPersonInteractionById } = require('../db') as typeof import('../db');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { writePersonSection, readPersonMemorySync, slugifyName } = require('./peopleMemory') as typeof import('./peopleMemory');
+    const { writePersonSection, readPersonMemorySync } = require('./peopleMemory') as typeof import('./peopleMemory');
 
     const ownerEmail = params.profile.user.email.toLowerCase();
+    const ownerDomain = ownerEmail.split('@')[1] ?? '';
     const assistantEmail = (params.profile.assistant.email ?? '').toLowerCase();
+    // v3.2.0 — resource mailboxes (the meeting room) are attendees on the
+    // calendar event but are NOT people; skip them so resolvePerson doesn't
+    // mint a spurious "person" row for the room.
+    const roomEmail = (params.profile.meetings.room_email ?? '').toLowerCase();
     const tz = params.profile.user.timezone;
 
     const whenDt = DateTime.fromISO(params.startIso, { zone: tz });
@@ -69,19 +83,29 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
       if (!email) continue;
       if (email === ownerEmail) continue;
       if (assistantEmail && email === assistantEmail) continue;
+      if (roomEmail && email === roomEmail) continue;
 
-      // Resolve slack_id via people_memory (email → slack_id). External
-      // attendees with no Slack-resolvable email are skipped — they have no
-      // md file in this model.
-      const matches = searchPeopleMemory(email);
-      const person = matches.find(m => (m.email ?? '').toLowerCase() === email);
-      if (!person) {
-        logger.debug('recordBooking: skipping external attendee (no people_memory row)', { email });
-        continue;
+      // v3.2.0 — find-or-create the person (internal OR external). slack_id
+      // (when known) is the strongest handle and dedups against an existing
+      // internal row regardless of stored email/name; pure-email candidates
+      // get a row created on first booking instead of being skipped.
+      const resolved = resolvePerson({ slackId: att.slack_id, email, name: att.name, ownerDomain });
+      if (!resolved) continue;
+      const person = resolved.row;
+
+      // DB-first: append the booking to the structured interaction timeline so
+      // the last-N-interactions recall (used when booking) includes externals.
+      try {
+        appendPersonInteractionById(person.person_id, {
+          type: params.mutation === 'booked' ? 'meeting_booked' : 'coordination',
+          summary: `${verb} "${params.subject}"${locPart} for ${whenLabel}`,
+        });
+      } catch (err) {
+        logger.warn('recordBooking: interaction-log append failed', { email, err: String(err).slice(0, 200) });
       }
 
-      const slug = slugifyName(person.name);
-      const existing = readPersonMemorySync(params.profile, slug) ?? '';
+      // Then the md narrative note, keyed by person_id.
+      const existing = readPersonMemorySync(params.profile, person.person_id, person.name) ?? '';
 
       // Append the new line to "What we've discussed" — DON'T replace.
       // Match capturePass behavior: append latest line, keep history.
@@ -99,14 +123,14 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
       try {
         await writePersonSection({
           profile: params.profile,
-          slug,
+          personId: person.person_id,
           displayName: person.name,
           section: "What we've discussed",
           text: newBody,
         });
       } catch (err) {
         logger.warn('recordBooking: writePersonSection failed for attendee', {
-          email, slug, err: String(err).slice(0, 200),
+          email, personId: person.person_id, err: String(err).slice(0, 200),
         });
       }
     }

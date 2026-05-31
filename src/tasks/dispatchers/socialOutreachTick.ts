@@ -471,10 +471,14 @@ export const dispatchSocialOutreachTick: TaskDispatcher = async (_app, task, pro
     // keeps other people eligible while preventing two proactive social
     // threads with the same person on the same day.
     const db = getDb();
+    // v3.2.0 — proactive social is internal-only (Q4). Externals live in the
+    // same table now but have no slack_id to DM, so the candidate scan must
+    // require a real Slack id (this also excludes the SELF row).
     const rows = db.prepare(`
       SELECT slack_id, name, timezone, engagement_rank, last_initiated_at, last_social_at,
              interaction_log, notes, profile_json, proactive_pending
       FROM people_memory
+      WHERE slack_id IS NOT NULL AND slack_id NOT LIKE 'SELF:%'
     `).all() as CandidateRow[];
 
     const nowUtc = DateTime.utc();

@@ -123,11 +123,6 @@ interface HealthIssue {
   fix_detail?: string;            // human-readable one-liner describing the fix applied
   fix_failed?: boolean;           // set when active-mode tried to fix and an error was thrown
   fix_error?: string;
-  // When true, the issue should NOT be rendered in the brief. Used by the
-  // active-mode fix loop for cases that the owner explicitly handled
-  // (e.g. deleted today's lunch) — the brief shouldn't keep flagging them
-  // as "skipped, want me to ..." every morning.
-  suppressed?: boolean;
 }
 
 export class CalendarHealthSkill implements Skill {
@@ -340,42 +335,26 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
           ...profile.schedule.home_days.days,
         ] as string[];
 
-        // v2.8.7 (bug 1.4) — pre-load recent floating-block deletions so the
-        // detection loop below can skip the `missing_floating_block` issue
-        // entirely on days the owner deliberately cleared. Pre-fix v2.8.5's
-        // check lived only in the auto-book fix path: detection still pushed
-        // the issue, the brief still narrated it ("Thursday has no lunch
-        // block. You deleted it recently…"), owner kept seeing the same
-        // skip-message every morning. Moving the check to detection means
-        // the issue never enters issues[] — no narration, no auto-book
-        // attempt, no daily reminder.
-        // `date` can be undefined when the audit log row didn't capture
-        // event_start_iso (rare — seriesMaster probe failed, alt code path).
-        // Matches Path 2's lenient behavior: subject-only fallback. Filter
-        // below treats undefined date as "matches any day" — conservative
-        // (prefers over-suppression to over-flagging when owner just
-        // deleted something).
-        let recentBlockDeletes: Array<{ blockName: string; date: string | undefined }> = [];
+        // v2.8.7 (bug 1.4) — skip the `missing_floating_block` issue entirely
+        // on days the owner deliberately cleared, so detection never pushes
+        // it (no narration, no auto-book, no daily skip-message). The check
+        // lives in DETECTION, not just the auto-book path.
+        //
+        // v3.1.7 / #119 — suppression source switched from the audit_log
+        // delete-meeting rows to the `calendar_issues` waived set. The audit
+        // approach over-suppressed: a single delete row lacking event_start_iso
+        // matched EVERY day in the window (`d.date === undefined`), so one
+        // dateless "Lunch" delete silenced the whole forward week of lunch
+        // detection for 14 days (the bug). The waived set is date-scoped via
+        // the block's synthetic event_id — only the exact day(s) the owner
+        // approved/deleted are suppressed.
+        let waivedBlockGapIds: Set<string> = new Set();
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { recentAuditEntries } = require('../db/client') as typeof import('../db/client');
-          const rows = recentAuditEntries({ action: 'delete_meeting', windowDays: 14 });
-          for (const row of rows) {
-            if (!row.details) continue;
-            const subject = String(row.details.subject ?? '').toLowerCase();
-            const startIso = typeof row.details.event_start_iso === 'string' ? row.details.event_start_iso : '';
-            if (!subject) continue;  // need at least a subject to match block name
-            for (const block of floatingBlocks) {
-              if (subject.includes(block.name.toLowerCase())) {
-                recentBlockDeletes.push({
-                  blockName: block.name.toLowerCase(),
-                  date: startIso ? startIso.slice(0, 10) : undefined,
-                });
-              }
-            }
-          }
+          const { getWaivedFloatingBlockEventIds } = require('../db/calendarIssues') as typeof import('../db/calendarIssues');
+          waivedBlockGapIds = getWaivedFloatingBlockEventIds(profile.user.slack_user_id);
         } catch (err) {
-          logger.warn('Calendar health: recent-delete preload failed — detection will not suppress', {
+          logger.warn('Calendar health: waived-gap preload failed — detection will not suppress', {
             err: String(err).slice(0, 200),
           });
         }
@@ -424,16 +403,15 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
               );
             });
             if (!hasBlock) {
-              // Skip when the owner deleted THIS block in the last 14 days.
-              // Match by exact day OR by no-date (when the audit row lacked
-              // event_start_iso — conservative fallback: any same-block
-              // delete suppresses). The issue doesn't enter issues[] at
-              // all → no brief narration, no auto-book attempt.
-              const recentlyDeleted = recentBlockDeletes.some(d =>
-                d.blockName === block.name.toLowerCase()
-                && (d.date === dayStr || d.date === undefined),
-              );
-              if (recentlyDeleted) continue;
+              // v3.1.7 / #119 — skip days the owner deliberately waived
+              // (approved the gap via manage_calendar_issue, or deleted the
+              // block on that day). Keyed to the exact day via the synthetic
+              // event_id (floatingBlockSyntheticEventId — single source of
+              // truth), so only that day is suppressed; future same-weekday
+              // blocks still surface. The issue never enters issues[] → no
+              // brief narration, no auto-book attempt.
+              const synth = fb.floatingBlockSyntheticEventId(profile, block.name, dayStr, timezone);
+              if (synth && waivedBlockGapIds.has(synth.eventId)) continue;
               issues.push({
                 type: 'missing_floating_block',
                 date: dayStr,
@@ -814,54 +792,12 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
           for (const issue of issues) {
             try {
               if (issue.type === 'missing_floating_block') {
-                // v2.8.5 — respect recent owner deletions. If the owner
-                // explicitly deleted this block on this day in the last 14
-                // days, don't re-book it. Match by block_name in the
-                // recorded subject + event_start_iso falling on the same
-                // calendar day (issue.date is YYYY-MM-DD in owner's TZ).
-                // The audit_log enrichment in delete_meeting now records
-                // both fields; older rows without event_start_iso are
-                // matched by subject only as a conservative fallback.
-                try {
-                  const { recentAuditEntries } = await import('../db/client');
-                  const recentDeletes = recentAuditEntries({ action: 'delete_meeting', windowDays: 14 });
-                  const blockName = (issue.block_name ?? '').toLowerCase();
-                  const matchesRecentDelete = recentDeletes.some(row => {
-                    if (!row.details) return false;
-                    const subject = String(row.details.subject ?? '').toLowerCase();
-                    if (!blockName || !subject.includes(blockName)) return false;
-                    const startIso = row.details.event_start_iso;
-                    if (typeof startIso !== 'string' || startIso.length === 0) {
-                      // Conservative fallback: subject matches but we don't
-                      // know which day — skip to avoid re-booking anywhere
-                      // recent. Beats re-undoing owner instructions.
-                      return true;
-                    }
-                    return startIso.slice(0, 10) === issue.date;
-                  });
-                  if (matchesRecentDelete) {
-                    // Mark for removal from issues[] — the owner deleted this
-                    // block deliberately; the brief shouldn't narrate it as
-                    // "skipped, want me to squeeze one in?" 15 mornings in a
-                    // row. Pre-fix Path 2 only set fix_detail and kept the
-                    // issue in the array, so the brief rendered it. Filter
-                    // at the end of this function drops issues with
-                    // .suppressed=true.
-                    issue.suppressed = true;
-                    logger.info('Calendar health: active-mode suppressed missing_floating_block — recent owner delete', {
-                      blockName: issue.block_name, date: issue.date,
-                    });
-                    internalActions.push({
-                      tool: 'book_floating_block',
-                      detail: `skipped ${issue.block_name ?? 'floating block'} ${issue.date} — owner deleted recently`,
-                    });
-                    continue;
-                  }
-                } catch (err) {
-                  logger.warn('Calendar health: recent-delete check failed — proceeding with auto-book', {
-                    err: String(err).slice(0, 200),
-                  });
-                }
+                // v3.1.7 / #119 — no suppression check here. Days the owner
+                // waived (approved gap, or deleted the block that day) are
+                // skipped at DETECTION via the waivedBlockGapIds set, so a
+                // suppressed gap never reaches this auto-book loop. The old
+                // audit-log delete check that lived here (and at detection)
+                // is gone — replaced by the date-scoped calendar_issues set.
                 // Reuse book_floating_block so alignment + buffer + day-scope
                 // rules apply consistently. Pass the block_name from the
                 // issue (set by the detector loop above) — the handler now
@@ -1330,19 +1266,9 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
           });
         }
 
-        // Drop suppressed issues before the brief sees them. Active-mode
-        // marks `.suppressed = true` for cases the owner explicitly
-        // handled (e.g. deleted today's lunch — don't keep flagging it as
-        // "skipped, want me to ..." every morning).
-        const beforeSuppress = issues.length;
-        for (let i = issues.length - 1; i >= 0; i--) {
-          if (issues[i].suppressed) issues.splice(i, 1);
-        }
-        if (beforeSuppress !== issues.length) {
-          logger.info('Calendar health: dropped suppressed issues from brief output', {
-            dropped: beforeSuppress - issues.length, remaining: issues.length,
-          });
-        }
+        // v3.1.7 / #119 — the old "drop .suppressed issues" pass is gone.
+        // Days the owner waived are now skipped at DETECTION (never enter
+        // issues[]), so there's nothing to filter out here before the brief.
 
         // v3.0.3 — cluster-based write for un-fixed issues. Maps HealthIssue
         // shape to DetectedIssue, groups via overlap edges into clusters,
@@ -1386,20 +1312,17 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
           // missing_floating_block: synthesize event_id per owner direction
           // ({NNN}-{MMDDYYYY}-{HHMM}). Index from profile.meetings.floating_blocks.
           if (cls === 'missing_floating_block') {
-            const fbs = profile.meetings.floating_blocks ?? [];
-            const idx = Math.max(0, fbs.findIndex(b => b.name === issue.block_name));
-            const block = fbs[idx];
-            const start = block?.preferred_start ?? '00:00';
-            const dt = DateTime.fromISO(issue.date, { zone: timezone });
-            const mmddyyyy = `${String(dt.month).padStart(2,'0')}${String(dt.day).padStart(2,'0')}${dt.year}`;
-            const hhmm = start.replace(':', '');
-            primaryId = `${String(idx + 1).padStart(3, '0')}-${mmddyyyy}-${hhmm}`;
-            peerId = undefined;
-            // event_end_ms = end of the block's window
-            const end = block?.preferred_end ?? '23:59';
-            const endDt = DateTime.fromISO(`${issue.date}T${end}`, { zone: timezone });
-            eventEndMs.set(primaryId, endDt.toMillis());
-            dateFallback.set(primaryId, issue.date);
+            // v3.1.7 / #119 — synthetic id via the single-source helper. Must
+            // match the detection-suppression, approve, and delete→dismiss
+            // paths exactly (they all call the same helper), so a waived gap
+            // suppresses and a re-detected gap re-anchors the same row.
+            const synth = fb.floatingBlockSyntheticEventId(profile, issue.block_name ?? '', issue.date, timezone);
+            if (synth) {
+              primaryId = synth.eventId;
+              peerId = undefined;
+              eventEndMs.set(primaryId, synth.eventEndMs);
+              dateFallback.set(primaryId, issue.date);
+            }
           }
           if (!primaryId) continue;
           const endMs = eventEndMs.get(primaryId) ?? 0;
@@ -2040,19 +1963,17 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
               message: `block_name="${blockName}" not in profile.meetings.floating_blocks. Known: ${fbs.map(b => b.name).join(', ') || '(none configured)'}`,
             };
           }
-          const block = fbs[idx];
-          const dt = DateTime.fromISO(date, { zone: timezone });
-          if (!dt.isValid) {
+          // v3.1.7 / #119 — synthetic id via the single-source helper (same
+          // formula the detector + delete→dismiss paths use, so the terminal
+          // row this writes actually matches what detection later looks up).
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { floatingBlockSyntheticEventId } = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
+          const synth = floatingBlockSyntheticEventId(profile, blockName, date, timezone);
+          if (!synth) {
             return { error: 'bad_date', message: `date="${date}" is not a valid YYYY-MM-DD.` };
           }
-          // Synthetic event_id construction MUST match calendarHealth.ts:1339-
-          // 1347 exactly — that's where the detector mints the id for the
-          // same gap. Drift here = no suppression.
-          const mmddyyyy = `${String(dt.month).padStart(2, '0')}${String(dt.day).padStart(2, '0')}${dt.year}`;
-          const hhmm = (block.preferred_start ?? '00:00').replace(':', '');
-          const syntheticEventId = `${String(idx + 1).padStart(3, '0')}-${mmddyyyy}-${hhmm}`;
-          const endDt = DateTime.fromISO(`${date}T${block.preferred_end ?? '23:59'}`, { zone: timezone });
-          const eventEndMs = endDt.isValid ? endDt.toMillis() : dt.endOf('day').toMillis();
+          const syntheticEventId = synth.eventId;
+          const eventEndMs = synth.eventEndMs;
 
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { getDb } = require('../db') as typeof import('../db');

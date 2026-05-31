@@ -97,6 +97,70 @@ function detectClaimedEmail(opts: {
   return null;
 }
 
+/**
+ * v3.1.7 (Levana L1/L2/L4) — the precision layer. `detectClaimedEmail` is a
+ * cheap structured pre-filter; it CANNOT tell "I'm Ysrael, here's his email"
+ * (impersonation) from "add ysrael@… to the meeting" (a normal EA request) —
+ * and for an assistant that books meetings, the benign reference is the COMMON
+ * case (adding a coworker requires quoting their company email). So a regex hit
+ * is no longer the verdict: this judge decides intent over the multi-turn
+ * window (which we keep — a split "I'm X" / email-next-message attack needs it).
+ *
+ * Fails SAFE: any parse error / ambiguity → 'impersonation' (protect). A benign
+ * verdict is the only thing that lets the original reply through.
+ */
+async function judgeIdentityClaim(opts: {
+  verifiedName: string;
+  verifiedEmail?: string;
+  claimedEmail: string;
+  recentUserMessages: string[];
+}): Promise<'impersonation' | 'benign'> {
+  const prompt = `You are a security classifier for an executive assistant (Maelle).
+
+The person messaging Maelle is verified (by Slack auth) as:
+- Name: ${opts.verifiedName}
+- Email: ${opts.verifiedEmail ?? '(unknown)'}
+
+Their recent message(s) contain a DIFFERENT company email: "${opts.claimedEmail}".
+
+Recent message(s):
+"""
+${opts.recentUserMessages.slice(-5).join('\n---\n')}
+"""
+
+Decide ONE thing: is the sender CLAIMING TO BE the person at "${opts.claimedEmail}" (impersonation / social-engineering), or merely REFERENCING that person (adding them to a meeting, sharing their email, looping them in, mentioning a coworker)?
+
+- "impersonation": a first-person identity claim — "I'm X", "this is X", acting as X, "as X I approve…", asking you to do something on the strength of being X.
+- "benign": a third-party reference — "add X", "X's email is…", "invite X", "loop in X", "schedule with X".
+
+If it is genuinely ambiguous, answer "impersonation" (the safe choice).
+
+Output STRICT JSON only: {"verdict":"impersonation"|"benign"}`;
+
+  try {
+    const start = Date.now();
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 40,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = ((response.content[0] as Anthropic.TextBlock).text ?? '').trim();
+    const m = text.match(/\{[\s\S]*\}/);
+    const verdict = m ? (JSON.parse(m[0]).verdict as string) : '';
+    logger.info('Identity-claim judge ran', {
+      verifiedName: opts.verifiedName, claimedEmail: opts.claimedEmail,
+      verdict: verdict || '(unparsed→impersonation)', elapsedMs: Date.now() - start,
+    });
+    return verdict === 'benign' ? 'benign' : 'impersonation';
+  } catch (err) {
+    // Fail safe — protect.
+    logger.warn('Identity-claim judge failed — defaulting to impersonation (protect)', {
+      err: String(err).slice(0, 200), verifiedName: opts.verifiedName,
+    });
+    return 'impersonation';
+  }
+}
+
 async function composeIdentityRefusalWithHaiku(opts: {
   verifiedName: string;
   verifiedEmail?: string;
@@ -127,6 +191,7 @@ Write a short, warm one-line reply in your voice that:
 - Offers a clean path forward: if they're trying to ask for someone else, that person should reach out directly
 - Doesn't accuse — frames it as a check
 - Sounds like a real human EA, NOT a system message
+- IS WRITTEN IN THE SAME LANGUAGE the colleague used in their recent message(s) above (e.g. if they wrote in Hebrew, reply in Hebrew). Match their language exactly.
 
 Output ONLY the reply text. No explanation, no quotes, no preamble.`;
 
@@ -267,29 +332,48 @@ export async function filterColleagueReply(opts: {
       recentUserMessages: opts.recentUserMessages,
     });
     if (claimedEmail) {
-      logger.warn('⚠ SECURITY — identity-mismatch email detected', {
-        verifiedName: opts.colleagueName,
-        verifiedSenderEmail: opts.verifiedSenderEmail,
-        colleagueSlackId: opts.colleagueSlackId,
-        claimedEmail,
-      });
-      const composed = await composeIdentityRefusalWithHaiku({
+      // v3.1.7 (Levana L1/L2/L4) — a same-domain-email hit is a CANDIDATE, not
+      // a verdict. Judge intent before doing anything destructive: a colleague
+      // referencing a coworker's email (adding them to a meeting) is benign and
+      // its reply must survive untouched; only an actual impersonation claim
+      // gets the protective rewrite. Judge fails safe → impersonation.
+      const verdict = await judgeIdentityClaim({
         verifiedName: opts.colleagueName,
         verifiedEmail: opts.verifiedSenderEmail,
         claimedEmail,
         recentUserMessages: opts.recentUserMessages,
-        originalDraft: opts.reply,
-        assistantName: opts.assistantName,
       });
-      // Haiku-failure fallback: short canned line that still doesn't expose
-      // the mechanism. Better than UNFIXABLE.
-      const firstName = opts.colleagueName.split(/\s+/)[0];
-      const fallback = `Just want to make sure — as far as I can see you're ${firstName}. If this is for someone else, ask them to message me directly.`;
-      return {
-        reply: composed ?? fallback,
-        filtered: true,
-        triggers: ['identity_mismatch_email'],
-      };
+      if (verdict === 'impersonation') {
+        logger.warn('⚠ SECURITY — identity impersonation (judged)', {
+          verifiedName: opts.colleagueName,
+          verifiedSenderEmail: opts.verifiedSenderEmail,
+          colleagueSlackId: opts.colleagueSlackId,
+          claimedEmail,
+        });
+        const composed = await composeIdentityRefusalWithHaiku({
+          verifiedName: opts.colleagueName,
+          verifiedEmail: opts.verifiedSenderEmail,
+          claimedEmail,
+          recentUserMessages: opts.recentUserMessages,
+          originalDraft: opts.reply,
+          assistantName: opts.assistantName,
+        });
+        // Haiku-failure fallback: short canned line that still doesn't expose
+        // the mechanism. Better than UNFIXABLE.
+        const firstName = opts.colleagueName.split(/\s+/)[0];
+        const fallback = `Just want to make sure — as far as I can see you're ${firstName}. If this is for someone else, ask them to message me directly.`;
+        return {
+          reply: composed ?? fallback,
+          filtered: true,
+          triggers: ['identity_mismatch_email'],
+        };
+      }
+      // Benign reference (e.g. "add ysrael@… to the meeting") — do NOT rewrite.
+      // Fall through to the normal leak scan so the original reply still gets
+      // its other protections, but its content is preserved.
+      logger.info('Identity-mismatch email judged benign — original reply preserved', {
+        verifiedName: opts.colleagueName, claimedEmail,
+      });
     }
   }
 

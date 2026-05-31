@@ -4,6 +4,7 @@ import fs from 'fs';
 import { config } from '../config';
 import logger from '../utils/logger';
 import { runV207ConsolidateRequests } from './migrations/v2_0_7_consolidate_requests';
+import { runPersonStoreMigration } from './migrations/v3_2_0_person_store';
 
 let db: Database.Database;
 
@@ -23,6 +24,15 @@ export function getDb(): Database.Database {
       runV207ConsolidateRequests(db, config.DB_PATH);
     } catch (err) {
       logger.error('v2.0.7 consolidate-requests migration threw — continuing', { err: String(err) });
+    }
+    // v3.2.0 — Unified Person Store: rebuild people_memory onto a surrogate
+    // person_id PK with nullable slack_id/email + kind, so externals live in
+    // the same table. Idempotent; backs up + asserts row parity before any
+    // destructive step. Runs AFTER initSchema so all legacy columns exist.
+    try {
+      runPersonStoreMigration(db, config.DB_PATH);
+    } catch (err) {
+      logger.error('v3.2.0 person-store migration threw — continuing', { err: String(err) });
     }
     logger.info('Database initialized', { path: config.DB_PATH });
   }

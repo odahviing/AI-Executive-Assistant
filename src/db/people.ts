@@ -87,7 +87,17 @@ export interface PersonInteraction {
 export type CoreFieldSetBy = 'owner' | 'person' | 'auto';
 
 export interface PersonMemory {
-  slack_id: string;
+  // v3.2.0 — Unified Person Store. `person_id` is the surrogate PK (stable,
+  // never changes). `slack_id` is now a nullable identity attribute — NULL for
+  // pure-email externals (gmail candidates, customers). `email` is the other
+  // identity attribute. `kind` distinguishes internal (has slack / company
+  // domain) from external from the synthetic SELF row. Resolve a person by any
+  // handle via `resolvePerson` — never assume slack_id is present.
+  person_id: string;
+  kind: 'internal' | 'external' | 'self';
+  org?: string;                 // company — mostly for externals
+  source?: string;              // row origin: slack | calendar | manual
+  slack_id: string | null;
   name: string;
   name_he?: string;             // Hebrew spelling, used verbatim when writing in Hebrew
   email?: string;
@@ -232,14 +242,25 @@ export function setCoreFieldWithProvenance(
   value: string,
   by: CoreFieldSetBy,
 ): boolean {
+  const pid = personIdForSlackId(slackId);
+  return pid ? setCoreFieldWithProvenanceById(pid, field, value, by) : false;
+}
+
+/** v3.2.0 — person_id-keyed worker (works for externals too). */
+export function setCoreFieldWithProvenanceById(
+  personId: string,
+  field: 'gender' | 'timezone' | 'state',
+  value: string,
+  by: CoreFieldSetBy,
+): boolean {
   if (!value || !value.trim()) return false;
   const db = getDb();
   const setByCol = `${field}_set_by` as const;
-  const row = db.prepare(`SELECT ${field} as value, ${setByCol} as setBy FROM people_memory WHERE slack_id = ?`).get(slackId) as
+  const row = db.prepare(`SELECT ${field} as value, ${setByCol} as setBy FROM people_memory WHERE person_id = ?`).get(personId) as
     | { value: string | null; setBy: CoreFieldSetBy | null }
     | undefined;
 
-  // No row yet — caller must upsert first; we no-op rather than create.
+  // No row yet — caller must create first; we no-op rather than create.
   if (!row) return false;
 
   const currentSetBy = row.setBy ?? null;
@@ -253,24 +274,38 @@ export function setCoreFieldWithProvenance(
   if (currentValue === value.trim() && currentSetBy === by) return false;
 
   db.prepare(
-    `UPDATE people_memory SET ${field} = ?, ${setByCol} = ?, updated_at = datetime('now') WHERE slack_id = ?`,
-  ).run(value.trim(), by, slackId);
+    `UPDATE people_memory SET ${field} = ?, ${setByCol} = ?, updated_at = datetime('now') WHERE person_id = ?`,
+  ).run(value.trim(), by, personId);
 
   // Side effect: setting gender via this path also flips gender_confirmed for
   // back-compat readers (gender_confirmed=1 means owner OR person, not auto).
   if (field === 'gender' && by !== 'auto') {
-    db.prepare(`UPDATE people_memory SET gender_confirmed = 1 WHERE slack_id = ?`).run(slackId);
+    db.prepare(`UPDATE people_memory SET gender_confirmed = 1 WHERE person_id = ?`).run(personId);
   }
 
   return true;
 }
 
+/** v3.2.0 — resolve a slack_id to its surrogate person_id (null if no row). */
+export function personIdForSlackId(slackId: string): string | null {
+  const db = getDb();
+  const row = db.prepare('SELECT person_id FROM people_memory WHERE slack_id = ?').get(slackId) as
+    | { person_id: string } | undefined;
+  return row?.person_id ?? null;
+}
+
 /** Set or update the Hebrew spelling of a contact's name. */
 export function setPersonNameHe(slackId: string, nameHe: string): void {
+  const pid = personIdForSlackId(slackId);
+  if (pid) setPersonNameHeById(pid, nameHe);
+}
+
+/** v3.2.0 — person_id-keyed worker. */
+export function setPersonNameHeById(personId: string, nameHe: string): void {
   const db = getDb();
   db.prepare(`
-    UPDATE people_memory SET name_he = ?, updated_at = datetime('now') WHERE slack_id = ?
-  `).run(nameHe, slackId);
+    UPDATE people_memory SET name_he = ?, updated_at = datetime('now') WHERE person_id = ?
+  `).run(nameHe, personId);
 }
 
 /**
@@ -299,9 +334,14 @@ export function upsertPersonMemory(params: {
   // NOTE: gender is only written when explicitly supplied AND not 'unknown'.
   // Respect gender_confirmed: never overwrite a confirmed gender here. A
   // confirmed update must go through confirmPersonGender().
+  // v3.2.0 — person_id is the PK now. For the internal upsert path the id is
+  // derived deterministically from slack_id (matches the migration's mapping),
+  // so a repeat upsert of the same colleague always lands on the same row.
+  const personId = `p_${params.slackId.replace(/[^A-Za-z0-9]/g, '_')}`;
+  const selfKind = params.slackId.startsWith('SELF:') ? 'self' : 'internal';
   db.prepare(`
-    INSERT INTO people_memory (slack_id, name, email, timezone, timezone_set_by, gender, last_seen)
-    VALUES (@slack_id, @name, @email, @timezone, @tz_set_by, @gender, datetime('now'))
+    INSERT INTO people_memory (person_id, slack_id, kind, source, name, email, timezone, timezone_set_by, gender, last_seen)
+    VALUES (@person_id, @slack_id, @kind, 'slack', @name, @email, @timezone, @tz_set_by, @gender, datetime('now'))
     ON CONFLICT(slack_id) DO UPDATE SET
       name             = @name,
       email            = COALESCE(@email, email),
@@ -319,7 +359,9 @@ export function upsertPersonMemory(params: {
       last_seen        = datetime('now'),
       updated_at       = datetime('now')
   `).run({
+    person_id: personId,
     slack_id:  params.slackId,
+    kind:      selfKind,
     name:      params.name,
     email:     params.email    ?? null,
     timezone:  params.timezone ?? null,
@@ -344,12 +386,18 @@ export function upsertPersonMemory(params: {
  * a human confirmation.
  */
 export function updatePersonGender(slackId: string, gender: PersonGender): void {
+  const pid = personIdForSlackId(slackId);
+  if (pid) updatePersonGenderById(pid, gender);
+}
+
+/** v3.2.0 — person_id-keyed worker. */
+export function updatePersonGenderById(personId: string, gender: PersonGender): void {
   const db = getDb();
   db.prepare(`
     UPDATE people_memory
        SET gender = ?, updated_at = datetime('now')
-     WHERE slack_id = ? AND gender_confirmed = 0
-  `).run(gender, slackId);
+     WHERE person_id = ? AND gender_confirmed = 0
+  `).run(gender, personId);
 }
 
 /**
@@ -359,12 +407,18 @@ export function updatePersonGender(slackId: string, gender: PersonGender): void 
  * or when the owner confirms on their behalf.
  */
 export function confirmPersonGender(slackId: string, gender: PersonGender): void {
+  const pid = personIdForSlackId(slackId);
+  if (pid) confirmPersonGenderById(pid, gender);
+}
+
+/** v3.2.0 — person_id-keyed worker. */
+export function confirmPersonGenderById(personId: string, gender: PersonGender): void {
   const db = getDb();
   db.prepare(`
     UPDATE people_memory
        SET gender = ?, gender_confirmed = 1, updated_at = datetime('now')
-     WHERE slack_id = ?
-  `).run(gender, slackId);
+     WHERE person_id = ?
+  `).run(gender, personId);
 }
 
 /**
@@ -372,8 +426,14 @@ export function confirmPersonGender(slackId: string, gender: PersonGender): void
  * the existing profile, leaving unspecified fields untouched.
  */
 export function updatePersonProfile(slackId: string, updates: Partial<PersonProfile>): void {
+  const pid = personIdForSlackId(slackId);
+  if (pid) updatePersonProfileById(pid, updates);
+}
+
+/** v3.2.0 — person_id-keyed worker. */
+export function updatePersonProfileById(personId: string, updates: Partial<PersonProfile>): void {
   const db = getDb();
-  const row = db.prepare('SELECT profile_json FROM people_memory WHERE slack_id = ?').get(slackId) as any;
+  const row = db.prepare('SELECT profile_json FROM people_memory WHERE person_id = ?').get(personId) as any;
   if (!row) return;
 
   const existing: PersonProfile = (() => {
@@ -387,8 +447,8 @@ export function updatePersonProfile(slackId: string, updates: Partial<PersonProf
   };
 
   db.prepare(`
-    UPDATE people_memory SET profile_json = ?, updated_at = datetime('now') WHERE slack_id = ?
-  `).run(JSON.stringify(merged), slackId);
+    UPDATE people_memory SET profile_json = ?, updated_at = datetime('now') WHERE person_id = ?
+  `).run(JSON.stringify(merged), personId);
 }
 
 /**
@@ -398,17 +458,26 @@ export function updatePersonProfile(slackId: string, updates: Partial<PersonProf
  * Keeps last 50 notes.
  */
 export function appendPersonNote(slackId: string, note: string): void {
-  // RMW guarded by BEGIN IMMEDIATE so concurrent writers serialize. Pre-fix
-  // an in-turn `note_about_self` from Sonnet could interleave with a
-  // background capture-pass write on the same row: A reads → B reads →
-  // A writes → B's write overwrites A. Lost note. With the transaction,
-  // the second writer either waits for the first commit (then sees the
-  // updated row on its own SELECT inside the txn) or fails with SQLITE_BUSY
-  // (which better-sqlite3 surfaces as an exception — caller's existing
-  // try/catch handles non-fatal logging).
+  const pid = personIdForSlackId(slackId);
+  if (pid) appendPersonNoteById(pid, note);
+}
+
+/**
+ * v3.2.0 — person_id-keyed worker (works for externals).
+ *
+ * RMW guarded by BEGIN IMMEDIATE so concurrent writers serialize. Pre-fix
+ * an in-turn `note_about_self` from Sonnet could interleave with a
+ * background capture-pass write on the same row: A reads → B reads →
+ * A writes → B's write overwrites A. Lost note. With the transaction,
+ * the second writer either waits for the first commit (then sees the
+ * updated row on its own SELECT inside the txn) or fails with SQLITE_BUSY
+ * (which better-sqlite3 surfaces as an exception — caller's existing
+ * try/catch handles non-fatal logging).
+ */
+export function appendPersonNoteById(personId: string, note: string): void {
   const db = getDb();
   const txn = db.transaction((id: string, newNote: string) => {
-    const row = db.prepare('SELECT notes FROM people_memory WHERE slack_id = ?').get(id) as
+    const row = db.prepare('SELECT notes FROM people_memory WHERE person_id = ?').get(id) as
       | { notes: string }
       | undefined;
     if (!row) return;
@@ -419,10 +488,10 @@ export function appendPersonNote(slackId: string, note: string): void {
     db.prepare(`
       UPDATE people_memory
       SET notes = ?, updated_at = datetime('now')
-      WHERE slack_id = ?
+      WHERE person_id = ?
     `).run(JSON.stringify(trimmed), id);
   });
-  txn.immediate(slackId, note);
+  txn.immediate(personId, note);
 }
 
 /**
@@ -437,9 +506,29 @@ export function appendPersonNote(slackId: string, note: string): void {
  * without the transaction, one entry is silently lost.
  */
 export function appendPersonInteraction(slackId: string, interaction: Omit<PersonInteraction, 'date'>): void {
+  // v3.2.0 — resolve to the surrogate person_id, then delegate. Keeps the
+  // slack_id-keyed call sites (assistant log_interaction, capturePass, social)
+  // unchanged while the storage is person_id-centric.
+  const db = getDb();
+  const row = db.prepare('SELECT person_id FROM people_memory WHERE slack_id = ?').get(slackId) as
+    | { person_id: string } | undefined;
+  if (!row) return;
+  appendPersonInteractionById(row.person_id, interaction);
+}
+
+/**
+ * v3.2.0 — append an interaction keyed by the surrogate person_id. This is the
+ * path that works for EXTERNAL people (no slack_id) — e.g. recordBooking now
+ * logs a booking against a pure-email candidate's timeline so the next time the
+ * owner books them, the last-N-interactions recall has the history.
+ *
+ * RMW guarded by BEGIN IMMEDIATE so concurrent writers serialize (same race
+ * shape as appendPersonNote). Keeps the last 200 interactions.
+ */
+export function appendPersonInteractionById(personId: string, interaction: Omit<PersonInteraction, 'date'>): void {
   const db = getDb();
   const txn = db.transaction((id: string, entry: Omit<PersonInteraction, 'date'>) => {
-    const row = db.prepare('SELECT interaction_log FROM people_memory WHERE slack_id = ?').get(id) as
+    const row = db.prepare('SELECT interaction_log FROM people_memory WHERE person_id = ?').get(id) as
       | { interaction_log: string }
       | undefined;
     if (!row) return;
@@ -454,10 +543,10 @@ export function appendPersonInteraction(slackId: string, interaction: Omit<Perso
     db.prepare(`
       UPDATE people_memory
       SET interaction_log = ?, updated_at = datetime('now')
-      WHERE slack_id = ?
+      WHERE person_id = ?
     `).run(JSON.stringify(trimmed), id);
   });
-  txn.immediate(slackId, interaction);
+  txn.immediate(personId, interaction);
 }
 
 /**
@@ -508,13 +597,159 @@ export function getPersonMemory(slackId: string): PersonMemory | null {
 export function searchPeopleMemory(query: string): PersonMemory[] {
   const db = getDb();
   const q = `%${query.toLowerCase()}%`;
+  // v3.2.0 — exclude the SELF row via `kind` (not the slack_id prefix): an
+  // external person has slack_id NULL, and `NULL NOT LIKE 'SELF:%'` is NULL
+  // (falsy) in SQL, which would silently drop every external from name search.
   return db.prepare(`
     SELECT * FROM people_memory
     WHERE (lower(name) LIKE ? OR lower(email) LIKE ?)
-      AND slack_id NOT LIKE 'SELF:%'
+      AND kind != 'self'
     ORDER BY last_seen DESC
     LIMIT 10
   `).all(q, q) as PersonMemory[];
+}
+
+/** v3.2.0 — fresh surrogate id for a runtime-created person (no slack_id to
+ *  derive from — e.g. a pure-email external first seen at booking time). */
+export function newPersonId(): string {
+  return `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** v3.2.0 — fetch by surrogate PK. */
+export function getPersonById(personId: string): PersonMemory | null {
+  const db = getDb();
+  return (db.prepare('SELECT * FROM people_memory WHERE person_id = ?').get(personId) as PersonMemory | null) ?? null;
+}
+
+/** v3.2.0 — fetch by email (logical key). Prefers a Slack-bearing (internal)
+ *  row when duplicates exist — Slack wins per the merge rule. Never returns
+ *  the SELF row. */
+export function getPersonByEmail(email: string): PersonMemory | null {
+  const e = (email ?? '').trim();
+  if (!e) return null;
+  const db = getDb();
+  return (db.prepare(`
+    SELECT * FROM people_memory
+    WHERE lower(email) = lower(?) AND kind != 'self'
+    ORDER BY (slack_id IS NOT NULL) DESC, last_seen DESC
+    LIMIT 1
+  `).get(e) as PersonMemory | null) ?? null;
+}
+
+export interface ResolvePersonInput {
+  slackId?: string | null;
+  email?: string | null;
+  name?: string | null;
+  /** Owner's company domain (e.g. "reflectiz.com") — classifies a fresh
+   *  email-only person as internal vs external. */
+  ownerDomain?: string;
+  /** Force the kind on create (overrides domain inference). */
+  kindHint?: 'internal' | 'external';
+}
+
+export interface ResolvedPerson {
+  person_id: string;
+  created: boolean;
+  row: PersonMemory;
+}
+
+/**
+ * v3.2.0 — THE person chokepoint. Find-or-create + light merge across
+ * {slack_id → email → fuzzy name}, returning a stable person_id. Every caller
+ * that has a slack_id / email / name and needs "who is this person" routes
+ * through here instead of a bare slack_id lookup — that's what lets a
+ * pure-email external (booked once, no Slack) be recognized next time.
+ *
+ * Merge-by-attach (Slack wins, per owner Q5): if we match a person by email
+ * and now also learn their slack_id, we attach the slack_id to that row and
+ * promote it to internal. The rarer two-rows-one-human case (a separate row
+ * already owns that slack_id) is left alone — realistically a company-domain
+ * person always arrives via Slack first, so it almost never happens.
+ *
+ * Returns null only when given no usable handle at all.
+ */
+export function resolvePerson(input: ResolvePersonInput): ResolvedPerson | null {
+  const db = getDb();
+  const slackId = (input.slackId ?? '').trim() || undefined;
+  const email = (input.email ?? '').trim().toLowerCase() || undefined;
+  const name = (input.name ?? '').trim() || undefined;
+
+  // 1. slack_id — the strongest handle.
+  if (slackId) {
+    const row = getPersonMemory(slackId);
+    if (row) {
+      if (email && !row.email) {
+        db.prepare(`UPDATE people_memory SET email = ?, updated_at = datetime('now') WHERE person_id = ?`)
+          .run(email, row.person_id);
+        row.email = email;
+      }
+      return { person_id: row.person_id, created: false, row };
+    }
+  }
+
+  // 2. email — logical key.
+  if (email) {
+    const row = getPersonByEmail(email);
+    if (row) {
+      if (slackId && !row.slack_id) {
+        // Attach the newly-known slack_id; promote to internal (Slack wins).
+        try {
+          db.prepare(`UPDATE people_memory SET slack_id = ?, kind = 'internal', source = 'slack', updated_at = datetime('now') WHERE person_id = ?`)
+            .run(slackId, row.person_id);
+          row.slack_id = slackId;
+          row.kind = 'internal';
+        } catch { /* slackId already owned by another row — leave as-is */ }
+      }
+      return { person_id: row.person_id, created: false, row };
+    }
+  }
+
+  // 3. fuzzy name — only trust an unambiguous match.
+  if (name) {
+    const matches = searchPeopleMemory(name);
+    const exact = matches.filter(m => m.name.toLowerCase() === name.toLowerCase());
+    const pick = exact.length === 1 ? exact[0] : (matches.length === 1 ? matches[0] : null);
+    if (pick) {
+      // Enrich the matched row with any new handle.
+      if (slackId && !pick.slack_id) {
+        try {
+          db.prepare(`UPDATE people_memory SET slack_id = ?, kind = 'internal', source = 'slack', updated_at = datetime('now') WHERE person_id = ?`).run(slackId, pick.person_id);
+          pick.slack_id = slackId; pick.kind = 'internal';
+        } catch { /* taken */ }
+      }
+      if (email && !pick.email) {
+        db.prepare(`UPDATE people_memory SET email = ?, updated_at = datetime('now') WHERE person_id = ?`).run(email, pick.person_id);
+        pick.email = email;
+      }
+      return { person_id: pick.person_id, created: false, row: pick };
+    }
+  }
+
+  // 4. create — requires at least one handle.
+  if (!slackId && !email && !name) return null;
+  const personId = slackId ? `p_${slackId.replace(/[^A-Za-z0-9]/g, '_')}` : newPersonId();
+  const ownerDomain = (input.ownerDomain ?? '').trim().toLowerCase();
+  const kind: 'internal' | 'external' =
+    input.kindHint
+    ?? (slackId ? 'internal'
+      : (email && ownerDomain && email.endsWith('@' + ownerDomain)) ? 'internal'
+      : 'external');
+  const source = slackId ? 'slack' : (email ? 'calendar' : 'manual');
+  const displayName = name ?? (email ? email.split('@')[0] : (slackId ?? 'Unknown'));
+  try {
+    db.prepare(`
+      INSERT INTO people_memory (person_id, slack_id, email, kind, source, name, gender, last_seen)
+      VALUES (?, ?, ?, ?, ?, ?, 'unknown', datetime('now'))
+    `).run(personId, slackId ?? null, email ?? null, kind, source, displayName);
+  } catch {
+    // Lost a race / unique collision — re-resolve by the strongest handle.
+    const again = slackId ? getPersonMemory(slackId) : (email ? getPersonByEmail(email) : null);
+    if (again) return { person_id: again.person_id, created: false, row: again };
+    return null;
+  }
+  const row = getPersonById(personId);
+  if (!row) return null;
+  return { person_id: personId, created: true, row };
 }
 
 /**
@@ -675,7 +910,7 @@ export function formatPeopleMemoryForPrompt(
       } catch { return []; }
     })();
 
-    const isFocus = focusSlackIds?.has(p.slack_id) ?? false;
+    const isFocus = p.slack_id ? (focusSlackIds?.has(p.slack_id) ?? false) : false;
     if (isFocus) {
       // FULL render — person is in the CURRENT chat (MPIM member / explicit
       // focus). Worth the tokens: Maelle is actively talking with them now.

@@ -68,6 +68,49 @@ export function getFloatingBlocks(profile: UserProfile): FloatingBlock[] {
 }
 
 /**
+ * Synthetic event_id for a MISSING floating-block gap.
+ *
+ * A gap (the block isn't on the calendar that day) has no real Graph event,
+ * so `calendar_issues` rows of class `missing_floating_block` use a
+ * deterministic surrogate id: `{NNN}-{MMDDYYYY}-{HHMM}` where NNN is the
+ * 1-based index of the block in `meetings.floating_blocks` and HHMM is its
+ * preferred_start (owner-local).
+ *
+ * SINGLE SOURCE OF TRUTH (v3.1.7 / #119). Four call sites derive this id —
+ * the detector (mints it when writing the cluster row), the preemptive-approve
+ * path, the delete→dismiss path, and the detection-time suppression check. Any
+ * divergence in the formula = no suppression match = the gap re-surfaces or
+ * re-books, so it MUST live in one place. (Previously duplicated inline in
+ * calendarHealth.ts at the detector + approve sites with a "drift = no
+ * suppression" warning comment.)
+ *
+ * Index resolution mirrors the detector: an unconfigured/auto-promoted block
+ * (e.g. lunch not listed explicitly) falls back to index 0 rather than
+ * failing, so the id still matches what detection mints. Returns null only
+ * when the date is unparseable.
+ */
+export function floatingBlockSyntheticEventId(
+  profile: UserProfile,
+  blockName: string,
+  dateIso: string,            // YYYY-MM-DD (owner-local)
+  timezone: string,
+): { eventId: string; eventEndMs: number } | null {
+  const fbs = (profile.meetings.floating_blocks ?? []) as FloatingBlock[];
+  const idx = Math.max(0, fbs.findIndex(b => b.name === blockName));
+  const block = fbs[idx];
+  const start = block?.preferred_start ?? '00:00';
+  const end = block?.preferred_end ?? '23:59';
+  const dt = DateTime.fromISO(dateIso, { zone: timezone });
+  if (!dt.isValid) return null;
+  const mmddyyyy = `${String(dt.month).padStart(2, '0')}${String(dt.day).padStart(2, '0')}${dt.year}`;
+  const hhmm = start.replace(':', '');
+  const eventId = `${String(idx + 1).padStart(3, '0')}-${mmddyyyy}-${hhmm}`;
+  const endDt = DateTime.fromISO(`${dateIso}T${end}`, { zone: timezone });
+  const eventEndMs = endDt.isValid ? endDt.toMillis() : dt.endOf('day').toMillis();
+  return { eventId, eventEndMs };
+}
+
+/**
  * Does this block apply on the given day-of-week?
  *
  * - `block.days` explicitly set → day must be in the list.
