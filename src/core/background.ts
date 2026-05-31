@@ -235,6 +235,13 @@ export async function initProfile(
   // insert a task on the next 5-min tick; the runner's lateness policy
   // decides run-or-skip. No startup special-case needed.
 
+  // v3.1.7 — the auto calendar backfill of external people was REMOVED: it
+  // swept the entire external calendar (customer demos, partner calls, a
+  // personal event, the Gong bot) instead of just deliberate recent bookings,
+  // and flooded the people catalog. External people are now persisted ONLY by
+  // the live recordBooking path when the owner actually books a meeting (with a
+  // non-human attendee filter); catch-up is a pick-list the owner chooses from.
+
   // Catch up on any messages sent while the bot was offline
   await catchUpMissedMessages(app, profile, dmChannel);
 }

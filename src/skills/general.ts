@@ -2,7 +2,10 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from './types';
 import type { UserProfile } from '../config/userProfile';
 import { config } from '../config';
+import { getAnthropicClient } from '../llm/client';
 import logger from '../utils/logger';
+
+const RESEARCH_PLAN_MODEL = 'claude-haiku-4-5-20251001';
 
 // ── External web-search response shapes ──────────────────────────────────────
 // Minimal-surface interfaces — only the fields we actually read. Provider
@@ -49,15 +52,27 @@ interface TavilyExtractResponse {
 }
 
 /**
- * Search Skill
- * Quick web lookups — weather, news, exchange rates, holidays, current events.
- * Available to both owner and colleagues.
- * For deep multi-step research and content creation, see the Research skill (owner-only).
+ * Search skill (v3.1.7 — rebuilt as the one home for all outbound research).
+ *
+ * Three tools, two altitudes:
+ *   - web_search / web_extract — primitives for a quick one-off fact or to read
+ *     a specific URL.
+ *   - research — the GROUNDED loop for current-events + content creation
+ *     (LinkedIn posts, articles, summaries, suggestions). It plans focused
+ *     searches, fetches + reads REAL sources, and returns them so whatever the
+ *     model writes is grounded and citable. This replaces the old blind
+ *     researchPreCheck that searched the task text and let content be written
+ *     from training memory with no source.
+ *
+ * Framework: PLAN (turn the goal into focused queries) → GATHER (search,
+ * recency-bounded) → READ (extract the top sources) → return {sources,
+ * readings} → the model SYNTHESIZES + CITES from what came back. Sources travel
+ * with the answer, so "what's your link?" is always answerable.
  */
 export class SearchSkill implements Skill {
   id = 'search' as const;
   name = 'Search';
-  description = 'Real-time web lookups — weather, news, exchange rates, holidays, current events.';
+  description = 'Web lookups + grounded research — quick facts, plus sourced research for current events and content (articles, summaries, suggestions).';
 
   getTools(_profile: UserProfile): Anthropic.Tool[] {
     return [
@@ -120,6 +135,30 @@ Note: Some pages may block extraction (login-required, bot-protected). If extrac
           required: ['url'],
         },
       },
+      {
+        name: 'web_research',
+        description: `Grounded, sourced web research. Use this — NOT web_search — whenever you'll WRITE or PROPOSE something based on current events, or the owner asks you to research / look into / explore a topic to produce content (a LinkedIn post, article, summary, suggestion, briefing).
+
+What it does in one call: plans focused searches from your goal, fetches REAL sources, reads the top articles, and returns the sources + their content.
+
+Then YOU: write GROUNDED in what it returns and CITE the source URLs (include the link in your output). NEVER state a current-events fact — a statistic, "this week", a named incident/campaign, a company event — that isn't in the returned sources. If research comes back empty, tell the owner you couldn't find a source instead of writing it from memory. The whole point is that every claim has a link behind it.
+
+For a quick one-off fact (weather, exchange rate, is today a holiday), use web_search instead — web_research is for when sourcing + grounding matter.`,
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            goal: {
+              type: 'string',
+              description: 'What you actually need to find out, in plain terms — e.g. "this week\'s notable web supply-chain / third-party-script security incidents" or "recent funding + product news for Acme Corp". Describe the TOPIC, not your task ("write a post about…").',
+            },
+            recency_days: {
+              type: 'number',
+              description: 'Optional. For current-events goals, restrict to the last N days (7 = this week, 14 = recent, 30 = this month). Omit for evergreen topics.',
+            },
+          },
+          required: ['goal'],
+        },
+      },
     ];
   }
 
@@ -128,6 +167,13 @@ Note: Some pages may block extraction (login-required, bot-protected). If extrac
     args: Record<string, unknown>,
     _context: SkillContext,
   ): Promise<unknown | null> {
+    if (toolName === 'web_research') {
+      const goal = (args.goal as string | undefined)?.trim();
+      if (!goal) return { error: 'empty_goal' };
+      const recency = typeof args.recency_days === 'number' ? args.recency_days : undefined;
+      return await runResearch(goal, recency);
+    }
+
     if (toolName === 'web_extract') {
       const url = args.url as string;
       logger.info('Web extract', { url });
@@ -168,10 +214,9 @@ Note: Some pages may block extraction (login-required, bot-protected). If extrac
       ? 'Always use metric units (°C, km, kg, etc.) — never Fahrenheit or imperial.'
       : 'Always use imperial units (°F, miles, lbs, etc.) — never Celsius or metric.';
     return `
-SEARCH
-You can look up any real-time information using web_search: weather, news, exchange rates, holidays, current events, company info, recent facts.
-
-For stable knowledge (history, geography, general concepts), answer directly — no search needed.
+SEARCH & RESEARCH
+- web_search — a quick one-off fact (weather, exchange rate, is today a holiday, a single current detail). Answer stable knowledge (history, geography, concepts) directly, no search.
+- web_research(goal) — use this whenever you'll WRITE or PROPOSE from current events (a LinkedIn post, article, summary, suggestion, briefing) or the owner asks you to research / look into / explore a topic. It returns real SOURCES + their content. Write GROUNDED in what it returns and CITE the links in your output. NEVER state a current-events fact — a stat, "this week", a named incident/campaign — that isn't in the returned sources; if it finds nothing, say you couldn't find a source rather than writing from memory. Combine with the knowledge base for our voice/positioning when drafting.
 
 ${units}
 
@@ -180,6 +225,102 @@ Keep answers short and conversational — this is office chat, not a report.
 Never use bullet points or headers for simple factual answers.
 `.trim();
   }
+}
+
+// ── Grounded research loop (v3.1.7) ─────────────────────────────────────────
+//
+// PLAN → GATHER → READ → return {sources, readings}. One call returns real,
+// citable material so whatever the model writes next is grounded. Self-
+// contained; fails soft (a step that throws degrades, never crashes the turn).
+
+interface ResearchSource { title?: string; url: string; snippet?: string; published?: string }
+
+/** PLAN — turn a fuzzy goal into 2–4 focused, searchable queries (+ recency).
+ *  Haiku; falls back to the raw goal on any failure so research still runs. */
+async function planResearchQueries(goal: string): Promise<{ queries: string[]; recencyDays?: number }> {
+  const prompt = `You plan web searches for an executive assistant's research tool.
+
+GOAL: "${goal}"
+
+Output STRICT JSON only: {"queries": ["...","..."], "recency_days": <number or null>}
+- 2-4 focused, specific search queries that will surface REAL primary sources (news articles, reports). Extract the actual searchable TOPIC — do NOT echo task framing like "write a post about" or "2-3 angles".
+- recency_days: if the goal is about recent/current events ("this week", "latest", breaking, news), set 7-30; otherwise null (evergreen).`;
+  try {
+    const res = await getAnthropicClient().messages.create({
+      model: RESEARCH_PLAN_MODEL,
+      max_tokens: 200,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = ((res.content[0] as Anthropic.TextBlock).text ?? '').trim();
+    const m = text.match(/\{[\s\S]*\}/);
+    if (m) {
+      const parsed = JSON.parse(m[0]) as { queries?: unknown; recency_days?: unknown };
+      const queries = Array.isArray(parsed.queries)
+        ? parsed.queries.filter((q): q is string => typeof q === 'string' && q.trim().length > 0).slice(0, 4)
+        : [];
+      const recencyDays = typeof parsed.recency_days === 'number' ? parsed.recency_days : undefined;
+      if (queries.length > 0) return { queries, recencyDays };
+    }
+  } catch (err) {
+    logger.warn('research — query planning failed, using raw goal', { err: String(err).slice(0, 160) });
+  }
+  return { queries: [goal] };
+}
+
+/** The grounded research bundle the model writes from. */
+export async function runResearch(goal: string, recencyOverride?: number): Promise<object> {
+  logger.info('research — start', { goal: goal.slice(0, 120), recencyOverride });
+  const plan = await planResearchQueries(goal);
+  const recency = recencyOverride ?? plan.recencyDays;
+
+  // GATHER — search each planned query, dedupe sources by URL.
+  const sources: ResearchSource[] = [];
+  const seen = new Set<string>();
+  for (const q of plan.queries) {
+    try {
+      const r = await tavilySearch(q, 'advanced', recency) as {
+        results?: Array<{ title?: string; url?: string; content?: string; published_date?: string }>;
+      };
+      for (const item of r.results ?? []) {
+        const url = item.url;
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        sources.push({
+          title: item.title,
+          url,
+          snippet: (item.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 300),
+          published: item.published_date,
+        });
+      }
+    } catch (err) {
+      logger.warn('research — a search query failed, continuing', { q, err: String(err).slice(0, 120) });
+    }
+  }
+
+  // READ — pull the full text of the top sources so facts come from the
+  // article, not a snippet (and definitely not memory).
+  const readings: Array<{ url: string; title?: string; content: string }> = [];
+  for (const s of sources.slice(0, 3)) {
+    try {
+      const ext = await tavilyExtract(s.url) as { content?: string };
+      if (ext.content && ext.content.trim().length > 0) {
+        readings.push({ url: s.url, title: s.title, content: ext.content.slice(0, 4000) });
+      }
+    } catch { /* page blocked extraction — snippet still carries it */ }
+  }
+
+  logger.info('research — done', { goal: goal.slice(0, 80), queries: plan.queries.length, sources: sources.length, readings: readings.length });
+
+  return {
+    goal,
+    queries_used: plan.queries,
+    recency_days: recency ?? null,
+    sources: sources.slice(0, 8),
+    readings,
+    note: sources.length === 0
+      ? 'NO web sources found. Do NOT fabricate facts — tell the owner you could not find a source and offer to try again.'
+      : 'Write GROUNDED in these sources and CITE the URLs in your output. Do not assert any current-events fact not present here.',
+  };
 }
 
 // ── Search implementations ────────────────────────────────────────────────────

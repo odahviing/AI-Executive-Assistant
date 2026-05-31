@@ -2593,6 +2593,8 @@ export class SchedulingSkill {
                 .filter((a): a is typeof a & { email: string } => typeof a.email === 'string' && a.email.length > 0)
                 .map(a => ({ email: a.email, name: a.name, slack_id: a.slack_id })),
               mutation: 'booked',
+              // v3.1.7 — only the owner asking to book persists new externals.
+              ownerInitiated: context.senderRole === 'owner',
             });
           } catch (err) {
             logger.warn('recordBookingInPersonMemory invocation failed (colleague-path) — continuing', {

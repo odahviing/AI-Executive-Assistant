@@ -1,6 +1,6 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.1.7** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.1.8** — check `package.json` if unsure; it is the source of truth.
 
 ## ✅ SHIPPED v3.1.7 — the Unified Person Store (`.claude/PERSON_STORE_PROJECT.md` = the build spec)
 

@@ -468,6 +468,21 @@ export async function bookCoordination(
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { recordBookingInPersonMemory } = require('../../../memory/recordBooking') as
             typeof import('../../../memory/recordBooking');
+          // v3.1.7 — owner-initiated coord persists new externals; a coord a
+          // colleague started (a meeting booked WITH the owner) does not. Read
+          // the coord request's initiated_by_role; default to owner-initiated
+          // (coordination is owner-driven by default) if it can't be resolved.
+          let coordOwnerInitiated = true;
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { getRequest } = require('../../../db/requests') as typeof import('../../../db/requests');
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { getDb } = require('../../../db') as typeof import('../../../db');
+            const linkRow = getDb().prepare(`SELECT request_id FROM coord_jobs WHERE id = ?`).get(job.id) as
+              { request_id: string | null } | undefined;
+            const req = linkRow?.request_id ? getRequest(linkRow.request_id) : null;
+            if (req && req.initiated_by_role && req.initiated_by_role !== 'owner') coordOwnerInitiated = false;
+          } catch { /* default true */ }
           void recordBookingInPersonMemory({
             profile,
             subject: job.subject,
@@ -481,6 +496,7 @@ export async function bookCoordination(
               .filter(p => typeof p.email === 'string' && p.email.length > 0)
               .map(p => ({ email: p.email as string, name: p.name, slack_id: p.slack_id })),
             mutation: 'booked',
+            ownerInitiated: coordOwnerInitiated,
           });
         } catch (err) {
           logger.warn('recordBookingInPersonMemory invocation failed (coord) — continuing', {

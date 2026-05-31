@@ -11,6 +11,7 @@ import {
   updateRequest,
   buildIdempotencyKey,
   getRequestByIdempotencyKey,
+  getRecentOutreachOwnerThread,
 } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
 import { resolveRequest, type ResolveVerdict } from '../core/requests/resolver';
@@ -690,6 +691,15 @@ Binding — how to pick the right approval_id:
         // idempotency_key (same path the LLM-judged dedup uses), and
         // return `reused_existing: true` so Sonnet's chain continues
         // and she can surface honestly to both parties.
+        // v3.1.7 — if this approval is a colleague's message being raised to the
+        // owner AND that colleague has a recent owner-outreach (the owner asked
+        // them for feedback/something), relay the owner DM into the owner's
+        // ORIGINAL conversation thread instead of a new top-level DM. The
+        // outreach recorded the owner's return thread in owner_dm_*.
+        const relayOwner = context.senderRole !== 'owner' && context.userId
+          ? getRecentOutreachOwnerThread(ownerUserId, context.userId)
+          : null;
+
         let row;
         try {
           row = createRequest({
@@ -706,6 +716,8 @@ Binding — how to pick the right approval_id:
             originChannel: channelId,
             originThreadTs: threadTs,
             originIsMpim: !!context.isMpim,
+            ownerDmChannel: relayOwner?.owner_dm_channel,
+            ownerDmThreadTs: relayOwner?.owner_dm_thread_ts,
             expiresAt,
             nextCheckAt,
             nextCheckHandler,
@@ -791,7 +803,12 @@ Binding — how to pick the right approval_id:
           const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
           const conn = getConnection(ownerUserId, 'slack');
           if (conn) {
-            const res = await conn.sendDirect(ownerUserId, dmText);
+            // v3.1.7 — thread into the owner's original conversation when this
+            // is a relay of a colleague reply to a recent owner-outreach.
+            const ownerSendOpts = relayOwner?.owner_dm_thread_ts
+              ? { threadTs: relayOwner.owner_dm_thread_ts }
+              : undefined;
+            const res = await conn.sendDirect(ownerUserId, dmText, ownerSendOpts);
             if (res.ok) {
               updateRequest(row.id, {
                 ownerDmChannel: res.ref ?? undefined,

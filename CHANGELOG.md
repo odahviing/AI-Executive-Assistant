@@ -2,6 +2,36 @@
 
 ---
 
+## 3.1.8 — search skill rebuilt for grounded research; person-store noise controls; same-thread relays
+
+Follow-on to the v3.1.7 person store, from a real-day session. Three threads: (1) the search skill is rebuilt around a grounded `web_research` tool so content stops being written from memory; (2) the person store gets the noise controls it needed — it only fills with people you chose to meet; (3) a colleague's reply to something you sent now comes back in your original conversation thread.
+
+### Changed — search skill: grounded `web_research`
+
+- Rebuilt the search skill (`skills/general.ts`) around a new **`web_research(goal, recency_days?)`** tool: one call runs PLAN (turn the goal into focused queries — not the task text) → GATHER (recency-bounded searches, deduped) → READ (extract the top sources' real text) → returns `{sources, readings}`. The model then writes **grounded in and citing** those sources; if none are found it says so instead of writing from memory. `web_search`/`web_extract` stay as quick-lookup primitives. Owner-path only.
+- **Removed `researchPreCheck`** (`utils/researchPreCheck.ts`, deleted; unwired from the orchestrator). The old blind pre-fetch searched the *task framing* ("research 2-3 LinkedIn angles…"), got junk, then injected a "research done" block that *suppressed* the real focused search — so a LinkedIn post cited "Ghost CMS, 700+ domains this week" with no source behind it. `web_research` replaces it: angle-driven, real sources, citable.
+
+### Changed — person store: only people you chose to meet
+
+- **`recordBooking` persists an external only when the OWNER initiated the booking.** Someone books a meeting *with* you (a colleague-path create_meeting / a colleague-initiated coord) → internal colleagues are still recorded ("we book meetings with each other"), but new external attendees are not created. Owner-initiated bookings persist everyone. An external already on file still gets the interaction logged; and you can always explicitly remember anyone via `note_about_person` / `update_person_memory`.
+- **Non-human attendee filter** in `recordBooking`: recording/notetaker bots (Gong, Otter, Fireflies, Read.ai, …), no-reply/notification senders, and calendar-resource mailboxes never become "person" rows.
+- **`slack_id` threaded into `recordBooking`** as the strongest dedup handle (matches an existing internal colleague even with no stored email / a differently-spelled name), and the **resource-room mailbox is skipped** — closes the duplicate-row + room-as-person edges from the person-store paper-trace.
+- Removed the auto calendar-backfill that briefly shipped during the session — it swept the entire external calendar (customers, partners, a personal event, the Gong bot) and flooded the people catalog. External memory is booking-driven + explicit-remember, not a calendar sweep.
+
+### Fixed — colleague-reply relay lands in your thread
+
+- When you ask Maelle (in a DM thread) to message a colleague and they reply, the relay back to you now posts **in your original conversation thread**, not a new top-level DM. Root cause: the outreach request's `origin_*` was repurposed for colleague-side thread continuity, dropping the owner's return address. Fix: the outreach records the owner's thread in `owner_dm_channel`/`owner_dm_thread_ts`, and a colleague-reply relay (`create_approval`) inherits it and threads on it (`skills/outreach.ts`, `db/requests.ts`, `tasks/skill.ts`).
+
+### Changed — "what do you know about X" framing
+
+- The `get_person_memory` tool now guides Maelle to answer person-data questions about the PERSON — role, relationship, durable prefs — and summarize meeting history rather than reciting one booking's logistics (date/time/venue/attendees). Scoped to that tool only.
+
+### Migration / ops
+
+- One-off maintenance scripts under `scripts/`: `cleanup-backfilled-externals.cjs` (removed the 59 over-imported externals) and `load-suggested-people.cjs` (loaded the two the owner picked — Max Attias, Natan Amid).
+
+---
+
 ## 3.1.7 — Unified Person Store: one backbone table for every person, internal and external
 
 The big one: `people_memory` evolves from a Slack-first table (PK = `slack_id`, so a pure-email external had nowhere to live) into ONE backbone table keyed by a surrogate `person_id`, holding every person Maelle knows — internal AND external — with their data and history in one place. The real bug this closes: the owner asked to book "Max Attias (gmail), who you already know" and Maelle had no record and re-asked for the email, because `recordBooking` skipped any attendee without a slack_id and the email-keyed `known_contacts` table was scaffolded but never wired. Now externals are persisted on first booking and recalled the next time. Ships alongside #119 (lunch auto-booking) and a security-gate precision pass. Kept a patch by owner direction despite the migration.

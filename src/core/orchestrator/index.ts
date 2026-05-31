@@ -894,36 +894,19 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     }
   }
 
-  // v2.8.5 — research pre-check. Owner-path only. When the message contains
-  // an explicit "explore X" / "research X" / "look into X" / "what's new
-  // with X" intent, run web_search deterministically and inject the results
-  // as a context block BEFORE the main Sonnet turn. Closes the standing
-  // gap where Sonnet would answer "explore" requests from internal KB +
-  // training alone, never reaching the outside web. Regex miss → empty
-  // block → normal flow (Sonnet still can call web_search herself).
-  let researchPrecheckBlock = '';
-  if (input.senderRole === 'owner' && userMessage && userMessage.trim().length > 0) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { precheckResearch } = require('../../utils/researchPreCheck') as
-        typeof import('../../utils/researchPreCheck');
-      const result = await precheckResearch({ message: userMessage });
-      if (result.ran && result.promptBlock) {
-        researchPrecheckBlock = result.promptBlock;
-      }
-    } catch (err) {
-      logger.warn('researchPreCheck threw — proceeding without pre-check', {
-        err: String(err).slice(0, 200),
-      });
-    }
-  }
+  // v3.1.7 — the blind research pre-check (researchPreCheck) is GONE. It
+  // mis-extracted the topic (searched the task framing), then injected a
+  // "research done" block that suppressed the real, focused searches the turn
+  // needed — so content got written from training memory, ungrounded. Replaced
+  // by the `research` tool in the search skill: the model calls it with a real
+  // goal, it plans focused searches, fetches + reads real sources, and returns
+  // them so the draft is grounded and cited.
 
   const systemBlocksDynamic = [
     priorOutboundBlock,
     availabilityPrecheckBlock,
     freeTimePrecheckBlock,
     recentCalendarIssuesBlock,
-    researchPrecheckBlock,
     promptParts.dynamic,
     threadContextBlock,
     actionTapeBlock,

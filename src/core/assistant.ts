@@ -279,13 +279,15 @@ Call this when:
 - You want to check what you already know before asking them something you might have asked before
 - Scheduling for them, messaging them, or answering a question about them benefits from the context
 
-The contacts list shows each person's name, timezone, gender, and email inline; their notes + conversation history load through this call. Keep calls narrow — one person at a time.`,
+The contacts list shows each person's name, timezone, gender, and email inline; their notes + conversation history load through this call. Keep calls narrow — one person at a time.
+
+WHEN YOU PRESENT what you know (owner asks "what do you know about X" / "data on X" / "tell me about X"): the point is the PERSON, not a calendar dump. Lead with WHO THEY ARE — role, how you relate, durable facts and preferences (e.g. "Yael — VP Marketing, heads-down on the launch; prefers mornings"). SUMMARIZE meeting/booking history at a relationship level ("ran a few interviews with you lately") rather than reciting one meeting's logistics (exact date/time/venue/attendees) — give those specifics only if the owner asks about that particular meeting. Depth about the relationship is welcome; a verbatim recap of one booking is not.`,
         input_schema: {
           type: 'object' as const,
           properties: {
             person: {
               type: 'string',
-              description: 'Person identifier — their slug from the PEOPLE NOTES catalog (e.g. "first-last"), their display name, or first name. Slug is most reliable.',
+              description: 'Person identifier — their display name or first name as shown in the PEOPLE NOTES catalog (a slack_id also works).',
             },
           },
           required: ['person'],

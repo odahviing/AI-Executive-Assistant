@@ -415,6 +415,26 @@ Only send messages the user explicitly asks for — never reach out to people on
         // its origin_* post-send to point at the colleague side.
         const linkedRequestId = getLinkedRequestIdForOutreach(jobId);
 
+        // v3.1.7 — record the OWNER's return thread on the outreach request so a
+        // later colleague-reply relay (create_approval) threads back into the
+        // owner's ORIGINAL conversation instead of a new top-level DM. This is
+        // SEPARATE from origin_* (repurposed for colleague-side continuity just
+        // below) — origin can't double as the owner return address once it's
+        // pointed at the colleague side. Owner-initiated only; a colleague-
+        // initiated outreach has no owner conversation thread to anchor.
+        if (linkedRequestId && context.senderRole === 'owner' && context.channelId && context.threadTs) {
+          try {
+            updateRequest(linkedRequestId, {
+              ownerDmChannel: context.channelId,
+              ownerDmThreadTs: context.threadTs,
+            });
+          } catch (err) {
+            logger.warn('message_colleague — owner return-thread anchor write failed (non-fatal)', {
+              err: String(err).slice(0, 200),
+            });
+          }
+        }
+
         let threadTsForSend: string | undefined;
         try {
           const openForColleague = getOpenRequestsForColleague(userId, colleagueSlackId);

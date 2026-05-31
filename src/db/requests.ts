@@ -190,6 +190,36 @@ export function getOpenRequestsForColleague(
 }
 
 /**
+ * v3.1.7 — the OWNER's return-thread for a recent outreach to this colleague.
+ *
+ * When the owner asks Maelle (in a DM thread) to message a colleague, the
+ * outreach records the owner's conversation thread in owner_dm_channel /
+ * owner_dm_thread_ts. Later, when the colleague's reply gets relayed back to
+ * the owner (e.g. as an approval), this lets the relay land in the OWNER's
+ * ORIGINAL conversation thread instead of a new top-level DM.
+ *
+ * Most-recent outreach targeting this colleague that carries an owner thread,
+ * within the last 2 days (open OR recently closed — fire-and-forget outreach
+ * closes immediately, so we can't gate on open-state). Returns null if none.
+ */
+export function getRecentOutreachOwnerThread(
+  ownerUserId: string,
+  colleagueSlackId: string,
+): { owner_dm_channel: string; owner_dm_thread_ts: string } | null {
+  const row = getDb().prepare(`
+    SELECT owner_dm_channel, owner_dm_thread_ts FROM requests
+    WHERE owner_user_id = ?
+      AND kind = 'outreach'
+      AND target_slack_id = ?
+      AND owner_dm_thread_ts IS NOT NULL
+      AND created_at > datetime('now', '-2 days')
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(ownerUserId, colleagueSlackId) as { owner_dm_channel: string; owner_dm_thread_ts: string } | undefined;
+  return row ?? null;
+}
+
+/**
  * Pending owner-decision requests — drives the system-prompt injection block.
  * Top-level rows only; awaiting_owner state.
  */

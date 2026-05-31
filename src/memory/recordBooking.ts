@@ -41,6 +41,16 @@ export interface RecordBookingParams {
   attendees: Array<{ email: string; name?: string; slack_id?: string }>;
   /** Kind of mutation — drives the verb in the line. */
   mutation: 'booked' | 'moved' | 'updated';
+  /**
+   * v3.1.7 — did the OWNER initiate this booking (owner-path create_meeting, or
+   * an owner-initiated coordination)? When false (someone else booked a meeting
+   * *with* the owner), we DON'T create new EXTERNAL people — the owner doesn't
+   * want every external from a meeting he didn't ask for. Internal colleagues
+   * are still recorded either way ("we just book meetings with each other"), and
+   * an external already on file still gets the interaction logged. The owner can
+   * always explicitly remember an external via note_about_person / update_person_memory.
+   */
+  ownerInitiated: boolean;
 }
 
 const VERB_BY_MUTATION: Record<RecordBookingParams['mutation'], string> = {
@@ -49,6 +59,24 @@ const VERB_BY_MUTATION: Record<RecordBookingParams['mutation'], string> = {
   updated: 'Updated',
 };
 
+// v3.1.7 — meeting attendees aren't always people. Recording/notetaker bots
+// (Gong, Otter, Fireflies, …), no-reply/notification senders, and calendar
+// resource mailboxes ride along on the invite — they must NOT become "person"
+// rows. Conservative by design: only obvious non-humans, never a real contact.
+const BOT_DOMAIN_FRAGMENTS = [
+  'gong.io', 'otter.ai', 'fireflies.ai', 'read.ai', 'fathom.video',
+  'recall.ai', 'avoma.com', 'tldv.io', 'sembly.ai', 'fellow.app',
+  'resource.calendar.google.com',
+];
+function isNonHumanAttendee(email: string): boolean {
+  const e = email.toLowerCase();
+  const localPart = e.split('@')[0] ?? '';
+  const domain = e.split('@')[1] ?? '';
+  if (/^(no-?reply|do-?not-?reply|donotreply|notifications?|mailer-daemon|postmaster)$/.test(localPart)) return true;
+  if (/(^|[._-])(no-?reply|do-?not-?reply|notification)([._-]|$)/.test(localPart)) return true;
+  return BOT_DOMAIN_FRAGMENTS.some(frag => domain === frag || domain.endsWith('.' + frag) || domain.endsWith(frag));
+}
+
 export async function recordBookingInPersonMemory(params: RecordBookingParams): Promise<void> {
   if (!params.subject || !params.attendees?.length) return;
 
@@ -56,7 +84,7 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
     // Lazy-load DB + memory writer to avoid circular-import risk from
     // skills/meetings/ops.ts → here → db → ... back into skills.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { resolvePerson, appendPersonInteractionById } = require('../db') as typeof import('../db');
+    const { resolvePerson, appendPersonInteractionById, getPersonByEmail } = require('../db') as typeof import('../db');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { writePersonSection, readPersonMemorySync } = require('./peopleMemory') as typeof import('./peopleMemory');
 
@@ -84,6 +112,13 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
       if (email === ownerEmail) continue;
       if (assistantEmail && email === assistantEmail) continue;
       if (roomEmail && email === roomEmail) continue;
+      if (isNonHumanAttendee(email)) continue;  // recording bots / no-reply / resource mailboxes
+      // v3.1.7 — someone else booked a meeting WITH the owner: keep internal
+      // colleagues ("we just book meetings with each other"), but don't CREATE a
+      // new EXTERNAL person the owner didn't ask for. An external already on file
+      // still gets the interaction logged.
+      const isExternal = !att.slack_id && !(ownerDomain && email.endsWith('@' + ownerDomain));
+      if (!params.ownerInitiated && isExternal && !getPersonByEmail(email)) continue;
 
       // v3.2.0 — find-or-create the person (internal OR external). slack_id
       // (when known) is the strongest handle and dedups against an existing
