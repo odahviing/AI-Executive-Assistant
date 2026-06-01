@@ -1359,6 +1359,30 @@ export class SchedulingSkill {
                   err: String(recErr).slice(0, 200),
                 });
               }
+              // v3.1.7 — clip the AUTO-recovery to the owner's working DAY.
+              // The recovery relaxes IN-DAY soft blocks (focus / lunch / category)
+              // so it can surface "13:00 breaks your lunch — book anyway?" — but it
+              // must NEVER offer a slot outside his working hours (pre-start /
+              // post-end). Maelle proposing "09:00, before your 10:30 start" was the
+              // bug (2026-05-31 Daniel): relaxing a soft block ≠ extending his day.
+              // (When the OWNER explicitly names an off-hours time, that call passes
+              // relaxed=true directly and never enters this auto-recovery branch.)
+              if (relaxedRecoverySlots.length > 0) {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const wh = require('../../utils/workHours') as typeof import('../../utils/workHours');
+                const durMin = args.duration_minutes as number;
+                relaxedRecoverySlots = relaxedRecoverySlots.filter(s => {
+                  const sd = DateTime.fromISO(s.start, { zone: timezone });
+                  if (!sd.isValid) return true;
+                  const windows = wh.getOwnerWorkHoursForDay(context.profile, sd.weekdayLong ?? '');
+                  if (windows.length === 0) return false; // day off → never offer
+                  const startMin = sd.hour * 60 + sd.minute;
+                  return wh.isSlotInWorkHours(windows, startMin, startMin + durMin);
+                });
+                logger.info('find_available_slots — recovery clipped to work-day', {
+                  kept: relaxedRecoverySlots.length,
+                });
+              }
               if (relaxedRecoverySlots.length === 0) {
                 // Recovery also empty — return original empty result with day_summary.
                 if (strictDaySummary && strictDaySummary.length > 0) {
@@ -3117,6 +3141,11 @@ export class SchedulingSkill {
         // seriesMaster would shift every occurrence in the series. Single
         // occurrence moves (type='occurrence' or 'exception') are allowed;
         // Graph creates an exception pinning just that date.
+        // v3.1.8 — capture the meeting's OLD start so the success result can
+        // report the VACATED slot (the time that just opened up). Lets a
+        // follow-up "move X into the freed slot" resolve without Maelle
+        // re-asking what time the moved meeting used to be at.
+        let preMoveStartIso: string | undefined;
         try {
           const { getEventType } = await import('../../connectors/graph/calendar');
           const probe = await getEventType(userEmail, args.meeting_id as string);
@@ -3131,6 +3160,7 @@ export class SchedulingSkill {
               message: `"${probe.subject}" is a recurring series. Moving the series here would shift every occurrence — the owner should do series-level moves directly in the calendar. For a SINGLE occurrence, call move_meeting with that occurrence's meeting_id from get_calendar for that specific date; Graph will create an exception for that one.`,
             };
           }
+          preMoveStartIso = probe?.startDateTime;
         } catch (err) {
           logger.warn('move_meeting recurring-preflight failed — proceeding', { err: String(err) });
         }
@@ -3203,13 +3233,23 @@ export class SchedulingSkill {
               // that's policy_exception territory.
               const isOwnerPath = context.senderRole === 'owner' || context.isOwnerInGroup === true;
               if (isOwnerPath) {
-                const hintStartMs = newStartDt.toMillis();
+                // v3.1.8 (D5) — snap the hint to the quarter grid. The general
+                // snap above is bypassed on the floating-block path because this
+                // branch overwrites effectiveStart with the raw hint, so a
+                // "right after" that lands at :40 booked lunch at :40 instead of
+                // the owner's quarter convention (:45). Redo the snap here; honor
+                // an exact owner-given time (start_is_explicit) as-is.
+                const alignedMs = args.start_is_explicit
+                  ? newStartDt.toMillis()
+                  : fb.alignNearestQuarter(newStartDt.toMillis(), timezone);
+                const hintStartDt = DateTime.fromMillis(alignedMs, { zone: timezone });
+                const hintStartMs = hintStartDt.toMillis();
                 const hintEndMs = hintStartMs + matchedBlock.duration_minutes * 60 * 1000;
                 const inWindow = hintStartMs >= wStart && hintEndMs <= wEnd;
                 const overrideOk = args.confirm_outside_window === true;
                 if (inWindow || overrideOk) {
-                  effectiveStart = newStartDt.toISO()!;
-                  effectiveEnd = newStartDt
+                  effectiveStart = hintStartDt.toISO()!;
+                  effectiveEnd = hintStartDt
                     .plus({ minutes: matchedBlock.duration_minutes })
                     .toISO()!;
                   logger.info(inWindow
@@ -3542,11 +3582,33 @@ export class SchedulingSkill {
           logger.warn('rebalance after move_meeting threw — continuing', { err: String(err).slice(0, 200) });
         }
 
+        // v3.1.8 — the VACATED slot (where the meeting WAS), so a follow-up
+        // "move X into the freed slot" resolves from this turn instead of
+        // Maelle re-asking the old time. Window = old start + the moved
+        // duration.
+        let vacated: { start: string; end: string; label: string } | undefined;
+        if (preMoveStartIso) {
+          const vs = DateTime.fromISO(preMoveStartIso, { zone: timezone });
+          const ns = DateTime.fromISO(args.new_start as string, { zone: timezone });
+          const ne = DateTime.fromISO(args.new_end as string, { zone: timezone });
+          const durMs = ns.isValid && ne.isValid ? ne.toMillis() - ns.toMillis() : 0;
+          if (vs.isValid) {
+            const ve = durMs > 0 ? vs.plus({ milliseconds: durMs }) : vs;
+            vacated = {
+              start: vs.toISO() ?? preMoveStartIso,
+              end: ve.toISO() ?? '',
+              label: `${vs.toFormat('EEE d MMM HH:mm')}–${ve.toFormat('HH:mm')}`,
+            };
+          }
+        }
+
         return {
           success: true,
           moved: args.meeting_subject,
           new_start: args.new_start,
           new_end: args.new_end,
+          // v3.1.8 — the slot that just opened up (old time of the moved meeting).
+          ...(vacated ? { vacated } : {}),
           // v1.8.3 — past-tense summary the reply quotes verbatim. Issue #26 bug 1:
           // without this, Sonnet could re-read the calendar post-move and narrate
           // the new time as a fresh discovery ("already at 12:30, nothing to change")

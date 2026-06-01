@@ -1,120 +1,175 @@
-# Prompt-reduction chat — starter / handoff (2026-05-29 update)
+# Prompt-reduction — session starter & standing guard (updated 2026-05-31)
 
-**Trigger for a new chat:** paste this file as the first message, then say "let's work on prompt reduction" / "let's cut the 46K prefix."
-
-This is an UPDATE layered on the standing plan. Read in this order:
-1. The usual context loads (MEMORY.md, project_overview.md, SESSION_STARTER.md, CLAUDE.md).
-2. **`.claude/PROJECT_REDUCE_PROMPTS.md`** — the standing prompt-reduction plan (modules A-G, #95). Most modules already shipped; modules A + B remain.
-3. **This file** — what a latency-focused session (2026-05-26 → 29) learned about *where the cost actually is*. It reframes the project. Where this contradicts the older doc, this wins (it's based on real token-usage data the old doc didn't have).
-
----
-
-## Why this update exists
-
-A separate chat spent several days on **latency**, added **token-usage logging**, and got the first real per-call-site cost data. The headline finding changes the prompt-reduction strategy:
-
-### Finding 1 — Sonnet is ~99% of spend, and it's the orchestrator main loop
-
-From `LLM usage` logs (the new instrumentation, see below):
-- `orchestrator` label = **~99% of logged LLM cost.** Gates + classifiers are rounding error.
-- **Sonnet : Haiku spend ratio ≈ 126 : 1.**
-- The auxiliary Haiku migrations done this session (claim-checker, merged classifier) save latency but only cents — they were never where the money was.
-
-**Implication:** cutting cost means cutting the orchestrator's per-call payload (the cached prefix) and/or its iteration count. Nothing else moves the needle.
-
-### Finding 2 — the cached prefix is ~46K tokens, and it's MOSTLY TOOL DEFINITIONS
-
-Real log line (orchestrator iteration 1, fresh thread):
-```
-cache_creation_input_tokens: 46042   ← the cached prefix, written once per 5-min window
-cache_read_input_tokens:     ~46-47K ← every subsequent iteration reads it (cheap)
-```
-
-The cached prefix = `tools` array + static system prose (Anthropic caches everything up to the `cache_control` breakpoint on the static system block; `tools` are sent before `system`, so they're in the cache). See `src/core/orchestrator/index.ts:~893` (`cache_control: { type: 'ephemeral' }` on `promptParts.static`).
-
-**Estimated split (NOT yet instrumented — VERIFY FIRST):**
-- Static system prose (identity, honesty rules, language, Hebrew, social layer, tone): ~6-9K tokens.
-- **48 tool definitions: ~37-40K tokens (~80%).** `find_available_slots` alone ≈ 2K; `create_meeting` / `coordinate_meeting` similar.
-
-⚠️ **Discrepancy to resolve:** the 2026-05-15 measurement in `PROJECT_REDUCE_PROMPTS.md` put tools at ~23K (and said "NOT cached"). Now the cached block is 46K and tools appear to be ~37-40K and ARE cached. Two things changed: (a) the cache restructure pulled tools into the cached prefix; (b) tools likely grew (venue skill, candidate_slots, more). **The new chat's FIRST task is to instrument the precise tools-vs-prose token split** — don't cut on my estimate.
-
-**Implication:** the original project framed reduction as "move prose RULES to code" (modules A-G, ~13K cut). That's still valid but it's attacking the ~6-9K prose, not the ~37-40K tools. **The bigger mass is the tool definitions.** "Kill the big prompt" ≈ "cut the tool surface."
-
-### Finding 3 — the caching tension (matters for the structure choice)
-
-The 46K is *cached*: reads cost $0.30/M (1/10th of $3/M fresh input); creation costs $3.75/M.
-- The expensive moment is **cache creation on the first iteration of the first turn in each 5-min window** (~$0.17). It was 58% of one example turn's cost.
-- Subsequent iterations read the cache at ~$0.014 each.
-
-**Per-turn scope filtering FRAGMENTS the cache.** The current scope filter (classifyTurn → toolScopes → getSkillTools) ships a different tool subset per turn-type. Each distinct subset is a different cache prefix → more cache misses → more $3.75/M creation hits. **Small-but-unstable can cost more than big-but-stable.** Any tool-reduction work must be designed around cache stability, not just raw token count.
+**How to use:** paste this file as the first message of a new chat, then say
+"let's keep cutting the prompt" / "prompt-reduction guard". You are the **guard
+that keeps Maelle's prompt small and keeps shrinking it** — without breaking
+behavior. Read MEMORY.md, project_overview.md, SESSION_STARTER.md, CLAUDE.md the
+normal way first; this file is the project-specific focus and wins for this work.
 
 ---
 
-## The reframed option set (ranked: lowest-risk / highest-leverage first)
+## The mission, in one line
 
-1. **Instrument the exact tools-vs-prose split** (~1 line). Log `JSON.stringify(tools).length` vs `promptParts.static.length` once per turn, or token-estimate both. Resolve the 46K composition before cutting. **Do this first.**
+Cut the per-turn token cost of Maelle's orchestrator prompt by **moving rules
+into code**, not by deleting judgment — and never let it grow back.
 
-2. **Tool-description audit + trim** — biggest lever, no architecture change, no coherence risk. The 48 tool descriptions have become mini-prompts (embedded rules, multiple examples, edge cases). Much of that belongs in the (scoped) skill prompt, not in a schema billed on every cached turn. Target: cut the tool block by a third with zero behavior change. Pull tool-call frequency from logs first to know which tools even earn their prefix slot.
+## The goal & non-negotiable principles
 
-3. **Tool cull** — drop dead/rarely-fired tools from the default surface. Measure firing frequency from `Tool executed` log lines.
-
-4. **Stable tool *bundles* instead of per-turn subsets** — collapse the scope filter to ~3 fixed bundles (meetings / social / general). Each caches independently and stays warm per domain: small prefix AND cache-stable. Fixes the Finding-3 fragmentation.
-
-5. **Sub-agents — LAST resort.** The real case for them is tool separation + cache stability (a meetings sub-agent ships ~10 stable tools + focused prompt ≈ 12K cached prefix), NOT prose separation. But: router-hop latency, context handoff, and **coherence risk — Maelle's whole value is being ONE assistant.** Heaviest lift, only one that risks the product's voice. Don't start here; 2-4 likely capture most of the win.
-
----
-
-## What this session already shipped (all UNCOMMITTED in the tree)
-
-These are latency changes; the prompt-reduction chat inherits them. None bundled/version-bumped yet.
-
-- **claim-checker**: extended honesty rules B-G removed (were advisory-only since v2.8.5); moved to Haiku.
-- **Merged classifier** (`src/core/social/classifyTurn.ts`): the old `classifyOwnerIntent` (Sonnet) + `classifyToolScope` (Haiku) collapsed into ONE Haiku call. **Module G (intent-aware tools) now lives here** — `classifyTurn` owns scope. The old two files were DELETED; their types moved into `classifyTurn.ts`.
-- **autoExpand fix** (`ops.ts`): single-slot validation calls (`create_meeting`/`move_meeting` Guard B) pass `autoExpand:false` — killed ~5s of wasted widening calendar reads per colleague booking.
-- **`candidate_slots` on `find_available_slots`**: batch-validate N specific times in one tool call instead of N sequential Sonnet iterations. (Note: this ADDED ~200 tokens to find_available_slots' description — relevant to the tool-trim work.)
-- **Token-usage logging** (`src/utils/usageLog.ts` — `logLlmUsage(label, model, response)`): wired into `callClaude` (orchestrator), claim_checker, classify_turn, human_gate, security_gate, concision_pass, close_loop. **This is the measurement tool for the prompt-reduction work.**
-
----
-
-## Measurement tools
-
-- **Prompt size:** `node scripts/measure-prompts.cjs` (from the standing plan — static/dynamic/tools breakdown, top-10 tools by size). **This is the key tool for prompt reduction — use it before/after every cut.**
-- **Live cost per call-site:** parse `LLM usage` log lines. A parser was written at `C:/Users/idanc/AppData/Local/Temp/maelle-cost.js` (groups by label + model, applies rates). Temp may not persist — rebuild if gone: parse `{"message":"LLM usage", label, model, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}`, cost = (in*rate_in + out*rate_out + cacheRead*rate_cr + cacheWrite*rate_cw)/1e6. Sonnet ≈ $3/$15 in/out, $3.75 cacheWrite, $0.30 cacheRead. Haiku ≈ $1/$5, $1.25, $0.10. **Verify current rates against Anthropic docs.**
-- **Tool firing frequency:** grep `"Tool executed"` log lines, group by `tool` — tells you which of the 48 tools earn their prefix slot.
+- **MODIFY, don't INCREASE.** The prompt is a fixed budget, not a junk drawer.
+  Net prompt should go *down* every session. If you must touch it, delete or
+  tighten an existing rule — don't add a new one. Returning a little back is OK
+  *if you write it better/smaller* (we've done that twice; see below).
+- **CODE-FIRST, always.** The durable fix is deterministic enforcement at the
+  chokepoint (a handler guard, a tool return-value the model reacts to, a tool
+  that owns the decision). Code is fixed-once, zero-prompt-cost, language-
+  agnostic. Prompt is the LAST resort, and ONLY for judgment / tone / format /
+  language / narration — never to *enforce* something code can.
+- **No regex on natural language.** Maelle is multilingual (Hebrew, Russian,
+  Spanish, English…). Word-count/length gates and structured-field checks are
+  fine; pattern-matching *meaning* in message text is not.
+- **Measure with real numbers, before and after every cut.** Never cut on an
+  estimate. Record before→after in the CHANGELOG.
+- **Structured data > prose.** When a convention must reach the model, prefer a
+  structured field surfaced as one compact line (e.g. category `title_hint`)
+  over a multi-sentence prose block.
 
 ---
 
-## Key file pointers
+## Current status (as of 3.1.8, 2026-05-31)
 
-- **System prompt builder:** `src/core/orchestrator/systemPrompt.ts` — `buildSystemPromptParts` (static at ~line 429, dynamic at ~646, returns `{static, dynamic}`). The static block is the cached prose.
-- **System block assembly + cache breakpoint:** `src/core/orchestrator/index.ts:~878-896` (`systemBlocksDynamic` join; `cache_control` on static at ~893).
-- **Tool definitions:** in each skill file's tool list `description` fields. Biggest: `src/skills/meetings.ts` (find_available_slots, create_meeting, coordinate_meeting, move_meeting…).
-- **Tool scope filter:** `src/skills/registry.ts` — `getSkillTools(profile, role, scopes)` + `ALWAYS_ON` set. Scope comes from `classifyTurn` (`src/core/social/classifyTurn.ts`).
-- **Post-draft gates (each its own Sonnet/Haiku call):** `src/utils/{claimChecker,humanGate,securityGate,dateVerifier}.ts`, plus concision pass in `postReply.ts`.
+**Common owner scheduling turn: ~59K → ~36K tokens (−39%).** Breakdown of a
+typical `meetings`-scoped turn now:
+- static (skills prose, cached): **~18–19K** (was ~27.7K)
+- tools JSON (scoped): **~15K** (was ~25K all-tools; ~22.7K on the old meetings scope)
+- dynamic (fresh every turn): **~2.9K** (was ~8.9K)
 
----
+Note: a turn that widens to `general` (ambiguous/short replies) still ships all
+~25K of tools — that's the safe fallback, not the common case.
 
-## Operational caveats (read before measuring)
-
-- **A rogue PM2 process was running the OLD compiled code** (`dist/`) alongside `npm run dev` (new code). Slack Socket Mode load-balanced turns between them ~50/50, so half of 2026-05-28's data is OLD-code and contaminates any before/after comparison. **Confirm only ONE process is running** before trusting measurements; clear stale `dist/` (`rm -rf dist/`).
-- **PM2 + auto-deploy are nominally OFF**, but something resurrected PM2 — verify `pm2 list` is empty.
-- Owner runs `npm run dev`; **restart picks up changes** (uncommitted tree won't be live until restart).
-- Filter analysis to NEW-code turns: a turn is new-code iff it emits an `LLM usage` line (old code didn't have the instrumentation).
+Version trail: 3.1.4 (tool-scoping landed), 3.1.5 (prose lazy-load + dedup +
+off-grid slot-align fix), 3.1.6 (regression fixes). 3.1.7/3.1.8 were *other*
+projects (Person Store, search rebuild) — not ours.
 
 ---
 
-## Standing rules (unchanged — from PROJECT_REDUCE_PROMPTS.md + CLAUDE.md)
+## What's shipped (the levers, biggest first)
 
-- **Propose first, build only on explicit "go/build/do it".** Bundle/version only on "wrap/ship/commit/bundle".
-- **Default version bump = PATCH.**
-- **No new prompt rules to fix things** — this project REDUCES prompt. Only add a short rule if it replaces a longer deleted one (net negative).
-- **Code over prompt** for deterministic things; **trust Sonnet** for judgment. Don't merge rules, don't delete rules just to delete.
-- **No personal info in code** (repo is public) — read from `profile.*`.
-- **Measure with real numbers**, not estimates — record before→after in each CHANGELOG entry.
-- **No `cd <path> &&` prefix** on shell commands.
+1. **Dynamic contacts → roster + on-demand pull.** The WORKSPACE CONTACTS block
+   used to inline every contact's ★notes + ↳history every turn (~6K, fresh
+   billed). Now: one compact identity line per contact + a "N notes on file"
+   hint; `get_person_memory` was extended to return the ★notes + recent ↳history
+   so the data loads on demand. Dynamic 8.9K → 2.9K. (`db/people.ts`, `assistant.ts`)
+2. **Tool scoping (Module G).** `ALWAYS_ON` slimmed 22 → 12. New scopes:
+   `coord` (rare multi-party — `coordinate_meeting` et al., barely fires),
+   `calendar` (review/health), `people` (person-writes). Rare/expensive tools
+   demoted off the every-turn surface. Gated by `behavior.intent_aware_tools`.
+   (`skills/registry.ts`, `core/social/classifyTurn.ts`)
+3. **Prose lazy-loading.** Coordination ROUTE-1 details, SUMMARIES, KNOWLEDGE
+   BASE, EXTERNAL VENUES, and CALENDAR-HEALTH prose render only when their scope
+   is active. `scopes` is plumbed through `buildSystemPromptParts` →
+   `buildSkillsPromptSection` → each skill's `getSystemPromptSection(profile, scopes)`.
+   `coord`/`calendar` deterministically union `meetings`; `freeTimeInquiry` unions `calendar`.
+4. **Static dedup/trim.** Removed the duplicate EVENT CATEGORIES block (kept the
+   richer MeetingsSkill copy), collapsed the dead location decision tree
+   (`resolveLocation` owns it), category descriptions → first-sentence cues
+   (`detectCategory` reads the full text server-side), about-you self-notes
+   deduped, several meetings prose blocks deduped against their canonical copy.
+5. **Tool-description dedup (small).** `rank_venue` legend, `create_meeting`
+   LANGUAGE restatement, `colleague_slack_id` warning — ~150t. (Descriptions are
+   mostly *distinct*, so this lever is small.)
 
 ---
 
-## Recommended first move for the new chat
+## Hard-won lessons & risks (don't relearn these)
 
-Don't touch code yet. Start with **Finding-2's open question**: add the one-line instrument that logs the exact `tools` token count vs `static prose` token count per turn, restart, capture a few real turns, and confirm the split. Then pull tool-firing frequency. *Then* propose the tool-description-trim plan with real numbers. Cut with knowledge, not the ~80% estimate.
+- **Scoping has NO mid-turn recovery.** If the Haiku scope-classifier misroutes,
+  a needed tool is simply absent and the turn breaks — there's no widen-on-miss
+  retry. Real bug (2026-05-31): a 1-3 word reply "meeting" was tagged
+  `knowledge`, which dropped `set_event_category` → "I can't from my end."
+  Mitigations shipped: **low-signal short replies (≤3 words) widen to `general`**;
+  the classifier already gets the thread (`recentContext`) but can still be
+  confidently wrong. **Building a real widen-on-miss recovery is the prerequisite
+  for any *more* aggressive scoping.**
+- **Prose dedup over-cuts twice.** Removing "redundant" prose lost a unique
+  nuance: (a) zero-slot narration ("she's booked" misattribution when the real
+  blocker was the owner's own calendar), (b) bare-"Interview" subject (the
+  category first-sentence trim dropped the discretion convention). Both restored
+  — as a **sharpened compact line** and a **structured `title_hint` field**, not
+  the original block. A re-audit of the other 5 dedups found only 1 minor
+  over-cut. Lesson: a multi-sentence block often carries one load-bearing
+  sentence the "covered elsewhere" copy doesn't.
+- **`calendar` scope is the riskiest** (no graceful fallback if a review turn
+  misroutes). Mitigated by keeping the health *tools* in `meetings` (always
+  present on a scheduling turn) and gating only the *prose*.
+- **Cache fragmentation.** Per-turn scope subsets fragment the cached prefix
+  (each distinct subset = a fresh $3.75/M cache-create). Keep scopes FEW and
+  STABLE; widening to `general` is cheap *correctness* insurance but a *different*
+  cache prefix.
+- **The original "it's all prose" estimate was wrong.** Tool definitions +
+  the dynamic contacts dump were the real mass. Measure first, every time.
+
+## The kill-switch
+
+`behavior.intent_aware_tools: false` in `config/users/idan.yaml` → `toolScopes`
+stays undefined → the **entire scoping + prose-lazy-load layer fail-opens**
+(every tool + all prose ship). It does NOT revert the pure dedups. This is the
+A/B test and the panic button for any scoping-caused regression.
+
+---
+
+## Remaining work (ranked — what's still on the table)
+
+1. **MEETINGS SKILL static prose (~12–13K) — the big remaining mass.** Paper-
+   traced across 4 agents: **most is KEEP** (genuine judgment — audience-aware
+   narration, reporting style, honesty, soft scheduling preferences with zero
+   code backstop). Realistic trim ≈ **2–4K**, mostly dedups + moving tool-enforced
+   rules into (scoped) tool descriptions. Only the first dedup batch (~640t +
+   restores) is done. This is the careful, paper-trace-each-block round — code-
+   verify each rule is enforced before cutting; restore unique nuance as
+   structured data.
+2. **Build the widen-on-miss recovery** for scoping. Until this exists, don't
+   scope more aggressively — fragility outweighs the savings.
+3. **Tool-description trim** of the big tools (`find_available_slots` ~2.7K,
+   `create_meeting` ~1.6K, `message_colleague` ~1.5K, `book_floating_block`
+   ~1.3K). They're mini-prompts with embedded rules/examples — push rules into
+   scoped skill prose, keep schema + one example. ~3K, but verify each (the
+   description is the tool's contract; trimming the wrong line breaks behavior).
+4. **Dynamic block** is mostly done (~2.9K). Diminishing returns.
+
+**Target:** the dream is **< 25K** on the common turn (we're at ~36K). Getting
+there means #1 + #3 done carefully, and likely #2 first to make further scoping
+safe. Don't force it — a trust regression costs more than the tokens.
+
+---
+
+## Measurement & key files
+
+- **Measure:** `node scripts/measure-prompts.cjs` (static/dynamic/tools split,
+  top-10 tools). `node scripts/_dump-prompts.cjs` (dumps the rendered blocks +
+  **per-scope** tool/prose sizes — use this to see what a `meetings` vs
+  `general` turn actually ships). Run before/after every cut.
+- **Prompt builder:** `src/core/orchestrator/systemPrompt.ts`
+  (`buildSystemPromptParts` — static at ~line 270+, returns {static, dynamic};
+  threads `toolScopes`).
+- **Scopes:** `src/skills/registry.ts` (`ALWAYS_ON_TOOLS`, `SCOPE_TO_TOOLS`,
+  `filterToolsByScope` — coord/calendar→meetings unions) +
+  `src/core/social/classifyTurn.ts` (the Haiku scope classifier + scope
+  descriptions + the low-signal short-reply widen).
+- **Skill prose:** each `src/skills/*.ts` `getSystemPromptSection(profile, scopes)`.
+  Meetings is the big one (`src/skills/meetings.ts`).
+- **Code that already owns rules** (cite these when arguing "move to code"):
+  `resolveLocation`, `detectCategory`, `scheduleRules.checkSlot`,
+  `alignNearestQuarter` (floatingBlocks), `findAvailableSlots` returns
+  `day_summary`/`broken_rule_label`/`per_attendee_local`.
+
+## Standing rules (from CLAUDE.md + this project)
+
+- Propose first; build only on an explicit per-item "go". Bundle/version only on
+  "wrap/ship". Default bump = PATCH.
+- No personal info in code (repo is public) — read from `profile.*`; `idan.yaml`
+  is gitignored.
+- No `cd <path> &&` prefix on shell commands; one logical command per Bash call.
+- The bug-fixing philosophy now lives in `SESSION_STARTER.md` ("How we fix bugs")
+  and the `bugs`/`github` skills (code-first ranking, no-regex, verify-already-
+  fixed-first). Reuse it — many "regressions" are over-cuts to restore compactly,
+  and some "open bugs" are already fixed.

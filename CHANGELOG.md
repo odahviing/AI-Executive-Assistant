@@ -2,6 +2,29 @@
 
 ---
 
+## 3.2.0 — Person Store + grounded research, hardened by a real-day bug bash
+
+The minor that caps a multi-session arc: the **Unified Person Store** (surrogate `person_id`, internal + external people in one table), the **grounded `web_research`** rebuild of the search skill, and a long real-day tail of correctness/UX fixes. The foundation landed across 3.1.7–3.1.8 (see those entries); this version adds the controls and polish that make it behave — cut as a minor because, taken together, it's a new capability surface: externals are remembered, content is sourced, and several recurring scheduling/state bugs are closed at the root.
+
+### Fixed
+
+- **Stuck in-flight guard ("still working on booking Dana & Max").** A confirm-override pause opened a hidden `in_flight_action` tracking row with no event-id; the eventual booking landed under a re-derived subject, so neither event-id nor subject matched and the row orphaned — the brief nagged for 24h. Root fix: `maybeOpenInFlightMeetingRequest` no longer opens a guard for an awaiting-owner-decision result (confirm-override, rule-exception, location/duration ask) — those are deliberate pauses the conversation already tracks, not silently-lost actions. The confirmation itself is unchanged. Removed the now-dead subject-match fallback in `closeMeetingArtifacts` (the symptom-patch this replaces).
+- **Floating-block move dropped quarter-alignment.** "Move lunch right after" (meeting ended 13:40) booked lunch at 13:40 instead of the owner's :45 convention — the floating-block move path overwrote the snapped start with the raw hint. Now snaps to the quarter grid (→ 13:45) on that path too, including the override branch; honors an explicit exact time.
+- **Claim-checker false-positive on proposals.** A draft "Best fit: Wed 13:00 — want me to move it there?" (analyzing a screenshot) was flagged as a phantom action; the retry degraded a good image-grounded reply into a "what are you scheduling?" clarification. Sharpened the exemption: a recommendation/offer is never a completed-action claim, however specific — only stated-as-done is flagged. Image-grounded drafts are treated as analysis + proposal.
+
+### Added / Changed
+
+- **`move_meeting` reports the vacated slot.** Its success result now returns `vacated: {start, end, label}` — the time that just opened up — so a follow-up "move X into the freed slot" resolves without Maelle re-asking the moved meeting's old time.
+- **Slack status indicator — full per-tool coverage.** Every user-facing tool now has a human-EA phrase (incl. `web_research` → "Looking online"; person/memory tools → "Remembering" / "Making a note" / "Keeping notes" / "Checking the history"). Internal pre-pass tools no longer overwrite the status with a "Working" placeholder — the orchestrator skips the call for them, so the last meaningful phrase persists.
+
+### Foundation (shipped 3.1.7–3.1.8, recapped)
+
+- **Unified Person Store** — `people_memory` rebuilt onto a surrogate `person_id` PK; `resolvePerson` chokepoint; externals persisted on owner-initiated bookings (non-human/bot filter + owner-initiated-only rule); md re-keyed to `person_id`.
+- **Grounded `web_research`** — the search skill's PLAN→GATHER→READ loop; blind `researchPreCheck` deleted.
+- **Same-thread relays** — a colleague's reply comes back in the owner's original conversation thread.
+
+---
+
 ## 3.1.8 — search skill rebuilt for grounded research; person-store noise controls; same-thread relays
 
 Follow-on to the v3.1.7 person store, from a real-day session. Three threads: (1) the search skill is rebuilt around a grounded `web_research` tool so content stops being written from memory; (2) the person store gets the noise controls it needed — it only fills with people you chose to meet; (3) a colleague's reply to something you sent now comes back in your original conversation thread.

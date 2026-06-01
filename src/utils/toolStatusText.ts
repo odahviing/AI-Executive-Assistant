@@ -7,10 +7,13 @@
  * override per tool with a short, human-EA-voiced phrase — present-progressive,
  * no jargon, neutral for owner / colleague / multi-party contexts.
  *
- * Tools not listed → '' (clears Slack's auto-default; nothing visible). This
- * covers observation tools (notes, preferences, memory) per the v2.4.0
- * SILENCE_ELIGIBLE policy — they're side effects, not "doing something
- * visible."
+ * Tools not listed → '' . v3.1.8: the orchestrator now SKIPS the setStatus
+ * call when this returns '' (instead of overwriting with a "Working"
+ * placeholder), so the LAST meaningful status persists while a truly-internal
+ * tool runs. Only genuine pre-pass / classifier tools (classify_*, pick_category,
+ * compose_ping, confirm_gender) are intentionally left unmapped now — every
+ * user-facing tool has a phrase, so the panel never falls back to a placeholder
+ * mid-work.
  *
  * Used by the orchestrator before each tool call. Fire-and-forget; never
  * blocks tool execution.
@@ -66,6 +69,19 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
   manage_knowledge: 'Going over my notes',    // v2.9 — get + ingest merged
   web_search: 'Searching the web',
   web_extract: 'Reading the page',
+  web_research: 'Looking online',              // v3.1.8 grounded research loop
+
+  // People / memory (v3.1.8 — were unmapped → showed the 'Working' placeholder)
+  get_person_memory: 'Remembering',
+  recall_interactions: 'Checking the history',
+  note_about_person: 'Making a note',
+  note_about_self: 'Making a note',
+  log_interaction: 'Keeping notes',
+  update_person_memory: 'Making a note',
+  update_person_profile: 'Updating the details',
+
+  // Coordination (read)
+  get_active_coordinations: "Checking what's in motion",
 
   // Meeting summary
   share_summary: 'Sending the recap',

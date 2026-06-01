@@ -1,8 +1,14 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.1.8** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.2.0** — check `package.json` if unsure; it is the source of truth.
 
-## ✅ SHIPPED v3.1.7 — the Unified Person Store (`.claude/PERSON_STORE_PROJECT.md` = the build spec)
+## ✅ SHIPPED v3.2.0 — Person Store + grounded research, hardened by a real-day bug bash
+
+Minor that caps a multi-session arc (foundation across 3.1.7–3.1.8; polish + root-cause fixes in 3.2.0). **FIRST THING NEXT SESSION:** owner restarts `npm run dev` (PM2 off) and watches whether Maelle behaves — owner's read is "probably not yet," so expect real-day bugs to keep arriving; fold them in. Then continue from the deferred items / GitHub #22 (external social) / WhatsApp.
+
+What 3.2.0 added on top of the Person Store (below): in-flight guard no longer orphans on confirm-override pauses (killed the "still working on booking Dana & Max" brief nag) + dead subject-match fallback removed; `move_meeting` returns `vacated` (the freed slot) so "move X into the open slot" resolves; floating-block move snaps to the quarter grid (lunch :40→:45); claim-checker no longer flags a proposal as a phantom action (the screenshot-reply degradation); full per-tool Slack status coverage (internal pre-passes skip, no "Working" placeholder). **Prompt-side fixes (D1–D3: relax-vs-working-day, answer-the-question, don't-cite-day-conflicts; + move_meeting vacated-slot narration) were handed to the prompt chat by the owner — not in the repo.** CHANGELOG has the full 3.2.0 entry.
+
+## ✅ Unified Person Store (`.claude/PERSON_STORE_PROJECT.md` = the build spec)
 
 Done, all phases, one build. `people_memory` rebuilt onto a surrogate **`person_id` PK** (migration `src/db/migrations/v3_2_0_person_store.ts` — backup + row-count assertion + idempotent; verified live 36/36); `slack_id`/`email` nullable identity attrs; `kind` internal|external|self. **`resolvePerson({slackId?,email?,name?})`** in `db/people.ts` is THE find-or-create+merge chokepoint; write helpers have `*ById` workers (slack variants delegate). `recordBooking` persists EVERY attendee (externals included, slack_id threaded as the dedup handle, room mailbox skipped) → externals recalled next booking. Write-tools (`note_about_person`/`log_interaction`/`confirm_gender`/`update_person_profile`) route through `resolvePersonTarget` so email-only externals are writable (owner-path). Md files re-keyed name-slug → `person_id` (collision fix; legacy migrates on touch). Capability-gating not storage-gating: proactive social + free/busy stay internal-only. **Known limits (owner-accepted):** external→Slack convert makes a 2nd row (no inbound merge; rare); booking history lives in md "What we've discussed", not the structured `recent_interactions` recall (by design). **Future:** opens GitHub #22.
 

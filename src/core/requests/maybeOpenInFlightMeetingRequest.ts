@@ -53,6 +53,22 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
   const result = (input.toolResult ?? {}) as Record<string, unknown>;
   const toolInput = input.toolInput ?? {};
 
+  // v3.1.8 — a result that ASKS the owner to decide (confirm an override, approve
+  // a rule exception, pick a location, confirm a duration) is a DELIBERATE PAUSE,
+  // not a silently-lost action. Don't open an in-flight guard for it: the owner
+  // sees the question and answers, the conversation already tracks it, and a
+  // guard here just orphans when the eventual booking lands under a re-derived
+  // subject (the "still working on booking Dana & Max" bug). The guard exists
+  // only for actions that vanish silently — not for ones awaiting the owner.
+  if (
+    result._deferred_action_hint != null
+    || typeof result.suggested_ask_text === 'string'
+    || result.needs_confirmation === true
+    || result.needs_owner_approval === true
+  ) {
+    return;
+  }
+
   // Per-tool spill detection. "Spill" = work didn't complete this turn.
   let spilled = false;
   let subject = '';

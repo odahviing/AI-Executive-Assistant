@@ -225,18 +225,12 @@ export function closeMeetingArtifacts(params: {
       for (const r of open) {
         if (directMatches.some(d => d.id === r.id)) continue;
         let matched = payloadReferencesMeeting(r.details_json, params.meetingId);
-        if (!matched && subjectLower && r.subkind === 'in_flight_action' && r.details_json) {
-          try {
-            const det = JSON.parse(r.details_json) as Record<string, unknown>;
-            const detSubject = typeof det.subject === 'string' ? det.subject.toLowerCase() : '';
-            if (detSubject && detSubject === subjectLower) {
-              matched = true;
-              logger.info('closeMeetingArtifacts — in_flight_action subject-match fallback fired', {
-                requestId: r.id, subject: params.subject, meetingId: params.meetingId,
-              });
-            }
-          } catch (_) { /* malformed details — skip */ }
-        }
+        // v3.1.8 — the in_flight_action subject-match fallback was REMOVED.
+        // It existed only because confirm-override pauses opened a guard with
+        // no event_id, then the booking landed under a re-derived subject so
+        // event-id and subject both missed. maybeOpenInFlightMeetingRequest no
+        // longer opens a guard for those deliberate-pause results, so this
+        // fragile fallback has nothing to catch — removed per "no patch-on-patch."
         // v3.0.7 — broadened subject match for colleague-initiated requests.
         // Pre-fix the subject-match fallback was scoped to `in_flight_action`
         // subkind only. But the Eli case (2026-05-26): owner amended a

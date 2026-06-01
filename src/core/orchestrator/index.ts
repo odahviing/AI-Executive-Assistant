@@ -1613,12 +1613,18 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { statusForTool } = require('../../utils/toolStatusText') as
             typeof import('../../utils/toolStatusText');
-          // Fire-and-forget — never await; status is UX polish, not load-bearing.
-          void setAssistantStatus(input.app, input.profile.assistant.slack.bot_token, {
-            channelId: input.channelId,
-            threadTs: input.threadTs,
-            status: statusForTool(toolUse.name, profile.user.name.split(' ')[0]),
-          });
+          // v3.1.8 — only update when this tool has a meaningful phrase. An
+          // empty mapping (internal classifiers / pre-passes) SKIPS the call so
+          // the last meaningful status persists, instead of clobbering it with
+          // a "Working" placeholder. Fire-and-forget — never await.
+          const toolStatus = statusForTool(toolUse.name, profile.user.name.split(' ')[0]);
+          if (toolStatus) {
+            void setAssistantStatus(input.app, input.profile.assistant.slack.bot_token, {
+              channelId: input.channelId,
+              threadTs: input.threadTs,
+              status: toolStatus,
+            });
+          }
         } catch (_) { /* helper failure is non-fatal */ }
       }
 

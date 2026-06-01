@@ -482,6 +482,8 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
 
 Owner-path: owner override IS the approval. Move the meeting when he asks.
 
+FREED SLOT — after a successful move the result includes \`vacated\` = the slot the meeting just LEFT (its old time): { start, end, label }. Surface it when useful ("that frees up your 11:00 today") so it's in the conversation. If the owner then asks to put something into "the new open slot" / "the freed slot", use \`vacated\` — don't re-ask what time the moved meeting used to be, and don't confuse where it moved TO with where it moved FROM.
+
 Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already booked with them, call this directly. The handler runs a rule-compliance check server-side (owner's work hours, work days, buffers, floating blocks, no conflicts). If the new slot passes, the move happens silently and the owner is shadow-notified. If the new slot breaks a rule, the tool returns { needs_owner_approval: true, reason, message } — don't keep trying; fall back to create_approval(kind=meeting_reschedule) with the requested slot so the owner can decide, and tell the colleague warmly that you're checking.`,
         input_schema: {
           type: 'object',
@@ -2017,7 +2019,7 @@ OWNER NAMES A SPECIFIC TIME WITH ISSUES — same override flow as OWNER-PATH OVE
 
 HYPOTHETICAL VALIDATION — "can we do X at Y?" → ASK THE TOOL.
 When ${firstName} asks a hypothetical ("can we do Elan after Gilly?", "would 13:00 work?", "is 15:30 free for 40 min?"), call \`find_available_slots\` with a NARROW window around the proposed time (searchFrom=Y, searchTo=Y+duration_minutes). The tool already enforces every rule he taught you (buffer, focus protection, lunch as floating, work hours, day type, attendee availability). Read the result:
-- Slot returned at ~Y → rules pass → say "Yes, works" without margin commentary. Don't add "tight but workable" or "55 min margin" — the tool didn't flag it, so it's fine.
+- Slot returned at ~Y → rules pass → answer the yes/no DIRECTLY and FIRST ("Yes, works" / "Yes, Daniel's free at 13:00"), no margin commentary, no "tight but workable". For "is <attendee> free at Y?" the answer is about THAT slot — a returned slot means free; NEVER cite the attendee's whole-day conflict count (irrelevant to the slot, and it contradicts the "yes").
 - Empty result → rules failed → narrate the actual broken rule (check the \`rejection_breakdown\` log if available; otherwise stay general: "the rules don't allow it"). Then ask if he wants to override.
 NEVER compute margins yourself. Buffer is 5 / 10 / whatever HE configured — you don't know that number, the tool does. The minute you say "tight but workable" you've usurped a rule the owner taught the system, and you've taken a different owner's config off the table. The right answer is always "tool said yes" or "tool said no, here's why".
 

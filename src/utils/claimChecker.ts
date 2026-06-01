@@ -219,7 +219,7 @@ Set claim_specifics_mismatch=false when the overclaim is about whether the actio
 NOT a false claim:
 - Any send/book/task claim where the matching tool appears in TOOL ACTIVITY THIS TURN above.
 - Describing what's ALREADY on the calendar ("Elan's triweekly is at 13:00").
-- Proposing / offering a future action ("I can book that", "want me to reach out?").
+- Proposing / offering / recommending a future action — EVEN when it names a specific meeting, time, or person. "Best fit: Wednesday 13:00 — want me to move the interview there?", "I can book that", "Want me to reach out?", "Shall I move it?" are PROPOSALS awaiting the owner's yes, NOT completed actions. A draft that recommends or asks-before-acting is claimed_action=false no matter how specific it is. Only flag when the draft states the action ALREADY happened ("moved", "booked", "done", "sent", "scheduled it"). When the turn was a reply to an attachment/screenshot, the draft is analysis + a proposal off that image — don't treat its specifics as a phantom action.
 - Referencing what the assistant did in PRIOR turns (history, not this turn).
 - Saying "on it" / "I'll handle that" — these are in-progress commitments, not completed claims.
 
