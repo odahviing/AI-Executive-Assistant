@@ -4,7 +4,19 @@ We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.2
 
 ## ✅ SHIPPED v3.2.0 — Person Store + grounded research, hardened by a real-day bug bash
 
-Minor that caps a multi-session arc (foundation across 3.1.7–3.1.8; polish + root-cause fixes in 3.2.0). **FIRST THING NEXT SESSION:** owner restarts `npm run dev` (PM2 off) and watches whether Maelle behaves — owner's read is "probably not yet," so expect real-day bugs to keep arriving; fold them in. Then continue from the deferred items / GitHub #22 (external social) / WhatsApp.
+Minor that caps a multi-session arc (foundation across 3.1.7–3.1.8; polish + root-cause fixes in 3.2.0).
+
+## 🎯 CURRENT MODE — real-day bug waves (this is the main work now)
+
+Maelle is in **daily real-world use** at work, and the big builds are done (Person Store ✅, requests spine ✅, grounded research ✅). So the default mode now is **reactive, code-first bug-bashing**: the owner brings **waves of bugs from actual usage** (often pasted Slack chats + screenshots), usually after a work session. Expect several at once. How to run it:
+
+- **Don't assume — trace.** Read `logs/maelle-YYYY-MM-DD.log` + the code; state root cause as `file:line — what happens`. The owner has zero patience for guessing and will call it out.
+- **Propose first, never auto-fix.** Bug reports / frustration / screenshots are diagnostic signals, not build signals. Mark each atomic bug → what happened / issue / suggested change / risk → wait for an explicit per-bug "fix it / do D5 / build that".
+- **Code-first, root-cause, no patch-on-patch.** Fix at the chokepoint; remove the rotting layer rather than stack a new one. Prompt is a last resort — and the owner manages the system prompt in a **separate "prompt chat"**: for prompt-class fixes, *write him a clean prompt block to move there* (explain issue + code context so the block is good), don't bloat the in-repo prompt.
+- **Couple of small upgrades will fall out of the bugs** — quarter-snap, vacated-slot, status texts were all bug-driven. Take those when a bug points at them; don't go hunting for big new features.
+- **Wrap when he says** ("wrap / ship / cut a version"); default patch, minor only on his call. He often runs **parallel chats** on the same repo — at wrap time, `git fetch` + check for other-chat commits/uncommitted edits in the shared tree before committing.
+
+Parked until a bug wave or owner pivot points there: GitHub #22 (external social), WhatsApp transport, fully dropping the vestigial `coord_jobs.status`/`outreach_jobs.status` columns.
 
 What 3.2.0 added on top of the Person Store (below): in-flight guard no longer orphans on confirm-override pauses (killed the "still working on booking Dana & Max" brief nag) + dead subject-match fallback removed; `move_meeting` returns `vacated` (the freed slot) so "move X into the open slot" resolves; floating-block move snaps to the quarter grid (lunch :40→:45); claim-checker no longer flags a proposal as a phantom action (the screenshot-reply degradation); full per-tool Slack status coverage (internal pre-passes skip, no "Working" placeholder). **Prompt-side fixes (D1–D3: relax-vs-working-day, answer-the-question, don't-cite-day-conflicts; + move_meeting vacated-slot narration) were handed to the prompt chat by the owner — not in the repo.** CHANGELOG has the full 3.2.0 entry.
 
