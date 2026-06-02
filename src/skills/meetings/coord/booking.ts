@@ -525,11 +525,16 @@ export async function bookCoordination(
       }
     }
 
-    // v2.3.1 (B7 / #64) — post-create floating block rebalance. The conflict
-    // check above filtered floating blocks out (so booking proceeds), but
-    // the new event may now sit on top of e.g. lunch. Re-place the affected
-    // block elsewhere in its window via the existing helper.
-    if (newEventId && !isMove) {
+    // v2.3.1 (B7 / #64) — post-mutation floating block rebalance. The conflict
+    // check above filtered floating blocks out (so booking proceeds), but the
+    // event may now sit on top of e.g. lunch. Re-place the affected block
+    // elsewhere in its window via the existing helper.
+    // v3.2.x — runs on the MOVE branch too (was `!isMove`, which left a
+    // coordinated/colleague reschedule that landed on lunch stuck — lunch never
+    // slid, never asked). There's no owner turn on this path to surface an
+    // offer, so the helper's auto-slide + shadow note is the correct headless
+    // handling. `slot` is the destination — the right day for the slide-out.
+    if (newEventId) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { rebalanceFloatingBlocksAfterMutation } = require('../../../utils/rebalanceFloatingBlocks') as

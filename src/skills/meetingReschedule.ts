@@ -186,6 +186,19 @@ export async function handleRescheduleReply(
         start: ctx.proposed_start,
         end: ctx.proposed_end,
       });
+      // v3.2.x — this is a headless reschedule (no owner turn), so a floating
+      // block the move just landed on must be auto-slid in code, not offered.
+      // Own try/catch: a rebalance hiccup must not read as a move failure.
+      try {
+        const { rebalanceFloatingBlocksAfterMutation } = await import('../utils/rebalanceFloatingBlocks');
+        await rebalanceFloatingBlocksAfterMutation({
+          profile,
+          affectedSlotIso: ctx.proposed_start,
+          ownerSlackId: profile.user.slack_user_id,
+        });
+      } catch (rebErr) {
+        logger.warn('rebalance after reschedule-approval move threw — continuing', { err: String(rebErr).slice(0, 200), jobId: job.id });
+      }
     } catch (err) {
       logger.error('updateMeeting failed on reschedule approval', { err: String(err), jobId: job.id });
       await conn.postToChannel(
@@ -336,6 +349,18 @@ export async function handleRescheduleReply(
                   start: counterStartDt.toISO() ?? ctx.proposed_start,
                   end: counterEndDt.toISO() ?? ctx.proposed_end,
                 });
+                // v3.2.x — headless move (auto-accepted counter): slide any
+                // floating block it landed on, in code. Own try/catch.
+                try {
+                  const { rebalanceFloatingBlocksAfterMutation } = await import('../utils/rebalanceFloatingBlocks');
+                  await rebalanceFloatingBlocksAfterMutation({
+                    profile,
+                    affectedSlotIso: counterStartDt.toISO() ?? ctx.proposed_start,
+                    ownerSlackId: profile.user.slack_user_id,
+                  });
+                } catch (rebErr) {
+                  logger.warn('rebalance after counter auto-accept move threw — continuing', { err: String(rebErr).slice(0, 200), jobId: job.id });
+                }
               } catch (err) {
                 logger.error('Reschedule counter auto-accept: updateMeeting failed, falling back to approval', {
                   err: String(err), jobId: job.id,

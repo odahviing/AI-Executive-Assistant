@@ -41,13 +41,41 @@ function shouldSkipOverlapShadow(fingerprint: string): boolean {
   return false;
 }
 
+/**
+ * A floating block that sits OUTSIDE its preferred window and could now be
+ * brought home — the mutation that just landed (a move or delete) freed an
+ * aligned slot inside the block's window. Tier 1 is PROPOSE-ONLY: the helper
+ * surfaces the candidate, the handler attaches it to the tool result, and the
+ * reply offers it ("…frees 12:30 — want lunch back there?"). We never auto-move
+ * it here, because a block outside its window may be owner-pinned on purpose;
+ * a declinable offer is the safe altitude.
+ */
+export interface ReclaimableBlock {
+  name: string;
+  /** ISO start of the in-window aligned slot the block could move back to. */
+  targetSlotIso: string;
+  /** Human label for the reply, e.g. "Wed 3 Jun 12:30–13:00". */
+  label: string;
+  /** Graph event id of the displaced block (so a follow-up move can target it). */
+  blockEventId: string;
+}
+
 export async function rebalanceFloatingBlocksAfterMutation(params: {
   profile: UserProfile;
   /** ISO timestamp of the new event start — used to derive the affected date. */
   affectedSlotIso: string;
   ownerSlackId?: string;
-}): Promise<{ moved: number; overlapping: number }> {
-  const result = { moved: 0, overlapping: 0 };
+  /**
+   * The slot this mutation actually FREED (a move's old position, a delete's
+   * removed event). When provided, a reclaim candidate is only surfaced if this
+   * freed range intersects the block's preferred window — i.e. THIS mutation
+   * plausibly opened the room, so we don't re-offer on unrelated same-day edits.
+   * Omit to fall back to permissive detection (any open window).
+   */
+  freedRangeIso?: { start: string; end: string };
+}): Promise<{ moved: number; overlapping: number; reclaimable: ReclaimableBlock[] }> {
+  const result: { moved: number; overlapping: number; reclaimable: ReclaimableBlock[] } =
+    { moved: 0, overlapping: 0, reclaimable: [] };
   const { profile, affectedSlotIso } = params;
 
   try {
@@ -87,6 +115,21 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
     const events = await getCalendarEvents(profile.user.email, startIso, endIso, tz);
     const realEvents = events.filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free');
 
+    // Freed-range gate (optional): when the caller tells us the slot this
+    // mutation actually freed, reclaim offers are limited to blocks whose
+    // window that freed range overlaps — so we don't re-offer on unrelated
+    // same-day edits. Absent → permissive (any open window qualifies).
+    let freedStartMs: number | null = null;
+    let freedEndMs: number | null = null;
+    if (params.freedRangeIso) {
+      const fs = DateTime.fromISO(params.freedRangeIso.start, { zone: tz });
+      const fe = DateTime.fromISO(params.freedRangeIso.end, { zone: tz });
+      if (fs.isValid && fe.isValid && fe.toMillis() > fs.toMillis()) {
+        freedStartMs = fs.toMillis();
+        freedEndMs = fe.toMillis();
+      }
+    }
+
     // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
 
     for (const block of blocks) {
@@ -119,23 +162,75 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         zone: blockEvent.end.timeZone ?? 'utc',
       }).setZone(tz).toMillis();
 
-      // Owner-pinned detection (option A): if the block currently sits
-      // OUTSIDE its preferred window, presume owner placed it there
-      // deliberately (via confirm_outside_window or manual Outlook edit)
-      // and DO NOT auto-rebalance. The sweep would otherwise undo an
-      // intentional override every time it runs. The original-time-free
-      // detection that could safely return it is future work.
+      // Block sits OUTSIDE its preferred window. We never AUTO-move it back —
+      // it may be owner-pinned on purpose (confirm_outside_window / manual
+      // Outlook edit), and silently undoing that is the regression the v2.x
+      // sweep was careful to avoid. BUT the mutation that just landed (a move
+      // or delete) may have freed an aligned slot inside the window — Tier 1
+      // (v3.2.x): surface that as a PROPOSE-ONLY reclaim candidate so the reply
+      // can offer to bring the block home. A wrong guess (owner-pinned) is just
+      // a declinable offer, so detection here doesn't need to disambiguate.
       const ownerPinWinStart = fb.windowMsForDay(dateStr, block.preferred_start, tz);
       const ownerPinWinEnd = fb.windowMsForDay(dateStr, block.preferred_end, tz);
       if (
         Number.isFinite(ownerPinWinStart) && Number.isFinite(ownerPinWinEnd)
         && (blockStartMs < ownerPinWinStart || blockEndMs > ownerPinWinEnd)
       ) {
-        logger.info('rebalanceFloatingBlocks: block skipped — outside preferred window (owner-pinned)', {
-          block: block.name, date: dateStr,
-          currentPlacement: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm')}`,
-          preferredWindow: `${block.preferred_start}-${block.preferred_end}`,
-        });
+        // Freed-range gate: if the caller told us what slot was freed, only
+        // consider this block when that freed range overlaps its window — the
+        // mutation has to plausibly be what opened the room. No overlap → this
+        // mutation isn't relevant to this block; skip without offering.
+        if (
+          freedStartMs !== null && freedEndMs !== null
+          && !(freedStartMs < ownerPinWinEnd && freedEndMs > ownerPinWinStart)
+        ) {
+          logger.info('rebalanceFloatingBlocks: block outside window, freed range not in its window — no offer', {
+            block: block.name, date: dateStr,
+          });
+          continue;
+        }
+        // Build busy-in-window for THIS block (excluding the block itself —
+        // it's the one we'd be moving). Mirror the overlap-branch math below.
+        const reclaimBusy: Array<{ start: number; end: number }> = [];
+        for (const e of realEvents) {
+          if (e.id === blockEvent.id) continue;
+          const eStart = DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' })
+            .setZone(tz).toMillis();
+          const eEnd = DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'utc' })
+            .setZone(tz).toMillis();
+          if (eStart < ownerPinWinEnd && eEnd > ownerPinWinStart) {
+            reclaimBusy.push({
+              start: Math.max(eStart, ownerPinWinStart),
+              end: Math.min(eEnd, ownerPinWinEnd),
+            });
+          }
+        }
+        const reclaimSlot = block.prefer_position === 'latest_in_window'
+          ? fb.findLatestAlignedSlotForBlock(block, dateStr, tz, reclaimBusy)
+          : fb.findAlignedSlotForBlock(block, dateStr, tz, reclaimBusy);
+        // Any in-window aligned slot is "more home" than the current
+        // out-of-window placement, so its mere existence makes this a candidate.
+        if (reclaimSlot !== null) {
+          const rs = DateTime.fromMillis(reclaimSlot, { zone: tz });
+          const re = rs.plus({ minutes: block.duration_minutes });
+          result.reclaimable.push({
+            name: block.name,
+            targetSlotIso: rs.toISO()!,
+            label: `${rs.toFormat('EEE d MMM HH:mm')}–${re.toFormat('HH:mm')}`,
+            blockEventId: blockEvent.id,
+          });
+          logger.info('rebalanceFloatingBlocks: reclaim candidate found (propose-only)', {
+            block: block.name, date: dateStr,
+            currentPlacement: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm')}`,
+            reclaimTo: rs.toFormat('HH:mm'),
+          });
+        } else {
+          logger.info('rebalanceFloatingBlocks: block outside window, no in-window slot to reclaim', {
+            block: block.name, date: dateStr,
+            currentPlacement: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm')}`,
+            preferredWindow: `${block.preferred_start}-${block.preferred_end}`,
+          });
+        }
         continue;
       }
 
@@ -241,6 +336,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
     affectedSlotIso,
     moved: result.moved,
     overlapping: result.overlapping,
+    reclaimable: result.reclaimable.length,
   });
   return result;
 }

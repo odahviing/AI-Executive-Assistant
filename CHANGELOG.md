@@ -2,6 +2,30 @@
 
 ---
 
+## 3.2.1 — reschedule-flow correctness: approval replay, floating-block moves, and a social mis-attribution
+
+A real-day bug-bash across two parallel sessions, hardening the move/reschedule path end to end: a stuck approval replay that couldn't absorb a follow-up answer, a colleague double-approval, owner-override persistence, floating blocks that didn't move when a meeting landed on them, and a proactive social ping built on a topic the colleague never raised.
+
+### Fixed
+
+- **Approval replay couldn't absorb a location answer (the "Yariv" loop).** A colleague reschedule of an external interview onto an office day needs an online/in-person decision; the approved move replayed, hit `ask_location_mode`, and errored `location_mode_unspecified` — and the owner's later "online" had nowhere to go, so every retry re-hit the same wall (5×) and Maelle eventually punted the work back to the colleague. Now `resolve_approval` carries the answer (`data:{ is_online }` / `{ location }`), the resolver merges it into the replayed move's args before firing, and the move lands. ([resolver.ts](src/core/requests/resolver.ts), [tasks/skill.ts](src/tasks/skill.ts))
+- **Approval-bound thread trapped recovery.** While a thread was bound to a pending approval, only `resolve_approval` was in scope — so when a replay failed needing a parameter, the only available lever just re-ran the same broken replay. The thread now also unlocks the bound approval's OWN deferred-action tool (e.g. `move_meeting`), so Maelle can complete it directly; every other tool stays filtered (anti-drift intact). ([orchestrator/index.ts](src/core/orchestrator/index.ts))
+- **Colleague reschedule raised two owner approvals.** A colleague's follow-up turn, combined with the mutation-contradiction retry re-firing the whole orchestrator turn, created a second, differently-named approval that slipped past the subject-string dedup. That retry is now text-only (`proseOnly`): it re-drafts the wording without re-executing any write tool, so it can't spawn a duplicate. ([postReply.ts](src/connectors/slack/postReply.ts))
+- **Moving a floating block dropped the freed slot.** `move_meeting`'s floating-block branch returned no `vacated` (only the regular path did), so "move lunch to free its slot" lost the freed-window info. One shared helper now feeds both return paths. ([ops.ts](src/skills/meetings/ops.ts))
+- **A meeting moved onto lunch left lunch overlapping.** On headless reschedule paths (coord/colleague reschedule approval, auto-accepted counter, coord booking's move branch) a block the move landed on was never slid — the post-mutation rebalance ran only on create, not move. It now runs on those move paths too, auto-sliding the block within its window (no owner turn to offer on → auto-slide + shadow note is the correct headless handling). ([meetingReschedule.ts](src/skills/meetingReschedule.ts), [coord/booking.ts](src/skills/meetings/coord/booking.ts), [rebalanceFloatingBlocks.ts](src/utils/rebalanceFloatingBlocks.ts))
+- **Proactive ping about a topic the colleague never raised.** The subject-reconciler created a "Clair Obscur Expedition 33" gaming interest for a colleague from a chat where he only asked Maelle's name — Maelle is named after that game, so it was HER lore, and the reconcile prompt's own worked example was that exact title. Taught the reconciler to attribute a subject to the COLLEAGUE's genuine interest (skip topics Maelle raised about herself, or ones the person waved off / didn't know), and replaced the self-referential example with a generic placeholder. The one mis-attributed row was removed. ([capturePass.ts](src/memory/capturePass.ts))
+
+### Changed
+
+- **Owner soft-rule override now persists through one mechanism.** An owner-path move/create that breaks a soft rule routes through the same `create_approval` → resolver-replay path as a colleague escalation — so the pending override survives the turn and the owner's later "yes" replays it deterministically — instead of the fragile "ask, then re-issue the move yourself next turn" path that could silently drop the action. An immediate `relaxed=true` retry is kept only for an explicit same-message pre-authorization ("move it, I'll handle the conflict"). ([ops.ts](src/skills/meetings/ops.ts))
+- **Owner-facing moves can offer to bring a displaced block home.** When a move/delete frees room inside a displaced floating block's window, the result carries a `reclaimable_block` so the reply can offer it ("…frees 12:30 — want lunch back there?") — propose-only, acted on only with the owner's yes. ([rebalanceFloatingBlocks.ts](src/utils/rebalanceFloatingBlocks.ts), [ops.ts](src/skills/meetings/ops.ts), [meetings.ts](src/skills/meetings.ts))
+
+### Housekeeping
+
+- GitHub #119 (active-mode forward-week lunch) closed — verified already fixed in 3.1.7. New ticket #121 filed (deferred): move calendar reads to a cross-turn, short-TTL cache with write-invalidation.
+
+---
+
 ## 3.2.0 — Person Store + grounded research, hardened by a real-day bug bash
 
 The minor that caps a multi-session arc: the **Unified Person Store** (surrogate `person_id`, internal + external people in one table), the **grounded `web_research`** rebuild of the search skill, and a long real-day tail of correctness/UX fixes. The foundation landed across 3.1.7–3.1.8 (see those entries); this version adds the controls and polish that make it behave — cut as a minor because, taken together, it's a new capability surface: externals are remembered, content is sourced, and several recurring scheduling/state bugs are closed at the root.

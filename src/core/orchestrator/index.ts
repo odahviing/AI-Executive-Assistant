@@ -1015,6 +1015,24 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           'list_pending_approvals',
           'message_colleague',
         ]);
+        // v3.2.1 (#120 / Yariv) — escape hatch for a TRAPPED recovery. When a
+        // bound approval's deferred action failed mid-replay needing a
+        // parameter (e.g. ask_location_mode → location_mode_unspecified), the
+        // owner-path thread was stuck: only resolve_approval was available, and
+        // it just re-ran the identical broken replay (the Yariv loop, 5×). Let
+        // the bound approval's OWN deferred-action tool through so Sonnet can
+        // complete it directly (e.g. move_meeting with is_online=true). This is
+        // on-topic for the approval, not drift — every OTHER tool stays
+        // filtered, so the anti-drift guard is intact.
+        for (const r of boundApprovals) {
+          try {
+            const det = JSON.parse(r.details_json ?? '{}') as { deferred_action?: { tool?: string } };
+            const deferredTool = det.deferred_action?.tool;
+            if (typeof deferredTool === 'string' && deferredTool.length > 0) {
+              APPROVAL_BOUND_TOOLS.add(deferredTool);
+            }
+          } catch { /* unparseable details — leave the base allow-list */ }
+        }
         const before = tools.length;
         tools = tools.filter(t => APPROVAL_BOUND_TOOLS.has(t.name));
         logger.info('Orchestrator — approval-bound thread, locked tool scope', {

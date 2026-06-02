@@ -27,6 +27,34 @@ function formatIsoTime(iso: string): string {
   return m ? m[1] : iso;
 }
 
+// v3.2.1 (#120 / 120b) — the VACATED slot of a move: the window the meeting
+// occupied BEFORE it moved, so a follow-up "move X into the freed slot"
+// resolves from this turn instead of Maelle re-asking the old time. Window =
+// old start + the moved duration. ONE helper, called from BOTH move return
+// sites (the regular-meeting tail AND the floating-block early return) so the
+// two paths can never drift apart again — the original bug was that only the
+// regular path returned `vacated`, so moving lunch to free its slot dropped
+// the freed-slot info entirely.
+function computeVacatedSlot(
+  preMoveStartIso: string | undefined,
+  newStartIso: string | undefined,
+  newEndIso: string | undefined,
+  timezone: string,
+): { start: string; end: string; label: string } | undefined {
+  if (!preMoveStartIso) return undefined;
+  const vs = DateTime.fromISO(preMoveStartIso, { zone: timezone });
+  if (!vs.isValid) return undefined;
+  const ns = newStartIso ? DateTime.fromISO(newStartIso, { zone: timezone }) : undefined;
+  const ne = newEndIso ? DateTime.fromISO(newEndIso, { zone: timezone }) : undefined;
+  const durMs = ns?.isValid && ne?.isValid ? ne.toMillis() - ns.toMillis() : 0;
+  const ve = durMs > 0 ? vs.plus({ milliseconds: durMs }) : vs;
+  return {
+    start: vs.toISO() ?? preMoveStartIso,
+    end: ve.toISO() ?? '',
+    label: `${vs.toFormat('EEE d MMM HH:mm')}–${ve.toFormat('HH:mm')}`,
+  };
+}
+
 // v2.1.5 — build synthetic busy blocks covering everything OUTSIDE the owner's
 // work hours (and all-day busy for non-work days) across the given range. Used
 // only for colleague-path get_free_busy calls so raw free gaps returned to
@@ -2243,7 +2271,12 @@ export class SchedulingSkill {
             _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
             _note: plan.action === 'escalate_approval'
               ? 'A scheduling rule was violated. Use create_approval(kind=policy_exception) with suggested_ask_text to get the owner to decide.'
-              : 'A scheduling rule was violated. Surface suggested_ask_text to the owner and wait for an explicit override before retrying with relaxed=true.',
+              // v3.2.1 (#120a — one mechanism) — owner-path soft-rule override flows
+              // through the SAME persisted approval path as escalate. If the owner
+              // ALREADY authorized it in THIS message, retry create_meeting now with
+              // relaxed=true. Otherwise create_approval(kind=policy_exception) so the
+              // override PERSISTS and his later "yes" replays it deterministically.
+              : 'A soft scheduling rule was violated. If the owner ALREADY authorized overriding it in THIS message, retry create_meeting now with relaxed=true. Otherwise call create_approval(kind=policy_exception) with suggested_ask_text — this PERSISTS the override (the orchestrator stamps the deferred booking) so the owner\'s later "yes" replays it on its own, instead of relying on you to re-issue the booking next turn.',
           };
         }
         // v2.8.2 — ask_location_mode: office day + external + same/unknown TZ
@@ -3282,9 +3315,15 @@ export class SchedulingSkill {
                     reason: 'moved',
                     subject: args.meeting_subject as string | undefined,
                   });
+                  // v3.2.1 (#120 / 120b) — return the vacated slot here too. The
+                  // floating-block move (e.g. lunch) is exactly the case where
+                  // the owner moves a block to FREE its slot for another
+                  // meeting; without this the freed-slot info was dropped.
+                  const vacated = computeVacatedSlot(preMoveStartIso, effectiveStart, effectiveEnd, timezone);
                   return {
                     success: true,
                     action_summary: `Moved ${matchedBlock.name} to ${formatIsoTime(effectiveStart)}.`,
+                    ...(vacated ? { vacated } : {}),
                   };
                 });
               }
@@ -3394,7 +3433,18 @@ export class SchedulingSkill {
               _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
               _note: movePlan.action === 'escalate_approval'
                 ? 'Move violates a scheduling rule. Use create_approval(kind=policy_exception) with suggested_ask_text.'
-                : 'Move violates a scheduling rule. Surface suggested_ask_text to the owner; if he confirms, retry with relaxed=true.',
+                // v3.2.1 (#120a — one mechanism) — owner-path soft-rule override now
+                // flows through the SAME persisted approval path as the colleague
+                // escalate, instead of the fragile "ask, then re-issue relaxed next
+                // turn" path (Sonnet dropped that re-issue → the meeting silently
+                // never moved). If the owner ALREADY authorized the override in THIS
+                // message ("do it anyway", "move it, I'll handle the conflict"), retry
+                // move_meeting now with relaxed=true. OTHERWISE call
+                // create_approval(kind=policy_exception) with suggested_ask_text — the
+                // orchestrator stamps the deferred move, so the override PERSISTS and
+                // the owner's later "yes" replays it deterministically. Do NOT just ask
+                // and rely on re-issuing the move yourself next turn.
+                : 'Move violates a soft scheduling rule. If the owner ALREADY authorized overriding it in THIS message (e.g. "do it anyway", "I\'ll handle the conflict"), retry move_meeting now with relaxed=true. Otherwise call create_approval(kind=policy_exception) with suggested_ask_text — this PERSISTS the override (the orchestrator stamps the deferred move) so the owner\'s later "yes" replays it on its own. Do NOT ask and then rely on re-issuing the move yourself next turn — that pending action gets lost.',
             };
           }
           // v2.8.2 — ask_location_mode on move (rare — external attendee, same/unknown TZ,
@@ -3569,37 +3619,32 @@ export class SchedulingSkill {
         // window. If no in-window slot fits, leave it overlapping and ping
         // the owner (the bumping-out-of-window decision still belongs to him,
         // via the policy_exception approval flow).
+        // v3.1.8 — the VACATED slot (where the meeting WAS), so a follow-up
+        // "move X into the freed slot" resolves from this turn instead of
+        // Maelle re-asking the old time. v3.2.1 — shared helper (see top of
+        // file); the floating-block early return uses the same one.
+        // Computed BEFORE the rebalance so it can gate reclaim detection to the
+        // slot this move actually freed.
+        const vacated = computeVacatedSlot(preMoveStartIso, args.new_start as string, args.new_end as string, timezone);
+
+        // v3.2.x (Tier 1) — capture the rebalance return so a displaced
+        // floating block whose window this move just freed can be OFFERED back
+        // (reclaimable_block), same propose-only pattern as `vacated`. The freed
+        // range (the meeting's OLD slot) gates the offer to a relevant move.
+        let reclaimable: import('../../utils/rebalanceFloatingBlocks').ReclaimableBlock[] = [];
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { rebalanceFloatingBlocksAfterMutation } = require('../../utils/rebalanceFloatingBlocks') as
             typeof import('../../utils/rebalanceFloatingBlocks');
-          await rebalanceFloatingBlocksAfterMutation({
+          const rebal = await rebalanceFloatingBlocksAfterMutation({
             profile: context.profile,
             affectedSlotIso: effectiveStart,
             ownerSlackId: context.profile.user.slack_user_id,
+            ...(vacated ? { freedRangeIso: { start: vacated.start, end: vacated.end } } : {}),
           });
+          reclaimable = rebal?.reclaimable ?? [];
         } catch (err) {
           logger.warn('rebalance after move_meeting threw — continuing', { err: String(err).slice(0, 200) });
-        }
-
-        // v3.1.8 — the VACATED slot (where the meeting WAS), so a follow-up
-        // "move X into the freed slot" resolves from this turn instead of
-        // Maelle re-asking the old time. Window = old start + the moved
-        // duration.
-        let vacated: { start: string; end: string; label: string } | undefined;
-        if (preMoveStartIso) {
-          const vs = DateTime.fromISO(preMoveStartIso, { zone: timezone });
-          const ns = DateTime.fromISO(args.new_start as string, { zone: timezone });
-          const ne = DateTime.fromISO(args.new_end as string, { zone: timezone });
-          const durMs = ns.isValid && ne.isValid ? ne.toMillis() - ns.toMillis() : 0;
-          if (vs.isValid) {
-            const ve = durMs > 0 ? vs.plus({ milliseconds: durMs }) : vs;
-            vacated = {
-              start: vs.toISO() ?? preMoveStartIso,
-              end: ve.toISO() ?? '',
-              label: `${vs.toFormat('EEE d MMM HH:mm')}–${ve.toFormat('HH:mm')}`,
-            };
-          }
         }
 
         return {
@@ -3609,6 +3654,10 @@ export class SchedulingSkill {
           new_end: args.new_end,
           // v3.1.8 — the slot that just opened up (old time of the moved meeting).
           ...(vacated ? { vacated } : {}),
+          // v3.2.x — a displaced floating block this move could bring home.
+          // PROPOSE-ONLY: surface it; the reply offers ("…frees 12:30 — want
+          // lunch back there?"). Not auto-moved (may be owner-pinned).
+          ...(reclaimable.length ? { reclaimable_block: reclaimable[0] } : {}),
           // v1.8.3 — past-tense summary the reply quotes verbatim. Issue #26 bug 1:
           // without this, Sonnet could re-read the calendar post-move and narrate
           // the new time as a fresh discovery ("already at 12:30, nothing to change")
@@ -3820,6 +3869,29 @@ export class SchedulingSkill {
           },
           outcome: 'success',
         });
+
+        // v3.2.x (Tier 1) — a delete frees the deleted event's slot, which may
+        // open a displaced floating block's window. Run the same post-mutation
+        // rebalance (move_meeting/create_meeting already do) and surface any
+        // reclaim candidate as a PROPOSE-ONLY offer. Guarded on preDeleteStartIso
+        // (the freed slot); skipped if the pre-delete probe didn't capture it.
+        let reclaimable: import('../../utils/rebalanceFloatingBlocks').ReclaimableBlock[] = [];
+        if (preDeleteStartIso) {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { rebalanceFloatingBlocksAfterMutation } = require('../../utils/rebalanceFloatingBlocks') as
+              typeof import('../../utils/rebalanceFloatingBlocks');
+            const rebal = await rebalanceFloatingBlocksAfterMutation({
+              profile: context.profile,
+              affectedSlotIso: preDeleteStartIso,
+              ownerSlackId: context.profile.user.slack_user_id,
+            });
+            reclaimable = rebal?.reclaimable ?? [];
+          } catch (err) {
+            logger.warn('rebalance after delete_meeting threw — continuing', { err: String(err).slice(0, 200) });
+          }
+        }
+
         // v2.7.0 — narrate the relay outcome honestly. Three shapes:
         //   sent                 → "Removed it from your side. I let <name> know."
         //   skipped_no_slack_id  → "Removed it from your side. <name> organized this one
@@ -3842,6 +3914,9 @@ export class SchedulingSkill {
           relay_status: relayStatus,
           organizer_name: relayOrganizerName ?? undefined,
           organizer_email: relayOrganizerEmail ?? undefined,
+          // v3.2.x — a displaced floating block whose window this delete freed.
+          // PROPOSE-ONLY: the reply offers to bring it home; not auto-moved.
+          ...(reclaimable.length ? { reclaimable_block: reclaimable[0] } : {}),
           action_summary: actionSummary,
           _note: relayStatus === 'skipped_no_slack_id'
             ? 'IMPORTANT: do NOT claim "I notified the organizer" — the organizer has no Slack account, no DM was sent. Tell the owner that explicitly and offer to draft an email if they want.'

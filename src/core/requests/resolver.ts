@@ -402,6 +402,30 @@ export async function resolveRequest(
     });
   }
 
+  // v3.2.1 (#120 / Yariv) — carry a location-mode answer from resolve_approval
+  // `data` into the replayed action. When a move/create deferred action lands
+  // on the ask_owner_online_or_physical branch (external attendee, unknown TZ,
+  // office day), the replay errors `location_mode_unspecified` and the owner's
+  // later "online" / "in person" had nowhere to go — every retry re-hit the
+  // same wall (the Yariv loop). Now the owner answers via resolve_approval
+  // data:{is_online} / data:{location}; we merge it into the action args so the
+  // replay resolves the location instead of re-asking. is_online flows to
+  // move_meeting/create_meeting as isOnlineHint → resolveLocation resolves it.
+  if (effectiveApprove
+      && (typeof approveData.is_online === 'boolean'
+          || (typeof approveData.location === 'string' && approveData.location.trim().length > 0))) {
+    const mergedArgs: Record<string, unknown> = { ...effectiveApprove.args };
+    if (typeof approveData.is_online === 'boolean') mergedArgs.is_online = approveData.is_online;
+    if (typeof approveData.location === 'string' && approveData.location.trim().length > 0) {
+      mergedArgs.location = approveData.location.trim();
+    }
+    effectiveApprove = { ...effectiveApprove, args: mergedArgs };
+    logger.info('resolveRequest — merged location-mode answer from approve data into replay args', {
+      id: requestId, tool: effectiveApprove.tool,
+      is_online: approveData.is_online, location: approveData.location,
+    });
+  }
+
   if (effectiveApprove) {
     return runApproveCallback(row, effectiveApprove, ctx, {
       mergedFromAmend: !!hasCounter,

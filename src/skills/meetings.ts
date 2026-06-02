@@ -483,6 +483,7 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
 Owner-path: owner override IS the approval. Move the meeting when he asks.
 
 FREED SLOT — after a successful move the result includes \`vacated\` = the slot the meeting just LEFT (its old time): { start, end, label }. Surface it when useful ("that frees up your 11:00 today") so it's in the conversation. If the owner then asks to put something into "the new open slot" / "the freed slot", use \`vacated\` — don't re-ask what time the moved meeting used to be, and don't confuse where it moved TO with where it moved FROM.
+RECLAIM — the result may also include \`reclaimable_block\` = { name, label, … } when this move/delete freed room inside a displaced floating block's window (e.g. lunch got bumped earlier, now its window is open again). OFFER it in the same reply ("…frees 12:30 — want lunch back there?"); it's a proposal, not done. Act only on his yes.
 
 Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already booked with them, call this directly. The handler runs a rule-compliance check server-side (owner's work hours, work days, buffers, floating blocks, no conflicts). If the new slot passes, the move happens silently and the owner is shadow-notified. If the new slot breaks a rule, the tool returns { needs_owner_approval: true, reason, message } — don't keep trying; fall back to create_approval(kind=meeting_reschedule) with the requested slot so the owner can decide, and tell the colleague warmly that you're checking.`,
         input_schema: {

@@ -180,7 +180,7 @@ Owner short-acks ("yes", "go", "no", "kill it") in a thread bound to a pending a
 - or you need to act on an approval from a different thread.
 
 Verdicts:
-- approve: owner said yes. \`data\` is meaningful ONLY for slot_pick approvals — e.g. \`{ slot_iso: "2026-04-22T10:00:00" }\` to pick a specific slot from the offered list. For every OTHER approval kind, \`data\` is dropped silently. If the owner wants to change anything at approve-time (different slot, different attendees, etc.), use verdict='amend' with \`counter\` — never approve+data.
+- approve: owner said yes. \`data\` is meaningful in two cases: (1) slot_pick approvals — e.g. \`{ slot_iso: "2026-04-22T10:00:00" }\` to pick a specific slot; (2) a move/booking approval that ALSO asked online-vs-in-person (external attendee, unknown timezone, office day) — pass the owner's answer as \`{ is_online: true }\` for online/Teams or \`{ is_online: false }\` for in-person, or \`{ location: "<place>" }\` for a named place. This is folded into the move/create the approval will replay, so it lands instead of re-asking. For every OTHER approval kind, \`data\` is dropped silently. If the owner wants to change the time/attendees at approve-time, use verdict='amend' with \`counter\` — never approve+data for those.
 - reject: owner said no. The linked work is cancelled.
 - amend: owner said "not as asked, but here's an alternative" (e.g. "no, but 13:30 would work"). Provide counter with the alternative.
 

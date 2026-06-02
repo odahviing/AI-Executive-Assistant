@@ -251,6 +251,15 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
           app,
           profile,
           extraInstruction: nudge,
+          // v3.2.1 (#120 bug 1) — this retry exists ONLY to fix the DRAFT TEXT
+          // (the "I deferred but actually acted" contradiction). It must NOT
+          // re-execute tools: the original turn already ran create_approval /
+          // move_meeting, and a full re-run created a SECOND, differently-worded
+          // approval that slipped past the subject-string dedup (the Dina
+          // double-request). proseOnly strips every write tool (incl.
+          // create_approval) so the re-run can only re-narrate what already
+          // happened — reads stay available so it can ground the wording.
+          proseOnly: true,
           isMpim,
           isOwnerInGroup,
           mpimMemberIds,

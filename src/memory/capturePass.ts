@@ -665,18 +665,29 @@ We track social interactions in three levels:
 
   Level 3 — TOPIC BEAT: the specific moment under a subject. Short labels (2-5 words). A beat ALWAYS belongs to ONE subject under ONE category.
 
+## Whose interest is it — read who OWNS the topic
+
+A SUBJECT is the COLLEAGUE's OWN recurring interest, life thread, or activity — something THEY are genuinely invested in and will keep coming back to. Before you create or match one, read the transcript for WHO the topic actually belongs to. Don't react to topic words just because they APPEAR in the chat — anchor on what the colleague revealed about THEIR world (what they play, watch, build, who's in their family, where they're travelling).
+
+Two ways a topic can show up that are NOT the colleague's subject:
+
+  - **It's Maelle's, not theirs.** Topics Maelle brings up about HERSELF — her name, where it comes from, her origin/lore, how she works — are never the colleague's subjects, even when the colleague replies to them. Example: the colleague asks "what does your name mean?" and Maelle explains she's named after a character in some game. That game is MAELLE's lore — it says nothing about the colleague's interests. Create nothing for the colleague from it. (Same for anything the OWNER raised about himself that the colleague merely heard.)
+  - **They're just reacting, not invested.** A polite one-off reply, a passing question, or "oh I don't really know that / not my thing" is not a subject — there's no ongoing interest of theirs to track. A subject needs THEIR genuine, repeated investment.
+
+Read the direction of the conversation: who introduced it, whose life/hobby/work it describes, and whether the colleague showed they actually care about it. When the topic is genuinely theirs → capture it. When it's Maelle's lore or a passing mention they didn't own → skip it.
+
 ## Pairing invariant — CRITICAL
 
 A chat can touch MULTIPLE subjects across MULTIPLE categories. Each decision in your output is a SELF-CONTAINED unit:
   { category + subject + this subject's topic_beats }
 
-NEVER put a beat from one category under a subject of another. If the chat covered both gaming (Clair Obscur progress) and family (kid's school project), output TWO decisions — one with category=gaming and the Clair-Obscur beats, one with category=family and the school beats. Beats stay with THEIR subject's category.
+NEVER put a beat from one category under a subject of another. If the chat covered both gaming (Stormvale Saga progress) and family (kid's school project), output TWO decisions — one with category=gaming and the Stormvale beats, one with category=family and the school beats. Beats stay with THEIR subject's category.
 
 ## Example shapes (English-only, illustrative)
 
   gaming:
-    Subject: "Clair Obscur Expedition 33"   (deep, multi-week investment — one subject for the whole game)
-      Topics under it: "destroyed the canvas ending", "Maelle Alice arc reveal", "act 1 inspiration moment", "party build choices"
+    Subject: "Stormvale Saga"   (PLACEHOLDER, made-up title — deep, multi-week investment → one subject for the whole game)
+      Topics under it: "beat the final boss", "act 1 plot twist", "endgame build choices", "weekend co-op run"
 
   movies:
     Subject: "Netflix movie recommendations"   (recurring discovery — umbrella over many individual films)
@@ -688,11 +699,11 @@ NEVER put a beat from one category under a subject of another. If the chat cover
 
 ## Multi-subject example (one chat, two categories)
 
-Chat covers "wrapped up Clair Obscur last night, ending was wild" AND "Ophir had a rough school day". Output:
+Chat covers "wrapped up Stormvale Saga last night, ending was wild" AND "Ophir had a rough school day". Output:
 
   [
     { category: "gaming",
-      action: "match", subject_id: "subj_abc123",  // existing Clair Obscur row
+      action: "match", subject_id: "subj_abc123",  // existing Stormvale Saga row
       sentiment: "positive",
       topic_beats: ["ending wrap-up", "wild ending reaction"] },
     { category: "family",
@@ -720,7 +731,7 @@ You may output zero decisions (if the chat had no social content), one decision 
   - When matching, subject_id MUST be exactly one of the IDs shown. Hallucinated IDs are dropped (we'd rather lose a signal than create a wrong-row write).
   - When creating, category MUST be one of the 30.
   - Granularity is judgment-class — use the shapes above as patterns.
-  - Topic-beats are always more specific than the subject. Under "Clair Obscur Expedition 33", beats are individual moments; never put the game title itself as a beat.
+  - Topic-beats are always more specific than the subject. Under "Stormvale Saga", beats are individual moments; never put the game title itself as a beat.
   - DON'T duplicate. If an active subject already covers this content, match it — don't create a near-duplicate with slightly different wording.
 
 Output JSON only. No prose, no markdown fences.`;
