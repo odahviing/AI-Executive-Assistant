@@ -89,9 +89,11 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
 
   // Preferences (v2.9 — merged)
   manage_preference: 'Saving the preference',
+  update_my_preferences: 'Saving the preference',
 
   // Calendar issues (v2.9 — merged)
   manage_calendar_issue: 'Sorting the calendar',
+  manage_working_elsewhere: 'Updating your travel days',
 
   // Venues (v2.9)
   find_venue: 'Finding a place',

@@ -272,7 +272,7 @@ ${pendingApprovalsSection}` : '';
 
   const activeSkills = getActiveSkills(profile);
   const skillNames = activeSkills.map(s => s.name).join(', ') || 'none';
-  const skillsSection = buildSkillsPromptSection(profile, toolScopes);
+  const skillsSection = buildSkillsPromptSection(profile, toolScopes, isOwner);
 
   const activeChannels = Object.entries(profile.channels ?? {})
     .filter(([, v]) => v?.enabled)

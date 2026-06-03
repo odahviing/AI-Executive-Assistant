@@ -29,12 +29,13 @@ const TOOL_NAMES = [
   'create_meeting', 'delete_meeting', 'escalate_to_user', 'finalize_coord_meeting',
   'find_available_slots', 'get_active_coordinations', 'get_calendar', 'get_free_busy',
   'move_meeting', 'set_event_category', 'update_meeting', 'manage_calendar_issue',
+  'manage_working_elsewhere',
   // Slack lookups
   'find_slack_channel', 'find_slack_user',
   // Knowledge
   'manage_knowledge', 'classify_document',
   // Memory / people
-  'manage_preference', 'recall_interactions', 'update_person_profile',
+  'manage_preference', 'update_my_preferences', 'recall_interactions', 'update_person_profile',
   'update_person_memory', 'get_person_memory', 'confirm_gender', 'log_interaction',
   // Social writes
   'note_about_person', 'note_about_self',

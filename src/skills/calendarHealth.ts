@@ -8,11 +8,13 @@ import {
   type CalendarEvent,
   createMeeting,
   updateMeeting,
+  deleteMeeting,
   findAvailableSlots,
 } from '../connectors/graph/calendar';
 import { auditLog, getActiveCalendarIssues, updateCalendarIssueStatus, buildClusters, upsertCluster, markStaleResolved, type DetectedIssue, type IssueClass, type IssueStatus } from '../db';
 import logger from '../utils/logger';
 import { displaySubject } from '../utils/displaySubject';
+import { formatSkillPreferencesBlock } from '../utils/skillPreferences';
 import type { PreferPosition, AnchorEvent } from '../utils/floatingBlocks';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -288,6 +290,27 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
           required: ['action'],
         },
       },
+      {
+        name: 'manage_working_elsewhere',
+        description: `Mark (or clear) days the OWNER is working from a different location/timezone — travel days, working from another office, etc. Sets Outlook's "Working Elsewhere" status so Maelle knows his normal office/home/work-hours rules don't apply those days: availability becomes tentative in his AWAY timezone and bookings route to approval.
+
+Use when the owner says he'll be elsewhere: "next week I'm in France Monday and Tuesday", "I'm working from the NYC office Thu–Fri", "I'll be in London all next week".
+
+action='set' — create the all-day Working Elsewhere marker spanning the dates. Always include \`location\` (where he'll be) — it's what derives his timezone there.
+action='clear' — remove Working Elsewhere markers overlapping the date range (a trip got cancelled / changed).
+
+Owner-only. This is a personal status marker, NOT a meeting — no attendees, no booking rules. Resolve the dates from the owner's words using your date table.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['set', 'clear'], description: 'set = create the marker; clear = remove markers in the range.' },
+            start_date: { type: 'string', description: 'First day, YYYY-MM-DD.' },
+            end_date: { type: 'string', description: 'Last day, YYYY-MM-DD (inclusive). Omit for a single day.' },
+            location: { type: 'string', description: 'Where he\'ll be — city or office ("France", "Boston Office", "London"). Drives the away-timezone; include whenever known (required for set).' },
+          },
+          required: ['action', 'start_date'],
+        },
+      },
     ];
   }
 
@@ -300,6 +323,76 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
     const { email: userEmail, timezone } = profile.user;
 
     switch (toolName) {
+      case 'manage_working_elsewhere': {
+        // v3.3 — owner-only personal status marker (Working Elsewhere). Creates
+        // / removes an all-day showAs=workingElsewhere event so WE-mode (slot
+        // finder + booking gate + active-mode skip) reads it. NOT a meeting.
+        if (context.senderRole !== 'owner') {
+          return { error: 'not_permitted', reason: 'Only the owner can set their working-elsewhere days.' };
+        }
+        const action = (args.action as string | undefined)?.trim();
+        const startDateArg = (args.start_date as string | undefined)?.trim();
+        const endDateArg = (args.end_date as string | undefined)?.trim() || startDateArg;
+        const location = (args.location as string | undefined)?.trim() ?? '';
+        if (!startDateArg) return { error: 'empty_start_date' };
+        const startDt = DateTime.fromISO(startDateArg, { zone: timezone });
+        const endDtInclusive = DateTime.fromISO(endDateArg!, { zone: timezone });
+        if (!startDt.isValid || !endDtInclusive.isValid) {
+          return { error: 'bad_date', message: 'start_date / end_date must be YYYY-MM-DD.' };
+        }
+
+        if (action === 'clear') {
+          try {
+            const events = await getCalendarEvents(userEmail, startDt.toFormat('yyyy-MM-dd'), endDtInclusive.toFormat('yyyy-MM-dd'), timezone);
+            const markers = events.filter(e => e.isAllDay && !e.isCancelled && e.showAs === 'workingElsewhere');
+            for (const m of markers) {
+              await deleteMeeting(userEmail, m.id);
+            }
+            logger.info('manage_working_elsewhere — cleared', { count: markers.length, from: startDateArg, to: endDateArg });
+            return { ok: true, action: 'clear', cleared: markers.length };
+          } catch (err) {
+            logger.warn('manage_working_elsewhere clear failed', { err: String(err).slice(0, 200) });
+            return { ok: false, error: 'clear_failed' };
+          }
+        }
+
+        if (action !== 'set') {
+          return { error: 'bad_action', message: "action must be 'set' or 'clear'." };
+        }
+        // All-day Graph event: start = midnight of first day, end = midnight of
+        // the day AFTER the last day (exclusive).
+        const allDayStart = startDt.startOf('day').toFormat("yyyy-MM-dd'T'00:00:00");
+        const allDayEnd = endDtInclusive.startOf('day').plus({ days: 1 }).toFormat("yyyy-MM-dd'T'00:00:00");
+        const subject = location ? `Working Elsewhere — ${location}` : 'Working Elsewhere';
+        try {
+          const created = await createMeeting({
+            subject,
+            start: allDayStart,
+            end: allDayEnd,
+            attendees: [],
+            isAllDay: true,
+            showAs: 'workingElsewhere',
+            ...(location ? { location } : {}),
+            userEmail,
+            timezone,
+          });
+          logger.info('manage_working_elsewhere — set', { id: created.id, from: startDateArg, to: endDateArg, location });
+          return {
+            ok: true,
+            action: 'set',
+            event_id: created.id,
+            from: startDt.toFormat('yyyy-MM-dd'),
+            to: endDtInclusive.toFormat('yyyy-MM-dd'),
+            location,
+            _note: location
+              ? `Marked Working Elsewhere (${location}) ${startDt.toFormat('EEE d MMM')}–${endDtInclusive.toFormat('EEE d MMM')}. Those days now use ${location} time for availability and route bookings to you.`
+              : `Marked Working Elsewhere ${startDt.toFormat('EEE d MMM')}–${endDtInclusive.toFormat('EEE d MMM')}. Tip: add a location next time so I can use the right timezone there.`,
+          };
+        } catch (err) {
+          logger.warn('manage_working_elsewhere set failed', { err: String(err).slice(0, 200) });
+          return { ok: false, error: 'set_failed' };
+        }
+      }
 
       case 'check_calendar_health': {
         // v2.1.4 — default window is owner-rule-driven (today → end of
@@ -789,8 +882,21 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
           logger.info('Calendar health: active mode — running fix loop', {
             ownerUserId, startDate, endDate, issueCount: issues.length,
           });
+          // v3.3 — Working Elsewhere days: the owner's rule layer is unreliable
+          // (different place + timezone), so DON'T auto-fix on them (no auto-add
+          // lunch in the wrong timezone, no auto-resolve). Detection off the
+          // already-fetched events; empty set → no-op (normal behavior).
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const weMod = require('../utils/workingElsewhere') as typeof import('../utils/workingElsewhere');
+          const weActiveDays = weMod.detectWorkingElsewhereDays(events, timezone);
           for (const issue of issues) {
             try {
+              if (weActiveDays.size > 0 && weActiveDays.has(issue.date)) {
+                logger.info('Calendar health: skipping auto-fix on working-elsewhere day', {
+                  date: issue.date, type: issue.type,
+                });
+                continue;
+              }
               if (issue.type === 'missing_floating_block') {
                 // v3.1.7 / #119 — no suppression check here. Days the owner
                 // waived (approved gap, or deleted the block that day) are
@@ -2109,7 +2215,7 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
     }
   }
 
-  getSystemPromptSection(profile: UserProfile, scopes?: string[]): string {
+  getSystemPromptSection(profile: UserProfile, scopes?: string[], isOwner?: boolean): string {
     // v3.x (Block 3 — prose lazy-load, "option 1"). The calendar-health TOOLS
     // (check_calendar_health / analyze_calendar / manage_calendar_issue) stay in
     // the 'meetings' scope so they ALWAYS ship on a scheduling turn — Sonnet can
@@ -2197,6 +2303,13 @@ TRUST THE ANALYZER (v1.6.4):
 - If a day's \`issues\` is empty, that day has NO issues. Do not invent one — don't say "lunch is effectively blocked" because the gap looked tight, don't say "back-to-back" because two meetings were close, don't say "no time for coffee" because nothing's scheduled. The analyzer already considers the buffer, the lunch window, the work hours, and free-time thresholds. If it didn't flag it, it isn't an issue.
 - If you spot something in the raw events that you THINK is an issue but the analyzer didn't flag, ask the owner — don't assert: "I noticed Monday is pretty packed, want me to check if there's room for [X]?"
 - Same for the events list: the analyzer already filtered personal events on non-working days. If a day returns empty, it IS empty for our purposes — don't pull personal events from get_calendar to fill the silence.
+
+LEARNING ${firstName.toUpperCase()}'S CALENDAR STYLE (v3.3):
+- When ${firstName} states a STANDING calendar preference — something to apply EVERY time, not a one-off for today — offer to remember it, and on his "yes" call \`update_my_preferences(skill='calendar', mode='add', text='<his preference, in his words>')\`.
+  Examples: "on Sundays, if there's no lunch, don't add one" · "duplicate invites from the recruiting system — just delete them, don't ask" · "don't flag duplicates until end of next week, I know about them".
+- A one-off instruction for TODAY's calendar is NOT a preference — just do it, don't save it.
+- To EDIT or REMOVE a saved preference, call \`update_my_preferences(skill='calendar', mode='replace', text='<the full new list>')\`.
+- His saved calendar preferences (if any) appear in the block below — already in force. Don't re-ask about something already listed there.${isOwner ? formatSkillPreferencesBlock(profile, 'calendar', { label: 'CALENDAR' }) : ''}
 `;
   }
 }

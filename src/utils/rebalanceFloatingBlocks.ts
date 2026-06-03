@@ -176,6 +176,26 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         Number.isFinite(ownerPinWinStart) && Number.isFinite(ownerPinWinEnd)
         && (blockStartMs < ownerPinWinStart || blockEndMs > ownerPinWinEnd)
       ) {
+        // v3.2.x — DIAGNOSTIC (not a fix). A floating block sitting at the
+        // window START (e.g. lunch 11:30 with window 11:30–13:30) was being
+        // routed here as "out-of-window" when it should read as in-window and
+        // take the auto-slide path — but the old log line carried nothing to
+        // tell a boundary bug from a real out-of-window pin from a TZ-parse
+        // skew. Dump the raw inputs so the NEXT occurrence is self-explaining:
+        // raw event start/end (+ their stored timeZone), the computed block ms
+        // vs window ms in owner-local, and which side of the comparison tripped.
+        logger.info('rebalanceFloatingBlocks: OUT-OF-WINDOW classification — diagnostic', {
+          block: block.name, date: dateStr,
+          rawEventStart: blockEvent.start.dateTime, rawEventStartTz: blockEvent.start.timeZone ?? 'utc',
+          rawEventEnd: blockEvent.end.dateTime, rawEventEndTz: blockEvent.end.timeZone ?? 'utc',
+          blockLocal: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm:ss')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm:ss')}`,
+          windowLocal: `${DateTime.fromMillis(ownerPinWinStart).setZone(tz).toFormat('HH:mm:ss')}-${DateTime.fromMillis(ownerPinWinEnd).setZone(tz).toFormat('HH:mm:ss')}`,
+          blockStartMs, blockEndMs, winStartMs: ownerPinWinStart, winEndMs: ownerPinWinEnd,
+          startBelowWindow: blockStartMs < ownerPinWinStart,
+          endAboveWindow: blockEndMs > ownerPinWinEnd,
+          startDeltaMs: blockStartMs - ownerPinWinStart,  // 0 = exactly at window start (the suspected edge bug)
+          freedRangeIso: params.freedRangeIso ?? null,
+        });
         // Freed-range gate: if the caller told us what slot was freed, only
         // consider this block when that freed range overlaps its window — the
         // mutation has to plausibly be what opened the room. No overlap → this

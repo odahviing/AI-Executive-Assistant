@@ -1142,6 +1142,10 @@ export class SchedulingSkill {
               top_reasons: string[];
               blocked_by?: Array<{ email: string; slots_blocked: number }>;
             }>;
+            workingElsewhere?: {
+              resolved: Array<{ date: string; away_tz: string; location: string }>;
+              unresolved: Array<{ date: string; location: string }>;
+            };
           } = {};
 
           // v2.7.6 — narrow-window detection. When owner explicitly named a
@@ -1349,6 +1353,16 @@ export class SchedulingSkill {
               && userNamedNarrowWindow
               && !isAlreadyRelaxed;
             if (rawSlots.length === 0 && !shouldRecover) {
+              // v3.3 — fail loud on an all-Working-Elsewhere window: surface the
+              // marker so Sonnet asks about timezone instead of saying "busy."
+              const weInfo = diagnosticsOut.workingElsewhere;
+              if (weInfo && (weInfo.resolved.length > 0 || weInfo.unresolved.length > 0)) {
+                return {
+                  slots: [],
+                  working_elsewhere: weInfo,
+                  _working_elsewhere_note: 'The window is entirely Working-Elsewhere day(s). For any day in `working_elsewhere.unresolved`, ASK the owner what timezone he is in that day — do NOT say he is unavailable. For `resolved` days with no slots, his day there is genuinely full. NEVER present his home-timezone availability for a working-elsewhere day.',
+                };
+              }
               return rawSlots;
             }
             let relaxedRecoverySlots: typeof rawSlots = [];
@@ -1413,6 +1427,16 @@ export class SchedulingSkill {
                 });
               }
               if (relaxedRecoverySlots.length === 0) {
+                // v3.3 — fail loud on working-elsewhere days (see strict-pass return above).
+                const weInfo = diagnosticsOut.workingElsewhere;
+                if (weInfo && (weInfo.resolved.length > 0 || weInfo.unresolved.length > 0)) {
+                  return {
+                    slots: [],
+                    working_elsewhere: weInfo,
+                    _working_elsewhere_note: 'The window is entirely Working-Elsewhere day(s). For any day in `working_elsewhere.unresolved`, ASK the owner what timezone he is in that day — do NOT say he is unavailable. For `resolved` days with no slots, his day there is genuinely full. NEVER present his home-timezone availability for a working-elsewhere day.',
+                    ...(strictDaySummary && strictDaySummary.length > 0 ? { day_summary: strictDaySummary } : {}),
+                  };
+                }
                 // Recovery also empty — return original empty result with day_summary.
                 if (strictDaySummary && strictDaySummary.length > 0) {
                   return { slots: [], day_summary: strictDaySummary };
@@ -1589,7 +1613,13 @@ export class SchedulingSkill {
               ? strictDaySummary
               : diagnosticsOut.daySummary;
             const hasDaySummary = Array.isArray(daySummary) && daySummary.length > 0;
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult) {
+            // v3.3 — Working Elsewhere surfacing. `resolved` days carry tentative
+            // slots (already tagged in annotatedSlots); `unresolved` days had a
+            // marker whose location couldn't be mapped to a timezone → Sonnet
+            // must ASK, never offer home-TZ times.
+            const weInfo = diagnosticsOut.workingElsewhere;
+            const hasWe = !!weInfo && (weInfo.resolved.length > 0 || weInfo.unresolved.length > 0);
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || hasWe) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               if (travelers.length > 0) result.travelers = travelers;
               if (hasDaySummary) result.day_summary = daySummary;
@@ -1599,6 +1629,11 @@ export class SchedulingSkill {
                 result._relaxed_recovery = true;
                 result._recovery_note =
                   'Strict pass returned 0 in the named window. These slots come from a relaxed retry that bypassed soft rules (focus_time / lunch / work-hours). Read day_summary.top_reasons to see WHICH rule each slot is breaking, and present with that trade-off explicitly ("X fits but eats into your focus block — book anyway?"). Owner gets the final say.';
+              }
+              if (hasWe) {
+                result.working_elsewhere = weInfo;
+                result._working_elsewhere_note =
+                  'Some days in this window are marked Working Elsewhere — the owner is in a different place/timezone, so his normal scheduling rules are SUSPENDED. Slots tagged `tentative_working_elsewhere:true` are TENTATIVE openings computed in his away timezone (see each slot\'s `away_tz` + `away_location`): present them in HIS local time there, ideally dual-TZ (e.g. "10:00 Boston / 17:00 your time"), say they need his confirmation, and route any booking through approval — never present as locked. For any day in `working_elsewhere.unresolved` (a marker whose location I could not map to a timezone), DO NOT offer times — ASK the owner what timezone he is in that day. NEVER show his home-timezone clock for a working-elsewhere day.';
               }
               return result;
             }

@@ -114,8 +114,11 @@ export interface CreateMeetingParams {
   // end is the day AFTER). Pre-this change callers had no way to set this
   // and any "all day" attempt landed as a 0-min event at midnight. Default
   // false — only set true when owner explicitly asks for a full-day event.
-  // showAs is intentionally not exposed: every meeting Maelle books is busy
-  // by default (owner direction).
+  // showAs is intentionally not exposed for normal MEETINGS: every meeting
+  // Maelle books is busy by default (owner direction). v3.3 — it IS settable
+  // for personal status markers (e.g. an all-day Working Elsewhere day created
+  // via manage_working_elsewhere). Omit → Graph default (busy).
+  showAs?: 'free' | 'busy' | 'tentative' | 'oof' | 'workingElsewhere';
   isAllDay?: boolean;
   userEmail: string;
   timezone: string;
@@ -629,8 +632,16 @@ export async function findAvailableSlots(params: {
        */
       blocked_by?: Array<{ email: string; slots_blocked: number }>;
     }>;
+    // v3.3 — Working Elsewhere summary for the window. `resolved` days carry
+    // tentative slots (already in the returned array, tagged); `unresolved`
+    // days had a marker whose location couldn't be resolved to a timezone —
+    // the caller must ASK the owner, never offer home-TZ slots for them.
+    workingElsewhere?: {
+      resolved: Array<{ date: string; away_tz: string; location: string }>;
+      unresolved: Array<{ date: string; location: string }>;
+    };
   };
-}): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other' }>> {
+}): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
   const maxSearchDays = params.maxSearchDays ?? 21;
@@ -665,7 +676,7 @@ export async function findAvailableSlots(params: {
   const absoluteCap = initialFrom.plus({ days: maxSearchDays });
   let currentTo = initialTo;
 
-  let candidates: Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other' }> = [];
+  let candidates: Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string }> = [];
 
   while (true) {
     candidates = [];
@@ -822,7 +833,12 @@ export async function findAvailableSlots(params: {
         if (!evt.isAllDay) continue;
         if (evt.isCancelled) continue;
         if (evt.showAs === 'free') continue;  // PTO marked free / WFH "available" / etc
-        // All-day busy / oof / tentative / workingElsewhere → full-day block.
+        // v3.3 — an all-day Working Elsewhere marker is NOT a block. The owner
+        // is working, just somewhere else; that day is handled by the separate
+        // tentative-availability path (the main walk skips it, and WE slots are
+        // appended after). Leaving it out of allBusy keeps the day open.
+        if (evt.showAs === 'workingElsewhere') continue;
+        // All-day busy / oof / tentative → full-day block.
         // Graph all-day events span midnight-to-midnight in their declared zone;
         // parse and treat as the whole local day.
         const dayStart = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' })
@@ -832,6 +848,14 @@ export async function findAvailableSlots(params: {
         allBusy.push({ start: dayStart, end: dayEnd, email: ownerEmailLower });
       }
     }
+
+    // v3.3 — Working Elsewhere detection. ALL-DAY workingElsewhere markers
+    // flag days where the owner's rule layer is unreliable (different place +
+    // timezone). Empty map (the common case — no marker) → every WE branch
+    // below is a no-op and behavior is identical to pre-v3.3.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const we = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
+    const weDays = profile ? we.detectWorkingElsewhereDays(ownerEventsForFb, params.timezone) : new Map<string, import('../../utils/workingElsewhere').WorkingElsewhereDay>();
 
     // v2.1 — remove floating-block time ranges from the base busy pool.
     // Without this, the isFree collision check below would reject any
@@ -1041,6 +1065,14 @@ export async function findAvailableSlots(params: {
       const cursorDt = DateTime.fromJSDate(cursor).setZone(params.timezone);
       const dayName = cursorDt.toFormat('EEEE');
       const dayKey = cursorDt.toFormat('yyyy-MM-dd');
+
+      // v3.3 — Working Elsewhere days are NOT walked with the normal rule
+      // engine (his office/home/work-hours/floor are unreliable while away).
+      // They're handled by the tentative away-TZ path appended after the walk.
+      if (weDays.size > 0 && weDays.has(dayKey)) {
+        cursor = new Date(cursor.getTime() + step);
+        continue;
+      }
 
       if (!workDays.includes(dayName)) {
         // Track once per day when this workweek day was excluded by meetingMode
@@ -1353,6 +1385,54 @@ export async function findAvailableSlots(params: {
         picked.sort((a, b) => a.start.localeCompare(b.start));
       }
       candidates.push(...picked);
+    }
+
+    // v3.3 — Working Elsewhere tentative availability. For each WE day in the
+    // window, resolve the away-TZ from the marker's location (cached; off the
+    // hot loop), compute busy-aware open gaps in the away-TZ daytime band, tag
+    // them tentative, and append. Unresolvable locations are surfaced so the
+    // caller asks the owner — NEVER silently offered in his home TZ.
+    if (weDays.size > 0) {
+      const winFromDate = DateTime.fromISO(windowFrom, { zone: params.timezone }).toFormat('yyyy-MM-dd');
+      const winToDate = DateTime.fromISO(windowTo, { zone: params.timezone }).toFormat('yyyy-MM-dd');
+      const weResolved: Array<{ date: string; away_tz: string; location: string }> = [];
+      const weUnresolved: Array<{ date: string; location: string }> = [];
+      for (const [dateIso, info] of weDays) {
+        if (dateIso < winFromDate || dateIso > winToDate) continue;
+        const awayTz = await we.resolveWorkingElsewhereTz(info.location);
+        if (!awayTz) {
+          weUnresolved.push({ date: dateIso, location: info.location });
+          continue;
+        }
+        // Real meetings on this day = owner's timed (non-all-day) events.
+        const dayBusy = ownerEventsForFb
+          .filter(e => !e.isAllDay && !e.isCancelled && e.showAs !== 'free')
+          .map(e => ({
+            start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' }).toJSDate(),
+            end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'utc' }).toJSDate(),
+          }))
+          .filter(b => {
+            const bDay = DateTime.fromJSDate(b.start).setZone(params.timezone).toFormat('yyyy-MM-dd');
+            return bDay === dateIso;
+          });
+        const weSlots = we.computeTentativeWeSlots({
+          date: dateIso,
+          awayTz,
+          awayLocation: info.location,
+          ownerTz: params.timezone,
+          durationMinutes: params.durationMinutes,
+          allBusy: dayBusy,
+          earliestAllowedMs: earliestAllowed.getTime(),
+        });
+        candidates.push(...weSlots);
+        weResolved.push({ date: dateIso, away_tz: awayTz, location: info.location });
+      }
+      if (params.diagnosticsOut && (weResolved.length > 0 || weUnresolved.length > 0)) {
+        params.diagnosticsOut.workingElsewhere = {
+          resolved: weResolved,
+          unresolved: weUnresolved,
+        };
+      }
     }
 
     // v2.3.6 (#71a) — diagnostic log for rejection reasons. When a slot
@@ -1973,6 +2053,7 @@ export async function createMeeting(params: CreateMeetingParams): Promise<Create
     ...(params.categories  && { categories:  params.categories }),
     ...(params.sensitivity && { sensitivity: params.sensitivity }),
     ...(params.isAllDay    && { isAllDay:    true }),
+    ...(params.showAs      && { showAs:      params.showAs }),
   };
 
   try {

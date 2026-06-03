@@ -9,6 +9,7 @@ import {
   slugifyName,
   listPersonFiles,
 } from '../memory/peopleMemory';
+import { writeSkillPreferences } from '../utils/skillPreferences';
 import { DateTime } from 'luxon';
 import logger from '../utils/logger';
 
@@ -321,6 +322,34 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
           required: ['person', 'section', 'text'],
         },
       },
+      {
+        name: 'update_my_preferences',
+        description: `Save or edit the OWNER's standing preferences for how Maelle should behave in a given AREA. These are free-text notes injected into that area's instructions — the owner's personal style, which overrides the defaults. The owner can put whatever he wants here.
+
+Use ONLY after the owner confirms a STANDING preference (apply every time), e.g. "on Sundays don't add a missing lunch", "just delete duplicate recruiting-system invites", "call me Mr. Cohen when you confirm a booking". Offer to remember, then save on his yes.
+
+NOT for: one-off instructions for today, facts about other PEOPLE (→ update_person_memory / update_person_profile), or company knowledge (→ KB markdown).`,
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            skill: {
+              type: 'string',
+              enum: ['general', 'calendar', 'meetings', 'summary', 'social', 'knowledge', 'search', 'venue'],
+              description: "Which area the preference governs. 'calendar' = calendar health / hygiene; 'meetings' = booking & scheduling style; 'general' = voice, how to address him, cross-cutting. Pick the area whose tools/behavior the preference changes.",
+            },
+            mode: {
+              type: 'string',
+              enum: ['add', 'replace'],
+              description: "add = append this as one new preference line. replace = overwrite ALL preferences for this area with `text` (use to edit or remove existing ones — pass the FULL new list).",
+            },
+            text: {
+              type: 'string',
+              description: "The preference in the owner's own words. mode=add: one line. mode=replace: the full new list, one preference per line.",
+            },
+          },
+          required: ['skill', 'mode', 'text'],
+        },
+      },
     ];
   }
 
@@ -350,7 +379,7 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
     // reports_to, collaboration_notes, communication_style, response_speed)
     // are silently dropped on the colleague-self path with a log line.
     if (!isOwner) {
-      const ownerOnlyTools = ['manage_preference', 'update_person_memory', 'get_person_memory', 'finalize_coord_meeting'];
+      const ownerOnlyTools = ['manage_preference', 'update_my_preferences', 'update_person_memory', 'get_person_memory', 'finalize_coord_meeting'];
       if (ownerOnlyTools.includes(toolName)) {
         logger.warn('Colleague attempted owner-only tool', { tool: toolName, userId: context.userId });
         return { error: 'not_permitted', reason: 'This action can only be performed by the owner.' };
@@ -732,6 +761,29 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
           base._note = `You wrote to a slot-relevant section ("${section}") for ${displayName}. Any prior find_available_slots results involving them are now stale — re-run find_available_slots before proposing options to the owner. Don't mentally filter old slot candidates.`;
         }
         return base;
+      }
+
+      case 'update_my_preferences': {
+        const skill = (args.skill as string | undefined)?.trim().toLowerCase();
+        const mode = (args.mode as string | undefined)?.trim();
+        const text = args.text as string | undefined;
+        if (!skill) return { error: 'empty_skill' };
+        if (mode !== 'add' && mode !== 'replace') return { error: 'invalid_mode', message: "mode must be 'add' or 'replace'." };
+        if (!text || !text.trim()) return { error: 'empty_text' };
+
+        const result = await writeSkillPreferences(context.profile, skill, mode, text);
+        if (!result.ok) {
+          logger.warn('update_my_preferences failed', { skill, mode, err: result.error });
+          return { ok: false, error: result.error };
+        }
+        logger.info('update_my_preferences', { skill, mode, created: result.created });
+        return {
+          ok: true,
+          skill,
+          mode,
+          created: result.created,
+          _note: `Saved to your ${skill} preferences. It's in force from your next ${skill}-related turn — no need to repeat it.`,
+        };
       }
 
       case 'update_person_profile': {

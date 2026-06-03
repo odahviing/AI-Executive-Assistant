@@ -1,6 +1,23 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.2.0** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.2.3** — check `package.json` if unsure; it is the source of truth.
+
+## 🧭 v3.2.3 — DE-TENANT / MEMORY-LAYER arc started (this is a DESIGN arc, not just bugs)
+
+A design session kicked off the "de-Idan-ification" work: Maelle has owner-specific logic leaked into prompts/code dressed as "general." The framework — every leak sorts into **(1) genuinely general → YAML**, **(2) computable → derive in code**, **(3) taste/judgment → learned per-user store**. Sharper test the owner added: *"would every employer teach a human secretary this?"* No → it's his agenda, not universal. The store layer must be **free-text, per-user data the LLM reads — never in the shipped binary**; deterministic gates stay code/config.
+
+**SHIPPED in 3.2.3 (built, typecheck-clean, NOT live-verified):**
+- **Per-skill learned-preference layer** — free-text `config/users/<owner>_prefs/<skill>.md` injected at the bottom of each skill's prompt (owner-path, scope-gated). Write via `update_my_preferences(skill, mode, text)` (always-on, owner-only). Live for calendar-health. The owner tested the capture loop live (Comeet-duplicate pref saved correctly).
+- **Working Elsewhere mode** (`.claude/WORKING_ELSEWHERE_MODE.md` = spec). All-day Outlook `workingElsewhere` marker → rules suspended that day, availability tentative in the away-TZ (location→TZ resolved off-loop via static→Sonnet, cached, **fails loud**), bookings → approval, active-mode auto-fix skipped. `manage_working_elsewhere(set|clear)` creates/clears the marker from chat. **Invariant: no all-day WE marker → byte-identical behavior.**
+
+**FIRST THING NEXT SESSION — verify both live** (owner restarts `npm run dev`): (a) prefs loop honored in a real calendar review; (b) WE-mode on the real **week of 2026-06-28** (`scripts/check-calendar-period.mjs 2026-06-28 2026-07-04` — there's a real "Boston placeholder" all-day WE marker; expect Boston-time tentative slots, the 10:00-Israel/03:00-Boston ones excluded).
+
+**OPEN THREADS from this session (proposed, NOT built):**
+- **De-tenant audit findings** (propose-only, bucket-sorted): the poster-child **timezone_preferences prompt leak** (`meetings.ts:~1970-1990` hardcodes "Israel"/"15:00"/"UK/AU" around YAML-driven labels → bucket 2, compute the overlap window from owner-TZ × attendee-TZ); plus `en-IL` date locale (`systemPrompt.ts:64`), EU-only date parsing (`availabilityPreCheck.ts:38`), Hebrew-culture gender prior (`genderDetect.ts:96`).
+- **Free-time-floor parameter bridge** — the Tier-1 recovery: `free_time_per_office/home_day_hours` (+ the office/home asymmetry) is Idan-psychology baked as a YAML default a 2nd tenant silently inherits; move behind `getEffective*` (neutral default + learned override). (Owner set both to 2h this session.)
+- **`min_slot_buffer` / `planMeeting` hole** — the lead-time buffer is enforced in `find_available_slots` search but NOT in `planMeeting`/`checkSlot`, so a direct named-time `create_meeting` bypasses it. Add a lead-time gate in `planMeeting` (colleague-path, owner 1h).
+- **OOO "quiet the proactive paths"** — a full-day `oof` should pause the morning brief / proactive social pings / non-urgent reminders (none check owner OOO today). The only genuinely-new use of OOO vs busy (OOF-conflict flagging already exists). Plus a one-line tightening: OOF detector → `isAllDay && showAs==='oof'` (owner: OOO is always full-day, never per-event).
+- **Tentative status** — future: coord temp-holds + "which events Maelle accepted" once she has Outlook write/accept access.
 
 ## ✅ SHIPPED v3.2.0 — Person Store + grounded research, hardened by a real-day bug bash
 

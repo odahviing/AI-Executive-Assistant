@@ -133,7 +133,7 @@ const SKILL_MAP = buildSkillMap();
 //   - web_extract → 'knowledge' scope (pairs with research). web_search stays.
 const ALWAYS_ON_TOOLS = new Set<string>([
   // Memory + people READS + preference learning (cross-cutting, any turn).
-  'manage_preference', 'get_person_memory', 'recall_interactions', 'log_interaction',
+  'manage_preference', 'update_my_preferences', 'get_person_memory', 'recall_interactions', 'log_interaction',
   // Outreach
   'message_colleague',
   // Tasks — create is cross-cutting (claim-checker references create_task by name).
@@ -162,6 +162,8 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
     'check_calendar_health', 'book_floating_block', 'set_event_category',
     // v2.9 — get_calendar_issues + update_calendar_issue merged.
     'manage_calendar_issue',
+    // v3.3 — owner marks travel / working-elsewhere days (Working Elsewhere mode).
+    'manage_working_elsewhere',
     // v2.9 — find_venue is reachable from a meetings-flavored turn
     // ("book coffee with Yael"); also lives in the 'venue' scope.
     'find_venue',
@@ -536,11 +538,11 @@ export async function executeSkillTool(
  * Each active skill contributes its own rules block.
  * Fails gracefully per skill — one bad skill doesn't blank the whole prompt.
  */
-export function buildSkillsPromptSection(profile: UserProfile, scopes?: string[]): string {
+export function buildSkillsPromptSection(profile: UserProfile, scopes?: string[], isOwner?: boolean): string {
   return getActiveSkills(profile)
     .map(skill => {
       try {
-        return skill.getSystemPromptSection(profile, scopes);
+        return skill.getSystemPromptSection(profile, scopes, isOwner);
       } catch (err) {
         logger.warn(`Skill "${skill.name}" getSystemPromptSection() failed`, { err: String(err) });
         return '';

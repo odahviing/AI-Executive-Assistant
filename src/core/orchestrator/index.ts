@@ -1964,6 +1964,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           share_summary: 'shared the summary',
           classify_summary_feedback: 'noted your feedback',
           // Memory
+          update_my_preferences: 'saved that as a standing preference',
           learn_preference: 'saved that as a preference',
           forget_preference: 'cleared that preference',
           recall_preferences: 'looked up your preferences',
@@ -1986,6 +1987,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           get_free_busy: 'checked availability',
           find_available_slots: 'searched for open times',
           analyze_calendar: 'reviewed your calendar',
+          manage_working_elsewhere: 'updated your working-elsewhere days',
           check_join_availability: 'checked if you can join',
           create_meeting: 'booked the meeting',
           move_meeting: 'moved the meeting',

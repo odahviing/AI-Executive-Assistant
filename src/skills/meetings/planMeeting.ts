@@ -355,6 +355,36 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // ── Check rules ─────────────────────────────────────────────────────────
   if (input.slotStartIso && input.slotEndIso) {
     const events = input.preloadedEvents ?? await loadEventsForCheck(profile, input.slotStartIso);
+
+    // v3.3 — Working Elsewhere gate. If the slot lands on an all-day WE day,
+    // the owner's normal rules are unreliable (different place + timezone). A
+    // COLLEAGUE booking escalates to approval — don't auto-book, and don't
+    // auto-refuse on a rule that may not apply. Owner-path falls through (he's
+    // the authority on his own time). No WE marker → this is a no-op.
+    if (initiator !== 'owner') {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const we = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
+      const weDays = we.detectWorkingElsewhereDays(events, profile.user.timezone);
+      if (weDays.size > 0) {
+        const slotDate = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }).toFormat('yyyy-MM-dd');
+        const weInfo = weDays.get(slotDate);
+        if (weInfo) {
+          const ownerFirst = profile.user.name.split(' ')[0];
+          const loc = weInfo.location ? ` (${weInfo.location})` : '';
+          const when = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }).toFormat('EEEE');
+          logger.info('planMeeting — colleague booking on working-elsewhere day, escalating', {
+            slotDate, location: weInfo.location,
+          });
+          return {
+            action: 'escalate_approval',
+            violationLabel: 'owner_working_elsewhere',
+            suggestedAskText: `Heads up — ${ownerFirst} is working elsewhere${loc} on ${when}, so I can't be sure his usual scheduling rules apply. I'd run this by him before booking. Want me to check with him?`,
+            category,
+          };
+        }
+      }
+    }
+
     const ruleResult = checkSlot({
       profile,
       slotStartIso: input.slotStartIso,

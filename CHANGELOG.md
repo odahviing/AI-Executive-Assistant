@@ -2,6 +2,23 @@
 
 ---
 
+## 3.2.3 — learned per-skill preferences + Working Elsewhere mode (de-tenant groundwork)
+
+First slice of the "de-Idan-ification" arc: start pulling owner-specific *style* out of the shipped prompt/code and into chat-taught per-user data, and teach Maelle to handle days the owner works from another place/timezone. Two new capabilities (normally minor-shaped; shipped as a patch per owner call) plus a diagnostic from a parallel chat. **Both features are built + typecheck-clean but NOT yet live-verified — verify WE-mode on a real Working-Elsewhere week, and the prefs loop end-to-end, before trusting them.**
+
+### Added
+
+- **Per-skill learned-preference layer** ([skillPreferences.ts](src/utils/skillPreferences.ts), `update_my_preferences` tool). The owner teaches Maelle standing preferences in plain language; they're saved as free-text per-skill markdown under `config/users/<owner>_prefs/<skill>.md` and injected at the bottom of that skill's prompt section (owner-path only, scope-gated → zero tokens when the skill isn't in play, nothing for a fresh user). This is the deliberate opposite of the process layer (yaml/code/general prompt): personal *style* lives as per-user data the LLM reads, never in the shipped binary. Live for calendar-health first (e.g. *"duplicate interview invites from the recruiting system — just delete them, don't ask"*); the write tool is always-on so any turn can capture an inferred-and-confirmed preference. ([assistant.ts](src/core/assistant.ts), [calendarHealth.ts](src/skills/calendarHealth.ts), [registry.ts](src/skills/registry.ts), [systemPrompt.ts](src/core/orchestrator/systemPrompt.ts), [types.ts](src/skills/types.ts))
+- **Working Elsewhere mode** ([workingElsewhere.ts](src/utils/workingElsewhere.ts), `manage_working_elsewhere` tool; spec at `.claude/WORKING_ELSEWHERE_MODE.md`). When the owner marks days with Outlook's all-day "Working Elsewhere" status, his normal rule layer (office/home/work-hours/free-time floor) is suspended for those days: real busy stays respected, availability is computed in the **away timezone** — derived from the marker's location via the static→Sonnet resolver, **off the slot hot-loop and cached**, and it **fails loud** (asks the owner the timezone) rather than ever offering home-TZ slots — tagged tentative, and colleague bookings route to approval. Active-mode calendar-health skips auto-fixes on those days. The owner creates/clears the marker from chat (*"next week I'm in France Mon–Tue"*); the Graph `createMeeting` gained an optional `showAs` for the all-day marker (still busy-by-default for normal meetings). ([calendar.ts](src/connectors/graph/calendar.ts), [planMeeting.ts](src/skills/meetings/planMeeting.ts), [ops.ts](src/skills/meetings/ops.ts))
+- Floating-block out-of-window classification now logs its raw inputs (event start/end + zones, computed block-vs-window ms in owner-local, which side of the comparison tripped) to pin a suspected boundary / TZ-skew bug on the next occurrence. Diagnostic only — no behavior change; from a parallel chat. ([rebalanceFloatingBlocks.ts](src/utils/rebalanceFloatingBlocks.ts))
+
+### Invariants preserved
+
+- **No Working-Elsewhere marker → byte-identical behavior.** Every WE branch is gated behind detecting an all-day `workingElsewhere` event; with none present, the slot engine, the `planMeeting` booking gate, and the active-mode fix loop run exactly as before. Detection is scoped to all-day markers only — timed events are untouched.
+- **Tenant-neutral by construction.** All owner-specific content (learned preferences, travel locations) lives as per-user data; the shipped code stays general. A second user starts empty and teaches their own — the whole point of the de-tenant arc.
+
+---
+
 ## 3.2.2 — calendar cache, owner-unblocked approvals, and offer-before-escalate
 
 A small wave from a continued real-day session: a cross-turn calendar cache (stop re-fetching the same day every turn), the owner is no longer tool-locked inside his own approval threads, and a colleague's rule-breaking reschedule now gets nearby alternatives offered before it escalates to the owner.

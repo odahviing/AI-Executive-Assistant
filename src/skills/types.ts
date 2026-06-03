@@ -43,8 +43,12 @@ export interface Skill {
    * A skill MAY use it to lazy-load rarely-used prose (e.g. ship coordination
    * details only when 'coord' is active). Undefined → render everything
    * (colleague path, classifier off, non-Slack callers).
+   *
+   * `isOwner` (v3.3) — true when the turn is the owner's. A skill MAY use it to
+   * append the owner's private free-text preference block (the style layer);
+   * those prefs must NEVER render on a colleague turn.
    */
-  getSystemPromptSection(profile: UserProfile, scopes?: string[]): string;
+  getSystemPromptSection(profile: UserProfile, scopes?: string[], isOwner?: boolean): string;
 }
 
 /**
