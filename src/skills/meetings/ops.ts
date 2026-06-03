@@ -726,6 +726,7 @@ export class SchedulingSkill {
           args.start_date as string,
           args.end_date as string,
           timezone,
+          args.force_refresh === true,  // v3.2.x (#121) — user asked to LOOK now → fresh
         );
         const processed = processCalendarEvents(rawEvents, userEmail, context.profile.user.name, timezone, context.profile);
 
@@ -816,7 +817,7 @@ export class SchedulingSkill {
 
       case 'get_free_busy':
         try {
-          const raw = await getFreeBusy(userEmail, args.emails as string[], args.start_date as string, args.end_date as string, timezone);
+          const raw = await getFreeBusy(userEmail, args.emails as string[], args.start_date as string, args.end_date as string, timezone, args.force_refresh === true);
           // v2.1.5 — for colleague-context asks, synthesize out-of-work-hours
           // busy blocks on the OWNER's row so the free gaps returned to Sonnet
           // are already clipped to Idan's work hours. A colleague should not
@@ -2254,6 +2255,21 @@ export class SchedulingSkill {
           category: 'category' in plan ? plan.category : undefined,
         });
 
+        // v3.2.x (#8) — colleague proposed a slot that breaks a soft rule and
+        // planMeeting found nearby rule-compliant alternatives. Offer them first
+        // instead of escalating; only if the colleague insists (or none fit)
+        // does Sonnet fall to create_approval.
+        if (plan.action === 'propose_alternative') {
+          return {
+            success: false,
+            error: 'soft_rule_offer_alternatives',
+            violation_label: plan.violationLabel,
+            alternatives: plan.alternatives,
+            suggested_ask_text: plan.suggestedAskText,
+            _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
+            _note: 'The proposed time breaks one of the owner\'s soft rules. Do NOT escalate yet. Offer these nearby rule-compliant slots (2 on the requested day + 1 after) and ask the colleague if one works. If they INSIST on the original time, or none of these work, THEN call create_approval(kind=policy_exception) with suggested_ask_text so the owner decides.',
+          };
+        }
         // Early-return on non-book plans:
         if (plan.action === 'confirm_override' || plan.action === 'escalate_approval') {
           return {
@@ -3421,6 +3437,20 @@ export class SchedulingSkill {
             priorStart: priorStartIso, newStart: effectiveStart,
             reasoning: 'reasoning' in movePlan ? movePlan.reasoning : undefined,
           });
+          // v3.2.x (#8) — colleague reschedule onto a soft-rule-breaking slot:
+          // offer nearby rule-compliant alternatives before escalating.
+          if (movePlan.action === 'propose_alternative') {
+            return {
+              success: false,
+              error: 'soft_rule_offer_alternatives',
+              meeting_subject: args.meeting_subject,
+              violation_label: movePlan.violationLabel,
+              alternatives: movePlan.alternatives,
+              suggested_ask_text: movePlan.suggestedAskText,
+              _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
+              _note: 'The requested new time breaks one of the owner\'s soft rules. Do NOT escalate yet. Offer these nearby rule-compliant slots (2 on the requested day + 1 after) and ask if one works. If the colleague INSISTS on the original time, or none of these work, THEN call create_approval(kind=policy_exception) with suggested_ask_text so the owner decides.',
+            };
+          }
           if (movePlan.action === 'confirm_override' || movePlan.action === 'escalate_approval') {
             return {
               success: false,

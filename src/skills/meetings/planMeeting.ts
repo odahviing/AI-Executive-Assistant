@@ -23,7 +23,7 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
-import { getCalendarEvents, getFreeBusy, type CalendarEvent } from '../../connectors/graph/calendar';
+import { getCalendarEvents, getFreeBusy, findAvailableSlots, type CalendarEvent } from '../../connectors/graph/calendar';
 import { resolveLocation, type LocationVerdict } from '../../utils/resolveLocation';
 import { checkSlot, type RuleCheckResult } from '../../utils/scheduleRules';
 import { detectCategory } from './detectCategory';
@@ -156,6 +156,7 @@ export type PlanAction =
   | { action: 'find_slots'; category: string | null; reasoning: string }
   | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; category: string | null }
   | { action: 'escalate_approval'; violationLabel: string; suggestedAskText: string; category: string | null }
+  | { action: 'propose_alternative'; violationLabel: string; suggestedAskText: string; alternatives: Array<{ start: string; end: string; label: string }>; category: string | null }
   | { action: 'decline_and_relay'; organizerName: string | null; organizerEmail: string | null; organizerSlackId: string | null; suggestedDmText: string }
   | { action: 'refuse_not_owners'; organizerName: string | null; organizerEmail: string | null }
   | { action: 'ask_location_mode'; suggestedAskText: string; category: string | null; reasoning: string }
@@ -372,6 +373,45 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       const askText = `Heads up — booking "${subj}" at ${DateTime.fromISO(input.slotStartIso).setZone(profile.user.timezone).toFormat("EEEE 'at' HH:mm")} would break a rule: ${label}. Want to override?`;
       if (initiator === 'owner') {
         return { action: 'confirm_override', violationLabel: label, suggestedAskText: askText, category };
+      }
+      // v3.2.x (#8) — colleague proposed a slot that breaks a rule. Instead of
+      // jumping straight to owner approval (colleague waits), offer NEARBY
+      // rule-compliant alternatives first — 2 on the requested day + 1 after —
+      // via the SAME findAvailableSlots the booking flow uses (so they're
+      // genuinely bookable). Whether the original time is a hard MUST is decided
+      // AFTER, by the colleague's reply: if they insist (or none of these work),
+      // Sonnet routes to create_approval. No regex, no extra planMeeting input.
+      // Only when nothing nearby fits do we escalate straight away.
+      try {
+        const tzAlt = profile.user.timezone;
+        const reqDay = DateTime.fromISO(input.slotStartIso, { zone: tzAlt });
+        const durMin = input.durationMin
+          ?? Math.max(15, Math.round(DateTime.fromISO(input.slotEndIso).diff(DateTime.fromISO(input.slotStartIso), 'minutes').minutes));
+        const attendeeEmails = nonOwnerParticipants
+          .map(p => (p.email ?? '').trim())
+          .filter((e): e is string => e.length > 0);
+        const dayIso = reqDay.toFormat('yyyy-MM-dd');
+        const after1 = reqDay.plus({ days: 1 }).toFormat('yyyy-MM-dd');
+        const after2 = reqDay.plus({ days: 2 }).toFormat('yyyy-MM-dd');
+        const base = { userEmail: profile.user.email, timezone: tzAlt, durationMinutes: durMin, attendeeEmails, profile };
+        const sameDay = await findAvailableSlots({ ...base, searchFrom: dayIso, searchTo: dayIso });
+        const later = await findAvailableSlots({ ...base, searchFrom: after1, searchTo: after2 });
+        const picks = [...sameDay.slice(0, 2), ...later.slice(0, 1)];
+        if (picks.length > 0) {
+          const alternatives = picks.map(s => {
+            const st = DateTime.fromISO(s.start).setZone(tzAlt);
+            const en = DateTime.fromISO(s.end).setZone(tzAlt);
+            return { start: s.start, end: s.end, label: `${st.toFormat('EEE d MMM HH:mm')}–${en.toFormat('HH:mm')}` };
+          });
+          logger.info('planMeeting — colleague soft-rule slot, offering nearby alternatives', {
+            label, count: alternatives.length, requested: input.slotStartIso,
+          });
+          return { action: 'propose_alternative', violationLabel: label, suggestedAskText: askText, alternatives, category };
+        }
+      } catch (err) {
+        logger.warn('planMeeting — alternative search threw, falling back to escalate_approval', {
+          err: String(err).slice(0, 200),
+        });
       }
       return { action: 'escalate_approval', violationLabel: label, suggestedAskText: askText, category };
     }

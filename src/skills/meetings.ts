@@ -262,6 +262,7 @@ If the meeting is NOT yet booked and they need to find a time together, use coor
           properties: {
             start_date: { type: 'string', description: 'Start date YYYY-MM-DD in the user\'s local timezone. Use the DATE LOOKUP table — never calculate.' },
             end_date: { type: 'string', description: 'End date YYYY-MM-DD in the user\'s local timezone.' },
+            force_refresh: { type: 'boolean', description: 'Set TRUE whenever the current message asks to SEE/LOOK AT/CHECK the calendar or day ("what\'s on my day?", "look at my calendar", "check again", "their calendar changed") — anything expressing a wish to view current state. Forces a fresh read past the short cache. Leave false/omit for internal reads during a scheduling flow (the cache keeps those warm).' },
           },
           required: ['start_date', 'end_date'],
         },
@@ -297,6 +298,7 @@ Do NOT use for:
             emails: { type: 'array', items: { type: 'string' }, description: 'Email addresses to check' },
             start_date: { type: 'string', description: 'Start of range in ISO 8601 format' },
             end_date: { type: 'string', description: 'End of range in ISO 8601 format' },
+            force_refresh: { type: 'boolean', description: 'Set TRUE when the current message asks to re-check availability now / says a calendar changed ("are they free now?", "check again — they moved something"). Forces a fresh read past the short cache. Leave false during a normal scheduling flow.' },
           },
           required: ['emails', 'start_date', 'end_date'],
         },

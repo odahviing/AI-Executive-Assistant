@@ -2,6 +2,29 @@
 
 ---
 
+## 3.2.2 — calendar cache, owner-unblocked approvals, and offer-before-escalate
+
+A small wave from a continued real-day session: a cross-turn calendar cache (stop re-fetching the same day every turn), the owner is no longer tool-locked inside his own approval threads, and a colleague's rule-breaking reschedule now gets nearby alternatives offered before it escalates to the owner.
+
+### Added
+
+- **Cross-turn calendar cache** ([calendarCache.ts](src/connectors/graph/calendarCache.ts)). `getCalendarEvents` and `getFreeBusy` now read through a short-TTL, process-global cache (default 300s, `CALENDAR_CACHE_TTL_SECONDS=0` to disable) so Maelle's calendar knowledge stays warm across a conversation instead of re-querying Graph cold every turn (a single scheduling chat was firing the same queries turn after turn). **Invariant: a read after a write is never stale** — `createMeeting`/`updateMeeting`/`deleteMeeting` invalidate the owner's event ranges and all free/busy (a write can flip an attendee's busy state); the TTL is the backstop for changes we can't observe (Outlook-direct edits, a colleague moving something). **Force mode**: `force_refresh` on `get_calendar`/`get_free_busy` — the tool descriptions tell Maelle to set it whenever the message expresses a wish to *see* the calendar ("look at my day", "check again", "their calendar changed"), so an explicit ask always goes to Graph; internal scheduling-flow reads stay warm.
+
+### Changed
+
+- **Owner is no longer tool-locked inside his own approval thread.** The approval-bound thread lock kept only `resolve_approval`/`list`/`message_colleague` in scope — which trapped legitimate *pivots* ("no, move it instead of cancelling"; "book a different time"): the redirect tool wasn't available, so the owner couldn't act. The lock now keeps the **full scheduling toolset** in scope for the owner, so he can resolve OR redirect in one turn; only non-scheduling tools (web, person-writes, knowledge) stay filtered. The pending approval is still in his prompt, so awareness/closure isn't lost. ([orchestrator/index.ts](src/core/orchestrator/index.ts))
+- **Colleague soft-rule reschedule offers alternatives before escalating** (#8). When a colleague proposes a slot that breaks a *soft* rule (lunch/focus/work-hours), `planMeeting` now returns a new `propose_alternative` verdict carrying **2 same-day + 1 next-day** rule-compliant slots (computed via the same `findAvailableSlots` the booking flow uses). Maelle offers those first; only if the colleague insists on the original time (or nothing nearby fits) does it escalate to `create_approval`. Whether the time is a hard must is decided by the colleague's reply, not a regex. ([planMeeting.ts](src/skills/meetings/planMeeting.ts), [ops.ts](src/skills/meetings/ops.ts))
+
+### Housekeeping
+
+- Removed a mis-attributed social subject ("Clair Obscur Expedition 33" wrongly stored as a colleague's interest — it was Maelle's own name-origin lore) and an orphaned `in_flight_action` row that had surfaced as a false "move didn't complete" brief item. Both one-off DB cleanups; the root causes were fixed in 3.2.1 / are being watched.
+
+### Deferred
+
+- Merging the morning brief + calendar-health into one message — on tracing, it's a routine-schedule + migration change (brief is a system cron; health is a twice-daily user routine) with double-send risk, so it's deferred to its own pass rather than rushed into this patch. #5 (request-ID security regex) dropped as wontfix (humanGate covers it; regex on words doesn't scale).
+
+---
+
 ## 3.2.1 — reschedule-flow correctness: approval replay, floating-block moves, and a social mis-attribution
 
 A real-day bug-bash across two parallel sessions, hardening the move/reschedule path end to end: a stuck approval replay that couldn't absorb a follow-up answer, a colleague double-approval, owner-override persistence, floating blocks that didn't move when a meeting landed on them, and a proactive social ping built on a topic the colleague never raised.

@@ -281,18 +281,36 @@ export async function getCalendarEvents(
   userEmail: string,
   startDate: string,
   endDate: string,
-  timezone: string = 'UTC'
+  timezone: string = 'UTC',
+  // v3.2.x (#121) — force a fresh Graph read, bypassing both caches. Set when
+  // the user explicitly asks Maelle to LOOK at the calendar (see the tool
+  // descriptions). "If she's sent to the calendar, she goes to the calendar."
+  forceRefresh: boolean = false,
 ): Promise<CalendarEvent[]> {
-  // v2.4.3 (A3) — per-turn memoization. Trace from 2026-05-03 showed 5
-  // identical calendar queries for the same date range within 12 seconds
-  // (single booking flow). Pure waste — calendar doesn't change between
-  // Sonnet's tool iterations within a single turn. turnCache.memoize
-  // returns the same promise to concurrent callers within a turn; outside
-  // a turn (background tasks, dispatchers) it bypasses and fetches normally.
+  const cacheKey = `getCalendarEvents|${userEmail}|${startDate}|${endDate}|${timezone}`;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const cache = require('./calendarCache') as typeof import('./calendarCache');
+
+  // v3.2.x (#121) — cross-turn cache (default 300s TTL, write-invalidated).
+  // Force → straight to Graph, then repopulate so the warm copy is fresh.
+  if (forceRefresh) {
+    const data = await getCalendarEventsImpl(userEmail, startDate, endDate, timezone);
+    cache.setCachedEvents(cacheKey, data);
+    return data;
+  }
+  const cached = cache.getCachedEvents<CalendarEvent[]>(cacheKey);
+  if (cached) return cached;
+
+  // v2.4.3 (A3) — per-turn memoization wraps the cross-turn miss: concurrent
+  // callers within one turn share a single in-flight fetch. Outside a turn
+  // (background tasks) memoize bypasses and just fetches.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { memoize } = require('../../utils/turnCache') as typeof import('../../utils/turnCache');
-  const cacheKey = `getCalendarEvents|${userEmail}|${startDate}|${endDate}|${timezone}`;
-  return memoize(cacheKey, () => getCalendarEventsImpl(userEmail, startDate, endDate, timezone));
+  return memoize(cacheKey, async () => {
+    const data = await getCalendarEventsImpl(userEmail, startDate, endDate, timezone);
+    cache.setCachedEvents(cacheKey, data);
+    return data;
+  });
 }
 
 async function getCalendarEventsImpl(
@@ -376,7 +394,8 @@ export async function getFreeBusy(
   emails: string[],
   startDate: string,
   endDate: string,
-  timezone: string
+  timezone: string,
+  forceRefresh: boolean = false,
 ): Promise<Record<string, FreeBusySlot[]>> {
   // v2.7.6 — guard against invalid time windows that crash Graph's
   // getSchedule with ErrorInvalidTimeInterval. Graph requires
@@ -408,6 +427,17 @@ export async function getFreeBusy(
     return getFreeBusy(callerEmail, emails, startDate, clamped, timezone);
   }
 
+  // v3.2.x (#121) — cross-turn free/busy cache (others' calendars change like
+  // ours → same write-invalidation + TTL + force-refresh). Key on the sorted
+  // attendee set + window so any caller order hits the same entry.
+  const fbKey = `getFreeBusy|${[...emails].sort().join(',')}|${startDate}|${endDate}|${timezone}`;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fbCache = require('./calendarCache') as typeof import('./calendarCache');
+  if (!forceRefresh) {
+    const hit = fbCache.getCachedFreeBusy<Record<string, FreeBusySlot[]>>(fbKey);
+    if (hit) return hit;
+  }
+
   const client = getClient();
   try {
     const response = await client.api(`/users/${callerEmail}/calendar/getSchedule`).post({
@@ -423,6 +453,7 @@ export async function getFreeBusy(
         parseGraphFreeBusySlot(item, timezone),
       );
     }
+    fbCache.setCachedFreeBusy(fbKey, result);
     return result;
   } catch (err: any) {
     logger.error('Failed to fetch free/busy', { err, emails });
@@ -1704,6 +1735,9 @@ export async function updateMeeting(params: UpdateMeetingParams): Promise<void> 
     });
 
     logger.info('Meeting updated', { id: params.meetingId, fields: Object.keys(patchedFields) });
+    // v3.2.x (#121) — invalidate after the write (see createMeeting).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    (require('./calendarCache') as typeof import('./calendarCache')).invalidateCalendarCache(params.userEmail, 'update_meeting');
   } catch (err) {
     auditLog({
       action: 'update_meeting',
@@ -1741,6 +1775,12 @@ export async function deleteMeeting(
   // Fallback: if Graph rejects /cancel (rare — happens when the event is in
   // a draft state with no attendees), retry with DELETE. Solo events
   // ("personal block" with no attendees) tolerate either endpoint.
+  // v3.2.x (#121) — invalidate before the delete attempt; covers both the
+  // /cancel and DELETE-fallback success returns in one place. A throw after
+  // this just costs a harmless cache miss (next read re-fetches and correctly
+  // still shows the event).
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  (require('./calendarCache') as typeof import('./calendarCache')).invalidateCalendarCache(userEmail, 'delete_meeting');
   try {
     await client.api(`/users/${userEmail}/events/${meetingId}/cancel`).post({
       Comment: options.comment ?? '',
@@ -1948,6 +1988,10 @@ export async function createMeeting(params: CreateMeetingParams): Promise<Create
     });
 
     logger.info('Meeting created', { id: created.id, subject: params.subject, start: params.start });
+    // v3.2.x (#121) — a write changes calendar state; drop the cache so the
+    // next read (Maelle re-checking the day) never returns pre-write state.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    (require('./calendarCache') as typeof import('./calendarCache')).invalidateCalendarCache(params.userEmail, 'create_meeting');
     const joinUrl: string | undefined = created?.onlineMeeting?.joinUrl;
     return { id: created.id, joinUrl };
   } catch (err) {

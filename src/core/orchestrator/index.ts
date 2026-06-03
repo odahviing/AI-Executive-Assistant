@@ -1014,6 +1014,19 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           'resolve_approval',
           'list_pending_approvals',
           'message_colleague',
+          // v3.2.x — the owner is never limited from acting on his own approval.
+          // The original lock assumed the only valid reply was a clean yes/no on
+          // the EXACT pending action — but real replies REDIRECT it ("no, move it
+          // instead of cancelling"; "book a different time"). Locking those out
+          // trapped the owner (the cancel→move / bad-hour→good-time breaks). The
+          // owner keeps the full scheduling toolset in an approval thread so he
+          // can resolve OR pivot in one turn; the pending approval is still in his
+          // prompt, so awareness/closure isn't lost. Only NON-scheduling tools
+          // (web, person-writes, knowledge) stay filtered — they can't bear on a
+          // scheduling decision and would just be drift.
+          'get_calendar', 'get_free_busy', 'find_available_slots',
+          'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
+          'coordinate_meeting', 'finalize_coord_meeting', 'check_join_availability',
         ]);
         // v3.2.1 (#120 / Yariv) — escape hatch for a TRAPPED recovery. When a
         // bound approval's deferred action failed mid-replay needing a
