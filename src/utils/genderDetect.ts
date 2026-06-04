@@ -93,12 +93,12 @@ async function detectGenderFromName(name: string): Promise<PersonGender> {
       max_tokens: 5,
       messages: [{
         role: 'user',
-        content: `Given this first/full name, what gender is the person most likely to be in Israeli / Hebrew-speaking culture? Consider English names too.
+        content: `Given this first/full name, what gender is the person most likely to be, based on the name's most common usage internationally? Consider the name's likely cultural origin as well as English usage.
 
 Name: "${name}"
 
 Reply with ONLY one word: male, female, or unknown.
-- "unknown" for genuinely ambiguous names (Noa, Alex, Yuval used for both, Shai, etc.) or names you can't place.
+- "unknown" for genuinely ambiguous or unisex names (Alex, Jordan, Noa, Yuval, Shai, etc. — used across genders) or names you can't place.
 - Prefer "unknown" over a low-confidence guess — a wrong guess is worse than no guess.`,
       }],
     });

@@ -32,9 +32,10 @@ import logger from './logger';
 // Time pattern — HH:MM (24-hour, with optional leading zero).
 const TIME_PATTERN = /\b(\d{1,2}):(\d{2})\b/g;
 
-// Date pattern — DD.MM[.YYYY] or DD/MM[/YYYY] (Israeli/EU format). The hours/
-// minutes pattern collides with DD/MM if the year is missing — we anchor on
-// month being <= 12 to disambiguate.
+// Date pattern — two 1-2 digit components + optional year. Day/month ORDER is
+// resolved in extractDates (value-based, then owner-locale tiebreaker) — the
+// regex itself is order-agnostic. The hours/minutes pattern collides with the
+// d/m pair if the year is missing — guarded by the month<=12 check downstream.
 const DATE_PATTERN = /\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b/g;
 
 // Question markers — both English and Hebrew. Cheap union test.
@@ -241,7 +242,11 @@ export async function precheckAvailability(params: {
   if (pairs.length === 0) {
     const times = extractTimes(params.message);
     if (times.length === 0) return empty;
-    const dateMatches = extractDates(params.message, tz);
+    // Owner locale order for ambiguous DD/MM vs MM/DD: Americas → month-first,
+    // everywhere else → day-first. Heuristic (fails open — the real slot search
+    // re-interprets on Sonnet's reading anyway), no new profile field needed.
+    const monthFirst = /^America\//.test(tz);
+    const dateMatches = extractDates(params.message, tz, monthFirst);
     pairs = pairTimesWithDates(params.message, times, dateMatches, today);
     if (pairs.length === 0) return empty;
   }
@@ -312,11 +317,20 @@ function extractTimes(text: string): Array<{ hour: number; minute: number; index
 
 interface DateMatch { date: string; index: number }
 
-function extractDates(text: string, tz: string): DateMatch[] {
+function extractDates(text: string, tz: string, monthFirst: boolean): DateMatch[] {
   const out: DateMatch[] = [];
   for (const m of text.matchAll(DATE_PATTERN)) {
-    const d = parseInt(m[1], 10);
-    const mo = parseInt(m[2], 10);
+    // v3.2.x de-tenant — don't hardcode DD/MM (Israeli/EU). Disambiguate by
+    // value first (a component >12 can't be a month), then fall back to the
+    // owner's locale order for the genuinely ambiguous case (e.g. "6/2" =
+    // June 2 for a month-first owner, 6 Feb for a day-first owner).
+    const a = parseInt(m[1], 10);
+    const b = parseInt(m[2], 10);
+    let d: number, mo: number;
+    if (a > 12 && b <= 12) { d = a; mo = b; }
+    else if (b > 12 && a <= 12) { d = b; mo = a; }
+    else if (monthFirst) { mo = a; d = b; }
+    else { d = a; mo = b; }
     if (d < 1 || d > 31 || mo < 1 || mo > 12) continue;
     let year: number;
     if (m[3]) {

@@ -406,9 +406,9 @@ export function analyzeCalendar(
   // v1.6.11 — per-day-type focus-time threshold. Office days usually need
   // more protected focus time than home days; profile can set each
   // separately. Home falls back to office value when not set.
-  const requiredFreeOfficeMin = (profile.meetings.free_time_per_office_day_hours ?? 2) * 60;
+  const requiredFreeOfficeMin = (profile.meetings.free_time_per_office_day_hours ?? 0) * 60;
   const requiredFreeHomeMin = ((profile.meetings.free_time_per_home_day_hours
-    ?? profile.meetings.free_time_per_office_day_hours ?? 2)) * 60;
+    ?? profile.meetings.free_time_per_office_day_hours ?? 0)) * 60;
 
   // Iterate every calendar day in the range
   const results: DayAnalysis[] = [];
@@ -730,6 +730,14 @@ export class SchedulingSkill {
         );
         const processed = processCalendarEvents(rawEvents, userEmail, context.profile.user.name, timezone, context.profile);
 
+        // v3.3 (fix #2) — Working Elsewhere enrichment. If the range covers
+        // WE days, attach the away-TZ note so Sonnet does NOT eyeball home-TZ
+        // "mornings clear" (the regression that offered Israel mornings while
+        // the owner was in Boston). Null when no WE marker → nothing attached.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const weModGc = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
+        const weNoteGc = await weModGc.summarizeWorkingElsewhere(rawEvents, timezone);
+
         // v2.8.6 (99C, Shape A) — when the query window comes back with no
         // events on an owner-DM turn, enrich the result with recent
         // delete_meeting + create_meeting audit entries that intersect the
@@ -771,6 +779,7 @@ export class SchedulingSkill {
               return {
                 events: processed,
                 _audit_context: `Calendar window is empty for the requested range, but Maelle has performed recent calendar actions inside this window. When the owner asks "did you do X" / "have you booked Y" / "what happened to Z", use this audit context BEFORE saying "I don't have a record":\n${lines.join('\n')}`,
+                ...(weNoteGc ?? {}),
               };
             }
           } catch (err) {
@@ -797,7 +806,7 @@ export class SchedulingSkill {
           };
         }
 
-        return processed;
+        return weNoteGc ? { events: processed, ...weNoteGc } : processed;
       }
 
       case 'analyze_calendar': {
@@ -812,7 +821,13 @@ export class SchedulingSkill {
         // Suppression handled at row-write time elsewhere.
         const _suppressed = getSuppressedEventIds(context.profile.user.slack_user_id);
         void _suppressed;
-        return analyzeCalendar(processed, args.start_date as string, args.end_date as string, context.profile);
+        const analysis = analyzeCalendar(processed, args.start_date as string, args.end_date as string, context.profile);
+        // v3.3 (fix #2) — attach the Working Elsewhere note when the range has
+        // WE days, so issue-narration is framed in the away timezone too.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const weModAc = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
+        const weNoteAc = await weModAc.summarizeWorkingElsewhere(rawEvents, timezone);
+        return weNoteAc ? { day_analysis: analysis, ...weNoteAc } : analysis;
       }
 
       case 'get_free_busy':
@@ -1216,7 +1231,13 @@ export class SchedulingSkill {
             };
 
             const results = await Promise.all(normalized.map(async (cand) => {
-              const diag: { rejectedCounts?: Record<string, number> } = {};
+              const diag: {
+                rejectedCounts?: Record<string, number>;
+                workingElsewhere?: {
+                  resolved: Array<{ date: string; away_tz: string; location: string }>;
+                  unresolved: Array<{ date: string; location: string }>;
+                };
+              } = {};
               try {
                 const slots = await findAvailableSlots({
                   userEmail,
@@ -1243,12 +1264,29 @@ export class SchedulingSkill {
                 });
                 const startMs = DateTime.fromISO(cand.start, { zone: timezone }).toMillis();
                 const matches = slots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
-                const brokenRule = matches ? undefined : Object.keys(diag.rejectedCounts ?? {})[0];
+                // v3.3 — Working Elsewhere reason. On a WE day the slot walk
+                // skips without recording a rejection (rejectedCounts is empty),
+                // so an unavailable candidate would have NO reason → Sonnet
+                // fabricates "conflict." Read diag.workingElsewhere and label it
+                // honestly: the candidate is outside his hours WHERE HE IS.
+                const candDate = DateTime.fromISO(cand.start, { zone: timezone }).toFormat('yyyy-MM-dd');
+                const weResolved = diag.workingElsewhere?.resolved.find(r => r.date === candDate);
+                const weUnresolved = diag.workingElsewhere?.unresolved.find(u => u.date === candDate);
+                let brokenRule = matches ? undefined : Object.keys(diag.rejectedCounts ?? {})[0];
+                let weLabel: string | undefined;
+                if (!matches && weResolved) {
+                  const awayClock = DateTime.fromISO(cand.start, { zone: timezone }).setZone(weResolved.away_tz).toFormat('HH:mm');
+                  brokenRule = 'owner_working_elsewhere';
+                  weLabel = `${ownerFirst} is working elsewhere${weResolved.location ? ` (${weResolved.location})` : ''} that day — this is ${awayClock} where he actually is, outside his working hours there. His real window that day is daytime in ${weResolved.location || 'his away location'}.`;
+                } else if (!matches && weUnresolved) {
+                  brokenRule = 'owner_working_elsewhere';
+                  weLabel = `${ownerFirst} is working elsewhere${weUnresolved.location ? ` (${weUnresolved.location})` : ''} that day and I don't have his timezone there — I'd need to confirm his local hours before booking.`;
+                }
                 return {
                   start: cand.start,
                   end: cand.end,
                   available: matches,
-                  ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: labelFor(brokenRule) } : {}),
+                  ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: weLabel ?? labelFor(brokenRule) } : {}),
                 };
               } catch (err) {
                 logger.warn('candidate-slot validation threw — marking unavailable', {

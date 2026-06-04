@@ -280,12 +280,43 @@ async function catchUpMissedMessages(
 
   const oldest = String((Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000) / 1000);
 
-  await processIfMissed({
-    app, profile, botToken, botUserId,
-    channelId: ownerChannel,
-    ownerId: profile.user.slack_user_id,
-    oldest,
-  });
+  // v3.2.x — scan ALL the bot's 1:1 DMs, not just the owner's. The old scope
+  // was owner-DM-only, so after an outage every colleague message sent while
+  // the bot was down was silently dropped (the 2026-06-04 all-day crash: she
+  // came back up and answered nobody). processIfMissed replies to at most the
+  // ONE latest-unanswered message per DM, so this stays bounded to ≤1 reply
+  // per conversation even across a long outage.
+  const channels = new Set<string>([ownerChannel]);
+  try {
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const list = await app.client.conversations.list({
+        token: botToken, types: 'im', limit: 200, cursor,
+      });
+      for (const c of (list.channels ?? []) as Array<Record<string, unknown>>) {
+        if (typeof c.id === 'string' && !c.is_user_deleted) channels.add(c.id);
+      }
+      cursor = (list.response_metadata?.next_cursor as string | undefined) || undefined;
+      pages++;
+    } while (cursor && pages < 5);
+  } catch (err) {
+    logger.warn('Catch-up: could not list DMs — falling back to owner DM only', { err: String(err) });
+  }
+
+  logger.info('Catch-up: scanning DMs for missed messages', { dmCount: channels.size });
+  for (const channelId of channels) {
+    try {
+      await processIfMissed({
+        app, profile, botToken, botUserId,
+        channelId,
+        ownerId: profile.user.slack_user_id,
+        oldest,
+      });
+    } catch (err) {
+      logger.warn('Catch-up: per-DM error, continuing', { channelId, err: String(err).slice(0, 200) });
+    }
+  }
 }
 
 interface CheckOpts {
@@ -321,12 +352,39 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
     return true;
   });
 
-  if (!latestUserMsg?.ts) return;
+  if (!latestUserMsg?.ts) {
+    // v3.2.x — DIAGNOSTIC: why a DM is skipped (silent before). Captures the
+    // 2026-06-04 case where the latest unanswered message ("you are out?") was
+    // skipped for a reason invisible in the logs.
+    logger.info('Catch-up: DM skipped', {
+      channelId, reason: 'no_user_message', messageCount: messages.length,
+      // v3.2.x — dump the shapes so we see WHY the user-msg filter rejected all
+      // of them (suspect: a blanket subtype exclusion dropping real DM msgs).
+      sample: messages.slice(0, 6).map(m => ({
+        user: m.user, bot_id: m.bot_id, subtype: m.subtype, type: m.type,
+        textPreview: typeof m.text === 'string' ? (m.text as string).slice(0, 40) : undefined,
+      })),
+    });
+    return;
+  }
 
   const userTs = parseFloat(latestUserMsg.ts as string);
 
   const latestBotMsg = messages.find(m => m.bot_id || m.user === botUserId);
   const botTs = latestBotMsg?.ts ? parseFloat(latestBotMsg.ts as string) : 0;
+
+  // v3.2.x — DIAGNOSTIC: the full catch/skip decision per DM, so a silently
+  // skipped latest message is explainable on the next restart.
+  logger.info('Catch-up: DM decision', {
+    channelId,
+    messageCount: messages.length,
+    latestUserTs: latestUserMsg.ts,
+    latestUserPreview: typeof latestUserMsg.text === 'string' ? (latestUserMsg.text as string).slice(0, 60) : '(non-text)',
+    latestBotTs: latestBotMsg?.ts ?? null,
+    botNewerThanUser: userTs <= botTs,
+    decision: userTs <= botTs ? 'skip:bot_newer' : 'proceed_to_thread_check',
+  });
+
   if (userTs <= botTs) return;
 
   const msgTs = latestUserMsg.ts as string;
@@ -340,7 +398,13 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
     const botThreadReply = (replies.messages ?? []).find(
       m => (m.bot_id || m.user === botUserId) && parseFloat(m.ts as string) > userTs
     );
-    if (botThreadReply) return;
+    if (botThreadReply) {
+      logger.info('Catch-up: DM skipped', {
+        channelId, reason: 'thread_already_replied',
+        latestUserTs: latestUserMsg.ts, botThreadReplyTs: botThreadReply.ts,
+      });
+      return;
+    }
   } catch {
     // No replies or no access — proceed with catchup
   }

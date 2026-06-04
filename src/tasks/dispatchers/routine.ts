@@ -187,6 +187,27 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       (!result.mutationActions || result.mutationActions.length === 0);
     const isSilent = vacuousRoutineRun || cleaned.trim().length === 0;
 
+    // v3.2.x — DIAGNOSTIC (not a fix). The silent path only logged on silence,
+    // so a "morning health didn't arrive" couldn't be told apart from "it
+    // sent and you missed it". Log the FULL send/silence decision on EVERY
+    // firing with the exact inputs, so the next occurrence is self-explaining:
+    // did it send or stay silent, and precisely why (vacuous health run vs a
+    // reply that scrubbed to empty vs Sonnet produced nothing).
+    logger.info('Routine reply decision', {
+      routineId: routine.id,
+      routineTitle: routine.title,
+      isSilent,
+      reason: isSilent
+        ? (vacuousRoutineRun ? 'vacuous_health_run' : (rawReply.trim().length === 0 ? 'empty_reply_from_orchestrator' : 'scrubbed_to_empty'))
+        : 'sending',
+      vacuousRoutineRun,
+      healthCheckVacuous: result.healthCheckVacuous === true,
+      bookingOccurred: result.bookingOccurred === true,
+      mutationActions: result.mutationActions?.length ?? 0,
+      rawReplyLen: rawReply.length,
+      cleanedLen: cleaned.trim().length,
+    });
+
     const conn = getConnection(profile.user.slack_user_id, 'slack');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const messaging = require('../../connections/slack/messaging') as

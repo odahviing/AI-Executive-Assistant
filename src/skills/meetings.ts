@@ -356,8 +356,9 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
               };
             })(),
             attendee_emails: { type: 'array', items: { type: 'string' } },
-            search_from: { type: 'string', description: 'Start of search window. ISO 8601 — can be date-only ("2026-05-25" → searches the whole day) OR include time-of-day ("2026-05-25T07:00:00" → searches from 7:00 onwards). Use the timed form when an attendee gives a window in text ("available 7-12") so the search clips to that range.' },
-            search_to: { type: 'string', description: 'End of search window. ISO 8601 — can be date-only ("2026-05-25" → end of that day) OR include time-of-day ("2026-05-25T12:00:00" → the meeting must END by noon). Use the timed form for window constraints. Auto-expanded up to 21 days if fewer than 3 slots found.' },
+            search_from: { type: 'string', description: 'Start of search window. ISO 8601, date-only ("2026-05-25") or with time ("2026-05-25T07:00:00"). NOTE: the time-of-day is only honored as a hard limit when time_window_is_hard=true (see below) — otherwise the tool searches the full work day. Auto-expanded up to 21 days if fewer than 3 slots found.' },
+            search_to: { type: 'string', description: 'End of search window. ISO 8601, date-only or with time. NOTE: the time-of-day is only honored as a hard limit when time_window_is_hard=true.' },
+            time_window_is_hard: { type: 'boolean', description: 'Set TRUE only when the owner/attendee gave a REAL time constraint ("must end by noon", "only after 3pm", "available 7–12"). Then the search_from/search_to times are honored as a hard clip. When false/omitted (DEFAULT), those times are treated as SOFT — the tool searches the OWNER\'S FULL WORK DAY (including night-shift hours) and lets the work-hours + attendee-timezone filters surface the real overlap. This prevents accidentally clipping off valid late/night-shift slots that overlap a far-timezone colleague\'s working hours.' },
             prefer_morning: { type: 'boolean', description: 'Prefer morning slots in the user timezone' },
             meeting_mode: {
               type: 'string',
@@ -1010,9 +1011,18 @@ ATTENDEES (v2.9.1):
         // any time component — making the tool description's "ISO 8601 format"
         // a lie and the per-attendee time-window flow (e.g. Yossi: "free 7-12")
         // structurally impossible to encode.
+        // v3.2.x — time-of-day in search_from/search_to is a HARD clip ONLY when
+        // the owner/attendee gave a real constraint ("end by noon", "after 3pm").
+        // By DEFAULT it's SOFT: strip the time so the search spans the full work
+        // day. Without this, Sonnet narrowing to e.g. 15:30 clipped off later
+        // work-hour windows — the night-shift slots that overlap a US colleague's
+        // afternoon got dropped (Ayala 6/9: "nothing clean" until she named 3pm
+        // EST). The per-day work-hours + attendee-hours filters still surface only
+        // the real overlap, so a full-day search isn't noisy.
+        const timeWindowHard = args.time_window_is_hard === true;
         const searchFromArg = args.search_from as string | undefined;
         const searchFromDate = searchFromArg
-          ? (searchFromArg.includes('T') ? searchFromArg : `${searchFromArg}T00:00:00`)
+          ? ((timeWindowHard && searchFromArg.includes('T')) ? searchFromArg : `${searchFromArg.split('T')[0]}T00:00:00`)
           : earliestSlot.toFormat("yyyy-MM-dd'T'HH:mm:ss");
 
         const extendedHours = args.extended_hours_ok === true;
@@ -1061,7 +1071,7 @@ ATTENDEES (v2.9.1):
           return anchor.toFormat("yyyy-MM-dd'T'HH:mm:ss");
         })();
         let searchEndDate = searchToArg
-          ? (searchToArg.includes('T') ? searchToArg : `${searchToArg}T23:59:59`)
+          ? ((timeWindowHard && searchToArg.includes('T')) ? searchToArg : `${searchToArg.split('T')[0]}T23:59:59`)
           : defaultSearchEnd;
         const MAX_SEARCH_WEEKS = 12;
 
@@ -1974,19 +1984,18 @@ ${(() => {
   const ns = profile.schedule.night_shift;
   const lines: string[] = [];
   if (tp) {
-    lines.push(`- All-Israeli meetings (everyone in Asia/Jerusalem): prefer ${tp.local_participants} — saves the afternoon for cross-timezone meetings.`);
-    lines.push(`- Any non-Israeli attendee (US, UK, AU, EU): prefer ${tp.remote_participants} ${firstName}'s time — overlaps best with their working day.`);
+    lines.push(`- When everyone is in ${firstName}'s own timezone (${profile.user.timezone}): lean toward ${tp.local_participants}.`);
+    lines.push(`- When ANY attendee is in a DIFFERENT timezone from ${firstName}: lean toward ${tp.remote_participants} ${firstName}'s time — it overlaps better with their working day.`);
     if (tp.note) lines.push(`- Note from ${firstName}: "${tp.note}"`);
   }
   if (ns) {
-    lines.push(`- Night-shift window: ${ns.hours_start}–${ns.hours_end} — ${firstName}'s standard work time${ns.typical_day ? ` on ${ns.typical_day}` : ''} (already merged into work_hours). Also useful for AU/Pacific overlap on other days when he offers it.`);
+    lines.push(`- Night-shift window: ${ns.hours_start}–${ns.hours_end} — ${firstName}'s standard late work time${ns.typical_day ? ` on ${ns.typical_day}` : ''} (already merged into work_hours). Also useful for overlap with attendees whose working day begins as ${firstName}'s is ending, when he offers it.`);
   }
   lines.push('');
   lines.push('How to apply these:');
-  lines.push(`- When attendees are all Israeli, narrow find_available_slots with \`search_from\` clipped to morning hours where possible.`);
-  lines.push(`- When ANY non-Israeli attendee present, narrow \`search_from\` to 15:00 ${firstName}'s time so afternoon options come back first.`);
-  lines.push(`- These are PREFERENCES not rules — if nothing in the preferred window works, propose outside it and NARRATE the trade-off (*"Nothing in your usual afternoon; best I have is Wed 11:30"*). Never refuse on a soft preference alone.`);
-  lines.push(`- For UK / AU / EU specifically: use Sonnet judgment — UK overlaps with IL late-afternoon, AU may need ${firstName}'s morning OR the night_shift window if he's offered it.`);
+  lines.push(`- find_available_slots ALREADY clips candidates to the intersection of everyone's working hours — each attendee's own timezone + work hours (from their saved profile) are honored automatically. The workable cross-timezone overlap is computed for you: do NOT pick a magic hour or reason about specific countries/regions. Just run the search; the tool returns the times that actually overlap.`);
+  if (tp) lines.push(`- Within that overlap, lean toward the preference above (same-timezone → ${tp.local_participants}; cross-timezone → ${tp.remote_participants}).`);
+  lines.push(`- These are PREFERENCES not rules — if nothing in the preferred window works, propose outside it and NARRATE the trade-off (*"Nothing in your usual window; best I have is Wed 11:30"*). Never refuse on a soft preference alone.`);
   lines.push(`- ${firstName} can override any preference at any time. The tool's \`relaxed:true\` flag bypasses these AND hard rules; each returned slot carries \`broken_rule_label\` so you narrate what's bypassed.`);
   return lines.join('\n');
 })()}${categoriesBlock}

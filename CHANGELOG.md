@@ -2,6 +2,34 @@
 
 ---
 
+## 3.2.4 — stay-alive + recovery + don't-clip-the-work-day (real-day stabilization, bundled with de-tenant continuation)
+
+Maelle crashed mid-day on a transient Slack socket event and — with no supervisor — stayed down all day, then on restart didn't replay the missed DMs. This wave is about surviving real load: crash-resilience, recovery diagnostics, and a slot-finder fix so a US-colleague's overlap (the owner's night shift) stops getting clipped. Bundled with the parallel chat's de-tenant continuation, per owner call, as one patch.
+
+### Fixed
+
+- **A transient Slack socket error no longer kills the bot.** `@slack/socket-mode`'s finity state machine threw *"Unhandled event 'server hello' in state 'connected'"* (a reconnect race); the `unhandledRejection` guard only matched on the error *message*, but the socket-mode marker was in the *stack*, so it fell through to `process.exit(1)` — and with PM2 off, the bot stayed down all day. Now socket/finity transients are matched by **stack + message** and survived, and a stray unhandled rejection **logs and keeps running** instead of exiting. ([index.ts](src/index.ts))
+- **Slot search no longer clips the owner's work day.** A timed `search_from`/`search_to` was always honored as a hard limit, so Sonnet narrowing to e.g. 15:30 dropped later work-hour windows — a US colleague's afternoon (which overlaps the owner's **night-shift** window) came back as "nothing clean" until the colleague named the exact time. The time-of-day is now **soft by default** (new `time_window_is_hard` flag); the search spans the full work day incl night shift, and the work-hours + attendee-timezone filters surface the real overlap. Hard clip only on a genuine "end by noon"-type constraint. Code-enforced, since the de-tenant prompt alone didn't stop the narrowing. ([meetings.ts](src/skills/meetings.ts))
+
+### Changed
+
+- **On-restart recovery broadened + instrumented (partial — see #122).** Catch-up now scans **all 1:1 DMs** (was owner-DM-only, which silently dropped the colleague backlog after an outage) and logs a per-DM catch/skip decision so a silent skip is explainable. The *complete* fix — a same-thread answered-check (unrelated shadow notes were masking real questions) + reading inside Slack AI-assistant threads + the colleague-panel storage question (those messages aren't in scannable `im` channels) — is **deferred to #122**. ([background.ts](src/core/background.ts))
+- **Routine send/skip is now logged on every firing** (decision + reason: vacuous-health / empty-reply / scrubbed-to-empty / sending), so a silent morning report is no longer a black box. ([routine.ts](src/tasks/dispatchers/routine.ts))
+
+### De-tenant continuation (parallel chat — bundled)
+
+- Neutral `free_time_per_office_day_hours` default (**2 → 0** — a 2h focus floor was one owner's theory silently imposed on every tenant; now each sets their own). ([userProfile.ts](src/config/userProfile.ts), [scheduleRules.ts](src/utils/scheduleRules.ts), [ops.ts](src/skills/meetings/ops.ts))
+- Locale-aware date/time rendering (`user.language`) instead of a hardcoded locale. ([systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+- Internationalized gender classifier (name's cultural origin + international usage; unisex → unknown). ([genderDetect.ts](src/utils/genderDetect.ts))
+- US `MM/DD` date parsing for `America/*` timezones (was EU `DD/MM` only). ([availabilityPreCheck.ts](src/utils/availabilityPreCheck.ts))
+- Working-Elsewhere surfacing in `get_calendar` / `analyze_calendar` results + an `owner_working_elsewhere` slot-finder label. ([ops.ts](src/skills/meetings/ops.ts), [workingElsewhere.ts](src/utils/workingElsewhere.ts))
+
+### Housekeeping
+
+- One-off DB cleanups (earlier this session): removed a mis-attributed social subject + an orphaned `in_flight_action` row. Deferred tickets: **#121** (cross-turn calendar cache), **#122** (on-restart recovery rebuild).
+
+---
+
 ## 3.2.3 — learned per-skill preferences + Working Elsewhere mode (de-tenant groundwork)
 
 First slice of the "de-Idan-ification" arc: start pulling owner-specific *style* out of the shipped prompt/code and into chat-taught per-user data, and teach Maelle to handle days the owner works from another place/timezone. Two new capabilities (normally minor-shaped; shipped as a patch per owner call) plus a diagnostic from a parallel chat. **Both features are built + typecheck-clean but NOT yet live-verified — verify WE-mode on a real Working-Elsewhere week, and the prefs loop end-to-end, before trusting them.**

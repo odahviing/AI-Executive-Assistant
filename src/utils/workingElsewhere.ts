@@ -88,6 +88,35 @@ export async function resolveWorkingElsewhereTz(location: string): Promise<strin
   return iana;
 }
 
+/**
+ * Shared enrichment for calendar-READ tools (get_calendar / analyze_calendar):
+ * if the fetched events include all-day Working Elsewhere markers, return a note
+ * telling the LLM those days' home-timezone clock is misleading, with the away
+ * timezones resolved. Returns null when there's no WE marker (the common case →
+ * callers attach nothing, behavior unchanged). Async (resolves away-TZ off any
+ * hot loop). This is how WE-awareness reaches list-and-eyeball surfaces, not
+ * just the slot finder.
+ */
+export async function summarizeWorkingElsewhere(
+  events: CalendarEvent[],
+  ownerTz: string,
+): Promise<{
+  working_elsewhere: { days: Array<{ date: string; away_tz: string | null; location: string }> };
+  _working_elsewhere_note: string;
+} | null> {
+  const weDays = detectWorkingElsewhereDays(events, ownerTz);
+  if (weDays.size === 0) return null;
+  const days: Array<{ date: string; away_tz: string | null; location: string }> = [];
+  for (const [date, info] of weDays) {
+    const away_tz = await resolveWorkingElsewhereTz(info.location);
+    days.push({ date, away_tz, location: info.location });
+  }
+  const locs = [...new Set(days.map(d => d.location).filter(Boolean))].join(', ') || 'another location';
+  const note =
+    `The owner is WORKING ELSEWHERE on ${days.map(d => d.date).join(', ')} (${locs}). On those days his normal office/home days and work hours DO NOT apply, and his home-timezone clock is MISLEADING — a time that looks like "morning" on this calendar is the middle of his night where he actually is. Do NOT eyeball availability from these event times or call any day "open in the morning." For real openings on those days, call find_available_slots (it returns tentative slots computed in his away timezone). Any booking on those days routes to approval.`;
+  return { working_elsewhere: { days }, _working_elsewhere_note: note };
+}
+
 export interface TentativeSlot {
   start: string;                         // owner-TZ ISO (absolute instant; same as the rest of the array)
   end: string;

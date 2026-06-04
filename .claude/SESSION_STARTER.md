@@ -1,6 +1,23 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.2.3** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.2.4** — check `package.json` if unsure; it is the source of truth.
+
+## 🚨 v3.2.4 — STABILIZATION WAVE. NOT STABLE YET — next session is ANOTHER BUG WAVE.
+
+Maelle is in daily real use and **broke hard this stretch** — she crashed mid-day on a transient Slack socket event and, with PM2 off, **stayed down all day**; then on restart didn't replay the missed DMs. The big builds are done; the job now is **keep her alive and correct under real load.** Default mode = reactive, code-first bug-bashing (trace `logs/`, propose-first, no auto-fix, wait for a per-bug "fix it").
+
+**Shipped in 3.2.4 (this wave + the parallel de-tenant chat — one bundle):**
+- **Crash resilience** (`index.ts`) — a transient `@slack/socket-mode` / finity error (e.g. *"Unhandled event 'server hello' in state 'connected'"*) no longer kills the process: socket-transients are matched by **stack + message** and survived, and a stray `unhandledRejection` **no longer `process.exit(1)`s**. This is what took her down all day.
+- **Recovery diagnostics + broadened scan** (`background.ts`) — catch-up now scans **all 1:1 DMs** (was owner-only) and logs a per-DM decision. **STILL INCOMPLETE — see #122:** the real fix (same-thread answered-check + reading inside Slack AI-assistant threads + the colleague-panel storage question) is deferred.
+- **Slot finder won't clip the work day** (`meetings.ts`) — a timed `search_from/search_to` is now **soft by default** (`time_window_is_hard` flag); the search spans the full work day incl **night shift**, so a US-colleague's afternoon overlap (= owner's night shift) is no longer dropped. Code-enforced, not prompt-dependent (the de-tenant prompt alone didn't stop the narrowing).
+- **De-tenant continuation (parallel chat)** — neutral `free_time_per_office_day_hours` default (2→0), locale-aware date/time (`user.language`), internationalized gender classifier, US `MM/DD` date parsing for `America/*`, and Working-Elsewhere surfacing in `get_calendar`/`analyze_calendar` + an `owner_working_elsewhere` slot label.
+
+**FIRST THING NEXT SESSION — it's a bug wave, assume instability:**
+1. Confirm she **stayed up** since the crash fix (no all-day silence again); skim `logs/` for `Unhandled rejection (kept alive` warnings (means a transient was survived — good).
+2. Verify the **night-shift slot fix** held on a real cross-TZ scheduling ask.
+3. Take whatever real-day bugs the owner brings — they interrupt and get folded in.
+
+**Open tickets (deferred, by owner):** **#121** cross-turn calendar cache (arch); **#122** on-restart recovery rebuild (same-thread answered-check + assistant-panel storage — the colleague-panel messages aren't in scannable `im` channels; likely needs `assistant.threads`). The 3.2.3 de-tenant "open threads" below are mostly **resolved** in 3.2.4 (timezone overlap now computed, free-time default neutralized, date-locale/parsing/gender de-tenanted).
 
 ## 🧭 v3.2.3 — DE-TENANT / MEMORY-LAYER arc started (this is a DESIGN arc, not just bugs)
 

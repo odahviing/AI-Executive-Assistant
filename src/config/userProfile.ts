@@ -177,7 +177,7 @@ const UserProfileSchema = z.object({
     allowed_durations: z.array(z.number()).min(1).default([25, 50]),                 // Meeting lengths Maelle picks from
     default_meeting_duration: z.number().optional(),                                  // Default when conversation doesn't name one; falls back to smallest above
     buffer_minutes: z.number().min(0).max(30).default(0),                             // Buffer between meetings (0 = back-to-back fine)
-    free_time_per_office_day_hours: z.number().min(0).max(8).default(2),              // Protected focus time per office day
+    free_time_per_office_day_hours: z.number().min(0).max(8).default(0),              // Protected focus time per office day. NEUTRAL default 0 = no floor imposed; each owner sets their own number (v3.2.x de-tenant — was 2, which silently imposed one owner's focus theory on every tenant).
     free_time_per_home_day_hours: z.number().min(0).max(8).optional(),                // Home-day focus target (defaults to office value)
     thinking_time_min_chunk_minutes: z.number().min(15).max(120).default(30),         // Smallest focus block worth counting
     min_slot_buffer_hours: z.number().min(0).max(12).default(4),                      // How far ahead colleagues can book (owner gets 1h)
@@ -262,7 +262,7 @@ const UserProfileSchema = z.object({
   }).default({
     allowed_durations: [25, 50],
     buffer_minutes: 0,
-    free_time_per_office_day_hours: 2,
+    free_time_per_office_day_hours: 0,
     thinking_time_min_chunk_minutes: 30,
     min_slot_buffer_hours: 4,
     physical_meetings_require_office_day: false,

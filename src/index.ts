@@ -102,23 +102,44 @@ async function main(): Promise<void> {
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT',  () => shutdown('SIGINT'));
+  // v3.2.x — a transient Slack socket-mode / finity reconnect-race error must
+  // NEVER take the bot down. The marker often lives in the STACK, not the
+  // message: the finity "Unhandled event 'server hello' in state 'connected'"
+  // crash (2026-06-04) had no 'SocketModeClient' in its message — only the
+  // stack — so the old message-only allowlist missed it, hit process.exit(1),
+  // and with PM2 off the bot stayed dark all day. Check stack + message.
+  const isTransientSocketError = (reason: unknown): boolean => {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    const stack = reason instanceof Error ? (reason.stack ?? '') : '';
+    return /SocketModeClient|@slack\/socket-mode|finity/i.test(stack)
+      || /server explicit disconnect|Unhandled event '.*' in state '.*'/i.test(message);
+  };
+
   process.on('uncaughtException', (err) => {
+    if (isTransientSocketError(err)) {
+      logger.warn('Slack socket-mode transient (uncaught) — staying up; socket reconnects', { message: err?.message });
+      return;
+    }
     logger.error('Uncaught exception', { err });
     process.exit(1);
   });
   process.on('unhandledRejection', (reason) => {
     const message = reason instanceof Error ? reason.message : String(reason);
 
-    if (message.includes('server explicit disconnect') || message.includes('SocketModeClient')) {
-      logger.warn('Slack WebSocket disconnected — reconnecting automatically', { message });
+    if (isTransientSocketError(reason)) {
+      logger.warn('Slack socket-mode transient — staying up; socket reconnects', { message });
       return;
     }
 
+    // v3.2.x — do NOT exit on a stray rejection. Previously this exited, and
+    // with no supervisor (PM2 off) one unhandled rejection took the bot down
+    // until a manual restart. A long-running assistant logs loudly and keeps
+    // running. (uncaughtException still exits — a sync uncaught throw can mean
+    // corrupt state — but socket-mode transients survive there too, above.)
     const detail = reason instanceof Error
       ? { message: reason.message, stack: reason.stack, name: reason.name }
       : { reason: message };
-    logger.error('Unhandled rejection', detail);
-    process.exit(1);
+    logger.error('Unhandled rejection (kept alive — not exiting)', detail);
   });
 }
 

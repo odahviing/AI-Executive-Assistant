@@ -61,7 +61,7 @@ export function buildSystemPromptParts(
   // ── DYNAMIC INPUTS ────────────────────────────────────────────────────────
   // These compute fresh per turn. Used only inside `dynamicContent` below.
 
-  const now = new Date().toLocaleString('en-IL', {
+  const now = new Date().toLocaleString(user.language || 'en', {
     timeZone: user.timezone,
     dateStyle: 'full',
     timeStyle: 'short',

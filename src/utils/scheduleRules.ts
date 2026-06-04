@@ -374,9 +374,9 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
     const isHome = homeDays.has(dayName);
     if (isOffice || isHome) {
       const requiredHours = isOffice
-        ? (profile.meetings.free_time_per_office_day_hours ?? 2)
+        ? (profile.meetings.free_time_per_office_day_hours ?? 0)
         : (profile.meetings.free_time_per_home_day_hours
-            ?? profile.meetings.free_time_per_office_day_hours ?? 1);
+            ?? profile.meetings.free_time_per_office_day_hours ?? 0);
       const requiredMin = requiredHours * 60;
       if (requiredMin > 0) {
         const minChunk = profile.meetings.thinking_time_min_chunk_minutes ?? 30;
