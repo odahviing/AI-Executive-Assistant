@@ -405,7 +405,7 @@ Binding — how to pick the right approval_id:
         const app = context.app;
         if (!app) return { ok: false, reason: 'No Slack app available in this context.' };
         try {
-          await sendMorningBriefing(app, context.profile, context.channelId, true);
+          await sendMorningBriefing(app, context.profile, context.channelId, true, context.threadTs);
           return { ok: true };
         } catch (err) {
           logger.error('send_briefing_now failed', { err });

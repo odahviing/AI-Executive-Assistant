@@ -44,13 +44,11 @@ export async function runDueTasks(
   const dueTasks = getTasksDueNow();
   if (dueTasks.length === 0) return;
 
-  // When the only due task(s) are recurring system ticks (social outreach /
-  // decay) — skip the summary line entirely. Hourly tick + same count = pure
-  // noise. Mixed batches and any user-facing tasks keep the info-level
-  // summary so the live log still shows real work.
-  const onlySystemTicks = dueTasks.every(t =>
-    t.type === 'social_outreach_tick' || t.type === 'social_decay',
-  );
+  // When the only due task(s) are recurring system ticks (social decay) —
+  // skip the summary line entirely. Same count tick-over-tick = pure noise.
+  // Mixed batches and any user-facing tasks keep the info-level summary so
+  // the live log still shows real work.
+  const onlySystemTicks = dueTasks.every(t => t.type === 'social_decay');
   if (!onlySystemTicks) {
     logger.info('Running due tasks', { count: dueTasks.length });
   }

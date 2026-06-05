@@ -34,6 +34,7 @@ export const PREF_SKILLS = [
   'general',
   'calendar',
   'meetings',
+  'brief',
   'summary',
   'social',
   'knowledge',
@@ -108,7 +109,7 @@ export async function writeSkillPreferences(
   skill: string,
   mode: 'add' | 'replace',
   text: string,
-): Promise<{ ok: true; created: boolean } | { ok: false; error: string }> {
+): Promise<{ ok: true; created: boolean; duplicate?: boolean } | { ok: false; error: string }> {
   const file = fileForSkill(profile, skill);
   if (!file) return { ok: false, error: 'invalid_skill' };
   const clean = text.trim();
@@ -126,6 +127,28 @@ export async function writeSkillPreferences(
       const prior = existed ? readFileSync(file, 'utf8').trimEnd() : '';
       // normalize the new line to a single bullet
       const line = clean.replace(/^[-*]\s*/, '').trim();
+      // Dedup (v3.x) — skip an append that's substantially the same as an
+      // existing line, so re-teaching the same preference is idempotent and the
+      // file (and the injected prompt) don't accumulate near-duplicates. Token-
+      // set Jaccard ≥ 0.6 counts as a match. To CHANGE a pref, use mode='replace'.
+      const norm = (s: string) =>
+        s.toLowerCase().replace(/^[-*]\s*/, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+      const newTokens = new Set(norm(line).split(' ').filter(Boolean));
+      if (newTokens.size > 0) {
+        for (const pl of prior.split('\n')) {
+          if (!pl.trim().startsWith('-')) continue;
+          const plTokens = new Set(norm(pl).split(' ').filter(Boolean));
+          if (plTokens.size === 0) continue;
+          const inter = [...newTokens].filter(t => plTokens.has(t)).length;
+          const union = new Set([...newTokens, ...plTokens]).size;
+          if (union > 0 && inter / union >= 0.6) {
+            logger.info('skillPreferences add — skipped near-duplicate', {
+              skill, similarity: Math.round((inter / union) * 100) / 100,
+            });
+            return { ok: true, created: false, duplicate: true };
+          }
+        }
+      }
       next = prior ? `${prior}\n- ${line}` : `- ${line}`;
     }
 

@@ -97,7 +97,7 @@ Optional skills (toggle in YAML):
 | Summary | `summary` | Transcript → structured summary → distribute. 3-stage state machine per thread |
 | Knowledge | `knowledge` | Owner-curated markdown KB at `config/users/<name>_kb/`. `manage_knowledge` for get/ingest |
 | Search | `search` | Web search + URL extraction (Tavily) |
-| Social | `social` | Off-topic chat tracking, codas, proactive colleague pings |
+| Social | `social` | Off-topic chat tracking + in-conversation social codas (rides a live turn; no out-of-the-blue DMs) |
 | Venue | `venue` | External meeting venues (cafés, restaurants). `find_venue` + `rank_venue` with per-owner rank catalog |
 
 Legacy YAML keys auto-migrate (`scheduling`/`coordination` → `meetings`, etc.).

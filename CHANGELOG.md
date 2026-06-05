@@ -2,6 +2,40 @@
 
 ---
 
+## 3.2.5 — proactive social, one engine one surface (kill the cold-open) + latency & brief polish
+
+Reworked how Maelle reaches out socially. There were **two** systems doing the same job: a cold-open hourly tick that DM'd colleagues out of the blue, and an in-conversation coda that rides a live chat — two topic-decision engines for one decision, the cold one built before the good engine existed and never migrated. Investigation of the live data showed the cold-open was the noisy, low-value half: it pinged the same 1–3 people (qualified by *work* topics mis-filed as social), they ignored it, and ranks ratcheted down. Per owner call we **deleted the cold-open entirely** — proactive social now happens **only** as a coda attached to a conversation the person is already having. Bundled (one patch, owner's call) with the parallel chat's latency + brief + preference work.
+
+### Changed
+
+- **Cold-open proactive outreach removed.** Deleted the hourly `social_outreach_tick` dispatcher (its eligibility funnel + discovery-question pinger). No more out-of-the-blue social DMs. The in-conversation coda (`chooseSocialDirective` → the 3-category-progression picker) is now the **single** proactive-social surface — one decision engine, one delivery surface. Lingering self-rearmed tick rows are drained once on startup. ([background.ts](src/core/background.ts), [dispatchers/index.ts](src/tasks/dispatchers/index.ts), [tasks/{types,runner,index}.ts](src/tasks))
+- **Social coda re-enabled on work/scheduling turns — at the *end* of the process, never mid-flight (option A).** A coda may ride a task turn when the work either **resolved** (booking confirmed, question answered) or was **handed off** (coordination / approval / await-reply outreach started — a natural lull). It's **suppressed** while the turn is still mid-exchange — Maelle returned a question/decision to the interlocutor (confirm-override, pick-a-slot, rule exception) or a tool failed — via a new `turnLeftWorkPending` guard computed in the tool loop. This is the original v2.2.1 piggyback, re-enabled now that the claim-checker coda-validator + the mid-flight guard prevent the old "btw that Samuel L. Jackson movie…" non-sequitur. ([orchestrator/index.ts](src/core/orchestrator/index.ts))
+
+### Latency (parallel chat — bundled)
+
+- **MPIM @mention fast-path.** An explicit `@Maelle` in a group DM now skips the relevance LLM entirely (the most unambiguous "respond" signal there is) — saves the ~2s classification on every group opener. ([app.ts](src/connectors/slack/app.ts))
+- **Relevance classifier Sonnet → Haiku.** The binary RESPOND/IGNORE group-DM judge (5-token output, strong RESPOND default) now runs on Haiku like the other fast judges, with usage logging. ([relevance.ts](src/connectors/slack/relevance.ts))
+- **`find_available_slots` zero-width/inverted window guard.** "Am I free at 3pm ET?" maps to `search_from == search_to`; free/busy returned empty and Sonnet had to redo the search next turn (~18s + a wasted iteration, observed in an Ayala MPIM). The window now expands to `from + duration` so the asked instant is actually tested. ([ops.ts](src/skills/meetings/ops.ts))
+- **Teams-URL-as-location patch is now fire-and-forget.** The cosmetic "show the join link as the location" PATCH (~2.5s) no longer blocks the `create_meeting` return — the meeting already has the Teams link/Join button; the patch runs async after success-verify. ([ops.ts](src/skills/meetings/ops.ts))
+
+### Added (parallel chat — bundled)
+
+- **`brief` learned-preference skill.** `update_my_preferences(skill='brief', …)` now teaches morning-brief style (what to lead with, emphasize, skip, length); the free-text prefs inject into the brief compose pass. ([assistant.ts](src/core/assistant.ts), [skillPreferences.ts](src/utils/skillPreferences.ts), [briefs.ts](src/tasks/briefs.ts))
+- **Brief language pinned to the owner's profile language** (generic `Intl.DisplayNames`, no hardcoded list) — de-tenant continuation. Greeting-rule comment cleaned up. ([briefs.ts](src/tasks/briefs.ts))
+- **Brief-in-thread.** A brief requested *inside* a thread (assistant panel / DM thread) posts back into that thread; the scheduled morning fire stays a top-level DM. ([briefs.ts](src/tasks/briefs.ts), [app.ts](src/connectors/slack/app.ts), [skill.ts](src/tasks/skill.ts))
+- **Preference dedup.** Re-teaching a near-identical preference (token-set Jaccard ≥ 0.6) is now an idempotent no-op with a `duplicate` flag surfaced to the tool; changing a pref uses `mode='replace'`. ([skillPreferences.ts](src/utils/skillPreferences.ts), [assistant.ts](src/core/assistant.ts))
+
+### Removed
+
+- `src/tasks/dispatchers/socialOutreachTick.ts` (cold-open system, ~620 LOC). `proactive_pending` (people_memory column + helpers) is now vestigial — set/read nowhere — kept pending the social-scoring cleanup pass.
+
+### Follow-ups (deferred, not in this version)
+
+- **Coda scoring** — the coda rank-check (`social_ping_rank_check kind='coda'`) is asymmetric: only ever `−1`, never `+1`. With the cold-open gone it's the sole scoring path; needs `+1` on engagement, one-vs-three rank-path reconciliation, and a rank-0 revival (retry once after 30d of no contact).
+- **Work-vs-social at the capture pass** — `runSubjectReconciliation` still files work content (e.g. "Idan call scheduling" → `partner`) as social subjects, so a `continue` coda can still surface a work topic; needs a work-exclusion rule + one-time cleanup.
+
+---
+
 ## 3.2.4 — stay-alive + recovery + don't-clip-the-work-day (real-day stabilization, bundled with de-tenant continuation)
 
 Maelle crashed mid-day on a transient Slack socket event and — with no supervisor — stayed down all day, then on restart didn't replay the missed DMs. This wave is about surviving real load: crash-resilience, recovery diagnostics, and a slot-finder fix so a US-colleague's overlap (the owner's night shift) stops getting clipped. Bundled with the parallel chat's de-tenant continuation, per owner call, as one patch.

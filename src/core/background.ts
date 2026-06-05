@@ -194,40 +194,30 @@ export async function initProfile(
     logger.warn('Social decay task seeding threw — continuing', { err: String(err) });
   }
 
-  // v2.2 — Proactive colleague outreach: hourly tick. System activity,
-  // owner-time-agnostic. Dispatcher short-circuits when
-  // profile.skills.social is falsy (v2.6.2 master toggle; was a separate
-  // proactive_colleague_social.enabled field pre-v2.6.2).
+  // v3.2.5 — cold-open proactive outreach (the hourly `social_outreach_tick`)
+  // was REMOVED. Proactive social now happens ONLY as an in-conversation coda
+  // (the social directive on a live turn — chooseSocialDirective), never as an
+  // out-of-the-blue DM. Owner direction: "kill the cold open, keep the coda as
+  // the entry point to raise topics — she attaches to a discussion the person
+  // is already having." Drain any lingering self-rearmed tick rows once so they
+  // don't sit in the queue (the dispatcher is gone; the runner would just mark
+  // them failed). Idempotent — a no-op after the first clean pass.
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getDb } = require('../db') as typeof import('../db');
-    const existing = getDb().prepare(`
-      SELECT id FROM tasks
+    const res = getDb().prepare(`
+      UPDATE tasks SET status = 'cancelled', updated_at = datetime('now')
       WHERE type = 'social_outreach_tick'
         AND owner_user_id = ?
         AND status IN ('new', 'scheduled', 'in_progress')
-      LIMIT 1
-    `).get(profile.user.slack_user_id);
-    if (!existing) {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { createTask } = require('../tasks') as typeof import('../tasks');
-      const firstDue = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-      createTask({
-        owner_user_id: profile.user.slack_user_id,
-        owner_channel: dmChannel,
-        type: 'social_outreach_tick',
-        status: 'new',
-        title: 'Proactive colleague outreach tick',
-        description: 'Hourly sweep for colleagues in their mid-day window; sends at most one ping per day.',
-        due_at: firstDue,
-        skill_ref: `social_outreach_tick_${profile.user.slack_user_id}`,
-        context: '{}',
-        who_requested: 'system',
+    `).run(profile.user.slack_user_id);
+    if (res.changes > 0) {
+      logger.info('Cold-open outreach ticks drained (cold-open system removed)', {
+        ownerUserId: profile.user.slack_user_id, cancelled: res.changes,
       });
-      logger.info('Social outreach tick seeded', { ownerUserId: profile.user.slack_user_id, firstDue });
     }
   } catch (err) {
-    logger.warn('Social outreach tick seeding threw — continuing', { err: String(err) });
+    logger.warn('Cold-open tick drain threw — continuing', { err: String(err) });
   }
 
   // v1.5.1 — checkMissedBriefing is gone. If today's briefing was missed,
@@ -352,39 +342,12 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
     return true;
   });
 
-  if (!latestUserMsg?.ts) {
-    // v3.2.x — DIAGNOSTIC: why a DM is skipped (silent before). Captures the
-    // 2026-06-04 case where the latest unanswered message ("you are out?") was
-    // skipped for a reason invisible in the logs.
-    logger.info('Catch-up: DM skipped', {
-      channelId, reason: 'no_user_message', messageCount: messages.length,
-      // v3.2.x — dump the shapes so we see WHY the user-msg filter rejected all
-      // of them (suspect: a blanket subtype exclusion dropping real DM msgs).
-      sample: messages.slice(0, 6).map(m => ({
-        user: m.user, bot_id: m.bot_id, subtype: m.subtype, type: m.type,
-        textPreview: typeof m.text === 'string' ? (m.text as string).slice(0, 40) : undefined,
-      })),
-    });
-    return;
-  }
+  if (!latestUserMsg?.ts) return;
 
   const userTs = parseFloat(latestUserMsg.ts as string);
 
   const latestBotMsg = messages.find(m => m.bot_id || m.user === botUserId);
   const botTs = latestBotMsg?.ts ? parseFloat(latestBotMsg.ts as string) : 0;
-
-  // v3.2.x — DIAGNOSTIC: the full catch/skip decision per DM, so a silently
-  // skipped latest message is explainable on the next restart.
-  logger.info('Catch-up: DM decision', {
-    channelId,
-    messageCount: messages.length,
-    latestUserTs: latestUserMsg.ts,
-    latestUserPreview: typeof latestUserMsg.text === 'string' ? (latestUserMsg.text as string).slice(0, 60) : '(non-text)',
-    latestBotTs: latestBotMsg?.ts ?? null,
-    botNewerThanUser: userTs <= botTs,
-    decision: userTs <= botTs ? 'skip:bot_newer' : 'proceed_to_thread_check',
-  });
-
   if (userTs <= botTs) return;
 
   const msgTs = latestUserMsg.ts as string;
@@ -398,13 +361,7 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
     const botThreadReply = (replies.messages ?? []).find(
       m => (m.bot_id || m.user === botUserId) && parseFloat(m.ts as string) > userTs
     );
-    if (botThreadReply) {
-      logger.info('Catch-up: DM skipped', {
-        channelId, reason: 'thread_already_replied',
-        latestUserTs: latestUserMsg.ts, botThreadReplyTs: botThreadReply.ts,
-      });
-      return;
-    }
+    if (botThreadReply) return;
   } catch {
     // No replies or no access — proceed with catchup
   }

@@ -585,7 +585,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
             logger.info('Brief request detected — short-circuiting to sendMorningBriefing', {
               senderId, channelId, preview: userMessage.slice(0, 80),
             });
-            await sendMorningBriefing(app, profile, channelId, true);
+            await sendMorningBriefing(app, profile, channelId, true, threadTs);
             return;
           }
         } catch (err) {
@@ -1663,7 +1663,23 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // mode here, and false negatives (Yael answering Maelle's question →
       // silenced) burn trust harder than false positives.
       const recentlyActive = history.slice(-3).some(m => m.role === 'assistant');
-      if (recentlyActive) {
+      // v3.1.x — explicit-@mention fast-path. When the message @mentions the
+      // bot directly, that's the most unambiguous "respond" signal there is —
+      // skip the relevance LLM entirely. (mentionedIds + botUserId are already
+      // computed above; we only reach here when mentions are absent OR the bot
+      // IS among them, since the other-people-only case returned at line ~1644.)
+      // Closes the ~2s wasted Sonnet relevance call on every @Maelle group
+      // opener — the old fast-path in relevance.ts required ZERO @mentions, so
+      // an explicit @Maelle disabled it and paid the full classification.
+      const botExplicitlyMentioned = botUserId != null && mentionedIds.includes(botUserId);
+      if (botExplicitlyMentioned) {
+        logger.info('MPIM relevance check skipped — bot explicitly @mentioned → RESPOND', {
+          senderId: event.user,
+          channelId: event.channel,
+          threadTs,
+          preview: rawText.slice(0, 80),
+        });
+      } else if (recentlyActive) {
         logger.info('MPIM relevance check skipped — Maelle was just active in this thread', {
           senderId: event.user,
           channelId: event.channel,

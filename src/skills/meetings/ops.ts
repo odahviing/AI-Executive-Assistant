@@ -928,7 +928,7 @@ export class SchedulingSkill {
           // getCalendarEvents already does internally via
           // `toEndOfDayLocal` — append T23:59:59 to a bare YYYY-MM-DD so
           // the description matches reality.
-          const effectiveSearchTo = ((): string => {
+          let effectiveSearchTo = ((): string => {
             const raw = args.search_to as string;
             if (typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw)) {
               return `${raw}T23:59:59`;
@@ -966,6 +966,37 @@ export class SchedulingSkill {
               logger.warn('find_available_slots — predecessor lookup threw, ignoring constraint', {
                 err: String(err).slice(0, 200),
               });
+            }
+          }
+
+          // v3.1.x — zero-width / inverted window guard. "Am I free at 3pm ET
+          // next Tuesday?" is a point-in-time availability check; Sonnet maps
+          // it to search_from == search_to (a single instant). getFreeBusy
+          // bails on a zero-width (or inverted) window and returns empty, the
+          // relaxed-recovery fallback also returns empty, so the whole
+          // iteration is wasted and Sonnet has to redo the search with a wider
+          // window on the NEXT turn — observed 2026-06-04T18:01 (Ayala MPIM),
+          // cost ~18s + a full extra Sonnet iteration. Defensive fix mirrors
+          // the date-only expansion above: when from >= to, expand `to` to
+          // from + duration_minutes so the requested instant is actually
+          // tested. (A predecessor-clip that pushed `from` past `to` lands
+          // here too.) The preferred_slot (when set) already pins the exact
+          // instant inside this window, so the asked time is guaranteed tested.
+          {
+            const fromDt = DateTime.fromISO(effectiveSearchFrom, { zone: timezone });
+            const toDt = DateTime.fromISO(effectiveSearchTo, { zone: timezone });
+            if (fromDt.isValid && toDt.isValid && fromDt.toMillis() >= toDt.toMillis()) {
+              const durMin = (args.duration_minutes as number) ?? 30;
+              const expandedTo = fromDt.plus({ minutes: durMin }).toISO();
+              if (expandedTo) {
+                logger.info('find_available_slots — zero-width/inverted window expanded to from+duration', {
+                  original_from: effectiveSearchFrom,
+                  original_to: effectiveSearchTo,
+                  expanded_to: expandedTo,
+                  duration_minutes: durMin,
+                });
+                effectiveSearchTo = expandedTo;
+              }
             }
           }
 
@@ -2544,29 +2575,6 @@ export class SchedulingSkill {
           defaultBodyAuthor: `${context.profile.assistant.name}, ${context.profile.user.name.split(' ')[0]} Assistant`,
         }).then(async createdMeeting => {
           const meetingId = createdMeeting.id;
-          // v2.8.2 — Teams-URL-as-location patch. When the location decision
-          // tree said "online with Teams URL as the location" (4a1, 5a,
-          // travel-override, non-work-day default), read the joinUrl back from
-          // Graph and patch the event's location.displayName so the calendar
-          // invite shows the join link as the location.
-          if (planTeamsUrlAsLocation && createdMeeting.joinUrl) {
-            try {
-              const { updateMeeting } = await import('../../connectors/graph/calendar');
-              await updateMeeting({
-                userEmail,
-                timezone,
-                meetingId,
-                location: createdMeeting.joinUrl,
-              });
-              logger.info('create_meeting — patched location with Teams join URL', {
-                meetingId, joinUrl: createdMeeting.joinUrl,
-              });
-            } catch (err) {
-              logger.warn('create_meeting — Teams URL location patch failed, leaving as auto', {
-                meetingId, err: String(err).slice(0, 200),
-              });
-            }
-          }
           // v2.2.5 (#54) — post-create verification. Graph occasionally returns
           // 200 OK + an event id on writes that didn't actually land (sync
           // delays, race conditions). Re-read by id and confirm the start time
@@ -2591,6 +2599,36 @@ export class SchedulingSkill {
               message,
             };
           }
+
+          // v2.8.2 / v3.1.x — Teams-URL-as-location patch, now FIRE-AND-FORGET.
+          // When the location decision tree said "online with Teams URL as the
+          // location" (4a1, 5a, travel-override, non-work-day default), patch
+          // the event's location.displayName to the joinUrl so the invite shows
+          // the link as its location. This is PURELY COSMETIC — the meeting was
+          // already created WITH the online meeting in the single createMeeting
+          // POST (isOnlineMeeting:true), so the Teams link + Join button exist
+          // in the body regardless of this patch. Pre-v3.1.x this was an
+          // awaited second Graph PATCH (~2.5s) blocking the tool return on every
+          // Teams booking. Now we fire it AFTER verify (so we only patch a
+          // confirmed-good event) and DON'T await it — the ~2.5s leaves the
+          // critical path. Worst case on failure: location shows the auto label
+          // instead of the URL. Runs only on the confirmed-success path.
+          if (planTeamsUrlAsLocation && createdMeeting.joinUrl) {
+            void (async () => {
+              try {
+                const { updateMeeting } = await import('../../connectors/graph/calendar');
+                await updateMeeting({ userEmail, timezone, meetingId, location: createdMeeting.joinUrl });
+                logger.info('create_meeting — patched location with Teams join URL (async)', {
+                  meetingId, joinUrl: createdMeeting.joinUrl,
+                });
+              } catch (err) {
+                logger.warn('create_meeting — Teams URL location patch failed, leaving as auto', {
+                  meetingId, err: String(err).slice(0, 200),
+                });
+              }
+            })();
+          }
+
           // v2.2.3 (scenario 8 row 7) — post-mutation floating-block rebalance.
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports

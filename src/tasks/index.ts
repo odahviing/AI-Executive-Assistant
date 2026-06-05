@@ -42,12 +42,11 @@ export function createTask(params: Omit<Task, 'id' | 'created_at' | 'updated_at'
     target_slack_id: params.target_slack_id ?? null,
     target_name: params.target_name ?? null,
   });
-  // Recurring system ticks (social_outreach_tick / social_decay) self-rearm
-  // every hour / every 7 days. Their creation is deterministic from the
-  // dispatcher's own behavior — logging it adds zero signal and floods the
-  // live log. Skip entirely. Everything user-facing (reminders, follow-ups,
-  // outreach, coord) stays at info.
-  const isSystemTick = params.type === 'social_outreach_tick' || params.type === 'social_decay';
+  // The recurring system tick (social_decay) self-rearms every 7 days. Its
+  // creation is deterministic from the dispatcher's own behavior — logging it
+  // adds zero signal and floods the live log. Skip entirely. Everything
+  // user-facing (reminders, follow-ups, outreach, coord) stays at info.
+  const isSystemTick = params.type === 'social_decay';
   if (!isSystemTick) {
     logger.info('Task created', {
       id,

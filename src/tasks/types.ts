@@ -37,16 +37,11 @@ export type TaskType =
   // 7 days. Topics hitting score 0 flip to dormant (Maelle stops raising
   // them; owner can still revive). System task, auto-reschedules every 7d.
   | 'social_decay'
-  // v2.2 — hourly tick that evaluates proactive colleague-outreach candidates.
-  // Runs every hour in owner-agnostic fashion (system activity). For each
-  // known colleague, checks whether their LOCAL time is inside the 13:00-15:00
-  // mid-day window, engagement_rank > 0, cooldown respected, no active
-  // conversation. Picks at most one per owner per day and sends a short
-  // warm ping via Sonnet. Self-reschedules every hour.
-  | 'social_outreach_tick'
-  // v2.2 — rank-adjustment feedback for proactive pings. Scheduled 48h after
-  // a ping fires; checks whether the colleague replied, adjusts
-  // engagement_rank accordingly (no reply → -1; engaged reply → +1).
+  // v2.2 — rank-adjustment feedback for proactive social. Scheduled 48h after
+  // a coda raises a topic; checks whether the colleague engaged, adjusts
+  // engagement_rank accordingly (no engagement → -1; engaged → +1).
+  // (The cold-open `social_outreach_tick` was removed in v3.2.5 — proactive
+  // social is coda-only now; this rank-check serves the coda path.)
   | 'social_ping_rank_check';
 
 export type TaskStatus =

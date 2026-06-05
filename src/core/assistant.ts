@@ -334,13 +334,13 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
           properties: {
             skill: {
               type: 'string',
-              enum: ['general', 'calendar', 'meetings', 'summary', 'social', 'knowledge', 'search', 'venue'],
-              description: "Which area the preference governs. 'calendar' = calendar health / hygiene; 'meetings' = booking & scheduling style; 'general' = voice, how to address him, cross-cutting. Pick the area whose tools/behavior the preference changes.",
+              enum: ['general', 'calendar', 'meetings', 'brief', 'summary', 'social', 'knowledge', 'search', 'venue'],
+              description: "Which area the preference governs. 'calendar' = calendar health / hygiene; 'meetings' = booking & scheduling style; 'brief' = the morning briefing (what to lead with, emphasize, skip, length); 'general' = voice, how to address him, cross-cutting. Pick the area whose tools/behavior the preference changes.",
             },
             mode: {
               type: 'string',
               enum: ['add', 'replace'],
-              description: "add = append this as one new preference line. replace = overwrite ALL preferences for this area with `text` (use to edit or remove existing ones — pass the FULL new list).",
+              description: "add = append this as one new preference line (de-duplicated — a near-identical line is a no-op). replace = overwrite ALL preferences for this area with `text`. If a similar preference already exists and the owner is CHANGING it, use replace with the full new list — don't 'add' a near-duplicate.",
             },
             text: {
               type: 'string',
@@ -776,13 +776,16 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
           logger.warn('update_my_preferences failed', { skill, mode, err: result.error });
           return { ok: false, error: result.error };
         }
-        logger.info('update_my_preferences', { skill, mode, created: result.created });
+        logger.info('update_my_preferences', { skill, mode, created: result.created, duplicate: result.duplicate });
         return {
           ok: true,
           skill,
           mode,
           created: result.created,
-          _note: `Saved to your ${skill} preferences. It's in force from your next ${skill}-related turn — no need to repeat it.`,
+          ...(result.duplicate ? { duplicate: true } : {}),
+          _note: result.duplicate
+            ? `You already have a matching ${skill} preference — nothing added (re-teaching is a no-op). To CHANGE it, give me the new wording with mode='replace'.`
+            : `Saved to your ${skill} preferences. It's in force from your next ${skill}-related turn — no need to repeat it.`,
         };
       }
 

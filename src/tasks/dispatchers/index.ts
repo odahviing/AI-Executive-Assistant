@@ -16,7 +16,6 @@ import { dispatchRoutine } from './routine';
 import { dispatchCalendarFix } from './calendarFix';
 import { dispatchSummaryActionFollowup } from './summaryActionFollowup';
 import { dispatchSocialDecay } from './socialDecay';
-import { dispatchSocialOutreachTick } from './socialOutreachTick';
 import { dispatchSocialPingRankCheck } from './socialPingRankCheck';
 
 export const DISPATCHERS: Partial<Record<Task['type'], TaskDispatcher>> = {
@@ -27,6 +26,5 @@ export const DISPATCHERS: Partial<Record<Task['type'], TaskDispatcher>> = {
   calendar_fix:             dispatchCalendarFix,
   summary_action_followup:  dispatchSummaryActionFollowup,
   social_decay:             dispatchSocialDecay,
-  social_outreach_tick:     dispatchSocialOutreachTick,
   social_ping_rank_check:   dispatchSocialPingRankCheck,
 };

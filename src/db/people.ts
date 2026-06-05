@@ -128,16 +128,17 @@ export interface PersonMemory {
 const SET_BY_RANK: Record<CoreFieldSetBy, number> = { owner: 3, person: 2, auto: 1 };
 
 /**
- * v2.2.3 — proactive ping anti-spam lock.
+ * v2.2.3 — proactive ping anti-spam lock. VESTIGIAL as of v3.2.5: the
+ * cold-open `socialOutreachTick` that set + read this lock was removed
+ * (proactive social is coda-only now). `setProactivePending`/`isProactivePending`
+ * have no live callers; the column is now always 0. Kept (column + helpers)
+ * pending the social-scoring cleanup pass — safe to drop there.
  *
- * setProactivePending(slackId)   → fired by socialOutreachTick after a
- *                                   proactive ping is sent. Locks the person
- *                                   out of further proactive pings.
- * clearProactivePendingOnInbound → fired ONLY on a real inbound message from
- *                                   the person. Their reply (to anything —
- *                                   the proactive ping itself, or a separate
- *                                   task-driven DM Maelle sent) is the signal
- *                                   that they're engaged again.
+ * setProactivePending(slackId)   → (no live caller) locked a person out of
+ *                                   further cold-open pings after one was sent.
+ * clearProactivePendingOnInbound → still fired on a real inbound message from
+ *                                   the person (harmless no-op while the column
+ *                                   stays 0).
  *
  * Outbound messages Maelle sends (task-driven message_colleague, coord DM,
  * a second proactive ping) DO NOT clear the lock. Only an inbound from them.

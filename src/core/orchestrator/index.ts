@@ -1080,6 +1080,17 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // Track tools called so we can save a summary in conversation history.
   // This prevents Claude from forgetting what it just did on the next turn.
   const toolCallSummaries: string[] = [];
+  // v3.2.5 — "is this turn still mid-process?" signal for the end-of-turn
+  // social coda (option A). The coda may fire when the work RESOLVED (booking
+  // done, question answered) OR was handed off to someone else (coordination /
+  // approval / await-reply outreach — a natural lull). It must NOT fire when
+  // the turn is still mid-exchange: Maelle returned a question/decision to the
+  // current interlocutor (confirm-override, pick-a-slot, rule exception) or a
+  // tool failed. Any such tool result this turn flips this true and the coda
+  // is suppressed — that's the "not in the middle" guard. Handoff tools
+  // (create_approval / coordinate_meeting / message_colleague) deliberately do
+  // NOT set this (they're the lull case the coda is allowed to ride).
+  let turnLeftWorkPending = false;
   // v2.8.3+ — rich per-mutation record used by the claim-checker retry path
   // (postReply.ts). Carries FULL event ids so a retry can build a hint that
   // tells Sonnet "to amend this booking, call move_meeting with id=X — don't
@@ -1845,6 +1856,33 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         }
       }
 
+      // v3.2.5 — end-of-turn coda guard (option A). Flag the turn as still
+      // mid-process when this tool result returns a question/decision to the
+      // current interlocutor or failed. These mean "the exchange isn't done"
+      // — appending a social line here is the jarring non-sequitur. Handoff
+      // tools (coordination / approval / await-reply outreach) are NOT flagged
+      // — those are lulls the coda is allowed to ride.
+      if (result && typeof result === 'object') {
+        const r = result as Record<string, unknown>;
+        const awaitingDecision =
+          r.needs_owner_approval === true
+          || r.needs_confirmation === true
+          || typeof r.suggested_ask_text === 'string'
+          || r._deferred_action_hint != null
+          || r.rule_violation != null
+          || r.not_organizer === true
+          || Array.isArray(r.options)
+          || Array.isArray(r.slot_options);
+        // A mutating meeting op that didn't close, or any tool that errored.
+        const mutators = new Set(['create_meeting', 'move_meeting', 'delete_meeting', 'book_floating_block', 'book_lunch']);
+        const failedMutation = mutators.has(toolUse.name)
+          && r.success !== true && r.deleted !== true;
+        const errored = r.ok === false || typeof r.error === 'string';
+        if (awaitingDecision || failedMutation || errored) {
+          turnLeftWorkPending = true;
+        }
+      }
+
       // v2.7.1 (bug 2.3 / 3.1) — open a follow_up request when owner-initiated
       // meeting work spills past this turn (rule_violation, options to pick,
       // not_organizer, etc.). Closure rides on existing closeMeetingArtifacts
@@ -2177,41 +2215,31 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     && finalReply
     && finalReply.trim().length > 0
     && toolCallSummaries.length > 0
-    // v2.5.2 — fire on BOTH owner-path AND colleague-path turns. The v2.2.4
-    // restriction to owner-only over-corrected: people memory + social
-    // engagement EXIST so Maelle is socially smarter with colleagues, not so
-    // she's social with the owner. The original v2.2.0 design model is right:
-    // first resolve the task (the parking tool fires below — that's the gate),
-    // THEN piggyback ONE warm line on the way out. Engagement_rank +
-    // proactive_pending + the daily-cap (proactive tick) prevent over-firing.
-    // The v2.2.4 anti-intrusive intuition still has merit for ONE specific
-    // case: a reschedule ask isn't the moment to chat. The parkingToolPattern
-    // below excludes that case implicitly — message_colleague + outreach_send
-    // + create_approval are owner-driven outbound, only colleague-path matches
-    // tend to be coordinate_meeting (booking, not reschedule). For the future
-    // reschedule-specific case we'd add an intent gate; for now the pattern is
-    // tight enough that the false-positive rate is acceptable.
+    // v2.5.2 — fire on BOTH owner-path AND colleague-path turns. People memory
+    // + social engagement EXIST so Maelle is socially smarter with colleagues
+    // (and warm with the owner). The model: resolve the task FIRST, then add
+    // ONE warm line on the way out. The daily/24h gates inside the picker
+    // (directiveForProactiveSlot) + rank-0 opt-out prevent over-firing.
   ) {
-    // v2.6.5 / v2.6.7-fix — piggyback-coda-on-task-turns DISABLED.
+    // v3.2.5 — end-of-turn social coda on work/scheduling turns, RE-ENABLED
+    // (option A). Owner direction: "run it on work turns, but at the END of the
+    // process, not in the middle." So the coda may ride a task turn when the
+    // work either RESOLVED this turn (booking done, question answered, note
+    // saved) OR was handed off to someone else (coordination / approval /
+    // await-reply outreach — a natural lull). It is SUPPRESSED only when the
+    // turn is still mid-exchange — Maelle returned a question/decision to the
+    // current interlocutor (confirm-override, pick-a-slot, rule exception) or a
+    // tool failed — which `turnLeftWorkPending` captures during the tool loop.
     //
-    // The original design (v2.2.1, kept through v2.6.5) fired social codas
-    // on task turns where Maelle parked the work waiting on someone else —
-    // intent: a human EA would naturally weave in social during the lull.
-    // In practice the picker is context-blind: it grabs the highest-engaged
-    // active subject from any category, regardless of what the current
-    // conversation is about. Result: mid-meeting-booking, owner gets a
-    // non-sequitur "btw that Samuel L. Jackson movie..." (2026-05-11
-    // 21:58 incident — coda validator caught it as invented_fact and
-    // dropped, but the misfire pattern itself was the bug).
-    //
-    // Owner direction (2026-05-11): drop the piggyback entirely. Codas only
-    // fire through the social state machine's existing paths — kind=social
-    // (genuine social conversation), kind=other + conversation_state=open
-    // (in-conversation proactive), and the hourly socialOutreachTick
-    // cold-DM cron (owner-time-agnostic outreach). All three remain in
-    // place; only this task-turn piggyback is killed.
-    const codaEligible = false;
-    void toolCallSummaries; // intentionally unused now; gate above is hard false
+    // History: the original piggyback (v2.2.1) fired on parking turns but the
+    // picker was context-blind → mid-booking non-sequitur ("btw that Samuel L.
+    // Jackson movie...", 2026-05-11). It was hard-disabled. Two things changed
+    // since: (1) the claimChecker coda-validator below drops invented-fact /
+    // off-base codas, and (2) the `turnLeftWorkPending` guard keeps the coda
+    // off genuinely mid-process turns. The cold-open socialOutreachTick is
+    // gone (v3.2.5) — this in-conversation coda is now the ONLY proactive-
+    // social surface.
+    const codaEligible = !turnLeftWorkPending;
     if (codaEligible) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports

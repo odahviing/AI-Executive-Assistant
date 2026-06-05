@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
 import { config } from '../../config';
 import logger from '../../utils/logger';
+import { logLlmUsage } from '../../utils/usageLog';
 
 // Single client instance — not recreated per call
 const anthropic = getAnthropicClient();
@@ -63,7 +64,13 @@ export async function isMessageForAssistant(
 
   try {
     const response = await anthropic.messages.create({
-      model:      'claude-sonnet-4-6',
+      // v3.1.x — Haiku. This is a binary RESPOND/IGNORE classifier with a
+      // 5-token output and a strong default (RESPOND) — exactly the shape the
+      // rest of the project's fast judges run on (classifyTurn, claimChecker,
+      // securityGate). A misjudgment errs toward responding in a group she was
+      // deliberately added to, which is the safe direction. Only fires when the
+      // bot wasn't explicitly @mentioned AND Maelle wasn't recently active.
+      model:      'claude-haiku-4-5-20251001',
       max_tokens: 5,
       system:
 `You decide if an AI assistant should stay SILENT in a group DM. Default is RESPOND.
@@ -84,6 +91,7 @@ The message may be in any language.`,
       }],
     });
 
+    logLlmUsage('mpim_relevance', 'claude-haiku-4-5-20251001', response);
     const answer        = ((response.content[0] as Anthropic.TextBlock)?.text ?? '').trim().toUpperCase();
     const shouldRespond = !answer.startsWith('IGNORE');
 

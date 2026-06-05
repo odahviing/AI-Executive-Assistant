@@ -2,12 +2,12 @@
  * Cron schedules CRUD (v2.7.0).
  *
  * Recurring trigger config. Replaces the old `routines` table AND the cron-
- * typed rows that used to live in `tasks` (social_outreach_tick, social_decay,
- * morning_brief, user routines). One concept: "this thing fires on a schedule;
- * each fire MAY create a request when there's actual work to do."
+ * typed rows that used to live in `tasks` (social_decay, morning_brief, user
+ * routines). One concept: "this thing fires on a schedule; each fire MAY
+ * create a request when there's actual work to do."
  *
- * Empty fires (e.g. social_outreach_tick picks zero candidates) do NOT create
- * a request — they just update last_fired_at + next_fire_at and exit.
+ * Empty fires (e.g. a decay sweep with nothing stale) do NOT create a
+ * request — they just update last_fired_at + next_fire_at and exit.
  *
  * One-shot lifecycle timers (approval_expiry, coord_nudge, outreach_decision)
  * do NOT live here — they live on the request row itself as `next_check_at` +
@@ -20,7 +20,6 @@ import logger from '../utils/logger';
 
 export type CronHandler =
   | 'morning_brief'
-  | 'social_outreach_tick'
   | 'social_decay'
   | 'user_routine';
 

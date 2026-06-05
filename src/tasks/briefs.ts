@@ -14,6 +14,7 @@ import { closeRequest } from '../core/requests/closeRequest';
 import type { RequestRow } from '../core/requests/types';
 import { parseDetails } from '../core/requests/types';
 import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calendar';
+import { formatSkillPreferencesBlock } from '../utils/skillPreferences';
 import { processCalendarEvents } from '../skills/meetings/ops';
 import { verifyScheduledOutcome, type ScheduleOutcome } from '../utils/verifyScheduledOutcome';
 import logger from '../utils/logger';
@@ -433,11 +434,23 @@ async function generateBriefingText(
   const anthropic = getAnthropicClient();
   const firstName = profile.user.name.split(' ')[0];
   const dataText = JSON.stringify(items, null, 2);
+  // v3.x — pin the brief to the owner's configured language (generic; no
+  // hardcoded language list). The brief is a standalone compose pass with no
+  // inbound message to match, so the owner's profile language is the source.
+  const ownerLangName = (() => {
+    try { return new Intl.DisplayNames(['en'], { type: 'language' }).of(profile.user.language) ?? profile.user.language; }
+    catch { return profile.user.language; }
+  })();
+  // v3.x — owner's learned BRIEF preferences (free-text, per-skill MD). '' when
+  // none. Same layer as calendar prefs; owner-private by nature (his brief).
+  const briefPrefs = formatSkillPreferencesBlock(profile, 'brief', { label: 'BRIEF' });
 
   const systemPrompt = `You are writing a morning briefing for ${firstName} from their AI executive assistant ${profile.assistant.name}.
 
+LANGUAGE — write the entire brief in ${ownerLangName} (${firstName}'s language). Proper nouns (names, meeting titles) keep their original spelling.
+
 STRUCTURE (in this order):
-1. TODAY'S CALENDAR — this is the FIRST line of the message (no greeting before it — the Slack app shows line 1 as the preview, so lead with the calendar + date, not "Morning —"). Only if a calendar_today item is present; apply the CALENDAR LISTING FORMAT block below. When no calendar_today item exists, the first line is instead the first notable item (step 3). Never open with a time-of-day greeting.
+1. TODAY'S CALENDAR — this is the FIRST line of the message. Only if a calendar_today item is present; apply the CALENDAR LISTING FORMAT block below. When no calendar_today item exists, the first line is instead the first notable item (step 3).
 2. TOMORROW (one short line) — only if calendar_tomorrow is present AND there's something notable.
 3. The rest — per-person paragraphs for colleagues who have open or recently-changed work, plus freestanding lines for items not tied to a specific person (calendar conflicts, pending approvals, auto-categorizations, etc.). No separate "ACTION ITEMS" section — every open or notable item gets narrated ONCE in the body, in whichever spot reads most naturally.
 
@@ -464,7 +477,7 @@ WHAT GETS SURFACED:
 TONE + PHRASING:
 - First person as the assistant. "I reached out...", "I'm waiting on...".
 - Time windows in human terms.
-- Don't write a status report — brief like a trusted assistant in 30 seconds of talking.
+- Don't write a status report — be concise; outcome over activity.
 
 PERSPECTIVE: You are the assistant. ${firstName} is the owner. Write from the assistant's POV.
 - NEVER "your message" — say "my message".
@@ -498,7 +511,7 @@ PRONOUNS — use the provided gender map. If a person isn't in the map, use "the
 PEOPLE_GENDER:
 ${Object.keys(peopleGender).length > 0
   ? Object.entries(peopleGender).map(([name, p]) => `  ${name}: ${p}`).join('\n')
-  : '  (no gender data available — use "they" for all)'}`;
+  : '  (no gender data available — use "they" for all)'}${briefPrefs}`;
 
   try {
     const response = await anthropic.messages.create({
@@ -534,7 +547,12 @@ export async function sendMorningBriefing(
   app: App,
   profile: UserProfile,
   ownerChannel: string,
-  force: boolean = false
+  force: boolean = false,
+  // v3.x — when the brief is requested IN a thread (owner asks "daily brief"
+  // inside the Slack assistant panel / a DM thread), post it back INTO that
+  // thread so it stays in the conversation. Omitted on the SCHEDULED fire
+  // (routine path) → top-level DM, which is correct for the morning push.
+  threadTs?: string,
 ): Promise<void> {
   const ownerUserId = profile.user.slack_user_id;
 
@@ -603,7 +621,7 @@ export async function sendMorningBriefing(
   const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
   const conn = getConnection(ownerUserId, 'slack');
   if (conn) {
-    await conn.postToChannel(ownerChannel, textToSend);
+    await conn.postToChannel(ownerChannel, textToSend, threadTs ? { threadTs } : undefined);
   } else {
     logger.warn('briefs — no Slack connection registered', { ownerUserId });
   }

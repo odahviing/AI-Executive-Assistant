@@ -1,6 +1,14 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.2.4** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.2.5** — check `package.json` if unsure; it is the source of truth.
+
+## 🧩 v3.2.5 — proactive social reworked: ONE engine, ONE surface
+
+The two-system split was collapsed. The **cold-open** hourly tick (`social_outreach_tick`) is **deleted** — no more out-of-the-blue social DMs (investigation showed it pinged the same 1–3 people, qualified by *work* topics mis-filed as social, who ignored it → ranks ratcheted down). Proactive social now happens **only as an in-conversation coda** riding a live turn (the 3-category picker is the single decision engine). On a work/scheduling turn the coda fires at the **end of the process** (resolved, or handed off to coord/approval/outreach), **suppressed mid-exchange** via `turnLeftWorkPending` (option A). Bundled with parallel-chat latency + brief + preference work (see CHANGELOG 3.2.5).
+
+**Deferred follow-ups (designed, NOT built — these are the next social work):**
+1. **Coda RANK scoring is asymmetric** — `social_ping_rank_check kind='coda'` only does `−1`, never `+1`. With cold-open gone it's the sole scoring path; needs `+1` on engagement, one-vs-three rank-path reconciliation (`adjustRankFromColleagueResponse` overlaps it), and a **rank-0 revival** (retry once after 30d of no contact + prior interaction).
+2. **Work-vs-social at the capture pass** — `runSubjectReconciliation` (`capturePass.ts`) still files work content ("Idan call scheduling" → `partner`) as social subjects, so a `continue` coda can still raise a work topic. Needs a work-exclusion rule in the reconcile classifier + a one-time cleanup of polluted rows. `people_memory.proactive_pending` is now vestigial (sweep it here).
 
 ## 🚨 v3.2.4 — STABILIZATION WAVE. NOT STABLE YET — next session is ANOTHER BUG WAVE.
 
