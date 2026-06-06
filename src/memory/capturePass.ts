@@ -669,12 +669,15 @@ We track social interactions in three levels:
 
 A SUBJECT is the COLLEAGUE's OWN recurring interest, life thread, or activity — something THEY are genuinely invested in and will keep coming back to. Before you create or match one, read the transcript for WHO the topic actually belongs to. Don't react to topic words just because they APPEAR in the chat — anchor on what the colleague revealed about THEIR world (what they play, watch, build, who's in their family, where they're travelling).
 
-Two ways a topic can show up that are NOT the colleague's subject:
+Social subjects are the person's PERSONAL life — hobbies, family, interests, plans outside the job. They are NOT work.
 
+Three ways a topic can show up that are NOT the colleague's social subject:
+
+  - **It's WORK, not personal life.** This is the most common mistake. NEVER create or match a subject from work content: meetings, scheduling, calls, syncs, "the call with X", projects, POCs, interviews, candidates, deadlines, code, customers, launches, deliverables, status updates. Work is the JOB, not a hobby — it's never a social subject, no matter how often it comes up. Do NOT force work into a social category (e.g. "Idan call scheduling" is NOT a 'partner' subject; "the Ido interview" is NOT a 'learning' subject; "Brainrocket POC" is NOT a 'side_projects' subject). If the only thing the chat revealed about the person is work, output ZERO decisions.
   - **It's Maelle's, not theirs.** Topics Maelle brings up about HERSELF — her name, where it comes from, her origin/lore, how she works — are never the colleague's subjects, even when the colleague replies to them. Example: the colleague asks "what does your name mean?" and Maelle explains she's named after a character in some game. That game is MAELLE's lore — it says nothing about the colleague's interests. Create nothing for the colleague from it. (Same for anything the OWNER raised about himself that the colleague merely heard.)
   - **They're just reacting, not invested.** A polite one-off reply, a passing question, or "oh I don't really know that / not my thing" is not a subject — there's no ongoing interest of theirs to track. A subject needs THEIR genuine, repeated investment.
 
-Read the direction of the conversation: who introduced it, whose life/hobby/work it describes, and whether the colleague showed they actually care about it. When the topic is genuinely theirs → capture it. When it's Maelle's lore or a passing mention they didn't own → skip it.
+Read the direction of the conversation: who introduced it, whose life/hobby/work it describes, and whether the colleague showed they actually care about it. When the topic is genuinely theirs AND personal (not work) → capture it. When it's work, Maelle's lore, or a passing mention they didn't own → skip it.
 
 ## Pairing invariant — CRITICAL
 

@@ -88,6 +88,28 @@ export function registerAssistantThread(key: AssistantThreadKey): void {
  * combination of (frequent dev restarts + refresh-on-lookup) keeps the
  * row alive without needing to refresh on every cached hit.
  */
+/**
+ * All registered assistant-panel threads still within the TTL window. Used by
+ * the on-restart catch-up (background.ts) to know which panel threads to scan
+ * for missed messages — panel messages are thread replies that the DM
+ * `conversations.history` scan can't see. Read-only; does not bump TTL.
+ */
+export function getActiveAssistantThreads(): AssistantThreadKey[] {
+  try {
+    const db = getDb();
+    const cutoff = new Date(Date.now() - TTL_MS).toISOString().replace('T', ' ').slice(0, 19);
+    const rows = db.prepare(`
+      SELECT channel_id, thread_ts FROM assistant_threads
+      WHERE registered_at >= ?
+      ORDER BY registered_at DESC
+    `).all(cutoff) as Array<{ channel_id: string; thread_ts: string }>;
+    return rows.map(r => ({ channelId: r.channel_id, threadTs: r.thread_ts }));
+  } catch (err) {
+    logger.warn('getActiveAssistantThreads failed', { err: String(err).slice(0, 200) });
+    return [];
+  }
+}
+
 export function isAssistantThread(key: AssistantThreadKey): boolean {
   const k = keyOf(key);
   if (cacheHits.has(k)) return true;

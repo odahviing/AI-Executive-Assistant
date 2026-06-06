@@ -14,7 +14,9 @@ import { closeRequest } from '../core/requests/closeRequest';
 import type { RequestRow } from '../core/requests/types';
 import { parseDetails } from '../core/requests/types';
 import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calendar';
+import { getPersonByEmail } from '../db/people';
 import { formatSkillPreferencesBlock } from '../utils/skillPreferences';
+import { formatSeenLogBlock, type NewsBundle } from '../skills/news';
 import { processCalendarEvents } from '../skills/meetings/ops';
 import { verifyScheduledOutcome, type ScheduleOutcome } from '../utils/verifyScheduledOutcome';
 import logger from '../utils/logger';
@@ -22,6 +24,67 @@ import { calendarListingFormatRule } from '../utils/calendarListingFormat';
 
 /** Items past this surface count flip to cancelled (auto-park). */
 const STALE_SURFACE_THRESHOLD = 3;
+
+/** v3.2.6 — news gather is best-effort + fail-open. If it doesn't return within
+ *  this window, the brief composes calendar+tasks exactly as today (no delay). */
+const NEWS_BRIEF_TIMEOUT_MS = 8_000;
+/** Cap how many meeting-companies we derive into news goals (cost control). */
+const NEWS_MEETING_COMPANY_CAP = 3;
+
+// Generic mailbox providers — an attendee here tells us nothing about a company.
+const GENERIC_EMAIL_DOMAINS = new Set([
+  'gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com',
+  'msn.com', 'yahoo.com', 'icloud.com', 'me.com', 'aol.com',
+  'proton.me', 'protonmail.com',
+]);
+
+/** "acme.com" → "Acme"; "mail.acme.co.uk" → "Acme". Best-effort label for a
+ *  company name when the person store has no explicit org. */
+function companyLabelFromDomain(domain: string): string | null {
+  const parts = domain.toLowerCase().split('.').filter(Boolean);
+  if (parts.length < 2) return null;
+  let labels = parts.slice(0, -1); // drop TLD
+  const secondLevel = new Set(['co', 'com', 'org', 'net', 'gov', 'ac', 'edu']);
+  if (labels.length > 1 && secondLevel.has(labels[labels.length - 1])) {
+    labels = labels.slice(0, -1);
+  }
+  const head = labels[labels.length - 1];
+  if (!head) return null;
+  return head.charAt(0).toUpperCase() + head.slice(1);
+}
+
+/**
+ * Derive the companies of the people on TODAY's calendar (the news calendar
+ * tie-in). READ-ONLY — uses getPersonByEmail (never resolvePerson, which would
+ * create rows as a side effect of the brief). Prefers the person store's `org`,
+ * falls back to the email domain. Skips internal (owner-domain) + generic
+ * providers. Deduped + capped. Returns [] when nothing usable.
+ */
+function deriveMeetingCompanies(items: RichItem[], profile: UserProfile): string[] {
+  const ownerDomain = (profile.user.email.split('@')[1] ?? '').toLowerCase();
+  const today = items.find(i => i.kind === 'calendar_today');
+  if (!today) return [];
+  const events = (today.events as Array<{ attendees?: Array<{ emailAddress?: { address?: string } }> }> | undefined) ?? [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const ev of events) {
+    for (const att of ev.attendees ?? []) {
+      const email = att.emailAddress?.address?.trim().toLowerCase();
+      if (!email || !email.includes('@')) continue;
+      const domain = email.split('@')[1];
+      if (!domain || domain === ownerDomain || GENERIC_EMAIL_DOMAINS.has(domain)) continue;
+      const row = getPersonByEmail(email);
+      const company = (row?.org && row.org.trim()) || companyLabelFromDomain(domain);
+      if (!company) continue;
+      const key = company.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(company);
+      if (out.length >= NEWS_MEETING_COMPANY_CAP) return out;
+    }
+  }
+  return out;
+}
 
 // ── Relative time helper ──────────────────────────────────────────────────────
 
@@ -424,8 +487,14 @@ async function generateBriefingText(
   items: RichItem[],
   profile: UserProfile,
   peopleGender: Record<string, 'he' | 'she' | 'they'> = {},
+  newsBundle?: NewsBundle,
 ): Promise<string> {
-  if (items.length === 0) {
+  // v3.2.6 — news is additive: it only changes the brief when there's grounded
+  // material. Empty bundle (news off / nothing found / no derived companies) →
+  // the brief is byte-identical to before this feature.
+  const hasNews = !!(newsBundle && newsBundle.sources.length > 0);
+
+  if (items.length === 0 && !hasNews) {
     // No time-of-day greeting on line 1 — the Slack app shows the first line
     // as the preview, so lead with the useful state, not "Morning —".
     return `All clear — nothing new today.`;
@@ -444,6 +513,20 @@ async function generateBriefingText(
   // v3.x — owner's learned BRIEF preferences (free-text, per-skill MD). '' when
   // none. Same layer as calendar prefs; owner-private by nature (his brief).
   const briefPrefs = formatSkillPreferencesBlock(profile, 'brief', { label: 'BRIEF' });
+
+  // v3.2.6 — the Updates (news) instruction + the rolling 7-day dedup log. Only
+  // present when there's grounded news material this morning, so the brief is
+  // unchanged when news is off / empty.
+  const newsBlock = hasNews
+    ? `
+
+UPDATES (news) — after the calendar/tasks body, add a short "Updates" section: AT MOST 3–5 bullets of news that matters to ${firstName} today, drawn ONLY from the NEWS SOURCES in the data below. Rules:
+- Only genuinely NEW developments from the last 7 days. Skip anything older, and skip anything already in the "already covered" log below.
+- Each bullet cites its source as a Slack hyperlink: <url|short label> (e.g. <https://...|Reuters>). NEVER paste a bare URL, and NEVER write "[link]" followed by the URL — that doubles the text. One compact hyperlink per bullet.
+- NEVER assert a current-events fact not present in the sources.
+- If a topic/company returned nothing, just leave it out — do NOT add an apology or a "couldn't find anything on X" line. If nothing new at all, OMIT the Updates section entirely (no empty heading).
+Write it in ${ownerLangName}.${formatSeenLogBlock(profile)}`
+    : '';
 
   const systemPrompt = `You are writing a morning briefing for ${firstName} from their AI executive assistant ${profile.assistant.name}.
 
@@ -511,14 +594,21 @@ PRONOUNS — use the provided gender map. If a person isn't in the map, use "the
 PEOPLE_GENDER:
 ${Object.keys(peopleGender).length > 0
   ? Object.entries(peopleGender).map(([name, p]) => `  ${name}: ${p}`).join('\n')
-  : '  (no gender data available — use "they" for all)'}${briefPrefs}`;
+  : '  (no gender data available — use "they" for all)'}${briefPrefs}${newsBlock}`;
+
+  // v3.2.6 — append the grounded news sources to the data so Sonnet can write +
+  // cite the Updates section. Only when there's material (keeps tokens at zero
+  // when news is off/empty).
+  const userContent = hasNews
+    ? `Write the morning briefing based on this data:\n\n${dataText}\n\nNEWS SOURCES (for the Updates section — write grounded in these and cite each as <url|label>):\n${JSON.stringify({ sources: newsBundle!.sources }, null, 2)}`
+    : `Write the morning briefing based on this data:\n\n${dataText}`;
 
   try {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 800,
+      max_tokens: hasNews ? 1100 : 800,
       system: systemPrompt,
-      messages: [{ role: 'user', content: `Write the morning briefing based on this data:\n\n${dataText}` }],
+      messages: [{ role: 'user', content: userContent }],
     });
     return ((response.content[0] as Anthropic.TextBlock).text ?? '').trim();
   } catch (err) {
@@ -596,8 +686,28 @@ export async function sendMorningBriefing(
   });
   markEventsSeen(ownerUserId);
 
+  // v3.2.6 — personalized news (gated + best-effort + fail-open). Gather BEFORE
+  // compose (the brief is a single direct Sonnet pass with no tool loop) and
+  // fold a grounded "Updates" section in. A slow/empty gather never delays or
+  // breaks the brief — calendar + tasks always ship.
+  let newsBundle: NewsBundle | undefined;
+  if ((profile.skills as any)?.news === true) {
+    try {
+      const meetingCompanies = deriveMeetingCompanies(items, profile);
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { gatherNews } = require('../skills/news') as typeof import('../skills/news');
+      const gathered = await Promise.race([
+        gatherNews(profile, { meetingCompanies }),
+        new Promise<undefined>(res => { const t = setTimeout(() => res(undefined), NEWS_BRIEF_TIMEOUT_MS); if (typeof t.unref === 'function') t.unref(); }),
+      ]);
+      if (gathered && gathered.sources.length > 0) newsBundle = gathered;
+    } catch (err) {
+      logger.warn('briefs — news gather threw, composing without it', { err: String(err).slice(0, 200) });
+    }
+  }
+
   // Generate + send.
-  const rawText = await generateBriefingText(items, profile, peopleGender);
+  const rawText = await generateBriefingText(items, profile, peopleGender, newsBundle);
 
   // v2.7.1 (bug 4.5) — humanGate the brief. The brief generator skipped the
   // owner-facing voice check that postReply.ts applies to regular replies,
@@ -621,9 +731,22 @@ export async function sendMorningBriefing(
   const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
   const conn = getConnection(ownerUserId, 'slack');
   if (conn) {
-    await conn.postToChannel(ownerChannel, textToSend, threadTs ? { threadTs } : undefined);
+    // v3.2.6 — when the brief carries news source links, suppress Slack's
+    // link/media unfurl so it doesn't balloon into 15–20 previews.
+    await conn.postToChannel(ownerChannel, textToSend, {
+      ...(threadTs ? { threadTs } : {}),
+      ...(newsBundle ? { unfurl: false } : {}),
+    });
   } else {
     logger.warn('briefs — no Slack connection registered', { ownerUserId });
+  }
+
+  // v3.2.6 — fire-and-forget the seen-log write so tomorrow's brief / an
+  // on-demand ask doesn't repeat today's stories (topic-level dedup). Non-fatal.
+  if (newsBundle) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { writeSeenLog } = require('../skills/news') as typeof import('../skills/news');
+    void writeSeenLog(profile, newsBundle).catch(() => { /* non-fatal */ });
   }
 
   // POST-BRIEF: stamp surfaced + auto-park stale items.

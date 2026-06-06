@@ -128,6 +128,17 @@ export function directiveForPersonSocial(params: {
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const TARGET_CATEGORIES = 3;
 
+// v3.2.6 — concrete, conversational categories a raise_new coda can anchor to.
+// Owner direction: don't open with a generic "how's your week" — pick a real
+// category (the "music" ping that landed well). We choose one the person has
+// no active subjects in yet, so each raise_new explores a fresh angle and
+// grows them toward the 3-active-category target. Subset of the fixed 30 that
+// works as a natural cold-opener (skips work-ish / sensitive ones).
+const CONVERSATIONAL_CATEGORIES = [
+  'weekend', 'travel', 'food', 'music', 'shows', 'movies', 'gaming',
+  'reading', 'sports', 'exercise', 'outdoor', 'pets', 'podcasts', 'holidays',
+];
+
 // Probability of raise_new given current active-category count.
 function raiseNewProbabilityForCount(count: number): number {
   if (count === 0) return 1.0;
@@ -174,6 +185,16 @@ export function directiveForProactiveSlot(params: {
   const activeCategories = getActiveCategoryEngagementForPerson(personSlackId);
   const activeCount = activeCategories.length;
 
+  // v3.2.6 — pick a fresh conversational category for raise_new: one the person
+  // has no active subjects in, so the discovery coda is anchored to a real
+  // category (music / weekend / travel …) instead of a generic check-in.
+  const activeLabels = new Set(activeCategories.map(c => c.category_label));
+  const pickFreshCategory = (): string => {
+    const fresh = CONVERSATIONAL_CATEGORIES.filter(c => !activeLabels.has(c));
+    const pool = fresh.length > 0 ? fresh : CONVERSATIONAL_CATEGORIES;
+    return pool[Math.floor(Math.random() * pool.length)];
+  };
+
   // Decide whether to raise_new based on growth probability.
   const raiseNewProb = raiseNewProbabilityForCount(activeCount);
   const wantsRaiseNew = activeCount < TARGET_CATEGORIES && Math.random() < raiseNewProb;
@@ -183,8 +204,8 @@ export function directiveForProactiveSlot(params: {
       mode: 'raise_new',
       subjectId: null,
       subjectLabel: null,
-      categoryLabel: null,
-      toneCue: 'one plain human question that invites a real fact about the person; no preamble',
+      categoryLabel: pickFreshCategory(),
+      toneCue: 'one plain, natural question about this category — invite a real fact about the person; no preamble',
       subject: null,
       firstMention: false,
     });
@@ -219,8 +240,8 @@ export function directiveForProactiveSlot(params: {
       mode: 'raise_new',
       subjectId: null,
       subjectLabel: null,
-      categoryLabel: null,
-      toneCue: 'one plain human question; no preamble',
+      categoryLabel: pickFreshCategory(),
+      toneCue: 'one plain, natural question about this category — invite a real fact about the person; no preamble',
       subject: null,
       firstMention: false,
     });

@@ -34,6 +34,13 @@ export function getDb(): Database.Database {
     } catch (err) {
       logger.error('v3.2.0 person-store migration threw — continuing', { err: String(err) });
     }
+    // v3.2.6 — is_vip on people_memory. Owner-marked VIP: their calendar is
+    // ALWAYS pulled into a thread-booking free/busy search; non-VIPs are
+    // invite-only (annotated, never gating). Default 0 — VIP only when the owner
+    // explicitly says so. Seed for the full VIP feature (#58). Added AFTER the
+    // person-store rebuild (which carries a fixed column list) so it lands on the
+    // final table shape in one boot; idempotent via try/catch.
+    try { db.exec(`ALTER TABLE people_memory ADD COLUMN is_vip INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
     logger.info('Database initialized', { path: config.DB_PATH });
   }
   return db;
@@ -321,12 +328,11 @@ function initSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE people_memory ADD COLUMN gender_set_by TEXT`); } catch (_) {}
   try { db.exec(`ALTER TABLE people_memory ADD COLUMN working_hours_auto TEXT`); } catch (_) {}
 
-  // v2.2.3 — proactive ping anti-spam lock. Set when socialOutreachTick sends
-  // a proactive ping; cleared ONLY when the person sends an inbound message
-  // (their reply to anything — proactive or task-driven). Outbound messages
-  // (including Maelle's task-driven DMs to them) DON'T clear the lock — only
-  // a real signal from them that they're engaged. Filtered out of pickCandidate
-  // so no second proactive ping until they respond.
+  // v2.2.3 — proactive ping anti-spam lock. DEAD as of v3.2.5: the cold-open
+  // (socialOutreachTick) that set + read it was removed; all TS helpers are
+  // deleted. The column is left in place at its default 0 (a column drop is a
+  // risky table rebuild on the live DB, and nothing reads it) — safe to drop
+  // in a future migration.
   try { db.exec(`ALTER TABLE people_memory ADD COLUMN proactive_pending INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
 
   // v2.2.4 — travel awareness. Stored profile fields (timezone, state) are

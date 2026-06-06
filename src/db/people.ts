@@ -97,6 +97,10 @@ export interface PersonMemory {
   kind: 'internal' | 'external' | 'self';
   org?: string;                 // company — mostly for externals
   source?: string;              // row origin: slack | calendar | manual
+  // v3.2.6 — owner-marked VIP (0/1). VIP calendars are ALWAYS pulled into a
+  // thread-booking free/busy search; non-VIPs are invite-only (annotated, never
+  // gating). Default 0 — set only on the owner's explicit say-so. Seed for #58.
+  is_vip?: number;
   slack_id: string | null;
   name: string;
   name_he?: string;             // Hebrew spelling, used verbatim when writing in Hebrew
@@ -127,24 +131,6 @@ export interface PersonMemory {
 
 const SET_BY_RANK: Record<CoreFieldSetBy, number> = { owner: 3, person: 2, auto: 1 };
 
-/**
- * v2.2.3 — proactive ping anti-spam lock. VESTIGIAL as of v3.2.5: the
- * cold-open `socialOutreachTick` that set + read this lock was removed
- * (proactive social is coda-only now). `setProactivePending`/`isProactivePending`
- * have no live callers; the column is now always 0. Kept (column + helpers)
- * pending the social-scoring cleanup pass — safe to drop there.
- *
- * setProactivePending(slackId)   → (no live caller) locked a person out of
- *                                   further cold-open pings after one was sent.
- * clearProactivePendingOnInbound → still fired on a real inbound message from
- *                                   the person (harmless no-op while the column
- *                                   stays 0).
- *
- * Outbound messages Maelle sends (task-driven message_colleague, coord DM,
- * a second proactive ping) DO NOT clear the lock. Only an inbound from them.
- *
- * isProactivePending(slackId)    → read; pickCandidate filters with this.
- */
 // ── v2.2.4 — travel awareness ────────────────────────────────────────────────
 //
 // People travel. A Tel Aviv person works from Boston for a week, an NYC
@@ -207,23 +193,24 @@ export function getCurrentTravel(slackId: string): CurrentTravel | null {
   }
 }
 
-export function setProactivePending(slackId: string): void {
+// ── v3.2.6 — VIP flag ────────────────────────────────────────────────────────
+// Owner-curated, like engagement_rank. VIP calendars are ALWAYS pulled into a
+// thread-booking free/busy search; non-VIPs are invite-only (annotated, never
+// gating). Set only on the owner's explicit say-so. Seed for the full VIP
+// feature (#58). Default 0; idempotent.
+
+export function setPersonVip(slackId: string, vip: boolean): void {
   const db = getDb();
-  db.prepare(`UPDATE people_memory SET proactive_pending = 1, updated_at = datetime('now') WHERE slack_id = ?`).run(slackId);
+  db.prepare(
+    `UPDATE people_memory SET is_vip = ?, updated_at = datetime('now') WHERE slack_id = ?`
+  ).run(vip ? 1 : 0, slackId);
 }
 
-export function clearProactivePendingOnInbound(slackId: string): void {
-  if (!slackId) return;
+export function setPersonVipById(personId: string, vip: boolean): void {
   const db = getDb();
-  db.prepare(`UPDATE people_memory SET proactive_pending = 0, updated_at = datetime('now') WHERE slack_id = ? AND proactive_pending = 1`).run(slackId);
-}
-
-export function isProactivePending(slackId: string): boolean {
-  const db = getDb();
-  const row = db.prepare(`SELECT proactive_pending FROM people_memory WHERE slack_id = ?`).get(slackId) as
-    | { proactive_pending: number | null }
-    | undefined;
-  return !!(row && row.proactive_pending === 1);
+  db.prepare(
+    `UPDATE people_memory SET is_vip = ?, updated_at = datetime('now') WHERE person_id = ?`
+  ).run(vip ? 1 : 0, personId);
 }
 
 /**

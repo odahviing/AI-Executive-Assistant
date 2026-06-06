@@ -15,6 +15,7 @@
 import { DateTime } from 'luxon';
 import { completeTask, createTask } from '../index';
 import { runWeeklyDecay } from '../../db/socialSubjects';
+import { reviveStaleRankZero } from '../../db/engagementRank';
 import logger from '../../utils/logger';
 import type { TaskDispatcher } from './types';
 
@@ -32,10 +33,13 @@ export const dispatchSocialDecay: TaskDispatcher = async (_app, task, profile) =
 
   try {
     const { decayed, dormantFlipped } = runWeeklyDecay(profile.user.slack_user_id);
+    // v3.2.6 — give rank-0 opt-outs one more chance after a quiet stretch.
+    const revived = reviveStaleRankZero(30);
     logger.info('social_decay dispatcher ran', {
       ownerUserId: profile.user.slack_user_id,
       decayed,
       dormantFlipped,
+      revived,
     });
   } catch (err) {
     logger.warn('social_decay dispatcher threw — continuing to reschedule', {

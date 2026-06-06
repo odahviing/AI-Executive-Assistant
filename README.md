@@ -35,7 +35,7 @@ Inbound (Slack DM | MPIM | channel @mention)
         ▼  ┌────────────────┐
    Core ──┤ memory          │  Skills (opt-in)
    ──────┤ outreach         │  meetings · calendar
-        │ tasks · routines │  summary · knowledge · search · social · venue
+        │ tasks · routines │  summary · knowledge · search · social · venue · news
         └────────────────┘
         │
         ▼
@@ -99,6 +99,7 @@ Optional skills (toggle in YAML):
 | Search | `search` | Web search + URL extraction (Tavily) |
 | Social | `social` | Off-topic chat tracking + in-conversation social codas (rides a live turn; no out-of-the-blue DMs) |
 | Venue | `venue` | External meeting venues (cafés, restaurants). `find_venue` + `rank_venue` with per-owner rank catalog |
+| News | `news` | Personalized, calendar-aware grounded news — folds a cited "Updates" section into the morning brief + on-demand `news` tool. Interests + source steer taught via `update_my_preferences(skill='news')`; 7-day topic-level dedup |
 
 Legacy YAML keys auto-migrate (`scheduling`/`coordination` → `meetings`, etc.).
 

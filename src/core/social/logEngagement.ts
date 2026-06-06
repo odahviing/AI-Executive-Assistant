@@ -33,7 +33,6 @@ import { adjustEngagementRank } from '../../db/engagementRank';
 import logger from '../../utils/logger';
 
 const RANK_RESPONSE_WINDOW_MS = 24 * 60 * 60 * 1000;
-const BRIEF_REPLY_CHAR_LIMIT = 30;
 
 /**
  * v3.0 follow-up — raise-feedback signal applied at end-of-chat (not per-turn).
@@ -114,30 +113,38 @@ export function applyOrganicMatchSignal(params: {
 }
 
 /**
- * In-conversation rank adjustment (v2.2.1 carryover).
+ * In-conversation engagement_rank adjustment — the SOLE rank mover for
+ * proactive social (v3.2.6).
  *
- * When a colleague replies inside an active conversation, check whether
- * the reply followed a recent assistant-initiated social moment. If so,
- * nudge the colleague's engagement_rank +/− based on quality.
+ * Owner model: a tail-end social coda costs nothing to ignore. So rank only
+ * moves on a genuine reply to a coda Maelle raised:
+ *   - negative sentiment (explicit brush-off)        → −1
+ *   - any other engaged social reply (pos / neutral) → +1
+ *   - no social reply at all → this path never fires → no change
+ *
+ * Window anchor is `people_memory.last_initiated_at` (set by recordSocialMoment
+ * on EVERY coda — continue AND raise_new). The old anchor read the most-recent
+ * RAISED SUBJECT, which is NULL for raise_new (discovery) codas — so a warm
+ * reply to "any good music lately?" never scored. Anchoring on last_initiated_at
+ * fixes that. There is no longer a 48h coda rank-check (ignoring is free, and
+ * engagement is credited here, live, for both coda modes).
  */
 export function adjustRankFromColleagueResponse(params: {
   colleagueSlackId: string;
   replyText: string;
   sentiment: 'positive' | 'negative' | 'neutral';
 }): void {
-  // Note: lastAssistantInitiatedAt was renamed from lastMaelleInitiatedAt.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { lastAssistantInitiatedAt } = require('../../db/socialSubjects') as
-    typeof import('../../db/socialSubjects');
-  const lastInit = lastAssistantInitiatedAt(params.colleagueSlackId);
-  if (!lastInit) return;
+  const { getPersonMemory } = require('../../db/people') as typeof import('../../db/people');
+  const person = getPersonMemory(params.colleagueSlackId);
+  const lastInit = person?.last_initiated_at;
+  if (!lastInit) return;  // no recent Maelle-raised social → nothing to score
   const sinceMs = Date.now() - new Date(lastInit).getTime();
   if (sinceMs > RANK_RESPONSE_WINDOW_MS) return;
 
-  const len = params.replyText.trim().length;
   if (params.sentiment === 'negative') {
-    adjustEngagementRank(params.colleagueSlackId, -1, 'reply_brief');
-  } else if (params.sentiment === 'positive' && len > BRIEF_REPLY_CHAR_LIMIT) {
+    adjustEngagementRank(params.colleagueSlackId, -1, 'colleague_deflected');
+  } else {
     adjustEngagementRank(params.colleagueSlackId, 1, 'reply_engaged');
   }
 }

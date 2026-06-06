@@ -136,12 +136,14 @@ ${input.reply}
 
 Two failure modes — flag if EITHER is present:
 
-(1) INVENTED FACT — the coda asserts something specific about ${input.coda.recipientName} that is NOT in the memory snapshot above. Examples:
+(1) INVENTED FACT — the coda asserts something specific about ${input.coda.recipientName}'s OWN life (their activities, plans, relationships, work, family) that is NOT in the memory snapshot above. Examples:
 - "How's the marathon training going?" when training isn't in their memory
 - "Kind of wild that she shares my name" when no such overlap is in memory (and isn't a real overlap a sane reader would see)
 - "Excited for your trip to Boston" when no Boston trip is in memory
 - "Hope the kitchen reno wraps up soon" when no kitchen reno is in memory
 Generic open questions ("anything fun outside work lately?", "how was the weekend?", "any travel coming up?") are NOT invented facts — they don't claim anything, they ask. Don't flag those.
+
+CRITICAL — subject-matter facts are NOT invented facts. This rule is ONLY about fabricated facts concerning ${input.coda.recipientName}'s personal life. It is NOT about whatever TOPIC the conversation is about. When ${input.coda.recipientName} is discussing a movie, book, show, company, product, news story, or any external subject, facts about THAT subject — a film's genre, an actor's role, a company's funding, a product's spec — are the subject matter (the assistant's general knowledge or this turn's web_search/web_research), NOT claims about ${input.coda.recipientName}. NEVER flag those. Example that must PASS: helping identify a film — "if it's a rape-revenge film, does he play the father?" asserts things about the MOVIE, not about ${input.coda.recipientName} — claimed_action=false. Only flag a claim that asserts something about ${input.coda.recipientName}'s own life that we have no basis for.
 
 (2) GOSSIPY THIRD-PARTY COMMENTARY — the coda contains evaluative commentary (positive OR negative) about a person named in the coda OTHER than ${input.coda.recipientName} themselves. Examples:
 - "Hope she's at least competent" about a third person — gossip

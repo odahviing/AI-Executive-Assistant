@@ -40,6 +40,7 @@ export const PREF_SKILLS = [
   'knowledge',
   'search',
   'venue',
+  'news',
 ] as const;
 export type PrefSkill = (typeof PREF_SKILLS)[number];
 

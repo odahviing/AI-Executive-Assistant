@@ -1,10 +1,10 @@
 # ===================================================================
-#  Welcome to Maelle.
+#  Welcome to Maelle — your AI executive assistant.
 #
-#  This file tells Maelle who you are, when you work, and how you like
-#  your calendar handled. Copy it to: config/users/<your-name>.yaml
+#  This file tells your assistant who you are, when you work, and how you
+#  like your calendar handled. Copy it to: config/users/<your-name>.yaml
 #  and fill in the parts marked REQUIRED. Everything else is optional —
-#  Maelle has sensible defaults and will run fine without it.
+#  there are sensible defaults and it will run fine without them.
 #
 #  config/users/ is gitignored, so your filled-in profile stays private.
 # ===================================================================
@@ -13,23 +13,22 @@
 
 # ─── ABOUT YOU ───────────────────────────────────────────────────────
 #
-# Maelle is your personal assistant — she needs to know who you are so
-# she can speak to you the right way, schedule meetings in your timezone,
-# and find you in Slack.
+# Your assistant needs to know who you are so she can speak to you the
+# right way, schedule meetings in your timezone, and find you in Slack.
 
 user:
 
   # === REQUIRED ===
 
-  # Your full name. Appears in calendar invites and is how Maelle refers
-  # to you in conversation.
+  # Your full name. Appears in calendar invites and is how your assistant
+  # refers to you in conversation.
   name: "Your Full Name"
 
-  # Your work email. Used on calendar invites Maelle sends on your behalf.
+  # Your work email. Used on calendar invites your assistant sends on your behalf.
   email: "you@yourcompany.com"
 
-  # Your timezone. Used everywhere — when you say "tomorrow at 3", Maelle
-  # uses this to figure out the actual UTC time.
+  # Your timezone. Used everywhere — when you say "tomorrow at 3", your
+  # assistant uses this to figure out the actual UTC time.
   # Format: official IANA timezone names. Examples:
   #   - "America/New_York"
   #   - "Europe/London"
@@ -39,41 +38,41 @@ user:
   # Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
   timezone: "America/New_York"
 
-  # Your Slack user ID. Tells Maelle which Slack account is you.
+  # Your Slack user ID. Tells your assistant which Slack account is you.
   # To find it: open your Slack profile, click "..." (more options),
   # choose "Copy member ID". It starts with "U" followed by letters/numbers.
   slack_user_id: "U123ABC456"
 
   # === OPTIONAL — uncomment if useful ===
 
-  # Your role / job title. Maelle uses this only for context (e.g. when a
-  # colleague asks who you are). Default: not set.
+  # Your role / job title. Used only for context (e.g. when a colleague
+  # asks who you are). Default: not set.
   # role: "CEO"
 
-  # Default language for Maelle's replies. Maelle automatically follows the
+  # Default language for replies. Your assistant automatically follows the
   # language you write in, but this sets the starting language. Default: "en".
   # Common values: "en", "es", "fr", "de", "he", "pt", "ja"
   # language: "en"
 
-  # Units for any weather / distance answers Maelle gives. Default: "metric".
+  # Units for any weather / distance answers. Default: "metric".
   # units: "metric"        # °C, km, kg
   # units: "imperial"      # °F, miles, lbs
 
-  # Your company name. Maelle uses this when introducing herself or
-  # explaining your context to people. Default: not set.
+  # Your company name. Used when your assistant introduces herself or
+  # explains your context to people. Default: not set.
   # company: "Acme Corp"
 
-  # A short paragraph telling Maelle what your company does. Helps her
-  # speak intelligently when colleagues bring up work topics. Default: not set.
+  # A short paragraph on what your company does. Helps her speak
+  # intelligently when colleagues bring up work topics. Default: not set.
   # company_brief: |
   #   We make industrial 3D printers for aerospace clients. Our flagship
   #   product is the X9 series. Customers include Boeing, Airbus, and SpaceX.
 
 
 
-# ─── ABOUT MAELLE ────────────────────────────────────────────────────
+# ─── ABOUT YOUR ASSISTANT ────────────────────────────────────────────
 #
-# This is Maelle herself — her name, her email, and the credentials she
+# Your assistant's identity — her name, her email, and the credentials she
 # needs to connect to Slack as a real workspace member. Her Slack identity
 # is separate from yours: she has her own user account in your Slack
 # workspace so messages from her appear as coming from her, not from you.
@@ -82,17 +81,19 @@ assistant:
 
   # === REQUIRED ===
 
-  # Maelle's display name. This is how she appears in Slack, on calendar
-  # invites she sends, and in conversation. You can keep "Maelle" or pick
-  # any name you like (think of her as a new hire — give her a real name).
+  # Your assistant's name — how she appears in Slack, on the calendar
+  # invites she sends, and in conversation. Choose whatever name you like
+  # (think of her as a new hire — give her a real name). "Maelle" is just
+  # the default; rename her freely.
   name: "Maelle"
 
-  # Slack app credentials. Maelle needs her OWN Slack app — separate from
-  # yours — so she can post messages, read DMs, and look up colleagues.
+  # Slack app credentials. Your assistant needs her OWN Slack app —
+  # separate from yours — so she can post messages, read DMs, and look up
+  # colleagues.
   #
   # To create the app:
   #   1. Go to https://api.slack.com/apps and click "Create New App" → "From scratch"
-  #   2. Name it after Maelle (or whatever name you chose above)
+  #   2. Name it after your assistant (whatever name you chose above)
   #   3. Install it to your workspace
   #   4. From the app dashboard, copy the three tokens below
   slack:
@@ -102,18 +103,18 @@ assistant:
 
   # === OPTIONAL ===
 
-  # How Maelle shows up in the Slack member list (shorter "nickname").
+  # How your assistant shows up in the Slack member list (shorter "nickname").
   # Default: same as her name above.
   # slack_display_name: "Maelle"
 
-  # Maelle's own email address. Required only if you want her to send
+  # Your assistant's own email address. Required only if you want her to send
   # calendar invites in her own name (otherwise the invites go out as
   # coming from you). Set up like an alias in your email provider.
-  # email: "maelle@yourcompany.com"
+  # email: "assistant@yourcompany.com"
 
-  # The personality Maelle uses when talking with you and your colleagues.
-  # This is a "system prompt" — write it like you'd describe a new EA to
-  # a friend. Default: a warm, direct, professional EA.
+  # The personality your assistant uses when talking with you and your
+  # colleagues. This is a "system prompt" — write it like you'd describe a
+  # new EA to a friend. Default: a warm, direct, professional EA.
   # persona: |
   #   You are sharp, warm, and direct — like a real EA who runs things.
   #   Natural greetings, clear and efficient, never robotic.
@@ -123,28 +124,28 @@ assistant:
 
 # ─── YOUR SCHEDULE ───────────────────────────────────────────────────
 #
-# When and where you work. Maelle uses this to know when to schedule
-# meetings, what days are office vs home (which affects meeting
+# When and where you work. Your assistant uses this to know when to
+# schedule meetings, what days are office vs home (which affects meeting
 # locations she picks), and to refuse 3am bookings.
 
 schedule:
 
   # === REQUIRED ===
 
-  # Days you go into the office. Maelle uses this to schedule in-person
-  # meetings on these days. Use weekday names with capital first letters.
+  # Days you go into the office. Used to schedule in-person meetings on
+  # these days. Use weekday names with capital first letters.
   office_days:
     days: ["Monday", "Wednesday"]
 
-  # Days you work from home. Maelle uses this for remote / online meetings.
+  # Days you work from home. Used for remote / online meetings.
   # If you're fully remote, set this to all your work days and leave
   # office_days empty (days: []).
   home_days:
     days: ["Tuesday", "Thursday", "Friday"]
 
-  # Your typical working hours for each day. Maelle won't propose meetings
-  # outside these hours (unless you explicitly say so). You can have one
-  # range per day, or split shifts if you have a midday break.
+  # Your typical working hours for each day. Your assistant won't propose
+  # meetings outside these hours (unless you explicitly say so). You can have
+  # one range per day, or split shifts if you have a midday break.
   #
   # Format: "HH:MM-HH:MM" using a 24-hour clock.
   # Single range:  ["09:00-17:30"]
@@ -160,13 +161,13 @@ schedule:
 
   # If you sometimes work late and consider "today" to extend past midnight
   # (e.g. you finish at 2 AM but still count that as the same workday),
-  # set the hour before which Maelle treats the clock as still being
-  # "yesterday". Default: "00:00" (real midnight — most people).
+  # set the hour before which the clock is still treated as "yesterday".
+  # Default: "00:00" (real midnight — most people).
   # day_boundary_hour: "05:00"
 
   # Night-shift hours, if you sometimes work a late block. Example: you
-  # take Tuesday evenings off but work 22:00–02:00 instead. Maelle will
-  # treat this window as work time on the day it falls on.
+  # take Tuesday evenings off but work 22:00–02:00 instead. This window is
+  # treated as work time on the day it falls on.
   # night_shift:
   #   hours_start:    "22:00"
   #   hours_end:      "02:00"
@@ -176,15 +177,15 @@ schedule:
 
 # ─── MEETING POLICIES ────────────────────────────────────────────────
 #
-# How Maelle picks meeting times, how long meetings should be, how much
-# buffer to leave, and which slots count as "protected" (focus time,
-# lunch, etc.). Every field here is optional — Maelle has reasonable
+# How your assistant picks meeting times, how long meetings should be, how
+# much buffer to leave, and which slots count as "protected" (focus time,
+# lunch, etc.). Every field here is optional — there are reasonable
 # defaults, and you can leave the whole section out.
 
 meetings:
 
-  # The meeting durations Maelle is allowed to offer. When picking a slot,
-  # she'll use one of these lengths. Default: [25, 50].
+  # The meeting durations your assistant is allowed to offer. When picking a
+  # slot, she'll use one of these lengths. Default: [25, 50].
   # Pick durations that match how your team thinks of meetings — some
   # people prefer 30/60, others 25/50 (leaves natural buffer).
   # allowed_durations: [25, 50]
@@ -193,14 +194,15 @@ meetings:
   # the durations above. Default: the smallest value above.
   # default_meeting_duration: 25
 
-  # Minutes of buffer Maelle insists on between meetings. With 0, she'll
-  # allow back-to-back. With 5, she'll leave 5 minutes between each.
+  # Minutes of buffer to insist on between meetings. With 0, back-to-back is
+  # allowed. With 5, she'll leave 5 minutes between each.
   # Default: 0 (meeting durations 25/50 already leave natural gaps).
   # buffer_minutes: 0
 
-  # How many hours of unbroken focus time Maelle tries to protect on each
-  # office day. If a meeting would eat into your last 2 hours of focus
-  # time, she'll flag it. Default: 2.
+  # How many hours of unbroken focus time to protect on each office day. If
+  # a meeting would eat into your last N hours of focus time, she'll flag
+  # it. Default: 0 (no focus-time floor unless you set one — pick your own
+  # number, this is personal).
   # free_time_per_office_day_hours: 2
 
   # Same idea for home days. Defaults to the office value above.
@@ -211,29 +213,29 @@ meetings:
   # Default: 30.
   # thinking_time_min_chunk_minutes: 30
 
-  # How far ahead other people can book on your calendar via Maelle.
+  # How far ahead other people can book on your calendar via your assistant.
   # 4 hours means: a colleague asking to meet "in 2 hours" gets declined.
   # You can always override. Default: 4.
   # min_slot_buffer_hours: 4
 
-  # When set to true, Maelle refuses to schedule in-person meetings on
-  # home days. Default: false.
+  # When set to true, in-person meetings are refused on home days.
+  # Default: false.
   # physical_meetings_require_office_day: false
 
-  # Your office's meeting-room email. If you set this, Maelle can book
-  # the room automatically when she sets up in-person meetings. Default: not set.
+  # Your office's meeting-room email. If you set this, your assistant can
+  # book the room automatically for in-person meetings. Default: not set.
   # room_email: "meeting-room@yourcompany.com"
 
   # FLOATING BLOCKS — flexible protected time.
-  # Things like lunch, gym, a daily writing hour, prayer time. Maelle
-  # treats these as protected, but she's allowed to slide them around
+  # Things like lunch, gym, a daily writing hour, prayer time. These are
+  # treated as protected, but your assistant is allowed to slide them around
   # inside the window you give her (no need to ask). If a meeting comes
   # in at 12:30, she'll move your lunch to 13:00 — same day, same window,
   # no friction.
   # Default: none.
   #
   # floating_blocks:
-  #   - name: "lunch"               # what Maelle calls this on your calendar
+  #   - name: "lunch"               # what she calls this on your calendar
   #     preferred_start: "12:00"    # earliest start
   #     preferred_end:   "14:00"    # latest end
   #     duration_minutes: 30        # how long
@@ -244,9 +246,9 @@ meetings:
   #     duration_minutes: 60
   #     days: ["Tuesday", "Thursday"]   # optional — only on certain days
 
-  # Events Maelle should completely ignore — never flag as conflicts, never
-  # try to move. Useful for things like a recurring "Family Time" block you
-  # always keep, or a "Home Time" marker. Default: none.
+  # Events to completely ignore — never flag as conflicts, never try to
+  # move. Useful for things like a recurring "Family Time" block you always
+  # keep, or a "Home Time" marker. Default: none.
   #
   # issue_exclusions:
   #   subjects: ["Family Time", "Home Time"]
@@ -256,13 +258,13 @@ meetings:
 # ─── OUTLOOK CATEGORIES ──────────────────────────────────────────────
 #
 # Only set this up if you use Outlook categories (the colored tags on
-# events). If you do, you can teach Maelle what each category means and
-# which limits / rules apply. Maelle will then auto-tag new events to the
+# events). If you do, you can teach your assistant what each category means
+# and which limits / rules apply. She'll then auto-tag new events to the
 # right category and refuse to over-book any one type.
 #
-# The ORDER matters: Maelle walks the list top-down and uses the FIRST
+# The ORDER matters: she walks the list top-down and uses the FIRST
 # matching category. List the most specific / important ones first.
-# Default: no categories (Maelle skips category tagging entirely).
+# Default: no categories (category tagging skipped entirely).
 #
 # categories:
 #   - name: "Interview"
@@ -278,20 +280,20 @@ meetings:
 
 
 
-# ─── HOW MAELLE WORKS ───────────────────────────────────────────────
+# ─── HOW YOUR ASSISTANT WORKS ────────────────────────────────────────
 #
 # Behavior knobs. Every field is optional — the defaults are sensible.
 
 behavior:
 
-  # "active" → Maelle silently fixes small calendar problems she notices
+  # "active" → she silently fixes small calendar problems she notices
   #            (rebooks a skipped lunch, sets a missing category, etc.)
-  # "passive" → Maelle just tells you about the problems and waits for you
+  # "passive" → she just tells you about the problems and waits for you
   #             to say what to do.
   # Default: "passive". Switch to "active" once you trust her.
   # calendar_health_mode: "active"
 
-  # When true, Maelle posts a small private summary every time she does
+  # When true, she posts a small private summary every time she does
   # something on her own (sent a message, booked a slot, etc.) so you
   # can catch issues in real time. Useful when you're first onboarding.
   # Default: false.
@@ -301,8 +303,8 @@ behavior:
 
 # ─── WHICH CAPABILITIES ARE ON ──────────────────────────────────────
 #
-# Maelle has several skills. Toggle each on or off. Defaults shown below
-# are what most people start with.
+# Your assistant has several skills. Toggle each on or off. Defaults shown
+# below are what most people start with.
 
 skills:
   # meetings:  true     # Calendar reading, slot finding, booking, moving meetings
@@ -313,7 +315,7 @@ skills:
   # social:    false    # Proactive "check-in with X" outreach to colleagues
   # venue:     false    # Find / save restaurant + coffee shop venues
 
-# Knowledge base — if you turned `knowledge: true` above, Maelle reads
+# Knowledge base — if you turned `knowledge: true` above, she reads
 # .md files you put in config/users/<your-name>_kb/. Each file is a
 # reference document she can pull from when answering questions or
 # composing replies.

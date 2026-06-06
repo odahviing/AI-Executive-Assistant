@@ -2,6 +2,42 @@
 
 ---
 
+## 3.3.0 — personalized news brief + thread actions (two new capabilities) + social-scoring redesign
+
+Two new opt-in capabilities ship this version. **News (#17):** a personalized, calendar-aware, *grounded* news layer — Maelle scans the owner's taught interests plus the companies of the people he's meeting today, dedupes topic-level against a rolling 7-day log, and folds a cited "Updates" section into the morning brief (plus an on-demand `news` tool). **Thread actions (#14):** the owner (or a colleague) can now pull Maelle into a channel/MPIM **thread** by @mentioning her — gated on the owner being a participant — to book a meeting, chase a commitment, or answer in-thread. Bundled with a parallel chat's **proactive-social scoring redesign** (ignoring a coda is now free; rank moves only on a live reply) and a batch of real-day fixes surfaced while testing news.
+
+### Added
+
+- **News skill (#17)** — new togglable `news` skill ([skills/news.ts](src/skills/news.ts)). Shared core `gatherNews` points the grounded-research engine at the owner's interests (taught via `update_my_preferences(skill='news')` → `config/users/<owner>_prefs/news.md`) + companies derived read-only from today's calendar attendees. Source steer (preferred/blocked domains → Tavily `include/exclude_domains`), a rolling **7-day seen-log** for topic-level dedup, and an on-demand `news(topic?)` tool. The morning brief gains a grounded, cited **Updates** section (fail-open: a slow/empty gather never delays or breaks the brief). Off by default → byte-identical brief for anyone who doesn't enable it.
+- **Thread actions (#14)** — Maelle acts on an @mention inside a channel/MPIM thread ([core/threadActions](src/core/threadActions/index.ts), [app.ts](src/connectors/slack/app.ts)). The **owner-presence gate** is the trust control: she acts only when the owner has posted in (or is sending) the thread — otherwise silent. Intent is classified book / follow_up / other; a code-derived roster + VIP split drives a directive executed through the existing coord / outreach / news engines. Reading a thread is ephemeral — no people-memory/capture writes from the read.
+- **`is_vip` on the person store** — owner-marked VIP (`update_person_profile(vip: true)`, owner-only). VIP calendars are always pulled into a thread-booking availability search; non-VIPs are invite-only (annotated, never gating). Seed for the full VIP feature (#58).
+- **`reviveStaleRankZero`** — rank-0 social opt-outs get one revival chance after 30 quiet days, wired into the weekly social-decay sweep ([engagementRank.ts](src/db/engagementRank.ts), [socialDecay.ts](src/tasks/dispatchers/socialDecay.ts)).
+- **Restart catch-up scans assistant-panel threads** — `getActiveAssistantThreads` so on-restart catch-up sees missed panel-thread replies, not just DM history ([assistantThreads.ts](src/connectors/slack/assistantThreads.ts), [background.ts](src/core/background.ts)).
+
+### Changed
+
+- **Proactive-social scoring redesign.** Ignoring a tail-end coda now costs nothing — `engagement_rank` moves **only on a live reply** (`adjustRankFromColleagueResponse`, anchored on `last_initiated_at` so discovery codas score too): +1 engaged, −1 explicit deflection. The 48h `social_ping_rank_check` task is **retired** (no-op drain dispatcher kept to clear in-flight rows). Discovery (`raise_new`) codas now anchor to a concrete conversational category (music / weekend / travel …) the person has no active subject in, instead of a generic "how's your week." ([logEngagement.ts](src/core/social/logEngagement.ts), [stateMachine.ts](src/core/social/stateMachine.ts), [generateCoda.ts](src/core/social/generateCoda.ts), [orchestrator/index.ts](src/core/orchestrator/index.ts))
+- **`web_research` is now scope-gated.** It was unmapped → `filterToolsByScope` shipped it on every owner turn, so Maelle kept reaching for deep research on news/scheduling/chit-chat turns. Now mapped to the `knowledge` scope alongside `web_extract`; `web_search` stays always-on for quick facts. ([registry.ts](src/skills/registry.ts))
+- **Maelle's replies no longer unfurl links.** Brief, live replies, and the catch-up path all post with `unfurl_links/media: false` — a news answer's many source links no longer balloon into a wall of previews. ([messaging.ts](src/connections/slack/messaging.ts), [postReply.ts](src/connectors/slack/postReply.ts), [background.ts](src/core/background.ts))
+- **Capture pass never files WORK as a social subject.** Strong new rule: meetings, scheduling, POCs, interviews, deliverables are the job, not a hobby — never captured as a social subject. ([capturePass.ts](src/memory/capturePass.ts))
+- **News teach-vs-ask routing.** When the owner describes what his news should cover ("track Acme", "I want updates on X", "include these companies"), Maelle saves it via `update_my_preferences` in one batched call — she does not deep-research a configuration message.
+
+### Fixed
+
+- **Catch-up reply crash on long messages.** A long reply (e.g. a news answer) overflowed Slack's 3000-char `section` block limit, so the entire catch-up message was rejected (`invalid_blocks`) and the owner saw nothing. Now chunked across multiple section blocks. ([background.ts](src/core/background.ts))
+- **Coda claim-checker false positive on subject-matter facts.** The social-coda honesty checker flagged facts about a *topic under discussion* (a film's genre, an actor's role) as "invented facts about the recipient." Carve-out added: only fabricated facts about the recipient's own life count; subject-matter / world / research facts never do. ([claimChecker.ts](src/utils/claimChecker.ts))
+- News polish: compact `<url|label>` citations (no bare-URL / `[link]`+URL doubling), no apology when a topic returns nothing, recency bounded (2-day daily / 7-day on-demand, ≤7d in compose), one lightweight search per goal (was fanning out to ~8 calls/goal → the "100+ requests per ask" blow-up), and seen-log self-dedup so re-runs don't pile up near-duplicate lines.
+
+### Migration
+
+- `people_memory` gains `is_vip INTEGER NOT NULL DEFAULT 0` — idempotent `ALTER TABLE`, applied after the v3.2.0 person-store rebuild so it lands on the final shape. No backfill; VIP is set only on the owner's explicit say-so.
+
+### Config
+
+- New `skills.news` toggle (default `false`). Enable per profile to expose the `news` tool and the brief Updates section.
+
+---
+
 ## 3.2.5 — proactive social, one engine one surface (kill the cold-open) + latency & brief polish
 
 Reworked how Maelle reaches out socially. There were **two** systems doing the same job: a cold-open hourly tick that DM'd colleagues out of the blue, and an in-conversation coda that rides a live chat — two topic-decision engines for one decision, the cold one built before the good engine existed and never migrated. Investigation of the live data showed the cold-open was the noisy, low-value half: it pinged the same 1–3 people (qualified by *work* topics mis-filed as social), they ignored it, and ranks ratcheted down. Per owner call we **deleted the cold-open entirely** — proactive social now happens **only** as a coda attached to a conversation the person is already having. Bundled (one patch, owner's call) with the parallel chat's latency + brief + preference work.

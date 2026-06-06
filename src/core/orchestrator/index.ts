@@ -421,19 +421,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     } catch (_) { /* helper failure is non-fatal */ }
   }
 
-  // v2.2.3 — clear the proactive-ping anti-spam lock when a colleague sends
-  // an inbound message. Their reply (to anything — the prior proactive ping
-  // itself, a task-driven DM Maelle sent, or a fresh ask of their own) is the
-  // signal they're engaged. Outbound messages Maelle sends DON'T clear the
-  // lock — only a real inbound from them.
-  if (input.senderRole === 'colleague' && input.userId) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { clearProactivePendingOnInbound } = require('../../db') as typeof import('../../db');
-      clearProactivePendingOnInbound(input.userId);
-    } catch (_) { /* never block message handling */ }
-  }
-
   // v1.6.2 — claim-checker retry path: allow appending a one-shot nudge to the
   // current user message so the model knows why it's being re-invoked. Never
   // persisted to conversation history (callers pass it as extraInstruction
@@ -2337,51 +2324,21 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
                 logger.warn('markSubjectRaised threw — continuing', { err: String(err).slice(0, 200) });
               }
             }
-            // Record the coda as a Maelle-initiated social moment
-            // on the PERSON (not just the topic). Sets people_memory.last_initiated_at
-            // so the 24h response window opens AND the rank-check below has a
-            // reference. Discovery codas (raise_new without a known topic, like
-            // "anything fun outside work?") had no topic → previously skipped this
-            // log → person rank stayed default forever even when ignored.
+            // Record the coda as a Maelle-initiated social moment on the PERSON.
+            // Sets people_memory.last_initiated_at → opens the 24h window that
+            // `adjustRankFromColleagueResponse` keys on to score the colleague's
+            // reply (+1 engaged / −1 deflection / nothing if ignored). Fires for
+            // BOTH continue and raise_new codas, so discovery codas score too.
+            // v3.2.6 — the old 48h `social_ping_rank_check (coda)` task was
+            // REMOVED: it penalized −1 for an ignored tail-end coda, which the
+            // owner explicitly killed ("nothing to lose by ignoring"). Rank now
+            // moves ONLY on a real reply, live, via adjustRankFromColleagueResponse.
             try {
               // eslint-disable-next-line @typescript-eslint/no-require-imports
               const { recordSocialMoment } = require('../../db') as typeof import('../../db');
               recordSocialMoment(turnPersonSlackId, 'maelle');
             } catch (err) {
               logger.warn('coda recordSocialMoment threw — continuing', {
-                err: String(err).slice(0, 200),
-              });
-            }
-            // v2.3.2 (C2) — schedule a rank-check 48h out. The dispatcher
-            // checks people_memory.last_social_at vs last_initiated_at: if the
-            // person hasn't engaged socially in the window → -1 to engagement
-            // rank. Repeated ignores drift the person to rank 0 (opt-out).
-            try {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { createTask } = require('../../tasks/index') as typeof import('../../tasks/index');
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { DateTime: DT } = require('luxon') as typeof import('luxon');
-              const dueAt = DT.utc().plus({ hours: 48 }).toISO();
-              if (dueAt) {
-                createTask({
-                  owner_user_id: profile.user.slack_user_id,
-                  owner_channel: input.channelId,
-                  type: 'social_ping_rank_check',
-                  status: 'new',
-                  title: `Rank check (coda) — ${input.senderName ?? turnPersonSlackId}`,
-                  description: 'Check whether the colleague engaged socially after a coda fired.',
-                  due_at: dueAt,
-                  skill_ref: `coda_${threadTs ?? 'no_thread'}_${turnPersonSlackId}`,
-                  context: JSON.stringify({
-                    kind: 'coda',
-                    colleague_slack_id: turnPersonSlackId,
-                    coda_at_iso: DT.utc().toISO(),
-                  }),
-                  who_requested: 'system',
-                });
-              }
-            } catch (err) {
-              logger.warn('coda rank-check schedule threw — continuing', {
                 err: String(err).slice(0, 200),
               });
             }

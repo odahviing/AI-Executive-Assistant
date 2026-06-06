@@ -307,6 +307,37 @@ async function catchUpMissedMessages(
       logger.warn('Catch-up: per-DM error, continuing', { channelId, err: String(err).slice(0, 200) });
     }
   }
+
+  // v3.2.6 (#122) — also replay missed messages from assistant-PANEL threads.
+  // Panel messages are thread replies, invisible to the conversations.history
+  // DM scan above (the gap that dropped the owner's "big news" prompt). The
+  // DB-backed registry survives restarts and tells us which (channel, thread)
+  // panels to check.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getActiveAssistantThreads } = require('../connectors/slack/assistantThreads') as
+      typeof import('../connectors/slack/assistantThreads');
+    const panels = getActiveAssistantThreads();
+    if (panels.length > 0) {
+      logger.info('Catch-up: scanning assistant-panel threads', { count: panels.length });
+      for (const p of panels) {
+        try {
+          await processAssistantThreadIfMissed({
+            app, profile, botToken, botUserId,
+            channelId: p.channelId,
+            ownerId: profile.user.slack_user_id,
+            oldest,
+          }, p.threadTs);
+        } catch (err) {
+          logger.warn('Catch-up: per-assistant-thread error, continuing', {
+            channelId: p.channelId, threadTs: p.threadTs, err: String(err).slice(0, 200),
+          });
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn('Catch-up: assistant-thread scan threw — continuing', { err: String(err).slice(0, 200) });
+  }
 }
 
 interface CheckOpts {
@@ -336,20 +367,17 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
     return;
   }
 
-  // DM-only catch-up — no mention gating; any user message in the 1:1 DM counts.
-  const latestUserMsg = messages.find(m => {
-    if (!m.user || m.bot_id || m.subtype) return false;
-    return true;
-  });
-
+  // DM-only catch-up — no mention gating; any top-level user message counts.
+  const latestUserMsg = latestByTs(messages, m => !!m.user && !m.bot_id && !m.subtype);
   if (!latestUserMsg?.ts) return;
 
   const userTs = parseFloat(latestUserMsg.ts as string);
-
-  const latestBotMsg = messages.find(m => m.bot_id || m.user === botUserId);
+  const latestBotMsg = latestByTs(messages, m => !!m.bot_id || m.user === botUserId);
   const botTs = latestBotMsg?.ts ? parseFloat(latestBotMsg.ts as string) : 0;
   if (userTs <= botTs) return;
 
+  // The message could have been answered inside its OWN thread (history returns
+  // top-level only). Check replies before replaying.
   const msgTs = latestUserMsg.ts as string;
   try {
     const replies = await app.client.conversations.replies({
@@ -366,18 +394,90 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
     // No replies or no access — proceed with catchup
   }
 
+  await replayMissedMessage(opts, latestUserMsg, { postThreadTs: msgTs, source: 'dm' });
+}
+
+// v3.2.6 (#122) — assistant-PANEL catch-up. Messages typed in the Slack
+// assistant panel are THREAD REPLIES under the panel's assistant thread;
+// `conversations.history` (top-level only) never returns them, so the DM scan
+// above is structurally blind to the surface the owner actually uses daily.
+// Here we pull the panel thread's replies directly and replay the latest
+// unanswered one. The (channel, thread_ts) coordinates come from the
+// DB-backed `assistant_threads` registry, which survives restarts.
+async function processAssistantThreadIfMissed(opts: CheckOpts, threadTs: string): Promise<void> {
+  const { app, botToken, channelId, botUserId, oldest } = opts;
+
+  let messages: Array<Record<string, unknown>>;
+  try {
+    const result = await app.client.conversations.replies({
+      token: botToken,
+      channel: channelId,
+      ts: threadTs,
+      limit: 200,
+    });
+    messages = (result.messages ?? []) as Array<Record<string, unknown>>;
+  } catch (err) {
+    logger.debug('Catch-up: assistant thread not accessible', { channelId, threadTs });
+    return;
+  }
+
+  const latestUserMsg = latestByTs(
+    messages,
+    m => !!m.user && !m.bot_id && !m.subtype && m.user !== botUserId,
+  );
+  if (!latestUserMsg?.ts) return;
+
+  const userTs = parseFloat(latestUserMsg.ts as string);
+  if (userTs < parseFloat(oldest)) return;  // older than lookback — leave it
+
+  const latestBotMsg = latestByTs(messages, m => !!m.bot_id || m.user === botUserId);
+  const botTs = latestBotMsg?.ts ? parseFloat(latestBotMsg.ts as string) : 0;
+  if (userTs <= botTs) return;  // already answered in the panel
+
+  // Reply back INTO the panel thread (thread_ts = the panel parent).
+  await replayMissedMessage(opts, latestUserMsg, { postThreadTs: threadTs, source: 'assistant_panel' });
+}
+
+// Newest message matching `pred`, by ts. Order-independent — works for both
+// conversations.history (newest-first) and conversations.replies (oldest-first).
+function latestByTs(
+  messages: Array<Record<string, unknown>>,
+  pred: (m: Record<string, unknown>) => boolean,
+): Record<string, unknown> | null {
+  let best: Record<string, unknown> | null = null;
+  let bestTs = -1;
+  for (const m of messages) {
+    if (typeof m.ts !== 'string' || !pred(m)) continue;
+    const t = parseFloat(m.ts);
+    if (Number.isFinite(t) && t > bestTs) { bestTs = t; best = m; }
+  }
+  return best;
+}
+
+// Shared replay tail — used by BOTH the DM (history) and assistant-panel
+// (replies) catch-up paths. Runs the missed message through the orchestrator
+// and posts the reply (threaded per `post.postThreadTs`: the message itself
+// for a DM, the panel parent for an assistant thread).
+async function replayMissedMessage(
+  opts: CheckOpts,
+  latestUserMsg: Record<string, unknown>,
+  post: { postThreadTs: string; source: 'dm' | 'assistant_panel' },
+): Promise<void> {
+  const { app, profile, channelId, ownerId } = opts;
+  const msgTs = latestUserMsg.ts as string;
+  const userTs = parseFloat(msgTs);
   const hoursAgo = Math.round((Date.now() / 1000 - userTs) / 3600);
   logger.info('Catching up missed message', {
     user: profile.user.name,
     channel: channelId,
+    source: post.source,
     hoursAgo,
   });
 
   // v1.8.14 — mark this message ts as processed BEFORE replying, so that if
   // Slack re-delivers the same event to the live socket handler after we
-  // reconnect, the live handler will see it as already handled and skip.
-  // Prevents the duplicate-reply bug where catch-up and live handler both
-  // answer the same missed message.
+  // reconnect, the live handler sees it as already handled and skips. Prevents
+  // catch-up and the live handler both answering the same missed message.
   try {
     const { markProcessed } = require('../connectors/slack/processedDedup') as typeof import('../connectors/slack/processedDedup');
     markProcessed(msgTs);
@@ -387,16 +487,12 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
 
   const senderId  = latestUserMsg.user as string;
   const rawText   = (latestUserMsg.text as string) ?? '';
-  const threadTs  = (latestUserMsg.thread_ts as string | undefined) ?? (latestUserMsg.ts as string);
+  const threadTs  = (latestUserMsg.thread_ts as string | undefined) ?? msgTs;
   const senderRole: 'owner' | 'colleague' = senderId === ownerId ? 'owner' : 'colleague';
-
   const timeLabel = hoursAgo < 1 ? 'less than an hour ago' : `about ${hoursAgo}h ago`;
 
-  // v1.5.1 — the raw message goes to the orchestrator unchanged. The catch-up
-  // framing lives only in the posted reply's context block (below), not in the
-  // prompt. The old "[Context: you were offline...]" injection regularly
-  // produced over-apologetic or confused replies because the LLM would
-  // interpret it as owner instructions rather than scaffolding.
+  // v1.5.1 — raw message to the orchestrator unchanged; catch-up framing lives
+  // only in the posted reply's context block (below), not in the prompt.
   const history = getConversationHistory(threadTs);
 
   let output;
@@ -428,30 +524,60 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
   const { formatForSlack } = await import('../connections/slack/formatting');
   const cleanReply = formatForSlack(output.reply);
 
-  // NOTE (v2.0.2): this is the single remaining core-path raw Slack call.
-  // It uses Slack-specific rich-layout blocks (`context` + `section`) to render
-  // the "↩ Catching up on your message from <time>" caption above the reply,
-  // and the Connection interface doesn't (yet) carry a blocks payload. Kept
-  // as a direct app.client call until the Connection interface grows a
-  // transport-specific rich-payload option — tracked under issue #22.
+  // NOTE (v2.0.2): this is the single remaining core-path raw Slack call —
+  // Slack-specific rich-layout blocks (`context` + `section`) render the
+  // "↩ Catching up…" caption above the reply, which the Connection interface
+  // doesn't carry yet (tracked under issue #22).
+  // v3.2.6 — a Slack `section` block's text is capped at 3000 chars; a long
+  // reply (e.g. a news answer) blew past it and the WHOLE message was rejected
+  // (invalid_blocks → the owner saw nothing). Chunk the reply across multiple
+  // section blocks so long replies post intact.
+  const replyChunks = chunkForSectionBlocks(cleanReply);
   try {
     await app.client.chat.postMessage({
       token: profile.assistant.slack.bot_token,
       channel: channelId,
-      thread_ts: latestUserMsg.ts as string,
-      text: cleanReply,
+      thread_ts: post.postThreadTs,
+      text: cleanReply.slice(0, 3000),
+      // v3.2.6 — suppress link/media unfurl here too (this raw path bypasses the
+      // connection layer + postReply where unfurl is already off). A news reply's
+      // many source links otherwise unfurl into previews.
+      unfurl_links: false,
+      unfurl_media: false,
       blocks: [
         {
           type: 'context',
           elements: [{ type: 'mrkdwn', text: `${contextLine}: _"${msgPreviewShort}"_` }],
         },
-        {
-          type: 'section',
-          text: { type: 'mrkdwn', text: cleanReply },
-        },
+        ...replyChunks.map(chunk => ({
+          type: 'section' as const,
+          text: { type: 'mrkdwn' as const, text: chunk },
+        })),
       ],
     });
   } catch (err) {
     logger.error('Catch-up: failed to post reply', { channelId, err: String(err) });
   }
+}
+
+/**
+ * Split text into ≤3000-char chunks for Slack `section` blocks (Slack's hard
+ * limit). Prefers newline boundaries so we don't cut mid-sentence; falls back to
+ * a hard cut when a single line is itself too long. Caps total chunks so a
+ * runaway reply can't exceed Slack's 50-block limit (the tail is truncated with
+ * a marker rather than failing the whole post).
+ */
+function chunkForSectionBlocks(text: string, max = 2900, maxChunks = 45): string[] {
+  if (text.length <= max) return [text];
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > max && chunks.length < maxChunks - 1) {
+    let cut = remaining.lastIndexOf('\n', max);
+    if (cut < max * 0.5) cut = max; // no usable newline near the limit → hard cut
+    chunks.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut).replace(/^\n+/, '');
+  }
+  if (remaining.length > max) remaining = remaining.slice(0, max - 1) + '…';
+  if (remaining) chunks.push(remaining);
+  return chunks;
 }

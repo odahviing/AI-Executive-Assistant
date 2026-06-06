@@ -51,6 +51,7 @@ export function createSlackConnection(app: App, botToken: string, profile: UserP
       const outcome = await sendDM(app, botToken, recipientRef, formatForSlack(text), {
         threadTs: opts?.threadTs,
         attachments: opts?.attachments,
+        unfurl: opts?.unfurl,
       });
       return toSendResult(outcome);
     },
@@ -75,7 +76,7 @@ export function createSlackConnection(app: App, botToken: string, profile: UserP
     },
 
     async postToChannel(channelRef, text, opts) {
-      const outcome = await slackPostToChannel(app, botToken, channelRef, formatForSlack(text), { threadTs: opts?.threadTs });
+      const outcome = await slackPostToChannel(app, botToken, channelRef, formatForSlack(text), { threadTs: opts?.threadTs, unfurl: opts?.unfurl });
       return toSendResult(outcome);
     },
 

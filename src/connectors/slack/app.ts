@@ -1,6 +1,8 @@
 import { App, LogLevel } from '@slack/bolt';
 import { config } from '../../config';
 import { runOrchestrator } from '../../core/orchestrator';
+import { getAnthropicClient } from '../../llm/client';
+import { ownerPostedInThread, classifyThreadAction, buildThreadRoster, buildThreadActionDirective } from '../../core/threadActions';
 import { isBriefRequest } from '../../core/briefIntent';
 import { sendMorningBriefing } from '../../tasks/briefs';
 import type { ChannelId } from '../../skills/types';
@@ -212,11 +214,18 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     isChannel: boolean;
     isMpim?: boolean;
     mpimMemberIds?: string[];  // all non-bot member IDs when in MPIM
+    // v3.2.6 (#14) — true when this turn arrived via app_mention (an explicit
+    // @Maelle). An explicit mention is unambiguously addressed to her, so the
+    // group-DM/channel addressee gate (which silences messages aimed at a human)
+    // must be skipped — otherwise a mid-thread thread-action mention, whose bot
+    // <@id> was stripped from the text and where Maelle hasn't spoken yet, gets
+    // mis-judged HUMAN/AMBIGUOUS and dropped.
+    isExplicitMention?: boolean;
     voiceInput?: boolean;      // true if input came from a voice message
     images?: AnthropicImageBlock[];  // v1.7.1 — image content blocks attached to this turn
     imageUrls?: string[];            // v2.5.2 — Slack url_private per attached image, persisted to history so Sonnet can forward via message_colleague.attachments
   }): Promise<void> {
-    const { senderId, text, channelId, ts, threadTs, say, client, isChannel, isMpim, voiceInput, mpimMemberIds, images, imageUrls } = params;
+    const { senderId, text, channelId, ts, threadTs, say, client, isChannel, isMpim, isExplicitMention, voiceInput, mpimMemberIds, images, imageUrls } = params;
     const rawRole = getSenderRole(senderId);
 
     // ── Colleague-mode testing (owner only, DMs only) ────────────────────────
@@ -462,7 +471,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // In a group DM / channel, not every message is for Maelle. Run a
       // cheap Haiku classifier; stay silent when the message was addressed
       // to a human (or is genuinely ambiguous). Skip for 1:1 DMs.
-      if ((isMpim === true || isChannel === true) && botUserId) {
+      if ((isMpim === true || isChannel === true) && botUserId && !isExplicitMention) {
         // v1.7.5 — same fix as the MPIM relevance gate: when Maelle was the
         // most recent or second-most-recent speaker in this thread, skip the
         // addressee gate entirely. The next message is almost always a
@@ -1928,6 +1937,10 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // Only people who posted in the thread or were @mentioned — NOT the full channel.
       // Their persona data is loaded so Claude has context about each active participant.
       let threadContext = '';
+      // v3.2.6 (#14) — hoisted so the owner-presence gate below can read who
+      // posted in the thread. Empty for a start-of-thread mention.
+      let threadMsgs: Array<{ user?: string }> = [];
+      let threadParticipantIds: string[] = [];
       if (threadTs !== event.ts) {
         try {
           const replies = await client.conversations.replies({
@@ -1937,11 +1950,13 @@ export function createSlackAppForProfile(profile: UserProfile): App {
             limit: 50,
           });
           const threadMessages = (replies.messages as any[]) ?? [];
+          threadMsgs = threadMessages;
           const uniqueUserIds = [...new Set(
             threadMessages
               .map(m => m.user as string | undefined)
               .filter((id): id is string => !!id && id !== botUserId)
           )];
+          threadParticipantIds = uniqueUserIds;
 
           if (uniqueUserIds.length > 0) {
             const nameEntries: string[] = [];
@@ -1951,8 +1966,15 @@ export function createSlackAppForProfile(profile: UserProfile): App {
                 const u = info.user as any;
                 const name = u?.real_name || u?.name || id;
                 nameEntries.push(`${name} (slack_id: ${id})`);
-                // Load persona data for each thread participant
-                if (id !== profile.user.slack_user_id) {
+                // Load persona data for each thread participant.
+                // v3.2.6 (#14, invariant 9) — EPHEMERAL READ: when this is a
+                // real-channel mid-thread mention (the thread-action path),
+                // reading the thread must persist NOTHING about its people. So
+                // skip the upsert here — the name above (from the Slack API, not
+                // the DB) is enough for in-memory threadContext, and the roster
+                // resolves VIP/email READ-ONLY (getPersonMemory). MPIMs are group
+                // DMs Maelle is part of, not blind channels — keep their upsert.
+                if (id !== profile.user.slack_user_id && isMpimChannel) {
                   upsertPersonMemory({ slackId: id, name, email: u?.profile?.email, timezone: u?.tz });
                 }
               } catch (_) {
@@ -1971,11 +1993,66 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         }
       }
 
+      // ── Thread actions (#14) — owner-presence gate (the trust control) ──
+      // Applies ONLY to a REAL-channel MID-THREAD mention: Maelle is being
+      // pulled into an existing thread she wasn't part of. NOT for MPIMs (group
+      // DMs use the owner-in-group authority model) and NOT for a start-of-
+      // thread mention (threadTs === event.ts → engages like an MPIM, existing
+      // behavior). His presence in the thread IS the authorization (invariant 1
+      // / S2): if the owner never posted here, Maelle does nothing — she's his
+      // EA, and a colleague can't drive her in a thread he isn't part of.
+      // Reading the thread for this is ephemeral — no capture/people/interaction
+      // writes (invariant 9); those drops live in the `message` handler.
+      let threadActionDirective = '';
+      if (!isMpimChannel && threadTs !== event.ts) {
+        // Owner is present if he posted earlier in the thread OR he is the one
+        // mentioning Maelle now (his just-sent message may not be in the fetched
+        // replies yet — Slack eventual consistency). Sender-is-owner trivially
+        // satisfies presence.
+        const ownerPresent =
+          event.user === profile.user.slack_user_id ||
+          ownerPostedInThread(threadMsgs, profile.user.slack_user_id);
+        if (!ownerPresent) {
+          logger.info('thread-action gate — owner not in thread; no action', {
+            channelId: event.channel, threadTs, senderId: event.user,
+          });
+          return; // silent — Maelle is the owner's EA
+        }
+        // Owner present → classify the ask and build the action directive. The
+        // orchestrator executes it through the existing engine (coord / outreach
+        // / news); the deterministic roster + VIP split is code-derived here.
+        try {
+          const action = await classifyThreadAction({
+            anthropic: getAnthropicClient(),
+            mentionText: rawText,
+            threadContext,
+            profile,
+          });
+          // Roster = thread speakers + anyone @mentioned in the mention text.
+          const mentionedIds = [...new Set(
+            (event.text.match(/<@([A-Z0-9]+)>/g) ?? [])
+              .map(m => m.replace(/[<@>]/g, ''))
+              .filter(id => id !== botUserId),
+          )];
+          const roster = buildThreadRoster(
+            [...threadParticipantIds, ...mentionedIds],
+            profile.user.slack_user_id,
+          );
+          threadActionDirective = buildThreadActionDirective(action, roster, profile);
+          logger.info('thread-action gate — owner present; routing', {
+            channelId: event.channel, threadTs, action,
+            rosterSize: roster.length, vipCount: roster.filter(r => r.isVip).length,
+          });
+        } catch (err) {
+          logger.warn('thread-action routing threw — falling through plain', { err: String(err).slice(0, 200) });
+        }
+      }
+
       // Resolve remaining user mentions to "Name (slack_id: ID)" format
       const resolvedText = await resolveSlackMentions(rawText);
       processMessage({
         senderId: event.user!,
-        text: mpimContext + threadContext + resolvedText,
+        text: threadActionDirective + mpimContext + threadContext + resolvedText,
         channelId: event.channel,
         ts: event.ts,
         threadTs,
@@ -1984,6 +2061,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         isChannel: !isMpimChannel,
         isMpim: isMpimChannel,
         mpimMemberIds: isMpimChannel ? mpimMemberIds : undefined,
+        isExplicitMention: true,
       }).catch(err => logger.error('processMessage error', { err }));
     });
   });

@@ -39,7 +39,7 @@ export interface PostReplyInput {
   app: App;
   profile: UserProfile;
   result: OrchestratorOutput;
-  say: (msg: { text: string; thread_ts?: string }) => Promise<unknown>;
+  say: (msg: { text: string; thread_ts?: string; unfurl_links?: boolean; unfurl_media?: boolean }) => Promise<unknown>;
   role: SenderRole;
   colleagueName?: string;
   senderId: string;
@@ -671,7 +671,7 @@ async function sendReply(opts: {
   threadTs: string;
   cleanReply: string;
   voiceInput: boolean;
-  say: (msg: { text: string; thread_ts?: string }) => Promise<unknown>;
+  say: (msg: { text: string; thread_ts?: string; unfurl_links?: boolean; unfurl_media?: boolean }) => Promise<unknown>;
 }): Promise<void> {
   const useAudio = shouldRespondWithAudio({
     inputWasVoice: opts.voiceInput,
@@ -707,7 +707,10 @@ async function sendReply(opts: {
   // a target to react on. No reaction here.
   // Bolt's `say` returns ChatPostMessageResponse at runtime even though the
   // surface type is Promise<unknown> (postReply abstracts from app-direct).
-  const sayRes = await opts.say({ text: opts.cleanReply, thread_ts: opts.threadTs }) as
+  // v3.2.6 — suppress Slack link/media unfurl on Maelle's replies. An EA's
+  // replies (esp. a news answer with many source links) shouldn't balloon into
+  // a wall of previews. Cited links stay clickable; they just don't auto-expand.
+  const sayRes = await opts.say({ text: opts.cleanReply, thread_ts: opts.threadTs, unfurl_links: false, unfurl_media: false }) as
     | { ts?: string; ok?: boolean } | undefined;
   if (sayRes?.ts) {
     const { recordMaelleMessage } = await import('../../utils/threadActivity');

@@ -444,6 +444,10 @@ const UserProfileSchema = z.object({
     // v2.9 — external-venue discovery + rank catalog. Off by default; flip true
     // to expose `find_venue` + `rank_venue` and auto-save bookings to the catalog.
     venue: z.boolean().default(false),
+    // v3.2.6 — personalized, calendar-aware grounded news. Off by default; flip
+    // true to expose the `news` tool and fold an "Updates" section into the
+    // morning brief (topics + source steer taught via update_my_preferences).
+    news: z.boolean().default(false),
     // Legacy aliases — auto-migrated at runtime; kept optional so old YAMLs boot.
     persona: z.boolean().optional(),             // → social (v2.6.2)
     scheduling: z.boolean().optional(),          // → meetings
@@ -453,7 +457,7 @@ const UserProfileSchema = z.object({
     calendar_health: z.boolean().optional(),     // → calendar
   }).default({
     meetings: true, summary: false, knowledge: false, calendar: true,
-    search: true, social: false, venue: false,
+    search: true, social: false, venue: false, news: false,
   })),
 
   // Which communication channels the assistant is active on

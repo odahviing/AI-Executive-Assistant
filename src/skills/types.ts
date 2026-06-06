@@ -68,6 +68,7 @@ export type SkillId =
   | 'search'
   | 'social'              // v2.6.2 (renamed from persona) — social engine, codas, proactive outreach
   | 'venue'               // v2.9 — external venue discovery + rank catalog
+  | 'news'                // v3.2.6 — personalized, calendar-aware grounded news (brief + on-demand)
   // legacy aliases — auto-migrated at load time, kept so old YAMLs still boot
   | 'scheduling'          // → meetings
   | 'coordination'        // → meetings

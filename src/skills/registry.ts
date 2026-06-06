@@ -89,6 +89,14 @@ function buildSkillMap(): Map<SkillId, Skill> {
         return new VenueSkill();
       },
     },
+    {
+      id: 'news',
+      loader: () => {
+        // v3.2.6 — personalized, calendar-aware grounded news.
+        const { NewsSkill } = require('./news');
+        return new NewsSkill();
+      },
+    },
   ];
 
   const map = new Map<SkillId, Skill>();
@@ -187,6 +195,12 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
     'manage_knowledge', 'classify_document',
     // v3.x (Change A) — deep URL fetch pairs with research; web_search stays always-on.
     'web_extract',
+    // v3.2.6 — web_research (the deep PLAN→GATHER→READ engine) was UNMAPPED, so
+    // filterToolsByScope shipped it on EVERY owner turn — which is why Maelle
+    // kept reaching for deep research on news/scheduling/chit-chat turns. Map it
+    // here with web_extract: it ships on research-flavored turns ('knowledge' /
+    // 'general'), not by default. web_search stays always-on for quick facts.
+    'web_research',
   ]),
   summary: new Set<string>([
     'classify_summary_feedback', 'share_summary', 'update_summary_draft',
@@ -211,6 +225,11 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
   // via the union semantics in filterToolsByScope.
   venue: new Set<string>([
     'find_venue', 'rank_venue',
+  ]),
+  // v3.2.6 — personalized grounded news. Ships only when the classifier picks
+  // 'news' (or 'general'); a non-news turn pays zero tokens for it.
+  news: new Set<string>([
+    'news',
   ]),
 };
 

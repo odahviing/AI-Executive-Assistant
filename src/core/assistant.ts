@@ -181,6 +181,10 @@ Call this after interactions — not during them. It's a background update.`,
               type: 'number',
               description: 'Numeric social engagement rank 0–3. 0=don\'t initiate social with them (opt-out), 1=minimal, 2=neutral (default for new), 3=loves to chat. Set ONLY when the owner explicitly directs you ("rank [name] at 3", "never ping [name]" → 0). Don\'t auto-set — the system auto-adjusts based on ping responses.',
             },
+            vip: {
+              type: 'boolean',
+              description: 'Mark this person a VIP (or pass false to un-mark). VIP means: whenever you book a meeting from a thread, this person\'s calendar is ALWAYS checked and the time is optimized around them (non-VIPs are invited but not gating). Set ONLY when the owner explicitly says so — "[name] is a VIP", "always check [name]\'s calendar", "[name]\'s time always matters". Never auto-set.',
+            },
             currently_traveling: {
               type: 'object',
               description: 'Travel window for the person. Stored profile timezone/state are defaults — when the colleague is travelling somewhere else for a stretch, set this so slot search and time-of-day display use the travel location instead. Set when (a) the colleague volunteers it ("I\'m in Boston next week", "Boston time"), or (b) the owner tells you ("[Person] is in NYC for a week"). Pass `clear: true` to wipe a known-stale travel window. Either pass concrete `from`+`until` dates, OR pass `from` + one of `for_days`/`for_weeks` and the system derives `until`. The system auto-clears the field once `until` passes.',
@@ -854,6 +858,11 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
             response_speed:      args.response_speed      as PersonProfile['response_speed'],
             collaboration_notes: args.collaboration_notes as string | undefined,
           });
+          // v3.2.6 — owner-curated VIP flag (externals can be VIPs too).
+          if (typeof args.vip === 'boolean') {
+            const { setPersonVipById } = require('../db') as typeof import('../db');
+            setPersonVipById(target.personId, args.vip);
+          }
           logger.info('Person profile updated (external)', { personId: target.personId, name: target.name });
           return { updated: true, name: target.name, external: true };
         }
@@ -935,6 +944,15 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { setEngagementRank } = require('../db') as typeof import('../db');
           setEngagementRank(slackId, clamped, 'owner_directive');
+        }
+
+        // v3.2.6 — owner-curated VIP flag. Owner-path only by construction
+        // (colleague-self writes drop `vip` — it's not in the self-writable
+        // allowlist), like engagement_rank.
+        if (typeof args.vip === 'boolean') {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { setPersonVip } = require('../db') as typeof import('../db');
+          setPersonVip(slackId, args.vip);
         }
 
         // v2.2.4 — travel awareness. clear=true wipes; otherwise expects

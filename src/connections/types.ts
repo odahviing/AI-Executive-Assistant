@@ -61,6 +61,13 @@ export interface SendOptions {
     /** Optional override for the filename used when re-uploading. */
     filename?: string;
   }>;
+  /**
+   * v3.2.6 — pass false to suppress link/media previews (Slack: unfurl_links /
+   * unfurl_media). Used by the news-bearing brief, which carries many source
+   * links that would otherwise unfurl into a wall of previews. Other transports
+   * may ignore.
+   */
+  unfurl?: boolean;
 }
 
 /**

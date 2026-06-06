@@ -68,6 +68,9 @@ export async function sendDM(
   opts: {
     threadTs?: string;
     attachments?: Array<{ sourceUrl: string; filename?: string }>;
+    // v3.2.6 — pass false to suppress Slack link/media previews (the news brief
+    // carries many source links; unfurling them spams the message).
+    unfurl?: boolean;
   } = {},
 ): Promise<SendOutcome> {
   try {
@@ -80,6 +83,7 @@ export async function sendDM(
       channel: channelId,
       text,
       ...(safeThreadTs(opts.threadTs) ? { thread_ts: safeThreadTs(opts.threadTs) } : {}),
+      ...(opts.unfurl === false ? { unfurl_links: false, unfurl_media: false } : {}),
     });
 
     // v2.2.7 — attachments. Download each Slack file URL with bot-token auth,
@@ -165,13 +169,14 @@ export async function postToChannel(
   botToken: string,
   channelId: string,
   text: string,
-  opts: { threadTs?: string } = {},
+  opts: { threadTs?: string; unfurl?: boolean } = {},
 ): Promise<SendOutcome> {
   const tryPost = async () => app.client.chat.postMessage({
     token: botToken,
     channel: channelId,
     text,
     ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}),
+    ...(opts.unfurl === false ? { unfurl_links: false, unfurl_media: false } : {}),
   });
 
   try {

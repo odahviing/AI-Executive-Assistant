@@ -268,7 +268,7 @@ Output STRICT JSON only: {"queries": ["...","..."], "recency_days": <number or n
 }
 
 /** The grounded research bundle the model writes from. */
-export async function runResearch(goal: string, recencyOverride?: number): Promise<object> {
+export async function runResearch(goal: string, recencyOverride?: number, opts?: DomainFilterOpts): Promise<object> {
   logger.info('research — start', { goal: goal.slice(0, 120), recencyOverride });
   const plan = await planResearchQueries(goal);
   const recency = recencyOverride ?? plan.recencyDays;
@@ -278,7 +278,7 @@ export async function runResearch(goal: string, recencyOverride?: number): Promi
   const seen = new Set<string>();
   for (const q of plan.queries) {
     try {
-      const r = await tavilySearch(q, 'advanced', recency) as {
+      const r = await tavilySearch(q, 'advanced', recency, opts) as {
         results?: Array<{ title?: string; url?: string; content?: string; published_date?: string }>;
       };
       for (const item of r.results ?? []) {
@@ -325,10 +325,15 @@ export async function runResearch(goal: string, recencyOverride?: number): Promi
 
 // ── Search implementations ────────────────────────────────────────────────────
 
+/** Optional domain steer for grounded research (news skill). Backward-compatible:
+ *  omit and the request body is byte-identical to the pre-existing behavior. */
+export interface DomainFilterOpts { includeDomains?: string[]; excludeDomains?: string[] }
+
 export async function tavilySearch(
   query: string,
   depth: 'basic' | 'advanced' = 'advanced',
   timeRangeDays?: number,
+  opts?: DomainFilterOpts,
 ): Promise<object> {
   // v1.8.8 — when caller passes timeRangeDays, use Tavily's news topic + days
   // filter so recency is enforced. Otherwise general-topic search (no date
@@ -343,6 +348,14 @@ export async function tavilySearch(
   if (typeof timeRangeDays === 'number' && timeRangeDays > 0) {
     body.topic = 'news';
     body.days = Math.min(Math.max(Math.round(timeRangeDays), 1), 365);
+  }
+  // v3.2.6 — source steer (news skill). Only added when present, so the
+  // web_research / web_search paths (no opts) send the same body as before.
+  if (opts?.includeDomains && opts.includeDomains.length > 0) {
+    body.include_domains = opts.includeDomains;
+  }
+  if (opts?.excludeDomains && opts.excludeDomains.length > 0) {
+    body.exclude_domains = opts.excludeDomains;
   }
   const res = await fetch('https://api.tavily.com/search', {
     method: 'POST',

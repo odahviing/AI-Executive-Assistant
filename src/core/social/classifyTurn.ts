@@ -59,9 +59,9 @@ export interface OwnerIntentClassification {
 }
 
 // ── Tool-scope types (formerly in classifyToolScope.ts, removed in v3.0.6) ──
-export type ToolScope = 'meetings' | 'coord' | 'calendar' | 'people' | 'tasks' | 'knowledge' | 'summary' | 'social' | 'venue' | 'general';
+export type ToolScope = 'meetings' | 'coord' | 'calendar' | 'people' | 'tasks' | 'knowledge' | 'summary' | 'social' | 'venue' | 'news' | 'general';
 
-export const ALL_SCOPES: ToolScope[] = ['meetings', 'coord', 'calendar', 'people', 'tasks', 'knowledge', 'summary', 'social', 'venue', 'general'];
+export const ALL_SCOPES: ToolScope[] = ['meetings', 'coord', 'calendar', 'people', 'tasks', 'knowledge', 'summary', 'social', 'venue', 'news', 'general'];
 
 export interface ToolScopeResult {
   scopes: ToolScope[];
@@ -155,6 +155,7 @@ export async function classifyTurn(params: {
   const summaryActive = (profile.skills as any)?.summary === true;
   const knowledgeActive = (profile.skills as any)?.knowledge === true;
   const venueActive = (profile.skills as any)?.venue === true;
+  const newsActive = (profile.skills as any)?.news === true;
   // v3.x (Change A) — 'people' is always in play (person-write tools moved off
   // ALWAYS_ON). The old 'social' SCOPE was an empty no-op; person notes now
   // route through 'people', so 'social' is no longer offered to the classifier.
@@ -162,6 +163,7 @@ export async function classifyTurn(params: {
   if (knowledgeActive) inPlayScopes.push('knowledge');
   if (summaryActive) inPlayScopes.push('summary');
   if (venueActive) inPlayScopes.push('venue');
+  if (newsActive) inPlayScopes.push('news');
   inPlayScopes.push('general');
 
   // ── Intent setup (only relevant when needIntent) ──
@@ -208,7 +210,7 @@ SCOPES — pick which tool scopes are relevant (one or more):
 - coord       — RARE. ONLY multi-party coordination where Maelle must reach out to SEVERAL people SEPARATELY to negotiate a time they all agree on ("coordinate a sync between Anna, Ben and me", "set up a meeting between the candidate and Idan and find a time that works for everyone"). NOT for booking a known time, NOT a 1:1, NOT when the people are already here in the conversation, NOT a direct "book X with Y". When unsure, pick 'meetings', not 'coord'. Fires alongside 'meetings'.
 - people      — saving or noting a durable fact about a PERSON (a colleague, not the owner's own prefs): where they live/work, timezone, working hours, communication style, gender, a hobby or personal detail — or any "remember / note that <X> about <someone>". Fires when the turn TEACHES you something about a person. (Just reading what you know about someone needs no scope — that tool is always available.)
 - tasks       — task list / routines / briefing: "what's pending?", "what did I miss?", "show my tasks", "set up a daily routine", "what's on my brief?".
-${knowledgeActive ? '- knowledge   — KB lookups / save a URL / research / "what do we know about X": company, product, customer, competitor, market.\n' : ''}${summaryActive ? '- summary     — post-meeting summary workflow only: classifying summary feedback, sharing a summary, updating a draft, listing speaker unknowns.\n' : ''}${venueActive ? '- venue       — external-venue management: ranking a venue ("rank Coffee Landwer 3"), or asking about saved venues. Finding a venue for a meeting fires here AND \'meetings\'.\n' : ''}- general     — pick when ambiguous, or to err toward shipping every tool. Cheap to over-include.
+${knowledgeActive ? '- knowledge   — KB lookups / save a URL / research / "what do we know about X": company, product, customer, competitor, market.\n' : ''}${summaryActive ? '- summary     — post-meeting summary workflow only: classifying summary feedback, sharing a summary, updating a draft, listing speaker unknowns.\n' : ''}${venueActive ? '- venue       — external-venue management: ranking a venue ("rank Coffee Landwer 3"), or asking about saved venues. Finding a venue for a meeting fires here AND \'meetings\'.\n' : ''}${newsActive ? '- news        — personalized NEWS: "what\'s the latest / any news on X", "anything new with <company/topic>", "catch me up on the news", or saving a news interest / preferred source. NOT a general background lookup (that\'s web_search/knowledge).\n' : ''}- general     — pick when ambiguous, or to err toward shipping every tool. Cheap to over-include.
 
 How to choose scopes:
 - Default to UNION when the message could touch multiple things.

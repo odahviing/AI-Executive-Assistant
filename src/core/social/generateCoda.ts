@@ -82,11 +82,17 @@ export async function generateSocialCoda(params: {
   } else if (directive.mode === 'raise_new') {
     // v2.2.4 (bug 1B) — discovery mode. Without an existing topic to continue,
     // a "raise_new" coda was free to fabricate ("Are you joining the offsite
-    // next month?" when there's no such offsite). Re-frame: ask a concrete,
-    // *discoverable* question — one whose answer is a real fact about the
-    // person we'd save to memory afterward. Steer away from invented
-    // specifics; lean into open-ended human curiosity.
-    intent = `Ask ONE plain, open human question — something whose answer is a real fact about ${senderFirstName} you don't already know (where they're based, what their week looks like, what they do outside work, whether they're traveling, family status if it comes up naturally). NEVER invent a specific event, project, or shared context that doesn't exist ("the offsite next month", "your daughter's recital", "the marathon you mentioned"). If you don't know something specific, ask something general. Plain phrasing — no "by the way", "speaking of", "changing subjects".`;
+    // next month?"). Re-frame: ask a concrete, *discoverable* question whose
+    // answer is a real fact we'd save to memory.
+    // v3.2.6 — anchor to a CONCRETE category the picker chose (music / weekend
+    // / travel …) instead of a generic "how's your week". Owner liked the
+    // category-anchored ping ("any good music lately?"). Still must NOT invent
+    // specifics — ask an open question ABOUT that category, discovering what
+    // they're into, not assuming a particular item/event exists.
+    const cat = directive.categoryLabel;
+    intent = cat
+      ? `Ask ONE plain, open question about ${senderFirstName}'s interest in "${cat}" — discover what they're into in that area (e.g. ${cat} = music → what they've been listening to; travel → any trips coming up; weekend → plans this weekend; pets → whether they have any). NEVER assume a specific item/event exists ("that concert", "the marathon you mentioned") — ask open. Plain phrasing — no "by the way", "speaking of".`
+      : `Ask ONE plain, open human question — something whose answer is a real fact about ${senderFirstName} you don't already know (what they do outside work, whether they're traveling). NEVER invent a specific event or shared context that doesn't exist. Plain phrasing — no "by the way", "speaking of".`;
   } else if (directive.mode === 'celebrate') {
     intent = `Briefly celebrate the ${directive.topicLabel ?? 'news'} they shared earlier.`;
   } else {
