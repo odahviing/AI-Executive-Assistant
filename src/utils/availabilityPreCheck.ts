@@ -400,10 +400,11 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile): strin
   const lines = verdicts.map(v => {
     const when = fmt(v.date, v.time);
     if (v.bookable) return `  - ${when}: BOOKABLE per ${profile.user.name.split(' ')[0]}'s rules`;
-    const reason = v.rejection_reason && v.rejection_reason !== 'unknown'
-      ? ` (rule violated: ${v.rejection_reason})`
-      : '';
-    return `  - ${when}: NOT BOOKABLE${reason}`;
+    // v3.3.x — precheckAvailability runs ONLY on the colleague path
+    // (orchestrator/index.ts gate). Never surface the rule name to a colleague —
+    // "focus_time_office" / "lunch" etc. leaks the owner's schedule mechanics.
+    // The bookable verdict alone is all the reply needs.
+    return `  - ${when}: NOT BOOKABLE`;
   });
   return `## AVAILABILITY CHECK (rule-aware, deterministic)
 

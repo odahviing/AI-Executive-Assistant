@@ -71,6 +71,16 @@ export interface ResolveLocationInput {
   ownerLocationHint?: string;
   ownerIsOnlineHint?: boolean;
 
+  // v3.2.6 (RC4) — who's driving this booking. On the COLLEAGUE path a bare
+  // `is_online=true` is Sonnet-derived, not a real request (the colleague
+  // asked for a normal meeting; nobody asked for online). We don't let it
+  // force an online-only meeting — it falls through to the day-type tree
+  // (office on an office day, online on a home/remote day). On owner-path (or
+  // when unset, for back-compat) the hint is honored as before. A genuine
+  // remote signal still wins regardless via `anyParticipantRemote` / the
+  // different-TZ branches below.
+  initiatorRole?: 'owner' | 'colleague';
+
   // Move-only inputs (drive the preserve path)
   priorStartIso?: string;
   existingLocation?: string;
@@ -150,7 +160,13 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
     };
   }
   // Owner explicit is_online=true with no location → online, teams URL as location.
-  if (input.ownerIsOnlineHint === true) {
+  // v3.2.6 (RC4) — only honored when the OWNER is driving (or role unset,
+  // back-compat). On colleague-path this flag is Sonnet-derived with no real
+  // request behind it, so we DON'T force online-only here — fall through to the
+  // day-type tree (internal + same-TZ + office-day → office with a Teams backup
+  // link, never Teams-as-location). A real remote signal still forces online
+  // via anyParticipantRemote / the different-TZ branches.
+  if (input.ownerIsOnlineHint === true && input.initiatorRole !== 'colleague') {
     return {
       kind: 'resolved',
       isOnline: true,

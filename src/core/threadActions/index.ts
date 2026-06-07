@@ -126,11 +126,18 @@ export interface ThreadRosterMember {
 
 /**
  * Resolve the thread roster READ-ONLY (getPersonMemory — never resolvePerson,
- * which would create rows; the app_mention path already upserted participants).
- * Excludes the owner (the principal) and any id with no usable row falls back to
- * the raw id. Invariant 9: reading the thread persists nothing new here.
+ * which would create rows; in a real-channel thread-action path we DON'T upsert
+ * participants either — invariant 9 — so their people_memory row is often
+ * absent). `nameById` carries the live Slack-API display names the caller already
+ * fetched (users.info) so an unknown participant resolves to a human name instead
+ * of leaking a raw `U0…` id into the directive. Fallback order: live name → stored
+ * row name → raw id. Excludes the owner (the principal).
  */
-export function buildThreadRoster(participantIds: string[], ownerSlackId: string): ThreadRosterMember[] {
+export function buildThreadRoster(
+  participantIds: string[],
+  ownerSlackId: string,
+  nameById?: Map<string, string>,
+): ThreadRosterMember[] {
   const out: ThreadRosterMember[] = [];
   const seen = new Set<string>();
   for (const id of participantIds) {
@@ -139,7 +146,7 @@ export function buildThreadRoster(participantIds: string[], ownerSlackId: string
     const row = getPersonMemory(id);
     out.push({
       slackId: id,
-      name: row?.name ?? id,
+      name: nameById?.get(id) ?? row?.name ?? id,
       email: row?.email,
       isVip: row?.is_vip === 1,
     });

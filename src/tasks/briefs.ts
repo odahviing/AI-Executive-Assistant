@@ -283,7 +283,18 @@ function buildCoordItem(
   const isTerminal = ['resolved', 'cancelled', 'expired'].includes(r.state);
   if (!isTerminal && ownerCalendarEvents.length > 0 && det.proposed_slots) {
     try {
-      const slots = JSON.parse(det.proposed_slots as string) as string[];
+      // v3.x — proposed_slots may already be a parsed array (parseDetails
+      // deserializes the whole details_json, so a nested array stays an array)
+      // OR a JSON-stringified string (older rows / other writers). JSON.parse
+      // on an array coerces it to "2026-..,2026-.." and parses "2026" as a
+      // number → "Unexpected non-whitespace character after JSON at position 4"
+      // (observed in the morning brief 2026-06-07). Accept both shapes.
+      const raw = det.proposed_slots;
+      const slots: string[] = Array.isArray(raw)
+        ? (raw as string[])
+        : typeof raw === 'string'
+          ? (JSON.parse(raw) as string[])
+          : [];
       if (Array.isArray(slots) && slots.length > 0) {
         verified = verifyScheduledOutcome({ proposedSlots: slots, subjectKeyword: r.subject }, ownerCalendarEvents, profile);
       }
@@ -365,8 +376,15 @@ async function collectBriefingData(
   // Pre-fetch owner's calendar for verifier.
   let ownerCalendarEvents: CalendarEvent[] = [];
   try {
+    // v3.3.x (M-11) — narrowed today+30 → today+7. The brief renders today/
+    // tomorrow, the auto-categorize sweep covers today..today+7, and coord/
+    // outreach outcome verification matches proposed slots inside this window.
+    // A coordination proposed >7 days out simply won't get a "booked ✓" line in
+    // the brief until the date nears (verifyScheduledOutcome returns 'none' →
+    // no outcome block, the item stays "collecting"); it never prints a false
+    // "missing meeting". Calendar HEALTH keeps its own (now 21-day) window.
     const calFrom = DateTime.now().setZone(timezone).minus({ days: 2 }).toFormat('yyyy-MM-dd');
-    const calTo = DateTime.now().setZone(timezone).plus({ days: 30 }).toFormat('yyyy-MM-dd');
+    const calTo = DateTime.now().setZone(timezone).plus({ days: 7 }).toFormat('yyyy-MM-dd');
     ownerCalendarEvents = await getCalendarEvents(profile.user.email, calFrom, calTo, timezone);
   } catch (err) {
     logger.warn('brief — calendar fetch failed', { err: String(err).slice(0, 200) });

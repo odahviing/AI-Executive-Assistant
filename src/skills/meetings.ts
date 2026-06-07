@@ -1825,7 +1825,7 @@ ATTENDEES (v2.9.1):
     }
   }
 
-  getSystemPromptSection(profile: UserProfile, scopes?: string[]): string {
+  getSystemPromptSection(profile: UserProfile, scopes?: string[], isOwner?: boolean): string {
     const officeDays = profile.schedule.office_days.days.join(', ');
     const homeDays = profile.schedule.home_days.days.join(', ');
     const firstName = profile.user.name.split(' ')[0];
@@ -1971,7 +1971,9 @@ When asking \${firstName} or a colleague "what time?" for a booking, JUST ASK. D
 MEETINGS SKILL
 Everything about booking meetings — direct calendar operations AND multi-party Slack coordination — lives here. This is the only skill that touches the calendar.
 
-${firstName.toUpperCase()}'S SCHEDULE — these are HARD RULES. Proposing a time outside them is a scheduling error you must flag explicitly.
+${isOwner === false
+  ? `${firstName.toUpperCase()}'S SCHEDULE IS PRIVATE — you do NOT see or narrate his work hours, days, night-shift, lunch, or focus windows to a colleague. find_available_slots / coordinate_meeting enforce all of it (hours, days, buffers, floating blocks, free-time) server-side — propose only the times the tool returns, and never explain his schedule.`
+  : `${firstName.toUpperCase()}'S SCHEDULE — these are HARD RULES. Proposing a time outside them is a scheduling error you must flag explicitly.
 - Office days: ${officeDays} · ${officeHours}
 - Home days: ${homeDays} · ${homeHours}
 - Days not listed above are days OFF. Never propose work meetings on those days.
@@ -1998,7 +2000,7 @@ ${(() => {
   lines.push(`- These are PREFERENCES not rules — if nothing in the preferred window works, propose outside it and NARRATE the trade-off (*"Nothing in your usual window; best I have is Wed 11:30"*). Never refuse on a soft preference alone.`);
   lines.push(`- ${firstName} can override any preference at any time. The tool's \`relaxed:true\` flag bypasses these AND hard rules; each returned slot carries \`broken_rule_label\` so you narrate what's bypassed.`);
   return lines.join('\n');
-})()}${categoriesBlock}
+})()}`}${categoriesBlock}
 
 FLOATING BLOCKS (any profile-defined block: lunch, coffee, gym, prayer, etc.): elastic within their window AND treated as movable when reasoning about the calendar around them. They're not fixed walls — they bend to make room.
 - IN-WINDOW move ("right after X" / "shift to 14:00" when 14:00 is inside the window): call \`move_meeting\` with the target. Handler does window/buffer/alignment math. Don't compute the slot yourself, don't ask permission.
@@ -2012,11 +2014,11 @@ SLOT START TIMES — propose times on the :00/:15/:30/:45 grid. The booking tool
 - Allowed durations: ${profile.meetings.allowed_durations.join(' / ')} min.
 - NEVER BOOK WITHOUT KNOWING THE LENGTH. If the requester didn't say and it isn't clearly obvious, ASK. No silent defaults.
 - Physical meetings require an office day: ${profile.meetings.physical_meetings_require_office_day ? 'YES — in-person meetings only on office days' : 'no, flexible'}.
-- Minimum free-time protection (find_available_slots drops slots that would eat into this; don't second-guess it):
+${isOwner === false ? '' : `- Minimum free-time protection (find_available_slots drops slots that would eat into this; don't second-guess it):
   · Office days: ${profile.meetings.free_time_per_office_day_hours}h
-  · Home days: ${profile.meetings.free_time_per_home_day_hours ?? profile.meetings.free_time_per_office_day_hours}h
+  · Home days: ${profile.meetings.free_time_per_home_day_hours ?? profile.meetings.free_time_per_office_day_hours}h`}
 
-When ${firstName} asks "is X allowed?" or "can I do Y" and you're unsure, answer using the block above. If a user-proposed time falls OUTSIDE these hours/windows, SAY SO and ask if they want to override — do not silently accept it and do not silently refuse it.
+${isOwner === false ? '' : `When ${firstName} asks "is X allowed?" or "can I do Y" and you're unsure, answer using the block above. If a user-proposed time falls OUTSIDE these hours/windows, SAY SO and ask if they want to override — do not silently accept it and do not silently refuse it.`}
 
 REPORTING OPTIONS — short, like a human EA:
 When giving ${firstName} slot options, lead with 2–3 concrete best bets, one line each. Do NOT walk through every day. Do NOT list the days that didn't work. Do NOT re-summarize your reasoning. He'll ask for more if he wants it.

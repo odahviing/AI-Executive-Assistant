@@ -365,7 +365,14 @@ export async function tavilySearch(
 
   if (!res.ok) {
     const errBody = await res.text();
-    logger.error('Tavily API error', { status: res.status, body: errBody.slice(0, 300) });
+    // v3.3.1 (M-6) — transient provider errors (rate-limit / 5xx) are WARN, not
+    // ERROR. News fires one search per goal in parallel; on a Tavily outage every
+    // goal would log a full error → N error lines per brief. Downgrade the
+    // transient class so an outage is one warn-per-goal, not an error storm. A
+    // genuine 4xx (bad key / malformed request) stays ERROR. Throw is unchanged —
+    // callers (runResearch / news searchGoal) still fail open.
+    const transient = res.status === 429 || res.status >= 500;
+    logger[transient ? 'warn' : 'error']('Tavily API error', { status: res.status, body: errBody.slice(0, 300) });
     throw new Error(`Tavily HTTP ${res.status}: ${errBody.slice(0, 200)}`);
   }
 

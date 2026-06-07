@@ -29,7 +29,7 @@ import {
 import { getLinkedRequestIdForOutreach, getCoordJobsByParticipant, getCoordLifecycle } from '../db/jobs';
 import { createTask } from '../tasks';
 import { updateRequest, getOpenRequestsForColleague } from '../db/requests';
-import { calcResponseDeadline } from '../connectors/slack/coordinator';
+import { calcResponseDeadline } from '../utils/responseDeadline';
 import { getConnection } from '../connections/registry';
 import logger from '../utils/logger';
 

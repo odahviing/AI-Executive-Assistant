@@ -135,13 +135,6 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     .then(r => { botUserId = r.user_id as string; logger.debug('Bot user ID', { botUserId }); })
     .catch(() => { logger.warn('Could not fetch bot user ID — mention dedup disabled'); });
 
-  // Returns true only if the message mentions THIS bot specifically
-  // Used to prevent double-firing when app_mention and message.im both trigger
-  function containsSelfMention(text: string): boolean {
-    if (!botUserId) return false; // if we don't know our ID, don't filter
-    return text.includes(`<@${botUserId}>`);
-  }
-
   // ── Mention resolver ─────────────────────────────────────────────────────
   // Replace <@USERID> with "Real Name (slack_id: USERID)" so Claude can use
   // the Slack ID directly without a separate find_slack_user call.
@@ -1373,10 +1366,6 @@ export function createSlackAppForProfile(profile: UserProfile): App {
 
     if (!message.text) return;
 
-    // Skip self-mentions only in channels — in DMs, respond regardless
-    // (app_mention doesn't fire in DMs, so we'd lose the message otherwise)
-    if (containsSelfMention(message.text!) && !is1on1DM(channelId)) return;
-
     const ts       = message.ts;
     const threadTs = ('thread_ts' in message && message.thread_ts) ? message.thread_ts : ts;
 
@@ -1907,6 +1896,12 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       let mpimContext = '';
       let mpimMemberIds: string[] | undefined;
       let isMpimChannel = false;
+      // Live Slack display names resolved this event (users.info), shared between
+      // the MPIM-member loop and the thread-speaker loop so a person who is BOTH
+      // a member and a thread speaker is resolved + upserted ONCE, not twice
+      // (#L-3). Also lets the thread-action roster resolve real names instead of
+      // leaking raw U0… ids (#M-3, invariant 9 — channel threads stay read-only).
+      const threadNamesById = new Map<string, string>();
       try {
         const infoRes = await client.conversations.info({
           token: assistant.slack.bot_token,
@@ -1929,6 +1924,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
                 const info = await client.users.info({ token: assistant.slack.bot_token, user: id });
                 const u = info.user as any;
                 const name = u?.real_name || u?.name || id;
+                threadNamesById.set(id, name);
                 if (id !== profile.user.slack_user_id) {
                   upsertPersonMemory({ slackId: id, name, email: u?.profile?.email, timezone: u?.tz });
                 }
@@ -1989,10 +1985,19 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           if (uniqueUserIds.length > 0) {
             const nameEntries: string[] = [];
             for (const id of uniqueUserIds) {
+              // #L-3 — if the MPIM-member loop above already resolved (and, for an
+              // MPIM, upserted) this person this event, reuse the cached name; don't
+              // re-call users.info or re-upsert the same id.
+              const cachedName = threadNamesById.get(id);
+              if (cachedName) {
+                nameEntries.push(`${cachedName} (slack_id: ${id})`);
+                continue;
+              }
               try {
                 const info = await client.users.info({ token: assistant.slack.bot_token, user: id });
                 const u = info.user as any;
                 const name = u?.real_name || u?.name || id;
+                threadNamesById.set(id, name);
                 nameEntries.push(`${name} (slack_id: ${id})`);
                 // Load persona data for each thread participant.
                 // v3.2.6 (#14, invariant 9) — EPHEMERAL READ: when this is a
@@ -2059,13 +2064,14 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           });
           // Roster = thread speakers + anyone @mentioned in the mention text.
           const mentionedIds = [...new Set(
-            (event.text.match(/<@([A-Z0-9]+)>/g) ?? [])
+            ((event.text ?? '').match(/<@([A-Z0-9]+)>/g) ?? [])
               .map(m => m.replace(/[<@>]/g, ''))
               .filter(id => id !== botUserId),
           )];
           const roster = buildThreadRoster(
             [...threadParticipantIds, ...mentionedIds],
             profile.user.slack_user_id,
+            threadNamesById,
           );
           threadActionDirective = buildThreadActionDirective(action, roster, profile);
           logger.info('thread-action gate — owner present; routing', {

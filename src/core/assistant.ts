@@ -9,7 +9,7 @@ import {
   slugifyName,
   listPersonFiles,
 } from '../memory/peopleMemory';
-import { writeSkillPreferences } from '../utils/skillPreferences';
+import { writeSkillPreferences, PREF_SKILLS } from '../utils/skillPreferences';
 import { DateTime } from 'luxon';
 import logger from '../utils/logger';
 
@@ -338,7 +338,12 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
           properties: {
             skill: {
               type: 'string',
-              enum: ['general', 'calendar', 'meetings', 'brief', 'summary', 'social', 'knowledge', 'search', 'venue', 'news'],
+              // v3.3 — DERIVED from PREF_SKILLS (single source of truth) so the
+              // tool's accepted values can't drift from the allowlist that
+              // fileForSkill / formatSkillPreferencesBlock honor. That drift is
+              // exactly what half-broke skill='news' (enum patched, but PREF_SKILLS
+              // wasn't → fileForSkill returned null → saves failed at the allowlist).
+              enum: [...PREF_SKILLS],
               description: "Which area the preference governs. 'calendar' = calendar health / hygiene; 'meetings' = booking & scheduling style; 'brief' = the morning briefing (what to lead with, emphasize, skip, length); 'news' = the news skill's topics / source steer; 'general' = voice, how to address him, cross-cutting. Pick the area whose tools/behavior the preference changes.",
             },
             mode: {
@@ -786,9 +791,9 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
           skill,
           mode,
           created: result.created,
-          ...(result.duplicate ? { duplicate: true } : {}),
+          ...(result.duplicate ? { duplicate: true, matched_line: result.matchedLine } : {}),
           _note: result.duplicate
-            ? `You already have a matching ${skill} preference — nothing added (re-teaching is a no-op). To CHANGE it, give me the new wording with mode='replace'.`
+            ? `Not added — you already have a matching ${skill} preference: "${result.matchedLine ?? ''}". If the owner is REFINING or changing it, call again with mode='replace' passing the full updated list (it backs up the old file first). If it's genuinely the same, you're done — just tell him it's already in place.`
             : `Saved to your ${skill} preferences. It's in force from your next ${skill}-related turn — no need to repeat it.`,
         };
       }

@@ -4,11 +4,15 @@ description: High-level facts about the Maelle platform — stack, current versi
 type: project
 ---
 
-Maelle is an AI executive assistant platform (**v3.3.1**) built in Node.js/TypeScript. Runs primarily on Slack, backed by Microsoft Graph (Outlook calendar), Anthropic Claude Sonnet 4.6 for reasoning (with optional Vertex AI provider via `LLM_PROVIDER` env var), SQLite via better-sqlite3. Per-user YAML profiles in `config/users/`. Multi-tenant: one deployment, N executives, one Slack app per assistant identity.
+Maelle is an AI executive assistant platform (**v3.3.2**) built in Node.js/TypeScript. Runs primarily on Slack, backed by Microsoft Graph (Outlook calendar), Anthropic Claude Sonnet 4.6 for reasoning (with optional Vertex AI provider via `LLM_PROVIDER` env var), SQLite via better-sqlite3. Per-user YAML profiles in `config/users/`. Multi-tenant: one deployment, N executives, one Slack app per assistant identity.
 
 **Mission: agent that works as a human EA.** Filter for every decision: "would a real human EA do this?" — outranks speed, completeness, elegance.
 
 **Runs under `npm run dev` on the owner's laptop** (PM2 + auto-build watcher are wired but currently OFF). Restart needed to pick up code changes. GitHub remains the bug data source.
+
+## v3.3.2 — audit wave 2 (latency + layering + news source-steer)
+
+Second audit-consumption pass across chats. **Latency:** `briefIntent`/`dateVerifier`/`taskContinuity` flipped Sonnet→Haiku (joins `addresseeGate`/`humanGate` from 3.3.1). **Layering (T-1):** `calcResponseDeadline` moved to `utils/responseDeadline.ts` — core OutreachCoreSkill no longer imports a Slack connector. **`update_my_preferences` enum now derived from `PREF_SKILLS`** (can't drift). **News source-steer — proper M-7 fix:** the planner now EMITS structured `preferred_domains`/`avoid_domains` from the free-text `news.md` → Tavily include/exclude (over-narrow fallback retries unfiltered); **code still never parses `news.md`** — the LLM emits the structure (supersedes the 3.3.1 "steer removed" stopgap). Plus M-5 (anchored seen-log merge), M-6 (Tavily transient→warn). Cross-cutting (audit chat): M-3/M-11/M-13/M-14/M-15/M-19, L-2/3/4, C-3 (meetings/calendar, thread-action raw-id-leak→name map, language detect util). news.ts audited clean after concurrent edits.
 
 ## v3.3.1 — audit hardening + calendar-health auto-move
 

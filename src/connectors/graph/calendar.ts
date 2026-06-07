@@ -182,7 +182,7 @@ function toEndOfDayLocal(dateStr: string, timezone: string): string {
  * Output: chronological regardless of internal day walk order.
  */
 export function pickSpreadSlots(
-  slots: Array<{ start: string }>,
+  slots: Array<{ start: string; disturbs_floating_block?: boolean }>,
   timezone: string,
   count = 3,
   anchorDay?: string,
@@ -198,13 +198,20 @@ export function pickSpreadSlots(
   const MAX_PER_DAY = 2;
 
   // Group candidates by local day.
-  const byDay = new Map<string, Array<{ start: string; dt: DateTime }>>();
+  const byDay = new Map<string, Array<{ start: string; dt: DateTime; disturbs: boolean }>>();
   for (const s of slots) {
     const dt = DateTime.fromISO(s.start).setZone(timezone);
     const day = dt.toFormat('yyyy-MM-dd');
     let bucket = byDay.get(day);
     if (!bucket) { bucket = []; byDay.set(day, bucket); }
-    bucket.push({ start: s.start, dt });
+    bucket.push({ start: s.start, dt, disturbs: s.disturbs_floating_block === true });
+  }
+  // v3.2.6 (RC1) — within each day, prefer slots that DON'T disturb a floating
+  // block (lunch). Stable sort keeps chronological order inside each group, so
+  // the per-day pick below takes the earliest non-disturbing slot first and
+  // only falls to a block-displacing one when nothing else is free.
+  for (const bucket of byDay.values()) {
+    bucket.sort((a, b) => (a.disturbs ? 1 : 0) - (b.disturbs ? 1 : 0));
   }
 
   // Chronological day list. Slots from findAvailableSlots are already
@@ -641,7 +648,7 @@ export async function findAvailableSlots(params: {
       unresolved: Array<{ date: string; location: string }>;
     };
   };
-}): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string }>> {
+}): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
   const maxSearchDays = params.maxSearchDays ?? 21;
@@ -676,7 +683,7 @@ export async function findAvailableSlots(params: {
   const absoluteCap = initialFrom.plus({ days: maxSearchDays });
   let currentTo = initialTo;
 
-  let candidates: Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string }> = [];
+  let candidates: Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean }> = [];
 
   while (true) {
     candidates = [];
@@ -864,8 +871,11 @@ export async function findAvailableSlots(params: {
     // Collect block-event ranges and subtract from allBusy (exact-match
     // drop; we don't split partials since floating blocks don't overlap
     // other events by construction).
+    // v3.2.6 (RC1) — hoisted to function scope so the per-slot tagging below
+    // can flag candidates that overlap a floating block's CURRENT placement
+    // (i.e. would force it to shift). Consumers prefer non-disturbing slots.
+    const blockRanges: Array<{ start: number; end: number }> = [];
     if (floatingBlocks.length > 0 && ownerEventsForFb.length > 0) {
-      const blockRanges: Array<{ start: number; end: number }> = [];
       for (const evt of ownerEventsForFb) {
         if (evt.isCancelled || evt.isAllDay || evt.showAs === 'free') continue;
         for (const block of floatingBlocks) {
@@ -1027,7 +1037,7 @@ export async function findAvailableSlots(params: {
     // 10:30, 10:45").
     const MAX_PER_DAY = 4;
     const PREFERRED_GAP_MS = 30 * 60 * 1000;
-    const dayBuckets: Map<string, Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other' }>> = new Map();
+    const dayBuckets: Map<string, Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean }>> = new Map();
 
     // v2.3.6 (#71a) — diagnostic rejection counters. Helps debug "why was 17:45
     // rejected?" by showing the per-rule breakdown at the end of the search.
@@ -1352,10 +1362,17 @@ export async function findAvailableSlots(params: {
       // leak and a real risk of conversion errors.
       const cursorLocal = DateTime.fromJSDate(cursor).setZone(params.timezone);
       const slotEndLocal = DateTime.fromJSDate(slotEnd).setZone(params.timezone);
+      // v3.2.6 (RC1) — does this slot sit on a floating block's CURRENT
+      // placement? If so, booking here forces the block to shift (allowed, but
+      // not preferred). Consumers prefer slots that leave the block untouched.
+      const slotStartMs = cursor.getTime();
+      const slotEndMs = slotEnd.getTime();
+      const disturbsBlock = blockRanges.some(r => slotStartMs < r.end && slotEndMs > r.start);
       dayBuckets.get(dayKey)!.push({
         start: cursorLocal.toISO()!,
         end: slotEndLocal.toISO()!,
         day_type: classifyDay(dayName),
+        disturbs_floating_block: disturbsBlock,
       });
       cursor = new Date(cursor.getTime() + step);
     }

@@ -373,7 +373,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       const inboundPreview = (userMessage ?? '').slice(0, 200).replace(/\s+/g, ' ').trim();
       const distinctTools = [...new Set(
         (result.toolSummaries ?? [])
-          .map(s => s.match(/^\[([a-z_]+)/)?.[1] ?? '')
+          .map(s => s.match(/^\[([a-z0-9_]+)/)?.[1] ?? '')
           .filter(name => name.length > 0)
       )];
       const toolHint = distinctTools.length > 0 ? ` (${distinctTools.join(', ')})` : '';

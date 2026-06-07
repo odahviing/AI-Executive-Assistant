@@ -2,6 +2,36 @@
 
 ---
 
+## 3.3.2 — audit wave 2: latency Haiku-flips, Connection-layering, news source-steer + cross-cutting fixes
+
+Second consumption pass over the v3.3.0 audit (`.claude/V3_3_0_AUDIT_HANDOFF.md`) across several chats: latency model-flips, a Connection-abstraction layering fix, the news source-steer done the right way (LLM-emitted, not parsed), and a batch of meetings/calendar/cross-cutting corrections. Patch — no new capabilities. (news.ts was edited by multiple chats this wave; audited clean — no duplicate/half-merged defs, types + callers consistent, typecheck green.)
+
+### Changed (latency / cost)
+
+- **`briefIntent`, `dateVerifier`, `taskContinuity` flipped Sonnet → Haiku** — all bounded classifiers/matchers. Completes the PERF Haiku cluster started in 3.3.1 (`addresseeGate`/`humanGate`). ([briefIntent.ts](src/core/briefIntent.ts), [dateVerifier.ts](src/utils/dateVerifier.ts), [taskContinuity.ts](src/core/taskContinuity.ts)) (audit PERF-9/10/11)
+
+### Changed (architecture hygiene)
+
+- **`calcResponseDeadline` moved out of the Slack connector** into [utils/responseDeadline.ts](src/utils/responseDeadline.ts). The core `OutreachCoreSkill` no longer imports from `connectors/slack/coordinator` — closes the Connection-abstraction leak that would have broken the Email/WhatsApp consumers. (audit T-1)
+- **`update_my_preferences` skill enum is now derived from `PREF_SKILLS`** so the tool schema and the runtime allowlist can't drift (the drift was the root cause of the 3.3.1 news-enum break). ([assistant.ts](src/core/assistant.ts))
+
+### Fixed (news skill)
+
+- **M-7 — source steer is now LLM-EMITTED, not parsed.** The Haiku planner outputs `preferred_domains` / `avoid_domains` from the owner's free-text `news.md` → Tavily include/exclude, with an over-narrow fallback (a tight "prefer X" that returns nothing retries unfiltered). Code never parses the MD. Upgrades "prefer Stratechery" / "skip tabloids" from soft (compose-only) to real search steer. ([news.ts](src/skills/news.ts))
+- **M-5** — seen-log today-section merge uses an anchored line-start regex (was a literal-string `.replace`).
+- **M-6** — transient Tavily 429/5xx log at `warn`, not `error` (kills the per-goal error storm on a provider outage; fail-open unchanged).
+- Removed a duplicate `'news'` in `PREF_SKILLS` (merge artifact).
+
+### Fixed (cross-cutting — audit chat; see handoff for definitions)
+
+- Shipped this wave per the audit chat tally: **M-3, M-11, M-13, M-14, M-15, M-19, L-2, L-3, L-4, C-3** — spanning meetings/calendar correctness ([planMeeting.ts](src/skills/meetings/planMeeting.ts), [resolveLocation.ts](src/utils/resolveLocation.ts), [workHours.ts](src/utils/workHours.ts), [availabilityPreCheck.ts](src/utils/availabilityPreCheck.ts)), a thread-action raw-Slack-id leak into the directive (now passes a live name map — CH-10, [threadActions/index.ts](src/core/threadActions/index.ts)), a message-language detection util ([detectMessageLanguage.ts](src/utils/detectMessageLanguage.ts)), the summary-action follow-up dispatcher, and cleanup. Full definitions + the deferred set live in `.claude/V3_3_0_AUDIT_HANDOFF.md`.
+
+### Not changed / deferred
+
+- Design refactors D-1…D-9 (orchestrator peel, Precheck interface, CI tool-map test, invariants doc) and the remaining TIER-2/3 items stay open in the handoff for later waves.
+
+---
+
 ## 3.3.1 — v3.3.0 audit hardening wave + calendar-health auto-move fix
 
 A propose-only audit (8 subagents, ~80 findings, filed at `.claude/V3_3_0_AUDIT_HANDOFF.md`) ran against 3.3.0. This patch consumes the critical + high-value waves across several chats, plus a fix to the recurring calendar-health auto-reschedule bug, plus news-skill correctness. No new capabilities — hardening, latency, and bug fixes. (Full finding set + the deferred items live in the handoff.)

@@ -335,6 +335,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       anyParticipantRemote,
       ownerLocationHint: input.locationHint,
       ownerIsOnlineHint: input.isOnlineHint,
+      initiatorRole: input.initiator,  // v3.2.6 (RC4) — gate baseless colleague-path online
       priorStartIso: input.priorSlotStartIso,
       existingLocation: input.existingEventLocation,
       existingIsOnline: input.existingEventIsOnline,

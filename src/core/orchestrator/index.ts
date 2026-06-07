@@ -889,7 +889,27 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // goal, it plans focused searches, fetches + reads real sources, and returns
   // them so the draft is grounded and cited.
 
+  // v3.3.x (RC3) — per-turn reply-language reinforcement. The static
+  // CURRENT-TURN-WINS language rule decays across a thread (drifts to Hebrew
+  // when Hebrew tool-results / memory bleed in). Re-stamping the detected
+  // language into the UNCACHED dynamic block every turn can't decay. Fires only
+  // for scripts that actually drift (Hebrew/Cyrillic/Arabic); Latin-script input
+  // returns null and falls through to the static rule. Voice messages are
+  // exempt — they reply in English regardless (systemPrompt VOICE rule, #12).
+  let languageDirectiveBlock = '';
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { detectMessageLanguage } = require('../../utils/detectMessageLanguage') as
+      typeof import('../../utils/detectMessageLanguage');
+    const isVoice = typeof userMessage === 'string' && userMessage.trimStart().startsWith('[Voice message]');
+    const lang = isVoice ? null : detectMessageLanguage(userMessage);
+    if (lang) {
+      languageDirectiveBlock = `LANGUAGE (this turn): the sender wrote in ${lang} — reply in ${lang}. This overrides any prior-turn language and the language of anything you read this turn (tool results, memory, calendar subjects).`;
+    }
+  } catch (_) { /* detection failure is non-fatal — static rule still governs */ }
+
   const systemBlocksDynamic = [
+    languageDirectiveBlock,
     priorOutboundBlock,
     availabilityPrecheckBlock,
     freeTimePrecheckBlock,
@@ -1935,7 +1955,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         // Build a compact human-ish summary of what fired
         const toolNames = toolCallSummaries.map(s => {
           // Tool summaries look like "[tool_name: short detail]" or "[tool_name]"
-          const m = s.match(/^\[([a-z_]+)/);
+          const m = s.match(/^\[([a-z0-9_]+)/);
           return m ? m[1] : 'something';
         });
         const distinct = [...new Set(toolNames)];

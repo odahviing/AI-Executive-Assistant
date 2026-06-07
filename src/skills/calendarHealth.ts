@@ -1250,7 +1250,13 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                       searchTo,
                       profile,
                     });
-                    const top = slots[0];
+                    // v3.2.6 (RC1) — prefer a slot that leaves floating blocks
+                    // (lunch) untouched. Only displace a block when NO
+                    // non-disturbing slot is free this week. This stops the
+                    // "moved Eli onto lunch at 12:45, then shoved lunch to
+                    // 13:30" damage — a free post-lunch slot wins over the
+                    // earliest-but-lunch-colliding one.
+                    const top = slots.find(s => !s.disturbs_floating_block) ?? slots[0];
                     if (!top) {
                       // v3.2.6 (Part A) — no in-week slot free for everyone. Per
                       // owner direction: do NOT push to next week — return it to him.

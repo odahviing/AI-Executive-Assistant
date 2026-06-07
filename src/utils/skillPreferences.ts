@@ -53,12 +53,12 @@ export const PREF_SKILLS = [
   'calendar',
   'meetings',
   'brief',
+  'news',
   'summary',
   'social',
   'knowledge',
   'search',
   'venue',
-  'news',
 ] as const;
 export type PrefSkill = (typeof PREF_SKILLS)[number];
 
@@ -128,7 +128,7 @@ export async function writeSkillPreferences(
   skill: string,
   mode: 'add' | 'replace',
   text: string,
-): Promise<{ ok: true; created: boolean; duplicate?: boolean } | { ok: false; error: string }> {
+): Promise<{ ok: true; created: boolean; duplicate?: boolean; matchedLine?: string } | { ok: false; error: string }> {
   const file = fileForSkill(profile, skill);
   if (!file) return { ok: false, error: 'invalid_skill' };
   const clean = text.trim();
@@ -144,12 +144,21 @@ export async function writeSkillPreferences(
       const root = rootForProfile(profile);
       if (!existsSync(root)) mkdirSync(root, { recursive: true });
       const existed = existsSync(file);
+      const priorFull = existed ? readFileSync(file, 'utf8') : '';
 
       let next: string;
       if (mode === 'replace') {
         next = clean;
+        // M-2 (v3.3) — back up before a destructive overwrite. `replace` blows
+        // away the whole file; a misfired "full new list" (Sonnet passing a
+        // single bullet) would otherwise wipe every preference with no recovery.
+        // Best-effort single <file>.bak, restorable by hand.
+        if (existed && priorFull.trim()) {
+          try { await fs.writeFile(`${file}.bak`, priorFull, 'utf8'); }
+          catch (e) { logger.warn('skillPreferences — .bak write failed', { skill, err: String(e).slice(0, 120) }); }
+        }
       } else {
-        const prior = existed ? readFileSync(file, 'utf8').trimEnd() : '';
+        const prior = priorFull.trimEnd();
         // normalize the new line to a single bullet
         const line = clean.replace(/^[-*]\s*/, '').trim();
         // Dedup (v3.x) — skip an append that's substantially the same as an
@@ -161,16 +170,22 @@ export async function writeSkillPreferences(
         const newTokens = new Set(norm(line).split(' ').filter(Boolean));
         if (newTokens.size > 0) {
           for (const pl of prior.split('\n')) {
-            if (!pl.trim().startsWith('-')) continue;
-            const plTokens = new Set(norm(pl).split(' ').filter(Boolean));
+            const t = pl.trim();
+            // M-4 (v3.3) — compare against ANY existing content line, not only
+            // '-' bullets (a prior `replace` may not have used dashes). Skip
+            // blanks and markdown headers.
+            if (!t || t.startsWith('#')) continue;
+            const plTokens = new Set(norm(t).split(' ').filter(Boolean));
             if (plTokens.size === 0) continue;
-            const inter = [...newTokens].filter(t => plTokens.has(t)).length;
+            const inter = [...newTokens].filter(x => plTokens.has(x)).length;
             const union = new Set([...newTokens, ...plTokens]).size;
             if (union > 0 && inter / union >= 0.6) {
-              logger.info('skillPreferences add — skipped near-duplicate', {
+              logger.info('skillPreferences add — near-duplicate, not appended', {
                 skill, similarity: Math.round((inter / union) * 100) / 100,
               });
-              return { ok: true, created: false, duplicate: true };
+              // M-5 (v3.3) — surface the matched line so the caller can offer a
+              // REPLACE instead of silently dropping a refinement of it.
+              return { ok: true, created: false, duplicate: true, matchedLine: t };
             }
           }
         }

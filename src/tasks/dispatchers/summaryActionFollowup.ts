@@ -25,7 +25,7 @@ import {
   createOutreachJob,
   getPersonMemory,
 } from '../../db';
-import { calcResponseDeadline } from '../../connectors/slack/coordinator';
+import { calcResponseDeadline } from '../../utils/responseDeadline';
 import { getConnection } from '../../connections/registry';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';

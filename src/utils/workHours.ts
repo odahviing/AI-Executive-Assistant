@@ -191,15 +191,19 @@ export function computeHealthCheckWindow(profile: UserProfile): {
 
   const now = DateTime.now().setZone(tz);
 
-  // Walk today..today+6 and take the LAST workday seen across the full
-  // 7-day window. The previous "stop at first non-workday" heuristic
+  // Walk today..today+(HEALTH_WINDOW_DAYS-1) and take the LAST workday seen
+  // across the full window. The previous "stop at first non-workday" heuristic
   // assumed contiguous workweeks — on a non-contiguous schedule (e.g.
   // Sun/Mon/Wed/Thu with Tuesday off), calling this on Sunday would
   // STOP at Tuesday and return Monday, losing Wednesday + Thursday from
   // the coverage window. With a calendar that mixes office days through
-  // the week, just take the furthest workday inside 7 days.
+  // the week, just take the furthest workday inside the window.
+  // v3.3.x (M-11) — widened 7 → 21 days: the health sweep now looks ~3 weeks
+  // out so conflicts/gaps surface with runway to fix them. Independent of the
+  // brief's calendar fetch (which was narrowed to today+7 in the same change).
+  const HEALTH_WINDOW_DAYS = 21;
   let endWorkday = now;
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < HEALTH_WINDOW_DAYS; i++) {
     const d = now.plus({ days: i });
     if (workDaySet.has(d.toFormat('EEEE'))) {
       endWorkday = d;

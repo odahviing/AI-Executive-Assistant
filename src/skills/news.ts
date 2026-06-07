@@ -45,8 +45,7 @@ const SEEN_LOG_DAYS = 7;               // rolling dedup window (also the MAX art
 
 // ── Shared bundle shapes (mirror runResearch's return) ──────────────────────
 export interface NewsSource { title?: string; url: string; snippet?: string; published?: string }
-export interface NewsReading { url: string; title?: string; content: string }
-export interface NewsBundle { goals: string[]; readings: NewsReading[]; sources: NewsSource[] }
+export interface NewsBundle { goals: string[]; sources: NewsSource[] }
 
 export interface GatherNewsOpts {
   /** Company/org names of people on today's calendar (derived fresh, never stored). */
@@ -57,7 +56,7 @@ export interface GatherNewsOpts {
   recencyDays?: number;
 }
 
-const EMPTY_BUNDLE: NewsBundle = { goals: [], readings: [], sources: [] };
+const EMPTY_BUNDLE: NewsBundle = { goals: [], sources: [] };
 
 // ── news.md parsing ─────────────────────────────────────────────────────────
 // The file is owner-taught free text. The LLM reads it verbatim; code does
@@ -86,54 +85,90 @@ export function parseNewsPrefs(md: string): ParsedNewsPrefs {
 // the owner wrote in the file. Fail-open: on any error, fall back to a
 // deterministic line/company extraction so the gather still runs.
 
+// M-7 (v3.3.x) — domain steer is EMITTED by the LLM planner as structured
+// output, never parsed out of the owner's free-text MD by code. news.md stays
+// pure taste ("I follow web-security; prefer Stratechery, skip tabloids"); the
+// planner translates that intent → bare hostnames we hand to Tavily. Code reads
+// STRUCTURE from the LLM, not prose — so any phrasing works and the
+// "code-doesn't-parse-the-MD" invariant (docs/AGENT_LOOP_INVARIANTS.md #7) holds.
+interface NewsPlan { goals: string[]; preferredDomains: string[]; avoidDomains: string[] }
+const DOMAIN_STEER_CAP = 8;
+
+/** Sanitize a domain the PLANNER emitted (this is LLM structured output, NOT a
+ *  free-text MD parse): bare hostname, lowercased, scheme/www/path stripped;
+ *  dropped if it doesn't look like a domain. */
+function cleanEmittedDomain(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  let d = raw.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '');
+  d = d.split('/')[0].split('?')[0].trim();
+  if (!d.includes('.') || /\s/.test(d)) return null;
+  return d;
+}
+function cleanDomainList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const x of raw) {
+    const d = cleanEmittedDomain(x);
+    if (d && !seen.has(d)) { seen.add(d); out.push(d); if (out.length >= DOMAIN_STEER_CAP) break; }
+  }
+  return out;
+}
+
 async function planNewsGoals(
   interestsText: string,
   meetingCompanies: string[],
   cap: number,
-): Promise<string[]> {
+): Promise<NewsPlan> {
+  const empty: NewsPlan = { goals: [], preferredDomains: [], avoidDomains: [] };
   const companiesLine = meetingCompanies.length > 0
     ? `\nCompanies of people on today's calendar (prioritize — these are timely): ${meetingCompanies.join(', ')}.`
     : '';
-  if (!interestsText && meetingCompanies.length === 0) return [];
+  if (!interestsText && meetingCompanies.length === 0) return empty;
 
   const prompt = `You plan a personalized morning NEWS brief for an executive assistant.
 
-OWNER'S STANDING NEWS INTERESTS (free text he taught — may include "skip X" / "ignore Y" instructions):
+OWNER'S STANDING NEWS INTERESTS (free text he taught — may include "skip X" / "ignore Y" topic instructions AND source preferences like "I like Stratechery" / "skip tabloids"):
 ${interestsText || '(none)'}
 ${companiesLine}
 
-Output STRICT JSON only: {"goals": ["...", "..."]}
-- Up to ${cap} concise, concrete web-search goals for TODAY's news (e.g. "EU AI Act enforcement news", "Acme Corp funding and product news").
-- HONOR any skip/ignore instruction — never produce a goal for an excluded topic.
-- Prefer the meeting companies (timely) and the owner's top interests.
-- Describe the TOPIC, not a task. No more than ${cap} goals.`;
+Output STRICT JSON only: {"goals": ["...","..."], "preferred_domains": ["..."], "avoid_domains": ["..."]}
+- goals: up to ${cap} concise, concrete web-search goals for TODAY's news (e.g. "EU AI Act enforcement news", "Acme Corp funding and product news"). HONOR any skip/ignore TOPIC instruction — never produce a goal for an excluded topic. Prefer the meeting companies (timely) + his top interests. Describe the TOPIC, not a task. No more than ${cap} goals.
+- preferred_domains / avoid_domains: translate any SOURCE preference in his free text into bare hostnames (e.g. "I like Stratechery" → preferred_domains ["stratechery.com"]; "skip the Daily Mail / tabloids" → avoid_domains ["dailymail.co.uk"]). ONLY a domain he clearly named or unambiguously implied — never invent one. Bare hostnames only (no http://, no paths). Empty arrays when he expressed no source preference.`;
 
   try {
     const res = await getAnthropicClient().messages.create({
       model: NEWS_MODEL,
-      max_tokens: 300,
+      max_tokens: 350,
       messages: [{ role: 'user', content: prompt }],
     });
     const text = ((res.content[0] as Anthropic.TextBlock).text ?? '').trim();
     const m = text.match(/\{[\s\S]*\}/);
     if (m) {
-      const parsed = JSON.parse(m[0]) as { goals?: unknown };
+      const parsed = JSON.parse(m[0]) as { goals?: unknown; preferred_domains?: unknown; avoid_domains?: unknown };
       const goals = Array.isArray(parsed.goals)
         ? parsed.goals.filter((g): g is string => typeof g === 'string' && g.trim().length > 0).map(g => g.trim())
         : [];
-      if (goals.length > 0) return goals.slice(0, cap);
+      if (goals.length > 0) {
+        return {
+          goals: goals.slice(0, cap),
+          preferredDomains: cleanDomainList(parsed.preferred_domains),
+          avoidDomains: cleanDomainList(parsed.avoid_domains),
+        };
+      }
     }
   } catch (err) {
     logger.warn('news — goal planning failed, using deterministic fallback', { err: String(err).slice(0, 160) });
   }
 
-  // Deterministic fallback: company goals + interest bullet lines, capped.
+  // Deterministic fallback: company goals + interest bullet lines, capped. No
+  // domain steer in the fallback (deriving it needs the LLM; broad is safe).
   const companyGoals = meetingCompanies.map(c => `${c} company news`);
   const interestGoals = interestsText
     .split('\n')
     .map(l => l.replace(/^[-*]\s*/, '').trim())
     .filter(l => l.length > 0 && !/^skip\b|^ignore\b/i.test(l));
-  return [...new Set([...companyGoals, ...interestGoals])].slice(0, cap);
+  return { goals: [...new Set([...companyGoals, ...interestGoals])].slice(0, cap), preferredDomains: [], avoidDomains: [] };
 }
 
 // ── Per-goal lightweight search (efficiency) ─────────────────────────────────
@@ -171,10 +206,15 @@ async function searchGoal(goal: string, recency: number, steer: DomainFilterOpts
         published: it.published_date,
       }));
   };
-  // Tavily runs unsteered (steer is always {}); the over-narrow guard the
-  // pre-v3.3.x parser needed is gone — source preferences live in the LLM
-  // compose pass now.
-  return run(steer);
+  // M-7 (v3.3.x) — domain steer is back, but LLM-emitted (not parsed). Over-narrow
+  // guard: if a preferred-domain (include) filter returns nothing for this goal,
+  // retry once WITHOUT the include (keep any avoid/exclude) so a tight "prefer X"
+  // never blanks a topic X had no news on today. Fail-open toward coverage.
+  let sources = await run(steer);
+  if ((steer.includeDomains?.length ?? 0) > 0 && sources.length === 0) {
+    sources = await run({ excludeDomains: steer.excludeDomains });
+  }
+  return sources;
 }
 
 /**
@@ -186,18 +226,22 @@ export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}
   try {
     const recency = opts.recencyDays ?? NEWS_MORNING_RECENCY_DAYS;
     const prefs = parseNewsPrefs(readSkillPreferences(profile, 'news'));
-    // No code-side domain steer — owner source preferences live in the free-
-    // text interest corpus and are honored by Sonnet at goal-planning + compose
-    // time. Tavily runs unsteered.
-    const steer: DomainFilterOpts = {};
 
-    // Goal set: a narrowed topic short-circuits the planner; otherwise plan from
-    // the interest corpus + today's meeting companies.
+    // Goal set: a narrowed topic short-circuits the planner (the owner asked for
+    // ONE thing — search it broad, the compose weighs sources). Otherwise the LLM
+    // planner emits goals AND structured source steer (preferred/avoid domains)
+    // from his free-text interests — code never parses the MD (M-7).
     let goals: string[];
+    let steer: DomainFilterOpts = {};
     if (opts.topic && opts.topic.trim()) {
       goals = [opts.topic.trim()];
     } else {
-      goals = await planNewsGoals(prefs.interestsText, opts.meetingCompanies ?? [], NEWS_GOAL_CAP);
+      const plan = await planNewsGoals(prefs.interestsText, opts.meetingCompanies ?? [], NEWS_GOAL_CAP);
+      goals = plan.goals;
+      steer = {
+        includeDomains: plan.preferredDomains.length ? plan.preferredDomains : undefined,
+        excludeDomains: plan.avoidDomains.length ? plan.avoidDomains : undefined,
+      };
     }
     if (goals.length === 0) {
       logger.info('news — no goals (empty interests + no meeting companies); empty bundle');
@@ -219,8 +263,7 @@ export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}
     }
 
     logger.info('news — gather done', { goals: goals.length, sources: sources.length });
-    // readings stays empty — the compose writes from snippets (cost fix).
-    return { goals, sources, readings: [] };
+    return { goals, sources };
   } catch (err) {
     logger.warn('news — gatherNews failed, returning empty bundle', { err: String(err).slice(0, 200) });
     return { ...EMPTY_BUNDLE };
@@ -400,9 +443,13 @@ export async function writeSeenLog(profile: UserProfile, bundle: NewsBundle): Pr
       if (lines.length === 0) return;
 
       // Merge into today's section if it already exists, else prepend a new one.
+      // v3.3.1 (M-5) — match the header as a LINE (anchored regex), not a literal
+      // substring. A bullet whose gist happens to contain "## <today>" could
+      // otherwise be matched by the old string .replace and corrupt the log.
+      const todayHeaderRe = new RegExp(`^## ${today}\\s*$`, 'm');
       let next: string;
-      if (pruned.includes(`## ${today}`)) {
-        next = pruned.replace(`## ${today}`, `## ${today}\n${lines.join('\n')}`);
+      if (todayHeaderRe.test(pruned)) {
+        next = pruned.replace(todayHeaderRe, `## ${today}\n${lines.join('\n')}`);
       } else {
         const todaySection = `## ${today}\n${lines.join('\n')}`;
         next = pruned ? `${todaySection}\n\n${pruned}` : todaySection;
