@@ -68,7 +68,7 @@ export function pickUncategorizedEvents(
   return events.filter(ev => {
     if (ev.isCancelled) return false;
     if (ev.isAllDay) return false;
-    const evCategories = (ev as unknown as { categories?: string[] }).categories ?? [];
+    const evCategories = ev.categories ?? [];
     const hasKnown = evCategories.some(c => knownCategoryNames.has(c.toLowerCase()));
     return !hasKnown;
   });
@@ -225,7 +225,7 @@ Example: [1] Interview | Subject mentions "candidate", external attendee from a 
     // Apply via Graph patch — preserve any existing categories that aren't
     // ours (e.g. someone manually tagged the event with something not in
     // profile; don't strip that).
-    const existing = (event as unknown as { categories?: string[] }).categories ?? [];
+    const existing = event.categories ?? [];
     const merged = [...existing, canonicalName];
     try {
       await updateMeeting({

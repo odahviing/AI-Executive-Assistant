@@ -870,7 +870,7 @@ export async function findAvailableSlots(params: {
         if (evt.isCancelled || evt.isAllDay || evt.showAs === 'free') continue;
         for (const block of floatingBlocks) {
           if (fb.isFloatingBlockEvent(
-            { subject: evt.subject, categories: (evt as unknown as { categories?: unknown }).categories },
+            { subject: evt.subject, categories: evt.categories },
             block,
           )) {
             const eStart = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' })
@@ -1236,7 +1236,7 @@ export async function findAvailableSlots(params: {
           for (const evt of ownerEventsForFb) {
             if (evt.isCancelled || evt.isAllDay || evt.showAs === 'free') continue;
             if (fb.isFloatingBlockEvent(
-              { subject: evt.subject, categories: (evt as unknown as { categories?: unknown }).categories },
+              { subject: evt.subject, categories: evt.categories },
               block,
             )) continue;  // elastic — skip
             const eStart = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' })

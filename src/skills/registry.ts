@@ -495,6 +495,27 @@ export async function executeSkillTool(
   args: Record<string, unknown>,
   context: SkillContext,
 ): Promise<unknown> {
+  // Defense-in-depth chokepoint (T-2). Today the "owner-only" perimeter has
+  // two layers:
+  //   (1) Positive allowlist at SHIPPING — `filterToolsByScope` removes
+  //       owner-only tools from the catalog Sonnet sees on a colleague turn.
+  //       Sonnet "can't call what it can't see" → the practical wall.
+  //   (2) Hard-block at HANDLE — a small `ownerOnlyTools` Set in
+  //       `core/assistant.ts:380` refuses 5 names if a colleague somehow
+  //       names them.
+  // Problem: (1) covers ~20 owner-only tools, (2) only 5. If (1) ever ships
+  // a tool by accident (Module G coverage map gap — exactly how `web_research`
+  // shipped to every owner turn pre-v3.3.0), the colleague path has no second
+  // wall. This chokepoint re-applies (1)'s allowlist at the dispatch boundary:
+  // a colleague turn cannot reach any skill handler with a tool outside
+  // COLLEAGUE_ALLOWED_TOOLS, regardless of how it got into args.
+  if (context.senderRole === 'colleague' && !COLLEAGUE_ALLOWED_TOOLS.has(toolName)) {
+    logger.warn('executeSkillTool: colleague-path tool blocked at chokepoint', {
+      tool: toolName, requesterId: context.userId,
+    });
+    return { error: 'not_permitted', reason: `Tool "${toolName}" is owner-only.` };
+  }
+
   const activeSkills = getActiveSkills(context.profile);
 
   // Always try always-active skills first (memory, coordination)

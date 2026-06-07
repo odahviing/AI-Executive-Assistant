@@ -57,7 +57,10 @@ export async function classifyAddressee(params: {
 
   try {
     const result = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      // Binary MAELLE/HUMAN/AMBIGUOUS classifier — Haiku-grade.
+      // (The original Sonnet choice was a leftover; top-of-file comment
+      // already documented the intent as "cheap Haiku call".)
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: 12,
       system:
         `You watch a group chat where ${assistantName} is the executive assistant to ${ownerFirstName}. ` +

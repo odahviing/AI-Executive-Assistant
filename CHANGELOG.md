@@ -2,6 +2,47 @@
 
 ---
 
+## 3.3.1 — v3.3.0 audit hardening wave + calendar-health auto-move fix
+
+A propose-only audit (8 subagents, ~80 findings, filed at `.claude/V3_3_0_AUDIT_HANDOFF.md`) ran against 3.3.0. This patch consumes the critical + high-value waves across several chats, plus a fix to the recurring calendar-health auto-reschedule bug, plus news-skill correctness. No new capabilities — hardening, latency, and bug fixes. (Full finding set + the deferred items live in the handoff.)
+
+### Fixed (critical)
+
+- **News teach-vs-ask was dead end-to-end.** `update_my_preferences`'s schema enum was missing `'news'`, so the server rejected `skill='news'` and nothing saved. Enum now includes `news` and matches the `PREF_SKILLS` runtime allowlist. ([assistant.ts:341](src/core/assistant.ts), [skillPreferences.ts](src/utils/skillPreferences.ts)) (audit #1)
+- **Channel privacy leak.** When a rate-limited colleague @mentioned Maelle in a channel, the "you already have pending requests with `<owner>`" notice posted top-level for everyone to see — now threaded / DM'd. ([app.ts](src/connectors/slack/app.ts)) (audit CH-1)
+- **Thread-action gate had no recency window.** A stale owner `👍` anywhere in a thread granted any participant indefinite owner-authority; presence now counts only from the recent tail. ([threadActions/index.ts](src/core/threadActions/index.ts)) (audit T-5)
+- **Identity-spoof judge hardened.** ([securityGate.ts](src/utils/securityGate.ts)) (audit T-3)
+
+### Changed (latency / cost)
+
+- **`addresseeGate` and `humanGate` flipped Sonnet → Haiku** — both are bounded classifiers/repairers (the addressee gate's own comment already claimed "cheap Haiku" while the code used Sonnet). Cuts ~1.5–2.5s + cost on every channel/MPIM gate and every reply. ([addresseeGate.ts](src/utils/addresseeGate.ts), [humanGate.ts](src/utils/humanGate.ts)) (audit PERF-1, PERF-4)
+
+### Fixed (news skill)
+
+- **Seen-log write race closed** — `writeSeenLog` now runs under a per-profile mutex (`withSeenLogLock`), so the morning brief and an on-demand `news()` seconds apart serialize instead of clobbering each other's day. (audit N-2)
+- **`todayStamp` / `keepFrom` are now owner-local** (were UTC) — a west-of-UTC owner's evening entries land under the correct local day. (audit N-3)
+- **On-demand `news()` with no topic now derives today's meeting companies** from the calendar (`extractMeetingCompaniesFromEvents`), matching the brief shape and the prompt's promise. (audit N-4)
+- **Source-steer parser removed** — `news.md` is LLM-only free text; no code-side `Preferred sources:` regex. Sonnet weighs any source preferences at compose time; Tavily runs unsteered. The system prompt no longer claims a delimited format. ([news.ts](src/skills/news.ts)) (audit M-7)
+- **Seen-log semantic dedup** — the write pass is now shown the existing 7-day log and skips already-covered stories (catches same-story-different-wording that the token-Jaccard backstop missed).
+
+### Fixed (calendar-health auto-reschedule — the recurring orphan)
+
+- **Internal overlap now MOVES directly instead of coordinating.** When a movable, internal-only meeting overlaps another, active mode books it into a verified-free **in-week** slot directly (owner authority) and notifies the attendee — no "waiting on X" coordination to orphan. **No in-week slot → it does NOT move; it surfaces to the owner.** ([calendarHealth.ts](src/skills/calendarHealth.ts))
+- **Pushback → approval.** The move notice routes the colleague's reply through the tested `meeting_reschedule` handler (now `already_moved`-aware): "fine" closes, "doesn't work" escalates to the owner with a revert option, a counter auto-accepts only if same-week + rule-compliant. ([meetingReschedule.ts](src/skills/meetingReschedule.ts))
+- **The coord DM was dead-on-arrival** — `initiateCoordination` built participants from calendar attendees (email, no slack_id) and never resolved one, so the colleague was never messaged (the orphan's root). It now resolves email→slack_id. ([coord/state.ts](src/skills/meetings/coord/state.ts))
+- **Idempotency** — an open move notice for an event blocks a duplicate move on the next morning's run.
+
+### Changed (TS hygiene + cleanup)
+
+- **`categories?: string[]` added to the canonical Graph event type** — erases all 16 `as unknown as { categories }` casts across the calendar code. ([calendar.ts](src/connectors/graph/calendar.ts)) (audit TS-6)
+- Stale-comment + dead-code touchups and prompt-wording changes across the wave (per the handoff's S-/C-/N- items + the orchestrator system prompt).
+
+### Not changed / deferred
+
+- Design refactors (orchestrator peel D-1, Precheck interface D-2, CI tool-map test D-5, invariants doc) and the remaining TIER-2/3 + recovery items stay open in `.claude/V3_3_0_AUDIT_HANDOFF.md` for later waves.
+
+---
+
 ## 3.3.0 — personalized news brief + thread actions (two new capabilities) + social-scoring redesign
 
 Two new opt-in capabilities ship this version. **News (#17):** a personalized, calendar-aware, *grounded* news layer — Maelle scans the owner's taught interests plus the companies of the people he's meeting today, dedupes topic-level against a rolling 7-day log, and folds a cited "Updates" section into the morning brief (plus an on-demand `news` tool). **Thread actions (#14):** the owner (or a colleague) can now pull Maelle into a channel/MPIM **thread** by @mentioning her — gated on the owner being a participant — to book a meeting, chase a commitment, or answer in-thread. Bundled with a parallel chat's **proactive-social scoring redesign** (ignoring a coda is now free; rank moves only on a live reply) and a batch of real-day fixes surfaced while testing news.

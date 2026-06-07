@@ -30,6 +30,7 @@ import {
   cancelOrphanCoordJobs,
   upsertPersonMemory,
   getPersonMemory,
+  getPersonByEmail,
   searchPeopleMemory,
   linkCoordToRequest,
   type PersonInteraction,
@@ -157,6 +158,31 @@ export async function initiateCoordination(
   if (filteredParticipants.length === 0) {
     logger.warn('All participants filtered out (all were the owner)', { ownerUserId: params.ownerUserId });
     return 'no_participants';
+  }
+
+  // v3.2.6 — resolve email-only participants to a slack_id. Callers like the
+  // calendar-health autofix build participants from calendar attendees (email,
+  // no slack_id); the participant DM needs a slack_id, so without this the coord
+  // is dead-on-arrival (the colleague is never messaged — the Eli orphan). For
+  // an internal colleague, getPersonByEmail finds the existing row + its slack_id.
+  for (const p of filteredParticipants) {
+    if (!p.slack_id && p.email) {
+      try {
+        const row = getPersonByEmail(p.email.trim().toLowerCase());
+        if (row?.slack_id) {
+          p.slack_id = row.slack_id;
+          logger.info('initiateCoordination — resolved participant slack_id from email', {
+            email: p.email, slackId: row.slack_id,
+          });
+        } else {
+          logger.warn('initiateCoordination — participant has no resolvable slack_id; DM will not reach them', {
+            name: p.name, email: p.email,
+          });
+        }
+      } catch (err) {
+        logger.warn('initiateCoordination — slack_id resolve threw', { email: p.email, err: String(err).slice(0, 160) });
+      }
+    }
   }
 
   // Ensure people memory exists for every booked participant.

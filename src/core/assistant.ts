@@ -338,8 +338,8 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
           properties: {
             skill: {
               type: 'string',
-              enum: ['general', 'calendar', 'meetings', 'brief', 'summary', 'social', 'knowledge', 'search', 'venue'],
-              description: "Which area the preference governs. 'calendar' = calendar health / hygiene; 'meetings' = booking & scheduling style; 'brief' = the morning briefing (what to lead with, emphasize, skip, length); 'general' = voice, how to address him, cross-cutting. Pick the area whose tools/behavior the preference changes.",
+              enum: ['general', 'calendar', 'meetings', 'brief', 'summary', 'social', 'knowledge', 'search', 'venue', 'news'],
+              description: "Which area the preference governs. 'calendar' = calendar health / hygiene; 'meetings' = booking & scheduling style; 'brief' = the morning briefing (what to lead with, emphasize, skip, length); 'news' = the news skill's topics / source steer; 'general' = voice, how to address him, cross-cutting. Pick the area whose tools/behavior the preference changes.",
             },
             mode: {
               type: 'string',

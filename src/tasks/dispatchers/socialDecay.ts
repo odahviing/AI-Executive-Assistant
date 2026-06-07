@@ -23,7 +23,7 @@ export const dispatchSocialDecay: TaskDispatcher = async (_app, task, profile) =
   // v2.6.2 (renamed from persona) — short-circuit when social skill is off.
   // No social topics to decay; let the cadence die out (don't reschedule).
   // If owner flips social back on, the catch-up startup hook re-seeds.
-  const socialActive = (profile.skills as any)?.social === true;
+  const socialActive = profile.skills?.social === true;
   if (!socialActive) {
     logger.debug('social_decay skipped — social skill off', {
       ownerUserId: profile.user.slack_user_id,

@@ -60,11 +60,18 @@ function companyLabelFromDomain(domain: string): string | null {
  * falls back to the email domain. Skips internal (owner-domain) + generic
  * providers. Deduped + capped. Returns [] when nothing usable.
  */
-function deriveMeetingCompanies(items: RichItem[], profile: UserProfile): string[] {
+/**
+ * Kernel — derive company names from raw events (used by both the morning
+ * brief and the on-demand news() tool, which fetches today's calendar at
+ * call time). Skips internal (owner-domain) + generic providers. Reads
+ * person store READ-ONLY (getPersonByEmail; never creates rows). Deduped
+ * and capped at NEWS_MEETING_COMPANY_CAP.
+ */
+export function extractMeetingCompaniesFromEvents(
+  events: Array<{ attendees?: Array<{ emailAddress?: { address?: string } }> }>,
+  profile: UserProfile,
+): string[] {
   const ownerDomain = (profile.user.email.split('@')[1] ?? '').toLowerCase();
-  const today = items.find(i => i.kind === 'calendar_today');
-  if (!today) return [];
-  const events = (today.events as Array<{ attendees?: Array<{ emailAddress?: { address?: string } }> }> | undefined) ?? [];
   const out: string[] = [];
   const seen = new Set<string>();
   for (const ev of events) {
@@ -84,6 +91,13 @@ function deriveMeetingCompanies(items: RichItem[], profile: UserProfile): string
     }
   }
   return out;
+}
+
+function deriveMeetingCompanies(items: RichItem[], profile: UserProfile): string[] {
+  const today = items.find(i => i.kind === 'calendar_today');
+  if (!today) return [];
+  const events = (today.events as Array<{ attendees?: Array<{ emailAddress?: { address?: string } }> }> | undefined) ?? [];
+  return extractMeetingCompaniesFromEvents(events, profile);
 }
 
 // ── Relative time helper ──────────────────────────────────────────────────────

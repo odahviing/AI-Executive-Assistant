@@ -28,6 +28,7 @@ import type { Skill, SkillContext } from './types';
 import type { UserProfile } from '../config/userProfile';
 import { promises as fs, existsSync, mkdirSync, readFileSync } from 'fs';
 import path from 'path';
+import { DateTime } from 'luxon';
 import { getAnthropicClient } from '../llm/client';
 import { tavilySearch, type DomainFilterOpts } from './general';
 import { readSkillPreferences, formatSkillPreferencesBlock } from '../utils/skillPreferences';
@@ -59,56 +60,24 @@ export interface GatherNewsOpts {
 const EMPTY_BUNDLE: NewsBundle = { goals: [], readings: [], sources: [] };
 
 // ── news.md parsing ─────────────────────────────────────────────────────────
-// The file is owner-taught free text. CODE reads only the clearly-delimited
-// source-steer lines; the rest is the interest corpus the goal planner reads.
+// The file is owner-taught free text. The LLM reads it verbatim; code does
+// NOT parse it.
 
-interface ParsedNewsPrefs { interestsText: string; includeDomains: string[]; excludeDomains: string[] }
-
-/** A domain off a "Preferred/Blocked sources:" line. Strips scheme/www/path. */
-function normalizeDomain(raw: string): string | null {
-  let d = raw.trim().toLowerCase();
-  if (!d) return null;
-  d = d.replace(/^https?:\/\//, '').replace(/^www\./, '');
-  d = d.split('/')[0].split('?')[0].trim();
-  // a bare domain has at least one dot and no spaces
-  if (!d.includes('.') || /\s/.test(d)) return null;
-  return d;
-}
-
-function splitDomainList(rest: string): string[] {
-  return rest
-    .split(/[,;]/)
-    .map(normalizeDomain)
-    .filter((d): d is string => !!d);
-}
+interface ParsedNewsPrefs { interestsText: string }
 
 /**
- * Parse news.md into the interest corpus + domain steer. Source lines look like:
- *   Preferred sources: theinformation.com, stratechery.com
- *   Blocked sources: tabloid.example
- * Everything else is the free-text interest corpus the goal planner reads.
+ * Owner free-text from news.md, passed verbatim into the LLM goal planner +
+ * compose pass. A prior version regex'd `Preferred sources:` /
+ * `Blocked sources:` lines into Tavily include/exclude_domains — that was an
+ * implicit format contract on owner free-text (any other phrasing silently
+ * dropped the steer) and a code-side parse of LLM-managed content, which
+ * breaks the "LLM-only — code doesn't parse" architecture invariant for
+ * skillPreferences. Now the full file becomes the interest corpus; Sonnet
+ * reads any source preferences mentioned in it and weighs results in the
+ * compose pass. Tavily runs unsteered.
  */
 export function parseNewsPrefs(md: string): ParsedNewsPrefs {
-  const includeDomains: string[] = [];
-  const excludeDomains: string[] = [];
-  const interestLines: string[] = [];
-  for (const line of md.split('\n')) {
-    const m = line.match(/^\s*[-*]?\s*(preferred|liked|blocked|ignored|excluded)\s+sources?\s*:\s*(.*)$/i);
-    if (m) {
-      const kind = m[1].toLowerCase();
-      const domains = splitDomainList(m[2]);
-      if (kind === 'preferred' || kind === 'liked') includeDomains.push(...domains);
-      else excludeDomains.push(...domains);
-      continue;
-    }
-    interestLines.push(line);
-  }
-  const dedupe = (a: string[]) => [...new Set(a)];
-  return {
-    interestsText: interestLines.join('\n').trim(),
-    includeDomains: dedupe(includeDomains),
-    excludeDomains: dedupe(excludeDomains),
-  };
+  return { interestsText: md.trim() };
 }
 
 // ── Goal planning ────────────────────────────────────────────────────────────
@@ -202,13 +171,10 @@ async function searchGoal(goal: string, recency: number, steer: DomainFilterOpts
         published: it.published_date,
       }));
   };
-  let sources = await run(steer);
-  // Over-narrow guard: an include-filter that returned nothing → re-run this one
-  // goal unfiltered so a too-tight source pin never blanks the topic.
-  if ((steer.includeDomains?.length ?? 0) > 0 && sources.length === 0) {
-    sources = await run({ excludeDomains: steer.excludeDomains });
-  }
-  return sources;
+  // Tavily runs unsteered (steer is always {}); the over-narrow guard the
+  // pre-v3.3.x parser needed is gone — source preferences live in the LLM
+  // compose pass now.
+  return run(steer);
 }
 
 /**
@@ -220,10 +186,10 @@ export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}
   try {
     const recency = opts.recencyDays ?? NEWS_MORNING_RECENCY_DAYS;
     const prefs = parseNewsPrefs(readSkillPreferences(profile, 'news'));
-    const steer: DomainFilterOpts = {
-      includeDomains: prefs.includeDomains.length ? prefs.includeDomains : undefined,
-      excludeDomains: prefs.excludeDomains.length ? prefs.excludeDomains : undefined,
-    };
+    // No code-side domain steer — owner source preferences live in the free-
+    // text interest corpus and are honored by Sonnet at goal-planning + compose
+    // time. Tavily runs unsteered.
+    const steer: DomainFilterOpts = {};
 
     // Goal set: a narrowed topic short-circuits the planner; otherwise plan from
     // the interest corpus + today's meeting companies.
@@ -272,9 +238,34 @@ function seenLogPath(profile: UserProfile): string {
   return path.resolve(process.cwd(), 'config', 'users', `${firstName}_news_seen.md`);
 }
 
-function todayStamp(): string {
-  // Local date is fine here — the log is the owner's, day-granular.
-  return new Date().toISOString().slice(0, 10);
+function todayStamp(profile: UserProfile): string {
+  // OWNER-LOCAL date. Pre-fix used UTC, which put west-of-UTC owners
+  // (America/*) into next-UTC-day's seen-log section during their local
+  // evening — the dedup window still slid day-by-day but offset wrong
+  // relative to "today" as the owner experienced it.
+  return DateTime.now().setZone(profile.user.timezone).toFormat('yyyy-MM-dd');
+}
+
+// Per-profile mutex for seen-log read+Haiku+write. Both the morning brief
+// (via tasks/briefs.ts) and the on-demand `news(topic)` tool can call
+// writeSeenLog within seconds of each other; without a lock they read the
+// same prior file, each computes a different `next` (with their own Haiku
+// summarize ~1-3s), and the slower-finishing one overwrites the faster's
+// merge → silent loss of one day's entries. Key per-profile so multi-tenant
+// stays parallel.
+const seenLogMutexes = new Map<string, Promise<unknown>>();
+async function withSeenLogLock<T>(profile: UserProfile, op: () => Promise<T>): Promise<T> {
+  const key = seenLogPath(profile);
+  const prev = (seenLogMutexes.get(key) ?? Promise.resolve()) as Promise<unknown>;
+  const next = prev.then(() => op(), () => op());  // chain regardless of prior outcome
+  seenLogMutexes.set(key, next);
+  try {
+    return await next;
+  } finally {
+    // Only clear the slot if it's still ours — a concurrent caller may have
+    // already chained a new promise behind us.
+    if (seenLogMutexes.get(key) === next) seenLogMutexes.delete(key);
+  }
 }
 
 /** The last `SEEN_LOG_DAYS` of the seen-log, for the compose dedup rule. Returns
@@ -307,14 +298,21 @@ function pruneSeenLog(md: string, keepFromDate: string): string {
 }
 
 /** Turn a gathered bundle into one-line seen-log entries via a cheap Haiku pass.
- *  Fail-open: on error, fall back to listing source titles + domains. */
-async function summarizeBundleForSeenLog(bundle: NewsBundle): Promise<string[]> {
+ *  `alreadyLogged` is the existing 7-day log — the pass SKIPS any story already
+ *  in it (semantic topic-match, the same judgment the compose step makes). This
+ *  is what catches "same story, different wording" that the token-Jaccard
+ *  backstop misses. Fail-open: on error, fall back to listing source titles. */
+async function summarizeBundleForSeenLog(bundle: NewsBundle, alreadyLogged: string): Promise<string[]> {
   const material = bundle.sources.slice(0, 8).map(s => {
     let domain = '';
     try { domain = new URL(s.url).hostname.replace(/^www\./, ''); } catch { /* ignore */ }
     return `- ${s.title ?? s.url}${s.snippet ? ` — ${s.snippet}` : ''} [${domain}]`;
   }).join('\n');
   if (!material) return [];
+
+  const alreadyBlock = alreadyLogged.trim()
+    ? `\nALREADY IN THE LOG (last 7 days) — do NOT re-log any story already covered here, even if worded differently or from a different outlet:\n${alreadyLogged.trim()}\n`
+    : '';
 
   try {
     const res = await getAnthropicClient().messages.create({
@@ -326,10 +324,10 @@ async function summarizeBundleForSeenLog(bundle: NewsBundle): Promise<string[]> 
 
 ITEMS:
 ${material}
-
-Output one line per distinct STORY (cluster outlets covering the same story into one line), format exactly:
+${alreadyBlock}
+Output one line per distinct STORY that is NOT already in the log above (cluster outlets covering the same story into one line), format exactly:
 • <topic/headline> — <one-line gist> [<source domain>]
-No preamble, max 6 lines.`,
+If every item is already logged, output nothing. No preamble, max 6 lines.`,
       }],
     });
     const text = ((res.content[0] as Anthropic.TextBlock).text ?? '').trim();
@@ -379,39 +377,46 @@ function dedupeSeenLogBullets(md: string): string {
  *  Fire-and-forget by callers. Non-fatal on any error. */
 export async function writeSeenLog(profile: UserProfile, bundle: NewsBundle): Promise<void> {
   if (!bundle.sources.length) return;
-  try {
-    const lines = await summarizeBundleForSeenLog(bundle);
-    if (lines.length === 0) return;
+  await withSeenLogLock(profile, async () => {
+    try {
+      const file = seenLogPath(profile);
+      const dir = path.dirname(file);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      const prior = existsSync(file) ? readFileSync(file, 'utf8') : '';
 
-    const file = seenLogPath(profile);
-    const dir = path.dirname(file);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const prior = existsSync(file) ? readFileSync(file, 'utf8') : '';
+      const today = todayStamp(profile);
+      // keepFrom = today (owner-local) minus (SEEN_LOG_DAYS - 1) days
+      const keepFrom = DateTime.now()
+        .setZone(profile.user.timezone)
+        .minus({ days: SEEN_LOG_DAYS - 1 })
+        .toFormat('yyyy-MM-dd');
 
-    const today = todayStamp();
-    // keepFrom = today minus (SEEN_LOG_DAYS - 1) days
-    const from = new Date();
-    from.setDate(from.getDate() - (SEEN_LOG_DAYS - 1));
-    const keepFrom = from.toISOString().slice(0, 10);
+      const pruned = pruneSeenLog(prior, keepFrom);
 
-    const pruned = pruneSeenLog(prior, keepFrom);
-    // Merge into today's section if it already exists, else prepend a new one.
-    let next: string;
-    if (pruned.includes(`## ${today}`)) {
-      next = pruned.replace(`## ${today}`, `## ${today}\n${lines.join('\n')}`);
-    } else {
-      const todaySection = `## ${today}\n${lines.join('\n')}`;
-      next = pruned ? `${todaySection}\n\n${pruned}` : todaySection;
+      // Summarize ONLY the genuinely-new stories — the pass is shown the existing
+      // 7-day log and skips anything already covered (semantic match, beats the
+      // token-Jaccard backstop on differently-worded repeats).
+      const lines = await summarizeBundleForSeenLog(bundle, pruned);
+      if (lines.length === 0) return;
+
+      // Merge into today's section if it already exists, else prepend a new one.
+      let next: string;
+      if (pruned.includes(`## ${today}`)) {
+        next = pruned.replace(`## ${today}`, `## ${today}\n${lines.join('\n')}`);
+      } else {
+        const todaySection = `## ${today}\n${lines.join('\n')}`;
+        next = pruned ? `${todaySection}\n\n${pruned}` : todaySection;
+      }
+      // Collapse near-duplicate stories (re-runs in the same day, same story
+      // across outlets) so the log stays clean and the dedup context stays sharp.
+      next = dedupeSeenLogBullets(next);
+
+      await fs.writeFile(file, `${next.trim()}\n`, 'utf8');
+      logger.info('news — seen-log written', { added: lines.length });
+    } catch (err) {
+      logger.warn('news — seen-log write failed', { err: String(err).slice(0, 160) });
     }
-    // Collapse near-duplicate stories (re-runs in the same day, same story
-    // across outlets) so the log stays clean and the dedup context stays sharp.
-    next = dedupeSeenLogBullets(next);
-
-    await fs.writeFile(file, `${next.trim()}\n`, 'utf8');
-    logger.info('news — seen-log written', { added: lines.length });
-  } catch (err) {
-    logger.warn('news — seen-log write failed', { err: String(err).slice(0, 160) });
-  }
+  });
 }
 
 /** Shared compose-time block: the seen-log + the dedup rule. '' when empty. */
@@ -462,7 +467,41 @@ Then YOU: write GROUNDED in what it returns and CITE the source links. NEVER ass
   ): Promise<unknown | null> {
     if (toolName !== 'news') return null;
     const topic = (args.topic as string | undefined)?.trim() || undefined;
-    const bundle = await gatherNews(context.profile, { topic, recencyDays: NEWS_ONDEMAND_RECENCY_DAYS });
+
+    // No-topic on-demand asks: derive today's meeting companies from the
+    // owner's calendar (READ-ONLY) so the gather mirrors the morning-brief
+    // shape. The system-prompt promised "today's meetings" — pre-fix this
+    // path didn't compute them and the promise was empty. Skip when a
+    // topic is explicit (Sonnet asked for one thing — give them one thing).
+    let meetingCompanies: string[] | undefined;
+    if (!topic) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getCalendarEvents } = require('../connectors/graph/calendar') as
+          typeof import('../connectors/graph/calendar');
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { extractMeetingCompaniesFromEvents } = require('../tasks/briefs') as
+          typeof import('../tasks/briefs');
+        const todayLocal = DateTime.now().setZone(context.profile.user.timezone).toFormat('yyyy-MM-dd');
+        const events = await getCalendarEvents(
+          context.profile.user.email,
+          todayLocal,
+          todayLocal,
+          context.profile.user.timezone,
+        );
+        meetingCompanies = extractMeetingCompaniesFromEvents(events, context.profile);
+      } catch (err) {
+        logger.warn('news on-demand: meetingCompanies derivation failed — continuing without', {
+          err: String(err).slice(0, 160),
+        });
+      }
+    }
+
+    const bundle = await gatherNews(context.profile, {
+      topic,
+      meetingCompanies,
+      recencyDays: NEWS_ONDEMAND_RECENCY_DAYS,
+    });
     // Fire-and-forget: log what we surfaced so the next ask/brief dedupes it.
     void writeSeenLog(context.profile, bundle).catch(() => { /* non-fatal */ });
     return {
@@ -497,6 +536,6 @@ Then YOU: write GROUNDED in what it returns and CITE the source links. NEVER ass
 
 NEWS
 - news(topic?) — grounded, cited news for ${firstName}. Pass a topic to narrow; omit it to use his standing interests + today's meetings. Call it ONCE per ask — it covers multiple topics; do NOT call it separately per company. It returns real SOURCES — write GROUNDED and CITE each with a Slack hyperlink <url|short label> (never a bare URL, never "[link]" + the URL). Keep it TIGHT: a few bullets, only genuinely NEW items, nothing older than 7 days. NEVER assert a current-events fact not in the returned bundle; if it returns nothing, say so in one plain line — no apology, no long explanation.
-- Source steer + interests live in his news.md (taught via update_my_preferences). Keep "Preferred sources:" / "Blocked sources:" lines clearly delimited so the engine can read the domains.${seenLog}${prefs}`.trim();
+- Source steer + interests live in his news.md (taught via update_my_preferences). The whole file is owner free-text — when his preferences (preferred outlets, sources to skip, focus areas) appear there, weigh them at compose time. Code does NOT parse the file.${seenLog}${prefs}`.trim();
   }
 }

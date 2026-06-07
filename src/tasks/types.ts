@@ -37,11 +37,12 @@ export type TaskType =
   // 7 days. Topics hitting score 0 flip to dormant (Maelle stops raising
   // them; owner can still revive). System task, auto-reschedules every 7d.
   | 'social_decay'
-  // v2.2 — rank-adjustment feedback for proactive social. Scheduled 48h after
-  // a coda raises a topic; checks whether the colleague engaged, adjusts
-  // engagement_rank accordingly (no engagement → -1; engaged → +1).
-  // (The cold-open `social_outreach_tick` was removed in v3.2.5 — proactive
-  // social is coda-only now; this rank-check serves the coda path.)
+  // RETIRED in v3.2.6 — engagement_rank now moves only on live reply
+  // (`adjustRankFromColleagueResponse`, anchored on last_initiated_at). The
+  // 48h scheduled rank-check is no longer created; the dispatcher remains as
+  // a no-op drain for in-flight rows from before the retirement. Remove
+  // the type member + dispatcher registration once the queue is reliably
+  // drained. See `dispatchers/socialPingRankCheck.ts`.
   | 'social_ping_rank_check';
 
 export type TaskStatus =

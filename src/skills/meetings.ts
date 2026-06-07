@@ -1641,7 +1641,7 @@ ATTENDEES (v2.9.1):
           for (const evt of events) {
             if (evt.isCancelled || evt.isAllDay || evt.showAs === 'free') continue;
             if (fb.isFloatingBlockEvent(
-              { subject: evt.subject, categories: (evt as unknown as { categories?: unknown }).categories },
+              { subject: evt.subject, categories: evt.categories },
               block,
             )) continue;  // elastic
             const eStart = evTime(evt.start).toMillis();
@@ -1670,7 +1670,7 @@ ATTENDEES (v2.9.1):
             const existingBlockEvent = events.find(e => {
               if (e.isCancelled || e.isAllDay || e.showAs === 'free') return false;
               return fb.isFloatingBlockEvent(
-                { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+                { subject: e.subject, categories: e.categories },
                 block,
               );
             });

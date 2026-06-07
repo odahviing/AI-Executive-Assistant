@@ -23,7 +23,6 @@ import {
   findSlackUser,
   findSlackChannel,
 } from './coordinator';
-import { isMessageForAssistant } from './relevance';
 import { initiateCoordination } from '../../skills/meetings/coord/state';
 import { getConnection } from '../../connections/registry';
 import { handleCoordReply } from '../../skills/meetings/coord/reply';
@@ -45,12 +44,22 @@ import { shadowNotify } from '../../utils/shadowNotify';
 import logger from '../../utils/logger';
 
 /**
- * RESPONSE RULES — Maelle only speaks when spoken to:
+ * RESPONSE RULES — Maelle only speaks when spoken to. v3.3.0 routing matrix:
  *
- *   1:1 DM      (D...)  → responds to every message from authorised user
- *   Group DM    (G...)  → responds to every message from authorised user
- *   Channel     (C...)  → ONLY responds when @mentioned, never otherwise
- *   Private ch  (G...)  → ONLY responds when @mentioned, never otherwise
+ *   1:1 DM      (D...)              → responds to every message from authorised user
+ *   Group DM / MPIM (G...)          → responds when @mentioned, when she was the
+ *                                     most-recent active speaker, OR when the
+ *                                     addressee-gate / relevance-classifier votes
+ *                                     RESPOND. MPIM @Maelle skips the relevance LLM
+ *                                     (fast-path, v3.2.5)
+ *   Channel — top-of-thread @mention → owner-presence gate applies (CH-2 caveat
+ *                                     known); when owner participates, runs the
+ *                                     thread-action engine (book / follow_up / other)
+ *   Channel — mid-thread @mention   → thread-action engine if the owner is a thread
+ *                                     participant (see `core/threadActions/`); otherwise
+ *                                     silent. Reading the thread is EPHEMERAL —
+ *                                     no people-memory upserts from a real-channel read
+ *   Channel — no @mention            → silent
  *
  * She never reads or processes messages she wasn't addressed in.
  */
@@ -332,12 +341,25 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // Step 3: Rate limit check — max 2 pending requests per colleague
       const pendingCount = getPendingRequestCountForColleague(profile.user.slack_user_id, senderId);
       if (pendingCount >= 2) {
-        logger.warn('Colleague rate limit reached', { senderId, pendingCount });
-        await app.client.chat.postMessage({
-          token: assistant.slack.bot_token,
-          channel: channelId,
-          text: `Hi — you already have a couple of pending requests with ${profile.user.name}. I'll follow up with you once those are resolved.`,
-        });
+        logger.warn('Colleague rate limit reached', { senderId, pendingCount, isChannel, isMpim });
+        // Privacy: in a real channel (where third parties can read), DM the
+        // colleague directly instead of posting publicly with the owner's
+        // name + a "you have pending requests" disclosure. In DM/MPIM the
+        // message stays in-thread (audience already knows the participants).
+        if (isChannel) {
+          await app.client.chat.postMessage({
+            token: assistant.slack.bot_token,
+            channel: senderId,
+            text: `Hi — you already have a couple of pending requests with ${profile.user.name}. I'll follow up with you once those are resolved.`,
+          });
+        } else {
+          await app.client.chat.postMessage({
+            token: assistant.slack.bot_token,
+            channel: channelId,
+            ...(threadTs ? { thread_ts: threadTs } : {}),
+            text: `Hi — you already have a couple of pending requests with ${profile.user.name}. I'll follow up with you once those are resolved.`,
+          });
+        }
         return;
       }
 
@@ -1680,29 +1702,26 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // Closes the ~2s wasted Sonnet relevance call on every @Maelle group
       // opener — the old fast-path in relevance.ts required ZERO @mentions, so
       // an explicit @Maelle disabled it and paid the full classification.
+      // v3.3.x — outer MPIM relevance Haiku call DELETED. It duplicated work
+      // already done by `classifyAddressee` inside `processMessage` (both Haiku
+      // post-v3.3.0, both classifying the same RESPOND/IGNORE question with
+      // slightly different framings). The inner gate has identical skip
+      // conditions (explicit @bot, recently-active, sender-is-owner) plus a
+      // finer MAELLE/HUMAN/AMBIGUOUS verdict. The fast-path log below preserves
+      // the "explicitly mentioned" / "recently active" trail for diagnostics
+      // without paying the LLM call.
       const botExplicitlyMentioned = botUserId != null && mentionedIds.includes(botUserId);
       if (botExplicitlyMentioned) {
-        logger.info('MPIM relevance check skipped — bot explicitly @mentioned → RESPOND', {
-          senderId: event.user,
-          channelId: event.channel,
-          threadTs,
-          preview: rawText.slice(0, 80),
+        logger.info('MPIM mention fast-path — bot explicitly @mentioned', {
+          senderId: event.user, channelId: event.channel, threadTs, preview: rawText.slice(0, 80),
         });
       } else if (recentlyActive) {
-        logger.info('MPIM relevance check skipped — Maelle was just active in this thread', {
-          senderId: event.user,
-          channelId: event.channel,
-          threadTs,
-          historySize: history.length,
-          preview: rawText.slice(0, 80),
+        logger.info('MPIM mention fast-path — Maelle was just active in this thread', {
+          senderId: event.user, channelId: event.channel, threadTs, preview: rawText.slice(0, 80),
         });
-      } else {
-        const shouldRespond = await isMessageForAssistant(rawText, assistant.name, assistantActive, mpimMemberNames);
-        if (!shouldRespond) {
-          logger.info('MPIM relevance check — staying silent', { senderId: event.user, preview: rawText.slice(0, 80) });
-          return;
-        }
       }
+      // No-fast-path messages flow through to processMessage where the inner
+      // addressee gate (`classifyAddressee`) does the single Haiku verdict.
 
       const resolvedText = await resolveSlackMentions(rawText);
 
@@ -1941,6 +1960,15 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // posted in the thread. Empty for a start-of-thread mention.
       let threadMsgs: Array<{ user?: string }> = [];
       let threadParticipantIds: string[] = [];
+      // Pre-condition for the thread-action engine: we successfully read the
+      // thread. If replies fetch fails (Slack rate-limit, 5xx), we have no
+      // roster — running the engine anyway would ship a directive saying
+      // "book a meeting with: (nobody)" and Sonnet would invent attendees
+      // from the @-mention text. Better: skip the engine entirely on fetch
+      // failure and let the orchestrator handle the @-mention as a plain
+      // prompt (the @-mention text usually names whom to book with —
+      // Sonnet reads it directly).
+      let threadFetchOk = true;
       if (threadTs !== event.ts) {
         try {
           const replies = await client.conversations.replies({
@@ -1990,6 +2018,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           }
         } catch (err) {
           logger.warn('Could not load channel thread participants', { err: String(err), channelId: event.channel, threadTs });
+          threadFetchOk = false;
         }
       }
 
@@ -2004,7 +2033,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       // Reading the thread for this is ephemeral — no capture/people/interaction
       // writes (invariant 9); those drops live in the `message` handler.
       let threadActionDirective = '';
-      if (!isMpimChannel && threadTs !== event.ts) {
+      if (!isMpimChannel && threadTs !== event.ts && threadFetchOk) {
         // Owner is present if he posted earlier in the thread OR he is the one
         // mentioning Maelle now (his just-sent message may not be in the fetched
         // replies yet — Slack eventual consistency). Sender-is-owner trivially

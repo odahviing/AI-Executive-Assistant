@@ -290,13 +290,18 @@ export async function runHumanGate(
   const systemPrompt = SYSTEM_PROMPT_TEMPLATE(assistantName, ownerFirst, audience);
 
   try {
+    // JSON-output classifier + light rewrite — same structural shape as the
+    // claim-checker which v3.0.6 moved to Haiku successfully. Flip from Sonnet
+    // for ~3× cost cut + ~1s latency drop per call. Fires on every owner +
+    // colleague reply + every brief, so the aggregate savings are meaningful.
+    const model = 'claude-haiku-4-5-20251001';
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      model,
       max_tokens: 600,
       system: systemPrompt,
       messages: [{ role: 'user', content: draft }],
     });
-    logLlmUsage('human_gate', 'claude-sonnet-4-6', resp, { audience });
+    logLlmUsage('human_gate', model, resp, { audience });
 
     const text = resp.content
       .filter(b => b.type === 'text')

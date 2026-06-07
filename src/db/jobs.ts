@@ -1,6 +1,22 @@
 import { getDb } from './client';
 import { closeRequest } from '../core/requests/closeRequest';
 
+// ══════════════════════════════════════════════════════════════════════════
+// PATH 2 INVARIANT (v3.1.0+) — read this once, the rest of the file references it.
+//
+// The `requests` table is the single source of truth for lifecycle. The
+// physical `coord_jobs.status` and `outreach_jobs.status` columns are
+// VESTIGIAL: defaulted, never read for lifecycle decisions.
+//
+// • `OutreachStatus` / `CoordJob.status` remain in code ONLY as the TRANSITION
+//   SIGNAL passed to create*/update* (drives the linked request + terminal
+//   cascade via closeRequest). Never persisted as authoritative state.
+// • All "is this open?" reads JOIN to `requests` (see getActiveCoordJobs,
+//   getPendingRequestCountForColleague, getCoordLifecycle, getOutreachLifecycle).
+// • Inline comments below repeat slices of this rule at each call site —
+//   they're correct, just verbose. This block is the canonical reference.
+// ══════════════════════════════════════════════════════════════════════════
+
 // ── Bridge helpers (v2.7.0) ──────────────────────────────────────────────────
 // Link a legacy outreach_jobs / coord_jobs row to its user-facing requests row.
 // The legacy table stays as the internal state machine; the request is what

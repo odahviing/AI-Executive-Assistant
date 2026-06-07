@@ -24,7 +24,7 @@ import { getAnthropicClient } from '../llm/client';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import type { OutreachJob } from '../db/jobs';
-import { updateOutreachJob } from '../db/jobs';
+import { createOutreachJob, updateOutreachJob } from '../db/jobs';
 import { updateRequest } from '../db/requests';
 import { getDb } from '../db';
 import { updateMeeting, findAvailableSlots } from '../connectors/graph/calendar';
@@ -41,6 +41,12 @@ export interface RescheduleContext {
   proposed_end: string;    // ISO
   original_start?: string; // ISO, optional — kept for narration
   original_end?: string;
+  // v3.2.6 (Part A) — the meeting was ALREADY moved (active-mode autofix moved
+  // it to a verified-free in-week slot, then notified the colleague). So a
+  // "yes/fine" reply is a no-op (don't re-move), a "doesn't work" reply must
+  // escalate to the owner WITH a revert option (the event is at proposed_*, not
+  // original_*), and a counter is handled as usual.
+  already_moved?: boolean;
 }
 
 interface RescheduleClassification {
@@ -178,6 +184,26 @@ export async function handleRescheduleReply(
 
   // ── Branch: approved → move the meeting ──────────────────────────────────
   if (decision.status === 'approved') {
+    // v3.2.6 (Part A) — when the meeting was ALREADY moved (autofix), an
+    // approval is a no-op: confirm to the colleague + report to owner, don't
+    // re-move. Skip straight past the move + rebalance.
+    if (ctx.already_moved) {
+      const colleagueMsg = `Great — see you then.`;
+      try {
+        if (job.dm_channel_id) await conn.postToChannel(job.dm_channel_id, colleagueMsg, { threadTs: job.dm_message_ts });
+        else await conn.sendDirect(job.colleague_slack_id, colleagueMsg);
+      } catch (err) { logger.warn('reschedule (already_moved approve) colleague DM failed', { err: String(err).slice(0, 160) }); }
+      conversation.push({ role: 'maelle', text: colleagueMsg });
+      await conn.postToChannel(job.owner_channel,
+        `${job.colleague_name} is fine with the moved time for "${ctx.meeting_subject}" (${proposedStartLocal}).`,
+        { threadTs: job.owner_thread_ts ?? undefined });
+      updateOutreachJob(job.id, { status: 'replied', reply_text: replyText, conversation_json: JSON.stringify(conversation) });
+      getDb().prepare(
+        `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
+         WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague')`,
+      ).run(job.id);
+      return true;
+    }
     try {
       await updateMeeting({
         userEmail: profile.user.email,
@@ -253,9 +279,16 @@ export async function handleRescheduleReply(
     return true;
   }
 
-  // ── Branch: declined → report to owner, keep original time ───────────────
+  // ── Branch: declined → report to owner ───────────────────────────────────
   if (decision.status === 'declined') {
-    const ownerMsg = `${job.colleague_name} declined moving "${ctx.meeting_subject}". Keeping the original time. Reply preview: "${replyText.slice(0, 120)}"`;
+    // v3.2.6 (Part A) — if the meeting was ALREADY moved, "doesn't work" can't
+    // just "keep the original" (it's not there anymore). Escalate to the owner
+    // WITH the revert option; his next-turn reply ("revert" / "leave it" / a new
+    // time) is handled by the orchestrator — same lightweight pattern as the
+    // counter fallback below.
+    const ownerMsg = ctx.already_moved
+      ? `${job.colleague_name} says the time I moved "${ctx.meeting_subject}" to (${proposedStartLocal}) doesn't work — I'd shifted it to clear a clash. Want me to move it back to ${ctx.original_start ? formatLocalTime(ctx.original_start, timezone) : 'the original time'} (back into the clash), or find another slot? Reply preview: "${replyText.slice(0, 120)}"`
+      : `${job.colleague_name} declined moving "${ctx.meeting_subject}". Keeping the original time. Reply preview: "${replyText.slice(0, 120)}"`;
     await conn.postToChannel(job.owner_channel, ownerMsg, {
       threadTs: job.owner_thread_ts ?? undefined,
     });
@@ -428,4 +461,76 @@ export async function handleRescheduleReply(
   }
 
   return false;
+}
+
+/**
+ * v3.2.6 (Part A) — notify a colleague that an active-mode autofix ALREADY moved
+ * a shared meeting (off a clash) to a verified-free in-week slot, with a pushback
+ * escape hatch. Creates a `meeting_reschedule` outreach job tagged
+ * `already_moved` so the colleague's reply routes back through
+ * `handleRescheduleReply`: "fine" → no-op confirm; "doesn't work" → owner
+ * approval w/ revert; a counter → auto-accept (same-week, rule-compliant) or ask.
+ * Best-effort; never throws (a notify failure must not unwind the move).
+ */
+export async function notifyColleagueOfMove(params: {
+  profile: UserProfile;
+  ownerChannel: string;
+  ownerThreadTs?: string;
+  colleagueSlackId: string;
+  colleagueName: string;
+  colleagueTz?: string;
+  meetingId: string;
+  meetingSubject: string;
+  originalStartIso: string;
+  originalEndIso: string;
+  newStartIso: string;
+  newEndIso: string;
+  conflictReason?: string;
+}): Promise<void> {
+  try {
+    const { profile } = params;
+    const conn = getConnection(profile.user.slack_user_id, 'slack');
+    if (!conn) return;
+    const tz = profile.user.timezone;
+    const newLocal = DateTime.fromISO(params.newStartIso, { zone: tz }).toFormat('EEEE d MMM \'at\' HH:mm');
+    const ownerFirst = profile.user.name.split(' ')[0];
+    const colleagueFirst = params.colleagueName.split(' ')[0];
+    const because = params.conflictReason ? ` — it clashed with ${params.conflictReason}` : '';
+    const message = `Hi ${colleagueFirst}, I moved our "${params.meetingSubject}" to ${newLocal}${because}. If that doesn't work for you, just say the word and I'll sort it out with ${ownerFirst}.`;
+
+    const ctx: RescheduleContext = {
+      meeting_id: params.meetingId,
+      meeting_subject: params.meetingSubject,
+      proposed_start: params.newStartIso,
+      proposed_end: params.newEndIso,
+      original_start: params.originalStartIso,
+      original_end: params.originalEndIso,
+      already_moved: true,
+    };
+
+    const jobId = createOutreachJob({
+      owner_user_id: profile.user.slack_user_id,
+      owner_channel: params.ownerChannel,
+      owner_thread_ts: params.ownerThreadTs,
+      colleague_slack_id: params.colleagueSlackId,
+      colleague_name: params.colleagueName,
+      colleague_tz: params.colleagueTz,
+      message,
+      await_reply: 1,
+      status: 'sent',
+      sent_at: new Date().toISOString(),
+      intent: 'meeting_reschedule',
+      context_json: JSON.stringify(ctx),
+    });
+
+    const res = await conn.sendDirect(params.colleagueSlackId, message);
+    if (res.ok && res.ts) {
+      updateOutreachJob(jobId, { dm_channel_id: res.ref, dm_message_ts: res.ts });
+    }
+    logger.info('notifyColleagueOfMove — sent move notice', {
+      jobId, colleague: params.colleagueName, meetingId: params.meetingId, newStart: params.newStartIso,
+    });
+  } catch (err) {
+    logger.warn('notifyColleagueOfMove threw — move stands, notice not sent', { err: String(err).slice(0, 200) });
+  }
 }

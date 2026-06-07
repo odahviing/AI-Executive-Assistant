@@ -47,9 +47,7 @@ export function isProtected(event: CalendarEvent, profile: UserProfile): Protect
 
   // Rule 3 — subject match against profile.meetings.protected[].name
   const subject = (event.subject ?? '').toLowerCase();
-  const categoriesOnEvent = Array.isArray((event as unknown as { categories?: unknown }).categories)
-    ? ((event as unknown as { categories: string[] }).categories)
-    : [];
+  const categoriesOnEvent = event.categories ?? [];
   for (const entry of profile.meetings.protected ?? []) {
     const name = (entry as { name?: string }).name;
     const cat = (entry as { category?: string }).category;
@@ -82,9 +80,7 @@ export function isProtected(event: CalendarEvent, profile: UserProfile): Protect
  */
 export function isYamlLockedUnmovable(event: CalendarEvent, profile: UserProfile): boolean {
   const subject = (event.subject ?? '').toLowerCase();
-  const categoriesOnEvent = Array.isArray((event as unknown as { categories?: unknown }).categories)
-    ? ((event as unknown as { categories: string[] }).categories)
-    : [];
+  const categoriesOnEvent = event.categories ?? [];
   for (const entry of profile.meetings.protected ?? []) {
     if ((entry as { movable?: boolean }).movable === false) {
       const name = (entry as { name?: string }).name;
@@ -117,9 +113,7 @@ export function sanitizeConflictReason(
   profile: UserProfile,
 ): string {
   const sensitivity = keptEvent.sensitivity;
-  const categories = Array.isArray((keptEvent as unknown as { categories?: unknown }).categories)
-    ? ((keptEvent as unknown as { categories: string[] }).categories)
-    : [];
+  const categories = keptEvent.categories ?? [];
   const privateCategoryNames = new Set(
     (profile.categories ?? []).filter(c => c.sets_sensitivity_private).map(c => c.name),
   );

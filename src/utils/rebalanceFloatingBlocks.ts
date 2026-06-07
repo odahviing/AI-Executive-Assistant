@@ -144,7 +144,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
       // currently exist on the calendar, no rebalance needed.
       const blockEvent = realEvents.find(e =>
         fb.isFloatingBlockEvent(
-          { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+          { subject: e.subject, categories: e.categories },
           block,
         ),
       );

@@ -125,7 +125,7 @@ function checkCompliance(
       if (other.id === event.id) continue;
       if (other.isCancelled || other.isAllDay || other.showAs === 'free') continue;
       if (isFloatingBlockEvent(
-        { subject: other.subject, categories: (other as unknown as { categories?: unknown }).categories },
+        { subject: other.subject, categories: other.categories },
         block,
       )) continue;
       const os = DateTime.fromISO(other.start.dateTime, { zone: other.start.timeZone ?? 'utc' }).toMillis();

@@ -123,9 +123,9 @@ The person messaging Maelle is verified (by Slack auth) as:
 
 Their recent message(s) contain a DIFFERENT company email: "${opts.claimedEmail}".
 
-Recent message(s):
+Recent message(s) (oldest first; the claimed email may appear anywhere):
 """
-${opts.recentUserMessages.slice(-5).join('\n---\n')}
+${opts.recentUserMessages.slice(-15).join('\n---\n')}
 """
 
 Decide ONE thing: is the sender CLAIMING TO BE the person at "${opts.claimedEmail}" (impersonation / social-engineering), or merely REFERENCING that person (adding them to a meeting, sharing their email, looping them in, mentioning a coworker)?

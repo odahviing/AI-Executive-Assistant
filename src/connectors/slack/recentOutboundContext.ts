@@ -111,12 +111,12 @@ function findOpenOutboundForColleague(params: {
 /**
  * Mark an outreach_jobs row as having its conversational follow-up closed.
  * When `replyText` is provided, the inbound represents a real text reply —
- * also stamp status='replied' + reply_text so downstream consumers
- * (notably social_ping_rank_check 48h later) can see the engagement
- * signal and bump rank correctly. Without this stamp the rank-check
- * reads status='sent' / reply_text=null → interprets warm engagement
- * as "ignored" → DECREMENTS the cold-pinged colleague's rank, the
- * opposite of intent.
+ * also stamp status='replied' + reply_text so downstream readers (the
+ * `activeSet` query in proactive picking, audit logs) see the engagement
+ * signal. NOTE: the 48h `social_ping_rank_check` that originally consumed
+ * this stamp was RETIRED in v3.2.6 — engagement_rank now moves only on
+ * live reply via `adjustRankFromColleagueResponse`. The stamp is kept for
+ * the remaining `activeSet`-style readers.
  *
  * Omit `replyText` for non-reply closures (emoji acks, auto-expire,
  * outbound-to-outbound matching) — those keep status untouched.

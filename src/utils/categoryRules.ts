@@ -101,7 +101,7 @@ export function countCategoryOccurrences(opts: {
   for (const ev of opts.events) {
     if (ev.isCancelled) continue;
     if (opts.excludeEventId && ev.id === opts.excludeEventId) continue;
-    const evCategories = (ev as unknown as { categories?: string[] }).categories ?? [];
+    const evCategories = ev.categories ?? [];
     if (!evCategories.some(c => c.toLowerCase() === lowerCat)) continue;
     // Event falls in window if its start < windowEnd AND end > windowStart.
     const startTz = ev.start.timeZone ?? 'utc';
@@ -242,7 +242,7 @@ export function findCategoryViolations(opts: {
       while (cursor < opts.rangeEnd) {
         const dayEnd = cursor.plus({ days: 1 });
         const dayEvents = opts.events.filter(ev => {
-          const evCategories = (ev as unknown as { categories?: string[] }).categories ?? [];
+          const evCategories = ev.categories ?? [];
           if (!evCategories.some(c => c.toLowerCase() === cat.name.toLowerCase())) return false;
           if (ev.isCancelled) return false;
           const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
@@ -269,7 +269,7 @@ export function findCategoryViolations(opts: {
       while (cursor < opts.rangeEnd) {
         const weekEnd = cursor.plus({ weeks: 1 });
         const weekEvents = opts.events.filter(ev => {
-          const evCategories = (ev as unknown as { categories?: string[] }).categories ?? [];
+          const evCategories = ev.categories ?? [];
           if (!evCategories.some(c => c.toLowerCase() === cat.name.toLowerCase())) return false;
           if (ev.isCancelled) return false;
           const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });

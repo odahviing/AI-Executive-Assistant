@@ -30,16 +30,27 @@ const MODEL = 'claude-haiku-4-5-20251001';
 export type ThreadActionKind = 'book' | 'follow_up' | 'other' | 'unclear';
 
 /**
- * The owner-presence gate. Did the owner POST in this thread? His presence IS
- * the authorization for any thread action. Pure + synchronous over the already-
- * fetched thread messages — no I/O, no writes.
+ * The owner-presence gate. Did the owner RECENTLY post in this thread? His
+ * presence IS the authorization for any thread action. Pure + synchronous
+ * over the already-fetched thread messages — no I/O, no writes.
+ *
+ * RECENCY: only the LAST 5 messages count. Pre-fix the check scanned the
+ * entire thread history, which meant a single "👍" from the owner months
+ * ago granted any thread participant indefinite owner-tier authority to
+ * drive Maelle in that thread (book, message, follow-up). Anchoring to the
+ * recent tail makes the gate read "is the owner currently engaged here?"
+ * not "has the owner ever touched this thread." Sender-is-owner is checked
+ * separately at the call site (owner himself @-mentioning always passes,
+ * regardless of how recently he posted).
  */
+const OWNER_PRESENCE_RECENT_WINDOW = 5;
 export function ownerPostedInThread(
   messages: Array<{ user?: string }>,
   ownerSlackId: string,
 ): boolean {
   if (!ownerSlackId) return false;
-  return messages.some(m => m.user === ownerSlackId);
+  const tail = messages.slice(-OWNER_PRESENCE_RECENT_WINDOW);
+  return tail.some(m => m.user === ownerSlackId);
 }
 
 /**

@@ -152,7 +152,7 @@ export class CalendarHealthSkill implements Skill {
 
 Returns a list of issues. Behavior depends on \`mode\`:
 - passive (default) → returns the issues for you to narrate. Owner asks for fixes; you execute them via book_floating_block / set_event_category / etc. in follow-up calls.
-- active → executes safe fixes in-tool before returning: missing floating blocks get booked, missing categories get set when the classifier is high-confidence, busy-day threshold breaches fire a DM to the owner. Overlap auto-resolve is NOT in this release (protected by design; use the owner's direction). Each issue in the returned list is tagged \`fixed: true\` with \`fix_detail\` when Maelle acted on it.
+- active → executes safe fixes in-tool before returning: missing floating blocks get booked, missing categories get set when the classifier is high-confidence, busy-day threshold breaches fire a DM to the owner. Overlap + OOF conflicts on a MOVABLE (internal-only, no external attendee) meeting are auto-resolved by initiating a move-coordination to reschedule it (see the fix loop below); a movable meeting with an external attendee is left for the owner. Each issue in the returned list is tagged \`fixed: true\` with \`fix_detail\` when Maelle acted on it.
 
 Use this proactively when the owner asks about their schedule, or when they ask you to check calendar health.`,
         input_schema: {
@@ -491,7 +491,7 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
             const hasBlock = dayEvents.some(e => {
               if (e.isAllDay) return false;
               return fb.isFloatingBlockEvent(
-                { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+                { subject: e.subject, categories: e.categories },
                 block,
               );
             });
@@ -563,13 +563,13 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
             // Exclusion 3: any configured floating block
             const matchesAnyBlock = floatingBlocks.some(b =>
               fb.isFloatingBlockEvent(
-                { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+                { subject: e.subject, categories: e.categories },
                 b,
               ),
             );
             if (matchesAnyBlock) return false;
             // Exclusion 5: yaml category flagged no_issue_tracking
-            const eCats = (e as unknown as { categories?: string[] }).categories ?? [];
+            const eCats = e.categories ?? [];
             if (eCats.some(c => noTrackCategories.has(c))) return false;
             // Exclusion 4: entirely outside work-hours (start >= workEnd OR end <= workStart)
             const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
@@ -1162,6 +1162,25 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                       // need their say-so, which is owner-decision territory.
                       continue;
                     }
+                    // v3.2.6 (Part C) — idempotency: if a move notice for THIS
+                    // event is already open (awaiting the colleague), don't move
+                    // + notify again on a later run. The direct move usually
+                    // self-resolves the overlap, but this guards the window
+                    // before the colleague replies (and a revert→re-detect race).
+                    try {
+                      // eslint-disable-next-line @typescript-eslint/no-require-imports
+                      const { getDb } = require('../db') as typeof import('../db');
+                      const inflight = getDb().prepare(
+                        `SELECT 1 FROM outreach_jobs WHERE owner_user_id = ? AND intent = 'meeting_reschedule'
+                           AND status = 'sent' AND context_json LIKE ? LIMIT 1`,
+                      ).get(ownerUserId, `%${movable.id}%`);
+                      if (inflight) {
+                        logger.info('Overlap autofix — move notice for this event already open; skipping', { movableId: movable.id });
+                        continue;
+                      }
+                    } catch (err) {
+                      logger.warn('Overlap idempotency check threw — proceeding', { err: String(err).slice(0, 160) });
+                    }
                     const mStart = parseGraphDt(movable.start.dateTime, movable.start.timeZone, timezone);
                     const mEnd = parseGraphDt(movable.end.dateTime, movable.end.timeZone, timezone);
                     const durationMin = Math.round(mEnd.diff(mStart, 'minutes').minutes);
@@ -1214,6 +1233,14 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                         });
                       }
                     }
+                    // v3.2.6 (Part A) — keep the move within the SAME week as the
+                    // conflict (owner direction: don't push it to next week).
+                    // Clamp searchTo to the end of the conflict's week (Sun–Sat,
+                    // owner-local). If nothing's free in-week, surface to the owner.
+                    const conflictDt = DateTime.fromISO(issue.date, { zone: timezone });
+                    const weekEndIso = conflictDt.minus({ days: conflictDt.weekday % 7 }).plus({ days: 6 }).endOf('day').toUTC().toISO()!;
+                    if (weekEndIso < searchTo) searchTo = weekEndIso;
+
                     const slots = await findAvailableSlots({
                       userEmail,
                       timezone,
@@ -1223,68 +1250,77 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                       searchTo,
                       profile,
                     });
-                    // Pick up to 3 distinct candidate slots
-                    const proposed = slots.slice(0, 3).map(s => ({
-                      start: s.start,
-                      location: 'Online' as string,
-                      isOnline: true,
-                    }));
-                    if (proposed.length === 0) {
+                    const top = slots[0];
+                    if (!top) {
+                      // v3.2.6 (Part A) — no in-week slot free for everyone. Per
+                      // owner direction: do NOT push to next week — return it to him.
                       issue.fix_failed = true;
-                      issue.fix_error = 'No alternate slot found — leaving for owner.';
+                      issue.fix_error = 'No slot free for everyone this week — left for you (move it yourself, or tell me to look next week).';
                     } else {
-                      // Build participants for the coord (movable meeting's
-                      // attendees, excluding the owner)
-                      const coordParticipants = participantsRaw
-                        .filter(a => a.emailAddress.address.toLowerCase() !== profile.user.email.toLowerCase())
-                        .map(a => ({
-                          name: a.emailAddress.name || a.emailAddress.address,
-                          email: a.emailAddress.address,
-                          tz: profile.user.timezone,
-                        }));
+                      // v3.2.6 (Part A) — the movable meeting is internal-only
+                      // (external attendees were gated out above) and `top` is a
+                      // slot verified free for the owner + all attendees, IN-WEEK.
+                      // MOVE IT DIRECTLY (owner authority, active mode), then notify
+                      // the attendee(s) with a pushback escape hatch. No coord, no
+                      // waiting, no orphan.
+                      const subj = displaySubject(movable, profile) || 'Meeting';
+                      const newStartIso = top.start;
+                      const newEndIso = DateTime.fromISO(newStartIso).plus({ minutes: durationMin }).toUTC().toISO()!;
+                      const conflictReason = protection.sanitizeConflictReason(kept, profile.user.name.split(' ')[0], profile);
+
+                      await updateMeeting({ userEmail, timezone, meetingId: movable.id, start: newStartIso, end: newEndIso });
+                      // Headless move — slide any floating block it landed on, in code.
+                      try {
+                        const { rebalanceFloatingBlocksAfterMutation } = await import('../utils/rebalanceFloatingBlocks');
+                        await rebalanceFloatingBlocksAfterMutation({ profile, affectedSlotIso: newStartIso, ownerSlackId: ownerUserId });
+                      } catch (rebErr) {
+                        logger.warn('rebalance after overlap auto-move threw — continuing', { err: String(rebErr).slice(0, 160) });
+                      }
+
+                      // Notify each non-owner attendee. Calendar attendees carry
+                      // email only → resolve slack_id (getPersonByEmail). The notice
+                      // is a meeting_reschedule(already_moved) so a "doesn't work"
+                      // reply routes back to the owner with a revert option.
                       // eslint-disable-next-line @typescript-eslint/no-require-imports
-                      const stateMod = require('./meetings/coord/state') as typeof import('./meetings/coord/state');
-                      await stateMod.initiateCoordination({
-                        ownerUserId,
-                        ownerChannel: context.channelId,
-                        ownerThreadTs: context.threadTs,
-                        ownerName: profile.user.name,
-                        ownerEmail: profile.user.email,
-                        ownerTz: profile.user.timezone,
-                        // v2.7.4 — mask private subjects on outbound coord
-                        // (DMs to colleagues quote the subject).
-                        subject: displaySubject(movable, profile) || 'Meeting',
-                        durationMin,
-                        participants: coordParticipants as Parameters<typeof stateMod.initiateCoordination>[0]['participants'],
-                        proposedSlots: proposed as Parameters<typeof stateMod.initiateCoordination>[0]['proposedSlots'],
-                        profile,
-                        moveExistingEvent: {
-                          id: movable.id,
-                          currentStartIso: mStart.toISO()!,
-                          currentEndIso: mEnd.toISO()!,
-                          conflictReason: protection.sanitizeConflictReason(kept, profile.user.name.split(' ')[0], profile),
-                        },
-                      });
+                      const { notifyColleagueOfMove } = require('./meetingReschedule') as typeof import('./meetingReschedule');
+                      // eslint-disable-next-line @typescript-eslint/no-require-imports
+                      const { getPersonByEmail } = require('../db') as typeof import('../db');
+                      const notified: string[] = [];
+                      for (const a of participantsRaw) {
+                        const email = a.emailAddress.address;
+                        if (!email || email.toLowerCase() === profile.user.email.toLowerCase()) continue;
+                        const row = getPersonByEmail(email.trim().toLowerCase());
+                        if (!row?.slack_id) continue; // can't DM → skip (meeting still moved; owner shadowed below)
+                        await notifyColleagueOfMove({
+                          profile,
+                          ownerChannel: context.channelId,
+                          ownerThreadTs: context.threadTs,
+                          colleagueSlackId: row.slack_id,
+                          colleagueName: a.emailAddress.name || row.name || email,
+                          colleagueTz: row.timezone,
+                          meetingId: movable.id,
+                          meetingSubject: subj,
+                          originalStartIso: mStart.toISO()!,
+                          originalEndIso: mEnd.toISO()!,
+                          newStartIso,
+                          newEndIso,
+                          conflictReason,
+                        });
+                        notified.push((a.emailAddress.name || row.name || email).split(' ')[0]);
+                      }
+
+                      const newLocal = DateTime.fromISO(newStartIso, { zone: timezone }).toFormat('EEE d MMM HH:mm');
                       issue.fixed = true;
-                      issue.fix_detail = `Started a move-coord: asking ${coordParticipants.map(p => p.name).join(' and ')} to shift "${displaySubject(movable, profile)}" (currently ${mStart.toFormat('HH:mm')}–${mEnd.toFormat('HH:mm')}). Will book once they agree.`;
+                      issue.fix_detail = notified.length > 0
+                        ? `Moved "${subj}" (was ${mStart.toFormat('HH:mm')}–${mEnd.toFormat('HH:mm')}) to ${newLocal} to clear the clash, and let ${notified.join(' and ')} know — I'll loop you in if they push back.`
+                        : `Moved "${subj}" to ${newLocal} to clear the clash.`;
                       fixesApplied += 1;
-                      // v2.7.4 — add to internal_actions so the routine
-                      // narration + claim-checker see the move-coord fired.
-                      // Previously this branch silently fixed without
-                      // signaling, so Sonnet narrated the same shape
-                      // whether or not the coord actually initiated.
                       internalActions.push({
-                        tool: 'initiate_coordination',
-                        detail: `Move-coord for "${displaySubject(movable, profile)}" — DMing ${coordParticipants.map(p => p.name).join(', ')}`,
+                        tool: 'move_meeting',
+                        detail: `Auto-moved "${subj}" to ${newLocal} (overlap autofix)${notified.length ? ` — notified ${notified.join(', ')}` : ''}`,
                       });
-                      // v3.1.2 (A1b-fix) — shadow-notify owner at the moment
-                      // the autonomous coord fires (real-time, not next-day
-                      // brief). The 2026-05-27 Lori-Weekly trace showed
-                      // category-overflow autofix DMing a colleague with
-                      // zero owner visibility — he only saw the closure
-                      // narration the next morning. Active mode keeps its
-                      // autonomy; the owner gets a chance to "cancel"
-                      // before the colleague replies.
+                      // Shadow-notify owner in real time — keeps autonomy, gives him
+                      // a chance to "revert" before the colleague even replies.
                       try {
                         // eslint-disable-next-line @typescript-eslint/no-require-imports
                         const { shadowNotify } = require('../utils/shadowNotify') as
@@ -1292,10 +1328,10 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                         await shadowNotify(profile, {
                           channel: context.channelId,
                           action: `Active-mode autofix — ${issue.type}`,
-                          detail: `${issue.description}. Started a move-coord on "${displaySubject(movable, profile)}" (${mStart.toFormat('HH:mm')}–${mEnd.toFormat('HH:mm')}) — DMed ${coordParticipants.map(p => p.name).join(', ')}. Say "cancel" to abort.`,
+                          detail: `${issue.description}. I moved "${subj}" to ${newLocal} (free for everyone, same week)${notified.length ? ` and let ${notified.join(', ')} know` : ''}. Say "revert" if you'd rather I hadn't.`,
                         });
                       } catch (err) {
-                        logger.warn('shadowNotify on active-mode coord threw — continuing', {
+                        logger.warn('shadowNotify on active-mode move threw — continuing', {
                           err: String(err).slice(0, 200),
                         });
                       }
@@ -1607,7 +1643,7 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
           const existingNearby = events.find(e => {
             if (e.isAllDay || e.isCancelled || e.showAs === 'free') return false;
             if (!fb.isFloatingBlockEvent(
-              { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+              { subject: e.subject, categories: e.categories },
               block,
             )) return false;
             const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
@@ -1738,7 +1774,7 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
         const existingEvent = events.find(e => {
           if (e.isAllDay || e.isCancelled || e.showAs === 'free') return false;
           const matches = fb.isFloatingBlockEvent(
-            { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+            { subject: e.subject, categories: e.categories },
             block,
           );
           if (!matches) return false;
@@ -1774,7 +1810,7 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
           .filter(e => {
             if (e.isAllDay || e.isCancelled || e.showAs === 'free') return false;
             if (fb.isFloatingBlockEvent(
-              { subject: e.subject, categories: (e as unknown as { categories?: unknown }).categories },
+              { subject: e.subject, categories: e.categories },
               block,
             )) return false;
             const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);

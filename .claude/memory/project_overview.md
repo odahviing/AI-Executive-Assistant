@@ -4,11 +4,15 @@ description: High-level facts about the Maelle platform — stack, current versi
 type: project
 ---
 
-Maelle is an AI executive assistant platform (**v3.0.7**) built in Node.js/TypeScript. Runs primarily on Slack, backed by Microsoft Graph (Outlook calendar), Anthropic Claude Sonnet 4.6 for reasoning (with optional Vertex AI provider via `LLM_PROVIDER` env var), SQLite via better-sqlite3. Per-user YAML profiles in `config/users/`. Multi-tenant: one deployment, N executives, one Slack app per assistant identity.
+Maelle is an AI executive assistant platform (**v3.3.1**) built in Node.js/TypeScript. Runs primarily on Slack, backed by Microsoft Graph (Outlook calendar), Anthropic Claude Sonnet 4.6 for reasoning (with optional Vertex AI provider via `LLM_PROVIDER` env var), SQLite via better-sqlite3. Per-user YAML profiles in `config/users/`. Multi-tenant: one deployment, N executives, one Slack app per assistant identity.
 
 **Mission: agent that works as a human EA.** Filter for every decision: "would a real human EA do this?" — outranks speed, completeness, elegance.
 
 **Runs under `npm run dev` on the owner's laptop** (PM2 + auto-build watcher are wired but currently OFF). Restart needed to pick up code changes. GitHub remains the bug data source.
+
+## v3.3.1 — audit hardening + calendar-health auto-move
+
+Consumed the critical/high waves of an 8-subagent propose-only audit (`.claude/V3_3_0_AUDIT_HANDOFF.md`, ~80 findings). Highlights: `update_my_preferences` enum gained `'news'` (the whole news teach-vs-ask was server-rejected before — assistant.ts:341); channel rate-limit notice no longer leaks top-level (CH-1); thread-action owner-presence gate now uses a recent-tail window, not all-history (T-5); `addresseeGate` + `humanGate` flipped Sonnet→Haiku (PERF-1/4); `categories?: string[]` on the canonical Graph event type erased 16 casts (TS-6). **News:** seen-log write is now per-profile-mutexed (N-2), `todayStamp`/`keepFrom` owner-local (N-3), on-demand `news()` derives today's meeting companies (N-4), and the **source-steer parser was removed** — `news.md` is LLM-only free text, code does NOT parse it (M-7); plus seen-log semantic dedup (write pass sees the existing log, skips already-covered). **Calendar-health overlap autofix REWRITTEN** (the recurring "waiting on X" orphan): for an internal-only movable meeting it now MOVES directly to a verified-free **in-week** slot (no in-week slot → surfaces to owner, doesn't move) and notifies the attendee via a `meeting_reschedule(already_moved)` notice → pushback routes back to the owner with a revert option (`calendarHealth.ts` overlap path + `meetingReschedule.ts`). Root cause of the orphan: `initiateCoordination` built participants from calendar attendees (email, no slack_id) and never resolved one, so the colleague was never DM'd — now resolves email→slack_id (`coord/state.ts`). Idempotency guard blocks a duplicate move while a notice is open.
 
 ## v3.3 — news + thread actions (two new capabilities)
 
