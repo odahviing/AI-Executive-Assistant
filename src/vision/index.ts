@@ -12,7 +12,11 @@
  */
 
 import type Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicClient } from '../llm/client';
+import { logLlmUsage } from '../utils/usageLog';
 import logger from '../utils/logger';
+
+const anthropic = getAnthropicClient();
 
 export const SUPPORTED_IMAGE_MIMETYPES = [
   'image/jpeg',
@@ -108,4 +112,45 @@ export function buildImageBlock(image: DownloadedImage): AnthropicImageBlock {
       data: image.buffer.toString('base64'),
     },
   };
+}
+
+/**
+ * Extract a compact text description of an image at INGESTION time so it can be
+ * persisted into conversation history like any other message text.
+ *
+ * Image bytes are native-multimodal for ONLY the turn they arrive (see the
+ * placeholder write in connectors/slack/app.ts) — so anything the image
+ * contained that the reply didn't restate is lost on the next turn (the
+ * "book me 25 mins" + screenshot bug: turn 2 "online" had no subject/time/
+ * attendees left). Persisting this description means the image's content rides
+ * the SAME conversation-history path as a normal message; nothing else changes.
+ *
+ * Tuned for ACTIONABLE detail (names, dates, times, durations, subjects,
+ * locations, numbers, the ask) so a follow-up turn still has what it needs.
+ * Fails soft → returns null and the caller falls back to the bare placeholder.
+ */
+export async function describeImage(block: AnthropicImageBlock): Promise<string | null> {
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 220,
+      messages: [{
+        role: 'user',
+        content: [
+          block,
+          {
+            type: 'text',
+            text:
+              'Describe this image in ONE compact line of plain text, capturing every ACTIONABLE detail an executive assistant would need later: people/names, dates, days, times, durations, meeting subject, locations, numbers, and what is being asked or decided. If it is a screenshot of a chat or email, summarize who is involved and the key content. No preamble, no markdown, no quotes — just the single descriptive line.',
+          },
+        ],
+      }],
+    });
+    logLlmUsage('image_describe', 'claude-haiku-4-5-20251001', response);
+    const text = ((response.content[0] as Anthropic.TextBlock)?.text ?? '').trim().replace(/\s+/g, ' ');
+    return text || null;
+  } catch (err) {
+    logger.warn('describeImage — vision pass threw', { err: String(err).slice(0, 200) });
+    return null;
+  }
 }

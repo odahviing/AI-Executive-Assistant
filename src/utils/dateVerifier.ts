@@ -31,7 +31,6 @@ import logger from './logger';
 import { config } from '../config';
 import type { UserProfile } from '../config/userProfile';
 import { getEffectiveToday } from './effectiveToday';
-import { extractFirstJsonObject } from './extractJson';
 
 const MONTHS_EN: Record<string, number> = {
   jan: 1, january: 1,
@@ -178,154 +177,18 @@ export async function verifyDates(draft: string, profile: UserProfile, userMessa
     }
   }
 
-  // v1.8.5 — LLM-based context verifier. Catches bare-weekday misreferences
-  // that slip past the weekday+date regex patterns above. Fires only if:
-  //   - the draft contains a bare weekday (cheap regex pre-gate, no LLM if not)
-  //   - no weekday+date mismatch already found (if the regex caught it, LLM
-  //     doesn't need to redo the work)
-  //   - userMessage is present (gives the classifier context to judge against)
-  //
-  // Runs on Sonnet (per owner's call — not Haiku). Cost is one small call per
-  // reply that happens to contain a weekday, which is a small fraction of
-  // replies. Fails open on any error.
-  const bareWeekdayRe = /\b(Mon(?:day)?|Tue(?:s(?:day)?)?|Wed(?:nesday)?|Thu(?:r(?:s(?:day)?)?)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)\b/i;
-  const draftHasBareWeekday = bareWeekdayRe.test(draft);
-  if (draftHasBareWeekday && mismatches.length === 0 && userMessage && userMessage.length > 0) {
-    try {
-      const contextMismatches = await verifyBareWeekdayContext({
-        draft,
-        userMessage,
-        profile,
-      });
-      for (const cm of contextMismatches) mismatches.push(cm);
-    } catch (err) {
-      logger.warn('dateVerifier: LLM context pass failed — skipping', { err: String(err) });
-    }
-  }
-
+  // The LLM bare-weekday context pass was REMOVED. It repeatedly hallucinated a
+  // target date for a bare weekday that had no anchor and REWROTE correct
+  // weekdays — Thursday→Monday then Thursday→Friday on the UNIC booking (the
+  // corrupted text was even persisted to history, so a confirming "ok" risked
+  // a wrong-day booking), and earlier the Michal mis-delete. It was also
+  // language-coupled (needed per-language anchor/weekday lists, which leak the
+  // tenant's language). Only the DETERMINISTIC weekday+date pair checks above
+  // run now — they never guess a date, so they can't corrupt a correct one.
   if (mismatches.length > 0) {
     logger.warn('dateVerifier: weekday/date mismatches in draft', { mismatches });
   }
   return { ok: mismatches.length === 0, mismatches };
-}
-
-// ── v1.8.5 LLM context verifier ─────────────────────────────────────────────
-// Sonnet classifier: given the user's message, Maelle's draft, and a 14-day
-// lookup anchored on today, identify any bare weekday in the draft that's
-// contextually wrong. Judgment on phrasing; determinism stays in the regex
-// checks above. Strict JSON output, fails open on parse errors.
-async function verifyBareWeekdayContext(params: {
-  draft: string;
-  userMessage: string;
-  profile: UserProfile;
-}): Promise<DateMismatch[]> {
-  // Anchor on effective-today so the lookup matches the prompt's DATE LOOKUP
-  // (post late-night shift). Without this, the classifier sees a different
-  // "Today" / "Tomorrow" than the model wrote against and flags correct
-  // answers as mismatches.
-  const today = getEffectiveToday(params.profile);
-  const lookupLines = Array.from({ length: 14 }, (_, i) => {
-    const d = today.plus({ days: i });
-    const label = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toFormat('EEE d MMM');
-    return `${label} (${d.toFormat('EEEE')}): ${d.toFormat('yyyy-MM-dd')}`;
-  }).join('\n');
-
-  const prompt = `You are a weekday-consistency checker for a calendar assistant's reply draft. Output strict JSON only, no prose, no fences.
-
-USER'S MESSAGE:
-${params.userMessage}
-
-ASSISTANT'S DRAFT REPLY:
-${params.draft}
-
-DATE LOOKUP (today and next 13 days in the user's timezone):
-${lookupLines}
-
-Task: find any bare weekday reference in the draft (e.g. "Monday's calendar", "on Monday", "this Monday", "Monday morning") that is CONTEXTUALLY WRONG given the user's message + the date lookup.
-
-Rules for judging:
-- ⚠️ MOST IMPORTANT — NO ANCHOR, NO FLAG. Only flag a bare weekday when the USER'S MESSAGE ITSELF contains an explicit relative-day anchor (today / tomorrow / this afternoon / tonight / at 3pm today / in an hour / later today / EOD / now) that pins which calendar date the weekday must be, AND the draft's weekday contradicts it. If the user's message does NOT contain such an anchor — if the weekday in the draft is standalone and you'd have to GUESS which date it refers to — you have NO BASIS to correct it. Return it as NOT a mismatch. NEVER infer the date from the draft alone, never guess a target_date, never "correct" a weekday you can't anchor to the user's own words. When unsure, return no mismatches. (A wrongly-"corrected" correct weekday is worse than a missed one.)
-- If the user's message refers to a day relative to now (today / tomorrow / this afternoon / at 3pm / tonight / in an hour / later / EOD / now), the reply's weekday must match the ACTUAL weekday for that day.
-- If the user explicitly named a weekday (e.g. "on Friday") and the reply uses the same weekday, that's fine.
-- A future-facing weekday far from now ("I'll ping you Monday" when today is Sunday) is NOT wrong — it refers to the next Monday, not a mismatched today.
-- Only flag mismatches where the weekday clearly refers to the day the user is asking about.
-- DO NOT flag a weekday that's already QUALIFIED BY A DATE next to it ("Tuesday 19 May", "Friday, June 7th", "Mon 20 Apr") — those are weekday+date pairs and a separate deterministic check handles them. If the weekday has a calendar date right next to it, it's NOT a bare weekday for the purposes of this task. Skip it.
-
-Output:
-{
-  "mismatches": [
-    {
-      "written_weekday": "Monday",
-      "draft_excerpt": "Monday's calendar",
-      "correct_weekday": "Sunday",
-      "target_date": "2026-04-19"
-    }
-  ]
-}
-
-Empty array if everything is consistent. Keep output minimal.`;
-
-  const anthropic = getAnthropicClient();
-  const resp = await anthropic.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 400,
-    messages: [{ role: 'user', content: prompt }],
-  });
-  const text = (resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '';
-  // v3.2.6 (3.2 / E) — tolerant parse via the shared extractor: takes the FIRST
-  // balanced { … } object and ignores trailing prose / a second object (the
-  // "Unexpected non-whitespace after JSON" crash class, 2026-06-07).
-  const jsonStr = extractFirstJsonObject(text);
-  if (!jsonStr) return [];
-  let parsed: {
-    mismatches?: Array<{
-      written_weekday: string;
-      draft_excerpt?: string;
-      correct_weekday: string;
-      target_date: string;
-    }>;
-  };
-  try {
-    parsed = JSON.parse(jsonStr);
-  } catch (err) {
-    logger.debug('dateVerifier: bare-weekday JSON parse failed after extraction — skipping', {
-      err: String(err).slice(0, 120),
-    });
-    return [];
-  }
-  if (!parsed.mismatches || parsed.mismatches.length === 0) return [];
-
-  // v2.8.6 — defensive post-filter. The LLM sometimes flags weekdays that
-  // are already qualified by a date right next to them (e.g. "Tuesday 19
-  // May"). Those are weekday+date pairs — the regex pass at the top of
-  // verifyDates already validates them. If the regex didn't fire a
-  // mismatch for THIS draft, any LLM mismatch on a qualified weekday is
-  // almost certainly a hallucination (root of the 2026-05-18 Michal
-  // incident: draft said "from Tuesday 19 May" which is correct; LLM
-  // returned correctWeekday=Monday; the spurious retry that followed
-  // deleted the wrong meeting).
-  const dateAdjacentRe = /\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i;
-
-  return parsed.mismatches
-    .filter(mm => mm.written_weekday && mm.correct_weekday && mm.written_weekday !== mm.correct_weekday)
-    .filter(mm => {
-      // Drop the mismatch when the excerpt clearly carries a date next to
-      // the weekday — that's not a bare weekday. The regex pass owns that
-      // case and would have caught any real mismatch.
-      if (mm.draft_excerpt && dateAdjacentRe.test(mm.draft_excerpt)) {
-        logger.info('dateVerifier: dropping LLM mismatch on qualified weekday (date adjacent)', {
-          excerpt: mm.draft_excerpt, llmCorrectWeekday: mm.correct_weekday,
-        });
-        return false;
-      }
-      return true;
-    })
-    .map(mm => ({
-      writtenWeekday: mm.written_weekday,
-      writtenDate: mm.draft_excerpt ? `(${mm.draft_excerpt})` : '(bare weekday)',
-      correctWeekday: mm.correct_weekday,
-      date: mm.target_date || '',
-    }));
 }
 
 /** Build a short corrective nudge for the retry path. */

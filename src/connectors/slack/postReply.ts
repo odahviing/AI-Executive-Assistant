@@ -537,6 +537,18 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
           ? /\[(create_meeting|finalize_coord_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block)/.test(toolSummariesText)
           : verdict.action_type === 'task'
             ? /\[(create_task|create_approval)/.test(toolSummariesText)
+            // Extend the false-positive shield to the memory/pref action-verb
+            // family. The claim-checker classifies "saved / noted / updated"
+            // claims as `other`, and these tools were never in the shield — so
+            // a legitimate update_my_preferences save that Sonnet narrated as
+            // "Saved" got flagged + retried (a wasted orchestrator turn; only
+            // the tool-call cache prevented a double-write). Same trust
+            // contract as book/task: the tool literally ran this turn ⇒ the
+            // claim is honest. The specifics-mismatch bypass below still fires
+            // for genuine over-claims, and an `other` claim with NONE of these
+            // tools present still retries (phantom-claim protection intact).
+            : verdict.action_type === 'other'
+            ? /\[(update_my_preferences|manage_preference|note_about_person|note_about_self|log_interaction|confirm_gender|update_person_profile|update_person_memory|manage_routine|manage_calendar_issue|update_task|update_summary_draft|manage_knowledge)/.test(toolSummariesText)
             : false;
 
     // v2.6.1 — when the claim-checker LLM has named a SPECIFIC change the

@@ -4,11 +4,15 @@ description: High-level facts about the Maelle platform — stack, current versi
 type: project
 ---
 
-Maelle is an AI executive assistant platform (**v3.3.2**) built in Node.js/TypeScript. Runs primarily on Slack, backed by Microsoft Graph (Outlook calendar), Anthropic Claude Sonnet 4.6 for reasoning (with optional Vertex AI provider via `LLM_PROVIDER` env var), SQLite via better-sqlite3. Per-user YAML profiles in `config/users/`. Multi-tenant: one deployment, N executives, one Slack app per assistant identity.
+Maelle is an AI executive assistant platform (**v3.3.4**) built in Node.js/TypeScript. Runs primarily on Slack, backed by Microsoft Graph (Outlook calendar), Anthropic Claude Sonnet 4.6 for reasoning (with optional Vertex AI provider via `LLM_PROVIDER` env var), SQLite via better-sqlite3. Per-user YAML profiles in `config/users/`. Multi-tenant: one deployment, N executives, one Slack app per assistant identity.
 
 **Mission: agent that works as a human EA.** Filter for every decision: "would a real human EA do this?" — outranks speed, completeness, elegance.
 
 **Runs under `npm run dev` on the owner's laptop** (PM2 + auto-build watcher are wired but currently OFF). Restart needed to pick up code changes. GitHub remains the bug data source.
+
+## v3.3.4 — news re-pull model (feature finalized) + spine dispatcher consolidation
+
+**News (the deliverable):** the daily edition now uses a **re-pull model** — the seen-log records ONLY items actually SHOWN in the brief (matched by cited URL in `writeSeenLog(profile, bundle, {briefText})`), NOT the whole gathered bundle. So a gathered-but-unshown article is no longer falsely marked "seen"; it resurfaces on the next re-pull (deduped vs what was seen) until shown or aged out. NO carryover file, NO extra LLM call. Gate is **relevance-first, up to 7, never pad** (1 good > 5 fillers). Windows: morning **3d**, on-demand **7d**; Tavily `max_results` **15**/goal (threaded via `tavilySearch`, capped 20; web_search/research unchanged). Importance-ordering deferred → #123. **Spine:** legacy tasks-table dispatchers reminder/follow_up/research DELETED — folded into the one `sweepDueRequests` (reminder_fire / research_run in `core/requests/runner.ts`). Plus dateVerifier slimmed ~150 LOC, vision update, assorted fixes (guards-audit handoff at `.claude/GUARDS_AUDIT_PROMPT.md`).
 
 ## v3.3.2 — audit wave 2 (latency + layering + news source-steer)
 

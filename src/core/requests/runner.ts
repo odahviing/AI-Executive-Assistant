@@ -84,6 +84,9 @@ async function dispatchHandler(
     case 'reminder_fire':
       return runReminderFire(row, profile);
 
+    case 'research_run':
+      return runResearchRun(row, profile, app);
+
     case 'outreach_expiry':
     case 'outreach_decision':
       return runOutreachExpiryOrDecision(row, profile);
@@ -222,13 +225,32 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
   const details = parseDetails<Record<string, unknown>>(row) ?? {};
   const message = typeof details.message === 'string' && details.message
     ? details.message
-    : row.subject;
-  const targetSlackId = row.target_slack_id ?? row.owner_user_id;
+    : (row.subject ?? '');
+  const ownerId = profile.user.slack_user_id;
+  const targetSlackId = row.target_slack_id ?? ownerId;
+  const remindingSomeoneElse = targetSlackId !== ownerId;
 
   try {
-    const conn = getConnection(profile.user.slack_user_id, 'slack');
+    const conn = getConnection(ownerId, 'slack');
     if (conn) {
-      await conn.sendDirect(targetSlackId, message);
+      if (remindingSomeoneElse) {
+        // Remind someone else: DM them framed as coming from the owner, then
+        // report back to the owner (or flag if they were unreachable). This is
+        // the behavior the old tasks-table dispatchReminder owned — now folded
+        // into the single spine chokepoint so there's one reminder path.
+        const ownerFirst = profile.user.name.split(' ')[0];
+        const targetName = row.target_name ?? 'them';
+        const framed = `${ownerFirst} asked me to remind you: ${message}`;
+        const res = await conn.sendDirect(targetSlackId, framed);
+        if (res.ok) {
+          await conn.sendDirect(ownerId, `Reminded ${targetName} about "${row.subject ?? message}".`);
+        } else {
+          await conn.sendDirect(ownerId, `I couldn't reach ${targetName} to send that reminder — you may want to ping them directly.`);
+        }
+      } else {
+        // Remind me — DM the owner the message.
+        await conn.sendDirect(ownerId, message);
+      }
     }
   } catch (err) {
     logger.warn('runReminderFire — DM threw', { requestId: row.id, err: String(err).slice(0, 200) });
@@ -237,6 +259,59 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
     id: row.id,
     state: 'resolved',
     closureReason: 'reminder_fired',
+    closedBy: 'system',
+  });
+  return 'closed';
+}
+
+/**
+ * Research fires — run the research prompt through the orchestrator (full
+ * agent loop, non-interactive), DM the owner the result, then close. Ported
+ * from the deleted tasks-table dispatchResearch so research lives on the one
+ * spine chokepoint (create_task → kind=research → handler='research_run')
+ * instead of the broken reminder_fire path that only DM'd the title and never
+ * actually researched anything.
+ */
+async function runResearchRun(row: RequestRow, profile: UserProfile, app: App | undefined): Promise<'closed'> {
+  const details = parseDetails<Record<string, unknown>>(row) ?? {};
+  const researchPrompt = (typeof details.message === 'string' && details.message)
+    ? details.message
+    : (row.description ?? `Research: ${row.subject ?? ''}`);
+  const ownerId = profile.user.slack_user_id;
+  const channelId = row.origin_channel ?? '';
+
+  try {
+    // Dynamic import avoids a load-time cycle (orchestrator → skills → spine).
+    const { runOrchestrator } = await import('../orchestrator');
+    const result = await runOrchestrator({
+      userMessage: researchPrompt,
+      conversationHistory: [],
+      threadTs: `research_${row.id}_${Date.now()}`,
+      channelId,
+      userId: row.owner_user_id,
+      senderRole: 'owner',
+      channel: 'slack',
+      interactive: false,  // scheduled research run, not a conversation: no social coda
+      profile,
+      app,
+    });
+    if (result.reply) {
+      const conn = getConnection(ownerId, 'slack');
+      if (conn) {
+        if (channelId) {
+          await conn.postToChannel(channelId, result.reply, { threadTs: row.origin_thread_ts ?? undefined });
+        } else {
+          await conn.sendDirect(ownerId, result.reply);
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn('runResearchRun — orchestrator threw', { requestId: row.id, err: String(err).slice(0, 300) });
+  }
+  closeRequest({
+    id: row.id,
+    state: 'resolved',
+    closureReason: 'research_completed',
     closedBy: 'system',
   });
   return 'closed';

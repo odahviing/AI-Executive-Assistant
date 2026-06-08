@@ -552,7 +552,8 @@ async function generateBriefingText(
   const newsBlock = hasNews
     ? `
 
-UPDATES (news) — after the calendar/tasks body, add a short "Updates" section: AT MOST 3–5 bullets of news that matters to ${firstName} today, drawn ONLY from the NEWS SOURCES in the data below. Rules:
+UPDATES (news) — after the calendar/tasks body, add an "Updates" section of news that matters to ${firstName}, drawn ONLY from the NEWS SOURCES in the data below. Rules:
+- RELEVANCE IS THE BAR. Include only items genuinely relevant to ${firstName}'s interests — NEVER add a marginal/off-topic one just to reach a count. Up to 7 items: when you have 6–7 genuinely relevant ones, show them (he skims and picks); when only 2–3 are relevant, show 2–3; if only 1, show 1. 7 is the ceiling, not a target — do not pad.
 - Only genuinely NEW developments from the last 7 days. Skip anything older, and skip anything already in the "already covered" log below.
 - MERGE same-story duplicates WITHIN today's set: if two sources report the SAME event/development (even from different outlets or worded differently — e.g. the same funding round, the same acquisition, the same company's valuation), produce exactly ONE bullet, citing the best source. Never list the same story twice.
 - Each bullet cites its source as a Slack hyperlink: <url|short label> (e.g. <https://...|Reuters>). NEVER paste a bare URL, and NEVER write "[link]" followed by the URL — that doubles the text. One compact hyperlink per bullet.
@@ -779,7 +780,10 @@ export async function sendMorningBriefing(
   if (newsBundle) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { writeSeenLog } = require('../skills/news') as typeof import('../skills/news');
-    void writeSeenLog(profile, newsBundle).catch(() => { /* non-fatal */ });
+    // v3.3.x — pass the posted brief so the seen-log records only the SHOWN
+    // (cited) items, not the whole gathered bundle. Unshown-but-recent articles
+    // then resurface on tomorrow's re-pull instead of being silently buried.
+    void writeSeenLog(profile, newsBundle, { briefText: textToSend }).catch(() => { /* non-fatal */ });
   }
 
   // POST-BRIEF: stamp surfaced + auto-park stale items.

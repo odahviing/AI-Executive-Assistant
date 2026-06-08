@@ -2,6 +2,28 @@
 
 ---
 
+## 3.3.4 — news re-pull model (don't-bury, relevance-first) + requests-spine dispatcher consolidation + cleanup
+
+Finalizes the personalized-news feature and bundles several chats' work. **The news change is the headline:** the daily edition now re-pulls and *resurfaces* unshown-but-recent articles instead of silently burying them, with **relevance — not a count — as the bar.** Patch; no new capabilities.
+
+### Changed (news — feature finalized)
+
+- **Re-pull model + shown-only seen-log (the core fix).** `writeSeenLog` now records only the items actually **shown** in the brief (matched by their cited URL), not the whole gathered bundle. So a gathered-but-unshown article is no longer marked "seen" — it **resurfaces on the next day's re-pull** (deduped against what was actually seen) until it's shown or ages out of the window. Fixes the silent-burial bug; **no carryover file, no extra LLM call.** ([news.ts](src/skills/news.ts), [briefs.ts](src/tasks/briefs.ts))
+- **Relevance-first gate.** Up to **7** items; relevance is the bar — never pad to a count (1 good beats 5 fillers; show 6–7 when that many are genuinely relevant, fewer otherwise). Applies to the brief Updates section and the on-demand `news` tool.
+- **Windows + net:** morning window **3 days** (re-pull re-offers an unshown item for ~3 days — a 1–2 day delay plus buffer, stays fresh), on-demand **7 days**; Tavily **`max_results` 15** per goal (threaded through `tavilySearch`, capped at 20 — `web_search`/`web_research` unchanged at 8). ([general.ts](src/skills/general.ts))
+- Importance-*ordering* of the daily edition stays deferred to #123.
+
+### Changed (requests spine — dispatcher consolidation)
+
+- Deleted the legacy tasks-table dispatchers `reminder` / `follow_up` / `research`; their firing now runs on the **single requests-spine sweep** (`sweepDueRequests` → `reminder_fire` / `research_run` in [runner.ts](src/core/requests/runner.ts)). Completes the Path-2 "one timer owns all lifecycle timing" arc. ([dispatchers/index.ts](src/tasks/dispatchers/index.ts), [requests/types.ts](src/core/requests/types.ts))
+
+### Changed (cleanup / fixes — parallel chats)
+
+- **`dateVerifier` slimmed ~150 lines** — dead/over-heavy logic removed. ([dateVerifier.ts](src/utils/dateVerifier.ts))
+- Vision/image-handling update ([vision/index.ts](src/vision/index.ts)), plus assorted small fixes across `app.ts`, `postReply.ts`, `meetings.ts`, `assistant.ts`, `tasks/skill.ts`. A guards-audit handoff is filed at `.claude/GUARDS_AUDIT_PROMPT.md` for a follow-up effort.
+
+---
+
 ## 3.3.3 — real-day bug-bash: calendar-health window/OOF/coda, booking location & duration, date-guard, robust JSON parsing
 
 A reactive bug-bash from a day of real use (pasted Slack chats + the morning report + brief). Patch — fixes and correctness, no new capability. Several date/scheduling guards were either firing wrong or failing silently; this wave makes them honest.

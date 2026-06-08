@@ -328,7 +328,7 @@ export async function runResearch(goal: string, recencyOverride?: number, opts?:
 
 /** Optional domain steer for grounded research (news skill). Backward-compatible:
  *  omit and the request body is byte-identical to the pre-existing behavior. */
-export interface DomainFilterOpts { includeDomains?: string[]; excludeDomains?: string[] }
+export interface DomainFilterOpts { includeDomains?: string[]; excludeDomains?: string[]; maxResults?: number }
 
 export async function tavilySearch(
   query: string,
@@ -343,7 +343,10 @@ export async function tavilySearch(
     api_key: config.TAVILY_API_KEY,
     query,
     search_depth: depth,
-    max_results: 8,
+    // v3.3.x — news passes a wider maxResults (it shows up to 7/day over a
+    // multi-day window, deduped, so it needs a deep candidate pool). Other
+    // callers (web_search/web_research) omit opts → unchanged at 8.
+    max_results: Math.min(Math.max(opts?.maxResults ?? 8, 1), 20),
     include_answer: true,
   };
   if (typeof timeRangeDays === 'number' && timeRangeDays > 0) {
@@ -382,7 +385,9 @@ export async function tavilySearch(
 
   return {
     answer: data.answer ?? null,
-    results: (data.results ?? []).slice(0, 6).map(r => ({
+    // Return up to the requested cap (news asks for ~15); default 6 keeps the
+    // web_search/web_research payloads small as before.
+    results: (data.results ?? []).slice(0, opts?.maxResults ?? 6).map(r => ({
       title: r.title,
       content: r.content,
       url: r.url,

@@ -9,19 +9,20 @@
 import type { Task } from '../index';
 import type { TaskDispatcher } from './types';
 
-import { dispatchReminder } from './reminder';
-import { dispatchFollowUp } from './followUp';
-import { dispatchResearch } from './research';
 import { dispatchRoutine } from './routine';
 import { dispatchCalendarFix } from './calendarFix';
 import { dispatchSummaryActionFollowup } from './summaryActionFollowup';
 import { dispatchSocialDecay } from './socialDecay';
 import { dispatchSocialPingRankCheck } from './socialPingRankCheck';
 
+// create_task work (reminder / follow_up / research) lives on the requests
+// spine now — create_task creates a request whose next_check_handler is fired
+// by the ONE sweep (sweepDueRequests): reminder_fire for reminders/follow-ups,
+// research_run for research. The old tasks-table dispatchReminder/FollowUp/
+// Research were never invoked (nothing creates those task rows) and were the
+// stranded duplicate path — deleted. This map now only holds the engine-internal
+// task types that genuinely still create tasks-table rows.
 export const DISPATCHERS: Partial<Record<Task['type'], TaskDispatcher>> = {
-  reminder:                 dispatchReminder,
-  follow_up:                dispatchFollowUp,
-  research:                 dispatchResearch,
   routine:                  dispatchRoutine,
   calendar_fix:             dispatchCalendarFix,
   summary_action_followup:  dispatchSummaryActionFollowup,

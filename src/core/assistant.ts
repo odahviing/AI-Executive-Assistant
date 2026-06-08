@@ -332,6 +332,8 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
 
 Use ONLY after the owner confirms a STANDING preference (apply every time), e.g. "on Sundays don't add a missing lunch", "just delete duplicate recruiting-system invites", "call me Mr. Cohen when you confirm a booking". Offer to remember, then save on his yes.
 
+SHAPE OF THE ASK: when he asks to change how you do something recurring, do NOT both pre-commit ("I'll do it next time") AND ask to make it standing — that's muddled (did it save, or are you waiting on him?). Acknowledge in one short line, then ask ONE clear question ("Want me to save that so every report comes this way?") and act only on his yes. Keep the ask uncrowded — don't re-list the whole structure inline, especially when the request was to reduce clutter.
+
 NOT for: one-off instructions for today, facts about other PEOPLE (→ update_person_memory / update_person_profile), or company knowledge (→ KB markdown).`,
         input_schema: {
           type: 'object' as const,

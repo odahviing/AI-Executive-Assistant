@@ -39,10 +39,13 @@ const NEWS_MODEL = 'claude-haiku-4-5-20251001';
 
 // Cost controls (code constants — tune after measuring).
 const NEWS_GOAL_CAP = 4;               // max research goals per gather
-const NEWS_MORNING_RECENCY_DAYS = 2;   // daily brief: only the freshest, so no "history"
-const NEWS_ONDEMAND_RECENCY_DAYS = 7;  // on-demand "catch me up": up to a week, aligned with the dedup window
+const NEWS_MORNING_RECENCY_DAYS = 3;   // daily brief window — fresh, but re-pull re-offers
+                                       // an unshown article for ~3 days (covers a 1-2 day delay)
+const NEWS_ONDEMAND_RECENCY_DAYS = 7;  // on-demand "catch me up": up to a week
 const NEWS_PER_GOAL_TIMEOUT_MS = 12_000; // a goal slower than this is dropped
-const SEEN_LOG_DAYS = 7;               // rolling dedup window (also the MAX article age we surface)
+const NEWS_MAX_RESULTS = 15;           // Tavily candidates per goal — deep pool so showing
+                                       // up to 7/day over a 3-day window (deduped) doesn't run dry
+const SEEN_LOG_DAYS = 7;               // rolling dedup window for SHOWN stories (don't-repeat)
 
 // ── Shared bundle shapes (mirror runResearch's return) ──────────────────────
 export interface NewsSource { title?: string; url: string; snippet?: string; published?: string }
@@ -213,7 +216,7 @@ async function searchGoal(goal: string, recency: number, steer: DomainFilterOpts
   // never blanks a topic X had no news on today. Fail-open toward coverage.
   let sources = await run(steer);
   if ((steer.includeDomains?.length ?? 0) > 0 && sources.length === 0) {
-    sources = await run({ excludeDomains: steer.excludeDomains });
+    sources = await run({ excludeDomains: steer.excludeDomains, maxResults: steer.maxResults });
   }
   return sources;
 }
@@ -233,13 +236,16 @@ export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}
     // planner emits goals AND structured source steer (preferred/avoid domains)
     // from his free-text interests — code never parses the MD (M-7).
     let goals: string[];
-    let steer: DomainFilterOpts = {};
+    // Wide candidate net per goal so the daily 6-7 (deduped over the window)
+    // doesn't run dry — see NEWS_MAX_RESULTS.
+    let steer: DomainFilterOpts = { maxResults: NEWS_MAX_RESULTS };
     if (opts.topic && opts.topic.trim()) {
       goals = [opts.topic.trim()];
     } else {
       const plan = await planNewsGoals(prefs.interestsText, opts.meetingCompanies ?? [], NEWS_GOAL_CAP);
       goals = plan.goals;
       steer = {
+        maxResults: NEWS_MAX_RESULTS,
         includeDomains: plan.preferredDomains.length ? plan.preferredDomains : undefined,
         excludeDomains: plan.avoidDomains.length ? plan.avoidDomains : undefined,
       };
@@ -417,10 +423,31 @@ function dedupeSeenLogBullets(md: string): string {
   return out.join('\n').trim();
 }
 
-/** Append today's surfaced items to the seen-log and prune days >7d old.
- *  Fire-and-forget by callers. Non-fatal on any error. */
-export async function writeSeenLog(profile: UserProfile, bundle: NewsBundle): Promise<void> {
+/** Append today's SHOWN items to the seen-log and prune days >7d old.
+ *  Fire-and-forget by callers. Non-fatal on any error.
+ *
+ *  v3.3.x — `opts.briefText` is the posted brief. When given, we log ONLY the
+ *  sources actually CITED in it (their url appears in the text), NOT the whole
+ *  gathered bundle. This is the load-bearing fix for the re-pull model: the
+ *  seen-log is a "don't repeat what he SAW" list, so a gathered-but-unshown
+ *  article is NOT marked seen and resurfaces on tomorrow's re-pull (deduped vs
+ *  what he did see) until shown or it ages out of the recency window. Without
+ *  briefText (the on-demand pull path) we log the bundle as before — the owner
+ *  engaged with that topic, so suppressing repeats of it is correct. */
+export async function writeSeenLog(
+  profile: UserProfile,
+  bundle: NewsBundle,
+  opts: { briefText?: string } = {},
+): Promise<void> {
   if (!bundle.sources.length) return;
+  // Shown-only filter (brief path): keep just the sources cited in the brief.
+  let toLog = bundle;
+  if (typeof opts.briefText === 'string') {
+    const text = opts.briefText;
+    const shown = bundle.sources.filter(s => s.url && text.includes(s.url));
+    if (shown.length === 0) return; // nothing from this gather was shown → log nothing
+    toLog = { ...bundle, sources: shown };
+  }
   await withSeenLogLock(profile, async () => {
     try {
       const file = seenLogPath(profile);
@@ -439,8 +466,9 @@ export async function writeSeenLog(profile: UserProfile, bundle: NewsBundle): Pr
 
       // Summarize ONLY the genuinely-new stories — the pass is shown the existing
       // 7-day log and skips anything already covered (semantic match, beats the
-      // token-Jaccard backstop on differently-worded repeats).
-      const lines = await summarizeBundleForSeenLog(bundle, pruned);
+      // token-Jaccard backstop on differently-worded repeats). `toLog` is the
+      // shown-only subset on the brief path (see the header note).
+      const lines = await summarizeBundleForSeenLog(toLog, pruned);
       if (lines.length === 0) return;
 
       // Merge into today's section if it already exists, else prepend a new one.
@@ -557,7 +585,7 @@ Then YOU: write GROUNDED in what it returns and CITE the source links. NEVER ass
       sources: bundle.sources,
       note: bundle.sources.length === 0
         ? 'No fresh sources came back. Say so plainly in one short line — matter-of-fact, NOT an apology, NOT a long explanation — and move on. Do not fabricate.'
-        : 'Write GROUNDED in these sources and CITE each with a Slack hyperlink <url|short label> (NOT a bare URL, NOT [link] followed by the URL). Keep it tight: a few bullets, the genuinely new items only. Skip anything older than 7 days or already in the "already covered" log. Do not assert any current-events fact not present here.',
+        : 'Write GROUNDED in these sources and CITE each with a Slack hyperlink <url|short label> (NOT a bare URL, NOT [link] followed by the URL). RELEVANCE is the bar — surface only items genuinely relevant to him, up to 7; never pad to a count (1 good beats 5 fillers). Skip anything older than 7 days or already in the "already covered" log. Do not assert any current-events fact not present here.',
     };
   }
 

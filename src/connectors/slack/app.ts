@@ -37,6 +37,7 @@ import {
 import {
   downloadSlackImage,
   buildImageBlock,
+  describeImage,
   type AnthropicImageBlock,
 } from '../../vision';
 import { scanImageForInjection } from '../../utils/imageGuard';
@@ -400,10 +401,22 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     // are gone after the turn, but the URL is still valid (bot token auth)
     // and the SendOptions.attachments path knows how to re-download +
     // re-upload to the recipient.
+    // v3.3.x — persist the image's CONTENT as text, not just a placeholder.
+    // Bytes are live only this turn; without a text description, anything the
+    // image carried (subject/time/attendees in a screenshot) is gone on the
+    // next turn and Maelle re-asks ("book me 25 mins" + screenshot → turn 2
+    // "online" had nothing left). One Haiku vision pass at ingestion; the
+    // result rides the SAME history path as a normal message. Fails soft.
+    let imageDescPart = '';
+    if (images && images.length > 0) {
+      const descriptions = (await Promise.all(images.map(b => describeImage(b))))
+        .filter((d): d is string => !!d);
+      if (descriptions.length > 0) imageDescPart = ` — ${descriptions.join(' | ')}`;
+    }
     const persistedText = images && images.length > 0
       ? (imageUrls && imageUrls.length > 0
-          ? `[Image attached — file_urls: ${imageUrls.join(' ')}] ${text}`
-          : `[Image] ${text}`)
+          ? `[Image${imageDescPart} — file_urls: ${imageUrls.join(' ')}] ${text}`
+          : `[Image${imageDescPart}] ${text}`)
       : text;
     appendToConversation(threadTs, channelId, { role: 'user', content: persistedText, ts });
 

@@ -1,6 +1,10 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.3.3** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.3.4** — check `package.json` if unsure; it is the source of truth.
+
+## 📰 NEWS — delivered (v3.3.4); now we want to TRACK it in real use
+
+The personalized news brief (#17) is feature-complete. The latest change (v3.3.4) is a **re-pull model**: the daily edition shows up to ~6–7 **relevant** items (relevance is the bar — never padded to a count), and the seen-log now records only what was **shown** (cited in the brief), not everything gathered — so an article that didn't make today's cut **resurfaces on a later day's re-pull** instead of being silently buried. Source steer ("prefer Stratechery, skip tabloids") is LLM-emitted into Tavily include/exclude; topics + sources are taught via `update_my_preferences(skill='news')` → `config/users/<owner>_prefs/news.md` (code never parses that file). **What we want to track now (next sessions):** does it surface ~6–7 *genuinely relevant* items/day · do unshown-but-recent ones come back the next day (not repeats of what was seen) · does the seen-log hold only shown items · is the source steer honored. Open follow-up: **#123** (importance-*ordering* of the daily edition — deferred, low). Watch `logs/` for the news gather/`writeSeenLog` lines.
 
 ## ✅ THIS ARC IS DONE — next chat = bugs + improvements; PARALLEL chats: WhatsApp + news
 

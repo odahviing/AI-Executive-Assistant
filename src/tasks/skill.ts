@@ -69,7 +69,7 @@ Task types:
             due_at: { type: 'string', description: 'ISO 8601 datetime when to execute this task.' },
             target_slack_id: { type: 'string', description: 'If reminding someone else, their Slack user ID' },
             target_name: { type: 'string', description: 'Display name of the target person' },
-            message: { type: 'string', description: 'What to say when the task executes.' },
+            message: { type: 'string', description: 'What to say when the task fires. When reminding someone ELSE, pass the reminder CONTENT only (e.g. "the board prep deck") — Maelle adds the "<owner> asked me to remind you" framing and reports back to the owner. When reminding the owner, this is the text DM\'d to them.' },
           },
           required: ['type', 'title', 'due_at'],
         },
@@ -241,8 +241,11 @@ Binding — how to pick the right approval_id:
         const kind: RequestKind = taskType === 'research' ? 'research' : taskType;
 
         // Owner-initiated → informed=1, state=in_flight (Maelle is working on it).
-        // Reminders schedule their fire via next_check_at + handler='reminder_fire'.
-        // Research runs through the agent loop independently.
+        // Reminders/follow-ups fire via next_check_at + handler='reminder_fire'.
+        // Research uses 'research_run' — runs the full agent loop at due_at and
+        // DMs the result. Both fire on the ONE spine sweep (sweepDueRequests);
+        // the old tasks-table dispatchers were the duplicate path, now deleted.
+        const nextCheckHandler = taskType === 'research' ? 'research_run' : 'reminder_fire';
         const row = createRequest({
           ownerUserId,
           initiatedBy: context.userId,
@@ -252,6 +255,10 @@ Binding — how to pick the right approval_id:
           description,
           state: 'in_flight',
           informed: 1,
+          // The reminder is an activity OWNED BY its requester (the owner
+          // here — create_task is owner-path). runReminderFire reads this to
+          // frame third-party reminders ("<requester> asked me to remind you").
+          requesterSlackId: context.userId,
           targetSlackId,
           targetName,
           originChannel: channelId,
@@ -259,7 +266,7 @@ Binding — how to pick the right approval_id:
           originIsMpim: !!context.isMpim,
           expiresAt: undefined,
           nextCheckAt: dueAt,
-          nextCheckHandler: 'reminder_fire',
+          nextCheckHandler,
           details: { message, due_at: dueAt },
         });
 
