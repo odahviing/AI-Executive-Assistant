@@ -1,10 +1,9 @@
 /**
  * Coordination guards — defense-in-depth for colleague-initiated coord requests.
  *
- * Three signals stacked:
- *   (a) Injection-pattern scan on the colleague's message
+ * Two signals stacked:
+ *   (a) Injection-pattern scan on the colleague's message (deterministic)
  *   (b) LLM-as-judge sanity check (Haiku, cheap)
- *   (c) Soft confirmation trigger (caller decides when)
  *
  * Any of (a) or (b) firing should prevent the coord from completing silently.
  */
@@ -209,26 +208,7 @@ VERDICT: SUSPICIOUS | short reason`;
   }
 }
 
-// ── (c) Soft confirmation heuristic ─────────────────────────────────────────
-
-/**
- * Returns true if the coord request SHOULD require soft confirmation from the
- * colleague before firing. Signals: junk subject, unusual participant set.
- */
-export function shouldRequireSoftConfirm(opts: {
-  subject: string;
-  participantCount: number;
-  hasPriorInteractionsWithAllParticipants: boolean;
-}): boolean {
-  const subject = (opts.subject ?? '').trim();
-  const tooShort = subject.length < 8;
-  const junky = /^(?:meeting|well|\.|test|meet|\w{1,3})\.{0,}$/i.test(subject);
-  if (tooShort || junky) return true;
-  if (opts.participantCount >= 3 && !opts.hasPriorInteractionsWithAllParticipants) return true;
-  return false;
-}
-
-// ── (d) Conversation-scoped suspicion cache ─────────────────────────────────
+// ── (c) Conversation-scoped suspicion cache ─────────────────────────────────
 // When the LLM judge flags a coord request SUSPICIOUS, we want downstream
 // colleague-path tools in the SAME conversation to also refuse — otherwise
 // Sonnet pivots from `coordinate_meeting` (caught) to `create_approval`

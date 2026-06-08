@@ -1,6 +1,7 @@
 import { config } from './config';
 import { App } from '@slack/bolt';
 import { createSlackAppForProfile } from './connectors/slack/app';
+import { startWhatsApp } from './connectors/whatsapp';
 import { loadAllProfiles } from './config/userProfile';
 import { getDb } from './db';
 import { startBackgroundTimer, initProfile } from './core/background';
@@ -115,6 +116,22 @@ async function main(): Promise<void> {
 
   logger.info('All assistants running in Socket Mode — no open ports', { count: runningApps.length });
 
+  // ── Phase 4: start WhatsApp transport (optional, per-profile, gated) ──────
+  // Fire-and-forget. startWhatsApp returns immediately when the profile has no
+  // whatsapp_phone configured (→ byte-identical to Slack-only). Even when
+  // enabled, its puppeteer launch / QR-wait must NEVER block the rest of
+  // startup, so we do NOT await it. Any failure is logged + alerted to the
+  // owner on Slack from inside startWhatsApp; nothing here can crash boot.
+  // (Runs after Phase 3 so the Slack connection — used for disconnect/QR
+  // alerts — is fully up.)
+  for (const [, profile] of profiles) {
+    void startWhatsApp(profile).catch((err) =>
+      logger.error('startWhatsApp failed (continuing — Slack unaffected)', {
+        user: profile.user.name, err: String(err),
+      }),
+    );
+  }
+
   // Background timer — runs every 5 minutes
   startBackgroundTimer(runningApps, profiles);
 
@@ -141,9 +158,26 @@ async function main(): Promise<void> {
       || /server explicit disconnect|Unhandled event '.*' in state '.*'/i.test(message);
   };
 
+  // A WhatsApp (whatsapp-web.js / puppeteer) async error must not take the
+  // whole process down — WhatsApp is an OPTIONAL transport, and its headless
+  // Chrome can crash or the linked device can drop. startWhatsApp wraps its own
+  // lifecycle, but a stray puppeteer rejection can still surface here. The
+  // marker is deliberately NARROW (puppeteer / whatsapp-web / Chrome DevTools
+  // protocol shapes) so unrelated bugs still exit as before.
+  const isWhatsAppTransientError = (reason: unknown): boolean => {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    const stack = reason instanceof Error ? (reason.stack ?? '') : '';
+    return /puppeteer|whatsapp-web|Protocol error|Target closed|Session closed|Execution context was destroyed|Navigation failed/i
+      .test(stack + ' ' + message);
+  };
+
   process.on('uncaughtException', (err) => {
     if (isTransientSocketError(err)) {
       logger.warn('Slack socket-mode transient (uncaught) — staying up; socket reconnects', { message: err?.message });
+      return;
+    }
+    if (isWhatsAppTransientError(err)) {
+      logger.warn('WhatsApp transport error (uncaught) — staying up; Slack unaffected', { message: err?.message });
       return;
     }
     logger.error('Uncaught exception', { err });
@@ -154,6 +188,11 @@ async function main(): Promise<void> {
 
     if (isTransientSocketError(reason)) {
       logger.warn('Slack socket-mode transient — staying up; socket reconnects', { message });
+      return;
+    }
+
+    if (isWhatsAppTransientError(reason)) {
+      logger.warn('WhatsApp transport error — staying up; Slack unaffected', { message });
       return;
     }
 

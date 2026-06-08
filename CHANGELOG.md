@@ -2,6 +2,33 @@
 
 ---
 
+## 3.3.5 — guard rebuild: detection kept, destructive actions retired (+ WhatsApp transport scaffolding, booking thread-match)
+
+Reworked the output-time "guard" stack so no guard can corrupt a correct reply. The principle: every guard still **detects**, but the places one took a **destructive** action — re-running the orchestrator, re-firing a tool, persisting a wrong date, or writing a durable record off an LLM hunch — are replaced with non-destructive or deterministic ones. Each guard's failure direction is now a safe miss or a deterministic fix. Bundles a parallel chat's WhatsApp transport scaffolding (inert until configured) and a booking→request thread-match fix. Patch; no new live capability.
+
+### Changed (guards — the headline)
+
+- **claimChecker: retry → tool-less "own-the-miss" rewrite.** A false action claim ("sent it", "booked it") no longer re-runs the orchestrator or force-fires `message_colleague` (the path behind the Amazia duplicate-DM). Instead a single tool-less rewrite makes the draft honestly surface that the action hasn't gone through — visible to the owner so he can nudge, not smoothed into "I'll handle it". No tool can fire from the guard, so a false claim can never become a duplicate action. Removed `buildPriorActionsHint` + the force-tool retry. ([claimChecker.ts](src/utils/claimChecker.ts), [postReply.ts](src/connectors/slack/postReply.ts))
+- **dateVerifier: language-agnostic, no name tables (Option C).** Deleted the hardcoded English+Hebrew weekday/month tables and regexes. A gated Haiku call now **extracts** the explicit weekday+date pairs in any language (and is forbidden from guessing a date for a bare weekday — the exact failure that got the old in-code LLM pass deleted); **code** judges them against the 14-day lookup and fixes a mismatch with a deterministic literal swap of the wrong weekday word inside the matched span (a no-op unless the lookup disagrees AND the span is literally present). Hebrew kept, French/Spanish/etc. covered for free, zero tables to maintain. ([dateVerifier.ts](src/utils/dateVerifier.ts))
+- **humanGate: fact-preservation net.** A voice-rewrite that drops a Slack `@mention`, clock time, or numeric date is discarded and the original kept — a deterministic string check (no LLM), firing only on the already-rare rewrite path. Closes the one corruption vector in the guard we deliberately kept. ([humanGate.ts](src/utils/humanGate.ts))
+- **coordGuard: stop scarring a colleague's record.** A judge-only SUSPICIOUS verdict no longer writes a permanent `[security]` impersonation note onto the colleague's people-memory — a fallible Haiku hunch was defaming real people and feeding future judges. The deterministic injection scan still hard-refuses; the in-memory 10-min defer + owner shadow stay. Deleted dead `shouldRequireSoftConfirm`. ([coordGuard.ts](src/utils/coordGuard.ts), [orchestrator/index.ts](src/core/orchestrator/index.ts))
+- **Prompt reinforcement (parallel chat).** HONESTY RULE 1 tightened — completed-tense only after the tool returns success, with the new awareness that an over-claim now surfaces as a visible slip — plus a "follow through next turn" rule and a GROUPED/MULTI-DAY date rule (file each event under the right header the first time; the verifier corrects the weekday word, not placement). ([systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+
+### Added (WhatsApp transport — Steps 1-2, INERT until configured — parallel chat)
+
+- Owner-path WhatsApp transport scaffolding: optional `whatsapp_phone` profile field; `whatsapp.ts` rewritten (per-profile, `os.tmpdir()`, msg-id dedup, bounded reconnect, Slack disconnect/QR alert); `startWhatsApp` wired into `index.ts` as a gated, fire-and-forget Phase 4 with narrow puppeteer/whatsapp-web crash-survival on `uncaughtException`/`unhandledRejection`. **Disabled = byte-identical to before** (no `whatsapp_phone` → returns before creating a client). Blocked on provisioning a dedicated number; Steps 3-6 (identity / trust / group) pending. Spec + locked decisions in [WHATSAPP_PROJECT.md](.claude/WHATSAPP_PROJECT.md). ([whatsapp.ts](src/connectors/whatsapp.ts), [index.ts](src/index.ts), [userProfile.ts](src/config/userProfile.ts))
+
+### Fixed (booking close-loop — parallel chat)
+
+- **Colleague request now closes by booking thread, not subject equality.** `closeMeetingArtifacts` takes the booking's `thread_ts` and thread-matches it to the originating colleague request via `origin_thread_ts` (single-candidate guard; ambiguous → left open, logged). Survives a meeting titled differently from the request (Dina: request "Gong call" vs booked "Gong <> Reflectiz" → previously never closed → false expiry tombstone). `bookingThreadTs` threaded through `create`/`update`/`move`/`delete` in ops.ts. ([closeMeetingArtifacts.ts](src/utils/closeMeetingArtifacts.ts), [ops.ts](src/skills/meetings/ops.ts))
+
+### Invariants preserved
+
+- Every guard still detects; none re-runs the orchestrator, re-fires a tool, persists a wrong date, or writes durable data off an LLM verdict. The `matchingToolAlreadyRan` shield is kept but is no longer load-bearing for safety (it now only prevents a false-positive from rewriting an honest reply).
+- WhatsApp disabled path is byte-identical to 3.3.4; every WhatsApp branch is gated on a live connection.
+
+---
+
 ## 3.3.4 — news re-pull model (don't-bury, relevance-first) + requests-spine dispatcher consolidation + cleanup
 
 Finalizes the personalized-news feature and bundles several chats' work. **The news change is the headline:** the daily edition now re-pulls and *resurfaces* unshown-but-recent articles instead of silently burying them, with **relevance — not a count — as the bar.** Patch; no new capabilities.

@@ -91,6 +91,7 @@ const UserProfileSchema = z.object({
     units: z.enum(['metric', 'imperial']).default('metric'),
     company: z.string().optional(),                        // optional — company name for prompt
     company_brief: z.string().optional(),                  // optional — short company description
+    whatsapp_phone: z.string().optional(),                 // optional — owner's WhatsApp number, digits only (e.g. 972501234567). Presence enables the WhatsApp transport for this profile; absence = WhatsApp disabled (byte-identical to today).
   }),
 
   assistant: z.object({

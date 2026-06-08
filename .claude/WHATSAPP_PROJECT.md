@@ -1,8 +1,118 @@
 # WhatsApp transport — build spec
 
-> Status: SPEC (design complete, not built). Authored by the feature/design chat.
-> Build in a focused build chat; verification plan is at the bottom.
+> Status: ⏸ PAUSED (2026-06-08) — Steps 1-2 built. **BLOCKER: buy a dedicated
+> WhatsApp phone number for Maelle.** Route is DECIDED: stay on whatsapp-web.js
+> (owner mostly replies → 24h-window of official API barely applies; local-now
+> hosting favors the port-less unofficial lib; later official migration only
+> swaps the thin transport layer). Resume Steps 3-6 once the number exists.
 > Shape mirrors `.claude/PERSON_STORE_PROJECT.md` / `.claude/WORKING_ELSEWHERE_MODE.md`.
+
+### Build status (2026-06-08)
+
+**Done (and currently INERT — zero runtime effect on Maelle):**
+- **Step 1** — `whatsapp_phone` added to profile schema (optional);
+  `src/connectors/whatsapp.ts` fully rewritten (owner-path only, per-profile,
+  `os.tmpdir()`, `channel:'whatsapp'`, msg-id dedup, non-owner→silent drop,
+  bounded/backed-off reconnect, disconnect/QR/auth_failure → Slack alert via
+  registry). Typecheck clean.
+- **Step 2** — `startWhatsApp(profile)` wired into `src/index.ts` as a gated,
+  fire-and-forget "Phase 4" (after sockets up); narrow puppeteer/whatsapp-web
+  crash-survival added to `uncaughtException` + `unhandledRejection`. Typecheck
+  clean. **Disabled = byte-identical** (no `whatsapp_phone` + empty
+  `WHATSAPP_OWNER_PHONE` env → `startWhatsApp` returns before creating a client).
+
+**🚧 BLOCKER (blocks all further build): buy a dedicated WhatsApp number for Maelle.**
+- Maelle = whatever WhatsApp account the QR links to, so she needs her OWN number,
+  SEPARATE from the owner's personal number. `whatsapp_phone` in YAML is the
+  OWNER's number, used ONLY for owner-recognition (the WhatsApp twin of
+  `slack_user_id`) — it is NOT the number Maelle runs on.
+- **Recommended number:** local (Israeli) prepaid SIM, registered with the
+  WhatsApp **Business** app, on a cheap always-on(-ish) spare phone. Treat as
+  DISPOSABLE (unofficial automation → ban risk; re-provision if banned). **Avoid
+  VoIP/Google-Voice/Twilio numbers** — frequently blocked at WhatsApp registration.
+- **Keep-alive:** linked-device sessions stay live ~14 days without the primary
+  phone online — Maelle's spare phone needs wifi every week or two.
+
+**Route DECIDED — whatsapp-web.js (recorded for context):**
+- Owner mostly REPLIES, almost never proactively outreaches → the official Cloud
+  API's 24h-window/template limit barely applies, so it wasn't the deciding factor.
+- Hosting is LOCAL now (Windows PC, no public endpoint) → whatsapp-web.js matches
+  the existing port-less Slack Socket Mode model; official API needs an inbound
+  webhook (tunnel while local). Plan: migrate to official Cloud API at cloud-move
+  time — the Connection abstraction means that only swaps the thin transport layer
+  (≈ Steps 1-2); the identity/trust/group brain (Steps 3-6) carries over untouched.
+
+**Pending (resume once the number exists), not yet approved:**
+- Drop the legacy `WHATSAPP_OWNER_PHONE` env fallback in `getOwnerPhone`
+  (profile-only activation = one clean on/off switch).
+- **Step 3** — dormant identity layer (`getPersonByPhone` + E.164 norm + `phone`
+  in `ResolvePersonInput` + phone-match step in `resolvePerson`).
+- Steps 4-6 per the build order below.
+
+---
+
+---
+
+## 0. Locked decisions (build chat — 2026-06-08)
+
+These OVERRIDE anything below that conflicts. Confirmed with owner.
+
+- **D1 — Unknown phone → PURE SILENCE.** Inbound 1:1 from a phone NOT on file is
+  dropped with NO reply — not even "I don't know you." Any response leaks signal
+  to an attacker probing whether the number is live + bot-operated. Resolves §10.1
+  and KILLS the §5.4.3 option-A "ask + route to owner approval" path. Unknown = the
+  message never enters the system.
+- **D2 — DoS drop ordering.** The drop happens BEFORE any content work: no body
+  read, no `downloadMedia()`, no voice transcription, no history append, no
+  orchestrator call. An unknown sender costs exactly one indexed DB lookup + a
+  `return`. (Honest caveat: whatsapp-web.js has already received the text bytes by
+  the time the handler fires — we cannot stop delivery; we guarantee ZERO work on
+  them. Text is protocol-bounded ~64KB; the real DoS levers — media + flooding —
+  sit below the drop.) New section §5.11.
+- **D3 — Inbound resolution is PHONE-ONLY.** Resolve inbound senders with
+  `getPersonByPhone(phone)` — NEVER pass the attacker-controlled WhatsApp display
+  name into `resolvePerson` (it fuzzy-name-matches → an unknown number named "Yael"
+  would inherit the real Yael's colleague access). Name may be ATTACHED only AFTER a
+  phone match, never used as a matching key. Corrects §5.3.4.
+- **D4 — Group = colleague-context ALWAYS,** even when the owner is present (this is
+  the existing orchestrator `mpimWithOthers` behavior, index.ts:377-386 — owner data
+  stays sanitized). Any approval Maelle needs about a group interaction is asked in
+  PRIVATE (owner's WhatsApp 1:1), NEVER in the group thread. Resolves §5.6.
+- **D5 — Maelle CANNOT create WhatsApp groups.** The owner creates a group and adds
+  her; she only participates. `sendGroupConversation` does NOT call
+  `client.createGroup` in v1 (no programmatic group creation). Resolves §10.2.
+- **D6 — Config home:** add an OPTIONAL `whatsapp_phone:` field to the profile
+  `user:` block. This is NET-NEW — it does not exist in the schema today. WhatsApp is
+  "live" ⟺ `whatsapp_phone` is configured AND the session is connected. Resolves §10.3.
+- **D7 — Known-sender DoS uncapped in v1.** Only the unknown-drop guards DoS. A
+  rogue/stolen KNOWN number could flood — documented v1 LIMITATION, not a v1 build
+  item.
+- **D8 — Two alert channels, do NOT unify:** group-approval question → owner's
+  WhatsApp 1:1 (WA is up, she's live in the group); disconnect / QR re-link alert →
+  Slack (WA is the thing that's DOWN, can't alert on it). Resolves §10.1 channel +
+  §5.8.
+- **D9 — `message.from` is trusted as linked-device-authenticated** (§10.4). Only the
+  owner's phone is linked; the owner path requires
+  `senderPhone === profile.user.whatsapp_phone`. Assumption documented.
+
+### Build order (risk-ascending; each step independently shippable + verifiable)
+
+1. **Config + rewrite inbound owner-path, UNWIRED.** Add `whatsapp_phone`; rewrite the
+   placeholder (per-profile config, `os.tmpdir()`, `channel:'whatsapp'`, dedup,
+   bounded reconnect, Slack disconnect/QR alert). NOT called from index.ts → zero
+   runtime effect on Maelle.
+2. **Wire into index.ts → owner front-door LIVE.** Gated on `whatsapp_phone`; wrapped
+   so a WhatsApp init failure can't crash startup. Owner can text/voice Maelle.
+3. **Identity layer (dormant).** `phone` in `ResolvePersonInput` + `getPersonByPhone`
+   + E.164 normalization + phone-match branch. No caller passes phone yet.
+4. **`WhatsAppConnection` + registry + router** (outbound half).
+5. **Colleague inbound + trust gate.** Phone-only resolution; unknown → silent drop
+   (D1/D2); securityGate + coordGuard on the colleague path.
+6. **Group coordination.** `@g.us` detect, MPIM flags, @mention-gate, colleague-
+   context (D4), private approvals.
+
+Steps 1-2 are owner-only and low-risk. The identity/trust/group risk concentrates in
+3-6. Every WhatsApp branch is gated on the connection being live (invariant 1).
 
 ---
 

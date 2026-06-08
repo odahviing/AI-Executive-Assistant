@@ -65,6 +65,15 @@ export function closeMeetingArtifacts(params: {
    * have subject in scope should pass it).
    */
   subject?: string;
+  /**
+   * The Slack thread the booking happened in. Used to thread-match the booking
+   * to its originating colleague request via request.origin_thread_ts — far
+   * more robust than exact-subject equality, which broke when a meeting's final
+   * title differed from the request's working title (Dina: request "Gong call"
+   * vs booked "Gong <> Reflectiz" → never closed → false expiry tombstone).
+   * Optional; when absent, thread-match is skipped (only id/subject matches run).
+   */
+  bookingThreadTs?: string;
 }): CloseMeetingArtifactsResult {
   const result: CloseMeetingArtifactsResult = {
     approvalsResolved: 0,
@@ -221,28 +230,54 @@ export function closeMeetingArtifacts(params: {
       // 'in_flight_action' to avoid false-positive matches with other request
       // kinds that happen to share a subject string.
       const open = getOpenRequestsForOwner(params.ownerUserId);
+
+      // Thread-match the booking to its originating colleague request. A
+      // request's origin_thread_ts is its "return address"; a booking made in
+      // that same thread is fulfilling that request. This is the robust signal
+      // that exact-subject equality lacked — it survives a meeting being titled
+      // differently from the request (Dina: "Gong call" vs "Gong <> Reflectiz").
+      // SINGLE-CANDIDATE GUARD: only auto-close when EXACTLY ONE open colleague
+      // request shares the booking thread. If a colleague has two open asks in
+      // one thread we don't guess (logged, left open) — never false-close.
+      let threadMatchId: string | null = null;
+      if (params.bookingThreadTs) {
+        const threadCandidates = open.filter(r =>
+          !directMatches.some(d => d.id === r.id)
+          && !!r.requester_slack_id
+          && r.requester_slack_id !== params.ownerUserId
+          && r.origin_thread_ts === params.bookingThreadTs,
+        );
+        if (threadCandidates.length === 1) {
+          threadMatchId = threadCandidates[0].id;
+        } else if (threadCandidates.length > 1) {
+          logger.info('closeMeetingArtifacts — multiple open colleague requests in booking thread, not auto-closing (ambiguous)', {
+            count: threadCandidates.length,
+            bookingThreadTs: params.bookingThreadTs,
+            requestIds: threadCandidates.map(c => c.id),
+          });
+        }
+      }
+
       const subjectLower = (params.subject ?? '').trim().toLowerCase();
       for (const r of open) {
         if (directMatches.some(d => d.id === r.id)) continue;
         let matched = payloadReferencesMeeting(r.details_json, params.meetingId);
-        // v3.1.8 — the in_flight_action subject-match fallback was REMOVED.
-        // It existed only because confirm-override pauses opened a guard with
-        // no event_id, then the booking landed under a re-derived subject so
-        // event-id and subject both missed. maybeOpenInFlightMeetingRequest no
-        // longer opens a guard for those deliberate-pause results, so this
-        // fragile fallback has nothing to catch — removed per "no patch-on-patch."
-        // v3.0.7 — broadened subject match for colleague-initiated requests.
-        // Pre-fix the subject-match fallback was scoped to `in_flight_action`
-        // subkind only. But the Eli case (2026-05-26): owner amended a
-        // policy_exception approval, then booked the new time via direct
-        // create_meeting (not via the resolver's deferred-action replay). The
-        // new meeting_id never linked back to the approval row → cascade
-        // missed it → request stayed in `awaiting_colleague` forever → Eli
-        // never got the close-loop "Idan locked it in" DM that Maelle had
-        // promised. Broaden: any OPEN colleague-initiated request
-        // (requester_slack_id set, ≠ owner) whose row subject matches the
-        // booked meeting's subject is a candidate. Scoped to ensure we don't
-        // false-match unrelated requests.
+
+        // PRIMARY colleague linkage — the request originated in the booking's
+        // thread and is the sole open colleague candidate there. Robust to the
+        // meeting being titled differently from the request.
+        if (!matched && threadMatchId && r.id === threadMatchId) {
+          matched = true;
+          logger.info('closeMeetingArtifacts — colleague-request thread-match fired', {
+            requestId: r.id, subject: r.subject,
+            bookingThreadTs: params.bookingThreadTs, meetingId: params.meetingId,
+          });
+        }
+
+        // SECONDARY (legacy) — exact-subject equality for colleague-initiated
+        // requests. Kept as a precise fallback for paths with no thread context
+        // (e.g. owner-path bookings); thread-match above is the robust primary.
+        // Exact equality only, so it can't false-match a renamed meeting.
         if (
           !matched
           && subjectLower

@@ -170,7 +170,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
 
   // Step 3 — owner-facing claim check (+ corrective retry).
   if (role === 'owner' || isOwnerInGroup) {
-    cleanReply = await runClaimCheckAndMaybeRetry({
+    cleanReply = await runClaimCheckAndMaybeRewrite({
       app, profile,
       initialReply: cleanReply,
       result,
@@ -201,10 +201,12 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     }
   }
 
-  // Step 3b — date-verifier (v1.6.6). Catches "Sunday 20 Apr" when Sunday
-  // is actually 19 Apr per the DATE LOOKUP table. Cheap regex — no LLM call.
-  // If mismatches found, one corrective orchestrator retry. Runs for both
-  // owner and colleague paths — a wrong date to a colleague is just as bad.
+  // Step 3b — date-verifier (v3.4, Option C). Catches "Thursday 11 June" when
+  // the 11th is a Wednesday, in any language. A gated Haiku call EXTRACTS the
+  // weekday+date pairs; CODE judges them against the DATE LOOKUP and swaps the
+  // wrong weekday word inside the exact matched span (deterministic verdict +
+  // fix — the LLM only reads). Runs for both owner and colleague paths — a
+  // wrong date to a colleague is just as bad.
   cleanReply = await runDateVerifierAndMaybeRetry({
     app, profile,
     initialReply: cleanReply,
@@ -438,14 +440,18 @@ interface ClaimCheckContext {
 
 /**
  * v1.6.2 — replaces the old reply verifier. Strict JSON classifier detects
- * false action claims. On detection, re-invoke the orchestrator once with a
- * corrective nudge; for message-type claims, also force tool_choice to
- * message_colleague so the model must actually call the tool.
+ * false action claims. v3.4 — on detection, the remedy is a single TOOL-LESS
+ * rewrite that makes the draft honestly own the un-done action (see
+ * rewriteOwningTheMiss). The old orchestrator re-run + force-message_colleague
+ * path is GONE: it auto-fired tools on a possibly-wrong verdict (the Amazia
+ * duplicate-send) and forced the matchingToolAlreadyRan shield to keep growing.
+ * No tool can fire from here now, so a false claim can never become a
+ * duplicate action — only an honest "that didn't go through yet".
  *
- * Fails open: verifier errors, JSON parse errors, retry errors — all leave
+ * Fails open: verifier errors, JSON parse errors, rewrite errors — all leave
  * the original draft in place. Never blocks a reply.
  */
-async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<string> {
+async function runClaimCheckAndMaybeRewrite(ctx: ClaimCheckContext): Promise<string> {
   const { app, profile, initialReply, result, history, userMessage } = ctx;
   let cleanReply = initialReply;
 
@@ -468,45 +474,6 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
         : undefined,
     });
 
-    // v2.8.3+ — shared helper for the priorActionsHint appended to BOTH
-    // claim-checker retry paths. Without this hint, a retry that follows a
-    // turn which already fired a write tool (create_meeting etc.) can
-    // re-fire the same write and create a duplicate — the 2026-05-16
-    // "Offensive Pricing Suggestions" double-booking bug. The hint gives
-    // Sonnet (a) the FULL event ids needed to amend via move/update/delete
-    // and (b) the playbook: usually the DRAFT was wrong → rewrite; rarely
-    // the ACTION was wrong → amend referencing the id. Never re-fire the
-    // creation tools.
-    const buildPriorActionsHint = (): string => {
-      const compactSummaries = result.toolSummaries ?? [];
-      const mutations = (result.mutationActions ?? []).filter(m => m.ok);
-      if (compactSummaries.length === 0 && mutations.length === 0) return '';
-      const lines: string[] = ['', '', 'IN THIS SAME TURN you already executed:'];
-      if (mutations.length > 0) {
-        for (const m of mutations) {
-          const parts: string[] = [m.tool];
-          if (m.subject) parts.push(`subject="${m.subject}"`);
-          if (m.start) parts.push(`start=${m.start}`);
-          if (m.new_start && m.new_start !== m.start) parts.push(`new_start=${m.new_start}`);
-          if (m.eventId) parts.push(`event_id=${m.eventId}`);
-          lines.push(`  • ${parts.join(' ')} → succeeded`);
-        }
-      } else {
-        // No mutation rich-data — fall back to the compact summaries list.
-        lines.push(`  ${compactSummaries.join(' ')}`);
-      }
-      if (mutations.length > 0) {
-        lines.push('');
-        lines.push('If your draft contradicts what an action above actually did, ONE of these is true:');
-        lines.push('- USUALLY: your draft was wrong. REWRITE the draft to match the tool\'s actual execution (e.g. if it booked 15:00 and you wrote 15:30, fix the text to say 15:00).');
-        lines.push('- RARELY: the action itself was wrong (e.g. wrong time, wrong attendees, wrong subject). AMEND via move_meeting / update_meeting / delete_meeting referencing the event_id above. NEVER re-call create_meeting / book_floating_block / coordinate_meeting / message_colleague — those would create duplicates.');
-        lines.push('If your draft does NOT contradict the action, just fix the specific honesty rule the checker flagged — don\'t change what was done.');
-      } else {
-        lines.push('Don\'t re-run those tools — and don\'t narrate their effects as if someone else did them.');
-      }
-      return lines.join('\n');
-    };
-
     // v3.0.6 — Module F + E booleans were fully removed from the checker
     // (advisory-only since v2.8.5; cost ~5s of Sonnet on every owner turn for
     // a verdict no caller acted on). Honesty rules 1/2/2b/2c/2d/3/5b/9 stay
@@ -517,9 +484,10 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
     // v1.7.4 — defense in depth. The claim-checker can false-positive (saw
     // it happen with "the message is on its way" being flagged even when
     // message_colleague ran). If the matching tool clearly DID run this turn,
-    // refuse the retry — the claim was honest, the checker erred. Without
-    // this guard, the retry forces the SAME tool with a corrective nudge,
-    // which creates a duplicate outreach (Amazia 6-second-apart bug).
+    // the claim was honest — skip. v3.4: this shield no longer guards a
+    // tool-re-firing retry (that's gone); it now prevents the own-the-miss
+    // rewrite from corrupting an HONEST reply into a false "that didn't go
+    // through" claim when the action actually DID happen.
     const toolSummariesText = (result.toolSummaries ?? []).join(' ');
     const matchingToolAlreadyRan =
       verdict.action_type === 'message'
@@ -561,7 +529,7 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
     // mismatch, trust the verdict — let the retry fire. Retry already carries
     // this turn's tool summaries (v2.3.4) so no duplicate-mutation risk.
     if (matchingToolAlreadyRan && !verdict.claim_specifics_mismatch) {
-      logger.warn('Claim-checker flagged but matching tool already ran this turn — skipping retry (false positive)', {
+      logger.warn('Claim-checker flagged but matching tool already ran this turn — skipping rewrite (false positive)', {
         senderId: ctx.senderId,
         threadTs: ctx.threadTs,
         action_type: verdict.action_type,
@@ -571,7 +539,7 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
       return cleanReply;
     }
     if (matchingToolAlreadyRan && verdict.claim_specifics_mismatch) {
-      logger.warn('Claim-checker shield bypassed — specifics mismatch identified, retry will fire', {
+      logger.warn('Claim-checker shield bypassed — specifics mismatch identified, rewrite will fire', {
         senderId: ctx.senderId,
         threadTs: ctx.threadTs,
         action_type: verdict.action_type,
@@ -581,7 +549,15 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
       });
     }
 
-    logger.warn('Claim-checker: retrying turn with corrective nudge', {
+    // v3.4 — confirmed false claim. DO NOT re-run the orchestrator or re-fire
+    // a tool. The old retry (with forceToolOnFirstTurn=message_colleague)
+    // auto-sent on a possibly-wrong verdict and caused the Amazia duplicate
+    // DM — the whole reason the matchingToolAlreadyRan shield had to keep
+    // growing. Instead, a single TOOL-LESS rewrite re-renders the prose so it
+    // HONESTLY owns the miss and makes the non-completion visible to the
+    // owner (so he can nudge). Tool-less ⇒ it can never duplicate an action.
+    // Fails open: rewrite null/empty → keep the original draft.
+    logger.warn('Claim-checker: false claim — rewriting to own the miss (no tool re-fire)', {
       senderId: ctx.senderId,
       threadTs: ctx.threadTs,
       action_type: verdict.action_type,
@@ -589,41 +565,23 @@ async function runClaimCheckAndMaybeRetry(ctx: ClaimCheckContext): Promise<strin
       action_summary: verdict.action_summary,
     });
 
-    const targetLabel = verdict.target_name ?? 'the person mentioned';
-    // v2.8.3+ — shared hint (see buildPriorActionsHint above). Carries the
-    // full event_ids for any write tool that fired turn 1 + amend-vs-rewrite
-    // playbook so the retry doesn't re-create duplicates.
-    const priorActionsHint = buildPriorActionsHint();
-    const nudge =
-      verdict.action_type === 'message'
-        ? `Your previous draft claimed you already messaged ${targetLabel}, but no send tool ran. Call message_colleague now to actually send it.${priorActionsHint}`
-        : `Your previous draft claimed you already did something (${verdict.action_summary ?? verdict.action_type ?? 'an action'}) that no tool call in that turn actually performed. Either call the right tool now to actually do it, or rewrite the reply as a plan ("I'll take care of that") instead of a completed claim.${priorActionsHint}`;
-
     try {
-      const retry = await runOrchestrator({
-        userMessage,
-        conversationHistory: history,
-        threadTs: ctx.threadTs,
-        channelId: ctx.channelId,
-        userId: ctx.senderId,
-        senderRole: ctx.role as 'owner' | 'colleague',
-        senderName: ctx.colleagueName,
-        channel: 'slack' as ChannelId,
-        profile,
-        app,
-        isMpim: ctx.isMpim,
-        isOwnerInGroup: ctx.isOwnerInGroup,
-        mpimMemberIds: ctx.mpimMemberIds,
-        extraInstruction: nudge,
-        forceToolOnFirstTurn:
-          verdict.action_type === 'message' ? { name: 'message_colleague' } : undefined,
+      const { rewriteOwningTheMiss } = await import('../../utils/claimChecker');
+      const rewritten = await rewriteOwningTheMiss({
+        draft: cleanReply,
+        actionSummary: verdict.action_summary,
+        actionType: verdict.action_type,
+        targetName: verdict.target_name,
+        ownerFirstName: profile.user.name.split(' ')[0],
       });
-      cleanReply = formatForSlack(retry.reply);
-      // Overwrite the conversation-history entry with the corrected draft so
-      // Claude's NEXT turn doesn't see the dishonest version.
-      appendToConversation(ctx.threadTs, ctx.channelId, { role: 'assistant', content: cleanReply });
-    } catch (retryErr) {
-      logger.warn('Claim-checker retry errored — keeping original draft', { err: String(retryErr) });
+      if (rewritten && rewritten.trim().length > 0) {
+        cleanReply = formatForSlack(rewritten);
+        // Overwrite the history entry with the honest version so the NEXT
+        // turn doesn't see the dishonest draft.
+        appendToConversation(ctx.threadTs, ctx.channelId, { role: 'assistant', content: cleanReply });
+      }
+    } catch (rwErr) {
+      logger.warn('Claim-checker rewrite errored — keeping original draft', { err: String(rwErr) });
     }
   } catch (err) {
     logger.warn('Claim-checker threw — sending original reply', { err: String(err) });
@@ -749,71 +707,55 @@ interface DateVerifyContext {
 }
 
 /**
- * v1.6.6 — scan the draft for weekday/date pairs (e.g. "Sunday 20 Apr") and
- * verify against the owner's local 14-day lookup. Mismatches trigger one
- * corrective orchestrator retry with a nudge listing the wrong pairs.
+ * v3.4 (Option C) — verify weekday/date pairs in ANY language. verifyDates runs
+ * a gated Haiku EXTRACTOR (reads the literal weekday+date pairs, never guesses a
+ * date), then CODE judges each against the 14-day lookup. A mismatch is fixed by
+ * a DETERMINISTIC literal swap of the wrong weekday word inside the exact matched
+ * span — a no-op unless the lookup disagrees AND the span is literally present,
+ * so it cannot corrupt a correct draft.
  *
  * Runs for BOTH owner and colleague paths — a date-wrong DM to a colleague
  * creates the same trust problem as one to the owner.
  *
- * Fails OPEN: parse errors, retry errors, anything → return the original draft.
- * Max one retry; the retry's output is NOT re-verified (avoid loops).
+ * Fails OPEN: extractor / parse errors or anything → return the original draft.
  */
 async function runDateVerifierAndMaybeRetry(ctx: DateVerifyContext): Promise<string> {
-  const { app, profile, initialReply, history, userMessage } = ctx;
+  const { profile, initialReply, userMessage } = ctx;
   let cleanReply = initialReply;
 
   try {
-    const { verifyDates, rewriteWithCorrectDates } = await import('../../utils/dateVerifier');
+    const { verifyDates } = await import('../../utils/dateVerifier');
     const verdict = await verifyDates(cleanReply, profile, userMessage);
     if (verdict.ok || verdict.mismatches.length === 0) return cleanReply;
 
-    logger.warn('Date verifier: draft has wrong weekday/date pairs — correcting', {
+    logger.warn('Date verifier: draft has wrong weekday/date pairs — correcting deterministically', {
       senderId: ctx.senderId,
       threadTs: ctx.threadTs,
       mismatches: verdict.mismatches,
     });
 
-    // v3.1.5 (Bug 4) — correct via a single tool-less rewrite, NOT a full
-    // orchestrator re-run. The old path re-invoked runOrchestrator (re-sent the
-    // ~46K cached prefix + all tools + history, re-ran the tool loop → ~30s on
-    // a long report). The rewrite call sees only the draft + the corrections —
-    // no tools, no prefix, fewer tokens than the original turn, ~1-2s. It also
-    // inherently can't refire a write (no tools), which removes the need for
-    // the old proseOnly write-guard (the 2026-05-18 Michal-delete incident).
-    let retriedReply: string | null = null;
-    try {
-      const rewritten = await rewriteWithCorrectDates(cleanReply, verdict.mismatches, profile);
-      if (rewritten && rewritten.trim().length > 0) {
-        retriedReply = formatForSlack(rewritten);
+    // v3.4 — correct with a DETERMINISTIC weekday-token swap only. The old
+    // LLM rewrite (rewriteWithCorrectDates) was removed: its riskiest edit —
+    // reflowing events under a corrected day header — was never verified, so
+    // it could strand an event under the wrong day (exactly the corruption the
+    // date detector exists to prevent). The swap only replaces the wrong
+    // weekday WORD against the authoritative lookup; it never touches event
+    // content, so it cannot corrupt. The detector already guarantees every
+    // mismatch is real (lookup-backed), so the swap is always safe to apply.
+    for (const mm of verdict.mismatches) {
+      // Swap the weekday word INSIDE the exact span the detector matched, then
+      // replace that literal span in the draft. Using the matched span (not a
+      // reconstructed \b regex) is language-agnostic: it fixes Hebrew
+      // ("יום ראשון 19 באפריל" → "יום שני 19 באפריל") and English alike, where
+      // \b word-boundaries silently fail to match around non-ASCII letters. The
+      // weekday token sits at the start of the span in both detector patterns,
+      // and the span carries its own date so the replace can't mis-target.
+      const corrected = mm.matchedText.replace(mm.writtenWeekday, mm.correctWeekday);
+      if (corrected !== mm.matchedText && cleanReply.includes(mm.matchedText)) {
+        cleanReply = cleanReply.split(mm.matchedText).join(corrected);
       }
-    } catch (retryErr) {
-      logger.warn('Date correction rewrite errored — falling through to deterministic correction', { err: String(retryErr) });
     }
-
-    // v1.8.14 — re-verify retry output. If it STILL has the same mismatches,
-    // deterministically rewrite the wrong weekday tokens inline. Prevents the
-    // "Thursday 24 Apr" bug where a retry loop produces the same wrong pair
-    // twice and the draft ships anyway. String replacement is bounded by the
-    // lookup we already computed — safe and always correct.
-    const candidate = retriedReply ?? cleanReply;
-    const reverdict = await verifyDates(candidate, profile, userMessage);
-    if (!reverdict.ok && reverdict.mismatches.length > 0) {
-      logger.warn('Date verifier: retry still has mismatches — applying deterministic correction', {
-        mismatches: reverdict.mismatches,
-      });
-      cleanReply = candidate;
-      for (const mm of reverdict.mismatches) {
-        // Example: written="Thursday" (or "Thu") + writtenDate="24 Apr" → correct="Friday".
-        // Find the exact wrong pair in the draft and swap the weekday token only.
-        const wdPattern = new RegExp(`\\b${escapeRegex(mm.writtenWeekday)}\\b(?=[,\\s]+(?:the\\s+)?\\d{1,2}(?:st|nd|rd|th)?\\s+${escapeRegex(mm.writtenDate.split(' ')[1] ?? '')})`, 'gi');
-        cleanReply = cleanReply.replace(wdPattern, mm.correctWeekday);
-      }
-      appendToConversation(ctx.threadTs, ctx.channelId, { role: 'assistant', content: cleanReply });
-    } else if (retriedReply) {
-      cleanReply = retriedReply;
-      appendToConversation(ctx.threadTs, ctx.channelId, { role: 'assistant', content: cleanReply });
-    }
+    appendToConversation(ctx.threadTs, ctx.channelId, { role: 'assistant', content: cleanReply });
   } catch (err) {
     logger.warn('Date verifier threw — sending original reply', { err: String(err) });
   }
@@ -929,6 +871,3 @@ ${trim}`,
   }
 }
 
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}

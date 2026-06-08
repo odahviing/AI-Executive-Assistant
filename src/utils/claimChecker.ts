@@ -369,3 +369,65 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
     return { claimed_action: false, elapsedMs: Date.now() - start, failed_open: true };
   }
 }
+
+/**
+ * v3.4 — own-the-miss rewrite. REPLACES the old claim-checker remedy of
+ * re-invoking the orchestrator (which re-ran the tool loop and could re-fire
+ * a write → the Amazia duplicate-send) and the force-message_colleague path
+ * (which auto-sent on a possibly-wrong verdict).
+ *
+ * When the checker confirms the draft claims an action that no tool backed
+ * this turn, this single TOOL-LESS rewrite re-renders the prose so it
+ * HONESTLY surfaces that the action has NOT happened — in the assistant's
+ * human voice, owning the slip plainly. Two hard rules baked into the prompt:
+ *   1. Make the non-completion UNMISTAKABLE so the owner knows to nudge.
+ *   2. Do NOT smooth it into "I'll handle it" (reads as already done).
+ *
+ * Tool-less ⇒ it can never duplicate an action. Fails open (returns null) →
+ * caller keeps the original draft (same risk tolerance as the prior
+ * retry-errored path).
+ */
+export async function rewriteOwningTheMiss(opts: {
+  draft: string;
+  actionSummary?: string | null;
+  actionType?: ClaimActionType;
+  targetName?: string | null;
+  ownerFirstName: string;
+}): Promise<string | null> {
+  const what = opts.actionSummary
+    || (opts.actionType === 'message'
+      ? `sending a message${opts.targetName ? ` to ${opts.targetName}` : ''}`
+      : 'that action');
+
+  const prompt = `You are fixing a message an assistant already drafted for ${opts.ownerFirstName}. The draft claims an action is done or under way that DID NOT actually happen this turn — no tool ran to do it. The unsupported claim is about: ${what}.
+
+Rewrite the message so it is HONEST about that gap, in a warm, natural HUMAN voice:
+- Make it UNMISTAKABLE that the thing has NOT gone through yet, so ${opts.ownerFirstName} knows it still needs to happen. (e.g. "Actually — hold on, that didn't go out yet, let me sort it." / "Sorry, I jumped the gun — it hasn't sent. Fixing that now.")
+- Do NOT claim it's done, sent, booked, flagged, or handled.
+- Do NOT smooth it into a confident "I'll take care of it" that reads like it's already resolved — the whole point is for ${opts.ownerFirstName} to SEE it's still outstanding.
+- Keep every other fact intact: names, times, dates, numbers, the rest of the message.
+- Sound like a real person owning a small slip — never a system/error message, no talk of tools, routines, or mechanism.
+- Match the language of the draft (Hebrew/English/etc).
+
+Output ONLY the corrected message text. No preamble, no quotes, no code fences.
+
+Draft:
+${opts.draft}`;
+
+  try {
+    const resp = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 600,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    logLlmUsage('claim_checker_rewrite', 'claude-haiku-4-5-20251001', resp);
+    const text = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
+    const out = text.replace(/^```(?:\w+)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    return out.length > 0 ? out : null;
+  } catch (err) {
+    logger.warn('rewriteOwningTheMiss threw — caller keeps original draft', {
+      err: String(err).slice(0, 200),
+    });
+    return null;
+  }
+}

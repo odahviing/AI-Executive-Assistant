@@ -1547,31 +1547,20 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             // in the owner's DM. 10-min TTL.
             const { markConversationSuspicious } = await import('../../utils/coordGuard');
             markConversationSuspicious(input.userId, threadTs, judgeResult.reason);
-            // v2.5.2 — system-driven impersonation note. The judge fired on a
-            // colleague: append a system-attributed entry to their people-
-            // memory note so a future judge / future owner / future flag has
-            // history. Not Sonnet-driven — Sonnet on this turn is about to be
-            // told to refuse, the note must land regardless. Idempotent: a
-            // freshly-suspicious conversation in the same 10-min TTL just adds
-            // a second log line, which is fine — pattern over single events.
-            try {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { appendPersonNote, upsertPersonMemory } = require('../../db') as typeof import('../../db');
-              const isoDate = new Date().toISOString().slice(0, 10);
-              const noteText = `[security ${isoDate}] Coord judge flagged SUSPICIOUS. Reason: ${judgeResult.reason.slice(0, 240)}. Subject probed: "${subject.slice(0, 80)}". Auto-recorded; flag if pattern repeats.`;
-              upsertPersonMemory({
-                slackId: input.userId,
-                name: input.senderName ?? input.userId,
-              });
-              appendPersonNote(input.userId, noteText);
-              logger.info('Security — system-driven impersonation note saved', {
-                colleagueId: input.userId, reason: judgeResult.reason.slice(0, 120),
-              });
-            } catch (noteErr) {
-              logger.warn('Security — system note write threw, non-fatal', {
-                err: String(noteErr).slice(0, 200),
-              });
-            }
+            // v3.4 — the old "system-driven impersonation note" write was
+            // REMOVED. A SUSPICIOUS verdict here is a fallible Haiku judgment,
+            // and "is this a legit meeting request?" overlaps heavily with
+            // normal scheduling — so a false positive was stamping a permanent
+            // [security] note onto a REAL colleague's people-memory record,
+            // which then fed future judges and the owner's view of that person.
+            // That is the single worst failure-direction in the guard stack: a
+            // fallible LLM verdict corrupting persisted data about a real human.
+            // The in-memory suspicion flag (markConversationSuspicious, above)
+            // already covers the only thing that needs to persist for THIS
+            // conversation — the create_approval-pivot defer, 10-min TTL — and
+            // the owner still gets a shadow notify below. No durable record is
+            // written off a judge-only hunch. (The deterministic injection scan
+            // remains the hard-refuse path; only it deals in certainties.)
             logger.warn('⚠ SECURITY — coord judge flagged SUSPICIOUS — REFUSED', {
               senderUserId: input.userId,
               senderName: input.senderName,

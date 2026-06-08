@@ -263,6 +263,41 @@ Language-agnostic. Same standard in Hebrew, French, etc. — match the input lan
 };
 
 /**
+ * v3.4 — deterministic fact-preservation guard. humanGate's job is to strip
+ * machine-voice, NOT to drop information. This is a pure string check (no LLM,
+ * no cost) that runs only when a rewrite was produced: if the rewrite lost a
+ * Slack @mention, a clock time, or a numeric date the original carried, we
+ * throw the rewrite away and keep the original draft. A mild bot-tell is
+ * recoverable; broken addressing or a dropped meeting time is not.
+ *
+ * Deliberately NARROW: it checks only @mentions / times / dates — the tokens a
+ * voice-rewrite must never touch. It does NOT check arbitrary numbers, because
+ * stripping "error 403" / structured codes is exactly what humanGate is FOR; a
+ * blanket number check would wrongly reject good rewrites.
+ */
+function rewriteDroppedAFact(original: string, rewrite: string): boolean {
+  const rwRaw = rewrite;
+  const rwTight = rewrite.toLowerCase().replace(/\s+/g, '');
+  // 1) Slack @mentions — every raw <@ID> must survive (else addressing breaks).
+  for (const m of original.match(/<@[UW][A-Z0-9]+>/g) ?? []) {
+    if (!rwRaw.includes(m)) return true;
+  }
+  // 2) 24h clock times (14:30) must survive.
+  for (const m of original.match(/\b\d{1,2}:\d{2}\b/g) ?? []) {
+    if (!rwRaw.includes(m)) return true;
+  }
+  // 3) 12h times (2pm / 11 am) must survive (whitespace-insensitive compare).
+  for (const m of original.match(/\b\d{1,2}\s*[ap]m\b/gi) ?? []) {
+    if (!rwTight.includes(m.toLowerCase().replace(/\s+/g, ''))) return true;
+  }
+  // 4) Numeric dates (11/06, 6/11/2026) must survive.
+  for (const m of original.match(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g) ?? []) {
+    if (!rwRaw.includes(m)) return true;
+  }
+  return false;
+}
+
+/**
  * Run the human gate on a draft. Returns { ok: true, rewrite: null } for
  * clean drafts; { ok: false, rewrite: <rewritten text> } when self-as-machine
  * framing, fake-capability promises, or audience-wrong third-person was
@@ -320,6 +355,17 @@ export async function runHumanGate(
     const parsed = JSON.parse(jsonStr ?? text) as { ok?: boolean; rewrite?: string | null };
 
     if (parsed.ok === false && typeof parsed.rewrite === 'string' && parsed.rewrite.trim().length > 0) {
+      // v3.4 — deterministic safety net: never let a voice-rewrite silently
+      // drop a load-bearing fact (@mention / time / date). If it did, the
+      // rewrite is worse than the bot-tell it fixed — keep the original.
+      if (rewriteDroppedAFact(draft, parsed.rewrite)) {
+        logger.warn('humanGate — rewrite dropped a load-bearing fact (@mention/time/date); keeping original draft', {
+          audience,
+          originalPreview: draft.slice(0, 120),
+          rewritePreview: parsed.rewrite.slice(0, 120),
+        });
+        return { ok: true, rewrite: null };
+      }
       logger.info('humanGate — rewrote draft', {
         audience,
         originalPreview: draft.slice(0, 120),

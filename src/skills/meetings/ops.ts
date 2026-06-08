@@ -2674,6 +2674,7 @@ export class SchedulingSkill {
             meetingId,
             reason: 'created',
             subject: args.subject as string | undefined,
+            bookingThreadTs: context.threadTs,
           });
 
           // v2.3.2 — colleague-path booking: shadow-DM the owner so he
@@ -3106,6 +3107,7 @@ export class SchedulingSkill {
           meetingId: args.meeting_id as string,
           reason: 'updated',
           subject: (args.new_subject as string | undefined) ?? (args.meeting_subject as string | undefined),
+          bookingThreadTs: context.threadTs,
         });
         auditLog({
           action: 'update_meeting',
@@ -3459,6 +3461,7 @@ export class SchedulingSkill {
                     meetingId: args.meeting_id as string,
                     reason: 'moved',
                     subject: args.meeting_subject as string | undefined,
+                    bookingThreadTs: context.threadTs,
                   });
                   // v3.2.1 (#120 / 120b) — return the vacated slot here too. The
                   // floating-block move (e.g. lunch) is exactly the case where
@@ -3735,6 +3738,7 @@ export class SchedulingSkill {
           meetingId: args.meeting_id as string,
           reason: 'moved',
           subject: args.meeting_subject as string | undefined,
+          bookingThreadTs: context.threadTs,
         });
         auditLog({
           action: 'move_meeting',
@@ -3973,6 +3977,7 @@ export class SchedulingSkill {
           meetingId: args.meeting_id as string,
           reason: 'deleted',
           subject: args.meeting_subject as string | undefined,
+          bookingThreadTs: context.threadTs,
         });
         // v3.1.7 / #119 — if the deleted event was a floating block (lunch,
         // etc.), record a date-scoped dismissal so active-mode health doesn't
