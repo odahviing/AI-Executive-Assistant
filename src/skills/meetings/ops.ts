@@ -1842,12 +1842,30 @@ export class SchedulingSkill {
               const snapped = allowed.reduce((best, candidate) =>
                 Math.abs(candidate - requestedMin) < Math.abs(best - requestedMin) ? candidate : best,
               allowed[0]);
-              const newEndIso = new Date(startMs + snapped * 60000).toISOString();
-              logger.info('create_meeting — snapped duration to allowed_durations', {
-                requested: requestedMin, snappedTo: snapped, allowed,
-                start: startIsoIn, endWas: endIsoIn, endNow: newEndIso,
-              });
-              args.end = newEndIso;
+              const snapDelta = Math.abs(requestedMin - snapped);
+              // v3.2.6 (2.4) — a SMALL snap (≤5 min, e.g. "1 hour" → 55) is the
+              // expected preset-alignment; apply it silently. A LARGE snap
+              // (>5 min, e.g. an explicit 2-hour copy → 55) used to silently
+              // DESTROY the length the owner actually asked for. Don't shrink it
+              // on our own — surface a verify question; honor the full length
+              // only on owner confirm (override_duration), or shrink to the
+              // preset if they pass duration_minutes=<preset> instead.
+              if (snapDelta > 5 && !args.override_duration) {
+                return {
+                  warning: `You asked for a ${requestedMin}-minute meeting, which is longer than the usual lengths (${allowed.join(', ')} min). Ask briefly: "That's ${requestedMin} min — book the full length, or shorten to ${snapped}?" If they want the full ${requestedMin} min, call create_meeting again with override_duration=true; if ${snapped} is fine, call again with duration_minutes=${snapped}.`,
+                  needs_confirmation: true,
+                };
+              }
+              if (snapDelta <= 5) {
+                const newEndIso = new Date(startMs + snapped * 60000).toISOString();
+                logger.info('create_meeting — snapped duration to allowed_durations', {
+                  requested: requestedMin, snappedTo: snapped, allowed,
+                  start: startIsoIn, endWas: endIsoIn, endNow: newEndIso,
+                });
+                args.end = newEndIso;
+              }
+              // snapDelta > 5 && override_duration → fall through: honor the
+              // requested length as-is (no snap).
             }
           }
         }

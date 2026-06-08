@@ -33,6 +33,7 @@ import { getAnthropicClient } from '../llm/client';
 import { tavilySearch, type DomainFilterOpts } from './general';
 import { readSkillPreferences, formatSkillPreferencesBlock } from '../utils/skillPreferences';
 import logger from '../utils/logger';
+import { extractFirstJsonObject } from '../utils/extractJson';
 
 const NEWS_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -143,9 +144,9 @@ Output STRICT JSON only: {"goals": ["...","..."], "preferred_domains": ["..."], 
       messages: [{ role: 'user', content: prompt }],
     });
     const text = ((res.content[0] as Anthropic.TextBlock).text ?? '').trim();
-    const m = text.match(/\{[\s\S]*\}/);
+    const m = extractFirstJsonObject(text);
     if (m) {
-      const parsed = JSON.parse(m[0]) as { goals?: unknown; preferred_domains?: unknown; avoid_domains?: unknown };
+      const parsed = JSON.parse(m) as { goals?: unknown; preferred_domains?: unknown; avoid_domains?: unknown };
       const goals = Array.isArray(parsed.goals)
         ? parsed.goals.filter((g): g is string => typeof g === 'string' && g.trim().length > 0).map(g => g.trim())
         : [];

@@ -219,6 +219,12 @@ export interface OrchestratorInput {
   channel: ChannelId;
   profile: UserProfile;
   app?: import('@slack/bolt').App;
+  // v3.2.6 (6.4) — false for SYSTEM-generated turns (scheduled routines,
+  // research runs) that flow through the orchestrator but aren't a live
+  // conversation. Suppresses the proactive social directive + end-of-turn coda
+  // so a one-way report doesn't get "Do you have any pets?" tacked on.
+  // Defaults to interactive (true) when omitted.
+  interactive?: boolean;
   isMpim?: boolean;                   // true if this is a group DM (MPIM)
   isChannel?: boolean;                // v2.6.6 — true if this is a public/private channel (vs DM/MPIM)
   isOwnerInGroup?: boolean;           // true when the owner sent this message in an MPIM
@@ -461,7 +467,9 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // pre-check can fire below for owner buffer/free-time questions, replacing
   // the leaky meetings.ts:2044 prompt rule.
   let isFreeTimeInquiry = false;
-  const needIntent = socialActive && !!userMessage && userMessage.trim().length > 1;
+  // v3.2.6 (6.4) — never run the social directive/coda on a non-interactive
+  // (routine/system) turn; a scheduled report isn't a conversation.
+  const needIntent = socialActive && input.interactive !== false && !!userMessage && userMessage.trim().length > 1;
   const needScopes = profile.behavior?.intent_aware_tools === true
     && isOwnerTurn
     && !!userMessage

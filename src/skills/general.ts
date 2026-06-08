@@ -4,6 +4,7 @@ import type { UserProfile } from '../config/userProfile';
 import { config } from '../config';
 import { getAnthropicClient } from '../llm/client';
 import logger from '../utils/logger';
+import { extractFirstJsonObject } from '../utils/extractJson';
 
 const RESEARCH_PLAN_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -252,9 +253,9 @@ Output STRICT JSON only: {"queries": ["...","..."], "recency_days": <number or n
       messages: [{ role: 'user', content: prompt }],
     });
     const text = ((res.content[0] as Anthropic.TextBlock).text ?? '').trim();
-    const m = text.match(/\{[\s\S]*\}/);
+    const m = extractFirstJsonObject(text);
     if (m) {
-      const parsed = JSON.parse(m[0]) as { queries?: unknown; recency_days?: unknown };
+      const parsed = JSON.parse(m) as { queries?: unknown; recency_days?: unknown };
       const queries = Array.isArray(parsed.queries)
         ? parsed.queries.filter((q): q is string => typeof q === 'string' && q.trim().length > 0).slice(0, 4)
         : [];

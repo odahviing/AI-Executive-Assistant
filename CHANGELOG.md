@@ -2,6 +2,34 @@
 
 ---
 
+## 3.3.3 — real-day bug-bash: calendar-health window/OOF/coda, booking location & duration, date-guard, robust JSON parsing
+
+A reactive bug-bash from a day of real use (pasted Slack chats + the morning report + brief). Patch — fixes and correctness, no new capability. Several date/scheduling guards were either firing wrong or failing silently; this wave makes them honest.
+
+### Fixed — calendar health
+- **Health window is now "this week + next week"** (today → the Saturday that ends next week) instead of the 21-day M-11 sweep (`workHours.ts:computeHealthCheckWindow`). The 21-day window made the morning report enormous and re-narrated conflicts three weeks out every day; the bounded window also stops most of the daily re-flagging.
+- **Full-day `busy`/`oof` days no longer flag a missing floating block** (`calendarHealth.ts`). A blocked vacation day stopped getting "no room for lunch."
+- **No social coda on system reports** (`orchestrator/index.ts` + `routine.ts`/`research.ts`). Scheduled routines/research now run with `interactive: false`, which gates off the proactive social directive + end-of-turn coda — the morning calendar-health report no longer gets "Do you have any pets?" tacked on. (Regression from the v3.3.x coda re-enable.)
+
+### Fixed — booking correctness
+- **No needless "online or physical?" approval on colleague bookings** (`resolveLocation.ts`). A colleague booking an external meeting on an office day now defaults to online instead of raising an owner approval (which left the invite unsent); the rule-driven cases (home day, internal, remote, owner-path) are unchanged, so an office meeting is never booked on a home day.
+- **Duration snap no longer silently shrinks an explicit long meeting** (`ops.ts`). Aligning an odd short duration to a preset stays silent (≤5 min, e.g. "1 hour"→55), but a snap larger than 5 min (an explicit 2-hour copy → 55) now asks the owner to confirm (`override_duration`) rather than quietly booking 55 minutes while narrating 2 hours.
+
+### Fixed — date guard
+- **dateVerifier stops guessing/corrupting weekdays** (`dateVerifier.ts`). The bare-weekday check now only flags a weekday when the user's message carries an explicit relative-day anchor it can pin the date to; with no anchor it returns no mismatch instead of inventing a target date and "correcting" a correct "Wednesday" into "Tuesday."
+
+### Fixed — robustness (JSON parsing across LLM gates)
+- **Shared `extractFirstJsonObject` / `parseFirstJsonObject` helper** (`utils/extractJson.ts`, new) replaces the fragile greedy `match(/\{[\s\S]*\}/)` + `JSON.parse` pattern in **10 gates** (humanGate, securityGate, claimChecker, dateVerifier, locationResolver, meetingReschedule, general, news, summary, capturePass ×3). The greedy match over-captured to the last brace, so any trailing model output threw "Unexpected non-whitespace after JSON" and silently disabled the gate (humanGate + securityGate fail open). Now each takes the first balanced object and ignores trailing content.
+
+### Fixed — news
+- **Within-batch duplicate merge** (`briefs.ts`). The Updates compose now merges same-story items reported by different sources/wording within today's set (the seen-log dedup was cross-day only), killing the double-listings seen in the seen-log.
+
+### Not changed / deferred
+- Wrong-week copy/move (a meeting copied to "weds" landing on the next calendar Wednesday instead of the referenced event's week) — accepted as an irreducible judgment error; no clean guard exists that doesn't false-fire on routine single-occurrence edits or double request cost.
+- Disconnected owner reminder for colleague-initiated approvals (owner_dm_thread_ts not captured) — deferred (thread-continuity class).
+
+---
+
 ## 3.3.2 — audit wave 2: latency Haiku-flips, Connection-layering, news source-steer + cross-cutting fixes
 
 Second consumption pass over the v3.3.0 audit (`.claude/V3_3_0_AUDIT_HANDOFF.md`) across several chats: latency model-flips, a Connection-abstraction layering fix, the news source-steer done the right way (LLM-emitted, not parsed), and a batch of meetings/calendar/cross-cutting corrections. Patch — no new capabilities. (news.ts was edited by multiple chats this wave; audited clean — no duplicate/half-merged defs, types + callers consistent, typecheck green.)

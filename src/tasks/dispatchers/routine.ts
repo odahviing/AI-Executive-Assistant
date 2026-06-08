@@ -162,6 +162,7 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       userId: routine.owner_user_id,
       senderRole: 'owner',
       channel: 'slack',
+      interactive: false,  // v3.2.6 (6.4) — scheduled report, not a conversation: no social coda
       profile,
       app,
     });

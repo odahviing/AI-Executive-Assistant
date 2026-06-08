@@ -31,6 +31,7 @@ import logger from './logger';
 import { config } from '../config';
 import type { UserProfile } from '../config/userProfile';
 import { getEffectiveToday } from './effectiveToday';
+import { extractFirstJsonObject } from './extractJson';
 
 const MONTHS_EN: Record<string, number> = {
   jan: 1, january: 1,
@@ -243,6 +244,7 @@ ${lookupLines}
 Task: find any bare weekday reference in the draft (e.g. "Monday's calendar", "on Monday", "this Monday", "Monday morning") that is CONTEXTUALLY WRONG given the user's message + the date lookup.
 
 Rules for judging:
+- ⚠️ MOST IMPORTANT — NO ANCHOR, NO FLAG. Only flag a bare weekday when the USER'S MESSAGE ITSELF contains an explicit relative-day anchor (today / tomorrow / this afternoon / tonight / at 3pm today / in an hour / later today / EOD / now) that pins which calendar date the weekday must be, AND the draft's weekday contradicts it. If the user's message does NOT contain such an anchor — if the weekday in the draft is standalone and you'd have to GUESS which date it refers to — you have NO BASIS to correct it. Return it as NOT a mismatch. NEVER infer the date from the draft alone, never guess a target_date, never "correct" a weekday you can't anchor to the user's own words. When unsure, return no mismatches. (A wrongly-"corrected" correct weekday is worse than a missed one.)
 - If the user's message refers to a day relative to now (today / tomorrow / this afternoon / at 3pm / tonight / in an hour / later / EOD / now), the reply's weekday must match the ACTUAL weekday for that day.
 - If the user explicitly named a weekday (e.g. "on Friday") and the reply uses the same weekday, that's fine.
 - A future-facing weekday far from now ("I'll ping you Monday" when today is Sunday) is NOT wrong — it refers to the next Monday, not a mismatched today.
@@ -270,10 +272,12 @@ Empty array if everything is consistent. Keep output minimal.`;
     messages: [{ role: 'user', content: prompt }],
   });
   const text = (resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '';
-  const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
-  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) return [];
-  const parsed = JSON.parse(jsonMatch[0]) as {
+  // v3.2.6 (3.2 / E) — tolerant parse via the shared extractor: takes the FIRST
+  // balanced { … } object and ignores trailing prose / a second object (the
+  // "Unexpected non-whitespace after JSON" crash class, 2026-06-07).
+  const jsonStr = extractFirstJsonObject(text);
+  if (!jsonStr) return [];
+  let parsed: {
     mismatches?: Array<{
       written_weekday: string;
       draft_excerpt?: string;
@@ -281,6 +285,14 @@ Empty array if everything is consistent. Keep output minimal.`;
       target_date: string;
     }>;
   };
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch (err) {
+    logger.debug('dateVerifier: bare-weekday JSON parse failed after extraction — skipping', {
+      err: String(err).slice(0, 120),
+    });
+    return [];
+  }
   if (!parsed.mismatches || parsed.mismatches.length === 0) return [];
 
   // v2.8.6 — defensive post-filter. The LLM sometimes flags weekdays that

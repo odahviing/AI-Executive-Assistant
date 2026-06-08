@@ -54,6 +54,7 @@ import { getAnthropicClient } from '../llm/client';
 import { isStrictIana } from '../utils/timezoneValidator';
 import { config } from '../config';
 import logger from '../utils/logger';
+import { extractFirstJsonObject } from '../utils/extractJson';
 import {
   FIXED_CATEGORIES,
   getActiveSubjectsForPerson,
@@ -170,10 +171,9 @@ function chatToTranscript(messages: Array<{ role: string; content: string }>, co
  */
 function parseDelta(raw: string): CaptureDelta | null {
   try {
-    const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```\s*$/i, '');
-    const match = cleaned.match(/\{[\s\S]*\}/);
+    const match = extractFirstJsonObject(raw);
     if (!match) return null;
-    return JSON.parse(match[0]) as CaptureDelta;
+    return JSON.parse(match) as CaptureDelta;
   } catch {
     return null;
   }
@@ -518,10 +518,9 @@ interface SelfCaptureDelta {
 
 function parseSelfDelta(raw: string): SelfCaptureDelta | null {
   try {
-    const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```\s*$/i, '');
-    const match = cleaned.match(/\{[\s\S]*\}/);
+    const match = extractFirstJsonObject(raw);
     if (!match) return null;
-    const parsed = JSON.parse(match[0]);
+    const parsed = JSON.parse(match);
     const notes = Array.isArray(parsed?.notes)
       ? parsed.notes.filter((n: unknown): n is string => typeof n === 'string' && n.trim().length > 0)
       : [];
@@ -754,10 +753,9 @@ interface ReconcileOutput {
 
 function parseReconcileOutput(raw: string): ReconcileOutput | null {
   try {
-    const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```\s*$/i, '');
-    const match = cleaned.match(/\{[\s\S]*\}/);
+    const match = extractFirstJsonObject(raw);
     if (!match) return null;
-    const parsed = JSON.parse(match[0]) as { decisions?: unknown };
+    const parsed = JSON.parse(match) as { decisions?: unknown };
     if (!Array.isArray(parsed.decisions)) return null;
     const decisions: SubjectDecision[] = [];
     for (const raw of parsed.decisions) {

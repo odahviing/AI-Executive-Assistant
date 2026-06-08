@@ -45,6 +45,7 @@ import { getAnthropicClient } from '../llm/client';
 import type { UserProfile } from '../config/userProfile';
 import { config } from '../config';
 import logger from './logger';
+import { extractFirstJsonObject } from './extractJson';
 import { logLlmUsage } from './usageLog';
 
 const anthropic = getAnthropicClient();
@@ -315,9 +316,8 @@ export async function runHumanGate(
     // throws SyntaxError("Unexpected token 'T'..."). Extract the first
     // balanced-looking {...} block and parse THAT. Same pattern as
     // skills/meetingReschedule.ts and other JSON-output gates.
-    const cleaned = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```\s*$/i, '');
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleaned) as { ok?: boolean; rewrite?: string | null };
+    const jsonStr = extractFirstJsonObject(text);
+    const parsed = JSON.parse(jsonStr ?? text) as { ok?: boolean; rewrite?: string | null };
 
     if (parsed.ok === false && typeof parsed.rewrite === 'string' && parsed.rewrite.trim().length > 0) {
       logger.info('humanGate — rewrote draft', {

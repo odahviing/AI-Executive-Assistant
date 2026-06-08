@@ -55,6 +55,7 @@ import { getConnection } from '../connections/registry';
 import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calendar';
 import { selectRelevantKbForMeeting } from './knowledge';
 import logger from '../utils/logger';
+import { extractFirstJsonObject } from '../utils/extractJson';
 
 const anthropic = getAnthropicClient();
 
@@ -483,13 +484,12 @@ Output strict JSON only (no prose, no fences):
       messages: [{ role: 'user', content: prompt }],
     });
     const raw = ((resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    const jsonMatch = extractFirstJsonObject(raw);
     if (!jsonMatch) {
       logger.info('style-learner: parse failure — skip', { rawPreview: raw.slice(0, 200) });
       return;
     }
-    const verdict = JSON.parse(jsonMatch[0]) as {
+    const verdict = JSON.parse(jsonMatch) as {
       is_style_rule: boolean;
       generalizes: boolean;
       scope: 'global' | 'type-specific';

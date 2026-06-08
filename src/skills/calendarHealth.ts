@@ -472,6 +472,13 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
             return eventStart.toFormat('yyyy-MM-dd') === dayStr;
           });
 
+          // v3.2.6 (6.3) — a FULL-DAY busy or OOF event (vacation / all-day
+          // block) means the day is off or fully spoken for: don't flag a
+          // missing floating block on it. The owner blocks vacation days; no
+          // lunch is expected there.
+          const fullDayBlocked = dayEvents.some(e =>
+            e.isAllDay && !e.isCancelled && (e.showAs === 'oof' || e.showAs === 'busy'));
+
           // ── Missing floating blocks ──
           // Every block configured for the profile (lunch + any custom) is
           // checked independently. Only the ones that apply on this day-of-week
@@ -487,6 +494,7 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
           // hasn't been placed surface for the active-mode auto-book on
           // the day of.
           for (const block of floatingBlocks) {
+            if (fullDayBlocked) break;  // v3.2.6 (6.3) — full-day busy/OOF: no lunch expected
             if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
             const hasBlock = dayEvents.some(e => {
               if (e.isAllDay) return false;

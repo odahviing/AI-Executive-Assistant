@@ -1,6 +1,17 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.2.5** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.3.3** — check `package.json` if unsure; it is the source of truth.
+
+## ✅ THIS ARC IS DONE — next chat = bugs + improvements; PARALLEL chats: WhatsApp + news
+
+A long multi-feature + bug-bash arc just wrapped (v3.2.5 → v3.3.3): the **proactive-social rework** (cold-open killed, coda-only — see the v3.2.5 section below; its two "deferred follow-ups" both SHIPPED this arc — the coda `+1`/`−1`/revival rank scoring **and** the work-vs-social capture-pass exclusion), the v3.3.0 **news brief + thread actions**, the v3.3.x **audit waves**, and a real-day **bug-bash (v3.3.3)**: calendar-health window narrowed to *this week + next week*, full-day-OOF lunch skip, **no social coda on system reports** (routine/research run `interactive: false`), colleague-booking location/approval fix, **duration-snap verify** (no silent 2h→55), dateVerifier stops guessing weekdays, a **shared robust JSON parser across 10 gates** (`utils/extractJson.ts`), and news within-batch dedup.
+
+**Next chat = reactive bugs + improvements** — the standing mode: trace `logs/maelle-YYYY-MM-DD.log`, propose-first, **code-first**, wait for a per-bug "fix it". **Preference changes go to the owner's Slack memory via `update_my_preferences`, NOT code/prompt** (owner sets them; the prompt is a budget). Two PARALLEL chats run alongside this one: **(1) WhatsApp** — first non-Slack `Connection` implementation (architecture's ready; skills speak through `getConnection`, never import `connectors/slack/*`); **(2) finish the news work** (close remaining gaps in the v3.3.0 news brief). At wrap: `git fetch` + check for parallel-chat commits/uncommitted edits before committing — this arc had heavy cross-chat overlap.
+
+**Still-open deferred bugs (from the v3.3.3 bash — NOT built):**
+- **Wrong-week copy/move** — copying a meeting to "weds" resolves to the next *calendar* Wednesday, not the referenced event's week. Accepted as irreducible (no clean guard without false-firing on routine single-occurrence edits / doubling request cost); owner catches it manually.
+- **Disconnected owner reminder** — colleague-initiated approvals don't capture `owner_dm_thread_ts`, so reminders land as standalone DMs (thread-continuity class, same family as the Dina 2-DM bug). Deferred ("too complicated").
+- **Daily re-flag (residual)** — conflicts *inside* the 2-week health window still re-narrate each morning until resolved (6.1 shrank the window but added no per-issue informed-suppression).
 
 ## 🧩 v3.2.5 — proactive social reworked: ONE engine, ONE surface
 

@@ -185,56 +185,20 @@ export function computeHealthCheckWindow(profile: UserProfile): {
   endDate: string;
 } {
   const tz = profile.user.timezone;
-  const officeDays = profile.schedule.office_days.days as string[];
-  const homeDays = profile.schedule.home_days.days as string[];
-  const workDaySet = new Set<string>([...officeDays, ...homeDays]);
-
   const now = DateTime.now().setZone(tz);
 
-  // Walk today..today+(HEALTH_WINDOW_DAYS-1) and take the LAST workday seen
-  // across the full window. The previous "stop at first non-workday" heuristic
-  // assumed contiguous workweeks — on a non-contiguous schedule (e.g.
-  // Sun/Mon/Wed/Thu with Tuesday off), calling this on Sunday would
-  // STOP at Tuesday and return Monday, losing Wednesday + Thursday from
-  // the coverage window. With a calendar that mixes office days through
-  // the week, just take the furthest workday inside the window.
-  // v3.3.x (M-11) — widened 7 → 21 days: the health sweep now looks ~3 weeks
-  // out so conflicts/gaps surface with runway to fix them. Independent of the
-  // brief's calendar fetch (which was narrowed to today+7 in the same change).
-  const HEALTH_WINDOW_DAYS = 21;
-  let endWorkday = now;
-  for (let i = 0; i < HEALTH_WINDOW_DAYS; i++) {
-    const d = now.plus({ days: i });
-    if (workDaySet.has(d.toFormat('EEEE'))) {
-      endWorkday = d;
-    }
-  }
-
-  // Compute the end-of-work-hours timestamp for the selected endWorkday.
-  // v2.8.1 — multi-window aware: use the LAST window's end on the day
-  // (so Tuesday "09:00-15:30, 21:30-23:59" → end is 23:59).
-  const dayName = endWorkday.toFormat('EEEE');
-  const windows = getOwnerWorkHoursForDay(profile, dayName);
-  const lastWindow = windows.length > 0 ? windows[windows.length - 1] : null;
-  const endDt = lastWindow
-    ? endWorkday.set({
-        hour: Math.floor(lastWindow.endMin / 60),
-        minute: lastWindow.endMin % 60,
-        second: 0,
-        millisecond: 0,
-      })
-    : endWorkday.endOf('day');
-
-  // If the full window is <= 24 hours, we're essentially out of runway
-  // this week. Extend into next week so there's time to coordinate moves.
-  const hoursInWindow = endDt.diff(now, 'hours').hours;
-  const finalEnd = hoursInWindow <= 24
-    ? endDt.plus({ days: 7 })
-    : endDt;
+  // v3.2.6 — window is "rest of this week + all of next week" (owner direction):
+  // today through the SATURDAY that ends NEXT week (Sun–Sat week). On a Sunday
+  // that's a full 14 days (Sun → Sat-after); on a Thursday it's Thu → Sat-after.
+  // Bounded + intuitive — short enough that the daily report stops re-narrating
+  // conflicts three weeks out (the old 21-day M-11 sweep over-surfaced).
+  // dayIndex: Sunday=0 … Saturday=6 (Luxon weekday is Mon=1..Sun=7 → %7).
+  const dayIndex = now.weekday % 7;
+  const endOfNextWeek = now.minus({ days: dayIndex }).startOf('day').plus({ days: 13 });
 
   return {
     startDate: now.toFormat('yyyy-MM-dd'),
-    endDate: finalEnd.toFormat('yyyy-MM-dd'),
+    endDate: endOfNextWeek.toFormat('yyyy-MM-dd'),
   };
 }
 

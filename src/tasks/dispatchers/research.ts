@@ -25,6 +25,7 @@ export const dispatchResearch: TaskDispatcher = async (app, task, profile, ctx) 
     userId: task.owner_user_id,
     senderRole: 'owner',
     channel: 'slack',
+    interactive: false,  // v3.2.6 (6.4) — scheduled research run, not a conversation: no social coda
     profile,
     app,
   });

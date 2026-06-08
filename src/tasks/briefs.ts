@@ -554,6 +554,7 @@ async function generateBriefingText(
 
 UPDATES (news) — after the calendar/tasks body, add a short "Updates" section: AT MOST 3–5 bullets of news that matters to ${firstName} today, drawn ONLY from the NEWS SOURCES in the data below. Rules:
 - Only genuinely NEW developments from the last 7 days. Skip anything older, and skip anything already in the "already covered" log below.
+- MERGE same-story duplicates WITHIN today's set: if two sources report the SAME event/development (even from different outlets or worded differently — e.g. the same funding round, the same acquisition, the same company's valuation), produce exactly ONE bullet, citing the best source. Never list the same story twice.
 - Each bullet cites its source as a Slack hyperlink: <url|short label> (e.g. <https://...|Reuters>). NEVER paste a bare URL, and NEVER write "[link]" followed by the URL — that doubles the text. One compact hyperlink per bullet.
 - NEVER assert a current-events fact not present in the sources.
 - If a topic/company returned nothing, just leave it out — do NOT add an apology or a "couldn't find anything on X" line. If nothing new at all, OMIT the Updates section entirely (no empty heading).

@@ -17,6 +17,7 @@ import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
+import { extractFirstJsonObject } from './extractJson';
 
 const anthropic = getAnthropicClient();
 
@@ -145,8 +146,8 @@ Output STRICT JSON only: {"verdict":"impersonation"|"benign"}`;
       messages: [{ role: 'user', content: prompt }],
     });
     const text = ((response.content[0] as Anthropic.TextBlock).text ?? '').trim();
-    const m = text.match(/\{[\s\S]*\}/);
-    const verdict = m ? (JSON.parse(m[0]).verdict as string) : '';
+    const m = extractFirstJsonObject(text);
+    const verdict = m ? ((JSON.parse(m) as { verdict?: string }).verdict ?? '') : '';
     logger.info('Identity-claim judge ran', {
       verifiedName: opts.verifiedName, claimedEmail: opts.claimedEmail,
       verdict: verdict || '(unparsed→impersonation)', elapsedMs: Date.now() - start,

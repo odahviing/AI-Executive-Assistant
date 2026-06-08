@@ -246,7 +246,24 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
           reasoning: 'office day + external + owner forced physical',
         };
       }
-      // Same TZ OR unknown TZ AND no owner hint → ask.
+      // Same TZ OR unknown TZ AND no owner hint.
+      // v3.2.6 (RC4 follow-up) — on the COLLEAGUE path, don't raise an
+      // "online or physical?" approval to the owner: that's friction for a
+      // booking a colleague is driving, and it was a regression from RC4
+      // (which stopped honoring the online hint on colleague-path, sending
+      // external office-day meetings here instead of just booking online).
+      // An external guest with unknown/same TZ defaults to ONLINE (Teams) —
+      // the safe no-assumption default; no approval. Owner-path still asks,
+      // so the owner gets to decide his own external meetings.
+      if (input.initiatorRole === 'colleague') {
+        return {
+          kind: 'resolved',
+          isOnline: true,
+          location: '',
+          teamsUrlAsLocation: true,
+          reasoning: 'office day + external (colleague-path) → default online, no owner approval',
+        };
+      }
       return {
         kind: 'ask_owner_online_or_physical',
         suggestedAskText: `Office day with an external guest — online or physical at ${fullLabel}?`,

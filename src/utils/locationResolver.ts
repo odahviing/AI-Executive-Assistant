@@ -17,6 +17,7 @@ import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import { tavilySearch } from '../skills/general';
 import logger from './logger';
+import { extractFirstJsonObject } from './extractJson';
 
 export interface ResolvedVenue {
   resolved: boolean;
@@ -108,12 +109,12 @@ Rules:
     });
 
     const text = (resp.content[0] && resp.content[0].type === 'text') ? resp.content[0].text : '';
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const jsonMatch = extractFirstJsonObject(text);
     if (!jsonMatch) {
       logger.warn('resolveVenueLocation — Sonnet returned non-JSON', { input, preview: text.slice(0, 200) });
       return fallback;
     }
-    const parsed = JSON.parse(jsonMatch[0]) as { resolved?: boolean; name?: string; address?: string };
+    const parsed = JSON.parse(jsonMatch) as { resolved?: boolean; name?: string; address?: string };
     if (!parsed.resolved || !parsed.name || !parsed.address) {
       return fallback;
     }

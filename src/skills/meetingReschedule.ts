@@ -33,6 +33,7 @@ import { config } from '../config';
 import { getConnection } from '../connections/registry';
 import { shadowNotify } from '../utils/shadowNotify';
 import logger from '../utils/logger';
+import { extractFirstJsonObject } from '../utils/extractJson';
 
 export interface RescheduleContext {
   meeting_id: string;
@@ -101,9 +102,8 @@ If ambiguous, prefer "declined" over guessing.`;
       messages: [{ role: 'user', content: prompt }],
     });
     const text = (resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '';
-    const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
-    const match = cleaned.match(/\{[\s\S]*\}/);
-    const parsed = JSON.parse(match ? match[0] : cleaned);
+    const match = extractFirstJsonObject(text);
+    const parsed = JSON.parse(match ?? text.trim());
     return {
       status: parsed.status,
       counter_start: parsed.counter_start ?? undefined,

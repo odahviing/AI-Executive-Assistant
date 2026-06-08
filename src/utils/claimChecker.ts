@@ -27,6 +27,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import logger from './logger';
+import { extractFirstJsonObject } from './extractJson';
 import { logLlmUsage } from './usageLog';
 
 const anthropic = getAnthropicClient();
@@ -287,11 +288,11 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
     // calendar candidate selection bug fixed in v1.7.3), extract the first
     // {...} block by regex before JSON.parse. Without this, the checker
     // fail-opens and any phantom-action claim ships unedited.
-    if (!cleaned.startsWith('{')) {
-      // Try to find the first JSON object in the prose. Use [\s\S] so . matches newlines.
-      const m = cleaned.match(/\{[\s\S]*?"claimed_action"[\s\S]*?\}/);
-      if (m) cleaned = m[0];
-    }
+    // Take the first balanced { … } object — handles a prose prefix AND
+    // trailing content after the JSON (the "Unexpected non-whitespace after
+    // JSON" crash class). Falls through to the raw string if no object found.
+    const extracted = extractFirstJsonObject(cleaned);
+    if (extracted) cleaned = extracted;
     let parsed: any;
     try { parsed = JSON.parse(cleaned); }
     catch (err) {
