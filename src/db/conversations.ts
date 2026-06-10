@@ -34,6 +34,38 @@ export function appendToConversation(
   `).run({ thread_ts: threadTs, channel_id: channelId, context: JSON.stringify(trimmed) });
 }
 
+/**
+ * v3.3.7 (#125c) — verbatim recall. Flatten the most recent threads in a
+ * channel into one message list (last `maxMessages`, oldest first). Used by
+ * recall_interactions to ground "what did you tell X?" answers in what was
+ * ACTUALLY exchanged, not the capture-pass summary — the summary-only answer
+ * is how Maelle confidently misdescribed the Yael conversation (#125).
+ * Thread order approximates chronology via updated_at; messages keep their
+ * within-thread order.
+ */
+export function getRecentChannelMessages(
+  channelId: string,
+  maxMessages: number = 10,
+): Array<ConversationMessage & { thread_ts: string }> {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT thread_ts, context FROM conversation_threads
+     WHERE channel_id = ?
+     ORDER BY updated_at DESC
+     LIMIT 5
+  `).all(channelId) as Array<{ thread_ts: string; context: string }>;
+  const all: Array<ConversationMessage & { thread_ts: string }> = [];
+  for (const row of rows.reverse()) {  // oldest thread first
+    try {
+      const msgs = JSON.parse(row.context) as ConversationMessage[];
+      for (const m of msgs) all.push({ ...m, thread_ts: row.thread_ts });
+    } catch {
+      // corrupt context row — skip, never break recall
+    }
+  }
+  return all.slice(-maxMessages);
+}
+
 // ── v2.9.3 (#103) end-of-chat capture support ────────────────────────────────
 
 /**

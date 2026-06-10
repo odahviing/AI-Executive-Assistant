@@ -40,7 +40,8 @@ Feature requests (`Roadmap` / `Next` / `Idea`) are out of scope here. Skip them.
 
 A single GitHub issue often contains multiple sub-bugs. Number them:
 
-- `77a`, `77b`, `77c` — sub-bugs inside issue #77
+- `<issue number><lowercase letter>` in REPORT ORDER: `77a`, `77b`, `77c` — sub-bugs inside issue #77, lettered in the order they appear in the report
+- These IDs are the conversation's shared vocabulary: the owner answers per-ID ("77b — fix it", "77c — explain more"), so once assigned, an ID must stay STABLE for the whole run — never renumber between messages, even after some bugs close
 - Carry the severity label (High / Medium / Low) from the issue onto each atomic bug
 - DO NOT group atomic bugs by severity — that mixes unrelated code areas
 

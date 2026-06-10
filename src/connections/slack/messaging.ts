@@ -59,6 +59,24 @@ export type SendOutcome =
 
 // ── Sends ────────────────────────────────────────────────────────────────────
 
+/**
+ * v3.3.7 (#125c) — resolve the 1:1 DM channel id for a user (opens it if
+ * needed). Same conversations.open call sendDM makes internally; exposed so
+ * the Connection can map person → DM channel for verbatim conversation recall.
+ */
+export async function resolveDmChannelId(
+  app: App,
+  botToken: string,
+  userId: string,
+): Promise<string | null> {
+  try {
+    const open = await app.client.conversations.open({ token: botToken, users: userId });
+    return ((open.channel as any)?.id as string | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Send a 1:1 DM to a Slack user. Opens the DM channel if needed. */
 export async function sendDM(
   app: App,

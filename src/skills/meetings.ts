@@ -1701,7 +1701,17 @@ ATTENDEES (v2.9.1):
         }
 
         // ── Fully free ──────────────────────────────────────────────────────────
-        if (directConflicts.length === 0 && bufferOnly.length === 0 && !lunchViolation) {
+        // v3.3.7 (#124a) — buffer-only collisions FALL THROUGH to "free".
+        // The owner's 5-min buffer is carried by the meeting LENGTHS
+        // (allowed_durations 10/25/40/55 end short of the grid) — it is not
+        // a standalone rule, and it must never escalate on its own. This is
+        // the same v2.6.4 decision already applied to colleague-path
+        // create_meeting ("owner's 5-min buffer is a HELPER, not a hard
+        // rule" — calendar.ts buffer split); this tool was the one surface
+        // still escalating on it (the "Yael 11:00, OK to approve the tight
+        // buffer?" phantom ask). Genuine overlap + floating-block violations
+        // still escalate below.
+        if (directConflicts.length === 0 && !lunchViolation) {
           // v2.1.1 — active-mode in-turn block move. When
           // calendar_health_mode='active' AND a floating block event would
           // need to shift to accommodate this meeting, move it now via
@@ -1735,13 +1745,17 @@ ATTENDEES (v2.9.1):
           const movesLine = movesDone.length > 0
             ? ` I ${movesDone.join(' and ')} to make room.`
             : '';
+          const backToBackLine = bufferOnly.length > 0
+            ? ` (Back-to-back with "${bufferOnly.map(ev => ev.subject).join('", "')}" — that's fine, no approval needed.)`
+            : '';
           return {
             can_join: true,
             time: timeStr,
             duration_min: durationMin,
             subject,
             blocks_moved: movesDone.length > 0 ? movesDone : undefined,
-            message: `${ownerFirst} is free at that time.${movesLine} Tell ${requesterName} to forward the calendar invite.`,
+            back_to_back_with: bufferOnly.length > 0 ? bufferOnly.map(ev => ev.subject) : undefined,
+            message: `${ownerFirst} is free at that time.${movesLine}${backToBackLine} Tell ${requesterName} to forward the calendar invite.`,
             _note: 'Do NOT book anything on the calendar. Just tell the colleague to forward the invite.',
           };
         }
@@ -1794,9 +1808,10 @@ ATTENDEES (v2.9.1):
           };
         }
 
-        // ── Buffer or lunch violation only → escalate to owner ──────────────────
+        // ── Floating-block violation only → escalate to owner ───────────────────
+        // (v3.3.7 — buffer-only no longer reaches here; it falls through to
+        // "free" above. Only an unsatisfiable floating block escalates.)
         const violations: string[] = [];
-        if (bufferOnly.length > 0) violations.push(`buffer between meetings (${profile.meetings.buffer_minutes}-min gap)`);
         if (lunchViolation) violations.push(`floating-block protection (${violatedBlocks.join(', ')})`);
 
         return {

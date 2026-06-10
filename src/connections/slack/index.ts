@@ -18,6 +18,7 @@ import {
   postToChannel as slackPostToChannel,
   findUserByName as slackFindUserByName,
   findChannelByName as slackFindChannelByName,
+  resolveDmChannelId,
   type SendOutcome,
 } from './messaging';
 import { formatForSlack } from './formatting';
@@ -164,6 +165,11 @@ If you already have an email for the person, you don't need this tool to book a 
           },
         },
       ];
+    },
+
+    // v3.3.7 (#125c) — person → DM channel, for verbatim conversation recall.
+    async resolveDirectChannelId(userRef) {
+      return resolveDmChannelId(app, botToken, userRef);
     },
 
     async reactToMessage(channelRef, messageTs, emojiName) {

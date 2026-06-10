@@ -190,6 +190,16 @@ export interface Connection {
    * touch, not part of any contract.
    */
   reactToMessage?(channelRef: string, messageTs: string, emojiName: string): Promise<void>;
+
+  /**
+   * v3.3.7 (#125c) — resolve the 1:1 direct-message channel ref for a user on
+   * this transport (Slack: conversations.open → D-channel id). Used by
+   * recall_interactions to read the verbatim recent exchange with a person
+   * out of the conversations store. Optional — transports without a stable
+   * DM-channel concept just don't implement; callers check before invoking.
+   * Returns null when the user doesn't resolve.
+   */
+  resolveDirectChannelId?(userRef: string): Promise<string | null>;
 }
 
 /**

@@ -383,9 +383,20 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
  *   1. Make the non-completion UNMISTAKABLE so the owner knows to nudge.
  *   2. Do NOT smooth it into "I'll handle it" (reads as already done).
  *
- * Tool-less ⇒ it can never duplicate an action. Fails open (returns null) →
- * caller keeps the original draft (same risk tolerance as the prior
- * retry-errored path).
+ * v3.4.x — VETO + Sonnet (GH #124/#125). The upstream RULE-A classifier (Haiku)
+ * false-positived three times in one day on PROPOSALS / OFFERS / future
+ * commitments ("Want me to move Michal?", "once you pick, I'll move it") — the
+ * exact cases its own prompt exempts. The shield can't catch them (no tool ran,
+ * correctly). So the rewriter no longer blindly trusts the verdict: it FIRST
+ * verifies the draft itself and, if the draft only proposes/offers/asks/commits
+ * to a future action, returns the literal `UNCHANGED` → caller keeps the
+ * original untouched (logged as a veto so we can count classifier wrongness).
+ * It runs on SONNET, not Haiku: the veto decision is exactly the judgment Haiku
+ * just failed at, and the rewriter fires only a few times a day (flags only),
+ * so the stronger model is essentially free here.
+ *
+ * Tool-less ⇒ it can never duplicate an action. Fails open (returns null, incl.
+ * on veto) → caller keeps the original draft.
  */
 export async function rewriteOwningTheMiss(opts: {
   draft: string;
@@ -399,30 +410,52 @@ export async function rewriteOwningTheMiss(opts: {
       ? `sending a message${opts.targetName ? ` to ${opts.targetName}` : ''}`
       : 'that action');
 
-  const prompt = `You are fixing a message an assistant already drafted for ${opts.ownerFirstName}. The draft claims an action is done or under way that DID NOT actually happen this turn — no tool ran to do it. The unsupported claim is about: ${what}.
+  const prompt = `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your FIRST job is to verify, not to assume.
 
-Rewrite the message so it is HONEST about that gap, in a warm, natural HUMAN voice:
-- Make it UNMISTAKABLE that the thing has NOT gone through yet, so ${opts.ownerFirstName} knows it still needs to happen. (e.g. "Actually — hold on, that didn't go out yet, let me sort it." / "Sorry, I jumped the gun — it hasn't sent. Fixing that now.")
-- Do NOT claim it's done, sent, booked, flagged, or handled.
-- Do NOT smooth it into a confident "I'll take care of it" that reads like it's already resolved — the whole point is for ${opts.ownerFirstName} to SEE it's still outstanding.
+STEP 1 — Decide what the draft actually does. If the draft only:
+- PROPOSES or OFFERS an action ("Want me to move Michal to Wed?", "I can book that", "Should I reach out to her?"), OR
+- ASKS PERMISSION before acting, OR
+- COMMITS to a FUTURE action conditional on ${opts.ownerFirstName}'s answer ("once you pick, I'll move it", "I'll get that sorted once you confirm"), OR
+- simply does NOT state that something is already done / sent / booked / moved / flagged
+then it is NOT a false claim — the checker misfired. Output EXACTLY the single token UNCHANGED and nothing else. Do not rewrite a proposal into an apology.
+
+STEP 2 — ONLY if the draft genuinely STATES a completed action ("Done — booked Wed 12:15", "I've sent it to Yael", "Moved your 17:00 over") that no tool performed: rewrite it so it is HONEST about the gap, warm and human:
+- Make it UNMISTAKABLE the thing has NOT gone through yet, so ${opts.ownerFirstName} knows it still needs to happen. (e.g. "Actually — hold on, that didn't go out yet, let me sort it.")
+- Do NOT claim it's done/sent/booked/flagged/handled, and do NOT smooth it into "I'll take care of it" (reads as resolved).
 - Keep every other fact intact: names, times, dates, numbers, the rest of the message.
-- Sound like a real person owning a small slip — never a system/error message, no talk of tools, routines, or mechanism.
+- Sound like a real person owning a small slip — never a system/error message, no talk of tools or mechanism.
 - Match the language of the draft (Hebrew/English/etc).
 
-Output ONLY the corrected message text. No preamble, no quotes, no code fences.
+Output ONLY the single token UNCHANGED, or ONLY the corrected message text. No preamble, no quotes, no code fences.
 
 Draft:
 ${opts.draft}`;
 
   try {
     const resp = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      // Sonnet — the veto (proposal vs. completed-claim) is the judgment Haiku
+      // misfired on; this path runs only on flags (a few/day), so cost is trivial.
+      model: 'claude-sonnet-4-6',
       max_tokens: 600,
       messages: [{ role: 'user', content: prompt }],
     });
-    logLlmUsage('claim_checker_rewrite', 'claude-haiku-4-5-20251001', resp);
+    logLlmUsage('claim_checker_rewrite', 'claude-sonnet-4-6', resp);
     const text = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
     const out = text.replace(/^```(?:\w+)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+
+    // VETO: the rewriter judged the draft a proposal/offer/future-commit, not a
+    // completed claim → the classifier false-positived. Keep the original draft
+    // untouched and log it (this count tells us if the Haiku classifier itself
+    // needs the Sonnet flip). Tolerant match: "UNCHANGED", "UNCHANGED.", etc.
+    if (out.toUpperCase().replace(/[^A-Z]/g, '') === 'UNCHANGED') {
+      logger.info('claim_checker_rewrite_vetoed — draft is a proposal/offer/future-commit, not a completed claim; keeping original (classifier false-positive)', {
+        action_type: opts.actionType,
+        action_summary: opts.actionSummary,
+        draftPreview: opts.draft.slice(0, 200),
+      });
+      return null;
+    }
+
     return out.length > 0 ? out : null;
   } catch (err) {
     logger.warn('rewriteOwningTheMiss threw — caller keeps original draft', {

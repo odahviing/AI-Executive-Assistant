@@ -69,6 +69,18 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
     return;
   }
 
+  // v3.3.7 (#124g) — an ERRORED tool call is not a silently-lost action either.
+  // The error goes straight back to Sonnet (registry wraps throws as
+  // { error: "Tool ... failed: ..." }), gets narrated, and the owner retries
+  // in-conversation. Opening a row here guarantees an orphan: the failed call
+  // often carries a malformed/absent meeting_id (that's frequently WHY it
+  // failed), so the success-retry's meeting_moved cascade can never match it —
+  // it rots for 24h, pollutes the next brief ("a calendar item labeled
+  // 'Meeting'"), then expires. Real case: 2026-06-09 Graph ErrorInvalidIdMalformed.
+  if (typeof result.error === 'string' && result.error.length > 0) {
+    return;
+  }
+
   // Per-tool spill detection. "Spill" = work didn't complete this turn.
   let spilled = false;
   let subject = '';

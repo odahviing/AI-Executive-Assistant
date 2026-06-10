@@ -22,7 +22,8 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
-import { findAvailableSlots } from '../connectors/graph/calendar';
+import { getCalendarEvents } from '../connectors/graph/calendar';
+import { checkSlot, type RuleViolationKind } from './scheduleRules';
 import { getAnthropicClient } from '../llm/client';
 import { logLlmUsage } from './usageLog';
 import logger from './logger';
@@ -67,6 +68,13 @@ const TZ_CUE_PATTERN = new RegExp(
 interface NormalizedInstant {
   /** UTC instant ISO string with offset (or Z). */
   instant_iso: string;
+  /**
+   * v3.3.7 (#125a) — the meeting length the colleague named, when they named
+   * one ("11:00-11:15" → 15, "חצי שעה" → 30, "for 45 min" → 45). Absent when
+   * only a start time was given. The verdict snaps it to allowed_durations
+   * exactly like create_meeting would, so verdict and booking agree.
+   */
+  duration_minutes?: number;
 }
 
 /**
@@ -87,24 +95,39 @@ interface NormalizedInstant {
 async function normalizeAvailabilityInstantsWithHaiku(
   message: string,
   profile: UserProfile,
+  recentThread?: Array<{ role: 'user' | 'assistant'; content: string }>,
 ): Promise<NormalizedInstant[]> {
   const anthropic = getAnthropicClient();
   const ownerFirst = profile.user.name.split(' ')[0];
   const tz = profile.user.timezone;
-  const today = DateTime.now().setZone(tz).toFormat('yyyy-MM-dd');
-  const ownerOffset = DateTime.now().setZone(tz).toFormat('ZZ');
+  const now = DateTime.now().setZone(tz);
+  const today = now.toFormat('yyyy-MM-dd');
+  const todayWeekday = now.toFormat('EEEE');
+  const ownerOffset = now.toFormat('ZZ');
+
+  // v3.3.7 (#125b) — thread context. The DAY a time refers to often lives in
+  // an EARLIER message ("מחר יש לי סינק ב-17:00" … next message: "13:00/13:30
+  // לא פנוי?"). Without it, time-only asks fell back to TODAY and the verdict
+  // was computed for the wrong day (the false "13:30 works" told to Yael).
+  const threadBlock = (recentThread ?? [])
+    .slice(-4)
+    .map(m => `${m.role === 'assistant' ? 'YOU' : 'COLLEAGUE'}: ${m.content.slice(0, 400)}`)
+    .join('\n');
 
   const systemPrompt = `You normalize specific time slots from a colleague's availability question into UTC-anchored ISO instants.
 
 OWNER context:
 - Name: ${ownerFirst}
 - Timezone: ${tz} (current offset ${ownerOffset})
-- Today's date: ${today}
-
+- Today's date: ${today} (${todayWeekday})
+${threadBlock ? `\nRECENT THREAD (older → newer; for resolving which DAY the times refer to):\n${threadBlock}\n` : ''}
 The colleague is proposing specific meeting times. They may state each slot in their OWN timezone (e.g. "12:00 Boston") with an explicit owner-local pair in parentheses (e.g. "(your 19:00)") or without. Your job: for each distinct slot the colleague proposed, output ONE ISO instant — the canonical moment in time, with offset.
 
 RULES:
 - One entry per slot the colleague actually proposed (not one per number in the message).
+- When the colleague named a meeting LENGTH — a range ("11:00-11:15" → start 11:00, duration_minutes 15) or an explicit duration ("for 20 min", "חצי שעה" → 30) — include duration_minutes. Omit it when only a start time was given.
+- Resolve relative day words in ANY language — "tomorrow"/"מחר", weekday names ("Tuesday"/"ביום שלישי"), "next week" — against today's date above.
+- When a time carries NO day in the current message, use the day under discussion in the RECENT THREAD (e.g. the colleague said "tomorrow at 17:00" a message earlier, then asks "13:00/13:30?" — those are TOMORROW). Only when no day reference exists anywhere, assume today.
 - When the message gives both a foreign time AND an explicit owner-local "(your X:Y)" pair for the SAME slot, prefer the owner-local — it's the most reliable anchor.
 - When only a foreign TZ is given, map the named place/abbreviation to the right IANA zone and compute the instant for the named date.
 - When no TZ is given for a time, treat it as ${tz} (owner-local).
@@ -130,6 +153,7 @@ Output EXACTLY ONE call to normalize_instants.`;
                 type: 'object',
                 properties: {
                   instant_iso: { type: 'string', description: 'ISO 8601 with offset, e.g. 2026-06-09T19:00:00+03:00' },
+                  duration_minutes: { type: 'number', description: 'Meeting length in minutes, ONLY when the colleague named one (a range like 11:00-11:15, or "for 20 min"). Omit otherwise.' },
                 },
                 required: ['instant_iso'],
               },
@@ -143,13 +167,16 @@ Output EXACTLY ONE call to normalize_instants.`;
     });
     logLlmUsage('availability_tz_normalize', 'claude-haiku-4-5-20251001', resp);
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const raw = toolUse?.input as { instants?: Array<{ instant_iso?: string }> } | undefined;
+    const raw = toolUse?.input as { instants?: Array<{ instant_iso?: string; duration_minutes?: number }> } | undefined;
     const out: NormalizedInstant[] = [];
     for (const entry of raw?.instants ?? []) {
       if (typeof entry?.instant_iso !== 'string') continue;
       const dt = DateTime.fromISO(entry.instant_iso, { setZone: true });
       if (!dt.isValid) continue;
-      out.push({ instant_iso: dt.toISO()! });
+      const dur = typeof entry.duration_minutes === 'number' && entry.duration_minutes >= 5 && entry.duration_minutes <= 480
+        ? entry.duration_minutes
+        : undefined;
+      out.push({ instant_iso: dt.toISO()!, ...(dur ? { duration_minutes: dur } : {}) });
     }
     return out;
   } catch (err) {
@@ -194,6 +221,9 @@ export async function precheckAvailability(params: {
   message: string;
   profile: UserProfile;
   durationMinutes?: number;  // default 25 (from profile.meetings.allowed_durations[1])
+  // v3.3.7 (#125b) — last few thread messages so the Haiku normalizer can
+  // resolve WHICH DAY a bare time refers to ("מחר" said a message earlier).
+  recentThread?: Array<{ role: 'user' | 'assistant'; content: string }>;
 }): Promise<AvailabilityPreCheckResult> {
   const empty: AvailabilityPreCheckResult = { ran: false, verdicts: [], promptBlock: '' };
 
@@ -215,9 +245,16 @@ export async function precheckAvailability(params: {
   // pulled both the foreign and owner-local numbers and tested each as if
   // it were owner-local. Empty Haiku result → fall through to the regex
   // path (still useful for the no-TZ case).
+  // v3.3.7 (#125b) — Haiku is now the PRIMARY extraction path whenever the
+  // message carries a time at all (was TZ-cue-only). The regex path can't
+  // resolve relative day words ("מחר" in a prior message), so it resolved
+  // time-only asks to TODAY — the wrong-day "13:30 works" verdict (#125).
+  // Regex stays below as the fail-open fallback when Haiku errors/returns
+  // empty. Cost-bounded: one Haiku call, only on question-marked colleague
+  // messages that contain a time pattern.
   let pairs: Pair[] = [];
-  if (TZ_CUE_PATTERN.test(params.message)) {
-    const instants = await normalizeAvailabilityInstantsWithHaiku(params.message, params.profile);
+  if (TZ_CUE_PATTERN.test(params.message) || extractTimes(params.message).length > 0) {
+    const instants = await normalizeAvailabilityInstantsWithHaiku(params.message, params.profile, params.recentThread);
     if (instants.length > 0) {
       const seen = new Set<string>();
       for (const inst of instants) {
@@ -228,9 +265,9 @@ export async function precheckAvailability(params: {
         const key = `${date}T${time}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        pairs.push({ date, time });
+        pairs.push({ date, time, ...(inst.duration_minutes ? { durationMin: inst.duration_minutes } : {}) });
       }
-      logger.info('availabilityPreCheck — TZ-cue path, Haiku normalized instants', {
+      logger.info('availabilityPreCheck — Haiku normalized instants', {
         instant_count: instants.length, pair_count: pairs.length,
       });
     }
@@ -253,35 +290,60 @@ export async function precheckAvailability(params: {
 
   const verdicts: SlotVerdict[] = [];
 
+  // v3.3.7 (#125a) — verdicts now come from `checkSlot`, the SAME validator
+  // the booking path runs on a named time (planMeeting). The previous
+  // per-pair narrow findAvailableSlots had two faithfulness holes:
+  //   (a) autoExpand silently widened the ±1-min window to a 7-day search;
+  //   (b) the focus-time floor computed against WINDOW-scoped busy — a
+  //       ~27-min window can't see the rest of the day, so the floor never
+  //       fired and a floor-blocked slot read as BOOKABLE... which the
+  //       booking flow then refused (the "13:30 works" → walk-back class).
+  // checkSlot evaluates against the slot's full WEEK of events (one
+  // per-turn-memoized fetch per week), exactly like write-time validation —
+  // verdict and booking can no longer disagree.
+  const allowedDurations = params.profile.meetings.allowed_durations ?? [25];
+  const eventsByWeek = new Map<string, import('../connectors/graph/calendar').CalendarEvent[]>();
   for (const pair of pairs.slice(0, 6)) {  // cap at 6 to bound cost
     try {
       const startDt = DateTime.fromISO(`${pair.date}T${pair.time}`, { zone: tz });
       if (!startDt.isValid) continue;
-      const startMs = startDt.toMillis();
-      const fromIso = DateTime.fromMillis(startMs - 60_000).toUTC().toISO();
-      const toIso = DateTime.fromMillis(startMs + durationMinutes * 60_000 + 60_000).toUTC().toISO();
-      if (!fromIso || !toIso) continue;
-
-      const diagnostics: { rejectedCounts: Record<string, number> } = { rejectedCounts: {} };
-      const slots = await findAvailableSlots({
-        userEmail: params.profile.user.email,
-        timezone: tz,
-        durationMinutes,
-        attendeeEmails: [params.profile.user.email],
-        searchFrom: fromIso,
-        searchTo: toIso,
-        profile: params.profile,
-        diagnosticsOut: diagnostics,
-      });
-      const matched = slots.some(s =>
-        Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000,
+      // Duration: the asked length when the colleague named one, snapped to
+      // allowed_durations exactly like create_meeting snaps (nearest). An
+      // "11:00-11:15" ask checks 11:00+10min — the same meeting booking
+      // would create — instead of a phantom default-25 window.
+      const askedMin = pair.durationMin ?? durationMinutes;
+      const snappedMin = allowedDurations.reduce(
+        (best, d) => (Math.abs(d - askedMin) < Math.abs(best - askedMin) ? d : best),
+        allowedDurations[0],
       );
-      if (matched) {
+      const endDt = startDt.plus({ minutes: snappedMin });
+      const weekKey = startDt.startOf('week').toFormat('yyyy-MM-dd');
+      let events = eventsByWeek.get(weekKey);
+      if (!events) {
+        events = await getCalendarEvents(
+          params.profile.user.email,
+          startDt.startOf('week').toFormat("yyyy-MM-dd'T'00:00:00"),
+          startDt.endOf('week').toFormat("yyyy-MM-dd'T'23:59:59"),
+          tz,
+        );
+        eventsByWeek.set(weekKey, events);
+      }
+      const check = checkSlot({
+        profile: params.profile,
+        slotStartIso: startDt.toISO()!,
+        slotEndIso: endDt.toISO()!,
+        category: null,
+        events,
+      });
+      if (check.passes) {
         verdicts.push({ date: pair.date, time: pair.time, bookable: true });
       } else {
-        const fired = Object.keys(diagnostics.rejectedCounts ?? {});
-        const reason = fired[0] ?? 'unknown';
-        verdicts.push({ date: pair.date, time: pair.time, bookable: false, rejection_reason: reason });
+        verdicts.push({
+          date: pair.date,
+          time: pair.time,
+          bookable: false,
+          rejection_reason: (check.violation_kind as RuleViolationKind | undefined) ?? 'unknown',
+        });
       }
     } catch (err) {
       // Single-slot failure shouldn't break the rest; log and skip.
@@ -353,7 +415,7 @@ function extractDates(text: string, tz: string, monthFirst: boolean): DateMatch[
   return out;
 }
 
-interface Pair { date: string; time: string }
+interface Pair { date: string; time: string; durationMin?: number }
 
 function pairTimesWithDates(
   _text: string,
@@ -403,7 +465,15 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile): strin
     // v3.3.x — precheckAvailability runs ONLY on the colleague path
     // (orchestrator/index.ts gate). Never surface the rule name to a colleague —
     // "focus_time_office" / "lunch" etc. leaks the owner's schedule mechanics.
-    // The bookable verdict alone is all the reply needs.
+    // v3.3.7 (#125a) — but DO distinguish soft (owner-relaxable day-load
+    // protections) from hard (real meetings / work hours): a soft block is
+    // "his day is loaded" + escalatable, not a flat refusal. Kinds are
+    // checkSlot's RuleViolationKind values (verdicts run checkSlot now).
+    const SOFT: string[] = ['focus_time_floor', 'floating_block_overlap'];
+    const isSoft = !!v.rejection_reason && SOFT.includes(v.rejection_reason);
+    if (isSoft) {
+      return `  - ${when}: NOT CLEAN (soft) — his day is loaded around then, not a hard conflict. If the colleague INSISTS on this exact time, raise create_approval(kind=policy_exception) with it so he decides — don't refuse outright, don't book.`;
+    }
     return `  - ${when}: NOT BOOKABLE`;
   });
   return `## AVAILABILITY CHECK (rule-aware, deterministic)
@@ -412,5 +482,5 @@ I pre-checked the times in this colleague's question against ${profile.user.name
 
 ${lines.join('\n')}
 
-If a slot is NOT BOOKABLE, say so honestly. If it's BOOKABLE, you can confirm. The verdicts above are what \`find_available_slots\` would return — the same source of truth the actual booking flow uses, so your answer here will match what happens at booking time.`;
+If a slot is NOT BOOKABLE, say so honestly ("he's booked then" / "that doesn't work"). If it's NOT CLEAN (soft), say his day is too loaded around then — and if the colleague pushes for that exact time, escalate via create_approval(kind=policy_exception) instead of refusing. If it's BOOKABLE, you can confirm. The verdicts above are what \`find_available_slots\` would return — the same source of truth the actual booking flow uses, so your answer here will match what happens at booking time.`;
 }

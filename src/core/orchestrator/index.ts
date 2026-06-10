@@ -768,6 +768,9 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       const result = await precheckAvailability({
         message: userMessage,
         profile,
+        // v3.3.7 (#125b) — the day a bare time refers to often lives a
+        // message earlier ("מחר... 17:00" → "13:00/13:30?").
+        recentThread: conversationHistory.slice(-4),
       });
       if (result.ran && result.promptBlock) {
         availabilityPrecheckBlock = result.promptBlock;

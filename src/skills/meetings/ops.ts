@@ -164,6 +164,8 @@ import {
   auditLog,
   getSuppressedEventIds,
   dismissFloatingBlockGap,
+  searchPeopleMemory,
+  getPersonMemory,
 } from '../../db';
 import { closeMeetingArtifacts } from '../../utils/closeMeetingArtifacts';
 
@@ -789,20 +791,36 @@ export class SchedulingSkill {
           }
         }
 
-        // Colleague-path enumeration guard. When a colleague (not in MPIM
-        // with owner present) reads the owner's calendar, wrap the events
-        // with a `_colleague_view` flag + hard-rule note so Sonnet does NOT
-        // enumerate subjects/companies/locations back to the requester. The
-        // colleague-block prompt rule's "title + time = fine" is over-permissive
-        // for the "show me the day" pattern; this tool-side guard keeps the
-        // data available for Maelle's OWN reasoning (e.g. which slot to
-        // propose) while telling Sonnet to summarize, not enumerate.
+        // Colleague-path calendar scoping (v3.3.7, #125a — replaces the v2.x
+        // enumeration guard). A colleague (not in MPIM with owner present)
+        // only ever sees the meetings THEY are on. The full day used to ship
+        // to Sonnet "for her own reasoning" with a please-don't-enumerate
+        // note — and that full event list is exactly what got eyeballed into
+        // wrong availability answers ("packed until 17:00", the 13:30
+        // walk-back, GH #125). With only shared meetings visible, "when is
+        // our sync?" still works, and availability can ONLY come from
+        // find_available_slots / check_join_availability — there is nothing
+        // else to reason from. This also closes the enumeration-privacy hole
+        // outright instead of asking Sonnet nicely.
         const isColleaguePath = context.senderRole === 'colleague' && context.isOwnerInGroup !== true;
         if (isColleaguePath) {
+          let colleagueEmailLower = '';
+          try {
+            colleagueEmailLower = (getPersonMemory(context.userId)?.email ?? '').toLowerCase();
+          } catch { /* unknown colleague → no shared events, note still explains */ }
+          const sharedRaw = rawEvents.filter(ev => {
+            if (!colleagueEmailLower) return false;
+            const onAttendees = (ev.attendees ?? []).some(
+              a => (a?.emailAddress?.address ?? '').toLowerCase() === colleagueEmailLower,
+            );
+            const isOrganizer = ((ev.organizer?.emailAddress?.address ?? '').toLowerCase() === colleagueEmailLower);
+            return onAttendees || isOrganizer;
+          });
+          const sharedProcessed = processCalendarEvents(sharedRaw, userEmail, context.profile.user.name, timezone, context.profile);
           return {
-            events: processed,
+            events: sharedProcessed,
             _colleague_view: true,
-            _enumeration_rule: 'You are reading the owner\'s calendar on behalf of a colleague. Do NOT list more than one specific meeting back to them. "He has a 1:1 at 11am" is fine when proposing a slot; "he has Isaac at 10:45, Elan at 11:30, Bank Hapoalim at 12:30..." is a privacy leak. Default response when the day is busy: "He\'s fully booked Thursday." If they push for which meetings could move, escalate via create_approval(kind=freeform) asking the owner — DO NOT enumerate options to the colleague yourself.',
+            _scope_note: 'COLLEAGUE VIEW — this list contains ONLY the meetings this colleague is on (their shared meetings with the owner). The rest of the owner\'s calendar is not visible here and must never be described or enumerated. This is NOT an availability source: whether the owner is free/busy at any time comes ONLY from find_available_slots (or check_join_availability for joining an existing meeting) — never from the absence or presence of events in this list.',
           };
         }
 
@@ -1249,6 +1267,7 @@ export class SchedulingSkill {
               resolved: Array<{ date: string; away_tz: string; location: string }>;
               unresolved: Array<{ date: string; location: string }>;
             };
+            unresolvedAttendees?: string[];
           } = {};
 
           // v2.7.6 — narrow-window detection. When owner explicitly named a
@@ -1453,6 +1472,58 @@ export class SchedulingSkill {
                 date: d.date, accepted: d.accepted, top_reasons: d.top_reasons,
               })),
             });
+
+            // v3.3.7 (#124h) — internal attendee addresses Graph could NOT
+            // resolve. A nonexistent mailbox returns NO busy data → reads as
+            // fully free → slots get offered without that person's calendar
+            // ever being checked (the invented "elinor.avny@" case). External
+            // addresses are skipped: Graph never has their data, first-time
+            // externals are normal. did_you_mean comes from people_memory by
+            // the address's first name token.
+            const ownerDomainLower = userEmail.includes('@') ? userEmail.split('@')[1].toLowerCase() : '';
+            const unresolvedInternal = (diagnosticsOut.unresolvedAttendees ?? [])
+              .filter(e => ownerDomainLower && e.endsWith('@' + ownerDomainLower));
+            let attendeeEmailWarning: Record<string, unknown> | undefined;
+            if (unresolvedInternal.length > 0) {
+              const entries = unresolvedInternal.map(email => {
+                let didYouMean: string | undefined;
+                try {
+                  const token = email.split('@')[0].split(/[._-]/)[0];
+                  if (token.length >= 3) {
+                    const hit = searchPeopleMemory(token).find(p =>
+                      p.email
+                      && p.email.toLowerCase() !== email
+                      && p.email.toLowerCase().endsWith('@' + ownerDomainLower));
+                    didYouMean = hit?.email ?? undefined;
+                  }
+                } catch { /* non-fatal — warning ships without the suggestion */ }
+                return { email, ...(didYouMean ? { did_you_mean: didYouMean } : {}) };
+              });
+              attendeeEmailWarning = {
+                unresolved_attendee_emails: entries,
+                _attendee_email_warning: 'These attendee addresses do NOT exist in the company directory — their availability was NOT checked (a nonexistent mailbox reads as fully free). The address is most likely a wrong guess. Re-call find_available_slots with the corrected address (see did_you_mean) or resolve the person via find_slack_user first. Do NOT present any slot as working for that person until the address resolves.',
+              };
+              logger.warn('find_available_slots — unresolved internal attendee email(s)', {
+                unresolvedInternal,
+                entries,
+              });
+            }
+
+            // v3.3.7 (#125a) — colleague-path soft-block narration hint. When
+            // the strict pass rejected slots on the owner's SOFT, owner-
+            // relaxable protections (free-time floor / 5-min buffer / floating
+            // block), the colleague must hear "his day is too loaded around
+            // then" (true, mechanism-free) — and an insisted-on time goes to
+            // the owner as an approval, never a flat refusal. Hard busy stays
+            // "he's booked".
+            const SOFT_REJECT_PREFIXES = ['focus_time', 'owner_buffer_collision', 'floating_block_no_room'];
+            const softRejectLabels = Object.keys(diagnosticsOut.rejectedCounts ?? {})
+              .filter(l => SOFT_REJECT_PREFIXES.some(p => l.startsWith(p)));
+            const colleagueSoftBlockHint = (!isOwnerInitiatedSearch && softRejectLabels.length > 0)
+              ? {
+                  _colleague_soft_block_hint: `Some times in this window were excluded by ${context.profile.user.name.split(' ')[0]}'s day-load protections — NOT by real meetings. To the colleague, phrase those as "his day is pretty loaded around then" (never reveal the mechanism, never enumerate his calendar). If the requester INSISTS on one of those specific times, do NOT flatly refuse and do NOT book it: raise it via create_approval(kind=policy_exception) with the requested slot so he decides.`,
+                }
+              : undefined;
             // v2.4.2 — narrow to 3 spread options before returning to Sonnet.
             // Owner spec: "spread 3 options as I want" — one per day where
             // possible, then ≥2h apart same-day, then ≥30min last-resort.
@@ -1487,6 +1558,17 @@ export class SchedulingSkill {
                   slots: [],
                   working_elsewhere: weInfo,
                   _working_elsewhere_note: 'The window is entirely Working-Elsewhere day(s). For any day in `working_elsewhere.unresolved`, ASK the owner what timezone he is in that day — do NOT say he is unavailable. For `resolved` days with no slots, his day there is genuinely full. NEVER present his home-timezone availability for a working-elsewhere day.',
+                  ...(attendeeEmailWarning ?? {}),
+                  ...(colleagueSoftBlockHint ?? {}),
+                };
+              }
+              if (attendeeEmailWarning || colleagueSoftBlockHint) {
+                return {
+                  slots: rawSlots,
+                  ...(diagnosticsOut.daySummary && diagnosticsOut.daySummary.length > 0
+                    ? { day_summary: diagnosticsOut.daySummary } : {}),
+                  ...(attendeeEmailWarning ?? {}),
+                  ...(colleagueSoftBlockHint ?? {}),
                 };
               }
               return rawSlots;
@@ -1561,11 +1643,18 @@ export class SchedulingSkill {
                     working_elsewhere: weInfo,
                     _working_elsewhere_note: 'The window is entirely Working-Elsewhere day(s). For any day in `working_elsewhere.unresolved`, ASK the owner what timezone he is in that day — do NOT say he is unavailable. For `resolved` days with no slots, his day there is genuinely full. NEVER present his home-timezone availability for a working-elsewhere day.',
                     ...(strictDaySummary && strictDaySummary.length > 0 ? { day_summary: strictDaySummary } : {}),
+                    ...(attendeeEmailWarning ?? {}),
+                    ...(colleagueSoftBlockHint ?? {}),
                   };
                 }
                 // Recovery also empty — return original empty result with day_summary.
-                if (strictDaySummary && strictDaySummary.length > 0) {
-                  return { slots: [], day_summary: strictDaySummary };
+                if ((strictDaySummary && strictDaySummary.length > 0) || attendeeEmailWarning || colleagueSoftBlockHint) {
+                  return {
+                    slots: [],
+                    ...(strictDaySummary && strictDaySummary.length > 0 ? { day_summary: strictDaySummary } : {}),
+                    ...(attendeeEmailWarning ?? {}),
+                    ...(colleagueSoftBlockHint ?? {}),
+                  };
                 }
                 return [];
               }
@@ -1764,10 +1853,12 @@ export class SchedulingSkill {
             // must ASK, never offer home-TZ times.
             const weInfo = diagnosticsOut.workingElsewhere;
             const hasWe = !!weInfo && (weInfo.resolved.length > 0 || weInfo.unresolved.length > 0);
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || hasWe) {
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || hasWe || attendeeEmailWarning || colleagueSoftBlockHint) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               if (travelers.length > 0) result.travelers = travelers;
               if (hasDaySummary) result.day_summary = daySummary;
+              if (attendeeEmailWarning) Object.assign(result, attendeeEmailWarning);
+              if (colleagueSoftBlockHint) Object.assign(result, colleagueSoftBlockHint);
               if (isRecoveryResult) {
                 // Flag so Sonnet knows these slots break soft rules — she
                 // should narrate the trade-off, not present as clean options.

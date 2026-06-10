@@ -1,7 +1,8 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
-import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, resolvePerson, type PersonProfile, type PersonInteraction, type PersonNote } from '../db';
+import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, resolvePerson, getRecentChannelMessages, type PersonProfile, type PersonInteraction, type PersonNote } from '../db';
+import { getConnection } from '../connections/registry';
 import {
   readPersonMemory,
   writePersonSection,
@@ -520,10 +521,66 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
         const name = (args as any).name as string;
         const events = getEventsByActor(userId, name);
 
-        if (events.length === 0) {
+        // v3.3.7 (#125c) — verbatim grounding. The event log holds capture-pass
+        // SUMMARIES; answering "what did you tell Yael?" from a summary is how
+        // Maelle confidently misdescribed a real exchange (read as lying).
+        // Attach the actual last messages exchanged in that person's DM so the
+        // answer is grounded in what was said.
+        //
+        // Scope gate: the OWNER may read any person's exchange (same exposure
+        // as the shadow mirrors already in his DM). A non-owner caller only
+        // ever gets their OWN conversation — the tool is owner-only today
+        // (COLLEAGUE_ALLOWED_TOOLS), this is the defensive layer if that
+        // ever changes.
+        const recentExchange = await (async () => {
+          try {
+            const hits = searchPeopleMemory(name)
+              .filter(p => p.slack_id && /^[UW][A-Z0-9]{6,}$/.test(p.slack_id));
+            const person = hits[0];
+            if (!person?.slack_id) return undefined;
+            if (context.senderRole !== 'owner' && person.slack_id !== context.userId) {
+              return undefined;  // never leak someone else's exchange to a colleague
+            }
+            const conn = getConnection(context.profile.user.slack_user_id, 'slack');
+            if (!conn?.resolveDirectChannelId) return undefined;
+            const channelId = await conn.resolveDirectChannelId(person.slack_id);
+            if (!channelId) return undefined;
+            const msgs = getRecentChannelMessages(channelId, 10);
+            if (msgs.length === 0) return undefined;
+            const tz = context.profile.user.timezone;
+            const assistantName = context.profile.assistant?.name ?? 'Assistant';
+            return msgs.map(m => {
+              const tsNum = m.ts ? Number(m.ts) : NaN;
+              const at = Number.isFinite(tsNum)
+                ? DateTime.fromSeconds(tsNum).setZone(tz).toFormat('yyyy-MM-dd HH:mm')
+                : undefined;
+              return {
+                ...(at ? { at } : {}),
+                from: m.role === 'assistant' ? assistantName : person.name,
+                text: m.content,
+              };
+            });
+          } catch (err) {
+            logger.warn('recall_interactions — verbatim exchange lookup failed (summaries only)', {
+              err: String(err).slice(0, 200),
+            });
+            return undefined;
+          }
+        })();
+
+        if (events.length === 0 && !recentExchange) {
           return {
             found: false,
             message: `No recorded interactions with ${name} in the event log.`,
+          };
+        }
+        if (events.length === 0 && recentExchange) {
+          return {
+            found: true,
+            count: 0,
+            interactions: [],
+            recent_exchange: recentExchange,
+            _note: 'recent_exchange is the VERBATIM last messages in their DM — when describing what was said, quote/paraphrase from it, never reconstruct from memory.',
           };
         }
 
@@ -554,6 +611,10 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
               detail: e.detail,
             };
           }),
+          ...(recentExchange ? {
+            recent_exchange: recentExchange,
+            _note: 'recent_exchange is the VERBATIM last messages in their DM — when describing what was said, quote/paraphrase from it, never reconstruct from memory. The interactions list above is summarized.',
+          } : {}),
         };
       }
 

@@ -406,6 +406,12 @@ export async function getFreeBusy(
   endDate: string,
   timezone: string,
   forceRefresh: boolean = false,
+  // v3.3.7 (#124h) — optional by-reference diagnostics. `unresolved` is filled
+  // with addresses Graph could NOT resolve to a mailbox (per-schedule `error`
+  // entry, or address missing from the response). Pre-fix this was silently
+  // dropped, so a guessed/typo'd internal address read as FULLY FREE — the
+  // "elinor.avny@" slots were offered without ever checking the real Elinor.
+  diagnostics?: { unresolved?: string[] },
 ): Promise<Record<string, FreeBusySlot[]>> {
   // v2.7.6 — guard against invalid time windows that crash Graph's
   // getSchedule with ErrorInvalidTimeInterval. Graph requires
@@ -445,7 +451,12 @@ export async function getFreeBusy(
   const fbCache = require('./calendarCache') as typeof import('./calendarCache');
   if (!forceRefresh) {
     const hit = fbCache.getCachedFreeBusy<Record<string, FreeBusySlot[]>>(fbKey);
-    if (hit) return hit;
+    if (hit) {
+      if (diagnostics) {
+        diagnostics.unresolved = fbCache.getCachedFreeBusy<string[]>(`${fbKey}|unresolved`) ?? [];
+      }
+      return hit;
+    }
   }
 
   const client = getClient();
@@ -458,12 +469,29 @@ export async function getFreeBusy(
     });
 
     const result: Record<string, FreeBusySlot[]> = {};
+    const unresolved: string[] = [];
     for (const schedule of response.value || []) {
+      // v3.3.7 (#124h) — Graph marks a non-existent / unresolvable address
+      // with a per-schedule `error` object instead of scheduleItems. Surface
+      // it; an empty array here is indistinguishable from "free all week".
+      if (schedule.error) {
+        unresolved.push(String(schedule.scheduleId ?? '').toLowerCase());
+        result[schedule.scheduleId] = [];
+        continue;
+      }
       result[schedule.scheduleId] = (schedule.scheduleItems || []).map((item: any) =>
         parseGraphFreeBusySlot(item, timezone),
       );
     }
+    // Belt-and-suspenders: an address Graph dropped from the response entirely.
+    for (const e of emails) {
+      const lower = e.toLowerCase();
+      const present = Object.keys(result).some(k => k.toLowerCase() === lower);
+      if (!present && !unresolved.includes(lower)) unresolved.push(lower);
+    }
+    if (diagnostics) diagnostics.unresolved = unresolved;
     fbCache.setCachedFreeBusy(fbKey, result);
+    fbCache.setCachedFreeBusy(`${fbKey}|unresolved`, unresolved);
     return result;
   } catch (err: any) {
     logger.error('Failed to fetch free/busy', { err, emails });
@@ -647,6 +675,10 @@ export async function findAvailableSlots(params: {
       resolved: Array<{ date: string; away_tz: string; location: string }>;
       unresolved: Array<{ date: string; location: string }>;
     };
+    // v3.3.7 (#124h) — attendee addresses Graph could not resolve to a mailbox
+    // (their "busy" was empty by nonexistence, not by freedom). Owner email
+    // excluded. Caller decides how to warn (ops.ts flags owner-domain ones).
+    unresolvedAttendees?: string[];
   };
 }): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
@@ -690,7 +722,12 @@ export async function findAvailableSlots(params: {
     const windowFrom = params.searchFrom;
     const windowTo = currentTo.toISO()!;
 
-    const busyMap = await getFreeBusy(params.userEmail, busyFilterEmails, windowFrom, windowTo, params.timezone);
+    const fbDiag: { unresolved?: string[] } = {};
+    const busyMap = await getFreeBusy(params.userEmail, busyFilterEmails, windowFrom, windowTo, params.timezone, false, fbDiag);
+    if (params.diagnosticsOut) {
+      const ownerLower = params.userEmail.toLowerCase();
+      params.diagnosticsOut.unresolvedAttendees = (fbDiag.unresolved ?? []).filter(e => e !== ownerLower);
+    }
 
     // FreeBusySlot.start/end now carry an explicit IANA offset (set by
     // parseGraphFreeBusySlot inside getFreeBusy). Luxon honors that offset
@@ -892,26 +929,67 @@ export async function findAvailableSlots(params: {
           }
         }
       }
-      if (blockRanges.length > 0) {
-        // In-place filter: drop any busy whose range matches a block range
-        // within 1-minute tolerance (Graph / Luxon rounding slack).
-        const TOLERANCE_MS = 60 * 1000;
-        for (let i = allBusy.length - 1; i >= 0; i--) {
-          const b = allBusy[i];
-          const bs = b.start.getTime();
-          const be = b.end.getTime();
-          if (blockRanges.some(r =>
-            Math.abs(r.start - bs) <= TOLERANCE_MS && Math.abs(r.end - be) <= TOLERANCE_MS,
-          )) {
-            allBusy.splice(i, 1);
-          }
+    }
+
+    // v3.3.7 (#124) — shared busy-carve. ONE mechanism for both subtraction
+    // sites (floating blocks + moving events). The previous exact-match
+    // splice (±1min on interval bounds) silently failed whenever Graph's
+    // MERGED free/busy fused the event with an adjacent meeting — on a
+    // packed day the event's bounds never match the merged interval, so
+    // lunch stopped being elastic and a moving meeting kept blocking the
+    // very slot it was vacating ("Michal is still there").
+    //
+    // carveRangeFromBusy trims/splits every overlapping busy interval, then
+    // re-adds the owner's OTHER events that overlap the carved range (from
+    // readdPool) — so a real meeting fused into the same merged interval is
+    // never falsely freed. Duplicate/overlapping re-adds are fine: the slot
+    // walker only checks overlap (idempotent, see all-day note above).
+    // Attendee busy (email !== owner) is carved only for moving events
+    // (includeAttendees=true): the moving meeting sits in their calendar
+    // too, but we can't see their events to re-add — an attendee
+    // double-booked inside that exact window is the accepted edge.
+    const excludeIdSet = new Set(params.excludeEventIds ?? []);
+    const readdPool: Array<{ start: number; end: number }> = [];
+    for (const evt of ownerEventsForFb) {
+      if (evt.isCancelled || evt.showAs === 'free' || evt.showAs === 'workingElsewhere') continue;
+      if (excludeIdSet.has(evt.id)) continue;
+      const isBlock = floatingBlocks.some(block => fb.isFloatingBlockEvent(
+        { subject: evt.subject, categories: evt.categories },
+        block,
+      ));
+      if (isBlock) continue;  // blocks are elastic — never re-add one
+      const s = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' }).setZone(params.timezone);
+      const e = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' }).setZone(params.timezone);
+      // All-day busy blocks its whole local day (mirrors the v2.2.3 push above).
+      readdPool.push(evt.isAllDay
+        ? { start: s.startOf('day').toMillis(), end: e.endOf('day').toMillis() }
+        : { start: s.toMillis(), end: e.toMillis() });
+    }
+    const carveRangeFromBusy = (rangeStart: number, rangeEnd: number, includeAttendees: boolean): void => {
+      if (rangeEnd <= rangeStart) return;
+      for (let i = allBusy.length - 1; i >= 0; i--) {
+        const b = allBusy[i];
+        if (!includeAttendees && b.email !== ownerEmailLower) continue;
+        const bs = b.start.getTime();
+        const be = b.end.getTime();
+        if (bs >= rangeEnd || be <= rangeStart) continue;  // no overlap
+        allBusy.splice(i, 1);
+        if (bs < rangeStart) allBusy.push({ start: b.start, end: new Date(rangeStart), email: b.email });
+        if (be > rangeEnd) allBusy.push({ start: new Date(rangeEnd), end: b.end, email: b.email });
+      }
+      for (const r of readdPool) {
+        if (r.start < rangeEnd && r.end > rangeStart) {
+          allBusy.push({ start: new Date(r.start), end: new Date(r.end), email: ownerEmailLower });
         }
       }
+    };
+    for (const r of blockRanges) {
+      carveRangeFromBusy(r.start, r.end, false);
     }
 
     // v2.4.1 — moving-event subtraction + forbidden-zone build. When the
     // caller passes excludeEventIds (the meeting(s) being moved), each one
-    // is removed from the busy pool (so candidate slots aren't blocked by a
+    // is carved out of the busy pool (so candidate slots aren't blocked by a
     // meeting that's leaving its current time anyway) AND added to a
     // forbidden-zones list (so the slot walker won't offer the original time
     // as a "move target"). Closes the "move 11:00 to 10:30" / "options to
@@ -920,25 +998,17 @@ export async function findAvailableSlots(params: {
     // back as a valid alternative.
     const movingEventForbiddenZones: Array<{ start: number; end: number }> = [];
     if (params.excludeEventIds && params.excludeEventIds.length > 0 && ownerEventsForFb.length > 0) {
-      const TOLERANCE_MS = 60 * 1000;
-      const idSet = new Set(params.excludeEventIds);
       for (const evt of ownerEventsForFb) {
-        if (!idSet.has(evt.id)) continue;
+        if (!excludeIdSet.has(evt.id)) continue;
         if (evt.isCancelled || evt.showAs === 'free') continue;
         const eStart = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' })
           .setZone(params.timezone).toMillis();
         const eEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
           .setZone(params.timezone).toMillis();
         movingEventForbiddenZones.push({ start: eStart, end: eEnd });
-        // Subtract from allBusy (mirror the floating-block in-place filter).
-        for (let i = allBusy.length - 1; i >= 0; i--) {
-          const b = allBusy[i];
-          const bs = b.start.getTime();
-          const be = b.end.getTime();
-          if (Math.abs(eStart - bs) <= TOLERANCE_MS && Math.abs(eEnd - be) <= TOLERANCE_MS) {
-            allBusy.splice(i, 1);
-          }
-        }
+        // Carve from busy — shared helper, attendee intervals included (the
+        // moving meeting exists in their calendars too).
+        carveRangeFromBusy(eStart, eEnd, true);
       }
     }
 
