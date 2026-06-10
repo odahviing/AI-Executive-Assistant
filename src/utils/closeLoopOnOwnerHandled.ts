@@ -44,6 +44,37 @@ Output strict JSON, no markdown:
 
 If nothing closes: { "closed_items": [] }`;
 
+// Generic words common to many request subjects — not distinctive enough to
+// anchor a closure on their own.
+const SUBJECT_STOPWORDS = new Set([
+  'meeting', 'meet', 'call', 'coordinating', 'coordinate', 'coordination', 'sync',
+  'with', 'about', 'quick', 'demo', 'intro', 'chat', 'session', 'follow', 'followup',
+  'reschedule', 'booking', 'request', 'event', 'time', 'catch', 'the', 'and', 'for',
+]);
+
+/**
+ * Deterministic backstop for the LLM scanner (the Eli false-close fix). The
+ * model sometimes matches a GENERIC closure ("just cancel the event") to a
+ * NAMED request it doesn't actually reference — e.g. the owner's "cancel the
+ * event" meant a different meeting, but the scanner closed the Eli coord. The
+ * prompt already forbids this, but the model ignored it under load, so we
+ * enforce it in code: only let a closure through when the owner's message
+ * actually names the request's counterpart OR carries a distinctive token from
+ * its subject. Fails SAFE — a blocked-but-legit closure just leaves the row for
+ * tomorrow's brief to resurface (the scanner's own preferred failure mode).
+ */
+function messageReferencesRequest(message: string, row: RequestRow): boolean {
+  const msg = ` ${message.toLowerCase()} `;
+  const det = parseDetails<Record<string, unknown>>(row) ?? {};
+  const counterpart = String(row.target_name || row.requester_name || (det.requester_name as string | undefined) || '');
+  const first = counterpart.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
+  if (first.length >= 3 && msg.includes(first)) return true;
+  const subject = String(row.subject ?? '').toLowerCase();
+  const tokens = subject.split(/[^a-z0-9]+/i).filter(t => t.length >= 4 && !SUBJECT_STOPWORDS.has(t));
+  if (tokens.some(t => msg.includes(t))) return true;
+  return false;
+}
+
 export async function closeLoopOnOwnerHandled(params: {
   profile: UserProfile;
   ownerMessage: string;
@@ -106,6 +137,17 @@ export async function closeLoopOnOwnerHandled(params: {
     const row = idToRow.get(id);
     if (!row) {
       logger.warn('closeLoopOnOwnerHandled: LLM returned unknown id — skipping', { id });
+      continue;
+    }
+    // Deterministic referent backstop (Eli false-close fix). Refuse to close a
+    // request the owner's message doesn't actually reference by counterpart or
+    // a distinctive subject token. Safe direction: leave it open for the brief.
+    if (!messageReferencesRequest(params.ownerMessage, row)) {
+      logger.info('closeLoopOnOwnerHandled: LLM matched a request the message does not reference by name/topic — refusing close (safe)', {
+        id, kind: row.kind, subject: row.subject,
+        counterpart: row.target_name ?? row.requester_name ?? null,
+        reason: reason.slice(0, 80),
+      });
       continue;
     }
     try {

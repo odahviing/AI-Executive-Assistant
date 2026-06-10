@@ -142,12 +142,21 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
 
       // Find the block event on this day (if any). If the block doesn't
       // currently exist on the calendar, no rebalance needed.
-      const blockEvent = realEvents.find(e =>
-        fb.isFloatingBlockEvent(
-          { subject: e.subject, categories: e.categories },
-          block,
-        ),
-      );
+      //
+      // DATE GUARD: the day-fetch window (startOf('day')→endOf('day') in tz,
+      // converted to UTC) spills across the UTC midnight boundary, so the
+      // fetched set can include the ADJACENT day's block. A plain find() then
+      // grabbed the wrong day's lunch and compared it against THIS day's window
+      // → misread as "out-of-window" → the sweep silently downgraded to
+      // propose-only (moved:0). Match only the event whose start falls on the
+      // day we're actually processing (dateStr).
+      const blockEvent = realEvents.find(e => {
+        if (!fb.isFloatingBlockEvent({ subject: e.subject, categories: e.categories }, block)) return false;
+        const evDay = DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' })
+          .setZone(tz)
+          .toFormat('yyyy-MM-dd');
+        return evDay === dateStr;
+      });
       if (!blockEvent) {
         logger.info('rebalanceFloatingBlocks: block skipped — no existing event on calendar', {
           block: block.name, date: dateStr,

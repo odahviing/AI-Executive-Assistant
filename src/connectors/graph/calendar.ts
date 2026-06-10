@@ -1070,6 +1070,35 @@ export async function findAvailableSlots(params: {
       ? [...officeDayNames, ...homeDayNames]
       : workDays;
 
+    // Per-day requested-time clamp (organizer / no-attendee case). The walker
+    // honors search_from's time only as the cursor START — so a multi-day
+    // "16:00-19:00" search returned LATER days at their morning. When NO
+    // attendee is driving the work-hours clip (e.g. an organizer collecting
+    // options with the requester dropped — the Yael case), the requested time
+    // window is the only signal, so clamp EVERY day to its time-of-day band.
+    // SKIPPED when attendees are present: their own work-hours already clip,
+    // and a loose search-time band would over-constrain them (Alex's slots come
+    // from his ET hours, not the literal Israel search times — clamping would
+    // wrongly drop them). Full-day / inverted bands are no-ops.
+    let bandFromMin = -1;
+    let bandToMin = -1;
+    {
+      const hasAttendeeClip = !!(params.attendeeAvailability && params.attendeeAvailability.length > 0);
+      if (!hasAttendeeClip) {
+        const bf = DateTime.fromISO(params.searchFrom, { zone: params.timezone });
+        const bt = DateTime.fromISO(params.searchTo, { zone: params.timezone });
+        if (bf.isValid && bt.isValid) {
+          const fm = bf.hour * 60 + bf.minute;
+          const tm = bt.hour * 60 + bt.minute;
+          // Only a real sub-day band (not full-day 00:00..~23:59, not wrapping).
+          if (tm > fm && !(fm === 0 && tm >= 23 * 60 + 59)) {
+            bandFromMin = fm;
+            bandToMin = tm;
+          }
+        }
+      }
+    }
+
     let cursor = DateTime.fromISO(params.searchFrom, { zone: params.timezone }).toJSDate();
     while (cursor.getTime() + durationMs <= searchEnd.getTime()) {
       const cursorDt = DateTime.fromJSDate(cursor).setZone(params.timezone);
@@ -1105,6 +1134,14 @@ export async function findAvailableSlots(params: {
       const inAnyWindow = dayHours.some(w => slotTotalMin >= w.startMin && slotEndMin <= w.endMin);
       if (!inAnyWindow) {
         trackReject('outside_owner_work_hours', cursorDt.toISO()!);
+        cursor = new Date(cursor.getTime() + step);
+        continue;
+      }
+      // Per-day requested-time clamp (see bandFromMin setup above). Only set in
+      // the organizer/no-attendee case; honors the requested window on EVERY
+      // day, not just the cursor's first day.
+      if (bandFromMin >= 0 && (slotTotalMin < bandFromMin || slotEndMin > bandToMin)) {
+        trackReject('outside_requested_window', cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
         continue;
       }

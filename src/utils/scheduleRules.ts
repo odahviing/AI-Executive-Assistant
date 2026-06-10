@@ -37,6 +37,7 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import type { CalendarEvent } from '../connectors/graph/calendar';
 import { checkCategorySlot, getProfileCategoryByName } from './categoryRules';
+import { getFloatingBlocks, isFloatingBlockEvent } from './floatingBlocks';
 
 export type RuleViolationKind =
   | 'vacation_or_off_day'
@@ -335,10 +336,20 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // Regular create_meeting still flags overlaps first time (allowRelaxed=false)
   // so Maelle doesn't silently double-book a meeting with attendees.
   if (!input.allowRelaxed && !input.isFloatingBlock) {
+    // A movable floating block (lunch / focus / gym) is NOT a hard collision.
+    // Rule 6 above already validated it can still fit elsewhere in its window,
+    // and after the booking commits `rebalanceFloatingBlocksAfterMutation`
+    // slides it automatically. Counting it as owner_busy here is what forced a
+    // spurious confirm_override ("want me to move lunch?") on every named-time
+    // booking that landed on the lunch slot — even though the block just shifts.
+    // Skip floating-block events: rule 6 owns the genuine "no room to shift"
+    // case (floating_block_overlap fires earlier), so no protection is lost.
+    const floatingBlockDefs = getFloatingBlocks(profile);
     for (const ev of input.events) {
       if (ev.isCancelled) continue;
       if (excludeSet.has(ev.id)) continue;
       if ((ev as any).showAs === 'free') continue;  // free/tentative blocks don't collide
+      if (floatingBlockDefs.some(b => isFloatingBlockEvent(ev, b))) continue;
       const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
       const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
       if (evStart < slotEnd && evEnd > slotStart) {

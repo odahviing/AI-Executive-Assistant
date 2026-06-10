@@ -1,6 +1,19 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.3.4** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.3.6** — check `package.json` if unsure; it is the source of truth.
+
+## 🔁 v3.3.6 — real-day bug wave, and the theme is: WE KEEP HITTING THE SAME BUGS
+
+Next chat is **another reactive bug wave** (same standing mode: trace `logs/maelle-YYYY-MM-DD.log`, propose-first, **code-first**, wait for a per-bug "fix it"). The owner's framing this session: *we keep repeating the same bugs.* The recurring clusters to expect — and to fix at the **root**, not patch again:
+- **Cross-timezone scheduling.** Inverted ET↔Israel labels, an ET time searched as Israel time, an organizer's own hours clipping the search. v3.3.6 added the deterministic tools (`present_in_timezone` output, `search_window_timezone` input, per-day time clamp, `requester_is_attending`) — but they depend on Sonnet **setting the flags**; the Yael-determinism prompt block is queued for the prompt chat. Watch for cross-TZ asks still going wrong = flags not set.
+- **Lunch / floating blocks.** "Ask instead of move" (fixed: rule-8 skips movable blocks) and the active sweep silently doing nothing (fixed: `rebalanceFloatingBlocks` ±24h date-guard). Watch for lunch not auto-sliding.
+- **On-restart catch-up / recovery.** v3.3.6 routed catch-up **through the live path** (`inboundReplayRegistry`) and fixed the `file_share` filter so voice/video/image are recovered. Watch the restart logs: a missed message of any type should now be detected → replayed → answered.
+- **Guard leaks (STILL OPEN).** Colleague-facing Hebrew leaks ("הכלי", "slots", "visibility", bot-framing) — securityGate is English-only regex + humanGate is on Haiku. The fix is the **parallel guards chat's** job; handoff at `.claude/GUARDS_LEAK_HANDOFF.md`. **It is NOT in the repo yet** — confirm the guards chat landed it before assuming it's fixed.
+
+What v3.3.6 shipped (see CHANGELOG): cross-TZ tool set; **morning brief now folds in a today-scoped active calendar-health pass** and the **07:00 standalone health routine is retired** (it's `13:00`-only — full this-week+next-week sweep); lunch rule-8 + rebalance date-guard; catch-up via live path; Eli false-close referent backstop. (Earlier this arc, folded into **3.3.5** by the guards chat: claimChecker `other`-tool shield, dateVerifier bare-weekday-pass deletion, reminder/follow_up/research spine consolidation, Bug8 image-to-text, booking thread-match.)
+
+**Owner must RESTART `npm run dev`** to load v3.3.6 (briefs/app/background changed). **Parallel chats on the same repo:** guards chat (#4/#5 leak) + a prompt chat (Yael TZ-flag reinforcement, persona/phrasing fixes). At wrap: `git fetch` + check origin/master + the working tree for their commits/uncommitted edits before committing — heavy cross-chat overlap this arc (3.3.5 bundled multiple chats' work).
+
 
 ## 📰 NEWS — delivered (v3.3.4); now we want to TRACK it in real use
 

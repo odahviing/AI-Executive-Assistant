@@ -2,6 +2,35 @@
 
 ---
 
+## 3.3.6 — real-day bug-bash: cross-timezone scheduling repaired, brief+today-health merged, catch-up routed through the live path
+
+A reactive wave against the bugs that kept recurring. The biggest is **cross-timezone coordination**, which regressed in v3.2.4's de-tenant work: a colleague asking for slots "in ET" got inverted labels ("09:00 ET = 02:00 Israel"), a requested time given in ET got searched as if it were Israel ("9:45 ET" → searched 09:45 Israel → "outside hours"), and an organizer's own calendar wrongly constrained the search. Also: the morning brief now carries a today-scoped active health check (the merge that was discussed but never built), the lunch "ask instead of move" bug, a floating-block sweep that silently did nothing, and on-restart catch-up that dropped every voice/video/image message. Patch; no schema change.
+
+### Fixed (cross-timezone scheduling — the headline)
+- **`present_in_timezone` (output).** `find_available_slots` can now render every slot in a requested zone deterministically (e.g. "Tue 16 Jun 09:00 EDT") — even when no attendee is stored there (an organizer collecting options for US colleagues). Sonnet quotes the pre-rendered string and never does the conversion in its head, which is what produced the inverted labels. ([ops.ts](src/skills/meetings/ops.ts), [meetings.ts](src/skills/meetings.ts))
+- **`search_window_timezone` (input).** A meeting time stated in a non-owner zone ("9:45 AM ET") is now tagged and converted to owner-time *by the tool* before searching — fixes the "searched 09:45 Israel for a 9:45-ET ask → before the 10:30 start → mis-narrated as 'Wednesday ends before that'" failure. ([ops.ts](src/skills/meetings/ops.ts))
+- **Per-day time clamp.** A timed window (e.g. 16:00–19:00) was honored only on the cursor's first day, so later days came back at their morning. Now clamped on every day — but only in the organizer/no-attendee case, so an attendee whose own work-hours already drive the clip (the common, working path) is untouched. ([calendar.ts](src/connectors/graph/calendar.ts))
+- **`requester_is_attending`.** A colleague organizing a meeting they're not in no longer has their own calendar/work-hours filter the search or get narrated back ("you're busy in all options"). Default true — a requester who *is* attending is unaffected. ([ops.ts](src/skills/meetings/ops.ts), [meetings.ts](src/skills/meetings.ts))
+
+### Added / Changed (morning brief + today health)
+- **Brief folds in a today-scoped active calendar-health pass.** `sendMorningBriefing` runs `check_calendar_health(mode=active, today→today)` (best-effort, timed, fail-open) and folds the result into the one morning message. The **07:00 standalone health slot is retired** (the routine is `13:00`-only now, which still runs the full this-week+next-week sweep). One morning message instead of two. ([briefs.ts](src/tasks/briefs.ts))
+
+### Fixed (lunch / floating blocks)
+- **`checkSlot` rule 8 (owner_busy_collision) now skips movable floating blocks.** A named-time booking landing on the lunch slot no longer escalates to a "want me to move lunch?" confirm — rule 6 already cleared the block as movable and the post-mutation rebalance slides it. ([scheduleRules.ts](src/utils/scheduleRules.ts))
+- **`rebalanceFloatingBlocks` date guard.** A UTC-midnight boundary made the per-day block lookup grab the *adjacent* day's lunch (~±24h skew), so the active sweep classified lunch "out-of-window" and silently did nothing (`moved:0`). Now matches only the event on the day being processed. ([rebalanceFloatingBlocks.ts](src/utils/rebalanceFloatingBlocks.ts))
+
+### Changed (catch-up routed through the live path)
+- **On-restart catch-up no longer reimplements the inbound path.** New `inboundReplayRegistry` lets `core/background.ts` hand each detected missed message to the *same* `processMessage` the live Slack listener uses (register-and-call; live listeners untouched). The scan filter now allows `file_share`, so **voice/video/image messages are recovered** (they were silently dropped — the filter excluded any subtype). Deleted the bespoke replay path + the now-dead `chunkForSectionBlocks`. ([inboundReplayRegistry.ts](src/connectors/slack/inboundReplayRegistry.ts), [app.ts](src/connectors/slack/app.ts), [background.ts](src/core/background.ts))
+
+### Fixed (request bookkeeping)
+- **`closeLoopOnOwnerHandled` referent backstop.** A generic "just cancel the event" can no longer false-close a *named* coordination it doesn't reference (the Eli coord got marked cancelled when the owner meant a different meeting). Code-side: a closure requires the owner's message to name the request's counterpart or a distinctive subject token; fails safe (leaves the row for the next brief). ([closeLoopOnOwnerHandled.ts](src/utils/closeLoopOnOwnerHandled.ts))
+
+### Not changed / still open
+- **#4/#5 Hebrew colleague-leak** ("הכלי" / "slots" / "visibility" / bot-framing) — securityGate is still English-only regex and humanGate still runs on Haiku; the fix is owned by the parallel guards chat and is **not in this repo yet**. Evidence + candidate solutions in `.claude/GUARDS_LEAK_HANDOFF.md`.
+- **Yael-determinism prompt block** — the cross-TZ code is correct but relies on Sonnet setting the three new flags; a reinforcing prompt block is queued for the prompt chat.
+
+---
+
 ## 3.3.5 — guard rebuild: detection kept, destructive actions retired (+ WhatsApp transport scaffolding, booking thread-match)
 
 Reworked the output-time "guard" stack so no guard can corrupt a correct reply. The principle: every guard still **detects**, but the places one took a **destructive** action — re-running the orchestrator, re-firing a tool, persisting a wrong date, or writing a durable record off an LLM hunch — are replaced with non-destructive or deterministic ones. Each guard's failure direction is now a safe miss or a deterministic fix. Bundles a parallel chat's WhatsApp transport scaffolding (inert until configured) and a booking→request thread-match fix. Patch; no new live capability.

@@ -1,8 +1,6 @@
 import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
-import { runOrchestrator } from './orchestrator';
-import { getConversationHistory, appendToConversation } from '../db';
 import { runDueTasks } from '../tasks/runner';
 import { materializeRoutineTasks, backfillNullNextRunAt } from '../tasks/routineMaterializer';
 import { ensureBriefingCron, updateBriefingCronChannel } from '../tasks/crons';
@@ -368,7 +366,11 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
   }
 
   // DM-only catch-up — no mention gating; any top-level user message counts.
-  const latestUserMsg = latestByTs(messages, m => !!m.user && !m.bot_id && !m.subtype);
+  // Allow `file_share` (voice / video / image) — excluding it (the old
+  // `!m.subtype`) silently dropped every media message from recovery (the
+  // owner's video that never got answered). Still excludes true system
+  // subtypes (channel_join, bot_message, etc.).
+  const latestUserMsg = latestByTs(messages, m => !!m.user && !m.bot_id && (!m.subtype || m.subtype === 'file_share'));
   if (!latestUserMsg?.ts) return;
 
   const userTs = parseFloat(latestUserMsg.ts as string);
@@ -423,7 +425,7 @@ async function processAssistantThreadIfMissed(opts: CheckOpts, threadTs: string)
 
   const latestUserMsg = latestByTs(
     messages,
-    m => !!m.user && !m.bot_id && !m.subtype && m.user !== botUserId,
+    m => !!m.user && !m.bot_id && (!m.subtype || m.subtype === 'file_share') && m.user !== botUserId,
   );
   if (!latestUserMsg?.ts) return;
 
@@ -463,7 +465,7 @@ async function replayMissedMessage(
   latestUserMsg: Record<string, unknown>,
   post: { postThreadTs: string; source: 'dm' | 'assistant_panel' },
 ): Promise<void> {
-  const { app, profile, channelId, ownerId } = opts;
+  const { profile, channelId } = opts;
   const msgTs = latestUserMsg.ts as string;
   const userTs = parseFloat(msgTs);
   const hoursAgo = Math.round((Date.now() / 1000 - userTs) / 3600);
@@ -485,99 +487,32 @@ async function replayMissedMessage(
     logger.warn('catch-up: could not mark ts as processed', { err: String(err) });
   }
 
-  const senderId  = latestUserMsg.user as string;
-  const rawText   = (latestUserMsg.text as string) ?? '';
-  const threadTs  = (latestUserMsg.thread_ts as string | undefined) ?? msgTs;
-  const senderRole: 'owner' | 'colleague' = senderId === ownerId ? 'owner' : 'colleague';
-  const timeLabel = hoursAgo < 1 ? 'less than an hour ago' : `about ${hoursAgo}h ago`;
-
-  // v1.5.1 — raw message to the orchestrator unchanged; catch-up framing lives
-  // only in the posted reply's context block (below), not in the prompt.
-  const history = getConversationHistory(threadTs);
-
-  let output;
-  try {
-    output = await runOrchestrator({
-      userMessage: rawText,
-      conversationHistory: history,
-      threadTs,
-      channelId,
-      userId: senderId,
-      senderRole,
-      channel: 'slack',
-      profile,
-      app,
+  // Route THROUGH the live inbound path (registered by connectors/slack/app)
+  // instead of reimplementing transcription / image-ingestion / orchestrator /
+  // reply here. Voice & video get transcribed, images downloaded, then the SAME
+  // processMessage answers — exactly as a live message would. The replay fn
+  // posts the "↩ Catching up" caption + the reply itself.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getInboundReplay } = require('../connectors/slack/inboundReplayRegistry') as
+    typeof import('../connectors/slack/inboundReplayRegistry');
+  const replay = getInboundReplay(profile.user.slack_user_id);
+  if (!replay) {
+    logger.warn('catch-up: no inbound replay registered for profile — skipping', {
+      channelId, profileId: profile.user.slack_user_id,
     });
-  } catch (err) {
-    logger.error('Catch-up: orchestrator failed', { channelId, err: String(err) });
     return;
   }
-
-  appendToConversation(threadTs, channelId, { role: 'user', content: rawText });
-  appendToConversation(threadTs, channelId, { role: 'assistant', content: output.reply });
-
-  const contextLine = `_↩️ Catching up on your message from ${timeLabel}_`;
-  const msgPreviewShort = rawText.slice(0, 60) + (rawText.length > 60 ? '…' : '');
-
-  // Run through the Slack outbound formatter (scrubs internal leakage + applies
-  // Slack's markdown dialect). Same helper the live handler uses.
-  const { formatForSlack } = await import('../connections/slack/formatting');
-  const cleanReply = formatForSlack(output.reply);
-
-  // NOTE (v2.0.2): this is the single remaining core-path raw Slack call —
-  // Slack-specific rich-layout blocks (`context` + `section`) render the
-  // "↩ Catching up…" caption above the reply, which the Connection interface
-  // doesn't carry yet (tracked under issue #22).
-  // v3.2.6 — a Slack `section` block's text is capped at 3000 chars; a long
-  // reply (e.g. a news answer) blew past it and the WHOLE message was rejected
-  // (invalid_blocks → the owner saw nothing). Chunk the reply across multiple
-  // section blocks so long replies post intact.
-  const replyChunks = chunkForSectionBlocks(cleanReply);
   try {
-    await app.client.chat.postMessage({
-      token: profile.assistant.slack.bot_token,
-      channel: channelId,
-      thread_ts: post.postThreadTs,
-      text: cleanReply.slice(0, 3000),
-      // v3.2.6 — suppress link/media unfurl here too (this raw path bypasses the
-      // connection layer + postReply where unfurl is already off). A news reply's
-      // many source links otherwise unfurl into previews.
-      unfurl_links: false,
-      unfurl_media: false,
-      blocks: [
-        {
-          type: 'context',
-          elements: [{ type: 'mrkdwn', text: `${contextLine}: _"${msgPreviewShort}"_` }],
-        },
-        ...replyChunks.map(chunk => ({
-          type: 'section' as const,
-          text: { type: 'mrkdwn' as const, text: chunk },
-        })),
-      ],
+    // conversations.history/replies rows don't carry `.channel` — inject it so
+    // the live path has the channel context.
+    await replay({
+      message: { ...latestUserMsg, channel: channelId },
+      channelId,
+      postThreadTs: post.postThreadTs,
+      source: post.source,
     });
   } catch (err) {
-    logger.error('Catch-up: failed to post reply', { channelId, err: String(err) });
+    logger.error('Catch-up: inbound replay failed', { channelId, err: String(err) });
   }
 }
 
-/**
- * Split text into ≤3000-char chunks for Slack `section` blocks (Slack's hard
- * limit). Prefers newline boundaries so we don't cut mid-sentence; falls back to
- * a hard cut when a single line is itself too long. Caps total chunks so a
- * runaway reply can't exceed Slack's 50-block limit (the tail is truncated with
- * a marker rather than failing the whole post).
- */
-function chunkForSectionBlocks(text: string, max = 2900, maxChunks = 45): string[] {
-  if (text.length <= max) return [text];
-  const chunks: string[] = [];
-  let remaining = text;
-  while (remaining.length > max && chunks.length < maxChunks - 1) {
-    let cut = remaining.lastIndexOf('\n', max);
-    if (cut < max * 0.5) cut = max; // no usable newline near the limit → hard cut
-    chunks.push(remaining.slice(0, cut));
-    remaining = remaining.slice(cut).replace(/^\n+/, '');
-  }
-  if (remaining.length > max) remaining = remaining.slice(0, max - 1) + '…';
-  if (remaining) chunks.push(remaining);
-  return chunks;
-}

@@ -42,6 +42,7 @@ import {
 } from '../../vision';
 import { scanImageForInjection } from '../../utils/imageGuard';
 import { shadowNotify } from '../../utils/shadowNotify';
+import { registerInboundReplay } from './inboundReplayRegistry';
 import logger from '../../utils/logger';
 
 /**
@@ -1085,6 +1086,73 @@ export function createSlackAppForProfile(profile: UserProfile): App {
       }
     }
   }
+
+  // On-restart catch-up routes missed messages THROUGH this live path instead
+  // of reimplementing it. Register a replay fn (closure over processMessage +
+  // the shared ingestion helpers) that core/background.ts calls per detected
+  // missed message — voice/video get transcribed, images downloaded, then the
+  // SAME processMessage handles the orchestrator + reply. One path, two callers.
+  registerInboundReplay(user.slack_user_id, async ({ message, channelId, postThreadTs, source }) => {
+    const senderId = message.user as string | undefined;
+    if (!senderId) return;
+    const ts = (message.ts as string) ?? postThreadTs;
+    const files = (message.files as Array<Record<string, unknown>> | undefined) ?? [];
+
+    let text = (message.text as string) ?? '';
+    let images: AnthropicImageBlock[] | undefined;
+    let imageUrls: string[] | undefined;
+    let voiceInput = false;
+
+    const audioFile = files.find(f => typeof f.mimetype === 'string'
+      && ((f.mimetype as string).startsWith('audio/') || (f.mimetype as string).startsWith('video/')));
+    const imageFiles = files.filter(f => typeof f.mimetype === 'string' && (f.mimetype as string).startsWith('image/'));
+
+    if (audioFile?.url_private) {
+      try {
+        const transcript = await transcribeSlackAudio(audioFile.url_private as string, assistant.slack.bot_token, undefined, audioFile.mimetype as string);
+        if (transcript && transcript.trim().length >= 2) { text = `[Voice message]: ${transcript}`; voiceInput = true; }
+      } catch (err) {
+        logger.warn('inboundReplay — transcription failed, skipping media', { err: String(err).slice(0, 200) });
+      }
+    } else if (imageFiles.length > 0) {
+      const blocks: AnthropicImageBlock[] = [];
+      const urls: string[] = [];
+      for (const f of imageFiles) {
+        try {
+          const dl = await downloadSlackImage(f.url_private as string, assistant.slack.bot_token, f.mimetype as string);
+          if ('buffer' in dl) { blocks.push(buildImageBlock(dl)); if (f.url_private) urls.push(f.url_private as string); }
+        } catch (err) {
+          logger.warn('inboundReplay — image download failed', { err: String(err).slice(0, 200) });
+        }
+      }
+      if (blocks.length > 0) { images = blocks; imageUrls = urls; text = text || '(image attached, no caption)'; }
+    }
+
+    if (!text || text.trim().length < 1) return;  // nothing replayable
+
+    // Caption first, then processMessage posts the actual reply via `say`.
+    try {
+      await app.client.chat.postMessage({
+        token: assistant.slack.bot_token, channel: channelId, thread_ts: postThreadTs,
+        text: '_↩️ Catching up on your message_', unfurl_links: false, unfurl_media: false,
+      });
+    } catch (_) { /* caption is cosmetic */ }
+
+    const catchUpSay = async (msg: { text: string; thread_ts?: string }) => {
+      await app.client.chat.postMessage({
+        token: assistant.slack.bot_token, channel: channelId,
+        thread_ts: msg.thread_ts ?? postThreadTs, text: msg.text,
+        unfurl_links: false, unfurl_media: false,
+      });
+    };
+
+    await processMessage({
+      senderId, text, channelId, ts, threadTs: postThreadTs,
+      say: catchUpSay as unknown as Function, client: app.client,
+      isChannel: false, isMpim: source === 'assistant_panel' ? false : false,
+      images, imageUrls, voiceInput,
+    });
+  });
 
   // ── Handler 1: Direct messages (1:1 DM) ──────────────────────────────────
   // Fires for every message in a 1:1 DM with Maelle — no mention needed

@@ -935,6 +935,31 @@ export class SchedulingSkill {
             }
             return raw;
           })();
+          // Input-side timezone conversion (the Tyler bug). When the requested
+          // meeting time was given in a NON-owner timezone ("9:45 AM ET"),
+          // Sonnet tags it with `search_window_timezone` and passes the clock
+          // time as-given (09:45). Re-interpret those clock times AS that zone
+          // and convert to the owner timezone for the search — so Sonnet never
+          // hand-converts a search time. Without this, Sonnet searched 09:45
+          // ISRAEL for a 9:45-ET ask → before the 10:30 start →
+          // outside_owner_work_hours → then mis-explained it as "Wednesday ends
+          // before 16:45." Symmetric to present_in_timezone (output side).
+          const searchWindowTz = typeof args.search_window_timezone === 'string'
+            ? args.search_window_timezone.trim()
+            : '';
+          if (searchWindowTz) {
+            const reinterpret = (iso: string): string => {
+              const dt = DateTime.fromISO(iso, { zone: searchWindowTz });
+              if (!dt.isValid) return iso;
+              return dt.setZone(timezone).toISO() ?? iso;
+            };
+            const fromRequested = effectiveSearchFrom;
+            effectiveSearchFrom = reinterpret(effectiveSearchFrom);
+            effectiveSearchTo = reinterpret(effectiveSearchTo);
+            logger.info('find_available_slots — converted search window from requested TZ to owner TZ', {
+              searchWindowTz, from_requested: fromRequested, from_owner: effectiveSearchFrom,
+            });
+          }
           const mustBeAfterId = args.must_be_after_event_id as string | undefined;
           if (mustBeAfterId) {
             try {
@@ -1149,6 +1174,38 @@ export class SchedulingSkill {
           // surface the work-hours rejection once (via day_summary.blocked_by
           // attribution emitted by calendar.ts), and on owner override the
           // tool drops the clip too. "If I decide, it's on me."
+          // REQUESTER ≠ ATTENDEE (Yael regression) — but DEFAULT-SAFE for the
+          // common case (Alex). When a colleague asks to book a meeting they're
+          // ATTENDING, they ARE an attendee: their TZ drives per_attendee_local
+          // (correct cross-TZ labels) and their work-hours correctly steer the
+          // search — dropping them would BREAK that (lose the ET conversion +
+          // the clip). So we only drop the requester when Sonnet explicitly
+          // flags her as organizing-not-attending (`requester_is_attending:
+          // false` — e.g. an EA collecting options for OTHERS, like Yael). Then
+          // her own calendar/work-hours stop clipping the search and she's not
+          // annotated "busy" back to herself. Default (flag unset/true) = keep,
+          // so the attending-requester case is untouched.
+          if (!isOwnerInitiatedSearch && context.userId && args.requester_is_attending === false) {
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { getPersonMemory } = require('../../db') as typeof import('../../db');
+              const requesterEmailLower = (getPersonMemory(context.userId)?.email ?? '').toLowerCase();
+              if (requesterEmailLower) {
+                const before = attendeeEmails.length;
+                attendeeEmails = attendeeEmails.filter(e => e.toLowerCase() !== requesterEmailLower);
+                if (attendeeEmails.length < before) {
+                  logger.info('find_available_slots — dropped requester from attendees (organizer, not attendee)', {
+                    requester: requesterEmailLower,
+                  });
+                }
+              }
+            } catch (err) {
+              logger.warn('find_available_slots — requester-exclusion lookup threw, continuing', {
+                err: String(err).slice(0, 200),
+              });
+            }
+          }
+
           const ignoreAttendeeBusy =
             args.ignore_attendee_availability === true
             || (args.relaxed === true && isOwnerInitiatedSearch);
@@ -1666,6 +1723,25 @@ export class SchedulingSkill {
                   };
                 }).filter((p): p is NonNullable<typeof p> => p !== null);
                 return per_attendee_local.length > 0 ? { ...s, per_attendee_local } : s;
+              });
+            }
+
+            // Presentation timezone — the requester asked for options in a
+            // specific zone (e.g. "in ET"), even when no attendee is stored
+            // there (an organizer collecting options for US colleagues). Without
+            // this, the tool gave Sonnet nothing to quote and she mathed ET
+            // herself and inverted it ("09:00 ET = 02:00 Israel"). Pre-render
+            // each slot in the requested zone deterministically. Ship only the
+            // formatted string (with the short offset name, e.g. "EDT") — never
+            // the raw IANA, to avoid the "America/New_York → New York" paste.
+            const presentTz = typeof args.present_in_timezone === 'string'
+              ? args.present_in_timezone.trim()
+              : '';
+            if (presentTz) {
+              annotatedSlots = annotatedSlots.map((s: any) => {
+                const dt = DateTime.fromISO(s.start, { zone: timezone }).setZone(presentTz);
+                if (!dt.isValid) return s;
+                return { ...s, presentation_local: dt.toFormat('EEE d MMM HH:mm ZZZZ') };
               });
             }
             // Surface per-day summary alongside slots so Sonnet can answer

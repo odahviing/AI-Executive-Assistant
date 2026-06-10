@@ -30,6 +30,11 @@ const STALE_SURFACE_THRESHOLD = 3;
 const NEWS_BRIEF_TIMEOUT_MS = 8_000;
 /** Cap how many meeting-companies we derive into news goals (cost control). */
 const NEWS_MEETING_COMPANY_CAP = 3;
+/** v3.x — today's calendar-health pass folded into the brief is best-effort +
+ *  fail-open. Active mode does Graph reads (+ possibly a coord move), so a
+ *  more generous window than news; if it overruns, the brief ships without the
+ *  health line and the fixes still complete in the background. */
+const BRIEF_HEALTH_TIMEOUT_MS = 25_000;
 
 // Generic mailbox providers — an attendee here tells us nothing about a company.
 const GENERIC_EMAIL_DOMAINS = new Set([
@@ -520,13 +525,22 @@ async function generateBriefingText(
   profile: UserProfile,
   peopleGender: Record<string, 'he' | 'she' | 'they'> = {},
   newsBundle?: NewsBundle,
+  healthSummary?: string,
 ): Promise<string> {
   // v3.2.6 — news is additive: it only changes the brief when there's grounded
   // material. Empty bundle (news off / nothing found / no derived companies) →
   // the brief is byte-identical to before this feature.
   const hasNews = !!(newsBundle && newsBundle.sources.length > 0);
+  // v3.x — today's calendar-health summary folded into the brief (replaces the
+  // separate morning health routine). Additive like news: only included when
+  // there's something to flag (skip the "looks healthy" no-op text).
+  const hasHealth = !!(
+    healthSummary
+    && healthSummary.trim().length > 0
+    && !/no issues|looks healthy|looks good|calendar looks/i.test(healthSummary)
+  );
 
-  if (items.length === 0 && !hasNews) {
+  if (items.length === 0 && !hasNews && !hasHealth) {
     // No time-of-day greeting on line 1 — the Slack app shows the first line
     // as the preview, so lead with the useful state, not "Morning —".
     return `All clear — nothing new today.`;
@@ -633,14 +647,18 @@ ${Object.keys(peopleGender).length > 0
   // v3.2.6 — append the grounded news sources to the data so Sonnet can write +
   // cite the Updates section. Only when there's material (keeps tokens at zero
   // when news is off/empty).
-  const userContent = hasNews
-    ? `Write the morning briefing based on this data:\n\n${dataText}\n\nNEWS SOURCES (for the Updates section — write grounded in these and cite each as <url|label>):\n${JSON.stringify({ sources: newsBundle!.sources }, null, 2)}`
-    : `Write the morning briefing based on this data:\n\n${dataText}`;
+  const newsPart = hasNews
+    ? `\n\nNEWS SOURCES (for the Updates section — write grounded in these and cite each as <url|label>):\n${JSON.stringify({ sources: newsBundle!.sources }, null, 2)}`
+    : '';
+  const healthPart = hasHealth
+    ? `\n\nCALENDAR HEALTH (today only) — fold this into the brief as a short, human "Calendar" note: what you auto-fixed today and what needs ${firstName}'s call today. Plain sentences, no header, no tool names. Today's issues only; the full week is handled separately at midday:\n${healthSummary!.trim()}`
+    : '';
+  const userContent = `Write the morning briefing based on this data:\n\n${dataText}${newsPart}${healthPart}`;
 
   try {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: hasNews ? 1100 : 800,
+      max_tokens: (hasNews || hasHealth) ? 1100 : 800,
       system: systemPrompt,
       messages: [{ role: 'user', content: userContent }],
     });
@@ -740,8 +758,41 @@ export async function sendMorningBriefing(
     }
   }
 
+  // v3.x — today-scoped calendar health, folded into the ONE morning brief
+  // (replaces the separate 07:00 standalone health routine). Active mode so it
+  // auto-fixes today's issues; scoped to TODAY only — the 13:00 routine still
+  // runs the full this-week + next-week sweep. Best-effort + fail-open + timed
+  // like news: a slow/erroring pass never delays or breaks the brief. The tool
+  // returns its result via `summary_text` and does NOT post its own owner
+  // message (the busy_day DM was retired in v2.3.1), so there's no double-send.
+  let healthSummary: string | undefined;
+  if ((profile.skills as Record<string, unknown> | undefined)?.calendar === true) {
+    try {
+      const today = DateTime.now().setZone(profile.user.timezone).toFormat('yyyy-MM-dd');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { executeSkillTool } = require('../skills/registry') as typeof import('../skills/registry');
+      const healthCtx = {
+        profile,
+        threadTs: threadTs ?? `brief_health_${ownerUserId}`,
+        channelId: ownerChannel,
+        userId: ownerUserId,
+        senderRole: 'owner' as const,
+        channel: 'slack' as const,
+        app,
+      };
+      const res = await Promise.race([
+        executeSkillTool('check_calendar_health', { mode: 'active', start_date: today, end_date: today }, healthCtx),
+        new Promise<undefined>(r => { const t = setTimeout(() => r(undefined), BRIEF_HEALTH_TIMEOUT_MS); if (typeof t.unref === 'function') t.unref(); }),
+      ]);
+      const summary = (res && typeof res === 'object') ? (res as { summary_text?: unknown }).summary_text : undefined;
+      if (typeof summary === 'string' && summary.trim().length > 0) healthSummary = summary.trim();
+    } catch (err) {
+      logger.warn('briefs — calendar-health gather threw, composing without it', { err: String(err).slice(0, 200) });
+    }
+  }
+
   // Generate + send.
-  const rawText = await generateBriefingText(items, profile, peopleGender, newsBundle);
+  const rawText = await generateBriefingText(items, profile, peopleGender, newsBundle, healthSummary);
 
   // v2.7.1 (bug 4.5) — humanGate the brief. The brief generator skipped the
   // owner-facing voice check that postReply.ts applies to regular replies,
