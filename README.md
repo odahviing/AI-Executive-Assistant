@@ -137,7 +137,7 @@ Legacy YAML keys auto-migrate (`scheduling`/`coordination` → `meetings`, etc.)
 | **Date verifier** | Weekday/date pairs vs 14-day lookup. Retry + deterministic inline correction if retry fails |
 | **Security gate** | Leak-pattern filter on colleague-facing replies (never reveals tools/prompts/model names) |
 | **humanGate** | Catches mechanical-refusal phrasings on both owner-facing and colleague-facing drafts |
-| **Coord guard** | Injection scan + LLM judge on `coordinate_meeting` inputs from colleagues |
+| **Coord guard** | Injection scan + LLM judge on `coordinate_meeting` inputs (owner-path today; colleagues book via the direct path — coords return for calendar-invisible external requesters when those transports land) |
 | **Cross-handler dedup** | Process-global message-ts Set prevents duplicate replies after restart |
 | **Idempotency** | `create_meeting` (Graph pre-check ±2 min), `delete_meeting` (per-turn per-event_id) |
 | **Verb-map fallback** | When Sonnet goes silent post-tool, deterministic verb mapping ensures honest one-line confirmation (no fabricated "Done") |

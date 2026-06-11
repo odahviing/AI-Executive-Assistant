@@ -193,6 +193,39 @@ export function getCurrentTravel(slackId: string): CurrentTravel | null {
   }
 }
 
+/**
+ * v3.3.8 — raw travel record, gated only on "not already over" (until >= today).
+ *
+ * getCurrentTravel answers "are they traveling NOW" — right for narration and
+ * social. The slot finder needs a different question: "what timezone are they
+ * in on the day being SEARCHED" — and a trip that starts Friday is invisible
+ * to now-semantics while being decisive for a Friday search. Real incident
+ * (Daniel, 2026-06-11): the owner taught "she's back in Israel on Tuesday",
+ * the record was saved correctly ({Israel, from/until 2026-06-16}), and the
+ * Tuesday search still applied Tokyo because getCurrentTravel returned null
+ * for a future trip. Consumers resolve per-day via
+ * `attendeeAvailability.attendeeTzForDay`.
+ */
+export function getTravelRecord(slackId: string): CurrentTravel | null {
+  const db = getDb();
+  const row = db.prepare(
+    `SELECT currently_traveling FROM people_memory WHERE slack_id = ?`
+  ).get(slackId) as { currently_traveling?: string | null } | undefined;
+  if (!row || !row.currently_traveling) return null;
+  try {
+    const t = JSON.parse(row.currently_traveling) as CurrentTravel;
+    if (!t.location || !t.from || !t.until) return null;
+    const today = new Date().toISOString().slice(0, 10);
+    if (t.until < today) {
+      clearCurrentTravel(slackId);
+      return null;
+    }
+    return t;
+  } catch (_) {
+    return null;
+  }
+}
+
 // ── v3.2.6 — VIP flag ────────────────────────────────────────────────────────
 // Owner-curated, like engagement_rank. VIP calendars are ALWAYS pulled into a
 // thread-booking free/busy search; non-VIPs are invite-only (annotated, never

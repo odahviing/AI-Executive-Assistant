@@ -378,6 +378,18 @@ export async function initiateCoordination(
   // ── Private-DM participants: individual DMs ──
   for (const participant of privateDmParticipants) {
     try {
+      // v3.3.8 (#126) — the REQUESTER asked for this coord inside their own
+      // DM conversation; their slot-options DM continues THAT thread instead
+      // of opening a parallel one. Guards: colleague-initiated only (owner-
+      // path coords have no requester among participants), origin must be a
+      // 1:1 DM ('D'-channel — an MPIM origin is handled by the in-group
+      // branch above), and an origin thread must exist.
+      const isRequesterInOwnDm =
+        params.senderRole === 'colleague'
+        && !!params.senderUserId
+        && participant.slack_id === params.senderUserId
+        && !!params.ownerChannel && params.ownerChannel.startsWith('D')
+        && !!params.ownerThreadTs;
       await sendCoordDM({
         participant,
         ownerName: params.ownerName,
@@ -389,6 +401,9 @@ export async function initiateCoordination(
         proposedSlots: params.proposedSlots,
         jobId,
         profile: params.profile,
+        originThread: isRequesterInOwnDm
+          ? { channel: params.ownerChannel, threadTs: params.ownerThreadTs! }
+          : undefined,
         moveContext: params.moveExistingEvent
           ? {
               currentStartIso: params.moveExistingEvent.currentStartIso,
@@ -456,6 +471,17 @@ async function sendCoordDM(
       currentStartIso: string;
       currentEndIso: string;
       conflictReason?: string;
+    };
+    // v3.3.8 (#126) — when this participant is the coord's REQUESTER and the
+    // coord was initiated from their own DM conversation, post the slot
+    // options INTO that thread instead of opening a fresh top-level DM.
+    // Pre-fix the requester asked in one thread, got the options in a brand
+    // new thread, and had to juggle two parallel threads for one request
+    // (the Maayan PT-Sales-Simulation incident). Cold participants (no
+    // existing conversation) keep the top-level DM.
+    originThread?: {
+      channel: string;
+      threadTs: string;
     };
   }
 ): Promise<void> {
@@ -601,7 +627,21 @@ async function sendCoordDM(
     throw new Error(`Participant ${params.participant.name} has no slack_id — cannot DM`);
   }
 
-  const res = await slackConn.sendDirect(params.participant.slack_id, message);
+  let res = await slackConn.sendDirect(
+    params.participant.slack_id,
+    message,
+    params.originThread ? { threadTs: params.originThread.threadTs } : undefined,
+  );
+  // Threaded send failed (stale/foreign thread ts)? The options MUST reach
+  // the requester — retry top-level rather than failing the whole coord leg.
+  if (!res.ok && params.originThread) {
+    logger.warn('sendCoordDM — threaded send into origin thread failed, retrying top-level', {
+      jobId: params.jobId, participant: params.participant.name,
+      reason: res.reason, detail: res.detail,
+    });
+    params.originThread = undefined;
+    res = await slackConn.sendDirect(params.participant.slack_id, message);
+  }
   if (!res.ok) {
     // Surface user_not_found clearly (was the users.info probe's job).
     if (res.detail?.includes('user_not_found')) {
@@ -614,7 +654,12 @@ async function sendCoordDM(
   }
 
   const dmChannel = res.ref;
-  const dmTs = res.ts;
+  // v3.3.8 (#126) — when the options were threaded into the requester's
+  // existing conversation, the thread ROOT is the origin ts, not this
+  // message's ts (Slack threads anchor to roots). Recording the root keeps
+  // the v1.8.6 booking-confirmation threading in the SAME conversation
+  // thread instead of forking a third one.
+  const dmTs = params.originThread ? params.originThread.threadTs : res.ts;
 
   const job = getCoordJob(params.jobId);
   if (job) {

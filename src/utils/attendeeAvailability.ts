@@ -36,6 +36,38 @@ export interface AttendeeAvailabilityEntry {
     homeTimezone: string;   // stored profile timezone, e.g. "Asia/Jerusalem"
     until: string;          // ISO yyyy-MM-dd
   };
+  /** v3.3.8 — stored profile timezone, always set when known. Per-day TZ
+   * resolution (attendeeTzForDay) derives from THIS + travelWindow, never
+   * from the now-collapsed `timezone` field above. */
+  homeTimezone?: string;
+  /**
+   * v3.3.8 — the travel record as a DATED window (covers future trips too).
+   * The work-hours clip and per-slot local display resolve the attendee's
+   * timezone PER SEARCHED DAY: inside [from, until] → this timezone, outside
+   * → homeTimezone. Fixes both directions of the now-collapse bug: a future
+   * trip ("back in Israel on Tuesday") was invisible when searching Tuesday,
+   * and a current trip ending Friday wrongly clipped next week's search.
+   */
+  travelWindow?: {
+    from: string;        // ISO yyyy-MM-dd (inclusive)
+    until: string;       // ISO yyyy-MM-dd (inclusive)
+    timezone: string;    // IANA of the travel location
+    location: string;
+  };
+}
+
+/**
+ * v3.3.8 — the attendee's effective IANA timezone on a specific calendar day.
+ * `isoDate` is yyyy-MM-dd (the slot walker's owner-TZ day — travel dates are
+ * calendar-level facts, sub-day boundary effects are noise).
+ */
+export function attendeeTzForDay(
+  entry: Pick<AttendeeAvailabilityEntry, 'timezone' | 'homeTimezone' | 'travelWindow'>,
+  isoDate: string,
+): string {
+  const tw = entry.travelWindow;
+  if (tw && isoDate >= tw.from && isoDate <= tw.until) return tw.timezone;
+  return entry.homeTimezone ?? entry.timezone;
 }
 
 /**
@@ -66,7 +98,7 @@ export function loadAttendeeAvailabilityForEmails(
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { searchPeopleMemory, getCurrentTravel } = require('../db') as typeof import('../db');
+    const { searchPeopleMemory, getTravelRecord } = require('../db') as typeof import('../db');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getEffectiveWorkingHours } = require('./workingHoursDefault') as
       typeof import('./workingHoursDefault');
@@ -87,16 +119,31 @@ export function loadAttendeeAvailabilityForEmails(
 
       let timezone = person.timezone;
       let travelMeta: AttendeeAvailabilityEntry['travel'];
-      const travel = person.slack_id ? getCurrentTravel(person.slack_id) : null;
+      let travelWindow: AttendeeAvailabilityEntry['travelWindow'];
+      // v3.3.8 — raw record (includes FUTURE trips). The dated window goes on
+      // the entry for per-day resolution; the now-collapsed `timezone` field
+      // keeps its v2.5.2 semantics (travel TZ only while the trip is active
+      // TODAY) for the travelers/narration consumers.
+      const travel = person.slack_id ? getTravelRecord(person.slack_id) : null;
       if (travel) {
         const travelTz = inferTimezoneFromStateStatic(travel.location);
         if (travelTz && travelTz !== person.timezone) {
-          travelMeta = {
-            location: travel.location,
-            homeTimezone: person.timezone,
+          travelWindow = {
+            from: travel.from,
             until: travel.until,
+            timezone: travelTz,
+            location: travel.location,
           };
-          timezone = travelTz;
+          const today = new Date().toISOString().slice(0, 10);
+          const activeToday = travel.from <= today;  // until >= today guaranteed by getTravelRecord
+          if (activeToday) {
+            travelMeta = {
+              location: travel.location,
+              homeTimezone: person.timezone,
+              until: travel.until,
+            };
+            timezone = travelTz;
+          }
         } else if (!travelTz) {
           logger.info('attendeeAvailability — travel location not in static TZ map, using stored', {
             email, location: travel.location,
@@ -110,7 +157,9 @@ export function loadAttendeeAvailabilityForEmails(
         workdays: wh.workdays,
         hoursStart: wh.hoursStart,
         hoursEnd: wh.hoursEnd,
+        homeTimezone: person.timezone,
         ...(travelMeta ? { travel: travelMeta } : {}),
+        ...(travelWindow ? { travelWindow } : {}),
       });
     }
 

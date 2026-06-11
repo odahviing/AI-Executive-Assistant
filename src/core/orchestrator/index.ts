@@ -782,6 +782,34 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     }
   }
 
+  // v3.3.8 — offered-slots binding block. When a previous turn in this
+  // conversation OFFERED specific slots (find_available_slots, colleague
+  // path), inject the exact instants so a pick ("Tuesday 20:30") binds to
+  // the offered date instead of being re-derived — re-derivation is how
+  // "יום שלישי 20:30" validated against Jun 23 when the offer was Jun 16
+  // (false "not free" on a free slot; the quiet variant books the wrong
+  // week silently). Coord stored offers on its job row; this is the same
+  // protection for the direct path. Same injection rail as the pre-check.
+  let offeredSlotsBlock = '';
+  if (input.senderRole === 'colleague' && input.channelId) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getOfferedSlots } = require('../../utils/offeredSlotsStash') as
+        typeof import('../../utils/offeredSlotsStash');
+      const offered = getOfferedSlots(input.channelId, input.threadTs);
+      if (offered && offered.length > 0) {
+        offeredSlotsBlock = `## SLOTS ALREADY OFFERED IN THIS CONVERSATION (binding)
+These exact instants were offered to this colleague earlier and are still on the table:
+${offered.map(s => `- ${s.display} → start_iso ${s.startIso}`).join('\n')}
+If their message picks one of these — by time ("20:30"), weekday+time ("Tuesday 20:30"), or position ("the second one") — it means THAT exact instant: use its start_iso verbatim in any create_meeting / validation call. NEVER re-resolve the date from a weekday word; the offer above is the authoritative date.`;
+      }
+    } catch (err) {
+      logger.warn('offeredSlotsStash read threw — proceeding without block', {
+        err: String(err).slice(0, 150),
+      });
+    }
+  }
+
   // v3.1.2 (D) — free-time pre-check. Owner-path only. When classifyTurn
   // flagged this turn as a buffer/free-time inquiry ("do I have buffer?",
   // "how packed is Thursday?", "am I free this afternoon?"), run
@@ -923,6 +951,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     languageDirectiveBlock,
     priorOutboundBlock,
     availabilityPrecheckBlock,
+    offeredSlotsBlock,
     freeTimePrecheckBlock,
     recentCalendarIssuesBlock,
     promptParts.dynamic,

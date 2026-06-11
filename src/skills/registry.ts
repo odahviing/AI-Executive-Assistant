@@ -309,7 +309,23 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   // this allowlist so a colleague-path Sonnet can flag things up to the owner.
   'create_task',
   'create_approval',
-  'coordinate_meeting',
+  // v3.3.8 — coordinate_meeting REMOVED from the colleague allowlist. Data
+  // verdict (June 2026): since the attendee free/busy intersection + direct
+  // booking landed (~mid-May), coord stopped completing — Apr: 5 booked,
+  // May: 1 booked / 12 dead, June: 0 booked / 3 abandoned — while the real
+  // bookings happened on the direct path (find_available_slots intersects
+  // every internal attendee's calendar; create_meeting invites everyone,
+  // externals by email with Outlook's native accept/decline). All a coord
+  // added for an internal requester was a parallel DM thread (#126) and an
+  // orphan job that kept nudging. Owner-path keeps the tool for explicit
+  // "poll them first" asks.
+  //
+  // FUTURE (owner direction, 2026-06-11): when external transports land
+  // (WhatsApp / email — see .claude/WHATSAPP_PROJECT.md), EXTERNAL
+  // requesters get coords back — their calendars are NOT visible, so
+  // slot-polling is the only way to converge on a time with them. The gate
+  // then becomes "requester's calendar visibility", not a blanket block.
+  // The coord state machine + coordGuard stay in place for that.
   'check_join_availability',
   'web_search',
   // v2.2.1 — inbound reschedule auto-accept. Colleagues can ask Maelle to move

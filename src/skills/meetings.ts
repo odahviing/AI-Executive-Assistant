@@ -237,7 +237,7 @@ Results:
 - Blocked by scheduling rule (lunch, buffer) → escalate to owner with context
 - Busy with another meeting → decline with the conflict info
 
-If the meeting is NOT yet booked and they need to find a time together, use coordinate_meeting instead.`,
+If the meeting is NOT yet booked and they need to find a time together, use find_available_slots (it checks every internal attendee's calendar) and book the agreed slot with create_meeting.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -289,9 +289,9 @@ Use ONLY for:
 
 Do NOT use for:
 - "Is he free at 3pm today to join my meeting" → use check_join_availability (specific time, existing meeting context)
-- Checking colleague availability before scheduling → use coordinate_meeting
+- Checking colleague availability before scheduling → use find_available_slots with attendee_emails (it intersects their calendars AND applies the schedule rules)
 - Needing actual bookable slots (with buffers, rules) → use find_available_slots
-- Presenting meeting-time options to anyone. Free/busy data does not apply schedule rules (office-day start, thinking-time, lunch, buffer). For bookable options, use find_available_slots (owner asks "when am I free") or coordinate_meeting (meeting needs to be arranged).`,
+- Presenting meeting-time options to anyone. Free/busy data does not apply schedule rules (office-day start, thinking-time, lunch, buffer). For bookable options, always use find_available_slots.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -305,7 +305,7 @@ Do NOT use for:
       },
       {
         name: 'find_available_slots',
-        description: `Find open slots on ${profile.user.name}'s own calendar — useful when you need to know what times are free before proposing options. NEVER call this directly for colleague scheduling; coordinate_meeting already handles that flow.
+        description: `Find bookable slots — ${profile.user.name}'s calendar intersected with every attendee you pass in attendee_emails, with all schedule rules applied. This is THE tool for proposing meeting times, for any attendee count: search → offer the slots → book the pick with create_meeting. (v3.3.8 — the old "coordinate_meeting handles colleague scheduling" doctrine is retired; coord is only for explicitly polling people whose calendars aren't visible.)
 
 Before calling this tool: ASK ${profile.user.name.split(' ')[0]} TWO HUMAN QUESTIONS first if you don't already know the answer. Do NOT use the words "meeting_mode" or list four options — that's robotic. Ask like a person:
   • "In person or online?"
@@ -415,7 +415,7 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
       },
       {
         name: 'create_meeting',
-        description: `Create a new calendar event directly (no coord needed — use this when the owner already knows the time + attendees). Call coordinate_meeting instead when participants need to agree on a time. Follow the location / category / work-day rules in the prompt section.
+        description: `Create a new calendar event directly — THE booking tool. The agreed time comes from find_available_slots (which already checked every internal attendee's calendar); externals get the invite by email and accept/decline natively. coordinate_meeting exists only for the owner explicitly asking to POLL people for preference. Follow the location / category / work-day rules in the prompt section.
 
 LOCATION & ONLINE — THE HANDLER DECIDES. There's a deterministic process: day-type (office/home) × party shape (internal-only / has-external) × TZ produces the right answer. ${profile.user.name.split(' ')[0]}'s home day + internal-only → Huddle. ${profile.user.name.split(' ')[0]}'s office day + internal-only → Office. External + home → online with Teams. External + office + different TZ → online with Teams. External + office + same TZ → handler asks ${profile.user.name.split(' ')[0]} once. You don't recreate this math; you let the handler run.
 
@@ -431,7 +431,7 @@ LOCATION FIELD:
 
 DON'T ASK WHEN A CLEAR SIGNAL ALREADY EXISTS (people_memory shows different TZ, prior conversation mentioned video, etc.) — reading the data is your job, not the owner's to repeat.
 
-Colleague-path (v2.3.2 + v2.6.5 + v2.6.6): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book — the requester (1:1), multi-internal (everyone in the same workspace), or owner-only-pollable (requester + externals). Externals are fine; they get the calendar invite via Outlook. The handler enforces server-side: every attendee must have an email; rule-compliant slot (work hours, work days, buffers, floating blocks, no conflicts via findAvailableSlots); then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). If an attendee has no email, the tool returns { success: false, error: 'attendee_missing_email' } — call coordinate_meeting instead (it DMs and collects email). DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
+Colleague-path (v2.3.2 + v2.6.5 + v2.6.6): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book — the requester (1:1), multi-internal (everyone in the same workspace), or owner-only-pollable (requester + externals). Externals are fine; they get the calendar invite via Outlook. The handler enforces server-side: every attendee must have an email; rule-compliant slot (work hours, work days, buffers, floating blocks, no conflicts via findAvailableSlots); then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). If an attendee has no email, the tool returns { success: false, error: 'attendee_missing_email' } — resolve it via find_slack_user (directory lookup); if it truly can't be resolved, raise create_approval(kind=freeform) so the owner supplies it. DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
 
 LANGUAGE: calendar invites are shared artifacts others read, so keep subject + body in English (translate if the owner instructs in Hebrew). The subject/body params restate this.`,
         input_schema: {
@@ -2056,12 +2056,14 @@ When ${firstName} asks a hypothetical ("can we do Elan after Gilly?", "would 13:
 - Empty result → rules failed → narrate the actual broken rule (check the \`rejection_breakdown\` log if available; otherwise stay general: "the rules don't allow it"). Then ask if he wants to override.
 NEVER compute margins yourself. Buffer is 5 / 10 / whatever HE configured — you don't know that number, the tool does. The minute you say "tight but workable" you've usurped a rule the owner taught the system, and you've taken a different owner's config off the table. The right answer is always "tool said yes" or "tool said no, here's why".
 
+AN INSTRUCTION IS NOT A QUESTION. When ${firstName} names a meeting + a direction ("move the prep early", "push Elan to next week", "cancel the 1:1"), that IS the request — do the discovery and come back THIS turn with the result or a concrete proposal. NEVER reply "want me to move it?" / "should I look for a time?": that's asking permission to do what he just told you to do. Ask only when you genuinely can't start (which meeting is truly unclear). "Move it early" → find earlier slots (next rule) and propose them, don't ask whether to look.
+
 VALIDATING / DISCOVERING A MOVE — pass moving_event_ids.
-When the question is about an EXISTING meeting changing time, pass the meeting's event id as \`moving_event_ids: [<id>]\` to find_available_slots. The tool then (a) treats that meeting's current time as FREE (it's leaving, doesn't block other slots), AND (b) forbids any candidate that overlaps the meeting's current time. Without this, the tool sees the meeting as a hard conflict with itself and gives bogus answers. Get the event id from get_calendar.
+When the question is about an EXISTING meeting changing time, pass its event id as \`moving_event_ids: [<id>]\` (from get_calendar). The tool then frees that meeting's current slot for the search AND won't offer it (or an overlap) back as the target. Without it the tool counts the meeting as a conflict with itself and returns bogus answers.
 
 The shape signals are STRONGER than they look. If ${firstName} just discussed/booked a meeting in this thread and now asks "any earlier opening?" / "any other time?" / "what about a different day?" / "an opening before X?" — those are MOVE questions about THAT meeting, not new-booking questions. Default to MOVE, not ADD. The clue: the recently-mentioned meeting + an open-ended scheduling question = move-discovery.
 
-VALIDATE A MOVE BEFORE PROPOSING IT — never narrate "I'll move X to make room for Y" without checking the move actually delivers Y. Call \`find_available_slots\` with \`moving_event_ids: [X.id]\` AND a window matching the requested duration. Read the result before speaking: if the requested window opens up, propose the move; if not, name the OTHER meeting still blocking it before offering anything. The "I'll move Simon to free 2 hours" → owner says yes → "actually moving Simon only opens 1 hour because lunch is next" pattern means the move was offered without validating its effect. One tool call up front replaces the staircase.
+VALIDATE A MOVE BEFORE PROPOSING IT — the slot you propose must come FROM \`find_available_slots\` (with \`moving_event_ids\`), NEVER from a gap you eyeballed in get_calendar. get_calendar shows only ${firstName}'s calendar, not the ATTENDEES' — so an open-looking gap can die at booking ("Maayan's busy at 13:30") one turn after he says yes. The tool checks every attendee + the requested duration up front, so a conflict surfaces BEFORE he commits, not after. Read the result before speaking: the window opens → propose it; it doesn't → name what's still blocking. One tool call up front replaces the staircase ("move Simon to free 2h" → "yes" → "actually only 1h, lunch's next").
 
 TIMEZONE NARRATION — always from the LISTENER's local TZ.
 Times you write to ${firstName} are in HIS local TZ; times you write to a colleague are in THAT colleague's local TZ. Don't math the conversion yourself — \`find_available_slots\` returns \`per_attendee_local[].local_display\` already correctly converted; quote it verbatim. If the OTHER party is in a DIFFERENT TZ and it's relevant to mention, append once as a parenthetical ("Wednesday 12:45 works — that's 15:15 her time"). If they're in the SAME TZ as the listener, do NOT add a "his/her time" parenthetical — same wall-clock, single number, no confusion. When \`travelers\` is set, mention the travel context once ("Anna's working from Boston this week").

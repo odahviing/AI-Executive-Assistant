@@ -592,10 +592,15 @@ export async function findAvailableSlots(params: {
   // dropped before Graph cost. Empty / omitted → no clipping.
   attendeeAvailability?: Array<{
     email: string;
-    timezone: string;          // IANA
+    timezone: string;          // IANA (now-resolved — travel TZ only while a trip is active today)
     workdays: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
     hoursStart: string;        // 'HH:MM'
     hoursEnd: string;
+    // v3.3.8 — per-day travel resolution (see utils/attendeeAvailability.ts).
+    // The clip resolves the attendee's TZ for the candidate's DAY: inside
+    // travelWindow [from, until] → its timezone; outside → homeTimezone.
+    homeTimezone?: string;     // stored profile IANA
+    travelWindow?: { from: string; until: string; timezone: string; location: string };
   }>;
   // Owner-override "show me everything" mode. When true:
   //   - skips focus-time protection (free_time_per_office/home_day_hours)
@@ -1279,10 +1284,24 @@ export async function findAvailableSlots(params: {
       // working hours (17:00 EST) block this — still want me to force it?"
       // instead of a generic "outside work hours" handwave.
       if (params.attendeeAvailability && params.attendeeAvailability.length > 0) {
+        // v3.3.8 — the candidate's owner-TZ calendar day, for travel-window
+        // resolution. Travel dates are calendar-level facts; comparing on the
+        // walked day grid is the defensible granularity.
+        const candidateDayIso = cursorDt.toFormat('yyyy-MM-dd');
         const blockingAttendee = params.attendeeAvailability.find(att => {
           try {
-            const attStart = DateTime.fromJSDate(cursor).setZone(att.timezone);
-            const attEnd = DateTime.fromJSDate(slotEnd).setZone(att.timezone);
+            // v3.3.8 — per-day TZ: a trip covering THIS day uses the travel
+            // TZ; any other day uses the home TZ. Pre-fix the TZ was resolved
+            // once at load time relative to TODAY, so a future trip ("back in
+            // Israel on Tuesday", saved as a dated record) was ignored when
+            // searching that very Tuesday — and a trip ending Friday wrongly
+            // clipped a next-week search (the Daniel incident, 2026-06-11).
+            const tw = att.travelWindow;
+            const effTz = (tw && candidateDayIso >= tw.from && candidateDayIso <= tw.until)
+              ? tw.timezone
+              : (att.homeTimezone ?? att.timezone);
+            const attStart = DateTime.fromJSDate(cursor).setZone(effTz);
+            const attEnd = DateTime.fromJSDate(slotEnd).setZone(effTz);
             if (!attStart.isValid || !attEnd.isValid) return false;
             const attDay = attStart.toFormat('EEEE') as 'Sunday'|'Monday'|'Tuesday'|'Wednesday'|'Thursday'|'Friday'|'Saturday';
             if (!att.workdays.includes(attDay)) return true;  // outside their workdays

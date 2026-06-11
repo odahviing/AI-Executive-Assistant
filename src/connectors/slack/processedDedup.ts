@@ -58,11 +58,19 @@ export function unmarkProcessed(ts: string): void {
 // Key shape: `${channelId}|${senderId}|${textHash}`. Hash is a stable
 // 32-bit fold over the message text — Slack will deliver the exact same
 // text bytes on both events, so a simple hash collides them deterministically.
-// TTL is short (90s) — long enough to cover Slack's mirror delay window,
-// short enough that legitimately repeated content (owner typing the same
-// phrase twice on purpose) is treated as new.
+//
+// v3.3.8 (#owner, 2026-06-11) — TTL 90s → 5s. The mirror duplicate this
+// guards against arrives within a SECOND of the original (the 2026-05-19
+// incident's two events were fractions of a second apart); 5s covers it
+// several times over. 90s was eating LEGITIMATE repeats: the owner answered
+// "Yes" to a NEW question 51s after a previous "Yes" and the message was
+// silently skipped — he read it as a crash. Same-key rapid messages are
+// handled downstream by the inboundQueue merge (debounce/abort-if-safe);
+// this net exists ONLY for the cross-thread-anchor mirror the queue can't
+// merge. A human cannot legitimately answer two different questions with
+// identical text inside 5 seconds.
 const processedContent: Set<string> = new Set();
-const CONTENT_TTL_MS = 90 * 1000;
+const CONTENT_TTL_MS = 5 * 1000;
 
 function hashString(s: string): string {
   // FNV-1a-ish 32-bit; deterministic and cheap. No security needs here —

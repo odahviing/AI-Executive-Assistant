@@ -1793,18 +1793,29 @@ export class SchedulingSkill {
             // of doing the math in chat (real-day bug 2026-05-16: she said
             // "10:30 IL = 08:30 Boston", off by ~5h). Code over prompt: the
             // conversion is pure determinism, no judgment.
-            const differentTzAttendees = (attendeeAvailability ?? []).filter(
-              a => a.timezone && a.timezone !== timezone,
-            );
-            if (differentTzAttendees.length > 0) {
+            // v3.3.8 — per-day TZ resolution (travel-window aware). An attendee
+            // whose trip covers a slot's day renders in the TRAVEL tz for that
+            // slot and the HOME tz for others — and gets NO parenthetical at
+            // all on days their effective tz matches the owner's (Daniel back
+            // in Israel on Tuesday should not show a Tokyo time for Tuesday).
+            const tzCandidates = (attendeeAvailability ?? []).filter(a => a.timezone);
+            if (tzCandidates.length > 0) {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { attendeeTzForDay } = require('../../utils/attendeeAvailability') as
+                typeof import('../../utils/attendeeAvailability');
               annotatedSlots = annotatedSlots.map((s: any) => {
-                const per_attendee_local = differentTzAttendees.map(a => {
-                  const dt = DateTime.fromISO(s.start, { zone: timezone }).setZone(a.timezone);
+                const slotDt = DateTime.fromISO(s.start, { zone: timezone });
+                if (!slotDt.isValid) return s;
+                const slotDayIso = slotDt.toFormat('yyyy-MM-dd');
+                const per_attendee_local = tzCandidates.map(a => {
+                  const effTz = attendeeTzForDay(a, slotDayIso);
+                  if (effTz === timezone) return null;  // same wall-clock — no parenthetical
+                  const dt = slotDt.setZone(effTz);
                   if (!dt.isValid) return null;
-                  // v3.1.2 — raw `timezone: a.timezone` (IANA) dropped from the
-                  // result. local_display is the pre-rendered string Sonnet
-                  // quotes; local_iso carries the offset (no city). Shipping
-                  // the IANA tag invited "America/New_York → New York" pastes.
+                  // v3.1.2 — raw IANA dropped from the result. local_display is
+                  // the pre-rendered string Sonnet quotes; local_iso carries the
+                  // offset (no city). Shipping the IANA tag invited
+                  // "America/New_York → New York" pastes.
                   return {
                     email: a.email,
                     local_iso: dt.toISO(),
@@ -1833,6 +1844,29 @@ export class SchedulingSkill {
                 return { ...s, presentation_local: dt.toFormat('EEE d MMM HH:mm ZZZZ') };
               });
             }
+            // v3.3.8 — remember what's being OFFERED in this conversation so a
+            // later pick ("Tuesday 20:30") binds to the offered instant instead
+            // of re-deriving the date (the Liza wrong-Tuesday incident). The
+            // orchestrator injects these on subsequent turns. Colleague-path
+            // only — the owner-path has its own correction loop.
+            if (!isOwnerInitiatedSearch && annotatedSlots.length > 0 && context.channelId) {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { recordOfferedSlots } = require('../../utils/offeredSlotsStash') as
+                  typeof import('../../utils/offeredSlotsStash');
+                recordOfferedSlots({
+                  channelId: context.channelId,
+                  threadTs: context.threadTs,
+                  timezone,
+                  slots: annotatedSlots as Array<{ start: string }>,
+                });
+              } catch (err) {
+                logger.warn('offeredSlotsStash record failed — continuing', {
+                  err: String(err).slice(0, 150),
+                });
+              }
+            }
+
             // Surface per-day summary alongside slots so Sonnet can answer
             // "why no Monday?" honestly. When both travelers and day_summary
             // are empty, fall back to the legacy array shape so existing
@@ -2970,6 +3004,18 @@ export class SchedulingSkill {
             logger.warn('recordBookingInPersonMemory invocation failed (colleague-path) — continuing', {
               err: String(err).slice(0, 200),
             });
+          }
+
+          // v3.3.8 — the offer on the table was consumed by this booking;
+          // clear it so a stale "bind picks to these" block can't mislead
+          // the conversation's next exchange.
+          if (context.channelId) {
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { clearOfferedSlots } = require('../../utils/offeredSlotsStash') as
+                typeof import('../../utils/offeredSlotsStash');
+              clearOfferedSlots(context.channelId, context.threadTs);
+            } catch (_) { /* non-fatal */ }
           }
 
           // v3.1.4 (Y3) — record the requester-link for a colleague's direct
