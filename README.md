@@ -191,7 +191,7 @@ npm run dev          # development with hot reload
 npm run build && npm start    # production
 ```
 
-PM2 + auto-deploy watcher are configured in `ecosystem.config.js` for unattended operation — see that file for setup.
+PM2 (single fork-mode process) is configured in `ecosystem.config.js` for unattended operation; deploys are manual via `npm run deploy` (build → restart → tail logs). Startup logs a build stamp (version + git SHA) so `pm2 logs` shows which build is live.
 
 ---
 

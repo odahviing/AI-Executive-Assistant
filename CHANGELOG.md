@@ -2,6 +2,18 @@
 
 ---
 
+## 3.3.9 — ops hardening (parallel chat): single-process PM2 + manual deploy + build stamp; `trace` skill
+
+Small bundle closing the day: the parallel ops chat's PM2/deploy rework, plus the new post-build verification skill. No behavior change to Maelle's conversations.
+
+### Changed (ops, parallel chat)
+- **`maelle-deploy-watcher` removed from PM2** ([ecosystem.config.js](ecosystem.config.js)) — it polled origin/master for auto-triage commits, and auto-triage is retired; the watcher had nothing to act on. Deploys are now explicit: **`npm run deploy`** (build → `pm2 restart maelle` → tail logs). `scripts/deploy-watcher.mjs` is orphaned (kept on disk).
+- **Fork mode pinned + documented** — Maelle is a single stateful process (one Slack socket, in-memory dedup/queues, one SQLite file); `exec_mode: 'fork'` with no `instances` makes >1 worker impossible by construction.
+- **Build stamp on startup** ([index.ts](src/index.ts)) — version + git SHA logged on every boot, so `pm2 logs maelle` answers "which build is live" at a glance (root of the 2026-05-28 stale-dist incident). Fail-safe reads; degrades to 'unknown'.
+
+### Added (tooling)
+- **`trace` skill** (`.claude/skills/trace/` + `/trace` command) — post-build paper-trace verification: generate a scenario matrix from the change just built (original incident replayed, symmetry directions, every actor/path, boundaries, no-regression cells, fail-open paths, override hatches, adjacent consumers), trace each against code on disk with file:line citations, and grade at 100% — a failing row means the build is not done. Distilled from the v3.3.7/v3.3.8 traces (13- and 10-scenario runs).
+
 ## 3.3.8 — conversation-state correctness: picks bind to offers, answers always land, facts resolve per-day, coord retired from the colleague path
 
 A same-day reactive wave on top of 3.3.7, from live incidents. The theme: things the conversation already established (an offered slot, a repeated "yes", a stated travel date, an ongoing thread) were being dropped at the layer below — re-derived dates, dedup-swallowed answers, today-anchored timezone resolution, fresh threads for ongoing chats. Plus a data-driven capability decision: coordination is no longer how colleagues book. Patch; no schema change.

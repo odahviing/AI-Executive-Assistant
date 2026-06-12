@@ -41,12 +41,12 @@ Architecture reference for Maelle **v3.0.5**. Living document of the four-layer 
 
 ---
 
-## Runtime + deploy pipeline (v1.8.2)
+## Runtime + deploy pipeline (v3.3.9)
 
-**Runs under PM2 on the owner's laptop.** Two processes defined in `ecosystem.config.js`:
+**Runs under PM2 on the owner's laptop.** ONE process in `ecosystem.config.js`:
 
-- `maelle` — main bot, runs `dist/index.js` (requires `npm run build` first)
-- `maelle-deploy-watcher` — polls `origin/master` every 5 min via `scripts/deploy-watcher.mjs`. When `HEAD !== origin/master` AND any new commit's author is `Maelle Auto-Triage`: `git pull --ff-only` → `npm ci` (if lockfile changed) → `npm run build` → `pm2 restart maelle`. Owner's own commits are skipped (he deploys those himself by running the same commands locally).
+- `maelle` — main bot, `dist/index.js`, `exec_mode: 'fork'` pinned (single stateful process: one Slack socket, in-memory dedup/queues, one SQLite — never cluster). Deploys are MANUAL: `npm run deploy` (build → `pm2 restart maelle` → tail logs). Startup logs a build stamp (version + git SHA) so `pm2 logs` shows which build is live.
+- `maelle-deploy-watcher` REMOVED (v3.3.9) — auto-triage is retired, the watcher had nothing to poll for. `scripts/deploy-watcher.mjs` orphaned on disk.
 
 Startup flow (one-time): `npm i -g pm2 pm2-windows-startup` → `pm2 start ecosystem.config.js` → `pm2 save` → `pm2-startup install` (Windows auto-start on reboot).
 

@@ -8,9 +8,36 @@ import { startBackgroundTimer, initProfile } from './core/background';
 import { seedAssistantSelf } from './core/assistantSelf';
 import { seedOwnerSelf } from './core/ownerSelf';
 import logger from './utils/logger';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { execSync } from 'node:child_process';
+
+/**
+ * Build stamp for startup logging. Under PM2 the bot runs the COMPILED
+ * `dist/index.js`, which only changes after `npm run build` — so a stale
+ * `dist/` can silently keep running old code (observed 2026-05-28: a forgotten
+ * PM2 process ran old `dist` alongside `npm run dev`). Logging version + git
+ * SHA on every boot lets `pm2 logs maelle` confirm at a glance WHICH build is
+ * live. Fail-safe: any read error degrades to 'unknown', never blocks startup.
+ * __dirname resolves to repo/dist (PM2) or repo/src (ts-node-dev) — `..` is
+ * the repo root in both.
+ */
+function getBuildStamp(): { version: string; gitSha: string } {
+  const repoRoot = join(__dirname, '..');
+  let version = 'unknown';
+  let gitSha = 'unknown';
+  try {
+    version = (JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version as string) ?? 'unknown';
+  } catch { /* keep 'unknown' */ }
+  try {
+    gitSha = execSync('git rev-parse --short HEAD', { cwd: repoRoot, encoding: 'utf8' }).trim();
+  } catch { /* keep 'unknown' — e.g. running outside a git checkout */ }
+  return { version, gitSha };
+}
 
 async function main(): Promise<void> {
-  logger.info('Assistant platform starting up...', { env: config.NODE_ENV });
+  const build = getBuildStamp();
+  logger.info('Assistant platform starting up...', { env: config.NODE_ENV, version: build.version, gitSha: build.gitSha });
 
   getDb();
   logger.info('Database ready');
