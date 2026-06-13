@@ -11,10 +11,14 @@
  * is exactly how a zombie process "looked alive" on 2026-06-12/13). If we
  * stamped on the timer, a dead-socket zombie's watermark would stay current
  * and recovery would think there was no gap. So stamp ONLY on:
- *   (a) a real inbound Slack message (proof the socket is delivering), and
- *   (b) a confirmed socket connect.
- * A zombie's watermark then correctly freezes at the last true inbound, so
- * recovery scans the whole gap.
+ *   (a) a real inbound Slack message (proof the socket is delivering),
+ *   (b) a confirmed socket connect, and
+ *   (c) a healthy socket-watchdog poll — i.e. ONLY when client.connected===true
+ *       (that branch is gated on real connectivity, unlike the bare timer).
+ * (c) is what keeps the watermark CURRENT through a quiet period (days with no
+ * inbound on a healthy socket) so a later crash recovers only the real
+ * downtime, not the quiet stretch. A zombie's watermark still correctly
+ * freezes — the watchdog stops stamping the moment connected flips false.
  *
  * In-memory is the source of truth for the live reconnect path; the file is
  * only for the process-restart path (so startup knows the pre-crash gap).

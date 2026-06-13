@@ -2266,6 +2266,16 @@ export function startSocketWatchdog(app: App, profile: UserProfile, ownerChannel
           } catch (err) {
             logger.error('Reconnect catch-up failed', { profileId, err: String(err).slice(0, 200) });
           }
+        } else {
+          // Healthy poll: stamp "alive" every tick while the socket is
+          // genuinely connected. This keeps the watermark CURRENT during quiet
+          // periods (no inbound for days) so a later crash recovers only the
+          // real downtime, not the whole quiet stretch. Safe to stamp here —
+          // unlike the bare process timer, this branch only runs when
+          // client.connected === true, never in a dead-socket zombie state.
+          try {
+            (require('./socketWatermark') as typeof import('./socketWatermark')).stampSocketAlive(profileId);
+          } catch { /* non-fatal */ }
         }
         wasConnected = true;
         disconnectedSinceMs = null;
