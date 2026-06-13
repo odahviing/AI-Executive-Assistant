@@ -197,6 +197,13 @@ export function createSlackAppForProfile(profile: UserProfile): App {
 
     // Replace <@USERID> with "Name (slack_id: USERID)" so Claude knows the ID immediately
     resolved = resolved.replace(/<@([A-Z0-9]+)>/g, (_, userId) => {
+      // v3.3.x — a mention of the BOT ITSELF renders as just the assistant's
+      // name, never "Maelle (slack_id: U0ARK...)". The slack_id is only useful
+      // for DMing a person; Maelle never DMs herself, so exposing her own ID
+      // into the prompt is pointless AND is the exact token that could get
+      // echoed back to a colleague (Ayala 2026-06-12: "@Maelle see above"
+      // rendered "Maelle (slack_id: U0ARK5814PQ) see above" into the turn).
+      if (userId === botUserId) return assistant.name;
       const info = nameMap[userId];
       if (!info) return userId;
       return `${info.name} (slack_id: ${userId})`;
@@ -231,6 +238,17 @@ export function createSlackAppForProfile(profile: UserProfile): App {
   }): Promise<void> {
     const { senderId, text, channelId, ts, threadTs, say, client, isChannel, isMpim, isExplicitMention, voiceInput, mpimMemberIds, images, imageUrls } = params;
     const rawRole = getSenderRole(senderId);
+
+    // v3.3.x — a delivered inbound proves the socket is alive RIGHT NOW. Stamp
+    // the recovery watermark here (the shared entry for DM/MPIM/mention). The
+    // watermark is what scopes on-restart / on-reconnect catch-up to the actual
+    // downtime gap instead of a blind 24h window — and stamping on real inbound
+    // (never the bare process timer) is what keeps a dead-socket zombie's
+    // watermark correctly frozen so its gap is fully recovered.
+    try {
+      const { stampSocketAlive } = require('./socketWatermark') as typeof import('./socketWatermark');
+      stampSocketAlive(user.slack_user_id);
+    } catch { /* non-fatal */ }
 
     // ── Colleague-mode testing (owner only, DMs only) ────────────────────────
     if (rawRole === 'owner' && !isChannel && !isMpim) {
@@ -2188,6 +2206,99 @@ export function createSlackAppForProfile(profile: UserProfile): App {
 // v2.0.7 — handleApprovalResponse retired with the legacy approval_queue
 // table. Approvals today are resolved via the `approvals` table + Sonnet's
 // free-text interpretation (resolve_approval tool); no command grammar needed.
+
+// ── Socket watchdog (v3.3.x — recovery rewrite) ────────────────────────────────
+//
+// The v3.2.4 "never crash on a socket transient" handlers (index.ts) keep the
+// process alive when the Slack socket dies — which, with recovery being
+// startup-only, turned socket-death into a SILENT ZOMBIE: process up, socket
+// dead, no inbound, no restart, no catch-up (2026-06-12/13). This watchdog
+// closes that: it POLLS the documented public `client.connected` boolean (no
+// API calls, no fragile finity event names — not a catch-up heartbeat) and:
+//   • reconnect after a gap → fire ONE gap-scoped catch-up (recover what
+//     arrived while the socket was down, without waiting for a restart).
+//   • disconnected > threshold AND Slack API still reachable → exit(1) so the
+//     supervisor (PM2 fork, autorestart) restarts clean → startup catch-up.
+//     The auth.test gate prevents a restart-storm during a real Slack outage
+//     (if the API is ALSO down, restarting won't help — ride it out).
+const WATCHDOG_POLL_MS = 30 * 1000;
+const DISCONNECT_EXIT_MS = 3 * 60 * 1000;
+
+export function startSocketWatchdog(app: App, profile: UserProfile, ownerChannel: string): void {
+  const profileId = profile.user.slack_user_id;
+  const botToken = profile.assistant.slack.bot_token;
+  let wasConnected = true;
+  let disconnectedSinceMs: number | null = null;
+  let watchdogDisabledLogged = false;
+
+  setInterval(() => {
+    void (async () => {
+      const client = (app as any).receiver?.client;
+      // CRITICAL fail-safe: `client.connected` is a runtime-internal of Bolt's
+      // SocketModeReceiver. If that shape ever changes and the client object
+      // isn't found, we CANNOT assess connectivity — and must NOT infer
+      // "disconnected" (that would exit-loop a perfectly healthy bot). Skip the
+      // poll entirely when the client/boolean is absent; recovery then falls
+      // back to startup-only, never to a restart storm.
+      if (!client || typeof client.connected !== 'boolean') {
+        if (!watchdogDisabledLogged) {
+          watchdogDisabledLogged = true;
+          logger.warn('Socket watchdog: client.connected not reachable — watchdog disabled (startup catch-up still active)', { profileId });
+        }
+        return;
+      }
+      const connected: boolean = client.connected === true;
+
+      if (connected) {
+        if (!wasConnected) {
+          // Reconnect after a gap → recover the downtime, scoped to the
+          // watermark captured BEFORE we stamp the reconnect moment.
+          const { getLastSocketAlive, stampSocketAlive } =
+            require('./socketWatermark') as typeof import('./socketWatermark');
+          const sinceMs = getLastSocketAlive(profileId) ?? undefined;
+          logger.warn('Socket reconnected after a gap — running gap-scoped catch-up', {
+            profileId, gapStartMs: sinceMs,
+          });
+          stampSocketAlive(profileId);
+          try {
+            const { catchUpMissedMessages } = require('../../core/background') as typeof import('../../core/background');
+            await catchUpMissedMessages(app, profile, ownerChannel, sinceMs);
+          } catch (err) {
+            logger.error('Reconnect catch-up failed', { profileId, err: String(err).slice(0, 200) });
+          }
+        }
+        wasConnected = true;
+        disconnectedSinceMs = null;
+        return;
+      }
+
+      // Disconnected.
+      wasConnected = false;
+      if (disconnectedSinceMs === null) {
+        disconnectedSinceMs = Date.now();
+        logger.warn('Socket reported disconnected — watching', { profileId });
+        return;
+      }
+      if (Date.now() - disconnectedSinceMs < DISCONNECT_EXIT_MS) return;
+
+      // Down past threshold. Only restart if Slack's API is reachable (socket-
+      // specific problem a restart fixes) — not during a full Slack/network
+      // outage (restarting won't help; avoid a PM2 max_restarts burn).
+      let apiReachable = false;
+      try { apiReachable = (await app.client.auth.test({ token: botToken }))?.ok === true; }
+      catch { apiReachable = false; }
+      if (!apiReachable) {
+        logger.warn('Socket down but Slack API unreachable — likely an outage; NOT restarting', { profileId });
+        return;
+      }
+      logger.error('Socket dead > threshold while API is reachable — exiting for a clean restart', {
+        profileId, downMs: Date.now() - disconnectedSinceMs,
+      });
+      try { (require('./socketWatermark') as typeof import('./socketWatermark')).flushSocketWatermark(); } catch { /* noop */ }
+      process.exit(1);
+    })();
+  }, WATCHDOG_POLL_MS).unref?.();
+}
 
 // ── Proactive messaging ───────────────────────────────────────────────────────
 // Phase 3 — push messages to user without them initiating

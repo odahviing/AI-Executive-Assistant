@@ -1,6 +1,7 @@
 import { config } from './config';
 import { App } from '@slack/bolt';
-import { createSlackAppForProfile } from './connectors/slack/app';
+import { createSlackAppForProfile, startSocketWatchdog } from './connectors/slack/app';
+import { stampSocketAlive, flushSocketWatermark } from './connectors/slack/socketWatermark';
 import { startWhatsApp } from './connectors/whatsapp';
 import { loadAllProfiles } from './config/userProfile';
 import { getDb } from './db';
@@ -159,11 +160,36 @@ async function main(): Promise<void> {
     );
   }
 
+  // ── Socket watchdog — recovery on reconnect + restart-on-dead-socket ──────
+  // v3.3.x. The socket just opened (Phase 3) → stamp the watermark, then start
+  // the watchdog that polls connectivity, fires gap-scoped catch-up on a
+  // reconnect, and exits (→ supervisor restart → startup catch-up) on a
+  // persistent dead socket. Decouples recovery from "process just started",
+  // closing the silent-zombie gap.
+  for (const { app, name } of runningApps) {
+    const profile = [...profiles.values()].find(p => p.assistant.name === name);
+    if (!profile) continue;
+    try {
+      const dmRes = await app.client.conversations.open({
+        token: profile.assistant.slack.bot_token,
+        users: profile.user.slack_user_id,
+      });
+      const ownerChannel = (dmRes.channel as any)?.id as string | undefined;
+      stampSocketAlive(profile.user.slack_user_id);
+      if (ownerChannel) startSocketWatchdog(app, profile, ownerChannel);
+    } catch (err) {
+      logger.warn('Could not start socket watchdog (continuing)', { name, err: String(err).slice(0, 200) });
+    }
+  }
+
   // Background timer — runs every 5 minutes
   startBackgroundTimer(runningApps, profiles);
 
   const shutdown = async (signal: string): Promise<void> => {
     logger.info('Shutting down', { signal });
+    // Persist the socket watermark so the next boot's catch-up scopes to the
+    // real gap (this clean-stop moment), not a blind 24h window.
+    try { flushSocketWatermark(); } catch { /* noop */ }
     await Promise.all(runningApps.map(({ app, name }) =>
       app.stop().then(() => logger.info('Assistant stopped', { name }))
     ));

@@ -911,8 +911,15 @@ export function formatPeopleMemoryForPrompt(
       ? `, tz: ${p.timezone}${!p.state ? ' (city not on file — TZ is reliable for time math; only ask for city when location/venue matters)' : ''}`
       : '';
 
+    // v3.3.x — surface language_preference on the OWNER-path contact line so
+    // it's available when Maelle INITIATES a message TO this person (outreach /
+    // coord / reminder). It is intentionally NOT on the colleague-path social
+    // block (buildSocialContextBlock) — a reply to the person's own message
+    // mirrors THAT message, not the stored pref. The prompt rule that consumes
+    // this for outbound is owned by the prompt chat (handoff filed).
+    const langPart = profile.language_preference ? `, language_pref: ${profile.language_preference}` : '';
     const parts: string[] = [
-      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${travelTag}${tzPart}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}${socialPart})`,
+      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${travelTag}${tzPart}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}${langPart}${socialPart})`,
     ];
 
     // Profile dimensions moved to per-person markdown files (v2.2.1). Fields
@@ -1022,7 +1029,13 @@ export function buildSocialContextBlock(slackId: string, timezone: string, assis
   // Profile summary — show anything known
   const profileParts: string[] = [];
   if (profile.communication_style)  profileParts.push(`style: ${profile.communication_style}`);
-  if (profile.language_preference)  profileParts.push(`language: ${profile.language_preference}`);
+  // v3.3.x — language_preference deliberately NOT rendered here. This block is
+  // the COLLEAGUE-path (inbound) social context: when the person writes to
+  // Maelle, the reply must mirror THEIR current message, never a stored pref
+  // (the Ayala "English in, Hebrew out" bug). The stored preference is for the
+  // OUTREACH path (when Maelle INITIATES) — surfaced on the owner-path contact
+  // line instead. Inbound language is governed by detectMessageLanguage's
+  // per-turn directive + the CURRENT-TURN-WINS rule.
   if (profile.working_hours)        profileParts.push(`hours: ${profile.working_hours}`);
   if (profile.response_speed)       profileParts.push(`responds: ${profile.response_speed}`);
   if (profile.role_summary)         profileParts.push(`role: ${profile.role_summary}`);

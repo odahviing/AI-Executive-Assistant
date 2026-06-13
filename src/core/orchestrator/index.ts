@@ -942,7 +942,14 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
       typeof import('../../utils/detectMessageLanguage');
     const isVoice = typeof userMessage === 'string' && userMessage.trimStart().startsWith('[Voice message]');
     const lang = isVoice ? null : detectMessageLanguage(userMessage);
-    if (lang) {
+    if (lang === 'Latin') {
+      // v3.3.x — symmetric override for a Latin-script inbound. Don't name the
+      // language (script can't distinguish English/Spanish/French); just bind
+      // to THIS message and forbid drifting to a non-Latin language or a stored
+      // preference. Fixes "English in, Hebrew out" (Ayala) when the thread /
+      // stored pref skews non-Latin.
+      languageDirectiveBlock = `LANGUAGE (this turn): the sender's current message is in a Latin-script language (English, Spanish, etc.) — reply in the EXACT same language as THIS message. Do NOT reply in Hebrew or any non-Latin language, and do NOT carry over the language of earlier messages in this thread, a stored language preference, or any tool result.`;
+    } else if (lang) {
       languageDirectiveBlock = `LANGUAGE (this turn): the sender wrote in ${lang} — reply in ${lang}. This overrides any prior-turn language and the language of anything you read this turn (tool results, memory, calendar subjects).`;
     }
   } catch (_) { /* detection failure is non-fatal — static rule still governs */ }

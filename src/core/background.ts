@@ -230,8 +230,13 @@ export async function initProfile(
   // the live recordBooking path when the owner actually books a meeting (with a
   // non-human attendee filter); catch-up is a pick-list the owner chooses from.
 
-  // Catch up on any messages sent while the bot was offline
-  await catchUpMissedMessages(app, profile, dmChannel);
+  // Catch up on any messages sent while the bot was offline. Gap-scoped to the
+  // persisted socket watermark (the last moment the socket was known alive),
+  // falling back to 24h on first-ever boot. See reconcileUnanswered.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getLastSocketAlive } = require('../connectors/slack/socketWatermark') as
+    typeof import('../connectors/slack/socketWatermark');
+  await catchUpMissedMessages(app, profile, dmChannel, getLastSocketAlive(profile.user.slack_user_id) ?? undefined);
 }
 
 // ── Catch-up on missed messages ──────────────────────────────────────────────
@@ -250,10 +255,14 @@ export async function initProfile(
  *     reply ("↩ Catching up on your message from Xh ago") tells the owner
  *     what they're looking at.
  */
-async function catchUpMissedMessages(
+// v3.3.x — exported so the socket watchdog can fire a gap-scoped recovery on
+// reconnect (not only at startup). `sinceMs` is the socket-alive watermark;
+// when omitted we fall back to the 24h lookback (first-ever boot).
+export async function catchUpMissedMessages(
   app: App,
   profile: UserProfile,
   ownerChannel: string,
+  sinceMs?: number,
 ): Promise<void> {
   const botToken = profile.assistant.slack.bot_token;
 
@@ -266,7 +275,21 @@ async function catchUpMissedMessages(
     return;
   }
 
-  const oldest = String((Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000) / 1000);
+  // Gap start: the precise downtime window from the watermark, capped at 24h
+  // back so a long outage still bounds the fetch. The per-conversation
+  // answered-check (latestHuman > latestBot) decides; the window only bounds
+  // how far we look.
+  //
+  // SAFETY (v3.3.x, owner-flagged before wrap): with NO watermark — first run
+  // on this build, or a lost file — do NOT sweep a blind 24h backlog. The new
+  // history-based panel discovery sees threads the OLD registry-blind catch-up
+  // never answered; a 24h sweep on first boot would belatedly reply to every
+  // one of them at once, blasting many colleagues with stale messages. "What's
+  // gone is gone": no watermark → gap starts NOW → replay nothing pre-existing.
+  // Real outages (watermark present) still recover precisely.
+  const nowMs = Date.now();
+  const floorMs = nowMs - LOOKBACK_HOURS * 60 * 60 * 1000;
+  const oldest = String((sinceMs != null ? Math.max(sinceMs, floorMs) : nowMs) / 1000);
 
   // v3.2.x — scan ALL the bot's 1:1 DMs, not just the owner's. The old scope
   // was owner-DM-only, so after an outage every colleague message sent while
@@ -292,49 +315,64 @@ async function catchUpMissedMessages(
     logger.warn('Catch-up: could not list DMs — falling back to owner DM only', { err: String(err) });
   }
 
-  logger.info('Catch-up: scanning DMs for missed messages', { dmCount: channels.size });
+  logger.info('Catch-up: scanning DMs for missed messages', { dmCount: channels.size, sinceMs });
   for (const channelId of channels) {
+    const opts: CheckOpts = {
+      app, profile, botToken, botUserId,
+      channelId,
+      ownerId: profile.user.slack_user_id,
+      oldest,
+    };
+    // Surface A — the DM's top-level stream.
     try {
-      await processIfMissed({
-        app, profile, botToken, botUserId,
-        channelId,
-        ownerId: profile.user.slack_user_id,
-        oldest,
-      });
+      await processIfMissed(opts);
     } catch (err) {
       logger.warn('Catch-up: per-DM error, continuing', { channelId, err: String(err).slice(0, 200) });
     }
-  }
-
-  // v3.2.6 (#122) — also replay missed messages from assistant-PANEL threads.
-  // Panel messages are thread replies, invisible to the conversations.history
-  // DM scan above (the gap that dropped the owner's "big news" prompt). The
-  // DB-backed registry survives restarts and tells us which (channel, thread)
-  // panels to check.
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getActiveAssistantThreads } = require('../connectors/slack/assistantThreads') as
-      typeof import('../connectors/slack/assistantThreads');
-    const panels = getActiveAssistantThreads();
-    if (panels.length > 0) {
-      logger.info('Catch-up: scanning assistant-panel threads', { count: panels.length });
-      for (const p of panels) {
+    // Surface B — assistant-PANEL threads, discovered from Slack itself (NOT a
+    // registry). v3.3.x: the old registry path checked whatever (channel,
+    // thread) it had stored, which could be STALE — Ayala talks in panel
+    // thread 1779990940 (since May) but the registry held a different thread
+    // for her channel, so her outage backlog was never seen (2026-06-12).
+    // Discovering parents from the channel's own recent history can't go
+    // stale: a panel parent is a top-level message in the DM, so it surfaces
+    // here, and we check ITS replies for an unanswered message.
+    try {
+      for (const parentTs of await discoverThreadParents(app, botToken, channelId)) {
         try {
-          await processAssistantThreadIfMissed({
-            app, profile, botToken, botUserId,
-            channelId: p.channelId,
-            ownerId: profile.user.slack_user_id,
-            oldest,
-          }, p.threadTs);
+          await processAssistantThreadIfMissed(opts, parentTs);
         } catch (err) {
-          logger.warn('Catch-up: per-assistant-thread error, continuing', {
-            channelId: p.channelId, threadTs: p.threadTs, err: String(err).slice(0, 200),
+          logger.warn('Catch-up: per-panel-thread error, continuing', {
+            channelId, threadTs: parentTs, err: String(err).slice(0, 200),
           });
         }
       }
+    } catch (err) {
+      logger.warn('Catch-up: panel discovery threw — continuing', { channelId, err: String(err).slice(0, 200) });
     }
-  } catch (err) {
-    logger.warn('Catch-up: assistant-thread scan threw — continuing', { err: String(err).slice(0, 200) });
+  }
+}
+
+/**
+ * Find assistant-panel thread parents in a DM by reading the channel's recent
+ * top-level history (NO registry, NO `oldest` — an active thread's parent can
+ * be old while its replies are recent, so we must see old parents too). A
+ * parent is any returned message with replies. Returns their ts (deduped),
+ * newest-first, capped. The reply-recency gate happens later in
+ * processAssistantThreadIfMissed via `oldest`.
+ */
+async function discoverThreadParents(app: App, botToken: string, channelId: string): Promise<string[]> {
+  try {
+    const res = await app.client.conversations.history({ token: botToken, channel: channelId, limit: 50 });
+    const msgs = (res.messages ?? []) as Array<Record<string, unknown>>;
+    const parents: string[] = [];
+    for (const m of msgs) {
+      const replyCount = typeof m.reply_count === 'number' ? m.reply_count : 0;
+      if (replyCount > 0 && typeof m.ts === 'string') parents.push(m.ts);
+    }
+    return parents.slice(0, 10);  // bound — realistic DMs have 0-1 active panels
+  } catch {
+    return [];  // no access / no history — nothing to discover
   }
 }
 

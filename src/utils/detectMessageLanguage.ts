@@ -72,9 +72,19 @@ export function detectMessageLanguage(text: string | null | undefined): string |
   if (letters < 2) return null; // too little signal to judge
 
   // First non-Latin script to clear the 30% threshold wins (SCRIPTS order =
-  // priority). Latin is intentionally NOT a winner — it falls through to null.
+  // priority).
   for (const s of SCRIPTS) {
     if ((counts[s.name] ?? 0) / letters >= 0.3) return s.name;
   }
+  // v3.3.x — Latin is now a winner too, returned as the sentinel 'Latin'.
+  // WHY: the per-turn re-stamp used to fire only for non-Latin scripts, so a
+  // person with a stored non-Latin pref (or a Hebrew-heavy thread) who SWITCHES
+  // to English got nothing to counter the stale language → Maelle kept replying
+  // Hebrew to English (Ayala, 2026-06-12). Returning 'Latin' lets the caller
+  // emit a "mirror this Latin message, don't drift to a non-Latin language"
+  // directive — symmetric override. We don't name English-vs-Spanish (script
+  // can't tell, and naming it wrong would mislabel Spanish-writing colleagues);
+  // script level is enough to kill the drift.
+  if (latin / letters >= 0.5) return 'Latin';
   return null;
 }
