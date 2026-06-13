@@ -6,9 +6,10 @@ import { materializeRoutineTasks, backfillNullNextRunAt } from '../tasks/routine
 import { ensureBriefingCron, updateBriefingCronChannel } from '../tasks/crons';
 import logger from '../utils/logger';
 
-// v1.5.1 — tightened scope: DM only, 24h window, reply in thread, last unread
-// message only. No more "I was offline" prompt injection hack.
-const LOOKBACK_HOURS = 24;
+// v3.3.10 — recovery scope: DM + panel threads, gap-from-watermark (no time
+// cap — "since Maelle was last online", any length), ONE reply per person to
+// their latest unanswered message, posted in-thread. The legacy 24h
+// LOOKBACK_HOURS was removed — the watermark IS the window.
 
 // ── Background timer ─────────────────────────────────────────────────────────
 
@@ -275,21 +276,20 @@ export async function catchUpMissedMessages(
     return;
   }
 
-  // Gap start: the precise downtime window from the watermark, capped at 24h
-  // back so a long outage still bounds the fetch. The per-conversation
-  // answered-check (latestHuman > latestBot) decides; the window only bounds
-  // how far we look.
+  // Gap = "since Maelle was last online", from the watermark. NO time cap
+  // (owner direction): if she was off two days, recover two days; off a week,
+  // a week. The per-conversation answered-check (latestHuman > latestBot)
+  // decides; the window just bounds how far back we look.
   //
-  // SAFETY (v3.3.x, owner-flagged before wrap): with NO watermark — first run
-  // on this build, or a lost file — do NOT sweep a blind 24h backlog. The new
-  // history-based panel discovery sees threads the OLD registry-blind catch-up
-  // never answered; a 24h sweep on first boot would belatedly reply to every
-  // one of them at once, blasting many colleagues with stale messages. "What's
-  // gone is gone": no watermark → gap starts NOW → replay nothing pre-existing.
-  // Real outages (watermark present) still recover precisely.
+  // SAFETY: with NO watermark — first run on this build, or a lost file — we
+  // have no record of when she was last up, so do NOT sweep an unknown
+  // backlog. The history-based panel discovery sees threads the OLD
+  // registry-blind catch-up never answered; sweeping on a fresh boot would
+  // belatedly blast colleagues with stale messages. "What's gone is gone":
+  // no watermark → gap starts NOW → replay nothing pre-existing. Once a
+  // watermark exists, real outages of ANY length recover fully.
   const nowMs = Date.now();
-  const floorMs = nowMs - LOOKBACK_HOURS * 60 * 60 * 1000;
-  const oldest = String((sinceMs != null ? Math.max(sinceMs, floorMs) : nowMs) / 1000);
+  const oldest = String((sinceMs != null ? sinceMs : nowMs) / 1000);
 
   // v3.2.x — scan ALL the bot's 1:1 DMs, not just the owner's. The old scope
   // was owner-DM-only, so after an outage every colleague message sent while
@@ -323,24 +323,27 @@ export async function catchUpMissedMessages(
       ownerId: profile.user.slack_user_id,
       oldest,
     };
-    // Surface A — the DM's top-level stream.
+    // ONE reply per person, to their single LATEST unanswered message (owner
+    // direction). A DM can have two surfaces — the top-level stream and one or
+    // more assistant-PANEL threads — so we gather an unanswered candidate from
+    // each, then replay only the newest. (Surface B is discovered from the
+    // channel's own Slack history, NOT a registry: the old registry could hold
+    // a stale thread_ts and miss a colleague's real panel thread — Ayala's, a
+    // long-lived thread the registry didn't have — which is why her message
+    // was never recovered on 2026-06-12. A panel parent is a top-level message,
+    // so it always surfaces in history; we then check its replies.)
+    const candidates: UnansweredCandidate[] = [];
     try {
-      await processIfMissed(opts);
+      const top = await findUnansweredTopLevel(opts);
+      if (top) candidates.push(top);
     } catch (err) {
       logger.warn('Catch-up: per-DM error, continuing', { channelId, err: String(err).slice(0, 200) });
     }
-    // Surface B — assistant-PANEL threads, discovered from Slack itself (NOT a
-    // registry). v3.3.x: the old registry path checked whatever (channel,
-    // thread) it had stored, which could be STALE — Ayala talks in panel
-    // thread 1779990940 (since May) but the registry held a different thread
-    // for her channel, so her outage backlog was never seen (2026-06-12).
-    // Discovering parents from the channel's own recent history can't go
-    // stale: a panel parent is a top-level message in the DM, so it surfaces
-    // here, and we check ITS replies for an unanswered message.
     try {
       for (const parentTs of await discoverThreadParents(app, botToken, channelId)) {
         try {
-          await processAssistantThreadIfMissed(opts, parentTs);
+          const c = await findUnansweredInThread(opts, parentTs);
+          if (c) candidates.push(c);
         } catch (err) {
           logger.warn('Catch-up: per-panel-thread error, continuing', {
             channelId, threadTs: parentTs, err: String(err).slice(0, 200),
@@ -350,7 +353,22 @@ export async function catchUpMissedMessages(
     } catch (err) {
       logger.warn('Catch-up: panel discovery threw — continuing', { channelId, err: String(err).slice(0, 200) });
     }
+    if (candidates.length === 0) continue;
+    const latest = candidates.reduce((a, b) => (b.userTs > a.userTs ? b : a));
+    try {
+      await replayMissedMessage(opts, latest.message, { postThreadTs: latest.postThreadTs, source: latest.source });
+    } catch (err) {
+      logger.warn('Catch-up: replay error, continuing', { channelId, err: String(err).slice(0, 200) });
+    }
   }
+}
+
+/** A person's latest unanswered message on one surface (top-level DM or a panel thread). */
+interface UnansweredCandidate {
+  message: Record<string, unknown>;
+  postThreadTs: string;
+  source: 'dm' | 'assistant_panel';
+  userTs: number;
 }
 
 /**
@@ -386,8 +404,11 @@ interface CheckOpts {
   oldest: string;
 }
 
-async function processIfMissed(opts: CheckOpts): Promise<void> {
-  const { app, profile, botToken, botUserId, channelId, ownerId, oldest } = opts;
+// Returns the DM top-level stream's latest unanswered user message as a
+// candidate, or null. (Was processIfMissed, which replayed directly; now
+// returns so the caller can pick ONE latest across all of a person's surfaces.)
+async function findUnansweredTopLevel(opts: CheckOpts): Promise<UnansweredCandidate | null> {
+  const { app, botToken, botUserId, channelId, oldest } = opts;
 
   let messages: Array<Record<string, unknown>>;
   try {
@@ -400,7 +421,7 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
     messages = (result.messages ?? []) as Array<Record<string, unknown>>;
   } catch (err) {
     logger.debug('Catch-up: skipping channel (no access)', { channelId });
-    return;
+    return null;
   }
 
   // DM-only catch-up — no mention gating; any top-level user message counts.
@@ -409,15 +430,15 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
   // owner's video that never got answered). Still excludes true system
   // subtypes (channel_join, bot_message, etc.).
   const latestUserMsg = latestByTs(messages, m => !!m.user && !m.bot_id && (!m.subtype || m.subtype === 'file_share'));
-  if (!latestUserMsg?.ts) return;
+  if (!latestUserMsg?.ts) return null;
 
   const userTs = parseFloat(latestUserMsg.ts as string);
   const latestBotMsg = latestByTs(messages, m => !!m.bot_id || m.user === botUserId);
   const botTs = latestBotMsg?.ts ? parseFloat(latestBotMsg.ts as string) : 0;
-  if (userTs <= botTs) return;
+  if (userTs <= botTs) return null;
 
   // The message could have been answered inside its OWN thread (history returns
-  // top-level only). Check replies before replaying.
+  // top-level only). Check replies before treating it as unanswered.
   const msgTs = latestUserMsg.ts as string;
   try {
     const replies = await app.client.conversations.replies({
@@ -429,12 +450,12 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
     const botThreadReply = (replies.messages ?? []).find(
       m => (m.bot_id || m.user === botUserId) && parseFloat(m.ts as string) > userTs
     );
-    if (botThreadReply) return;
+    if (botThreadReply) return null;
   } catch {
-    // No replies or no access — proceed with catchup
+    // No replies or no access — proceed
   }
 
-  await replayMissedMessage(opts, latestUserMsg, { postThreadTs: msgTs, source: 'dm' });
+  return { message: latestUserMsg, postThreadTs: msgTs, source: 'dm', userTs };
 }
 
 // v3.2.6 (#122) — assistant-PANEL catch-up. Messages typed in the Slack
@@ -444,7 +465,9 @@ async function processIfMissed(opts: CheckOpts): Promise<void> {
 // Here we pull the panel thread's replies directly and replay the latest
 // unanswered one. The (channel, thread_ts) coordinates come from the
 // DB-backed `assistant_threads` registry, which survives restarts.
-async function processAssistantThreadIfMissed(opts: CheckOpts, threadTs: string): Promise<void> {
+// Returns a panel thread's latest unanswered user message as a candidate, or
+// null. (Was processAssistantThreadIfMissed, which replayed directly.)
+async function findUnansweredInThread(opts: CheckOpts, threadTs: string): Promise<UnansweredCandidate | null> {
   const { app, botToken, channelId, botUserId, oldest } = opts;
 
   let messages: Array<Record<string, unknown>>;
@@ -458,24 +481,24 @@ async function processAssistantThreadIfMissed(opts: CheckOpts, threadTs: string)
     messages = (result.messages ?? []) as Array<Record<string, unknown>>;
   } catch (err) {
     logger.debug('Catch-up: assistant thread not accessible', { channelId, threadTs });
-    return;
+    return null;
   }
 
   const latestUserMsg = latestByTs(
     messages,
     m => !!m.user && !m.bot_id && (!m.subtype || m.subtype === 'file_share') && m.user !== botUserId,
   );
-  if (!latestUserMsg?.ts) return;
+  if (!latestUserMsg?.ts) return null;
 
   const userTs = parseFloat(latestUserMsg.ts as string);
-  if (userTs < parseFloat(oldest)) return;  // older than lookback — leave it
+  if (userTs < parseFloat(oldest)) return null;  // before the gap — leave it
 
   const latestBotMsg = latestByTs(messages, m => !!m.bot_id || m.user === botUserId);
   const botTs = latestBotMsg?.ts ? parseFloat(latestBotMsg.ts as string) : 0;
-  if (userTs <= botTs) return;  // already answered in the panel
+  if (userTs <= botTs) return null;  // already answered in the panel
 
-  // Reply back INTO the panel thread (thread_ts = the panel parent).
-  await replayMissedMessage(opts, latestUserMsg, { postThreadTs: threadTs, source: 'assistant_panel' });
+  // Reply target = the panel parent thread.
+  return { message: latestUserMsg, postThreadTs: threadTs, source: 'assistant_panel', userTs };
 }
 
 // Newest message matching `pred`, by ts. Order-independent — works for both
