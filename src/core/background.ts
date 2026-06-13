@@ -7,9 +7,10 @@ import { ensureBriefingCron, updateBriefingCronChannel } from '../tasks/crons';
 import logger from '../utils/logger';
 
 // v3.3.10 — recovery scope: DM + panel threads, gap-from-watermark (no time
-// cap — "since Maelle was last online", any length), ONE reply per person to
-// their latest unanswered message, posted in-thread. The legacy 24h
-// LOOKBACK_HOURS was removed — the watermark IS the window.
+// cap — "since Maelle was last online", any length), one reply per distinct
+// unread THREAD (a person with two separate unanswered threads gets both),
+// posted in-thread. The legacy 24h LOOKBACK_HOURS was removed — the watermark
+// IS the window.
 
 // ── Background timer ─────────────────────────────────────────────────────────
 
@@ -323,15 +324,17 @@ export async function catchUpMissedMessages(
       ownerId: profile.user.slack_user_id,
       oldest,
     };
-    // ONE reply per person, to their single LATEST unanswered message (owner
-    // direction). A DM can have two surfaces — the top-level stream and one or
-    // more assistant-PANEL threads — so we gather an unanswered candidate from
-    // each, then replay only the newest. (Surface B is discovered from the
-    // channel's own Slack history, NOT a registry: the old registry could hold
-    // a stale thread_ts and miss a colleague's real panel thread — Ayala's, a
-    // long-lived thread the registry didn't have — which is why her message
-    // was never recovered on 2026-06-12. A panel parent is a top-level message,
-    // so it always surfaces in history; we then check its replies.)
+    // One reply per distinct unread THREAD (owner direction): the same person
+    // can have two separate unanswered conversations — a top-level DM and a
+    // panel, or two panels — and each is its own thing to answer. We gather an
+    // unanswered candidate from every surface, dedup by thread (so a panel
+    // parent that also appears as a top-level message isn't answered twice),
+    // and replay the latest unanswered message of each thread. (Surface B is
+    // discovered from the channel's own Slack history, NOT a registry: the old
+    // registry could hold a stale thread_ts and miss a colleague's real panel
+    // thread — Ayala's, a long-lived thread the registry didn't have — which is
+    // why her message was never recovered on 2026-06-12. A panel parent is a
+    // top-level message, so it always surfaces in history; we check its replies.)
     const candidates: UnansweredCandidate[] = [];
     try {
       const top = await findUnansweredTopLevel(opts);
@@ -354,16 +357,25 @@ export async function catchUpMissedMessages(
       logger.warn('Catch-up: panel discovery threw — continuing', { channelId, err: String(err).slice(0, 200) });
     }
     if (candidates.length === 0) continue;
-    const latest = candidates.reduce((a, b) => (b.userTs > a.userTs ? b : a));
-    try {
-      await replayMissedMessage(opts, latest.message, { postThreadTs: latest.postThreadTs, source: latest.source });
-    } catch (err) {
-      logger.warn('Catch-up: replay error, continuing', { channelId, err: String(err).slice(0, 200) });
+    // Dedup by thread — keep the latest unanswered message per distinct thread,
+    // so an overlap (a panel parent surfacing both as a top-level candidate and
+    // a thread candidate) is answered once, not twice.
+    const byThread = new Map<string, UnansweredCandidate>();
+    for (const c of candidates) {
+      const existing = byThread.get(c.postThreadTs);
+      if (!existing || c.userTs > existing.userTs) byThread.set(c.postThreadTs, c);
+    }
+    for (const c of byThread.values()) {
+      try {
+        await replayMissedMessage(opts, c.message, { postThreadTs: c.postThreadTs, source: c.source });
+      } catch (err) {
+        logger.warn('Catch-up: replay error, continuing', { channelId, threadTs: c.postThreadTs, err: String(err).slice(0, 200) });
+      }
     }
   }
 }
 
-/** A person's latest unanswered message on one surface (top-level DM or a panel thread). */
+/** A thread's latest unanswered message (top-level DM stream or a panel thread). */
 interface UnansweredCandidate {
   message: Record<string, unknown>;
   postThreadTs: string;
