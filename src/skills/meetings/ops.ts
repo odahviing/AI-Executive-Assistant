@@ -1717,15 +1717,24 @@ export class SchedulingSkill {
 
             const slots = candidateSet.filter(s => chosenStarts.has(s.start));
 
-            // v2.7.0 — initiator-aware annotation. Owner-path already pre-
-            // dropped attendee-busy slots via attendeeBusyEmails (line 807).
-            // Colleague-path didn't pre-drop — slots may come back when an
-            // internal attendee is busy. Annotate each slot with each
-            // internal attendee's free/busy status so Sonnet narrates honestly
-            // (per owner direction: colleague-path includes + annotates,
-            // owner-path drops).
+            // v2.7.0 — initiator-aware annotation. Owner-path normally pre-
+            // dropped attendee-busy slots via attendeeBusyEmails. Colleague-path
+            // doesn't pre-drop — it ANNOTATES each slot with the attendee's
+            // free/busy status so Sonnet narrates honestly.
+            //
+            // v3.3.x (Dina webinar, 2026-06-14) — REUSE that annotation on the
+            // OWNER path when finding time for a colleague-REQUESTED meeting.
+            // When the owner says "find her a time" for a meeting the colleague
+            // asked for (esp. urgent), the colleague is FLEXIBLE — she'll move
+            // her own thing — so her busy must NOT hard-drop the owner's free
+            // slots. Sonnet signals this by setting ignore_attendee_availability
+            // (→ attendeeBusyEmails undefined, no hard drop); we then run the
+            // SAME annotation so the result is "12:30: Idan free, Dina busy" and
+            // Maelle can say "works for you — want me to ask Dina to move it?"
+            // instead of "no time" / bouncing the question back to the requester.
+            const annotateForFlexibleRequester = isOwnerInitiatedSearch && ignoreAttendeeBusy;
             let annotatedSlots: Array<any> = slots;
-            if (!isOwnerInitiatedSearch && attendeeEmails.length > 0) {
+            if ((!isOwnerInitiatedSearch || annotateForFlexibleRequester) && attendeeEmails.length > 0) {
               try {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const { annotateSlotsWithAttendeeStatus } = require('../../utils/annotateSlotsWithAttendeeStatus') as

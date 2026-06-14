@@ -2,6 +2,18 @@
 
 ---
 
+## 3.3.11 — colleague-requested scheduling: the requester flexes, the owner is the constraint
+
+Real-day wave (Dina's urgent webinar-setup request, 2026-06-14): Maelle told Idan "no time tomorrow / something's blocking one of your calendars / want me to ask Dina when she's free?" — when Dina had *requested* the meeting and flagged it urgent. She treated the requester's calendar as a hard wall, narrated vaguely, and bounced the question back to the person who asked. Patch; no schema change.
+
+### Fixed
+- **Requester's busy no longer hard-blocks; the owner is the scarce resource.** When the owner asks Maelle to find time for a meeting a COLLEAGUE requested, the requester is flexible (she'll move her own conflict). `find_available_slots` now reuses the colleague/coord path's `annotateSlotsWithAttendeeStatus` on the OWNER path (gated on `ignore_attendee_availability`, which Sonnet sets for colleague-requested meetings per the sharpened tool description): owner-free slots come back TAGGED with the requester's busy status instead of being dropped. So Maelle says "12:30 works for Idan — you've got something then, want me to ask you to move it?" instead of "no time," and never bounces "when are you free?" back to the requester. Pure reuse of existing annotation code. ([ops.ts](src/skills/meetings/ops.ts), [meetings.ts](src/skills/meetings.ts) tool description)
+- **Requester close-loop no longer leaks the internal approval question.** The "{owner} said yes on {X}" relay pasted the raw approval ask ("Can Idan find 10 minutes with Dina tomorrow for Zoom webinar setup?") verbatim to the colleague. Every subject candidate now runs through `usableRelaySubject`, which rejects approval-meta AND question-form internal asks (not just `row.subject` as before) → falls back to a clean generic instead of leaking the internal framing. ([resolver.ts](src/core/requests/resolver.ts))
+- **Recovery footnote:** the half-dead-socket catch-up fired correctly in the wild this wave — Idan's "find her time" reply was missed live and recovered by the periodic/restart catch-up (the v3.3.10 work, confirmed on a real incident).
+
+### Changed (prompt, parallel chat)
+- Scheduling-narration sharpened (Bug 2): name the specific blocker (whose calendar / which rule) — never "something's blocking one of your calendars"; the owner is the constraint, the requester flexes; don't declare "no time" without treating the requester as flexible and considering an owner soft-rule override. Most of this rule already existed; the parallel prompt chat sharpened it.
+
 ## 3.3.10 — recovery rewrite (decoupled from startup), language inbound/outbound split, bot self-mention leak closed
 
 Driven by a real outage: Ayala messaged while Maelle was unreachable, the restart didn't recover her, and she'd been getting Hebrew replies to English messages. Root-caused all three to patched-over layers and rewrote them at the core. Patch; one new file, no schema change.

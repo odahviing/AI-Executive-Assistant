@@ -734,13 +734,34 @@ async function resolveSlotPickApproval(
  * this returns true, the caller falls back to a generic phrase instead.
  */
 function looksLikeApprovalMeta(subject: string): boolean {
-  const lower = subject.toLowerCase();
+  const lower = subject.trim().toLowerCase();
   return lower.endsWith('needs your input')
     || lower === 'unknown person'
     || lower === 'policy exception'
     || lower === 'duration override'
     || lower === 'lunch bump'
     || lower === 'calendar conflict';
+}
+
+// v3.3.x (Dina webinar, 2026-06-14) — a candidate subject that is phrased as a
+// QUESTION is the internal approval ASK ("Can Idan find 10 minutes with Dina
+// tomorrow for Zoom webinar setup?"), framed to the OWNER. Pasting it into the
+// requester-facing "{owner} said yes on {X}" relay leaked that internal framing
+// to Dina ("said yes on Can Idan find 10 minutes…?"). A real meeting subject is
+// a noun phrase, never a question — reject question-form candidates so the relay
+// falls back to a clean generic.
+function looksLikeApprovalQuestion(subject: string): boolean {
+  const t = subject.trim();
+  if (t.endsWith('?')) return true;
+  return /^(can|could|would|will|should|does|is|are|may|shall)\b/i.test(t);
+}
+
+function usableRelaySubject(candidate: unknown): string | undefined {
+  if (typeof candidate !== 'string') return undefined;
+  const s = candidate.trim();
+  if (!s) return undefined;
+  if (looksLikeApprovalMeta(s) || looksLikeApprovalQuestion(s)) return undefined;
+  return s;
 }
 
 async function notifyRequesterOfDecision(
@@ -783,11 +804,16 @@ async function notifyRequesterOfDecision(
   const deferredStart = typeof deferred?.args?.start === 'string'
     ? deferred.args.start as string
     : (typeof deferred?.args?.new_start === 'string' ? deferred.args.new_start as string : undefined);
+  // v3.3.x — every candidate is filtered through usableRelaySubject, which
+  // rejects approval-meta ("policy exception") AND question-form internal asks
+  // ("Can Idan find 10 minutes…?") so neither leaks into the requester relay.
+  // (Pre-fix only row.subject was filtered; details.question — the raw internal
+  // question — fell straight through and leaked to Dina, 2026-06-14.)
   const subject =
-    (deferredSubject && deferredSubject.trim()) ||
-    (typeof details.subject === 'string' && details.subject) ||
-    (typeof details.question === 'string' && details.question) ||
-    (row.subject && !looksLikeApprovalMeta(row.subject) ? row.subject : undefined) ||
+    usableRelaySubject(deferredSubject) ||
+    usableRelaySubject(details.subject) ||
+    usableRelaySubject(details.question) ||
+    usableRelaySubject(row.subject) ||
     'that ask';
 
   // v2.9.4 (#107d) — language-aware relay body. Renders Hebrew when the
