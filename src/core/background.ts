@@ -82,6 +82,57 @@ export function startBackgroundTimer(
       }
     })();
   }, 5 * 60 * 1000);
+
+  // v3.3.10 follow-up — PERIODIC catch-up safety net (every 10 min).
+  // WHY: the socket watchdog triggers recovery on a DETECTED reconnect/dead
+  // socket. But a "half-dead" socket — Bolt reporting client.connected===true
+  // while delivering nothing (real case 2026-06-14: laptop network dropped
+  // overnight, socket went deaf, `connected` stayed true) — is never detected,
+  // so no reconnect fires and inbound silently stops until a manual restart.
+  // This scan runs over HTTP (WebClient, independent of socket health) and
+  // recovers missed messages regardless of what the socket claims.
+  //
+  // CRITICAL: it scopes to its OWN last-scan time, NOT the socket-alive
+  // watermark. In the half-dead case the watchdog keeps stamping that watermark
+  // fresh (connected lies true), so scoping to it would see a zero gap and miss
+  // the very message we need. lastPeriodicScan is detection-independent: a
+  // rolling ~10-min window, bounded and cheap; the per-conversation
+  // answered-check + markProcessed dedup prevent any double-reply with live
+  // delivery or the startup/reconnect catch-up.
+  const PERIODIC_CATCHUP_MS = 10 * 60 * 1000;
+  const lastPeriodicScan = new Map<string, number>();
+  let periodicInFlight = false;
+  setInterval(() => {
+    void (async () => {
+      if (periodicInFlight) return;  // never overlap a prior slow run
+      const app = runningApps[0]?.app;
+      if (!app) return;
+      periodicInFlight = true;
+      try {
+        for (const profile of profiles.values()) {
+          const pid = profile.user.slack_user_id;
+          const sinceMs = lastPeriodicScan.get(pid) ?? (Date.now() - PERIODIC_CATCHUP_MS);
+          const scanStart = Date.now();
+          try {
+            const dmRes = await app.client.conversations.open({
+              token: profile.assistant.slack.bot_token,
+              users: pid,
+            });
+            const ownerChannel = (dmRes.channel as any)?.id as string | undefined;
+            if (!ownerChannel) continue;
+            await catchUpMissedMessages(app, profile, ownerChannel, sinceMs);
+            lastPeriodicScan.set(pid, scanStart);  // advance only on success
+          } catch (err) {
+            logger.warn('Periodic catch-up — per-profile error, continuing', {
+              pid, err: String(err).slice(0, 200),
+            });
+          }
+        }
+      } finally {
+        periodicInFlight = false;
+      }
+    })();
+  }, PERIODIC_CATCHUP_MS);
 }
 
 // ── Startup initialisation ───────────────────────────────────────────────────
