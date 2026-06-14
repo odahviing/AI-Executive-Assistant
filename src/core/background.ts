@@ -120,7 +120,7 @@ export function startBackgroundTimer(
             });
             const ownerChannel = (dmRes.channel as any)?.id as string | undefined;
             if (!ownerChannel) continue;
-            await catchUpMissedMessages(app, profile, ownerChannel, sinceMs);
+            await catchUpMissedMessages(app, profile, ownerChannel, sinceMs, true);
             lastPeriodicScan.set(pid, scanStart);  // advance only on success
           } catch (err) {
             logger.warn('Periodic catch-up — per-profile error, continuing', {
@@ -308,14 +308,33 @@ export async function initProfile(
  *     reply ("↩ Catching up on your message from Xh ago") tells the owner
  *     what they're looking at.
  */
+// The periodic heartbeat (every 10 min) scans all DMs and almost always finds
+// nothing — logging that scan each time floods the log (~144 lines/day of "I
+// looked, found nothing"). Throttle the heartbeat's scan line to at most one
+// per hour. The scan itself still runs every tick — only the log is rate-
+// limited. Startup / reconnect catch-ups (rare, meaningful) are never throttled.
+const HEARTBEAT_SCAN_LOG_INTERVAL_MS = 60 * 60 * 1000;
+let lastHeartbeatScanLogMs = 0;
+function shouldLogHeartbeatScan(): boolean {
+  const now = Date.now();
+  if (now - lastHeartbeatScanLogMs >= HEARTBEAT_SCAN_LOG_INTERVAL_MS) {
+    lastHeartbeatScanLogMs = now;
+    return true;
+  }
+  return false;
+}
+
 // v3.3.x — exported so the socket watchdog can fire a gap-scoped recovery on
 // reconnect (not only at startup). `sinceMs` is the socket-alive watermark;
 // when omitted we fall back to the 24h lookback (first-ever boot).
+// `isHeartbeat` is set by the 10-min periodic safety-net caller so its routine
+// "scanning DMs" log line is throttled to ≤1/hour (the scan still runs).
 export async function catchUpMissedMessages(
   app: App,
   profile: UserProfile,
   ownerChannel: string,
   sinceMs?: number,
+  isHeartbeat?: boolean,
 ): Promise<void> {
   const botToken = profile.assistant.slack.bot_token;
 
@@ -367,7 +386,9 @@ export async function catchUpMissedMessages(
     logger.warn('Catch-up: could not list DMs — falling back to owner DM only', { err: String(err) });
   }
 
-  logger.info('Catch-up: scanning DMs for missed messages', { dmCount: channels.size, sinceMs });
+  if (!isHeartbeat || shouldLogHeartbeatScan()) {
+    logger.info('Catch-up: scanning DMs for missed messages', { dmCount: channels.size, sinceMs });
+  }
   for (const channelId of channels) {
     const opts: CheckOpts = {
       app, profile, botToken, botUserId,

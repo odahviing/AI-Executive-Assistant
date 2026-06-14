@@ -417,6 +417,8 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
         name: 'create_meeting',
         description: `Create a new calendar event directly — THE booking tool. The agreed time comes from find_available_slots (which already checked every internal attendee's calendar); externals get the invite by email and accept/decline natively. coordinate_meeting exists only for the owner explicitly asking to POLL people for preference. Follow the location / category / work-day rules in the prompt section.
 
+RESCHEDULING ≠ CREATING. Before booking a recurring 1:1 (Weekly / BiWeekly) to a NEW time: if that person's series already exists on the calendar, you are RESCHEDULING — call move_meeting on the existing occurrence (get its id from get_calendar), NOT create_meeting. Creating a fresh event leaves a duplicate next to the live series. create_meeting is for genuinely NEW meetings only.
+
 LOCATION & ONLINE — THE HANDLER DECIDES. There's a deterministic process: day-type (office/home) × party shape (internal-only / has-external) × TZ produces the right answer. ${profile.user.name.split(' ')[0]}'s home day + internal-only → Huddle. ${profile.user.name.split(' ')[0]}'s office day + internal-only → Office. External + home → online with Teams. External + office + different TZ → online with Teams. External + office + same TZ → handler asks ${profile.user.name.split(' ')[0]} once. You don't recreate this math; you let the handler run.
 
 WHEN TO PASS \`is_online\` AT ALL (v2.9.1):
@@ -484,7 +486,7 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
       },
       {
         name: 'move_meeting',
-        description: `Move (reschedule) an existing meeting to a new time slot. ALWAYS prefer this over delete + recreate — it preserves attendees, the Teams link, and meeting history.
+        description: `Move (reschedule) an existing meeting — THE tool whenever the owner asks to move / reschedule / shift / push a meeting that's already on the calendar. Prefer over create_meeting AND delete+recreate; preserves attendees, Teams link, duration, history. Includes relocating a recurring 1:1 (Weekly/BiWeekly) to a different day or week — moving a recurring occurrence creates a single-occurrence exception, leaves the rest of the series intact (that's what 'move my weekly' means). Get the occurrence id from get_calendar. Keep the meeting's current duration unless told otherwise (new_end = new_start + existing length).
 
 Owner-path: owner override IS the approval. Move the meeting when he asks.
 
@@ -2100,6 +2102,7 @@ Examples:
 
 DATE CONTEXT BIAS — "that Monday" means the recently-discussed Monday.
 When ${firstName} or a colleague uses ambiguous date phrasing ("that Monday", "that day", "the meeting", "the same week") in context of a meeting just discussed/booked/mentioned in the same thread, the date refers to THAT meeting's date. Don't default to the nearest-matching weekday from today. Example: just-booked Eli meeting is on Monday May 11; ${firstName} replies "any opening that Monday before 3pm?" → "that Monday" = May 11, NOT this coming Monday. The recently-mentioned meeting wins the date-bind.
+TRIP / EVENT-RELATIVE DATES — resolve to a concrete date AND confirm it before mutating. When a date is anchored to a trip or another event ("the Sunday after my trip", "the week after Boston", "before I leave"), work out the actual calendar date and STATE IT BACK before booking: "That's Sunday July 5, the week after Boston — book them there?". NEVER silently snap a trip-relative phrase to the nearest matching weekday from today — "the Sunday after" is almost never THIS Sunday when he's anchoring on a future trip. Applies in every language.
 
 LEAD WITH THE GAP, NOT THE CALENDAR.
 When asked "any opening?" / "when is free?" / "any gap?", lead with the GAP, not a meeting-by-meeting listing. "Only gap before 3pm is 13:10-14:00 (50 min) — book at 13:15?" beats listing five meetings before getting to the answer. List meetings only when ${firstName} explicitly asks for the calendar, not when he asks for openings.

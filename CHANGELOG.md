@@ -2,6 +2,23 @@
 
 ---
 
+## 3.3.12 — Boston-trip rescheduling: move-not-create, confirm trip-relative dates, quieter catch-up
+
+Real-day wave (Boston-trip reschedule, 2026-06-14): Idan asked Maelle to move his recurring Israeli 1:1s around a trip; she created one-time duplicates next to the live recurring series instead of moving them, took a wrong 25-min duration on the fresh creates, and resolved "the Sunday after [the trip]" to the nearest upcoming Sunday (a week+ *before* the trip) instead of the week after. Root-caused to tool-description contracts that pushed create over move, plus a today-anchored relative-date resolution. Patch; no schema change. The fix is description/prompt-side; the durable code guard is documented as a fallback at `.claude/SLOP_BLOCKER_PROJECT.md` if it doesn't hold under load.
+
+### Fixed (create-vs-move — tool-description contracts, prompt chat)
+- **"Move my weekly" now points to move_meeting, not create_meeting.** The contracts contradicted each other: create_meeting was described as "THE booking tool" (the endpoint of the find_available_slots pipeline Sonnet was already on), while move_meeting framed itself only against "delete + recreate" — nothing told the model that rescheduling an existing recurring 1:1 is a move. So Sonnet ran the slot-search→create pipeline and stacked one-time "X & Idan - Weekly" duplicates beside the live series (it even logged "Subject matches Weekly 1:1 pattern but the event is NOT recurring" and proceeded). create_meeting now carries a RESCHEDULING ≠ CREATING cue (person's series exists → move, not create); move_meeting is reframed as THE tool whenever the owner says move/reschedule/shift, explicitly preferred over create_meeting, covering recurring-occurrence relocation (single-occurrence exception) with a duration-preservation cue (new_end = new_start + existing length). The 25-min wrong-duration symptom dissolves with the move (it inherits the series' real length, proven by the in-thread recovery landing 10:00–10:40). ([meetings.ts](src/skills/meetings.ts) create_meeting + move_meeting descriptions)
+- **Trip/event-relative dates are confirmed before booking.** "The Sunday after my trip" was silently resolved to the nearest upcoming Sunday from today (June 21, a week+ before the trip — should have been July 5). New rule: when a date is anchored to a trip or another event, resolve it to a concrete date and STATE IT BACK before mutating the calendar ("That's Sunday July 5, the week after Boston — book them there?") — catches a wrong resolution before it's booked. ([meetings.ts](src/skills/meetings.ts) MEETINGS section)
+
+### Changed (logging)
+- **Catch-up heartbeat log throttled to ≤1/hour.** The 10-min periodic catch-up safety net (v3.3.10) logged "scanning DMs for missed messages" every tick (~144 lines/day of "looked, found nothing"), burying the lines that matter. The scan still runs every 10 min; only the routine scan log is rate-limited to once per hour. Startup/reconnect catch-ups and the actual "found a missed message" log are unthrottled. ([background.ts](src/core/background.ts))
+
+### Added (doc)
+- **.claude/SLOP_BLOCKER_PROJECT.md** — analysis + decision record for this class: the create-vs-move root cause, why the fix is the description contract rather than a code guard (a horizon-widened guard would risk blocking legitimate new bookings), and the deferred code-guard fallback. Records the retraction of the initial "she lied" framing — the claim-checker actually performed correctly here; this was a wrong-action bug, not a dishonesty one.
+
+### Not changed
+- create_meeting's handler is untouched — genuinely-new bookings (no existing series) behave byte-identically; the steer is conditional on an existing series and relies on model judgment, avoiding the false-positive risk a blunt code match would carry. Wrong-week is *mitigated* by the confirm-the-date rule, not deterministically solved; surfacing future-trip windows into prompt context (so relative dates resolve correctly, not just get confirmed) is a deferred optional code change.
+
 ## 3.3.11 — colleague-requested scheduling: the requester flexes, the owner is the constraint
 
 Real-day wave (Dina's urgent webinar-setup request, 2026-06-14): Maelle told Idan "no time tomorrow / something's blocking one of your calendars / want me to ask Dina when she's free?" — when Dina had *requested* the meeting and flagged it urgent. She treated the requester's calendar as a hard wall, narrated vaguely, and bounced the question back to the person who asked. Patch; no schema change.

@@ -1,6 +1,40 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.3.6** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.3.12** — check `package.json` if unsure; it is the source of truth.
+
+## 🔭 v3.3.12 — Boston-trip rescheduling bug-bash (create-vs-move slop)
+
+Real-day wave: "move my Israeli weekly 1:1s around my Boston trip" → Maelle **created one-time duplicates** next to the live recurring series (wrong 25-min duration on the fresh creates), and resolved "the Sunday **after** the trip" to **June 21** (nearest upcoming Sunday from today) instead of **July 5**. Root cause was **tool-selection, not a missing capability**: move_meeting exists and works (single-occurrence exception, inherits duration — proven by the in-thread recovery), but the **tool-description contracts pushed create over move** (create = "THE booking tool" / the find_available_slots endpoint; move framed only against delete+recreate). Owner chose the **description-contract fix over a code guard** (a horizon-widened guard would risk blocking legit new bookings). Both contracts + a trip-relative-date confirm rule landed in `meetings.ts` (prompt chat). **It's a soft fix — watch the next real reschedule; the code-guard fallback is documented at `.claude/SLOP_BLOCKER_PROJECT.md`.** Also: the v3.3.10 10-min catch-up heartbeat log is now throttled to ≤1/hr (scan still runs every tick).
+
+**Correction worth remembering:** the initial read of this incident was "she lied / the honesty layer was silenced." That was WRONG — the claim-checker performed correctly (its flags were false-positives, correctly suppressed); every "done/moved" was a truthful report of a wrong action. This was a wrong-ACTION bug, not a dishonesty one. Don't re-litigate the honesty layer for this class.
+
+## 🔭 v3.3.11 — NEXT CHAT: more real-day bugs + the SLOT PICKER
+
+The owner is bringing **more bugs** (he has a queue) AND wants to take on **the slot picker** — both the `find_available_slots` regressions and the **reserve-slot-on-pick build (#30)**, whose plan is written and waiting at **`.claude/RESERVE_SLOT_PROJECT.md`** (3 open decisions flagged: hold TTL 1-vs-2 workdays, brief visibility, owner-side visibility). Standing mode unchanged: trace `logs/maelle-YYYY-MM-DD.log`, **propose-first, code-first**, wait for a per-bug **"fix it"**.
+
+**⚠️ WRAP DISCIPLINE (I drifted on this — don't repeat):** "done", "ok", "fix it", "include chat" are **build/ack words, NOT wrap signals.** Build → typecheck → STOP → summarize ("tree shows X, your call when to bundle"). Only bump `package.json` / CHANGELOG / commit / push on an explicit **"wrap / ship / commit / cut a version"**. I bumped 3.3.11 on a bare "done" this session — the owner corrected it.
+
+**⚠️ RESTART to load v3.3.11** — `npm run deploy` (build → `pm2 restart maelle` → tail). She runs under **PM2 fork** now; the boot log prints `version` + `gitSha` — confirm it matches HEAD (she has repeatedly run a stale `dist`/process). Watchdog self-heals a cleanly-dead socket; a **half-dead socket** (Bolt says `connected=true` while deaf) is covered by the 10-min **periodic catch-up** (proven live on Dina, 2026-06-14) — but only after a restart loads it.
+
+### Regression watchlist — the clusters that keep biting (fix at root, never re-patch)
+- **The slot picker (`find_available_slots`) is the hot zone.** This arc alone: merged-free/busy carve (the "Michal still there" / vacated-slot class — `carveRangeFromBusy`), `checkSlot` as the ONE validator for verdicts AND bookings (no more search-vs-book whipsaw), the phantom **5-min buffer** (gone from search + checkSlot + check_join — keeps trying to resurface; buffer lives in meeting LENGTHS), focus-floor surfaced as "loaded, want override?" not "no time", **requester-flexibility** (3.3.11: a colleague who REQUESTED a meeting flexes; owner is the constraint; reuse `annotateSlotsWithAttendeeStatus`), offered-slots stash so a pick binds to the offered instant (the wrong-Tuesday class). Expect more here.
+- **Recovery / socket.** 3 layers now: startup + reconnect-watchdog + 10-min periodic catch-up (HTTP, covers the half-dead socket). Watermark = "last socket-alive", scoped to the real gap (no 24h cap), one reply per distinct unread thread, registry-free panel discovery. Watch restart/quiet-period logs.
+- **Language.** Inbound mirrors the sender's current message (detectMessageLanguage re-stamps Latin too); stored `language_preference` is OUTBOUND-only (compose/outreach), surfaced as `language_pref` on the owner-path contact line. The capture over-eagerly saves a pref from a one-time "do you speak X?" (Dina/Dirk/Ayala) — owner watching whether it's one-off or recurring before we touch capture.
+- **Claim-checker false-positives.** Proposals/offers flagged as phantom actions → the own-the-miss rewriter has an `UNCHANGED` veto (runs on Sonnet). Still on Haiku for the classifier itself.
+- **Coord is demoted** (colleague-path): colleagues book via the DIRECT path; coord is owner-path/explicit only. FUTURE: external transports (WhatsApp/email) re-enable coord for calendar-invisible requesters.
+- **Social coda on transactional/urgent turns** (Dina "do you have any pets?" on an urgent webinar escalation) — owner said **ignore for now**, but it's a known rough edge (deferred #4).
+- **Guards Hebrew leak — STILL OPEN.** Colleague-facing Hebrew leaks ("הכלי", "slots", "visibility", bot-framing). Handoff at `.claude/GUARDS_LEAK_HANDOFF.md`; the claim-checker-veto handoff at `.claude/CLAIM_CHECKER_FALSE_POSITIVE_HANDOFF.md`. The parallel **guards chat** owns these — confirm landed before assuming fixed.
+
+**Parallel chats on the same repo:** a **prompt chat** (owns the system-prompt — language rules, scheduling narration "name the blocker", RULE-7 override; Bug 2 narration was sharpened there this wave) and the **guards chat**. At wrap: `git fetch` + check origin/master + the tree for their edits before committing.
+
+### What shipped 3.3.7 → 3.3.11 (this arc — read CHANGELOG for detail)
+- **3.3.7** colleague-availability truth: one validator, slot-finder carve, guards stop corrupting clean drafts.
+- **3.3.8** conversation-state: offered-slots stash (picks bind), per-day travel TZ, **coord demoted from colleague path**, content-dedup 90s→5s, #126 coord-requester threading.
+- **3.3.9** ops: single-process PM2, `npm run deploy`, startup build stamp, **`trace` skill** (post-build scenario matrix at 100%).
+- **3.3.10** recovery rewrite (decoupled from startup: watermark + registry-free discovery + socket watchdog + periodic catch-up) + language inbound/outbound split + bot self-mention slack_id leak closed.
+- **3.3.11** colleague-requested scheduling: requester flexes (reuse annotation), requester close-loop subject-leak filter.
+
+---
 
 ## 🔁 v3.3.6 — real-day bug wave, and the theme is: WE KEEP HITTING THE SAME BUGS
 
