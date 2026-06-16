@@ -1516,7 +1516,7 @@ export class SchedulingSkill {
             // then" (true, mechanism-free) — and an insisted-on time goes to
             // the owner as an approval, never a flat refusal. Hard busy stays
             // "he's booked".
-            const SOFT_REJECT_PREFIXES = ['focus_time', 'owner_buffer_collision', 'floating_block_no_room'];
+            const SOFT_REJECT_PREFIXES = ['focus_time', 'owner_buffer_collision', 'floating_block_no_room', 'within_lead_time'];
             const softRejectLabels = Object.keys(diagnosticsOut.rejectedCounts ?? {})
               .filter(l => SOFT_REJECT_PREFIXES.some(p => l.startsWith(p)));
             const colleagueSoftBlockHint = (!isOwnerInitiatedSearch && softRejectLabels.length > 0)
@@ -1544,9 +1544,17 @@ export class SchedulingSkill {
             // Sonnet narrate "12:30 fits everyone but breaks your focus block
             // — book anyway?" instead of "Monday fully booked." Owner-path only.
             const isAlreadyRelaxed = args.relaxed === true && context.senderRole === 'owner';
+            // #128 part-2 — a colleague's MUST-BE request (Sonnet sets must_be:
+            // they named a specific time, or said "has to be today/tomorrow" and
+            // the owner's clean options are too far) reuses the SAME relaxed
+            // recovery as the owner path to surface the soft-blocked candidates —
+            // but they come back for the OWNER's approval ONLY, never offered to
+            // the colleague (see the must-be return below). Regular colleague
+            // requests stay fully blocked (no recovery, no surfacing).
+            const mustBe = args.must_be === true && !isOwnerInitiatedSearch;
             const shouldRecover =
               rawSlots.length === 0
-              && isOwnerInitiatedSearch
+              && (isOwnerInitiatedSearch || mustBe)
               && userNamedNarrowWindow
               && !isAlreadyRelaxed;
             if (rawSlots.length === 0 && !shouldRecover) {
@@ -1589,8 +1597,8 @@ export class SchedulingSkill {
                   meetingMode: mode as import('../../connectors/graph/calendar').MeetingMode,
                   travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
                   attendeeAvailability,
-                  minBufferHours: (context.senderRole === 'owner' || context.isOwnerInGroup === true)
-                    ? 1
+                  minBufferHours: (context.senderRole === 'owner' || context.isOwnerInGroup === true || mustBe)
+                    ? 1   // #128 — must-be: the owner overrides his own colleague booking lead-time for an urgent ask
                     : (context.profile.meetings.min_slot_buffer_hours ?? 4),
                   profile: context.profile,
                   relaxed: true,  // bypass focus/lunch/work-hours; attendee busy still enforced
@@ -1657,6 +1665,34 @@ export class SchedulingSkill {
                   };
                 }
                 return [];
+              }
+              // #128 part-2 — colleague MUST-BE with surfaced candidates. These
+              // times are open ONLY because the recovery relaxed the owner's soft
+              // protections (booking lead-time / focus / buffer). The colleague
+              // must NOT see or book them — return them as OWNER approval
+              // candidates so Sonnet raises create_approval(policy_exception); the
+              // owner's single yes books via the existing resolver. (Owner-path
+              // recovery is unaffected — it falls through to the candidate logic
+              // below as before.)
+              if (mustBe && relaxedRecoverySlots.length > 0) {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { pickSpreadSlots: pickSpreadMustBe } = require('../../connectors/graph/calendar') as
+                  typeof import('../../connectors/graph/calendar');
+                const pickedMustBe = new Set(pickSpreadMustBe(relaxedRecoverySlots, timezone, 3, undefined, args.duration_minutes as number | undefined));
+                const ownerFirst = context.profile.user.name.split(' ')[0];
+                const candidates = relaxedRecoverySlots
+                  .filter(s => pickedMustBe.has(s.start))
+                  .map(s => {
+                    const st = DateTime.fromISO(s.start).setZone(timezone);
+                    const en = DateTime.fromISO(s.end).setZone(timezone);
+                    return { start: s.start, end: s.end, label: `${st.toFormat('EEE d MMM HH:mm')}–${en.toFormat('HH:mm')}` };
+                  });
+                return {
+                  slots: [],
+                  owner_approval_candidates: candidates,
+                  _must_be_owner_approval_note: `No clean slot here — these times are open but sit inside ${ownerFirst}'s day-load protections (focus / buffer / booking lead-time), so they're his call. This is a MUST-BE request: do NOT tell the colleague there's no time and do NOT book directly. Raise create_approval(kind=policy_exception) with ONE of owner_approval_candidates plus the urgency reason so ${ownerFirst} decides with a single yes. Never reveal these specific times (or the mechanism) to the colleague — only that you're checking with ${ownerFirst}.`,
+                  ...(strictDaySummary && strictDaySummary.length > 0 ? { day_summary: strictDaySummary } : {}),
+                };
               }
             }
             // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -2669,6 +2705,10 @@ export class SchedulingSkill {
         const planCategory: string | null = plan.category;
         const planAddRoomEmail = plan.addRoomEmail === true;
         const planTeamsUrlAsLocation = plan.teamsUrlAsLocation === true;
+        // #127 — owner booked through a soft own-day rule (focus floor, hours,
+        // lunch, his own busy-collision). Captured here (where `plan` is narrowed
+        // to 'book') so it survives into the createMeeting().then() closure below.
+        const planOverrideNotice = plan.overrideNotice;
         // skipLocationField fires when resolveLocation gave us no physical
         // string AND we're not in the Teams-URL-as-location flow (those get
         // patched post-create, so the create call sends empty location).
@@ -3069,6 +3109,10 @@ export class SchedulingSkill {
             // Sonnet from narrating the post-action calendar state as a fresh
             // discovery instead of the result of her own action (issue #26 bug 1).
             action_summary: `Booked '${args.subject}' for ${formatIsoTime(args.start as string)}–${formatIsoTime(args.end as string)}.`,
+            // #127 — owner booked through a soft own-day rule: surface the heads-up
+            // so Maelle mentions it ONCE ("Booked — note this dips your focus floor
+            // to 1h55"), never a blocking re-ask. Undefined on clean bookings.
+            ...(planOverrideNotice ? { override_notice: planOverrideNotice } : {}),
           };
         });
       }

@@ -759,7 +759,16 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
           } catch { recentInteractions = []; }
         }
 
-        if (content === null && notes.length === 0 && recentInteractions.length === 0) {
+        // #132 — surface the stored identity (email / slack_id) so a person we've
+        // booked before is reusable without re-asking. The address lived in the
+        // row all along (Max Attias case) but this tool never returned it, so
+        // Maelle said "no email on file" with the email one field away. Owner-only
+        // tool, so this never exposes a contact's email to a colleague.
+        const email = row?.email ?? null;
+        const slackId = row?.slack_id ?? null;
+        const hasMemory = content !== null || notes.length > 0 || recentInteractions.length > 0;
+
+        if (!hasMemory && !email && !slackId) {
           return {
             found: false,
             person: row?.name ?? query,
@@ -767,11 +776,14 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
           };
         }
         logger.info('Person memory fetched', {
-          person: row?.name ?? query, bytes: content?.length ?? 0, notes: notes.length, interactions: recentInteractions.length,
+          person: row?.name ?? query, bytes: content?.length ?? 0, notes: notes.length,
+          interactions: recentInteractions.length, hasEmail: !!email,
         });
         return {
           found: true,
           person: row?.name ?? query,
+          email,
+          slack_id: slackId,
           content: content ?? '',
           notes: notes.map(n => ({ date: n.date, note: n.note })),
           recent_interactions: recentInteractions,

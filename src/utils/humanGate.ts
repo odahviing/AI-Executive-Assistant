@@ -227,6 +227,8 @@ ${aud.abdicationExamples}
 
 DON'T INVENT CAPABILITY ${assistantName} DOESN'T HAVE. If the original draft is abdicating because there's genuinely no tool path forward, DO NOT rewrite "you do it" into "let me do it now" — that manufactures a false promise. Rewrite to honest escalation instead (audience-appropriate, see examples above), or leave the abdication alone if it's already humanly worded.
 
+NEVER INVERT A QUESTION INTO AN INABILITY. Asking the reader for something ${assistantName} needs to do her job — an email address, a preferred time, a phone number, a confirmation — is NORMAL EA work. It is NOT abdication and NOT a capability gap. "What's your email so I can check availability?" is her doing her job, not giving up. HARD RULE: if the draft ASKS for something, your rewrite MUST still ask for that same thing. NEVER turn a question into a statement of inability or hand-off — flipping "What's your email?" into "I don't have an email" / "I can't do that" / "work with ${ownerFirst} directly" ships an outright falsehood and is NEVER a valid rewrite. When a draft is a question, the safe move is to leave it ALONE (ok=true) unless it carries actual bot/infrastructure framing — and even then, the rewrite stays a question asking for the same thing.
+
 ${assistantName} IS NOT THE APPROVER — only ${ownerFirst} approves. Lines like "I will approve" / "I'll sign off" / "I'll confirm and send" are claims to a role she doesn't have. When she's about to BOOK a meeting (which is her job — she doesn't need approval to book a rule-compliant slot), say so plainly.
 ${aud.approverExamples}
 
@@ -270,10 +272,17 @@ Language-agnostic. Same standard in Hebrew, French, etc. — match the input lan
  * throw the rewrite away and keep the original draft. A mild bot-tell is
  * recoverable; broken addressing or a dropped meeting time is not.
  *
- * Deliberately NARROW: it checks only @mentions / times / dates — the tokens a
- * voice-rewrite must never touch. It does NOT check arbitrary numbers, because
- * stripping "error 403" / structured codes is exactly what humanGate is FOR; a
- * blanket number check would wrongly reject good rewrites.
+ * Deliberately NARROW on tokens: it checks only @mentions / times / dates — the
+ * tokens a voice-rewrite must never touch. It does NOT check arbitrary numbers,
+ * because stripping "error 403" / structured codes is exactly what humanGate is
+ * FOR; a blanket number check would wrongly reject good rewrites.
+ *
+ * It ALSO guards one piece of intent that a token check can't: a QUESTION. If
+ * the original asks something and the rewrite asks nothing, the rewrite inverted
+ * an information-request into a statement — the Mike Naumenko bug (2026-06-15):
+ * "What's your email?" → "I don't have an email — work with Idan directly", an
+ * outright falsehood shipped to a colleague. humanGate changes VOICE, never
+ * whether she's asking, so a vanished question is always a corrupted meaning.
  */
 function rewriteDroppedAFact(original: string, rewrite: string): boolean {
   const rwRaw = rewrite;
@@ -294,6 +303,11 @@ function rewriteDroppedAFact(original: string, rewrite: string): boolean {
   for (const m of original.match(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g) ?? []) {
     if (!rwRaw.includes(m)) return true;
   }
+  // 5) Question preservation — if the draft asks something (ASCII "?", Hebrew/
+  // Latin share it; Arabic "؟"; fullwidth "？") and the rewrite asks nothing, the
+  // rewrite flipped a question into a statement (the email-inversion bug). Veto.
+  const QMARK = /[?？؟]/;
+  if (QMARK.test(original) && !QMARK.test(rewrite)) return true;
   return false;
 }
 

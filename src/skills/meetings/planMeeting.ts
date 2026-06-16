@@ -152,6 +152,7 @@ export type PlanAction =
       preserveExisting?: boolean;      // ops.ts leaves the existing event's location/isOnline alone (move case)
       category: string | null;
       reasoning: string;
+      overrideNotice?: string;   // #127 — owner booked through a soft own-day rule; surface this heads-up, never re-ask
     }
   | { action: 'find_slots'; category: string | null; reasoning: string }
   | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; category: string | null }
@@ -294,6 +295,11 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
 
   // ── Resolve location ────────────────────────────────────────────────────
   let locationVerdict: LocationVerdict | null = null;
+  // #127 — when the OWNER books through a soft own-day rule (focus floor, work
+  // hours/days, lunch/floating, buffer, his own busy-collision), we record the
+  // heads-up here and fall through to the book return — one step, no re-ask —
+  // instead of bouncing a confirm_override (which cost him a 2nd/3rd "yes").
+  let ownerOverrideNotice: string | undefined;
   if (input.slotStartIso) {
     const ownerDomain = ownerEmail.split('@')[1].toLowerCase();
     const externalEmails: string[] = [];
@@ -397,14 +403,18 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       isFloatingBlock: !!input.isFloatingBlock,
     });
 
-    if (!ruleResult.passes) {
+    if (!ruleResult.passes && initiator === 'owner') {
+      // #127 — owner override is total and ONE-STEP. A broken own-day rule on a
+      // slot the owner explicitly asked to book is not a question: record the
+      // heads-up and FALL THROUGH to the book return so Maelle books it and says
+      // "Booked — heads up, <rule>", instead of a blocking confirm_override that
+      // cost a 2nd/3rd "yes". The attendee-busy gate below still confirms once —
+      // double-booking a COLLEAGUE imposes on someone else, not just his own day.
+      ownerOverrideNotice = ruleResult.violation_label ?? 'a scheduling rule';
+    } else if (!ruleResult.passes) {
       const label = ruleResult.violation_label ?? 'rule violated';
-      const ownerFirst = profile.user.name.split(' ')[0];
       const subj = input.subject ?? 'this meeting';
       const askText = `Heads up — booking "${subj}" at ${DateTime.fromISO(input.slotStartIso).setZone(profile.user.timezone).toFormat("EEEE 'at' HH:mm")} would break a rule: ${label}. Want to override?`;
-      if (initiator === 'owner') {
-        return { action: 'confirm_override', violationLabel: label, suggestedAskText: askText, category };
-      }
       // v3.2.x (#8) — colleague proposed a slot that breaks a rule. Instead of
       // jumping straight to owner approval (colleague waits), offer NEARBY
       // rule-compliant alternatives first — 2 on the requested day + 1 after —
@@ -609,6 +619,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     preserveExisting,
     category,
     reasoning: `category=${category ?? 'none'} (${categoryReason}); location=${locationVerdict?.reasoning ?? 'n/a'}`,
+    overrideNotice: ownerOverrideNotice,
   };
 }
 

@@ -1221,6 +1221,12 @@ export async function findAvailableSlots(params: {
         continue;
       }
       if (cursor.getTime() < earliestAllowed.getTime()) {
+        // #128 — was a SILENT continue: same-day slots inside the booking
+        // lead time vanished with no rejection label, so a colleague search
+        // returned an unexplained "no clean slots" while real openings sat
+        // just inside the lead window. Label it so day_summary can name the
+        // reason ("inside your booking lead time") instead of empty silence.
+        trackReject('within_lead_time', cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
         continue;
       }

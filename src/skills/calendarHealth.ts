@@ -11,7 +11,7 @@ import {
   deleteMeeting,
   findAvailableSlots,
 } from '../connectors/graph/calendar';
-import { auditLog, getActiveCalendarIssues, updateCalendarIssueStatus, buildClusters, upsertCluster, markStaleResolved, type DetectedIssue, type IssueClass, type IssueStatus } from '../db';
+import { auditLog, getActiveCalendarIssues, updateCalendarIssueStatus, buildClusters, upsertCluster, markStaleResolved, type DetectedIssue, type IssueClass, type IssueStatus, type CalendarIssueRow } from '../db';
 import logger from '../utils/logger';
 import { displaySubject } from '../utils/displaySubject';
 import { formatSkillPreferencesBlock } from '../utils/skillPreferences';
@@ -30,6 +30,71 @@ function parseGraphDt(dateTimeStr: string, eventTz: string, fallbackTz: string):
     return DateTime.fromISO(clean).setZone(tz);
   }
   return DateTime.fromISO(clean, { zone: tz });
+}
+
+/**
+ * Re-validate tracked OVERLAP issues against the CURRENT calendar before they're
+ * surfaced. A stored row goes stale when the owner moves an event DIRECTLY in
+ * Outlook (no closeMeetingArtifacts cascade fires → resolveCalendarIssuesForMeeting
+ * never runs) AND its date sits outside the health window (so markStaleResolved
+ * can't reach it). The row then surfaces every run until manually dismissed — the
+ * June-28 "Yael weekly overlaps the El Al flight" case the owner moved two days
+ * earlier in Outlook. Here we re-fetch the issue's day and recompute the overlap;
+ * if it's gone we resolve the row and drop it from the surfaced set.
+ *
+ * FAIL-SAFE: on any fetch error or ambiguity we KEEP the row surfaced — never
+ * silently hide a real conflict. Only the `overlap` class is re-checked (it's the
+ * one deterministically verifiable from two event times); other classes keep
+ * their existing re-detection + markStaleResolved path untouched.
+ */
+async function revalidateActiveOverlapIssues(
+  issues: CalendarIssueRow[],
+  userEmail: string,
+  timezone: string,
+): Promise<CalendarIssueRow[]> {
+  const overlapDates = new Set(
+    issues.filter(i => i.issue_class === 'overlap' && i.peer_event_id).map(i => i.event_date),
+  );
+  if (overlapDates.size === 0) return issues;
+
+  const eventsByDate = new Map<string, Awaited<ReturnType<typeof getCalendarEvents>>>();
+  for (const date of overlapDates) {
+    try {
+      eventsByDate.set(date, await getCalendarEvents(userEmail, date, date, timezone));
+    } catch (err) {
+      logger.warn('revalidateOverlap — day fetch failed, keeping its issues surfaced', {
+        date, err: String(err).slice(0, 120),
+      });
+    }
+  }
+
+  const survivors: CalendarIssueRow[] = [];
+  for (const row of issues) {
+    if (row.issue_class !== 'overlap' || !row.peer_event_id) { survivors.push(row); continue; }
+    const dayEvents = eventsByDate.get(row.event_date);
+    if (!dayEvents) { survivors.push(row); continue; }          // fetch failed → fail-safe keep
+    const a = dayEvents.find(e => e.id === row.event_id && !e.isCancelled);
+    const b = dayEvents.find(e => e.id === row.peer_event_id && !e.isCancelled);
+    let stillOverlaps: boolean;
+    if (!a || !b) {
+      stillOverlaps = false;   // one moved off this day / was deleted → overlap gone
+    } else {
+      const aS = parseGraphDt(a.start.dateTime, a.start.timeZone ?? '', timezone).toMillis();
+      const aE = parseGraphDt(a.end.dateTime, a.end.timeZone ?? '', timezone).toMillis();
+      const bS = parseGraphDt(b.start.dateTime, b.start.timeZone ?? '', timezone).toMillis();
+      const bE = parseGraphDt(b.end.dateTime, b.end.timeZone ?? '', timezone).toMillis();
+      stillOverlaps = aS < bE && aE > bS;
+    }
+    if (stillOverlaps) {
+      survivors.push(row);
+    } else {
+      updateCalendarIssueStatus(row.id, 'resolved', '[re-validated: overlap no longer present on the calendar]');
+      logger.info('revalidateOverlap — resolved stale overlap issue before surfacing', {
+        id: row.id, event_date: row.event_date,
+      });
+    }
+  }
+  return survivors;
 }
 
 /**
@@ -865,8 +930,13 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
         const ownerUserId = profile.user.slack_user_id;
         let newIssueCount = 0;
 
-        // Include any active (unresolved) issues from previous checks
-        const activeIssues = getActiveCalendarIssues(ownerUserId);
+        // Include any active (unresolved) issues from previous checks — but
+        // re-validate overlap rows against the live calendar first, so a stale
+        // one (owner moved the event in Outlook, date outside the health window)
+        // is resolved instead of surfaced. Fail-safe: keeps the row on any error.
+        const activeIssues = await revalidateActiveOverlapIssues(
+          getActiveCalendarIssues(ownerUserId), profile.user.email, profile.user.timezone,
+        );
 
         // Active-mode fix loop. Runs ONLY when mode='active'. Each fix is
         // deterministic or high-confidence; failures fail open (the issue

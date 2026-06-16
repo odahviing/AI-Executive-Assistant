@@ -1,6 +1,12 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.3.12** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.4.0** — check `package.json` if unsure; it is the source of truth.
+
+## 🔭 v3.4.0 — NEXT CHAT: #129 (LinkedIn/research grounding) + the SLOT BLOCKER build
+
+A GitHub real-day bug-bash (#127–#132) capped the 3.3.x arc. **Next up, in order: (1) #129** — the LinkedIn-ideas routine asserted an unverified "you have a webinar" about the owner; news module is healthy, the gap is **no grounding gate on owner-self claims** (regression of the v3.1.8 researchPreCheck class). Research comment is on the issue; the likely fix is feeding the LinkedIn routine from the grounded **news pipeline** + a rule that owner-activity claims must come from his records. **(2) The slot blocker (#30)** — plan is at `.claude/RESERVE_SLOT_PROJECT.md`, owner decisions locked (memory not Outlook · 2-workday TTL · 3 holds/person, VIP-gated later · brief shows holds · only on explicit pick-and-defer). **Storage decision recommended = a dedicated `slot_holds` table (NOT the requests spine)** — owner leaning that way; confirm before building. A handful of open build questions remain (see the doc's "Open questions" + the chat where they were enumerated).
+
+**What v3.4.0 shipped (this bug-bash):** **#127** owner own-day overrides book in ONE step + heads-up (focus floor / hours / lunch / his own busy-collision) — no more 2nd/3rd "yes"; only double-booking a *colleague* still asks once. **#128** urgent colleague MUST-BE requests route to owner `create_approval(policy_exception)` with surfaced soft-blocked options (reuses relaxed-recovery + soft-block-hint, no new pass; `must_be` flag, colleague-only) + `within_lead_time` is now a labeled (not silent) rejection. **#131** prior user messages carry their send-time so "tomorrow" anchors to when it was said. **#132** `get_person_memory` returns the stored email/identity (was hidden). Calendar `overlap` issues self-heal (re-validated vs live calendar before surfacing — kills the stale "Yael vs El Al flight" nag after an Outlook move). **#130** humanGate question-inversion fix (guard chat). **Decided not to fix now:** #129 (above); 130a duration-enum snap + slot-count narration are prompt-chat items.
 
 ## 🔭 v3.3.12 — Boston-trip rescheduling bug-bash (create-vs-move slop)
 

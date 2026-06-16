@@ -384,6 +384,10 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
               type: 'boolean',
               description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
             },
+            must_be: {
+              type: 'boolean',
+              description: `OPTIONAL (default false). COLLEAGUE-PATH ONLY. Set true when a colleague's request is a genuine MUST-BE and the strict search would otherwise find nothing: (1) they named a SPECIFIC time that has to happen ("it has to be 12:00 tomorrow"), OR (2) they said it MUST be today/tomorrow (urgent) and ${profile.user.name.split(' ')[0]}'s clean options are too far out. When set and no clean slot exists, the tool returns \`owner_approval_candidates\` — times that are open but sit inside ${profile.user.name.split(' ')[0]}'s soft day-load protections (focus / buffer / booking lead-time). Do NOT offer these to the colleague and do NOT book them; raise create_approval(kind=policy_exception) with one so ${profile.user.name.split(' ')[0]} decides with a single yes. Leave false for ordinary requests — those just hear his day is loaded.`,
+            },
             moving_event_ids: {
               type: 'array',
               items: { type: 'string' },
@@ -2043,7 +2047,8 @@ ${isOwner === false ? '' : `- Minimum free-time protection (find_available_slots
 ${isOwner === false ? '' : `When ${firstName} asks "is X allowed?" or "can I do Y" and you're unsure, answer using the block above. If a user-proposed time falls OUTSIDE these hours/windows, SAY SO and ask if they want to override — do not silently accept it and do not silently refuse it.`}
 
 REPORTING OPTIONS — short, like a human EA:
-When giving ${firstName} slot options, lead with 2–3 concrete best bets, one line each. Do NOT walk through every day. Do NOT list the days that didn't work. Do NOT re-summarize your reasoning. He'll ask for more if he wants it.
+When giving ${firstName} or a colleague slot options, lead with 2–3 concrete best bets, one line each. Do NOT walk through every day. Do NOT list the days that didn't work. Do NOT re-summarize your reasoning. They'll ask for more if they want it.
+SOURCE OF TRUTH + COUNT: offer EXACTLY the slots THIS turn's find_available_slots returned — never blend in slots remembered from a prior turn's search or a different window (a Thursday-only search doesn't suddenly include Tuesday). Honor the count asked: want 3 and the search returned more → give 3; returned fewer → say how many are actually open ("only 2 clean on Thursday"); never pad to a number.
 Good: "Best bets for 55 min: Tuesday 09:00 or Thursday 10:30. Which?"
 Bad: "Here's what I found going day by day: Sunday... Monday... Tuesday... Wednesday..."
 

@@ -208,9 +208,29 @@ function extractActionTape(history: Array<{ role: 'user' | 'assistant'; content:
   return out.slice(-20);
 }
 
+// #131 — stamp each PRIOR user message with the absolute time it was sent, in
+// owner-local time, so the model anchors relative words ("tomorrow", "today")
+// to WHEN they were said, not to the current turn's "now". Without this a
+// message read a day later re-resolves "tomorrow" against the new today (Dina's
+// Sunday "tomorrow"=Monday silently became Tuesday on Monday). Slack gives a `ts`
+// on every message; the system prompt's "now" still anchors the live turn, so we
+// stamp history only. Fails open to the raw content on any bad/absent ts.
+function stampHistoryTime(content: string, ts: string | undefined, tz: string): string {
+  if (!ts) return content;
+  const secs = parseFloat(ts);
+  if (!Number.isFinite(secs)) return content;
+  try {
+    const when = DateTime.fromSeconds(secs).setZone(tz);
+    if (!when.isValid) return content;
+    return `[${when.toFormat('EEE d MMM, HH:mm')}] ${content}`;
+  } catch {
+    return content;
+  }
+}
+
 export interface OrchestratorInput {
   userMessage: string;
-  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
+  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string; ts?: string }>;
   threadTs: string;
   channelId: string;
   userId: string;
@@ -575,7 +595,9 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   const messages: Anthropic.MessageParam[] = trimHistory([
     ...conversationHistory.map(m => ({
       role: m.role as 'user' | 'assistant',
-      content: m.content,
+      content: m.role === 'user'
+        ? stampHistoryTime(m.content, m.ts, profile.user.timezone)
+        : m.content,
     })),
     currentTurn,
   ]);

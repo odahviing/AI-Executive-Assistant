@@ -2,6 +2,25 @@
 
 ---
 
+## 3.4.0 — real-day bug-bash: owner override is one-step, urgent colleagues route to approval, calendar issues self-heal
+
+A GitHub-issue wave (#127–#132) from a day of real use, capping the 3.3.x arc. The throughline: stop making the owner repeat himself, and stop surfacing things that aren't real. Minor — it changes the owner-override interaction model and adds an urgent-colleague approval path. No schema change. Restart required.
+
+### Changed (owner override — #127)
+- **An owner booking that breaks one of his OWN-DAY rules now books in one step + a heads-up, instead of a blocking "book anyway?".** Focus floor, work hours/days, lunch/floating block, buffer, and his own busy-collision are his to override — Maelle books it and says "Booked — note this dips your focus floor to 1h55", never a 2nd/3rd "yes" (the "resolved 7 times" repeatable). The ONE thing that still asks once: booking over an invited COLLEAGUE's busy time (that imposes on someone else). `planMeeting` owner-path rule-fail → `book` + `override_notice` (was `confirm_override`), surfaced on the create result. ([planMeeting.ts](src/skills/meetings/planMeeting.ts), [ops.ts](src/skills/meetings/ops.ts))
+
+### Added (urgent colleague scheduling — #128)
+- **A colleague's MUST-BE request routes to the owner's approval with concrete options, instead of dead-ending in "no clean slots".** When a colleague names a specific time, or it has to be today/tomorrow and clean options are too far, Sonnet sets `must_be` on find_available_slots; with no clean slot, the existing relaxed-recovery surfaces the soft-blocked times (open but inside the owner's focus / buffer / booking-lead-time) as `owner_approval_candidates` — never shown to the colleague — and Sonnet raises `create_approval(policy_exception)` so the owner decides with a single yes. Regular colleague requests stay fully blocked (just "his day's loaded"). Reuses the recovery pass + soft-block hint + the policy_exception resolver — no new pass. The colleague booking lead-time skip is now a labeled rejection (`within_lead_time`) instead of a silent drop, so "no slots" can name the reason. ([ops.ts](src/skills/meetings/ops.ts), [calendar.ts](src/connectors/graph/calendar.ts), [meetings.ts](src/skills/meetings.ts))
+
+### Fixed
+- **#131 — "tomorrow" drifted to the wrong day across days.** Prior user messages in the model's context now carry their send-time in owner-local time (`[Sun 14 Jun, 13:19] …`), so a relative date anchors to WHEN it was said, not the current turn's "now" — closes the Dina Sunday-"tomorrow"=Monday-became-Tuesday class. ([index.ts](src/core/orchestrator/index.ts))
+- **#132 — a previously-booked person's email wasn't reused.** `get_person_memory` (owner-only) now returns the stored email / slack_id even when the memory file is thin — the address was in the row all along, the tool just never returned it. ([assistant.ts](src/core/assistant.ts))
+- **Stale calendar-health issues kept re-surfacing.** A tracked `overlap` issue is re-validated against the live calendar before it's surfaced; if the events no longer overlap (e.g. the owner moved one directly in Outlook, so no cascade fired) it auto-resolves instead of nagging — closes the "Yael overlaps the El Al flight" row the owner had moved days earlier. Fail-safe: keeps the issue on any fetch error. ([calendarHealth.ts](src/skills/calendarHealth.ts))
+- **humanGate inverted a question into a falsehood** (parallel guard chat, #130): a draft asking "What's your email?" was rewritten to "I don't have an email — work with Idan directly". A deterministic question-mark veto + a prompt rule now forbid turning any question into a statement of inability. ([humanGate.ts](src/utils/humanGate.ts))
+
+### Not changed / filed
+- **#129** (LinkedIn routine asserted an unverified "you have a webinar" about the owner) — kept open, research filed on the issue; rethink of grounding for owner-self claims is next-session work. #130's duration-enum snap (45→40) and slot-count narration are prompt-chat items.
+
 ## 3.3.12 — Boston-trip rescheduling: move-not-create, confirm trip-relative dates, quieter catch-up
 
 Real-day wave (Boston-trip reschedule, 2026-06-14): Idan asked Maelle to move his recurring Israeli 1:1s around a trip; she created one-time duplicates next to the live recurring series instead of moving them, took a wrong 25-min duration on the fresh creates, and resolved "the Sunday after [the trip]" to the nearest upcoming Sunday (a week+ *before* the trip) instead of the week after. Root-caused to tool-description contracts that pushed create over move, plus a today-anchored relative-date resolution. Patch; no schema change. The fix is description/prompt-side; the durable code guard is documented as a fallback at `.claude/SLOP_BLOCKER_PROJECT.md` if it doesn't hold under load.
