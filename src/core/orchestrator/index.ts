@@ -963,7 +963,22 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
     const { detectMessageLanguage } = require('../../utils/detectMessageLanguage') as
       typeof import('../../utils/detectMessageLanguage');
     const isVoice = typeof userMessage === 'string' && userMessage.trimStart().startsWith('[Voice message]');
-    const lang = isVoice ? null : detectMessageLanguage(userMessage);
+    let lang = isVoice ? null : detectMessageLanguage(userMessage);
+    if (!lang && !isVoice) {
+      // A contentless reply — "11:15", "yes", "ok", an emoji — carries no
+      // language signal, so detectMessageLanguage returns null and the per-turn
+      // LANGUAGE override vanishes. That let a stored/attendee language_pref pull
+      // the reply into another language (English booking → Hebrew confirmation on
+      // "11:15"). Carry the language forward from the most recent prior message
+      // that DID carry one (the human's, not Maelle's own past replies) so the
+      // conversation's language sticks across short replies.
+      for (let i = conversationHistory.length - 1; i >= 0; i--) {
+        const m = conversationHistory[i];
+        if (m.role !== 'user') continue;
+        const prior = detectMessageLanguage(m.content);
+        if (prior) { lang = prior; break; }
+      }
+    }
     if (lang === 'Latin') {
       // v3.3.x — symmetric override for a Latin-script inbound. Don't name the
       // language (script can't distinguish English/Spanish/French); just bind

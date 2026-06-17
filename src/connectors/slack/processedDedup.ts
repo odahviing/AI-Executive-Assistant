@@ -86,7 +86,7 @@ function hashString(s: string): string {
 /**
  * Mark a (channel, sender, text) tuple as seen. Returns true if it was
  * newly added; false if the same content from the same sender in the same
- * channel was already processed within the 90s TTL — caller should skip
+ * channel was already processed within the 5s TTL — caller should skip
  * to avoid duplicate orchestrator runs from Slack assistant-panel mirrors.
  */
 export function markContentProcessed(channelId: string, senderId: string, text: string): boolean {

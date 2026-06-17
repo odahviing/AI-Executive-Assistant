@@ -379,17 +379,6 @@ export function setPhase(id: string, phase: RequestPhase): void {
   getDb().prepare(`UPDATE requests SET phase = ?, updated_at = datetime('now') WHERE id = ?`).run(phase, id);
 }
 
-/** Requests due for the time-based sweep, narrowed to a specific handler. */
-export function getDueRequestsByHandler(handler: NextCheckHandler): RequestRow[] {
-  return getDb().prepare(`
-    SELECT * FROM requests
-    WHERE next_check_handler = ?
-      AND next_check_at IS NOT NULL
-      AND datetime(next_check_at) <= datetime('now')
-      AND state IN ('awaiting_owner','awaiting_colleague','in_flight')
-  `).all(handler) as RequestRow[];
-}
-
 // ── update ──────────────────────────────────────────────────────────────────
 
 export interface UpdateRequestPatch {

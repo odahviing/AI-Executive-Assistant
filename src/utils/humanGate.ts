@@ -31,10 +31,10 @@
  * is a tech people, but not to talk about her backend."
  *
  * Shape mirrors securityGate / claimChecker:
- *   - Single Sonnet pass with strict JSON output
+ *   - Single Haiku pass with strict JSON output
  *   - Fails open on any error (don't block legitimate replies)
- *   - Owner-facing only — colleague-facing replies still go through
- *     securityGate, which is the stricter regex-based gate.
+ *   - Runs on BOTH audiences (see above); securityGate is the additional
+ *     stricter regex gate that colleague-facing replies also pass through.
  *
  * Language-agnostic by design — the LLM judges humanness in any language
  * (Hebrew, French, mixed-language messages all handled).
@@ -43,7 +43,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
 import type { UserProfile } from '../config/userProfile';
-import { config } from '../config';
 import logger from './logger';
 import { extractFirstJsonObject } from './extractJson';
 import { logLlmUsage } from './usageLog';

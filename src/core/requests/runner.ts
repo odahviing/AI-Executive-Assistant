@@ -4,7 +4,9 @@
  * Sweeps `requests` rows whose `next_check_at <= now` and dispatches to the
  * named `next_check_handler`. Per Q2(a) — lifecycle timers live ON the request
  * row, not in a separate dispatch table. One sweep handles every kind of
- * deferred action: approval reminders, expiry, coord nudge, outreach decision.
+ * deferred action; see `dispatchHandler` for the full set (expiry, approval
+ * reminder, reminder_fire, research_run, outreach expiry/decision,
+ * send_scheduled_outreach, coord nudge/abandon).
  *
  * After handling, the dispatcher EITHER:
  *   - clears next_check_at + next_check_handler (terminal, no more checks),
@@ -398,7 +400,29 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     }
     return 'rearmed';
   } catch (err) {
-    logger.warn('runSendScheduledOutreach — send threw', { requestId: row.id, err: String(err).slice(0, 200) });
+    // Bounded retry. Pre-fix this returned 'rearmed' WITHOUT touching
+    // next_check_at, so the row kept its past-due time and re-fired every
+    // 5-min tick FOREVER on a persistent throw (deactivated user, bad channel,
+    // a Slack exception rather than an {ok:false}) — infinite loop + a request
+    // that never closes (pollutes the brief). Now: back off and cap. A
+    // transient Slack hiccup still recovers (retry); a permanent failure
+    // closes after MAX_SEND_ATTEMPTS instead of looping.
+    const MAX_SEND_ATTEMPTS = 3;
+    const attempts = (typeof details.send_attempts === 'number' ? details.send_attempts : 0) + 1;
+    logger.warn('runSendScheduledOutreach — send threw', {
+      requestId: row.id, attempt: attempts, maxAttempts: MAX_SEND_ATTEMPTS,
+      err: String(err).slice(0, 200),
+    });
+    if (attempts >= MAX_SEND_ATTEMPTS) {
+      closeRequest({ id: row.id, state: 'cancelled', closureReason: 'scheduled_send_failed', closedBy: 'system' });
+      return 'closed';
+    }
+    // Re-arm with linear backoff (10m, 20m), bump the attempt counter.
+    updateRequest(row.id, {
+      details: { ...details, send_attempts: attempts },
+      nextCheckAt: DateTime.now().plus({ minutes: 10 * attempts }).toUTC().toISO(),
+      nextCheckHandler: 'send_scheduled_outreach',
+    });
     return 'rearmed';
   }
 }

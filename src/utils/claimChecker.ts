@@ -25,7 +25,6 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { config } from '../config';
 import logger from './logger';
 import { extractFirstJsonObject } from './extractJson';
 import { logLlmUsage } from './usageLog';
@@ -283,7 +282,7 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
 
     // Strip accidental markdown fences — belt-and-braces, the prompt forbids them.
     let cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-    // v1.7.5 — tolerant parse: when Sonnet adds prose preamble despite the
+    // v1.7.5 — tolerant parse: when the model adds prose preamble despite the
     // JSON-only instruction (observed in real-world QA — same root as the
     // calendar candidate selection bug fixed in v1.7.3), extract the first
     // {...} block by regex before JSON.parse. Without this, the checker

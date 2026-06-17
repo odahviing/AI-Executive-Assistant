@@ -20,8 +20,8 @@ import logger from '../../utils/logger';
 import { DateTime } from 'luxon';
 import type { SkillContext } from '../types';
 
-// v1.8.3 — extract "HH:MM" from an ISO datetime string for action_summary formatting.
-// Falls back to the raw string if the shape is unexpected.
+// v1.8.3 — extract "HH:MM" from an ISO datetime string for action_summary
+// formatting. Falls back to the raw string if the shape is unexpected.
 function formatIsoTime(iso: string): string {
   const m = /T(\d{2}:\d{2})/.exec(iso);
   return m ? m[1] : iso;
@@ -32,9 +32,8 @@ function formatIsoTime(iso: string): string {
 // resolves from this turn instead of Maelle re-asking the old time. Window =
 // old start + the moved duration. ONE helper, called from BOTH move return
 // sites (the regular-meeting tail AND the floating-block early return) so the
-// two paths can never drift apart again — the original bug was that only the
-// regular path returned `vacated`, so moving lunch to free its slot dropped
-// the freed-slot info entirely.
+// two paths can never drift apart — both must return `vacated`, otherwise
+// moving lunch to free its slot drops the freed-slot info entirely.
 function computeVacatedSlot(
   preMoveStartIso: string | undefined,
   newStartIso: string | undefined,
@@ -189,9 +188,9 @@ function parseGraphDateTime(dateTimeStr: string, eventTimeZone: string, fallback
     // matches the parsed zone.
     return DateTime.fromISO(clean).setZone(fallbackTz);
   }
-  // No offset → Graph returned it in the event's timezone (via Prefer header)
-  // v2.3.1 (B5 / #63) — same fix: re-zone to fallbackTz so display is owner-local
-  // even when Graph honored an event-side declared zone like "UTC".
+  // No offset → Graph returned it in the event's timezone (via Prefer header).
+  // v2.3.1 (B5 / #63) — re-zone to fallbackTz so display is owner-local even
+  // when Graph honored an event-side declared zone like "UTC".
   return DateTime.fromISO(clean, { zone: tz }).setZone(fallbackTz);
 }
 
@@ -290,17 +289,16 @@ export function processCalendarEvents(
       eventType = 'colleague_info';
     }
 
-    // Private/personal events: mask the subject. v2.9.4 (#107a) — checks
-    // BOTH paths via the central displaySubject helper:
+    // Private/personal events: mask the subject. v2.9.4 (#107a) — checks BOTH
+    // paths via the central displaySubject helper:
     //   (1) Outlook sensitivity is 'private' / 'personal'
     //   (2) any of the event's categories matches a yaml category with
-    //       sets_sensitivity_private:true (e.g. Idan's `Personal` category)
-    // Pre-fix only path (1) was masked here — category-based privacy was
-    // silently bypassed, so Sonnet saw raw subjects for category-private
-    // events and could narrate them verbatim (root of #107a). The lower-
-    // level getCalendarEvents still returns raw subjects; the internal
-    // classifier flows (autoCategorize / detectCategory) read those directly
-    // and stay unaffected.
+    //       sets_sensitivity_private:true (e.g. the `Personal` category)
+    // Both must be masked here, else Sonnet sees raw subjects for category-
+    // private events and could narrate them verbatim. The lower-level
+    // getCalendarEvents still returns raw subjects; the internal classifier
+    // flows (autoCategorize / detectCategory) read those directly and stay
+    // unaffected.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { displaySubject } = require('../../utils/displaySubject') as
       typeof import('../../utils/displaySubject');
@@ -389,10 +387,10 @@ export function analyzeCalendar(
   startDate: string,
   endDate: string,
   profile: UserProfile,
-  // v3.0.3 — pre-filter parameter removed. Suppression now happens at row-
-  // write time via upsertCluster's 'suppressed' return (callers that write
-  // rows skip already-approved clusters). Read-only callers see the full
-  // detected list; Sonnet's prompt covers narration filtering.
+  // v3.0.3 — suppression happens at row-write time via upsertCluster's
+  // 'suppressed' return (callers that write rows skip already-approved
+  // clusters). Read-only callers see the full detected list; Sonnet's prompt
+  // covers narration filtering.
   _legacy?: Set<string>,
 ): DayAnalysis[] {
   const officeDays = new Set(profile.schedule.office_days.days as string[]);
@@ -514,10 +512,7 @@ export function analyzeCalendar(
 
       // v2.0.8 — true overlap detection. A new meeting starting BEFORE the
       // previous one ends is a real time conflict and must be flagged as high
-      // severity. Previously the analyzer only fired a back_to_back issue
-      // when evStart >= prevEndMin (adjacent, not overlapping). Overlaps
-      // slipped through silently — the Apr 29 FC & Capri 14:45–15:30 +
-      // Fulcrum Product Sync 15:00 case is the observed example.
+      // severity (distinct from adjacent back-to-back, which is fine).
       if (prevEndMin > workStartMin && evStart < prevEndMin) {
         // Find the previous meeting (the one ending at prevEndMin) for a
         // clearer error message. Walk back through timedMeetings.
@@ -538,10 +533,10 @@ export function analyzeCalendar(
           suggestedFix: 'Move one of the meetings or drop out of one.',
         });
       }
-      // back_to_back emit retired. The scheduler removed buffer-between-
-      // meetings enforcement in v2.7.1 ("Connected back-to-backs are fine
-      // by design"), so flagging them as analyzer issues had no fix path
-      // and just produced morning-brief noise.
+      // v2.7.1 — no back_to_back emit: connected back-to-backs are fine by
+      // design (no buffer-between-meetings enforcement), so flagging them as
+      // analyzer issues would have no fix path and just produce morning-brief
+      // noise.
       totalMeetingMin += evDur;
       prevEndMin = Math.max(prevEndMin, evEnd);
     }
@@ -674,9 +669,9 @@ export function analyzeCalendar(
 
     const sortedMy = timedMeetings.sort((a, b) => a._localStartTime.localeCompare(b._localStartTime));
 
-    // v3.0.3 — no pre-filter here. Suppression handled by upsertCluster at
-    // row-write time; this function is read-only and returns the full detected
-    // list. Callers that surface to the owner do so via the cluster-write path.
+    // v3.0.3 — suppression handled by upsertCluster at row-write time; this
+    // function is read-only and returns the full detected list. Callers that
+    // surface to the owner do so via the cluster-write path.
     results.push({
       date: dateStr,
       day: dayName,
@@ -708,11 +703,10 @@ export class SchedulingSkill {
   // Kept only for call sites inside executeToolCall that reference `this.id` etc.
   readonly id = 'meetings' as const;
 
-  // v2.0.7 — former getTools + getSystemPromptSection methods deleted. Both
-  // were documented as "DEAD CODE since v1.7" and verified unused (zero
-  // callers — MeetingsSkill owns both schemas + prompts). Only executeToolCall
-  // is still invoked externally via `this.ops.executeToolCall(...)` from
-  // meetings.ts.
+  // v2.0.7 — no getTools / getSystemPromptSection here (the former methods,
+  // dead since v1.7, were deleted). MeetingsSkill owns both schemas and
+  // prompts. Only executeToolCall is invoked externally, via
+  // `this.ops.executeToolCall(...)` from meetings.ts.
 
   async executeToolCall(
     toolName: string,
@@ -722,6 +716,82 @@ export class SchedulingSkill {
     const { email: userEmail, timezone } = context.profile.user;
 
     switch (toolName) {
+      case 'hold_slot': {
+        // Tentative slot reservation. Colleague-path: only a slot WE
+        // offered them this conversation, max 3, re-pick replaces same-thread.
+        // Owner-path: any slot, any holder. Auto-expires at min(2 workdays,
+        // slot-start) via the tick (sweepExpiredSlotHolds). See db/slotHolds.ts.
+        const ownerUserId = context.profile.user.slack_user_id;
+        const isOwner = context.senderRole === 'owner';
+        const action = args.action as string;
+        const sh = await import('../../db/slotHolds');
+
+        if (action === 'release') {
+          if (typeof args.hold_id === 'string' && args.hold_id) {
+            const ok = sh.releaseSlotHold(args.hold_id, isOwner ? 'owner_cancelled' : 'colleague_released');
+            return { success: ok, released: ok ? 1 : 0 };
+          }
+          const released = isOwner
+            ? sh.releaseHoldsForOwner(ownerUserId, { startIso: args.start_iso as string | undefined }, 'owner_cancelled')
+            : sh.releaseHoldsForOwner(ownerUserId, { holderSlackId: context.userId, startIso: args.start_iso as string | undefined }, 'colleague_released');
+          return { success: true, released: released.length };
+        }
+
+        // action === 'hold'
+        const startIso = args.start_iso as string | undefined;
+        const endIso = args.end_iso as string | undefined;
+        if (!startIso || !endIso) {
+          return { success: false, error: 'missing_slot', message: 'Need start_iso and end_iso to hold a slot.' };
+        }
+        // Expiry = min(2 owner-workdays from now, the slot's own start).
+        const { addWorkdays } = await import('../../utils/workHours');
+        const twoWd = addWorkdays(new Date().toISOString(), 2, context.profile);
+        const expiresAt = Date.parse(twoWd) < Date.parse(startIso) ? twoWd : startIso;
+
+        if (isOwner) {
+          const hold = sh.createSlotHold({
+            ownerUserId,
+            holderSlackId: typeof args.holder_slack_id === 'string' ? args.holder_slack_id : null,
+            holderName: (args.holder_name as string | undefined) ?? 'someone',
+            subject: args.subject as string | undefined,
+            startIso, endIso,
+            originChannel: context.channelId,
+            originThreadTs: context.threadTs,
+            reason: args.reason as string | undefined,
+            expiresAt,
+          });
+          return { success: true, hold_id: hold.id, expires_at: expiresAt };
+        }
+
+        // Colleague path — validate the slot was offered here, enforce the cap.
+        const holderSlackId = context.userId;
+        const { getOfferedSlots } = await import('../../utils/offeredSlotsStash');
+        const offered = getOfferedSlots(context.channelId, context.threadTs) ?? [];
+        const startMs = Date.parse(startIso);
+        const wasOffered = offered.some(o => Math.abs(Date.parse(o.startIso) - startMs) <= 60_000);
+        if (!wasOffered) {
+          return { success: false, error: 'slot_not_offered', message: 'You can only hold a time I actually offered you in this conversation.' };
+        }
+        // Re-pick in the same thread replaces the prior hold (doesn't stack).
+        sh.releaseHoldsForHolderThread(ownerUserId, holderSlackId, context.threadTs, 'replaced_by_repick');
+        if (sh.countActiveHoldsForHolder(ownerUserId, holderSlackId) >= sh.MAX_HOLDS_PER_HOLDER) {
+          return { success: false, error: 'hold_cap_reached', message: `You already have ${sh.MAX_HOLDS_PER_HOLDER} times on hold — release one before adding another.` };
+        }
+        const { getPersonMemory: getPM } = await import('../../db');
+        const requesterRow = getPM(holderSlackId);
+        const hold = sh.createSlotHold({
+          ownerUserId,
+          holderSlackId,
+          holderName: requesterRow?.name ?? (args.holder_name as string | undefined) ?? 'a colleague',
+          subject: args.subject as string | undefined,
+          startIso, endIso,
+          originChannel: context.channelId,
+          originThreadTs: context.threadTs,
+          reason: args.reason as string | undefined,
+          expiresAt,
+        });
+        return { success: true, hold_id: hold.id, expires_at: expiresAt, message: 'Holding it tentatively while you check.' };
+      }
       case 'get_calendar': {
         const rawEvents = await getCalendarEvents(
           userEmail,
@@ -743,12 +813,10 @@ export class SchedulingSkill {
         // v2.8.6 (99C, Shape A) — when the query window comes back with no
         // events on an owner-DM turn, enrich the result with recent
         // delete_meeting + create_meeting audit entries that intersect the
-        // window. Closes the "did you cancel the meeting you booked with X?"
-        // amnesia (root of the 2026-05-18 Michal incident: get_calendar
-        // returned empty post-delete, Sonnet asserted "I don't have a record
-        // of booking a meeting with Michal" — the booking + delete were both
-        // in audit_log but never read). Owner-DM only — colleagues mustn't
-        // see audit traces of meetings they're not on.
+        // window. Closes the "did you cancel the
+        // meeting you booked with X?" amnesia — get_calendar returns empty
+        // post-delete, but the booking + delete are both in audit_log. Owner-DM
+        // only — colleagues mustn't see audit traces of meetings they're not on.
         const isOwnerDm = context.senderRole === 'owner' && context.isMpim !== true;
         const eventCount = Array.isArray(processed) ? processed.length : 0;
         if (isOwnerDm && eventCount === 0) {
@@ -791,17 +859,15 @@ export class SchedulingSkill {
           }
         }
 
-        // Colleague-path calendar scoping (v3.3.7, #125a — replaces the v2.x
-        // enumeration guard). A colleague (not in MPIM with owner present)
-        // only ever sees the meetings THEY are on. The full day used to ship
-        // to Sonnet "for her own reasoning" with a please-don't-enumerate
-        // note — and that full event list is exactly what got eyeballed into
-        // wrong availability answers ("packed until 17:00", the 13:30
-        // walk-back, GH #125). With only shared meetings visible, "when is
-        // our sync?" still works, and availability can ONLY come from
-        // find_available_slots / check_join_availability — there is nothing
-        // else to reason from. This also closes the enumeration-privacy hole
-        // outright instead of asking Sonnet nicely.
+        // v3.3.7 (#125a) — colleague-path calendar scoping. A colleague (not in
+        // MPIM with owner present) only ever sees the meetings THEY are on.
+        // Shipping the full
+        // day to Sonnet led to wrong availability answers eyeballed off the
+        // event list. With only shared meetings visible, "when is our sync?"
+        // still works, and availability can ONLY come from find_available_slots
+        // / check_join_availability — there is nothing else to reason from.
+        // This also closes the enumeration-privacy hole in code rather than
+        // asking Sonnet nicely.
         const isColleaguePath = context.senderRole === 'colleague' && context.isOwnerInGroup !== true;
         if (isColleaguePath) {
           let colleagueEmailLower = '';
@@ -835,8 +901,8 @@ export class SchedulingSkill {
           timezone,
         );
         const processed = processCalendarEvents(rawEvents, userEmail, context.profile.user.name, timezone, context.profile);
-        // v3.0.3 — pre-filter removed; analyzeCalendar is read-only.
-        // Suppression handled at row-write time elsewhere.
+        // v3.0.3 — analyzeCalendar is read-only. Suppression handled at
+        // row-write time elsewhere.
         const _suppressed = getSuppressedEventIds(context.profile.user.slack_user_id);
         void _suppressed;
         const analysis = analyzeCalendar(processed, args.start_date as string, args.end_date as string, context.profile);
@@ -853,12 +919,11 @@ export class SchedulingSkill {
           const raw = await getFreeBusy(userEmail, args.emails as string[], args.start_date as string, args.end_date as string, timezone, args.force_refresh === true);
           // v2.1.5 — for colleague-context asks, synthesize out-of-work-hours
           // busy blocks on the OWNER's row so the free gaps returned to Sonnet
-          // are already clipped to Idan's work hours. A colleague should not
-          // be able to learn that 09:00 is free when Idan's office day starts
-          // at 10:30 — out-of-hours availability requires explicit owner
-          // override, not a drive-by "check get_free_busy" bypass. Owner-path
-          // calls get raw data (owner knows their own schedule and may
-          // genuinely want to see all gaps).
+          // are already clipped to the owner's work hours. A colleague should not
+          // be able to learn that 09:00 is free when the office day starts at
+          // 10:30 — out-of-hours availability requires explicit owner override,
+          // not a drive-by "check get_free_busy" bypass. Owner-path calls get
+          // raw data (owner knows their own schedule and may want all gaps).
           const isColleaguePath = context.senderRole === 'colleague' && context.isOwnerInGroup !== true;
           if (isColleaguePath && Array.isArray(args.emails) && (args.emails as string[]).includes(userEmail)) {
             const ownerBusy = raw[userEmail] ?? [];
@@ -869,6 +934,22 @@ export class SchedulingSkill {
               timezone,
             );
             raw[userEmail] = [...ownerBusy, ...synthetic];
+          }
+          // Daniel-bug (offer-then-retract) — get_free_busy returns RAW per-person
+          // blocks, NOT a validated set of common bookable slots. When it's called
+          // with attendees, presenting its gaps as "both free / best bet" is
+          // owner-only eyeballing that contradicts the booking check (planMeeting
+          // DOES intersect attendees) → the 14:30 "both free" then "both busy"
+          // flip. Steer to find_available_slots, the one tool that intersects
+          // everyone's calendar + work hours. (Stronger than the static tool
+          // description, which Sonnet ignored — this rides the result it just read.)
+          const emailsArg = Array.isArray(args.emails) ? (args.emails as string[]) : [];
+          const hasOtherAttendees = emailsArg.some(e => e && e.toLowerCase() !== userEmail.toLowerCase());
+          if (hasOtherAttendees) {
+            return {
+              ...(raw as Record<string, unknown>),
+              _note: 'These are RAW per-person free/busy blocks, NOT a validated set of common bookable slots. To present bookable meeting options across these people (or ANY meeting with attendees), call find_available_slots — it intersects everyone\'s calendar + work hours. Do NOT offer gaps from this result as "both free" / "best bet"; that is owner-only eyeballing and will contradict the attendee check at booking time.',
+            };
           }
           return raw;
         } catch (err) {
@@ -886,16 +967,13 @@ export class SchedulingSkill {
 
       case 'find_available_slots':
         // v1.6.4 — meeting_mode is required from the LLM. Let findAvailableSlots
-        // scope the workDays per mode (in_person → office only, else both).
-        // Do NOT pre-pass workDays from here — we let the function's own
-        // mode-aware logic decide so in_person is enforced as a hard rule.
+        // scope the workDays per mode (in_person → office only, else both). Do
+        // NOT pre-pass workDays from here — the function's own mode-aware logic
+        // decides so in_person is enforced as a hard rule.
         {
-          // v3.1.6 (L2) — duration safety default. The tool description tells
-          // Sonnet to default to default_meeting_duration when no length was
-          // stated; this is the code backstop for when she omits it entirely.
-          // (When she WRONGLY passes a longer value off a meeting-type guess —
-          // "interview" → 55 — the description tightening is what corrects that;
-          // the handler can't tell a guessed value from a stated one.)
+          // v3.1.6 (L2) — duration safety default — code backstop for when
+          // Sonnet omits duration entirely (the tool description tells her to
+          // default to default_meeting_duration when no length was stated).
           if (args.duration_minutes == null) {
             const allowed = context.profile.meetings.allowed_durations;
             args.duration_minutes = context.profile.meetings.default_meeting_duration
@@ -935,17 +1013,11 @@ export class SchedulingSkill {
           // searchFrom date — saves a per-event-id roundtrip and is bounded.
           let effectiveSearchFrom = args.search_from as string;
           // v3.0.6 — expand date-only search_to to end-of-that-day. The
-          // tool description (added in v3.0.3 fix-up) authorizes Sonnet to
-          // pass date-only `"2026-05-27"` for "end of Wednesday", but the
-          // downstream parser reads any date-only string as 00:00 of that
-          // day. When Sonnet passed `search_from=search_to="2026-05-27"`
-          // for "tomorrow", both sides resolved to 2026-05-27T00:00 →
-          // 0-minute window → getFreeBusy bailed → strict pass returned 0
-          // → Maelle said "nothing tomorrow" on a wide-open day (real
-          // observed bug, 2026-05-26 09:20 IL). Mirror what
-          // getCalendarEvents already does internally via
-          // `toEndOfDayLocal` — append T23:59:59 to a bare YYYY-MM-DD so
-          // the description matches reality.
+          // downstream parser reads any date-only string as 00:00 of that day,
+          // so a bare `search_from=search_to="2026-05-27"` would collapse to a
+          // 0-minute window and return nothing on a wide-open day. Mirror what
+          // getCalendarEvents does internally via `toEndOfDayLocal` — append
+          // T23:59:59 to a bare YYYY-MM-DD.
           let effectiveSearchTo = ((): string => {
             const raw = args.search_to as string;
             if (typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw)) {
@@ -1013,14 +1085,13 @@ export class SchedulingSkill {
           }
 
           // v3.1.x — zero-width / inverted window guard. "Am I free at 3pm ET
-          // next Tuesday?" is a point-in-time availability check; Sonnet maps
-          // it to search_from == search_to (a single instant). getFreeBusy
-          // bails on a zero-width (or inverted) window and returns empty, the
-          // relaxed-recovery fallback also returns empty, so the whole
-          // iteration is wasted and Sonnet has to redo the search with a wider
-          // window on the NEXT turn — observed 2026-06-04T18:01 (Ayala MPIM),
-          // cost ~18s + a full extra Sonnet iteration. Defensive fix mirrors
-          // the date-only expansion above: when from >= to, expand `to` to
+          // next Tuesday?" is a point-in-time availability check; Sonnet maps it
+          // to search_from == search_to (a single instant). getFreeBusy bails on
+          // a zero-width (or inverted) window and returns empty, the
+          // relaxed-recovery fallback also returns empty, so the whole iteration
+          // is wasted and Sonnet has to redo the search with a wider window on
+          // the NEXT turn. Mirror the date-only expansion above: when from >=
+          // to, expand `to` to
           // from + duration_minutes so the requested instant is actually
           // tested. (A predecessor-clip that pushed `from` past `to` lands
           // here too.) The preferred_slot (when set) already pins the exact
@@ -1101,10 +1172,9 @@ export class SchedulingSkill {
           // find_available_slots WITHOUT including the colleague in
           // attendee_emails — so loadAttendeeAvailabilityForEmails below has
           // nothing to load, work-hours clip never runs, and slots fall in the
-          // colleague's middle-of-the-night (real bug 2026-05-28: 10:30 IL =
-          // 03:30 ET offered to Boston-based Ayala). Auto-add catches this so
-          // the existing v2.8.3 per_attendee_local enrichment also kicks in,
-          // giving Sonnet the dual-TZ rendering she needs.
+          // colleague's middle-of-the-night. Auto-add catches this so the
+          // v2.8.3 per_attendee_local enrichment also kicks in, giving Sonnet the
+          // dual-TZ rendering she needs.
           //
           // Owner-path only. Detection is structured Slack mention syntax
           // <@Uxxx>, not freeform NL — no scaling concern.
@@ -1182,18 +1252,17 @@ export class SchedulingSkill {
           // Owner can opt out of attendee BUSY filtering (their other meetings)
           // when forcing a slot regardless of their existing calendar — but
           // their TIMEZONE / work-hours window is ALWAYS honored, no flag
-          // Owner direction (2026-05-26): when owner triggers the full
-          // override (relaxed=true on owner-path, OR explicit
+          // Owner direction: when the owner triggers the full override
+          // (relaxed=true on owner-path, OR explicit
           // ignore_attendee_availability=true), the override is TOTAL — drop
-          // BOTH the busy filter AND the attendee work-hours clip. Earlier
-          // direction had work-hours stay enforced ("no 3-AM bookings") but
-          // the attendee work-hours data is owner-curated in people_memory,
-          // can go stale, and silently filtered owner-valid slots. New rule:
-          // surface the work-hours rejection once (via day_summary.blocked_by
-          // attribution emitted by calendar.ts), and on owner override the
-          // tool drops the clip too. "If I decide, it's on me."
-          // REQUESTER ≠ ATTENDEE (Yael regression) — but DEFAULT-SAFE for the
-          // common case (Alex). When a colleague asks to book a meeting they're
+          // BOTH the busy filter AND the attendee work-hours clip. The attendee
+          // work-hours data is owner-curated in people_memory, can go stale, and
+          // would otherwise silently filter owner-valid slots. So: surface the
+          // work-hours rejection once (via day_summary.blocked_by attribution
+          // emitted by calendar.ts), and on owner override the tool drops the
+          // clip too. "If I decide, it's on me."
+          // REQUESTER ≠ ATTENDEE — but DEFAULT-SAFE for the common case. When a
+          // colleague asks to book a meeting they're
           // ATTENDING, they ARE an attendee: their TZ drives per_attendee_local
           // (correct cross-TZ labels) and their work-hours correctly steer the
           // search — dropping them would BREAK that (lose the ET conversion +
@@ -1241,13 +1310,12 @@ export class SchedulingSkill {
             : loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail);
 
           // #77 — owner-initiated path with attendees: auto-pass
-          // attendeeBusyEmails so Graph free/busy filters the candidate
-          // pool, not just work-hour clipping. Prior fixes (v2.2.3 #43,
-          // v2.3.6 #71) wired the work-hours half but left the busy half
-          // requiring explicit per-call args nobody passed. The
-          // colleague-initiated path (coord state machine) deliberately
-          // does NOT auto-pass — coord uses annotateSlotsWithAttendeeStatus
-          // to TAG slots with status, showing all options per owner's rule.
+          // attendeeBusyEmails so Graph free/busy filters the candidate pool,
+          // not just work-hour clipping. Prior fixes (v2.2.3 #43, v2.3.6 #71)
+          // wired the work-hours half. The colleague-initiated path (coord state
+          // machine) deliberately does NOT auto-pass — coord uses
+          // annotateSlotsWithAttendeeStatus to TAG slots with status, showing
+          // all options per owner's rule.
           const attendeeBusyEmails = (isOwnerInitiatedSearch && !ignoreAttendeeBusy && attendeeEmails.length > 0)
             ? attendeeEmails
             : undefined;
@@ -1287,15 +1355,11 @@ export class SchedulingSkill {
           })();
 
           // v3.0.6 — candidate-slots batch validation. When the caller has N
-          // specific times to check ("can we do A, B, C, or D?"), Sonnet
-          // passes them all as `candidate_slots`. We fire N parallel narrow
-          // findAvailableSlots calls (each autoExpand:false), collect per-
-          // candidate verdicts in ONE response.
-          //
-          // Pre-v3.0.6 Sonnet had to call find_available_slots N times
-          // sequentially — N Sonnet round-trips. Ayalla coord turn
-          // 2026-05-28T19:14 was 6 iterations + 40s + $0.31 for 4 candidates;
-          // candidate_slots collapses that to 2 iterations.
+          // specific times to check ("can we do A, B, C, or D?"), Sonnet passes
+          // them all as `candidate_slots`. We fire N parallel narrow
+          // findAvailableSlots calls (each autoExpand:false) and collect
+          // per-candidate verdicts in ONE response — collapsing what would
+          // otherwise be N sequential Sonnet round-trips into one.
           //
           // Returns a DIFFERENT shape than the default branch:
           //   { mode: 'candidate_validation', results: [{start, end,
@@ -1443,14 +1507,14 @@ export class SchedulingSkill {
               relaxed: args.relaxed === true && context.senderRole === 'owner',
               // v2.4.1 — when validating/discovering a MOVE, the meeting(s)
               // being moved are subtracted from busy AND forbidden as
-              // candidates. See findAvailableSlots.excludeEventIds for the
-              // full semantics.
+              // candidates. See findAvailableSlots.excludeEventIds for the full
+              // semantics.
               excludeEventIds: Array.isArray(args.moving_event_ids)
                 ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
                 : undefined,
               // v2.6 — category scheduling rules. When set, slot loop filters
-              // out slots that would violate the category's day_type / per_day
-              // / per_week limits.
+              // out slots that would violate the category's day_type / per_day /
+              // per_week limits.
               category: args.category as string | undefined,
               diagnosticsOut,
             });
@@ -1475,11 +1539,10 @@ export class SchedulingSkill {
 
             // v3.3.7 (#124h) — internal attendee addresses Graph could NOT
             // resolve. A nonexistent mailbox returns NO busy data → reads as
-            // fully free → slots get offered without that person's calendar
-            // ever being checked (the invented "elinor.avny@" case). External
-            // addresses are skipped: Graph never has their data, first-time
-            // externals are normal. did_you_mean comes from people_memory by
-            // the address's first name token.
+            // fully free → slots get offered without that person's calendar ever
+            // being checked. External addresses are skipped: Graph never has
+            // their data, and first-time externals are normal. did_you_mean
+            // comes from people_memory by the address's first name token.
             const ownerDomainLower = userEmail.includes('@') ? userEmail.split('@')[1].toLowerCase() : '';
             const unresolvedInternal = (diagnosticsOut.unresolvedAttendees ?? [])
               .filter(e => ownerDomainLower && e.endsWith('@' + ownerDomainLower));
@@ -1525,20 +1588,17 @@ export class SchedulingSkill {
                 }
               : undefined;
             // v2.4.2 — narrow to 3 spread options before returning to Sonnet.
-            // Owner spec: "spread 3 options as I want" — one per day where
-            // possible, then ≥2h apart same-day, then ≥30min last-resort.
-            // pickSpreadSlots was already used by the coord path
-            // (`pickSpreadSlots(slots, ownerTz, 3)`) but the owner-direct path
-            // had been returning up to 30 raw candidates since v2.0.9 — Sonnet
-            // had to pick which to surface (often over-listed). Single source
-            // of truth now: tool returns spread, Sonnet narrates.
+            // Owner spec: "spread 3 options" — one per day where possible, then
+            // ≥2h apart same-day, then ≥30min last-resort. Single source of
+            // truth: tool returns the spread, Sonnet narrates (rather than
+            // receiving raw candidates and over-listing).
             // Edge case: narrow validation searches (HYPOTHETICAL VALIDATION
             // rule, "can we do X at Y?") naturally return ≤1 candidate from
             // findAvailableSlots, and pickSpreadSlots' Pass 1 (one-per-day)
             // returns it unchanged. No regression on the validation path.
 
-            // v2.7.6 — auto-relaxed recovery on user-named narrow windows.
-            // When strict returns 0 AND owner asked about a specific day/window
+            // v2.7.6 — auto-relaxed recovery on user-named narrow windows. When
+            // strict returns 0 AND owner asked about a specific day/window
             // AND he didn't already opt into relaxed, automatically re-run with
             // relaxed=true so soft-rule-breaking slots surface tagged. Lets
             // Sonnet narrate "12:30 fits everyone but breaks your focus block
@@ -1618,14 +1678,14 @@ export class SchedulingSkill {
                   err: String(recErr).slice(0, 200),
                 });
               }
-              // v3.1.7 — clip the AUTO-recovery to the owner's working DAY.
-              // The recovery relaxes IN-DAY soft blocks (focus / lunch / category)
-              // so it can surface "13:00 breaks your lunch — book anyway?" — but it
+              // v3.1.7 — clip the AUTO-recovery to the owner's working DAY. The
+              // recovery relaxes IN-DAY soft blocks (focus / lunch / category) so
+              // it can surface "13:00 breaks your lunch — book anyway?" — but it
               // must NEVER offer a slot outside his working hours (pre-start /
-              // post-end). Maelle proposing "09:00, before your 10:30 start" was the
-              // bug (2026-05-31 Daniel): relaxing a soft block ≠ extending his day.
-              // (When the OWNER explicitly names an off-hours time, that call passes
-              // relaxed=true directly and never enters this auto-recovery branch.)
+              // post-end). Relaxing a soft block ≠ extending his day.
+              // (When the OWNER explicitly names an off-hours time, that call
+              // passes relaxed=true directly and never enters this
+              // auto-recovery branch.)
               if (relaxedRecoverySlots.length > 0) {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const wh = require('../../utils/workHours') as typeof import('../../utils/workHours');
@@ -1717,7 +1777,34 @@ export class SchedulingSkill {
             // trade-off explicitly: "12:30 fits everyone but eats into your
             // 2h focus block — want it anyway?"
             const candidateSet = relaxedRecoverySlots.length > 0 ? relaxedRecoverySlots : rawSlots;
-            const chosenStarts = new Set(pickSpreadSlots(candidateSet, timezone, 3, anchorDay, args.duration_minutes as number | undefined));
+            // DEPRIORITIZE held slots: a time tentatively held for someone
+            // else is never the first offer. Pick from the FREE candidates; a
+            // held time only surfaces (tagged, below) when there's nothing free
+            // left in the window — better than "no slots", and the owner can
+            // still book over it explicitly (the confirm gate fires). Holds are
+            // internal state, so Graph free/busy reports them free — without this
+            // they'd rank like any open slot.
+            let pickPool = candidateSet;
+            try {
+              const { getActiveSlotHolds: getHolds } = await import('../../db/slotHolds');
+              const heldNow = getHolds(context.profile.user.slack_user_id);
+              if (heldNow.length > 0) {
+                const overlapsHold = (s: { start: string; end?: string }) => {
+                  const ss = Date.parse(s.start);
+                  const se = Date.parse(s.end ?? s.start);
+                  return heldNow.some(h => {
+                    const hs = Date.parse(h.start_iso);
+                    const he = Date.parse(h.end_iso);
+                    return Number.isFinite(hs) && Number.isFinite(he) && ss < he && se > hs;
+                  });
+                };
+                const freeOnly = candidateSet.filter(s => !overlapsHold(s as any));
+                if (freeOnly.length > 0) pickPool = freeOnly;  // hold back held slots while free ones exist
+              }
+            } catch (err) {
+              logger.warn('find_available_slots — hold deprioritization threw, using full set', { err: String(err).slice(0, 120) });
+            }
+            const chosenStarts = new Set(pickSpreadSlots(pickPool, timezone, 3, anchorDay, args.duration_minutes as number | undefined));
 
             // v2.9.2 — preferred_slot guarantee. When the requester named a
             // specific time ("preferably 11:30"), pickSpreadSlots' MIN_GAP
@@ -1753,21 +1840,21 @@ export class SchedulingSkill {
 
             const slots = candidateSet.filter(s => chosenStarts.has(s.start));
 
-            // v2.7.0 — initiator-aware annotation. Owner-path normally pre-
-            // dropped attendee-busy slots via attendeeBusyEmails. Colleague-path
-            // doesn't pre-drop — it ANNOTATES each slot with the attendee's
-            // free/busy status so Sonnet narrates honestly.
+            // v2.7.0 — initiator-aware annotation. Owner-path normally pre-drops
+            // attendee-busy slots via attendeeBusyEmails. Colleague-path doesn't
+            // pre-drop — it ANNOTATES each slot with the attendee's free/busy
+            // status so Sonnet narrates honestly.
             //
-            // v3.3.x (Dina webinar, 2026-06-14) — REUSE that annotation on the
-            // OWNER path when finding time for a colleague-REQUESTED meeting.
-            // When the owner says "find her a time" for a meeting the colleague
-            // asked for (esp. urgent), the colleague is FLEXIBLE — she'll move
-            // her own thing — so her busy must NOT hard-drop the owner's free
-            // slots. Sonnet signals this by setting ignore_attendee_availability
-            // (→ attendeeBusyEmails undefined, no hard drop); we then run the
-            // SAME annotation so the result is "12:30: Idan free, Dina busy" and
-            // Maelle can say "works for you — want me to ask Dina to move it?"
-            // instead of "no time" / bouncing the question back to the requester.
+            // v3.3.x (Dina webinar, 2026-06-14) — the OWNER path REUSES that
+            // annotation when finding time for a
+            // colleague-REQUESTED meeting. When the owner says "find her a time"
+            // for a meeting the colleague asked for (esp. urgent), the colleague
+            // is FLEXIBLE — she'll move her own thing — so her busy must NOT
+            // hard-drop the owner's free slots. Sonnet signals this by setting
+            // ignore_attendee_availability (→ attendeeBusyEmails undefined, no
+            // hard drop); we then run the SAME annotation so the result is
+            // "12:30: owner free, Dina busy" and Maelle can say "works for you —
+            // want me to ask Dina to move it?" instead of "no time".
             const annotateForFlexibleRequester = isOwnerInitiatedSearch && ignoreAttendeeBusy;
             let annotatedSlots: Array<any> = slots;
             if ((!isOwnerInitiatedSearch || annotateForFlexibleRequester) && attendeeEmails.length > 0) {
@@ -1815,15 +1902,13 @@ export class SchedulingSkill {
             }
 
             // v2.5.2 — surface travelers so Sonnet renders dual-TZ on slot
-            // lines. Travelers list only present when at least one attendee
-            // had an active travel record at availability-load time.
-            // v3.1.2 — `location` (free text, e.g. "Boston") is the ONLY
-            // field Sonnet should narrate; it's the proper location source.
-            // The raw IANA tz fields (travelTimezone/homeTimezone) were
-            // dropped — a timezone is not a place, and leaving the IANA in
-            // the tool JSON re-opened the "America/New_York → New York" paste
-            // risk. TZ math is handled by per_attendee_local below + the
-            // slot-finder clip; Sonnet never needs the raw zone.
+            // lines. Travelers list only present when at least one attendee had
+            // an active travel record at availability-load time. v3.1.2 —
+            // `location` (free text, e.g. "Boston") is the ONLY field Sonnet
+            // should narrate; the raw IANA tz fields are deliberately NOT shipped
+            // — a timezone is not a place, and leaving the IANA in the tool JSON
+            // re-opens the "America/New_York → New York" paste risk. TZ math is
+            // handled by per_attendee_local below + the slot-finder clip.
             const travelers = (attendeeAvailability ?? [])
               .filter(a => a.travel)
               .map(a => ({
@@ -1832,17 +1917,14 @@ export class SchedulingSkill {
                 until: a.travel!.until,
               }));
 
-            // v2.8.3 hotfix — when attendees live in a TZ different from
-            // owner's, pre-render the slot in each such attendee's local TZ
-            // and attach to the slot result. Sonnet quotes verbatim instead
-            // of doing the math in chat (real-day bug 2026-05-16: she said
-            // "10:30 IL = 08:30 Boston", off by ~5h). Code over prompt: the
-            // conversion is pure determinism, no judgment.
-            // v3.3.8 — per-day TZ resolution (travel-window aware). An attendee
+            // v2.8.3 hotfix — when attendees live in a TZ different from owner's,
+            // pre-render the slot in each such attendee's local TZ and attach to
+            // the slot result. Sonnet quotes verbatim instead of doing the math
+            // in chat (the conversion is pure determinism, no judgment).
+            // v3.3.8 — per-day TZ resolution (travel-window aware): an attendee
             // whose trip covers a slot's day renders in the TRAVEL tz for that
-            // slot and the HOME tz for others — and gets NO parenthetical at
-            // all on days their effective tz matches the owner's (Daniel back
-            // in Israel on Tuesday should not show a Tokyo time for Tuesday).
+            // slot and the HOME tz for others — and gets NO parenthetical at all
+            // on days their effective tz matches the owner's.
             const tzCandidates = (attendeeAvailability ?? []).filter(a => a.timezone);
             if (tzCandidates.length > 0) {
               // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1857,9 +1939,9 @@ export class SchedulingSkill {
                   if (effTz === timezone) return null;  // same wall-clock — no parenthetical
                   const dt = slotDt.setZone(effTz);
                   if (!dt.isValid) return null;
-                  // v3.1.2 — raw IANA dropped from the result. local_display is
-                  // the pre-rendered string Sonnet quotes; local_iso carries the
-                  // offset (no city). Shipping the IANA tag invited
+                  // v3.1.2 — no raw IANA in the result. local_display is the
+                  // pre-rendered string Sonnet quotes; local_iso carries the
+                  // offset (no city). Shipping the IANA tag invites
                   // "America/New_York → New York" pastes.
                   return {
                     email: a.email,
@@ -1891,9 +1973,9 @@ export class SchedulingSkill {
             }
             // v3.3.8 — remember what's being OFFERED in this conversation so a
             // later pick ("Tuesday 20:30") binds to the offered instant instead
-            // of re-deriving the date (the Liza wrong-Tuesday incident). The
-            // orchestrator injects these on subsequent turns. Colleague-path
-            // only — the owner-path has its own correction loop.
+            // of re-deriving the date. The orchestrator injects these on
+            // subsequent turns. Colleague-path only — the owner-path has its own
+            // correction loop.
             if (!isOwnerInitiatedSearch && annotatedSlots.length > 0 && context.channelId) {
               try {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1912,6 +1994,39 @@ export class SchedulingSkill {
               }
             }
 
+            // Annotate any returned slot overlapping an active hold. Never
+            // drop it (the owner arbitrates races); just tag it so Maelle narrates
+            // "tentatively held". PRIVACY: the OWNER sees who holds it + why; a
+            // colleague hears only "held" (never another colleague's name), unless
+            // it's THEIR OWN hold ("still yours").
+            try {
+              const { getActiveSlotHolds } = await import('../../db/slotHolds');
+              const holds = getActiveSlotHolds(context.profile.user.slack_user_id);
+              if (holds.length > 0) {
+                annotatedSlots = annotatedSlots.map((s: any) => {
+                  const sStart = Date.parse(s.start);
+                  const sEnd = Date.parse(s.end ?? s.start);
+                  const hit = holds.find(h => {
+                    const hs = Date.parse(h.start_iso);
+                    const he = Date.parse(h.end_iso);
+                    return Number.isFinite(hs) && Number.isFinite(he) && sStart < he && sEnd > hs;
+                  });
+                  if (!hit) return s;
+                  if (!isOwnerInitiatedSearch && hit.holder_slack_id === context.userId) {
+                    return { ...s, on_hold: { status: 'yours', note: 'You are already holding this time — confirm to book it, or pick another.' } };
+                  }
+                  if (isOwnerInitiatedSearch) {
+                    return { ...s, on_hold: { status: 'held', holder: hit.holder_name, reason: hit.reason ?? undefined,
+                      note: `Tentatively held for ${hit.holder_name}${hit.reason ? ` (${hit.reason})` : ''} — booking over it will release the hold + notify them.` } };
+                  }
+                  return { ...s, on_hold: { status: 'held',
+                    note: 'This time is tentatively held by someone else. Offer to wait or look at alternatives — do NOT name who holds it. If they INSIST, raise create_approval(kind=policy_exception) so the owner decides; never book it directly.' } };
+                });
+              }
+            } catch (err) {
+              logger.warn('find_available_slots — hold annotation threw, continuing', { err: String(err).slice(0, 150) });
+            }
+
             // Surface per-day summary alongside slots so Sonnet can answer
             // "why no Monday?" honestly. When both travelers and day_summary
             // are empty, fall back to the legacy array shape so existing
@@ -1926,8 +2041,9 @@ export class SchedulingSkill {
               ? strictDaySummary
               : diagnosticsOut.daySummary;
             const hasDaySummary = Array.isArray(daySummary) && daySummary.length > 0;
-            // v3.3 — Working Elsewhere surfacing. `resolved` days carry tentative
-            // slots (already tagged in annotatedSlots); `unresolved` days had a
+            // v3.3 — Working Elsewhere surfacing. `resolved` days carry
+            // tentative slots (already tagged in annotatedSlots); `unresolved`
+            // days had a
             // marker whose location couldn't be mapped to a timezone → Sonnet
             // must ASK, never offer home-TZ times.
             const weInfo = diagnosticsOut.workingElsewhere;
@@ -1968,18 +2084,13 @@ export class SchedulingSkill {
         }
 
       case 'create_meeting': {
-        // v3.0.7 — runtime array guard. Pre-fix the cast `as Array<...>` was a
-        // pure-TS assertion, no runtime check. When Sonnet passed `attendees`
-        // as a non-array shape (single object, keyed object, null, omitted —
-        // all observed in the wild), the downstream `attendees.filter(...)`
-        // call at line ~1669/1864 crashed with
-        // `TypeError: attendees.filter is not a function`. The registry's
-        // generic catch wrapped it as `{ error: 'Tool ... failed: ...' }`,
-        // the summarizer rendered it as `[create_meeting FAILED ...
-        // unclear_result]`, and Sonnet retried with the same broken shape →
-        // owner saw 3 identical FAILEDs in one turn (2026-05-26 08:57 IL,
-        // Onn/Oran/Lital booking). Refuse early with a shape-explicit error
-        // message Sonnet can react to instead of the opaque TypeError.
+        // v3.0.7 — runtime array guard. The `as Array<...>` cast is a pure-TS
+        // assertion with no runtime check. When Sonnet passes `attendees` as a non-array
+        // shape (single object, keyed object, null, omitted — all observed),
+        // the downstream `attendees.filter(...)` crashes with a TypeError that
+        // the registry wraps as an opaque FAILED, and Sonnet retries with the
+        // same broken shape. Refuse early with a shape-explicit error message
+        // Sonnet can react to instead.
         const rawAttendees = args.attendees;
         if (!Array.isArray(rawAttendees)) {
           logger.warn('create_meeting — args.attendees not an array, refusing', {
@@ -2029,20 +2140,16 @@ export class SchedulingSkill {
           }
         }
 
-        // v2.9.0 — BookingRequest normalization. Single validated pre-data
-        // shape that planMeeting consumes (replacing ad-hoc PlanMeetingInput
-        // construction below). The normalizer is idempotent: it reads from
-        // args (after the legacy in-handler prep below runs), produces a
-        // strict BookingRequest with owner-in-participants invariant +
-        // snapped duration + gated sensitivity + gated relaxed + minimal
-        // context (threadTs / isMpim / isOwnerInGroup). Phase A keeps the
-        // legacy handler prep alongside; Phase B consolidates by reading
-        // req.X downstream and removing the duplicate handler-side blocks.
+        // v2.9.0 — BookingRequest normalization. Single validated pre-data shape
+        // that planMeeting consumes. The normalizer is idempotent: it reads from args
+        // and produces a strict BookingRequest with owner-in-participants
+        // invariant + snapped duration + gated sensitivity + gated relaxed +
+        // minimal context (threadTs / isMpim / isOwnerInGroup).
         const { normalizeBookingRequest } = await import('./bookingRequest');
         const { planInputFromBookingRequest } = await import('./planMeeting');
 
         // v2.8.6 (102a) — sensitivity gate on colleague-path. The tool schema
-        // exposes `sensitivity` so Yael can ask "mark this private" at booking
+        // exposes `sensitivity` so a colleague can ask "mark this private" at booking
         // time (attendee right). But we don't trust an arbitrary colleague-
         // path call to set sensitivity on a meeting they're NOT on — that
         // would let a random colleague mark someone else's calendar event
@@ -2072,10 +2179,8 @@ export class SchedulingSkill {
 
         // v2.8.6 — snap duration to profile.meetings.allowed_durations at the
         // single chokepoint every booking path reaches (direct Sonnet call,
-        // outreach handoff, deferred-replay). Pre-fix, only the outreach
-        // handoff in coordinator.ts snapped; direct create_meeting calls
-        // shipped whatever start/end Sonnet passed (root of the Maayan 20-min
-        // booking landing at 12:15-12:35 off-alignment).
+        // outreach handoff, deferred-replay). Without this, direct create_meeting
+        // calls ship whatever start/end Sonnet passed and land off-alignment.
         const startIsoIn = args.start as string | undefined;
         const endIsoIn   = args.end   as string | undefined;
         if (typeof startIsoIn === 'string' && typeof endIsoIn === 'string') {
@@ -2090,12 +2195,12 @@ export class SchedulingSkill {
               allowed[0]);
               const snapDelta = Math.abs(requestedMin - snapped);
               // v3.2.6 (2.4) — a SMALL snap (≤5 min, e.g. "1 hour" → 55) is the
-              // expected preset-alignment; apply it silently. A LARGE snap
-              // (>5 min, e.g. an explicit 2-hour copy → 55) used to silently
-              // DESTROY the length the owner actually asked for. Don't shrink it
-              // on our own — surface a verify question; honor the full length
-              // only on owner confirm (override_duration), or shrink to the
-              // preset if they pass duration_minutes=<preset> instead.
+              // expected preset-alignment; apply it silently. A LARGE snap (>5 min, e.g.
+              // an explicit 2-hour copy → 55) would silently DESTROY the length
+              // the owner actually asked for. Don't shrink it on our own —
+              // surface a verify question; honor the full length only on owner
+              // confirm (override_duration), or shrink to the preset if they
+              // pass duration_minutes=<preset> instead.
               if (snapDelta > 5 && !args.override_duration) {
                 return {
                   warning: `You asked for a ${requestedMin}-minute meeting, which is longer than the usual lengths (${allowed.join(', ')} min). Ask briefly: "That's ${requestedMin} min — book the full length, or shorten to ${snapped}?" If they want the full ${requestedMin} min, call create_meeting again with override_duration=true; if ${snapped} is fine, call again with duration_minutes=${snapped}.`,
@@ -2143,12 +2248,11 @@ export class SchedulingSkill {
           });
         }
 
-        // v2.3.2 — colleague-path booking gate. When a colleague has
-        // confirmed slot + duration + subject in this DM (1:1 or fast-path
-        // multi-internal flow), Maelle calls create_meeting directly instead
-        // of falling back to "you send the invite" or kicking off a redundant
-        // coordinate_meeting. Same trust pattern as v2.2.1 move_meeting:
-        // rule-compliance is the gate.
+        // v2.3.2 — colleague-path booking gate. When a colleague has confirmed
+        // slot + duration + subject in this DM (1:1 or fast-path multi-internal
+        // flow), Maelle calls create_meeting directly instead of falling back to
+        // "you send the invite" or kicking off a redundant coordinate_meeting.
+        // Same trust pattern as the v2.2.1 move_meeting gate: rule-compliance is the gate.
         // Guards (in code, not prompt):
         //   - 1:1 case: just the requesting colleague — always allowed
         //   - multi-internal: every additional attendee must have an internal
@@ -2161,27 +2265,21 @@ export class SchedulingSkill {
         //     DMs to non-self internal attendees ("Oran asked, I checked
         //     your calendar, booked Tue 14:00")
         if (context.senderRole === 'colleague') {
-          // v2.6 Bug 4 — early idempotency probe BEFORE Guards A and B.
-          // Background: when a colleague's continuing chat causes Sonnet to
-          // re-attempt create_meeting after the first attempt already
-          // succeeded, Guard B's rule-compliance check can throw (Graph
-          // free/busy interval errors, transient API failures) and
-          // defensively escalate to create_approval(kind=policy_exception).
-          // That stale approval lands in the owner's DM and re-surfaces in
-          // every brief until manually rejected (the actual incident:
-          // 2026-05-05 Oran chatbot ask — first attempt 06:13:11 booked at
-          // 13:30 successfully; second attempt 06:15:31 threw Graph error
-          // and created appr_1777961736240_i064x which sat pending until
-          // 2026-05-06 morning when the owner manually rejected it).
+          // v2.6 Bug 4 — early idempotency probe BEFORE Guards A and B. When a
+          // colleague's continuing chat causes Sonnet to re-attempt create_meeting after the
+          // first attempt already succeeded, Guard B's rule-compliance check can
+          // throw (Graph free/busy errors, transient API failures) and
+          // defensively escalate to create_approval(kind=policy_exception) — a
+          // stale approval that lands in the owner's DM and re-surfaces in every
+          // brief until manually rejected.
           //
-          // Fix: probe Graph for an existing meeting at this same
-          // subject+start (±2-min tolerance) BEFORE Guards A/B fire. If
-          // found → return success with idempotent=true. The downstream
-          // late-idempotency check at line ~1049 stays as defense-in-depth.
-          // Subject+start match is the same heuristic the late check uses;
-          // attendee-list matching is a future tightening (the rare collision
-          // case is owner manually booked an unrelated event with the same
-          // subject; trade-off favors avoiding stale approvals).
+          // So: probe Graph for an existing meeting at this same subject+start
+          // (±2-min tolerance) BEFORE Guards A/B fire. If found → return success
+          // with idempotent=true. The downstream late-idempotency check stays as
+          // defense-in-depth. Subject+start match is the same heuristic the late
+          // check uses; attendee-list matching is a future tightening (the rare
+          // collision is the owner manually booking an unrelated event with the
+          // same subject; trade-off favors avoiding stale approvals).
           try {
             const startDt = DateTime.fromISO(args.start as string, { zone: timezone });
             if (startDt.isValid) {
@@ -2287,15 +2385,13 @@ export class SchedulingSkill {
           }
 
           // v2.8.6 (103D/F) — owner-in-MPIM deterministic override. When the
-          // owner is present in this MPIM and recently proposed THIS exact
-          // slot in chat (24h or 12h time format match against owner-typed
-          // messages in the recent history), treat his presence as the
-          // approval. Set relaxed=true on the args so the downstream Guard B
-          // check and planMeeting both bypass soft rules (work hours, focus,
-          // floating blocks). Closes the path that today produces the leaked
-          // "Idan said yes on policy exception needs your input" MPIM message
-          // — when owner just typed "what about 10:30pm?" in the same thread,
-          // there's no reason to escalate it back to him as an approval.
+          // owner is present in this MPIM and recently proposed THIS exact slot in chat (24h or 12h
+          // time format match against owner-typed messages in the recent
+          // history), treat his presence as the approval. Set relaxed=true on
+          // the args so the downstream Guard B check and planMeeting both bypass
+          // soft rules (work hours, focus, floating blocks). When the owner just
+          // typed "what about 10:30pm?" in the same thread, there's no reason to
+          // escalate it back to him as an approval.
           if (context.isMpim === true && context.isOwnerInGroup === true && args.relaxed !== true) {
             try {
               const { ownerProposedSlot } = await import('../../utils/ownerProposedSlot');
@@ -2367,23 +2463,21 @@ export class SchedulingSkill {
               const durationMin = Math.max(5, Math.round((endDt.toMillis() - startDt.toMillis()) / 60_000));
               const { findAvailableSlots } = await import('../../connectors/graph/calendar');
               const startMs = startDt.toMillis();
-              // v2.6.1 — pass the EXACT requested window. Pre-v2.6.1 widened
-              // by ±60s on each side, but findAvailableSlots strides 15-min
-              // from searchFrom — so cursor landed at start-1min and the
-              // requested slot was never tested. Worst-case bug: a 10:30
-              // request on an office day with hours_start: '10:30' got
-              // rejected as outside_owner_work_hours because cursor was at
-              // 10:29 (one minute outside the boundary). Confirmed in log
-              // 2026-05-06T18:39:45.015Z. The widening defended against
-              // nothing concrete (work-hours / busy / focus checks read
-              // integer-minute fields, sub-second drift doesn't matter).
+              // v2.6.1 — pass the EXACT requested window — do NOT widen.
+              // findAvailableSlots strides 15-min from searchFrom, so widening
+              // by ±60s lands the cursor at start-1min and the requested slot is
+              // never tested (a 10:30 request on an office day with hours_start:
+              // '10:30' then gets rejected as outside_owner_work_hours because
+              // the cursor is at 10:29). The widening defends against nothing
+              // concrete — work-hours / busy / focus checks read integer-minute
+              // fields, so sub-second drift doesn't matter.
               const fromIso = startDt.toUTC().toISO();
               const toIso = endDt.toUTC().toISO();
               let validSlots: Array<{ start: string }> = [];
               // v2.6.1 — collect rejection diagnostics from findAvailableSlots
               // by reference so we can name THIS slot's broken rule in the
-              // refusal returned to Sonnet (instead of forcing her to guess
-              // which led to "rule-non-compliant" + fabricated reasons).
+              // refusal returned to Sonnet (instead of forcing her to guess,
+              // which leads to "rule-non-compliant" + fabricated reasons).
               const diagnostics: { rejectedCounts?: Record<string, number>; rejectedExamples?: Record<string, string[]> } = {};
               if (fromIso && toIso) {
                 validSlots = await findAvailableSlots({
@@ -2402,30 +2496,28 @@ export class SchedulingSkill {
                   // to create_approval with the rule name (RULE-NAMING).
                   category: args.category as string | undefined,
                   diagnosticsOut: diagnostics,
-                  // v3.0.6 — this is a single-slot yes/no validation. The
-                  // window is exactly [start, end], so findAvailableSlots
-                  // returns ≤1 slot → <3 → auto-expand would re-query the
-                  // calendar 2-3 more times at widening ranges (~5-6s on
-                  // every colleague booking), and the expanded slots are
-                  // discarded anyway (matches checks ±60s of the requested
-                  // start). Disable it.
+                  // v3.0.6 — single-slot yes/no validation. The window is
+                  // exactly [start, end], so findAvailableSlots returns ≤1 slot →
+                  // <3 → auto-expand would re-query the calendar 2-3 more times at
+                  // widening ranges on every colleague booking, and the expanded
+                  // slots are discarded anyway (matches checks ±60s of the
+                  // requested start). Disable it.
                   autoExpand: false,
                 });
               }
               const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
               if (!matches) {
                 const ownerFirst = context.profile.user.name.split(' ')[0];
-                // v2.6.1 — derive a one-phrase human label for the rule
-                // that rejected this slot. Sonnet pastes this verbatim
-                // into create_approval(kind=policy_exception).ask_text so
-                // the owner sees "in your lunch window" / "outside your
-                // work hours" / etc. instead of "rule-non-compliant" or a
-                // fabricated reason. broken_rule_label === 'unknown' means
-                // the diagnostics didn't fire (rare — defensive); Sonnet
-                // says so honestly rather than guessing.
-                // v2.7.1 — owner_buffer_collision removed (was a soft-preference
-                // collision check that duplicated the buffer baked into standard
-                // durations). Connected back-to-backs are fine by design.
+                // v2.6.1 — derive a one-phrase human label for the rule that
+                // rejected this slot. Sonnet pastes this verbatim into
+                // create_approval(kind=policy_exception).ask_text so the owner
+                // sees "in your lunch window" / "outside your work hours" / etc.
+                // instead of "rule-non-compliant" or a fabricated reason.
+                // broken_rule_label === 'unknown' means the diagnostics didn't
+                // fire (rare — defensive); Sonnet says so honestly rather than
+                // guessing. v2.7.1 — no owner_buffer_collision label: connected
+                // back-to-backs are fine by design (the buffer is baked into
+                // standard durations).
                 const labelFor = (reason: string | undefined): string => {
                   switch (reason) {
                     case 'outside_owner_work_hours': return `outside ${ownerFirst}'s work hours`;
@@ -2466,14 +2558,13 @@ export class SchedulingSkill {
                   message: brokenRuleLabel === 'unknown'
                     ? `That time doesn't pass ${ownerFirst}'s scheduling rules and I can't tell exactly which one flagged it. Call create_approval(kind=policy_exception) — describe the slot honestly and let him decide.`
                     : `That time is ${brokenRuleLabel} for ${ownerFirst}. I can't book it on my own — call create_approval(kind=policy_exception) and pass the same phrase ("${brokenRuleLabel}") in ask_text so he knows what he's overriding.`,
-                  // v2.8.6 (103E wiring) — stamp the deferred_action_hint so
-                  // the orchestrator can auto-attach it to the follow-up
-                  // create_approval. Pre-fix this colleague-path early-reject
-                  // returned without a hint, so owner-approve resolved the
-                  // request with no replay — booking never fired, requester
-                  // got the "I'll take it from here" empty promise. Now the
-                  // same `payload.deferred_action` machinery that the
-                  // planMeeting-path refusals use also covers this path.
+                  // v2.8.6 (103E wiring) — stamp the deferred_action_hint so the
+                  // orchestrator can auto-attach it to the follow-up
+                  // create_approval. Without it, owner-approve would resolve the
+                  // request with no replay — booking never fires, requester gets
+                  // an empty promise. This reuses the same
+                  // `payload.deferred_action` machinery the planMeeting-path
+                  // refusals use.
                   _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
                 };
               }
@@ -2601,20 +2692,16 @@ export class SchedulingSkill {
           logger.warn('create_meeting idempotency pre-check failed — proceeding with create', { err: String(err) });
         }
 
-        // v2.7.0 — single pipeline through planMeeting. Replaces the v2.6.x
-        // determineSlotLocation + helperForcesOnline + skipLocationField mess.
-        // planMeeting handles category detection, location resolution, and
-        // rule application as ONE coherent decision. Output drives the rest
-        // of the booking.
+        // v2.7.0 — single pipeline through planMeeting: category detection,
+        // location resolution, and rule application as ONE coherent decision.
+        // Output drives the rest of the booking.
         const { planMeeting } = await import('./planMeeting');
         // v2.9.0 — build the normalized BookingRequest and feed it through
-        // planInputFromBookingRequest. Replaces the previous ad-hoc
-        // PlanMeetingInput construction. Args are passed AS-IS to the
-        // normalizer — the legacy in-handler prep above already applied
-        // (duration snap, sensitivity gate, email auto-fill); the
-        // normalizer reads those mutated values and produces the canonical
-        // shape. See bookingRequest.ts for the invariants the normalizer
-        // enforces.
+        // planInputFromBookingRequest. Args are passed AS-IS to the normalizer —
+        // the in-handler prep above already applied (duration snap, sensitivity
+        // gate, email auto-fill); the normalizer reads those mutated values and
+        // produces the canonical shape. See bookingRequest.ts for the invariants
+        // the normalizer enforces.
         const bookingRequest = await normalizeBookingRequest('create_meeting', args, context);
         const plan = await planMeeting(planInputFromBookingRequest(bookingRequest, context.profile));
         logger.info('create_meeting — planMeeting verdict', {
@@ -2646,20 +2733,21 @@ export class SchedulingSkill {
             violation_label: plan.violationLabel,
             suggested_ask_text: plan.suggestedAskText,
             category: plan.category,
-            // v2.7.2 — deferred_action_hint: the original tool call, ready
-            // to be stamped on a follow-up create_approval. Orchestrator
-            // auto-attaches this to payload.deferred_action when Sonnet
-            // raises a policy_exception this turn, so the resolver can
-            // replay the booking on approve. The "redirect URL token"
-            // pattern — args round-trip through the approval.
+            // v2.7.2 — deferred_action_hint: the original tool call, ready to be
+            // stamped on a follow-up create_approval. Orchestrator auto-attaches
+            // this to payload.deferred_action when Sonnet raises a
+            // policy_exception this turn, so the resolver can replay the booking
+            // on approve. The "redirect URL token" pattern — args round-trip
+            // through the approval.
             _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
             _note: plan.action === 'escalate_approval'
               ? 'A scheduling rule was violated. Use create_approval(kind=policy_exception) with suggested_ask_text to get the owner to decide.'
-              // v3.2.1 (#120a — one mechanism) — owner-path soft-rule override flows
-              // through the SAME persisted approval path as escalate. If the owner
-              // ALREADY authorized it in THIS message, retry create_meeting now with
-              // relaxed=true. Otherwise create_approval(kind=policy_exception) so the
-              // override PERSISTS and his later "yes" replays it deterministically.
+              // v3.2.1 (#120a — one mechanism) — owner-path soft-rule override
+              // flows through the SAME persisted approval path as escalate. If
+              // the owner ALREADY authorized it in THIS message, retry
+              // create_meeting now with relaxed=true. Otherwise
+              // create_approval(kind=policy_exception) so the override PERSISTS
+              // and his later "yes" replays it deterministically.
               : 'A soft scheduling rule was violated. If the owner ALREADY authorized overriding it in THIS message, retry create_meeting now with relaxed=true. Otherwise call create_approval(kind=policy_exception) with suggested_ask_text — this PERSISTS the override (the orchestrator stamps the deferred booking) so the owner\'s later "yes" replays it on its own, instead of relying on you to re-issue the booking next turn.',
           };
         }
@@ -2716,9 +2804,9 @@ export class SchedulingSkill {
         if (planCategory && !args.category) {
           args.category = planCategory;
         }
-        // v2.8.2 — location stamping is now a single string from resolveLocation
-        // (no more multi-part label/address/parking joining). For owner-explicit
-        // non-ASCII venues we still resolve to English for the calendar.
+        // v2.8.2 — location stamping is a single string from resolveLocation.
+        // For owner-explicit non-ASCII venues we resolve to English for the
+        // calendar.
         const resolvedLocationParts: string[] = await (async (): Promise<string[]> => {
           if (skipLocationField) return [];
           const hasNonAscii = /[^\x20-\x7e]/.test(planLocation);
@@ -2751,35 +2839,68 @@ export class SchedulingSkill {
           }
         }
 
+        // #30 — hold-conflict gate. Never book over a slot tentatively held for
+        // SOMEONE ELSE. Owner → confirm once ("X reserved that — book anyway?"),
+        // override_hold:true on the retry → book + release + DM holder. Colleague
+        // → can't override another's hold; route to the OWNER's approval (the
+        // RESERVE_SLOT design: a race goes to the owner, code never silently picks
+        // a winner). A holder booking the slot THEY hold proceeds (own confirm →
+        // released on success below). holder_slack_id===userId skips the gate.
+        {
+          const { getActiveHoldOverlapping } = await import('../../db/slotHolds');
+          const conflictHold = getActiveHoldOverlapping(
+            context.profile.user.slack_user_id, args.start as string, args.end as string,
+          );
+          if (conflictHold && conflictHold.holder_slack_id !== context.userId) {
+            if (context.senderRole === 'owner') {
+              if (args.override_hold !== true) {
+                return {
+                  success: false,
+                  error: 'slot_on_hold',
+                  hold_id: conflictHold.id,
+                  holder_name: conflictHold.holder_name,
+                  message: `${conflictHold.holder_name} asked to reserve ${formatIsoTime(args.start as string)}${conflictHold.reason ? ` (${conflictHold.reason})` : ''}. Book over it anyway? On your yes I'll book it and let ${conflictHold.holder_name} know the hold was released.`,
+                  _deferred_action_hint: { tool: 'create_meeting', args: { ...args, override_hold: true } },
+                  _note: 'Surface this to the owner. If he says book it anyway, retry create_meeting with override_hold:true — that books it, releases the hold, and DMs the holder.',
+                };
+              }
+              // owner + override_hold:true → fall through and book; release fires on success.
+            } else {
+              // Colleague booking over ANOTHER colleague's hold — never silently.
+              return {
+                success: false,
+                error: 'slot_held_needs_owner_approval',
+                hold_id: conflictHold.id,
+                message: `That time is tentatively held for someone else — don't book it, and don't reveal who holds it. Raise create_approval(kind=policy_exception) with this slot so ${context.profile.user.name.split(' ')[0]} decides; tell the colleague warmly you're checking on it.`,
+              };
+            }
+          }
+        }
+
         return createMeeting({
           userEmail,
           timezone,
-          // v2.4.3 (E1) — subject NOT scrubbed (per owner direction: " - "
-          // separator is fine in subjects, "Welcome Meeting - X & Y" reads
-          // naturally). The em-dash + " - " pattern is the chat-side issue;
-          // calendar subjects can keep them.
+          // v2.4.3 (E1) — subject NOT scrubbed: " - " separator is fine in
+          // subjects ("Welcome Meeting - X & Y" reads naturally). The em-dash /
+          // " - " pattern is only a chat-side issue; calendar subjects can keep them.
           subject:    args.subject  as string,
           start:      args.start    as string,
           end:        args.end      as string,
           // By this point Guard A has refused any attendee missing email and
           // the auto-fill has populated names. Coerce to the strict shape.
           attendees:  attendees.map(a => ({ name: a.name ?? '', email: a.email ?? '' })),
-          // v2.4.3 (E1) — body scrubbed AND auto-enriched with location.
-          // Pre-v2.4.3 the location often rendered cluttered ("Reflectiz HQ
-          // — Shoham 5 — Parking: ...") in the Outlook location field where
-          // many clients truncate it; Sonnet's body sometimes lacked the
-          // address entirely. Now the body always carries a readable
-          // location line at the top so attendees can find the meeting
+          // v2.4.3 (E1) — body scrubbed AND auto-enriched with location. The
+          // Outlook location field is truncated by many clients, so the body
+          // always carries a readable location line at the top — attendees can find the meeting
           // regardless of how their client renders the location field.
           body: (() => {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { scrubInternalLeakage } = require('../../utils/textScrubber') as typeof import('../../utils/textScrubber');
             const raw = args.body as string | undefined;
             const cleanedRaw = raw ? scrubInternalLeakage(raw) : '';
-            // v2.6.2 (D5) — same fix as resolvedLocationParts above. Use
-            // skipLocationField (not effectiveIsOnline) so office-day internal
-            // hybrid meetings DO get a location block in the body even when a
-            // Teams link is also being added.
+            // v2.6.2 (D5) — use skipLocationField (not effectiveIsOnline) so
+            // office-day internal hybrid meetings DO get a location block in the
+            // body even when a Teams link is also being added.
             if (skipLocationField) {
               // Fully online — no physical location to surface. Return body as-is.
               return cleanedRaw || undefined;
@@ -2798,8 +2919,8 @@ export class SchedulingSkill {
             return composed;
           })(),
           // v2.5.2 — effective isOnline pulls from Sonnet's explicit arg first,
-          // falls back to determineSlotLocation's day-aware decision when both
-          // is_online and location were left blank.
+          // falls back to the day-aware decision when both is_online and location
+          // were left blank.
           isOnline:   effectiveIsOnline,
           // All-day events. Sonnet sets is_all_day=true ONLY when owner
           // explicitly asks for a full-day event. createMeeting() clamps
@@ -2807,10 +2928,10 @@ export class SchedulingSkill {
           // requirement; we just pass the flag through here.
           isAllDay:   args.is_all_day === true,
           // v2.3.2 (1C) / v2.3.6 (#73) / v2.4.3 (E1) — clean comma-joined
-          // location with no em-dash separators. Pre-v2.4.3 used " — " as
-          // the joiner which made the Outlook location field hard to read.
-          // Same parts, comma-separated, then routed through scrubInternalLeakage
-          // for safety against any owner-yaml accidental dashes.
+          // location with no em-dash separators (an em-dash joiner makes the
+          // Outlook location field hard to read), routed through
+          // scrubInternalLeakage for safety against any owner-yaml accidental
+          // dashes.
           location: ((): string | undefined => {
             if (args.is_online === true) return undefined;
             if (!resolvedLocationParts || resolvedLocationParts.length === 0) return undefined;
@@ -2825,9 +2946,9 @@ export class SchedulingSkill {
           // a future profile that wants a different category to be its
           // privacy marker just sets the flag in yaml.
           // v2.8.6 — explicit args.sensitivity overrides the category-driven
-          // default. Lets owner OR an attendee ask "mark this private" at
-          // booking time. Default is undefined (Outlook normal); only set
-          // when the conversation asked for it (102a on the 2026-05-18 wave).
+          // default. Lets owner OR an attendee ask "mark this private" at booking
+          // time. Default is undefined (Outlook normal); only set when the
+          // conversation asked for it.
           sensitivity: (() => {
             const explicit = args.sensitivity as string | undefined;
             const ALLOWED = ['normal', 'personal', 'private', 'confidential'];
@@ -2870,17 +2991,16 @@ export class SchedulingSkill {
 
           // v2.8.2 / v3.1.x — Teams-URL-as-location patch, now FIRE-AND-FORGET.
           // When the location decision tree said "online with Teams URL as the
-          // location" (4a1, 5a, travel-override, non-work-day default), patch
-          // the event's location.displayName to the joinUrl so the invite shows
-          // the link as its location. This is PURELY COSMETIC — the meeting was
-          // already created WITH the online meeting in the single createMeeting
-          // POST (isOnlineMeeting:true), so the Teams link + Join button exist
-          // in the body regardless of this patch. Pre-v3.1.x this was an
-          // awaited second Graph PATCH (~2.5s) blocking the tool return on every
-          // Teams booking. Now we fire it AFTER verify (so we only patch a
-          // confirmed-good event) and DON'T await it — the ~2.5s leaves the
-          // critical path. Worst case on failure: location shows the auto label
-          // instead of the URL. Runs only on the confirmed-success path.
+          // location" (travel-
+          // override, non-work-day default, etc.), patch the event's
+          // location.displayName to the joinUrl so the invite shows the link as
+          // its location. PURELY COSMETIC — the meeting was already created WITH
+          // the online meeting in the single createMeeting POST
+          // (isOnlineMeeting:true), so the Teams link + Join button exist in the
+          // body regardless. Fired AFTER verify (so we only patch a
+          // confirmed-good event) and NOT awaited, keeping the ~2.5s PATCH off
+          // the critical path. Worst case on failure: location shows the auto
+          // label instead of the URL.
           if (planTeamsUrlAsLocation && createdMeeting.joinUrl) {
             void (async () => {
               try {
@@ -2911,14 +3031,14 @@ export class SchedulingSkill {
             logger.warn('rebalance after create_meeting threw — continuing', { err: String(err).slice(0, 200) });
           }
 
-          // v2.9.2 — close in-flight artifacts. Per closeMeetingArtifacts'
-          // own contract (v1.8.8 / v2.4.2 comments): "Every meeting mutation
-          // — create / move / update / delete — can leave stale artifacts."
-          // Pre-fix this path was the one mutation type that DIDN'T call the
-          // cascade, so in_flight_action follow_ups opened during a spilled
-          // create attempt (#11.2) never closed on the successful retry.
-          // Subject is passed so the subject-fallback match catches rows
-          // whose details.meeting_id is undefined.
+          // v2.9.2 — close in-flight artifacts. Per closeMeetingArtifacts' own
+          // contract (v1.8.8 / v2.4.2 comments): "Every meeting mutation —
+          // create / move / update / delete — can leave stale artifacts." Every
+          // mutation path must call the cascade,
+          // else in_flight_action follow_ups opened during a spilled create
+          // attempt never close on the successful retry. Subject is passed so
+          // the subject-fallback match catches rows whose details.meeting_id is
+          // undefined.
           closeMeetingArtifacts({
             ownerUserId: context.profile.user.slack_user_id,
             meetingId,
@@ -2927,11 +3047,40 @@ export class SchedulingSkill {
             bookingThreadTs: context.threadTs,
           });
 
-          // v2.3.2 — colleague-path booking: shadow-DM the owner so he
-          // sees the book happen even when he wasn't in the loop. Mirrors the
-          // v2.2.1 move_meeting shadow on inbound reschedule. Threaded under
-          // the colleague conversation key so all shadows from this thread
-          // group together in the owner's DM.
+          // The booked slot became real, so any tentative hold on it is
+          // resolved. Release it; if it was held by SOMEONE ELSE (the owner
+          // booked over it via override_hold), DM that holder it was let go.
+          // The holder's own confirm releases silently (it's their meeting now).
+          try {
+            const sh = await import('../../db/slotHolds');
+            const cleared = sh.releaseHoldsForOwner(
+              context.profile.user.slack_user_id, { startIso: args.start as string }, 'slot_booked',
+            );
+            for (const h of cleared) {
+              if (!h.holder_slack_id || h.holder_slack_id === context.userId) continue;
+              try {
+                const { getConnection } = await import('../../connections/registry');
+                const conn = getConnection(context.profile.user.slack_user_id, 'slack');
+                if (conn) {
+                  await conn.sendDirect(
+                    h.holder_slack_id,
+                    `Quick heads up — ${context.profile.user.name.split(' ')[0]} ended up taking ${formatIsoTime(args.start as string)}, so I've released the hold I had for you there. Happy to find you another time whenever.`,
+                    h.origin_thread_ts ? { threadTs: h.origin_thread_ts } : undefined,
+                  );
+                }
+              } catch (dmErr) {
+                logger.warn('create_meeting — hold-release DM failed (hold already released)', { err: String(dmErr).slice(0, 150) });
+              }
+            }
+          } catch (err) {
+            logger.warn('create_meeting — slot-hold release threw, continuing', { err: String(err).slice(0, 150) });
+          }
+
+          // v2.3.2 — colleague-path booking: shadow-DM the owner so he sees the
+          // book happen even when he wasn't in the loop. Mirrors the v2.2.1
+          // move_meeting shadow on inbound reschedule. Threaded under the
+          // colleague conversation key so all shadows from this thread group
+          // together in the owner's DM.
           if (context.senderRole === 'colleague') {
             try {
               const { shadowNotify } = await import('../../utils/shadowNotify');
@@ -2954,15 +3103,13 @@ export class SchedulingSkill {
               logger.warn('shadowNotify after colleague create_meeting failed — continuing', { err: String(err).slice(0, 200) });
             }
 
-            // v2.3.2 — post-booking heads-up DMs to non-self internal
-            // attendees. The fast-path skipped DMs during slot search (we
-            // checked their calendars directly via Graph) — they deserve a
-            // soft "this just got booked" so they aren't surprised by the
-            // calendar invite. Phrased like a human EA: "Hi Amazia, Oran
-            // asked for a meeting with you and Idan — I checked your
-            // calendar and booked it for Tue 09:00. See you then." Lookup
-            // by email via searchPeopleMemory; skip silently if no slack_id
-            // available (the calendar invite still went out).
+            // v2.3.2 — post-booking heads-up DMs to non-self internal attendees.
+            // The fast-path skipped DMs during slot search (we checked their
+            // calendars directly via Graph) — they deserve a soft "this just got
+            // booked" so they aren't surprised by the calendar invite, phrased
+            // like a human EA. Lookup by email via searchPeopleMemory; skip
+            // silently if no slack_id available (the calendar invite still went
+            // out).
             try {
               const { searchPeopleMemory, getPersonMemory } = await import('../../db');
               const { getConnection } = await import('../../connections/registry');
@@ -3018,8 +3165,9 @@ export class SchedulingSkill {
                   ownerUserId: context.profile.user.slack_user_id,
                   name: planLocation,
                   // address is the same as name for the v2.9 MVP — the stamped
-                  // location string typically already includes "Name, Street City".
-                  // Future Google-Places integration (#96) will split these out.
+                  // location string typically already includes "Name, Street
+                  // City". Future Google-Places integration (#96) will split
+                  // these out.
                 });
               }
             } catch (err) {
@@ -3055,9 +3203,9 @@ export class SchedulingSkill {
             });
           }
 
-          // v3.3.8 — the offer on the table was consumed by this booking;
-          // clear it so a stale "bind picks to these" block can't mislead
-          // the conversation's next exchange.
+          // v3.3.8 — the offer on the table was consumed by this booking; clear
+          // it so a stale "bind picks to these" block can't mislead the
+          // conversation's next exchange.
           if (context.channelId) {
             try {
               // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -3068,13 +3216,12 @@ export class SchedulingSkill {
           }
 
           // v3.1.4 (Y3) — record the requester-link for a colleague's direct
-          // booking. findMeetingOwner reads the requests spine to decide
-          // "who controls this meeting"; coord bookings already record their
-          // requester, but a direct colleague create_meeting did not — so a
-          // colleague editing the meeting they just requested wasn't
-          // recognized as its requester. One terminal row keyed on the event
-          // closes that gap; the requester then controls add/rename/location
-          // via the update_meeting + move_meeting gates.
+          // booking. findMeetingOwner reads the requests spine to decide "who
+          // controls this meeting"; a direct colleague create_meeting must record its
+          // requester (coord bookings already do), else a colleague editing the
+          // meeting they just requested isn't recognized as its requester. One
+          // terminal row keyed on the event lets the requester control
+          // add/rename/location via the update_meeting + move_meeting gates.
           if (context.senderRole === 'colleague' && meetingId) {
             try {
               // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -3109,8 +3256,8 @@ export class SchedulingSkill {
             // Sonnet from narrating the post-action calendar state as a fresh
             // discovery instead of the result of her own action (issue #26 bug 1).
             action_summary: `Booked '${args.subject}' for ${formatIsoTime(args.start as string)}–${formatIsoTime(args.end as string)}.`,
-            // #127 — owner booked through a soft own-day rule: surface the heads-up
-            // so Maelle mentions it ONCE ("Booked — note this dips your focus floor
+            // #127 — owner booked through a soft own-day rule: surface the
+            // heads-up so Maelle mentions it ONCE ("Booked — note this dips your focus floor
             // to 1h55"), never a blocking re-ask. Undefined on clean bookings.
             ...(planOverrideNotice ? { override_notice: planOverrideNotice } : {}),
           };
@@ -3120,9 +3267,9 @@ export class SchedulingSkill {
       case 'update_meeting': {
         // v2.1.4 — attendee-only guard. If the event's organizer is not the
         // owner, the owner is an ATTENDEE on someone else's meeting. Graph
-        // rejects PATCH from non-organizers, but the error message is
-        // unhelpful; refuse early with a clear human message so Maelle
-        // doesn't offer a fake "I'll add the location" then silently fail.
+        // rejects PATCH from non-organizers, but the error message is unhelpful;
+        // refuse early with a clear human message so Maelle doesn't offer a fake
+        // "I'll add the location" then silently fail.
         try {
           // v2.7.0 — ownership via findMeetingOwner (per D4 / Q1).
           const { findMeetingOwner } = await import('./findMeetingOwner');
@@ -3173,8 +3320,8 @@ export class SchedulingSkill {
           logger.warn('update_meeting recurring-preflight failed — proceeding', { err: String(err) });
         }
 
-        // v2.9.1 — attendee add/remove path. The schema introduced
-        // `add_attendees` and `remove_attendees`; when either is non-empty
+        // v2.9.1 — attendee add/remove path. When `add_attendees` or
+        // `remove_attendees` is non-empty
         // we (a) gate colleague-path to self-only, (b) load the existing
         // event, (c) compute the new attendee list, (d) re-evaluate
         // category + location ONLY when the change is shape-affecting
@@ -3192,9 +3339,9 @@ export class SchedulingSkill {
           const ownerFirst = context.profile.user.name.split(' ')[0];
           // v3.1.4 (Y2) — resolve name-only adds to emails from the directory
           // BEFORE the missing-email filter, via the shared resolver every
-          // booking path uses. Pre-fix, "add Eli Feldman" (no email) was
-          // dropped here → attendee_missing_email → Maelle asked the colleague
-          // for an email she already had on file.
+          // booking path uses. Without this, "add Eli Feldman" (no email) gets
+          // dropped → attendee_missing_email → Maelle asks the colleague for an
+          // email she already has on file.
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { resolveAttendeeEmail } = require('./resolveAttendeeEmails') as
             typeof import('./resolveAttendeeEmails');
@@ -3218,11 +3365,11 @@ export class SchedulingSkill {
 
           // v3.1.4 (Y3) — requester-controls gate (replaces the old self-only
           // gate). Owner direction: whoever REQUESTED a meeting controls it —
-          // they can add anyone, rename, change location, even if they're not
-          // on it. A non-requester colleague editing the owner's meeting →
-          // escalate to ONE approval. The requester is resolved from the
-          // requests spine via findMeetingOwner (coord bookings + the v3.1.4
-          // colleague-booking requester-link both populate it).
+          // they can add anyone, rename, change location, even if they're not on
+          // it. A non-requester colleague editing the owner's meeting → escalate
+          // to ONE approval. The requester is resolved from the requests spine
+          // via findMeetingOwner (coord bookings + the v3.1.4 colleague-booking
+          // requester-link both populate it).
           if (context.senderRole === 'colleague') {
             let isRequester = false;
             try {
@@ -3464,10 +3611,10 @@ export class SchedulingSkill {
                 const durationMin = Math.max(5, Math.round((endDt.toMillis() - startDt.toMillis()) / 60_000));
                 const { findAvailableSlots } = await import('../../connectors/graph/calendar');
                 const startMs = startDt.toMillis();
-                // v2.6.1 — pass exact requested window. See parallel comment
-                // in create_meeting Guard B for the full reasoning (±60s
-                // padding caused cursor to land outside work-hours boundaries
-                // by one minute, slot never tested).
+                // v2.6.1 — pass exact requested window. See the parallel comment
+                // in create_meeting Guard B for the full reasoning (±60s padding
+                // lands the cursor outside work-hours boundaries by one minute,
+                // and the slot is never tested).
                 const fromIso = startDt.toUTC().toISO();
                 const toIso = endDt.toUTC().toISO();
                 let validSlots: Array<{ start: string }> = [];
@@ -3481,18 +3628,18 @@ export class SchedulingSkill {
                     searchFrom: fromIso,
                     searchTo: toIso,
                     profile: context.profile,
-                    // v2.6 — pass category so move_meeting colleague-path
-                    // also enforces day_type / per_day / per_week limits at
+                    // v2.6 — pass category so move_meeting colleague-path also
+                    // enforces day_type / per_day / per_week limits at
                     // the destination. The destination day's count excludes
                     // the event being moved (it's leaving its current day);
                     // findAvailableSlots widens its event fetch when
                     // category is set so day/week counts are accurate.
                     category: args.category as string | undefined,
                     diagnosticsOut: diagnostics,
-                    // v3.0.6 — single-slot validation; see parallel comment
-                    // in create_meeting Guard B. Auto-expand would re-query
-                    // the calendar at widening ranges for slots that get
-                    // discarded (matches checks ±60s of newStart). Disable.
+                    // v3.0.6 — single-slot validation; see the parallel comment
+                    // in create_meeting Guard B. Auto-expand would re-query the
+                    // calendar at widening ranges for slots that get discarded
+                    // (matches checks ±60s of newStart). Disable.
                     autoExpand: false,
                   });
                 }
@@ -3585,8 +3732,8 @@ export class SchedulingSkill {
 
         // v1.8.8 — same series-master block as update_meeting. Moving a
         // seriesMaster would shift every occurrence in the series. Single
-        // occurrence moves (type='occurrence' or 'exception') are allowed;
-        // Graph creates an exception pinning just that date.
+        // occurrence moves (type='occurrence' or 'exception') are allowed; Graph
+        // creates an exception pinning just that date.
         // v3.1.8 — capture the meeting's OLD start so the success result can
         // report the VACATED slot (the time that just opened up). Lets a
         // follow-up "move X into the freed slot" resolve without Maelle
@@ -3625,7 +3772,7 @@ export class SchedulingSkill {
         // v3.x — grid-align an off-grid move target to the :00/:15/:30/:45 grid
         // unless the owner named the exact time. Floating blocks are realigned
         // by findAlignedSlotForBlock below, so this only affects the regular
-        // (non-floating) move fall-through. Replaces the SLOT START TIMES rule.
+        // (non-floating) move fall-through.
         if (!args.start_is_explicit && typeof effectiveStart === 'string') {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { alignNearestQuarter } = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
@@ -3671,20 +3818,18 @@ export class SchedulingSkill {
 
               // v2.3.2 (3A) — owner-explicit hint respects target as-is when
               // in-window. Don't snap to a different slot, don't refuse on
-              // conflict. findAlignedSlotForBlock conflated window-check and
-              // conflict-check; for owner-explicit moves only the window
-              // matters — owner overrides any conflict (it shows as a normal
-              // calendar overlap she can sort separately, e.g. she said
-              // "I'll move a conflict after"). Out-of-window still refuses —
+              // conflict. For owner-explicit moves only the window matters —
+              // owner overrides any conflict (it shows as a normal calendar
+              // overlap she can sort separately). Out-of-window still refuses —
               // that's policy_exception territory.
               const isOwnerPath = context.senderRole === 'owner' || context.isOwnerInGroup === true;
               if (isOwnerPath) {
                 // v3.1.8 (D5) — snap the hint to the quarter grid. The general
                 // snap above is bypassed on the floating-block path because this
-                // branch overwrites effectiveStart with the raw hint, so a
-                // "right after" that lands at :40 booked lunch at :40 instead of
-                // the owner's quarter convention (:45). Redo the snap here; honor
-                // an exact owner-given time (start_is_explicit) as-is.
+                // branch overwrites effectiveStart with the raw hint, so a "right
+                // after" landing at :40 would book lunch at :40 instead of the
+                // owner's quarter convention (:45). Redo the snap here; honor an
+                // exact owner-given time (start_is_explicit) as-is.
                 const alignedMs = args.start_is_explicit
                   ? newStartDt.toMillis()
                   : fb.alignNearestQuarter(newStartDt.toMillis(), timezone);
@@ -3731,8 +3876,8 @@ export class SchedulingSkill {
                   });
                   // v3.2.1 (#120 / 120b) — return the vacated slot here too. The
                   // floating-block move (e.g. lunch) is exactly the case where
-                  // the owner moves a block to FREE its slot for another
-                  // meeting; without this the freed-slot info was dropped.
+                  // the owner moves a block to FREE its slot for another meeting;
+                  // without this the freed-slot info was dropped.
                   const vacated = computeVacatedSlot(preMoveStartIso, effectiveStart, effectiveEnd, timezone);
                   return {
                     success: true,
@@ -3796,11 +3941,10 @@ export class SchedulingSkill {
           );
           const movingEvent = existing.find(e => e.id === args.meeting_id);
           const priorStartIso = movingEvent?.start?.dateTime;
-          // v2.8.5 — also extract prior END so planMeeting's freebusy
-          // overlap check can exclude the source event when an attendee's
-          // calendar still shows it. Closes the "move 13:00→13:15 trips
-          // confirm_override because Onn is busy at 13:15 (with the very
-          // meeting being moved)" bug.
+          // v2.8.5 — also extract prior END so planMeeting's freebusy overlap
+          // check can exclude the source event when an attendee's calendar still
+          // shows it. Otherwise a move like 13:00→13:15 trips confirm_override
+          // because the attendee looks busy at 13:15 (with the very meeting being moved).
           const priorEndIso = movingEvent?.end?.dateTime;
           const existingCats = ((movingEvent as any)?.categories as string[] | undefined) ?? [];
           const existingLocation = (movingEvent as any)?.location?.displayName as string | undefined;
@@ -3824,8 +3968,8 @@ export class SchedulingSkill {
             priorSlotStartIso: priorStartIso,
             priorSlotEndIso: priorEndIso,
             // v2.8.2 — owner-explicit hints flow through on move too. Without
-            // these, every owner-explicit "move it to 3pm in person" lost the
-            // physical signal and resolveLocation defaulted to day-type rules.
+            // these, an owner-explicit "move it to 3pm in person" loses the
+            // physical signal and resolveLocation defaults to day-type rules.
             locationHint: args.location as string | undefined,
             isOnlineHint: typeof args.is_online === 'boolean' ? args.is_online : undefined,
             allowRelaxed: args.relaxed === true,
@@ -3861,22 +4005,22 @@ export class SchedulingSkill {
               _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
               _note: movePlan.action === 'escalate_approval'
                 ? 'Move violates a scheduling rule. Use create_approval(kind=policy_exception) with suggested_ask_text.'
-                // v3.2.1 (#120a — one mechanism) — owner-path soft-rule override now
+                // v3.2.1 (#120a — one mechanism) — owner-path soft-rule override
                 // flows through the SAME persisted approval path as the colleague
-                // escalate, instead of the fragile "ask, then re-issue relaxed next
-                // turn" path (Sonnet dropped that re-issue → the meeting silently
-                // never moved). If the owner ALREADY authorized the override in THIS
-                // message ("do it anyway", "move it, I'll handle the conflict"), retry
-                // move_meeting now with relaxed=true. OTHERWISE call
-                // create_approval(kind=policy_exception) with suggested_ask_text — the
-                // orchestrator stamps the deferred move, so the override PERSISTS and
-                // the owner's later "yes" replays it deterministically. Do NOT just ask
-                // and rely on re-issuing the move yourself next turn.
+                // escalate, instead of the fragile "ask, then re-issue relaxed
+                // next turn" path (Sonnet can drop that re-issue → the meeting
+                // silently never moves). If the owner ALREADY authorized the
+                // override in THIS message, retry move_meeting now with
+                // relaxed=true. OTHERWISE call
+                // create_approval(kind=policy_exception) — the orchestrator
+                // stamps the deferred move, so the override PERSISTS and the
+                // owner's later "yes" replays it deterministically.
                 : 'Move violates a soft scheduling rule. If the owner ALREADY authorized overriding it in THIS message (e.g. "do it anyway", "I\'ll handle the conflict"), retry move_meeting now with relaxed=true. Otherwise call create_approval(kind=policy_exception) with suggested_ask_text — this PERSISTS the override (the orchestrator stamps the deferred move) so the owner\'s later "yes" replays it on its own. Do NOT ask and then rely on re-issuing the move yourself next turn — that pending action gets lost.',
             };
           }
-          // v2.8.2 — ask_location_mode on move (rare — external attendee, same/unknown TZ,
-          // and the move flips into office day). Refuse + surface the ask.
+          // v2.8.2 — ask_location_mode on move (rare — external attendee,
+          // same/unknown TZ, and the move flips into office day). Refuse +
+          // surface the ask.
           if (movePlan.action === 'ask_location_mode') {
             return {
               success: false,
@@ -3924,6 +4068,42 @@ export class SchedulingSkill {
           });
         }
 
+        // #30 — hold-conflict gate on MOVE (mirror of the create gate). Never
+        // move a meeting onto a slot tentatively held for SOMEONE ELSE. Owner →
+        // confirm once (override_hold:true on retry → move + release + DM holder).
+        // Colleague → route to the owner's approval. The mover's OWN hold proceeds.
+        {
+          const { getActiveHoldOverlapping } = await import('../../db/slotHolds');
+          const conflictHold = getActiveHoldOverlapping(
+            context.profile.user.slack_user_id, effectiveStart, effectiveEnd,
+          );
+          if (conflictHold && conflictHold.holder_slack_id !== context.userId) {
+            if (context.senderRole === 'owner') {
+              if (args.override_hold !== true) {
+                return {
+                  success: false,
+                  error: 'slot_on_hold',
+                  meeting_subject: args.meeting_subject,
+                  hold_id: conflictHold.id,
+                  holder_name: conflictHold.holder_name,
+                  message: `${conflictHold.holder_name} asked to reserve ${formatIsoTime(effectiveStart)}${conflictHold.reason ? ` (${conflictHold.reason})` : ''}. Move "${args.meeting_subject}" over it anyway? On your yes I'll move it and let ${conflictHold.holder_name} know the hold was released.`,
+                  _deferred_action_hint: { tool: 'move_meeting', args: { ...args, override_hold: true } },
+                  _note: 'Surface to the owner. If he says move it anyway, retry move_meeting with override_hold:true — that moves it, releases the hold, and DMs the holder.',
+                };
+              }
+              // owner + override_hold:true → fall through and move; release fires on success.
+            } else {
+              return {
+                success: false,
+                error: 'slot_held_needs_owner_approval',
+                meeting_subject: args.meeting_subject,
+                hold_id: conflictHold.id,
+                message: `That time is tentatively held for someone else — don't move it there, and don't reveal who holds it. Raise create_approval(kind=policy_exception) with this slot so ${context.profile.user.name.split(' ')[0]} decides; tell the colleague warmly you're checking.`,
+              };
+            }
+          }
+        }
+
         await updateMeeting({
           userEmail,
           timezone,
@@ -3933,8 +4113,8 @@ export class SchedulingSkill {
           // v2.7.0 — pass-through location/isOnline/categories from the
           // planMeeting verdict. Undefined values leave the existing fields
           // untouched on Graph's side. v2.8.2 — preserveExisting keeps both
-          // undefined so a move within the same day-type doesn't overwrite
-          // owner conventions like "Huddle".
+          // undefined so a move within the same day-type doesn't overwrite owner
+          // conventions like "Huddle".
           location: movePlanLocation,
           isOnline: movePlanIsOnline,
           categories: movePlanCategories,
@@ -4006,6 +4186,36 @@ export class SchedulingSkill {
           subject: args.meeting_subject as string | undefined,
           bookingThreadTs: context.threadTs,
         });
+        // #30 — the move landed on this slot, so release any hold overlapping it
+        // (overlap, not exact-start: a move target may not begin exactly at the
+        // held slot). If held by someone ELSE (owner moved over it via
+        // override_hold), DM that holder; the mover's own hold releases silently.
+        try {
+          const sh = await import('../../db/slotHolds');
+          const overlapHold = sh.getActiveHoldOverlapping(
+            context.profile.user.slack_user_id, effectiveStart, effectiveEnd,
+          );
+          if (overlapHold) {
+            sh.releaseSlotHold(overlapHold.id, 'slot_taken_by_move');
+            if (overlapHold.holder_slack_id && overlapHold.holder_slack_id !== context.userId) {
+              try {
+                const { getConnection } = await import('../../connections/registry');
+                const conn = getConnection(context.profile.user.slack_user_id, 'slack');
+                if (conn) {
+                  await conn.sendDirect(
+                    overlapHold.holder_slack_id,
+                    `Quick heads up — ${context.profile.user.name.split(' ')[0]} ended up taking ${formatIsoTime(effectiveStart)}, so I've released the hold I had for you there. Happy to find you another time whenever.`,
+                    overlapHold.origin_thread_ts ? { threadTs: overlapHold.origin_thread_ts } : undefined,
+                  );
+                }
+              } catch (dmErr) {
+                logger.warn('move_meeting — hold-release DM failed (hold already released)', { err: String(dmErr).slice(0, 150) });
+              }
+            }
+          }
+        } catch (err) {
+          logger.warn('move_meeting — slot-hold release threw, continuing', { err: String(err).slice(0, 150) });
+        }
         auditLog({
           action: 'move_meeting',
           source: context.channel,
@@ -4048,12 +4258,12 @@ export class SchedulingSkill {
         // window. If no in-window slot fits, leave it overlapping and ping
         // the owner (the bumping-out-of-window decision still belongs to him,
         // via the policy_exception approval flow).
-        // v3.1.8 — the VACATED slot (where the meeting WAS), so a follow-up
-        // "move X into the freed slot" resolves from this turn instead of
-        // Maelle re-asking the old time. v3.2.1 — shared helper (see top of
-        // file); the floating-block early return uses the same one.
-        // Computed BEFORE the rebalance so it can gate reclaim detection to the
-        // slot this move actually freed.
+        // v3.1.8 — the VACATED slot (where the meeting WAS) lets a follow-up
+        // "move X into the freed slot" resolve from this turn instead of Maelle
+        // re-asking the old time. v3.2.1 — shared helper (see top of file); the
+        // floating-block early return uses the same one. Computed BEFORE the
+        // rebalance so it can gate reclaim detection to the slot this move
+        // actually freed.
         const vacated = computeVacatedSlot(preMoveStartIso, args.new_start as string, args.new_end as string, timezone);
 
         // v3.2.x (Tier 1) — capture the rebalance return so a displaced
@@ -4247,12 +4457,10 @@ export class SchedulingSkill {
         });
         // v3.1.7 / #119 — if the deleted event was a floating block (lunch,
         // etc.), record a date-scoped dismissal so active-mode health doesn't
-        // re-book the gap the owner just cleared. Keyed to the exact day via
-        // the synthetic event_id, so only THIS day is suppressed — future
-        // same-weekday blocks still get placed. Replaces the old audit-log
-        // delete suppressor that over-suppressed the whole forward window.
-        // Subject-only match (categories aren't captured pre-delete); mirrors
-        // the prior audit approach's match basis. Non-fatal on any failure.
+        // re-book the gap the owner just cleared. Keyed to the exact day via the
+        // synthetic event_id, so only THIS day is suppressed — future
+        // same-weekday blocks still get placed. Subject-only match (categories
+        // aren't captured pre-delete). Non-fatal on any failure.
         try {
           const delStartIso = preDeleteStartIso;
           const delSubject = (args.meeting_subject ?? preDeleteSubject ?? '') as string;

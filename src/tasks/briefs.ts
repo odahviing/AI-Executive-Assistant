@@ -526,6 +526,7 @@ async function generateBriefingText(
   peopleGender: Record<string, 'he' | 'she' | 'they'> = {},
   newsBundle?: NewsBundle,
   healthSummary?: string,
+  slotHoldsSummary?: string,
 ): Promise<string> {
   // v3.2.6 — news is additive: it only changes the brief when there's grounded
   // material. Empty bundle (news off / nothing found / no derived companies) →
@@ -653,12 +654,18 @@ ${Object.keys(peopleGender).length > 0
   const healthPart = hasHealth
     ? `\n\nCALENDAR HEALTH (today only) — fold this into the brief as a short, human "Calendar" note: what you auto-fixed today and what needs ${firstName}'s call today. Plain sentences, no header, no tool names. Today's issues only; the full week is handled separately at midday:\n${healthSummary!.trim()}`
     : '';
-  const userContent = `Write the morning briefing based on this data:\n\n${dataText}${newsPart}${healthPart}`;
+  // #30 — active slot holds, so ${firstName} can see if tentative reservations
+  // are piling up (overuse oversight; there's no hard global cap by design).
+  const hasHolds = !!(slotHoldsSummary && slotHoldsSummary.trim().length > 0);
+  const holdsPart = hasHolds
+    ? `\n\nSLOT HOLDS — tentative reservations currently open (not booked yet). Fold into the brief as a brief, human note ONLY if it's worth ${firstName}'s attention (e.g. several open, or one sitting a while). Plain sentences, no header:\n${slotHoldsSummary!.trim()}`
+    : '';
+  const userContent = `Write the morning briefing based on this data:\n\n${dataText}${newsPart}${healthPart}${holdsPart}`;
 
   try {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: (hasNews || hasHealth) ? 1100 : 800,
+      max_tokens: (hasNews || hasHealth || hasHolds) ? 1100 : 800,
       system: systemPrompt,
       messages: [{ role: 'user', content: userContent }],
     });
@@ -791,8 +798,28 @@ export async function sendMorningBriefing(
     }
   }
 
+  // #30 — active slot holds, surfaced for overuse oversight (no hard global cap
+  // by design — the brief is how the owner notices if holds are piling up).
+  let slotHoldsSummary: string | undefined;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getActiveSlotHolds } = require('../db/slotHolds') as typeof import('../db/slotHolds');
+    const holds = getActiveSlotHolds(ownerUserId);
+    if (holds.length > 0) {
+      slotHoldsSummary = holds.map(h => {
+        const when = DateTime.fromISO(h.start_iso).setZone(profile.user.timezone);
+        const whenLabel = when.isValid ? when.toFormat('EEE d MMM HH:mm') : h.start_iso;
+        const since = DateTime.fromISO((h.created_at || '').replace(' ', 'T'), { zone: 'utc' });
+        const ageHrs = since.isValid ? Math.round(DateTime.now().diff(since, 'hours').hours) : null;
+        return `- ${h.holder_name}: ${whenLabel}${h.subject ? ` (${h.subject})` : ''}${h.reason ? ` — ${h.reason}` : ''}${ageHrs != null ? `, held ${ageHrs}h` : ''}`;
+      }).join('\n');
+    }
+  } catch (err) {
+    logger.warn('briefs — slot-holds gather threw, continuing', { err: String(err).slice(0, 150) });
+  }
+
   // Generate + send.
-  const rawText = await generateBriefingText(items, profile, peopleGender, newsBundle, healthSummary);
+  const rawText = await generateBriefingText(items, profile, peopleGender, newsBundle, healthSummary, slotHoldsSummary);
 
   // v2.7.1 (bug 4.5) — humanGate the brief. The brief generator skipped the
   // owner-facing voice check that postReply.ts applies to regular replies,

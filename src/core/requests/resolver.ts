@@ -891,9 +891,14 @@ async function notifyRequesterOfDecision(
         ? `${hi} — ${ownerFirst} אישר. אני קובעת את "${subject}" ל${startFormatted}. הזימון בדרך.`
         : `${hi} — ${ownerFirst} said yes. Booking "${subject}" for ${startFormatted}. Calendar invite incoming.`;
     } else {
+      // Action-AGNOSTIC fallback. The LLM composer below is the primary path;
+      // this only fires if it errors. It must NOT assert "approved {subject}" —
+      // for a cancellation that reads as approving the meeting itself (the Yael
+      // "you mean approved to cancel?" bug). A neutral "got back to me, I'm on it"
+      // is never wrong regardless of the underlying action.
       body = requesterLang === 'he'
-        ? `${hi} — ${ownerFirst} אישר את ${subject}. אני לוקחת מכאן, אעדכן אותך כשזה מסודר.`
-        : `${hi} — ${ownerFirst} said yes on ${subject}. I'll take it from here, will let you know once it's sorted.`;
+        ? `${hi} — ${ownerFirst} חזר אליי בנושא. אני מטפלת בזה ואעדכן אותך.`
+        : `${hi} — ${ownerFirst} got back to me on this. I'm on it and will update you.`;
     }
   } else if (verdict === 'reject') {
     const reasonTail = reason && reason.trim() ? ` (${reason.trim()})` : '';
@@ -923,6 +928,52 @@ async function notifyRequesterOfDecision(
       body = requesterLang === 'he'
         ? `${hi} — ${ownerFirst} הציע משהו אחר${counterSummary ? ': ' + counterSummary : ''}. זה עובד לך?`
         : `${hi} — ${ownerFirst} suggested a different approach${counterSummary ? ': ' + counterSummary : ''}. Does that work for you?`;
+    }
+  }
+
+  // 2.1 — the templates above are now a FALLBACK. Compose the requester relay as
+  // FREE TEXT with the LLM so it (a) names the ACTION correctly — a cancellation
+  // reads as "okayed cancelling it", never "approved {meeting}" (which reads as
+  // approving the meeting itself; Yael: "you mean approved to cancel?", 2026-06-15)
+  // — and (b) writes in the requester's actual language instead of the rigid
+  // he/en branch. Approve + reject only; amend keeps its template (it carries the
+  // specific counter/question the composer wouldn't have). Fails open to `body`.
+  if (verdict === 'approve' || verdict === 'reject') {
+    try {
+      const rawAsk =
+        (typeof details.question === 'string' && details.question.trim() ? details.question.trim() : '') ||
+        (typeof details.subject === 'string' && details.subject.trim() ? details.subject.trim() : '') ||
+        row.subject || subject;
+      const deferredTool = (details.deferred_action as { tool?: string } | undefined)?.tool;
+      const actionHint =
+        deferredTool === 'delete_meeting' ? 'a cancellation'
+          : (deferredTool === 'move_meeting' || deferredTool === 'update_meeting') ? 'a change to an existing meeting'
+            : (deferredTool === 'create_meeting' || deferredTool === 'finalize_coord_meeting') ? 'a booking'
+              : undefined;
+      const outcome = verdict === 'approve'
+        ? `${ownerFirst} said yes`
+        : `${ownerFirst} can't make it work${reason && reason.trim() ? ` (${reason.trim()})` : ''}`;
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getAnthropicClient } = require('../../llm/client') as typeof import('../../llm/client');
+      const anthropic = getAnthropicClient();
+      const assistantName = ctx.profile.assistant?.name ?? 'the assistant';
+      const sys = `You are ${assistantName}, ${ownerFirst}'s executive assistant, sending ONE short, warm Slack message to ${requesterFirst ?? 'a colleague'} to close the loop on something they asked you to arrange with ${ownerFirst}.
+RULES:
+- Language: ${requesterLang === 'he' ? 'write in Hebrew' : 'match the language of their request below (English / Spanish / etc.)'}.
+- Name the ACTION clearly, zero ambiguity. If their request was to CANCEL something, say it's cancelled / being taken care of — NEVER phrase it as "${ownerFirst} approved {the meeting}", which reads like approving the meeting itself. If it was a booking, say it's booked${startFormatted ? ` for ${startFormatted}` : ''}.
+- Do NOT mention approvals, "policy", internal tools, or that you "asked ${ownerFirst}" — just the human outcome, EA-voiced and natural.
+- ONE sentence. A light "Hi ${requesterFirst ?? ''}" is fine; no sign-off.`;
+      const usr = `Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''} Outcome: ${outcome}.${startFormatted ? ` Scheduled for ${startFormatted}.` : ''} Write the message.`;
+      const resp = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 200,
+        system: sys,
+        messages: [{ role: 'user', content: usr }],
+      });
+      const composed = ((resp.content[0] as { text?: string })?.text ?? '').trim();
+      if (composed) body = composed;
+    } catch (err) {
+      logger.warn('notifyRequesterOfDecision — LLM relay compose failed, using template', { id: row.id, err: String(err).slice(0, 150) });
     }
   }
 

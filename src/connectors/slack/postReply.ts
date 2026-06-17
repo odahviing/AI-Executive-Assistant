@@ -10,9 +10,11 @@ import { getAnthropicClient } from '../../llm/client';
  *   1. Save the raw draft to conversation history (so Claude's next turn sees
  *      what she did).
  *   2. Normalize markdown artefacts (** → *, etc) for Slack rendering.
- *   3. OWNER PATH: run the claim-checker. On false-claim verdict, re-invoke
- *      the orchestrator with a corrective nudge (and, for message-type
- *      claims, tool_choice forcing message_colleague). Capped at one retry.
+ *   3. OWNER PATH: run the claim-checker. On a false-claim verdict, a single
+ *      tool-less rewrite makes the draft honestly surface that the action
+ *      hasn't gone through (v3.3.5 — no orchestrator re-invoke, no forced
+ *      tool; a guard can no longer fire a tool, so a false claim can't become
+ *      a duplicate action).
  *   4. COLLEAGUE PATH: run the security gate. Rewrites leaking drafts, logs
  *      details to WARN only (never to Slack).
  *   5. Audio vs text branch based on the input modality + TTS availability.
@@ -602,7 +604,7 @@ async function runSecurityGate(opts: {
   assistantName: string;
   ownerFirstName: string;
   // v3.0.5 — identity-spoof inputs (all optional; when absent, only leak
-  // filter runs). See detectIdentitySpoof in securityGate.ts.
+  // filter runs). See detectClaimedEmail + judgeIdentityClaim in securityGate.ts.
   verifiedSenderEmail?: string;
   ownerEmail?: string;
   recentUserMessages?: string[];

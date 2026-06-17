@@ -9,7 +9,7 @@
  * the same topic under multiple titles.
  *
  * This module is called from the `create_task` tool handler BEFORE inserting.
- * If there's any open task in the same `owner_thread_ts`, run a tiny Sonnet
+ * If there's any open task in the same `owner_thread_ts`, run a tiny Haiku
  * tool_use classifier over {new request, existing task titles/descriptions}.
  * If it's a follow-up, the caller skips creation and returns a reference to
  * the existing task so Sonnet can narrate accordingly.

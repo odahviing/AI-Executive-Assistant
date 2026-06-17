@@ -443,6 +443,36 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_social_topics_lru ON social_topics(subject_id, last_used_at);
   `);
 
+  // Slot holds (#30) — a tentative reservation on a slot someone picked but
+  // hasn't confirmed (or the owner explicitly parked). Internal state ONLY,
+  // never an Outlook event. Read on the hot slot-finder path to annotate a held
+  // time; expires at min(2 owner-workdays, slot-start) via the 5-min tick
+  // (sweepExpiredSlotHolds → release + DM the holder). Dedicated table, NOT the
+  // requests spine: a hold is a flat single-leg reservation with a hot read, not
+  // a multi-step request — see .claude/RESERVE_SLOT_PROJECT.md storage analysis.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS slot_holds (
+      id               TEXT PRIMARY KEY,
+      owner_user_id    TEXT NOT NULL,
+      holder_slack_id  TEXT,                                   -- internal holder; NULL for an owner-parked external
+      holder_name      TEXT NOT NULL,
+      subject          TEXT,                                   -- what the hold is for ("Simon 1:1")
+      start_iso        TEXT NOT NULL,
+      end_iso          TEXT NOT NULL,
+      origin_channel   TEXT,                                   -- where to DM the holder on release
+      origin_thread_ts TEXT,
+      reason           TEXT,
+      status           TEXT NOT NULL DEFAULT 'active',         -- active | released | expired
+      created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at       TEXT NOT NULL,                          -- min(2 owner-workdays, slot-start)
+      closure_reason   TEXT,
+      closed_at        TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_slot_holds_owner_status ON slot_holds(owner_user_id, status);
+    CREATE INDEX IF NOT EXISTS idx_slot_holds_holder ON slot_holds(holder_slack_id, status);
+    CREATE INDEX IF NOT EXISTS idx_slot_holds_expiry ON slot_holds(status, expires_at);
+  `);
+
   // Wipe per-owner category rows so the global-scope seed is canonical.
   // Safe — the global seed re-creates the 30 labels immediately.
   try {

@@ -15,6 +15,46 @@ import logger from '../utils/logger';
 // ── Background timer ─────────────────────────────────────────────────────────
 
 /**
+ * #30 — expire slot holds past min(2 owner-workdays, slot-start). Releases each
+ * as 'expired' and DMs the holder that the time was freed (threaded into the
+ * conversation where the hold was made — decision 4: "always cancel after 2
+ * days → DM the person"). Owner-parked holds with no holder slack_id are
+ * released silently. Fire-and-forget on the 5-min tick; never throws upward.
+ */
+async function sweepExpiredSlotHolds(profiles: Map<string, UserProfile>): Promise<void> {
+  try {
+    const { getDueSlotHolds, releaseSlotHold } = await import('../db/slotHolds');
+    const { getConnection } = await import('../connections/registry');
+    const { DateTime } = await import('luxon');
+    const due = getDueSlotHolds(new Date().toISOString());
+    if (due.length === 0) return;
+    for (const h of due) {
+      releaseSlotHold(h.id, 'expired', true);
+      if (!h.holder_slack_id) continue;                 // owner-parked external — no one to DM
+      const profile = profiles.get(h.owner_user_id);
+      if (!profile) continue;
+      try {
+        const conn = getConnection(h.owner_user_id, 'slack');
+        if (!conn) continue;
+        const when = DateTime.fromISO(h.start_iso).setZone(profile.user.timezone);
+        const whenLabel = when.isValid ? when.toFormat('EEE d MMM HH:mm') : h.start_iso;
+        const subj = h.subject ? ` for "${h.subject}"` : '';
+        await conn.sendDirect(
+          h.holder_slack_id,
+          `Freed up the ${whenLabel} hold${subj} — it had been pending a couple of days, so I let it go. Just say the word if you still want it.`,
+          h.origin_thread_ts ? { threadTs: h.origin_thread_ts } : undefined,
+        );
+      } catch (err) {
+        logger.warn('sweepExpiredSlotHolds — holder DM failed (hold already released)', { id: h.id, err: String(err).slice(0, 150) });
+      }
+    }
+    logger.info('sweepExpiredSlotHolds', { expired: due.length });
+  } catch (err) {
+    logger.warn('sweepExpiredSlotHolds threw — continuing', { err: String(err).slice(0, 200) });
+  }
+}
+
+/**
  * Starts the 5-minute background timer that runs all periodic tasks.
  */
 export function startBackgroundTimer(
@@ -41,6 +81,7 @@ export function startBackgroundTimer(
     if (!app) return;
     materializeRoutineTasks(profiles)
       .then(() => runDueTasks(app, profiles))
+      .then(() => sweepExpiredSlotHolds(profiles))
       .catch(err => logger.error('Routine→task pipeline error', { err: String(err) }));
 
     // v3.1 (Path 2 Stage 8) — requests-spine reconciliation + retention. Closes
@@ -60,6 +101,11 @@ export function startBackgroundTimer(
       if (reconciled > 0 || pruned > 0) {
         logger.info('Requests-spine maintenance', { reconciled, pruned });
       }
+      // #30 — slot-hold retention (drop terminal rows >30d), alongside the spine prune.
+      try {
+        const { cleanOldSlotHolds } = require('../db/slotHolds') as typeof import('../db/slotHolds');
+        cleanOldSlotHolds();
+      } catch (_) { /* non-fatal */ }
     } catch (err) {
       logger.warn('Requests-spine maintenance threw — non-fatal', { err: String(err).slice(0, 200) });
     }
@@ -284,8 +330,9 @@ export async function initProfile(
   // non-human attendee filter); catch-up is a pick-list the owner chooses from.
 
   // Catch up on any messages sent while the bot was offline. Gap-scoped to the
-  // persisted socket watermark (the last moment the socket was known alive),
-  // falling back to 24h on first-ever boot. See reconcileUnanswered.
+  // persisted socket watermark (the last moment the socket was known alive).
+  // No watermark (first-ever boot / lost file) → gap starts NOW → replay
+  // nothing pre-existing ("what's gone is gone"). See catchUpMissedMessages.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getLastSocketAlive } = require('../connectors/slack/socketWatermark') as
     typeof import('../connectors/slack/socketWatermark');
@@ -295,18 +342,17 @@ export async function initProfile(
 // ── Catch-up on missed messages ──────────────────────────────────────────────
 
 /**
- * On startup: scan the owner's 1:1 DM for messages that arrived while the bot
- * was offline and never got a reply.
+ * On startup (and on reconnect / the 10-min heartbeat): scan the bot's DMs +
+ * panel threads for messages that arrived while the socket was down and never
+ * got a reply.
  *
- * v1.5.1 rules (tighter than v1.5):
- *   - DM ONLY (the owner's 1:1 with Maelle). No MPIMs.
- *   - 24h lookback (was 48h).
- *   - Only the LAST unread user message is replied to.
- *   - Reply is posted as a thread reply under that message — never top-level.
- *   - No more "[Context: you were offline...]" prompt injection hack; the
- *     orchestrator sees the raw message. The context block on the posted
- *     reply ("↩ Catching up on your message from Xh ago") tells the owner
- *     what they're looking at.
+ *   - Window = since the socket watermark (no cap); no watermark → since NOW
+ *     (replay nothing). See the SAFETY note on `oldest` below.
+ *   - At most ONE reply per distinct unanswered thread (answered-check +
+ *     per-thread dedup).
+ *   - Replies route through the live inbound path (replayMissedMessage), so
+ *     voice/image/video are handled exactly as a live message; the posted
+ *     reply carries a "↩ Catching up" caption.
  */
 // The periodic heartbeat (every 10 min) scans all DMs and almost always finds
 // nothing — logging that scan each time floods the log (~144 lines/day of "I
@@ -326,7 +372,8 @@ function shouldLogHeartbeatScan(): boolean {
 
 // v3.3.x — exported so the socket watchdog can fire a gap-scoped recovery on
 // reconnect (not only at startup). `sinceMs` is the socket-alive watermark;
-// when omitted we fall back to the 24h lookback (first-ever boot).
+// when omitted the gap starts NOW (replay nothing — see the `oldest` SAFETY
+// note below), NOT a 24h lookback.
 // `isHeartbeat` is set by the 10-min periodic safety-net caller so its routine
 // "scanning DMs" log line is throttled to ≤1/hour (the scan still runs).
 export async function catchUpMissedMessages(
@@ -625,11 +672,26 @@ async function replayMissedMessage(
   // Slack re-delivers the same event to the live socket handler after we
   // reconnect, the live handler sees it as already handled and skips. Prevents
   // catch-up and the live handler both answering the same missed message.
+  // markProcessed returns false when this ts was ALREADY marked — which means
+  // the live handler ingested it and is mid-flight (slow orchestrator turn,
+  // reply not posted to Slack yet, so the answered-check that selected this
+  // candidate saw stale botTs). Replaying now would post a SECOND reply. Gate
+  // on the return: if the live path already owns this message, skip. (After
+  // the 10-min dedup TTL, a genuinely-unanswered message becomes re-markable
+  // and a later tick will recover it — so a live turn that marked-then-threw
+  // still self-heals.)
+  let alreadyOwned = false;
   try {
     const { markProcessed } = require('../connectors/slack/processedDedup') as typeof import('../connectors/slack/processedDedup');
-    markProcessed(msgTs);
+    alreadyOwned = !markProcessed(msgTs);
   } catch (err) {
     logger.warn('catch-up: could not mark ts as processed', { err: String(err) });
+  }
+  if (alreadyOwned) {
+    logger.info('catch-up: msg already owned by the live handler (mid-flight) — skipping replay to avoid double reply', {
+      channel: channelId, msgTs,
+    });
+    return;
   }
 
   // Route THROUGH the live inbound path (registered by connectors/slack/app)

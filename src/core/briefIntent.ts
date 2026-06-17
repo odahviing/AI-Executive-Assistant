@@ -13,7 +13,7 @@
  *      update", "rundown", "what's on / what do I have", "didn't get / where's
  *      my brief", "catch me up", "any updates". Length cap (≤ 100 chars) drops
  *      long working messages that mention "brief" mid-sentence.
- *   2. Sonnet yes/no judge — only on candidates. One tool_use, ~120 tokens.
+ *   2. Haiku yes/no judge — only on candidates. One tool_use, ~120 tokens.
  *
  * The classifier is deliberately STRICT in its definition (see prompt): "asking
  * for the daily brief" only. NOT "brief me on Yael" / "give me a quick brief
@@ -24,7 +24,6 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { config } from '../config';
 import logger from '../utils/logger';
 
 const PRE_FILTER = /\b(brief(ing)?|morning update|rundown|what.{0,4}(on|today|do i have)|catch me up|any updates|missed.{0,15}brief|where.{0,10}brief|didn.?t (get|see).{0,20}brief)\b/i;

@@ -7,6 +7,7 @@ export * from './events';
 // v2.0.7 — './requests' (pending_requests + approval_queue helpers) retired.
 // Use db/approvals for the first-class approvals API.
 export * from './calendarIssues';
+export * from './slotHolds';
 export * from './approvals';
 export * from './summarySessions';
 export * from './socialSubjects';

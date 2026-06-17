@@ -6,18 +6,22 @@
  *   - the morning brief (`tasks/briefs.ts`), which calls gatherNews
  *     programmatically and folds the result into an "Updates" section.
  *
- * It is NOT a crawler. It points the existing grounded-research engine
- * (`runResearch`, skills/general.ts) at the owner's taught interests + the
- * companies of the people on today's calendar, steered by liked/disliked
- * domains, deduped topic-level against a rolling 7-day seen-log.
+ * It is NOT a crawler. It points the grounded web-search engine
+ * (`tavilySearch`, skills/general.ts) at the owner's taught interests + the
+ * companies of the people on today's calendar, deduped topic-level against a
+ * rolling 7-day seen-log.
  *
  * Layer discipline (per the spec):
- *   - CODE (here): goal assembly + cap, per-goal timeout, domain-filter
- *     plumbing, seen-log read/write/prune, fail-open. gatherNews NEVER throws.
+ *   - CODE (here): goal assembly + cap, per-goal timeout, seen-log
+ *     read/write/prune, fail-open. gatherNews NEVER throws. Code does NOT
+ *     parse news.md for domain steer (removed v3.4.0 — the regex was an
+ *     implicit format contract on owner free-text); Tavily runs unsteered.
  *   - PROMPT (getSystemPromptSection): what's worth surfacing, the
- *     "already covered?" call, tone, citation. No enforcement.
- *   - LEARNED MEMORY: news.md (topics + preferred/blocked domains), taught via
- *     update_my_preferences(skill='news'). The seen-log MD is code-maintained.
+ *     "already covered?" call, tone, citation, and weighing any source
+ *     preferences the owner wrote in news.md. No enforcement.
+ *   - LEARNED MEMORY: news.md (free-text topics + source preferences), taught
+ *     via update_my_preferences(skill='news'); the model reads it, code does
+ *     not. The seen-log MD is code-maintained.
  *
  * Multi-tenant by construction: no hardcoded topic/source/locale; a fresh user
  * with an empty news.md and no marked meetings produces an empty bundle.
@@ -81,6 +85,23 @@ interface ParsedNewsPrefs { interestsText: string }
  */
 export function parseNewsPrefs(md: string): ParsedNewsPrefs {
   return { interestsText: md.trim() };
+}
+
+/**
+ * Normalize a URL to host+path for shown-vs-gathered matching: lowercase host,
+ * drop scheme, leading `www.`, query string, fragment, and a trailing slash.
+ * So `https://www.x.com/a/?utm_source=rss` and `http://x.com/a` both reduce to
+ * `x.com/a`. Pure string ops — no URL() parse (a malformed citation shouldn't
+ * throw inside the seen-log writer).
+ */
+function normalizeUrl(u: string): string {
+  return u
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/[?#].*$/, '')
+    .replace(/\/+$/, '');
 }
 
 // ── Goal planning ────────────────────────────────────────────────────────────
@@ -444,7 +465,20 @@ export async function writeSeenLog(
   let toLog = bundle;
   if (typeof opts.briefText === 'string') {
     const text = opts.briefText;
-    const shown = bundle.sources.filter(s => s.url && text.includes(s.url));
+    // Match by NORMALIZED url, not exact substring. Sonnet cites with the
+    // <url|label> Slack form and routinely trims a `?utm_…`, a trailing slash,
+    // or http→https — exact `text.includes(s.url)` then misses a shown item,
+    // so it's never logged and resurfaces tomorrow as a stale "new" story.
+    // Normalize both sides to host+path and compare; keep exact-includes as a
+    // fast first pass. (Machine URLs vs machine text — not owner free-text.)
+    const textUrls = new Set(
+      (text.match(/https?:\/\/[^\s<>|)\]]+/gi) ?? []).map(normalizeUrl),
+    );
+    const shown = bundle.sources.filter(s => {
+      if (!s.url) return false;
+      if (text.includes(s.url)) return true;
+      return textUrls.has(normalizeUrl(s.url));
+    });
     if (shown.length === 0) return; // nothing from this gather was shown → log nothing
     toLog = { ...bundle, sources: shown };
   }

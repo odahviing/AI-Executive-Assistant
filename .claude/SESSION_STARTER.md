@@ -1,8 +1,16 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.4.0** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.4.1** — check `package.json` if unsure; it is the source of truth.
 
-## 🔭 v3.4.0 — NEXT CHAT: #129 (LinkedIn/research grounding) + the SLOT BLOCKER build
+## 🔭 v3.4.1 — slot blocker SHIPPED; NEXT: #129 + the close-loop reconnection (Daniel-B / 2.2)
+
+The **slot blocker (#30) is built and shipped** (data → `hold_slot` tool → expiry sweep → find_available_slots deprioritize+annotate → owner-confirm/colleague-approval hold gate on create AND move → release+DM → brief overuse surface). Dedicated `slot_holds` table (not the spine — storage analysis in `.claude/RESERVE_SLOT_PROJECT.md`). The parallel **audit chat's hardening wave** (P-1…P-6, `.claude/V3_4_0_AUDIT_HANDOFF.md`) landed in the same 3.4.1 bundle. **RESTART (`npm run deploy`)** to load the new table + tool + tick wiring; confirm the boot stamp shows 3.4.1.
+
+**NEXT CHAT, in order:** **(1) #129** — LinkedIn/research routine asserts unverified owner-self facts ("you have a webinar"); the news module is healthy, the gap is no grounding gate on owner-self claims (regression of the v3.1.8 class). Likely fix: feed the LinkedIn routine from the grounded news pipeline + a rule that owner-activity claims come from his records. Research comment is on the issue. **(2) The close-loop reconnection (Daniel-B + 2.2, deferred)** — a freeform approval CLOSES at approve, so a later booking/cancel can't reconnect to notify the requester (Daniel never heard "booked Mon 17:00"; Yael's follow-up lost the just-cancelled state). Same family: the requester-facing close-loop assumes approve==done, breaks when the action is separate. Fix needs reconnecting the booking/cancel to the resolved requester request (or keeping it open until the action lands). **(3) Remaining audit items** (P-7+ in the handoff, beyond the TOP-6 already landed) — owner picks.
+
+**Watch the slot blocker live** (first real-day use): does a held slot stay out of others' offers (deprioritize), does the owner-book-over-hold confirm fire, does expiry DM the holder at 2 workdays, does the brief show holds. It's a soft-gated feature (annotate + confirm/route), not a hard lock — `find_available_slots` deprioritizes but the owner can always override.
+
+## 🔭 v3.4.0 — Boston/real-day bug-bash (create-vs-move slop, owner override one-step)
 
 A GitHub real-day bug-bash (#127–#132) capped the 3.3.x arc. **Next up, in order: (1) #129** — the LinkedIn-ideas routine asserted an unverified "you have a webinar" about the owner; news module is healthy, the gap is **no grounding gate on owner-self claims** (regression of the v3.1.8 researchPreCheck class). Research comment is on the issue; the likely fix is feeding the LinkedIn routine from the grounded **news pipeline** + a rule that owner-activity claims must come from his records. **(2) The slot blocker (#30)** — plan is at `.claude/RESERVE_SLOT_PROJECT.md`, owner decisions locked (memory not Outlook · 2-workday TTL · 3 holds/person, VIP-gated later · brief shows holds · only on explicit pick-and-defer). **Storage decision recommended = a dedicated `slot_holds` table (NOT the requests spine)** — owner leaning that way; confirm before building. A handful of open build questions remain (see the doc's "Open questions" + the chat where they were enumerated).
 

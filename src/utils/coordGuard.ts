@@ -3,14 +3,13 @@
  *
  * Two signals stacked:
  *   (a) Injection-pattern scan on the colleague's message (deterministic)
- *   (b) LLM-as-judge sanity check (Haiku, cheap)
+ *   (b) LLM-as-judge sanity check (Sonnet — flags only, a few calls/day)
  *
  * Any of (a) or (b) firing should prevent the coord from completing silently.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { config } from '../config';
 import logger from './logger';
 
 const anthropic = getAnthropicClient();

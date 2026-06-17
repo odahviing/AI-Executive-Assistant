@@ -2,6 +2,33 @@
 
 ---
 
+## 3.4.1 — slot blocker (#30) ships + audit hardening wave + real-day fixes
+
+Big patch: the **slot-blocker feature** (#30) lands, the parallel **audit chat's hardening wave** (V3_4_0_AUDIT_HANDOFF.md, P-1…P-6) is folded in, plus more real-day bug fixes. Restart required (new `slot_holds` table + tool + tick wiring). No destructive migration — the table is `CREATE TABLE IF NOT EXISTS`.
+
+### Added — Slot blocker (#30, full feature)
+- **Tentative slot holds.** When someone picks an offered slot but defers ("slot 1 works, let me check with my team"), Maelle can `hold_slot` it — a tentative reservation in a dedicated `slot_holds` table (NOT the requests spine; a hold is a flat passive reservation, see the storage analysis in `.claude/RESERVE_SLOT_PROJECT.md`). Internal state only, never an Outlook event.
+- **Lifecycle:** colleague-path holds validate against the offered set + cap at 3 per holder (re-pick replaces by thread); owner can park/cancel any. Expiry = min(2 owner-workdays, slot-start), swept on the 5-min tick → release + DM the holder. 30-day retention.
+- **Reads:** `find_available_slots` **deprioritizes** held slots (free times lead; a held slot only surfaces when nothing free is left, always tagged) and **annotates** any that surface — owner sees the holder name, a third colleague hears only "tentatively held" (privacy), the holder's own hold reads "yours."
+- **Hold-conflict gate (create + move, P-6):** booking/moving over a slot held for *someone else* → owner gets a one-step confirm (`override_hold:true` → book/move + release + DM holder); a **colleague** can't override another's hold → routed to `create_approval(policy_exception)` so the owner arbitrates ("code never silently picks a winner"); a holder confirming their own slot proceeds. Brief surfaces active holds for overuse oversight.
+- `hold_slot` tool ([meetings.ts](src/skills/meetings.ts), [ops.ts](src/skills/meetings/ops.ts)), `db/slotHolds.ts`, table in [client.ts](src/db/client.ts), sweep in [background.ts](src/core/background.ts), brief in [briefs.ts](src/tasks/briefs.ts).
+
+### Fixed — real-day bugs
+- **Language drift on a contentless reply.** A bare "11:15" / "yes" / emoji yields no language signal, so the per-turn LANGUAGE override vanished and an attendee's stored pref pulled the reply sideways (English booking → Hebrew confirmation). Now the language **carries forward from the most recent prior user message that had one**. ([orchestrator/index.ts](src/core/orchestrator/index.ts))
+- **Requester close-loop relay was a rigid template** that mis-framed cancellations ("Idan approved {meeting}" read as approving the meeting, not cancelling it — Yael "you mean approved to cancel?"). Now **LLM-composed free text**: action-aware + in the requester's language, with a safe action-agnostic fallback (never the old "approved {meeting}" line). ([resolver.ts](src/core/requests/resolver.ts))
+- **Offer-then-retract free/busy (Daniel).** A meeting offer built from `get_free_busy` (owner-only) presented "14:30, both free" then retracted "both busy" at book time (attendee check lives only on the book path). `get_free_busy` now returns a steer note when called with attendees → route options through `find_available_slots` (the one tool that intersects everyone). ([ops.ts](src/skills/meetings/ops.ts))
+
+### Fixed — audit hardening wave (parallel audit chat, V3_4_0_AUDIT_HANDOFF.md)
+- **P-1** focus-floor validator parsed event times in the process TZ, not the event's zone — phantom free time / false floor on a non-owner-TZ host. Now parses like rules 6/8. ([scheduleRules.ts](src/utils/scheduleRules.ts))
+- **P-2** `runSendScheduledOutreach` stranded a request forever (infinite 5-min retry) on a send throw — now closes/backs off. ([runner.ts](src/core/requests/runner.ts))
+- **P-3** `reconcileOrphanedRequests` could mislabel a booked coord as cancelled — now probes for an unlinked booked coord_job first. ([reconcile.ts](src/core/requests/reconcile.ts))
+- **P-4** news shown-detection broke when the LLM altered the cited URL (silent stale-repeat) — now normalizes both sides. ([news.ts](src/skills/news.ts), [briefs.ts](src/tasks/briefs.ts))
+- **P-5** periodic catch-up double-replied against a slow in-flight live turn — now gates on `markProcessed`'s return. ([background.ts](src/core/background.ts))
+- Plus comment-debris cleanup + small hardening across postReply / securityGate / coordGuard / claimChecker / closeRequest / taskContinuity / briefIntent / processedDedup / requests.
+
+### Deferred
+- **Daniel-B / 2.2 — requester not notified of the actual booking + colleague-turn lost-state.** Same close-loop decoupling: a freeform approval closes at approve, so the later booking can't reconnect to notify the requester (the request is no longer open + `requester_notified_at` is stamped). Needs the close-loop reconnection (next session).
+
 ## 3.4.0 — real-day bug-bash: owner override is one-step, urgent colleagues route to approval, calendar issues self-heal
 
 A GitHub-issue wave (#127–#132) from a day of real use, capping the 3.3.x arc. The throughline: stop making the owner repeat himself, and stop surfacing things that aren't real. Minor — it changes the owner-override interaction model and adds an urgent-colleague approval path. No schema change. Restart required.

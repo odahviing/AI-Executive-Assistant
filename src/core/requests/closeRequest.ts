@@ -1,12 +1,14 @@
 /**
  * closeRequest (v2.7.0) — THE ONLY way a request terminates.
  *
- * Five callers, exhaustive:
+ * Principal callers:
  *   1. resolver — owner explicit verdict (approve/reject/amend/cancel)
  *   2. closeLoopOnOwnerHandled scanner — LLM matched owner free-text
- *   3. expiry / timer dispatcher — next_check_at fired with handler='expiry'
+ *   3. the spine runner (runner.ts) — expiry / reminder / outreach / coord
+ *      timers firing on next_check_at
  *   4. meeting mutation cascade — calendar event vanished / confirmed
  *   5. outreach reply handler — colleague replied to awaiting_colleague outreach
+ *   6. reconcile.ts — orphaned-request sweep (booked-bypass / missing coord_job)
  *   (also: brief itself, when surfaced_count >= 3 → cancelled)
  *
  * No other code path may write `state` directly to a terminal value. Schema

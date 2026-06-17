@@ -400,9 +400,16 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
           if (excludeSet.has(ev.id)) continue;
           if ((ev as any).showAs === 'free') continue;
           if ((ev as any).isAllDay) continue;
+          // Parse zone-aware (matches rules 6 + 8). Graph returns dateTime as a
+          // bare wall-clock string with the zone in `.timeZone`; `new Date(str)`
+          // would interpret it in the Node PROCESS timezone, so on a host whose
+          // TZ ≠ the owner's the busy blocks shift by the offset → the focus
+          // floor mis-fires (phantom free time → over-book, or false floor
+          // violations). This is the write-path validator for named-time picks,
+          // so the skew silently diverged search from validate off-owner-TZ.
           busyBlocks.push({
-            start: new Date(ev.start.dateTime),
-            end: new Date(ev.end.dateTime),
+            start: DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toJSDate(),
+            end: DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).toJSDate(),
           });
         }
         // Add the proposed slot itself — checking what's left after booking.

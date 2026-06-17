@@ -28,6 +28,7 @@
 import { getDb } from '../../db/client';
 import { closeRequest } from './closeRequest';
 import type { RequestRow } from './types';
+import { parseDetails } from './types';
 import logger from '../../utils/logger';
 
 /** A coord request younger than this is never treated as an orphan (link race). */
@@ -66,8 +67,34 @@ export function reconcileOrphanedRequests(ownerUserId: string): number {
         `SELECT id, external_event_id FROM coord_jobs WHERE request_id = ?`
       ).get(req.id) as { id: string; external_event_id: string | null } | undefined;
 
-      // (a) coord_job gone entirely → manual delete / never linked. Orphan.
+      // (a) coord_job not reachable by request_id → manual delete, OR the
+      // link never landed. linkCoordToRequest runs AFTER createRequest, which
+      // already stored details.coord_job_id — so if that link threw, the
+      // coord_job exists but is unreachable by request_id. Blindly cancelling
+      // here would mark a possibly-BOOKED coord as cancelled. Fall back to the
+      // id the request carries before declaring it an orphan.
       if (!coordRow) {
+        const details = parseDetails<{ coord_job_id?: string }>(req) ?? {};
+        const byDetailsId = details.coord_job_id
+          ? (db.prepare(`SELECT id, external_event_id FROM coord_jobs WHERE id = ?`)
+              .get(details.coord_job_id) as { id: string; external_event_id: string | null } | undefined)
+          : undefined;
+        if (byDetailsId?.external_event_id) {
+          // The coord booked; only the request_id link failed. Resolve, don't cancel.
+          closeRequest({
+            id: req.id,
+            state: 'resolved',
+            closureReason: 'reconcile_coord_booked_unlinked',
+            closedBy: 'system',
+            outcomeExternalEventId: byDetailsId.external_event_id,
+          });
+          closed++;
+          logger.info('reconcileOrphanedRequests — resolved coord request (booked via details.coord_job_id; link had failed)', {
+            requestId: req.id, subject: req.subject, coordJobId: byDetailsId.id,
+          });
+          continue;
+        }
+        // Genuinely gone, or unlinked-and-not-booked → orphan, cancel.
         closeRequest({
           id: req.id,
           state: 'cancelled',

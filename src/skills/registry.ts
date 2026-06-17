@@ -350,6 +350,11 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   // had no correct tool — Sonnet flailed through create/move (both rule-failed),
   // burned the rate limit, and punted vaguely to the owner.
   'update_meeting',
+  // #30 — a colleague who picks an offered slot but defers ("let me check with
+  // my team") can tentatively hold it. The handler validates the slot was
+  // offered in THIS conversation + caps at 3 active holds; they can never freeze
+  // arbitrary calendar time, only a slot Maelle actually offered them.
+  'hold_slot',
   // v2.5.2 — self-write reopening. Personal-knowledge tools were over-tightened
   // pre-v2.4 as a side-effect of broader colleague-path defense. The product
   // model is: people memory + travel + social engagement are FOR colleagues —

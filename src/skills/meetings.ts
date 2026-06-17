@@ -475,6 +475,10 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
               type: 'boolean',
               description: 'OPTIONAL (default false). Set TRUE only when the user explicitly asks for a full-day / all-day event ("block the whole day", "full day", "all day", "vacation marker"). When true: the system clamps start/end to midnight of the day → midnight of the next day in the user TZ; you can pass start as the day at any time and the handler normalizes. Owner-only personal blocks (no attendees, focus / prep / vacation marker) → also pass category=Logistic to skip the location stamp.',
             },
+            override_hold: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). Owner-only. The tool refuses with error="slot_on_hold" when the slot is tentatively held for someone else, surfacing "X asked to reserve that — book anyway?". Pass TRUE on the retry after the owner says book it anyway — it books, releases the hold, and DMs the holder it was let go.',
+            },
             relaxed: {
               type: 'boolean',
               description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
@@ -520,6 +524,10 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             category: {
               type: 'string',
               description: 'OPTIONAL. The category the meeting is tagged with — used by the colleague-path rule check at the destination day to enforce category limits (per_day / per_week) and day_type constraints. Pass the meeting\'s existing category from get_calendar so the destination day count is validated correctly. Omit when the meeting has no category or when the move is purely owner-driven.',
+            },
+            override_hold: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). Owner-only. The tool refuses with error="slot_on_hold" when the move target is tentatively held for someone else, surfacing "X asked to reserve that — move anyway?". Pass TRUE on the retry after the owner says move it anyway — it moves the meeting, releases the hold, and DMs the holder it was let go.',
             },
           },
           required: ['meeting_id', 'meeting_subject', 'new_start', 'new_end'],
@@ -574,6 +582,28 @@ ATTENDEES (v2.9.1):
             meeting_subject: { type: 'string' },
           },
           required: ['meeting_id', 'meeting_subject'],
+        },
+      },
+      {
+        name: 'hold_slot',
+        description: `Tentatively HOLD a slot someone picked but hasn't confirmed — or that ${profile.user.name.split(' ')[0]} explicitly parks — so a SECOND person asking that time hears "tentatively held" instead of "free". Internal state only; never a calendar event. Auto-expires at the slot's start OR 2 ${profile.user.name.split(' ')[0]}-workdays (whichever first), DMing the holder it was freed.
+
+WHEN TO HOLD (action='hold'): a colleague was offered slots and picks ONE but DEFERS confirmation — "slot 1 works, let me check with my team", "20:30 טוב, רק אבדוק עם דנה". NOT on a clean yes (that books — call create_meeting). NOT at offer time (offers stay open). NOT on a vague "these all look ok" (no specific slot picked). ${profile.user.name.split(' ')[0]} can also park one explicitly ("hold Tue 14:00 for Yael until Thursday").
+RELEASE (action='release'): the holder confirms (then book it), declines, or re-picks a different time; or ${profile.user.name.split(' ')[0]} cancels a hold.
+Colleague-path: a colleague can only hold/release a time that WAS offered to them in THIS conversation (validated against the offered set), max 3 active holds; a new pick in the same thread replaces the old one. Owner-path: any slot, any holder, no limit.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['hold', 'release'] },
+            start_iso: { type: 'string', description: 'ISO start of the slot. Required for hold; for release it identifies which hold.' },
+            end_iso: { type: 'string', description: 'ISO end. Required for hold.' },
+            holder_name: { type: 'string', description: 'Who the hold is for. Owner-path: name the person ("Yael"). Colleague-path: defaults to the requester — omit.' },
+            holder_slack_id: { type: 'string', description: 'OPTIONAL slack id of the holder (owner-path, when known).' },
+            subject: { type: 'string', description: 'OPTIONAL — what the hold is for ("Simon 1:1").' },
+            reason: { type: 'string', description: 'OPTIONAL — why it is held ("verifying with her team").' },
+            hold_id: { type: 'string', description: 'OPTIONAL — for release, the specific hold id if you have it.' },
+          },
+          required: ['action'],
         },
       },
     ];
@@ -1842,6 +1872,7 @@ ATTENDEES (v2.9.1):
       case 'move_meeting':
       case 'update_meeting':
       case 'delete_meeting':
+      case 'hold_slot':
         return await this.ops.executeToolCall(toolName, args, context);
 
       default:

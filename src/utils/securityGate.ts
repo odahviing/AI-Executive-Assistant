@@ -14,7 +14,6 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { config } from '../config';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
 import { extractFirstJsonObject } from './extractJson';
@@ -35,8 +34,14 @@ const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
   { name: 'self_internals_2', pattern: /\b(?:the\s+)?(?:system\s+prompt|tool\s+call|function\s+call|tool\s+use)\b/i },
   { name: 'self_internals_3', pattern: /\bI\s+(?:have\s+access\s+to|can\s+call|can\s+invoke|can\s+execute)\s+(?:the\s+)?(?:following\s+)?(?:tools?|functions?|skills?|apis?)\b/i },
 
-  // Model / provider leaks
-  { name: 'model_leak', pattern: /\b(?:Anthropic|Claude|GPT-?\d?|OpenAI|Haiku|Sonnet|Opus|large\s+language\s+model)\b/i },
+  // Model / provider leaks. Bare model NAMES (Claude / Haiku / Sonnet / Opus)
+  // are NOT triggers on their own — "Claude" is a person's name, "haiku" a
+  // poem, "Opus"/"Sonnet" product words; matching them nuked correct colleague
+  // replies to the canned fallback. Keep the unambiguous provider tokens, and
+  // catch model names only in a self-referential frame ("I'm Claude", "powered
+  // by Sonnet", "running on GPT") — which is the actual leak this guards.
+  { name: 'model_leak', pattern: /\b(?:Anthropic|OpenAI|GPT-?\d|claude-[a-z0-9.-]+|large\s+language\s+model)\b/i },
+  { name: 'model_self_ref', pattern: /\b(?:I(?:'|’)?m|I\s+am|built\s+on|powered\s+by|running\s+on|based\s+on|(?:my\s+)?model\s+is)\s+(?:an?\s+|the\s+)?(?:Claude|GPT|Sonnet|Opus|Haiku|Gemini|Llama)\b/i },
 
   // Structured payload echoes — JSON-looking self-describing blocks,
   // function_call syntax, tool_use tags
