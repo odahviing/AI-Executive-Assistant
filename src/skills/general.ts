@@ -124,7 +124,7 @@ Use this for:
 - Getting the text from any URL the user provides
 - Researching a specific page's content
 
-Note: Some pages may block extraction (login-required, bot-protected). If extraction fails, fall back to web_search about the topic.`,
+Note: Some pages may block extraction (login-required, bot-protected — LinkedIn especially). If extraction fails you got NO content from that page: fall back to web_search about the topic, and NEVER describe or propose anything as if you'd read it — don't invent a title, date, or detail you didn't actually extract.`,
         input_schema: {
           type: 'object' as const,
           properties: {
@@ -217,7 +217,7 @@ For a quick one-off fact (weather, exchange rate, is today a holiday), use web_s
     return `
 SEARCH & RESEARCH
 - web_search — a quick one-off fact (weather, exchange rate, is today a holiday, a single current detail). Answer stable knowledge (history, geography, concepts) directly, no search.
-- web_research(goal) — use this whenever you'll WRITE or PROPOSE from current events (a LinkedIn post, article, summary, suggestion, briefing) or the owner asks you to research / look into / explore a topic. It returns real SOURCES + their content. Write GROUNDED in what it returns and CITE the links in your output. NEVER state a current-events fact — a stat, "this week", a named incident/campaign — that isn't in the returned sources; if it finds nothing, say you couldn't find a source rather than writing from memory. Combine with the knowledge base for our voice/positioning when drafting.
+- web_research(goal) — use this whenever you'll WRITE or PROPOSE from current events (a LinkedIn post, article, summary, suggestion, briefing) or the owner asks you to research / look into / explore a topic. It returns real SOURCES + their content. Write GROUNDED in what it returns and CITE the links in your output. NEVER state a current-events fact — a stat, "this week", a named incident/campaign — that isn't in the returned sources; if it finds nothing, say you couldn't find a source rather than writing from memory. When you PROPOSE angles / post ideas, each must be SELF-CONTAINED — the specific item, its concrete details (what it is, when, why it's relevant now), and the source link — so the owner can say "draft that" without asking "which one?". If you can't substantiate an angle (source blocked or empty, no real details), DROP it — never float a bare reference like "post about the webinar". One fewer idea beats one he can't act on. Combine with the knowledge base for our voice/positioning when drafting.
 
 ${units}
 

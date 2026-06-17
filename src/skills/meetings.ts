@@ -444,8 +444,9 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
           type: 'object',
           properties: {
             subject: { type: 'string', description: 'Meeting subject — ENGLISH ONLY, even when conversing in Hebrew.' },
-            start: { type: 'string', description: 'ISO 8601 datetime in user local timezone' },
-            end: { type: 'string', description: 'ISO 8601 datetime in user local timezone' },
+            start: { type: 'string', description: 'ISO 8601 datetime. In the owner local timezone UNLESS start_timezone is set, in which case it is the clock time in THAT zone.' },
+            end: { type: 'string', description: 'ISO 8601 datetime. Same timezone basis as start.' },
+            start_timezone: { type: 'string', description: 'IANA timezone the start/end CLOCK times are expressed in (e.g. "America/New_York"). Set this when the meeting time was GIVEN in a non-owner zone — e.g. the owner said "9:30 EST" / "2pm ET", or he is travelling and stated a time in the destination zone: pass start="...T09:30:00" + start_timezone="America/New_York" and the tool converts to the owner timezone deterministically. OMIT when the time is already in the owner timezone. NEVER hand-convert the time yourself — tag the source zone and let the tool do the math.' },
             attendees: {
               type: 'array',
               items: {
@@ -509,6 +510,7 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             meeting_subject: { type: 'string' },
             new_start: { type: 'string' },
             new_end: { type: 'string' },
+            start_timezone: { type: 'string', description: 'IANA timezone the new_start/new_end CLOCK times are expressed in (e.g. "America/New_York"). Set this when the move target was GIVEN in a non-owner zone — e.g. "move it to 9:30 EST", or the owner is travelling and stated a destination-zone time: pass new_start="...T09:30:00" + start_timezone="America/New_York" and the tool converts to the owner timezone deterministically. OMIT when the time is already in the owner timezone. NEVER hand-convert yourself — tag the source zone and let the tool do the math.' },
             start_is_explicit: {
               type: 'boolean',
               description: 'OPTIONAL (default false). Set TRUE only when the owner named an EXACT off-grid new time ("move it to 14:40"). Otherwise the handler snaps new_start to the :00/:15/:30/:45 grid.',
@@ -535,7 +537,9 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
       },
       {
         name: 'update_meeting',
-        description: `Update metadata on an existing meeting WITHOUT rescheduling it — change category, subject, or the attendee list.
+        description: `Update metadata on an existing meeting WITHOUT rescheduling it — change subject or the attendee list.
+
+CATEGORY changes do NOT belong here — use \`set_event_category\` for ALL category changes. It sets the category on the owner's OWN copy of the event and works for ANY event regardless of who organized it (Outlook categories are per-user). update_meeting's category path requires the owner to be the ORGANIZER and returns \`not_organizer\` on a meeting someone else created — which is wrong, since the owner can categorize anything on his calendar. So: category-only change → \`set_event_category\`, always.
 
 ATTENDEES (v2.9.1):
 - Use \`add_attendees\` to bring new people onto an existing meeting (e.g. "add Dina to the 3pm").
@@ -548,7 +552,7 @@ ATTENDEES (v2.9.1):
           properties: {
             meeting_id:      { type: 'string' },
             meeting_subject: { type: 'string' },
-            category:        categoryEnum ? { type: 'string', enum: categoryEnum } : { type: 'string' },
+            category:        categoryEnum ? { type: 'string', enum: categoryEnum, description: 'AVOID — use set_event_category for category changes (works on any event regardless of organizer). This path only succeeds when the owner organized the meeting.' } : { type: 'string', description: 'AVOID — use set_event_category instead (organizer-independent).' },
             new_subject:     { type: 'string' },
             add_attendees: {
               type: 'array',
@@ -2111,6 +2115,8 @@ NEVER compute a cross-timezone conversion in your head — inverted labels, and 
 - Want options shown/forwarded in a specific zone — INCLUDING an organizer gathering options for US colleagues with no attendee stored there → \`present_in_timezone\` + quote the returned \`presentation_local\` verbatim.
 - A colleague ORGANIZING a meeting they're NOT in → \`requester_is_attending: false\`, so their own calendar doesn't filter the search or come back as "you're busy in all the options".
 A colleague who IS attending needs none of these — their stored timezone already drives the labels.
+
+BOOKING / MOVING a time GIVEN in another zone — same tag-don't-convert contract, on the booking tools. When the time was stated in a non-owner zone ("book it 9:30 EST", "2pm ET", or a destination-zone clock while ${firstName} is travelling), \`create_meeting\` / \`move_meeting\` take \`start_timezone\`: pass the clock EXACTLY as stated (start/new_start = "...T09:30:00") + \`start_timezone\` = that IANA zone, and the tool converts to his local time deterministically. SAME TRAP as the search field above: do NOT also hand-convert the time — passing a converted clock AND start_timezone double-converts it. Omit start_timezone only when the time is already his local zone.
 
 AVAILABILITY VS BOOKING — answer the question, then OFFER to book.
 When a colleague asks "is ${firstName} free at X?" / "is X open Sunday at 14:00?" — that's an AVAILABILITY check, not a booking request. Answer the availability question first ("yes, he's free Sunday 10.5 at 14:00 for 55 min"), THEN offer the next step in the same reply: "want me to send the invite, or are you just checking?" Give them the choice. Don't assume they want it booked, don't assume they don't. The colleague might be lining up multiple options before committing, OR they might be ready to lock it in — let them tell you. ONLY call \`create_meeting\` / \`coordinate_meeting\` after they say go.

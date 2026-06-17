@@ -51,7 +51,7 @@ const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
 
   // Role-header echoes from injection payloads
   { name: 'role_header_echo', pattern: /\[(?:This\s+)?[Mm]essage\s+(?:is\s+)?from\b/ },
-  { name: 'inject_marker', pattern: /\[%00\]|\[\]\s*$/m },
+  { name: 'inject_marker', pattern: /\[%00\]/ },
 ];
 
 /**

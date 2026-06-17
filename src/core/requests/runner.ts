@@ -19,7 +19,7 @@
 import { DateTime } from 'luxon';
 import type { App } from '@slack/bolt';
 import type { UserProfile } from '../../config/userProfile';
-import { getDueRequests, updateRequest } from '../../db/requests';
+import { getDueRequests, getRequest, updateRequest } from '../../db/requests';
 import { getCoordJobByRequestId, updateCoordJob, type CoordParticipant } from '../../db/jobs';
 import { closeRequest } from './closeRequest';
 import type { NextCheckHandler, RequestRow } from './types';
@@ -85,6 +85,9 @@ async function dispatchHandler(
 
     case 'reminder_fire':
       return runReminderFire(row, profile);
+
+    case 'approval_action_timeout':
+      return runApprovalActionTimeout(row, profile);
 
     case 'research_run':
       return runResearchRun(row, profile, app);
@@ -177,6 +180,71 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
       });
     }
   }
+  return 'closed';
+}
+
+/**
+ * v3.4.2 (2.2 close-loop) — owner approved a colleague-requested approval, and
+ * we held it open (state=in_flight, details.awaiting_fulfilling_action) so the
+ * fulfilling booking/cancel could reconnect and notify the requester with the
+ * concrete result. This fires only if that action NEVER landed within the grace
+ * window — i.e. the approval was a plain yes/no with no follow-up, OR the booking
+ * was abandoned. Relay a NEUTRAL "owner signed off" (never promise an action that
+ * didn't happen) so the requester isn't left hanging, then close resolved.
+ *
+ * If the booking DID land, closeMeetingArtifacts already closed the request +
+ * sent the concrete DM and nulled this timer — so this never fires (the stale
+ * guard catches any race).
+ */
+async function runApprovalActionTimeout(row: RequestRow, profile: UserProfile): Promise<'closed' | 'noop'> {
+  // Re-read fresh: the batch `row` is a snapshot from sweep start. A booking
+  // committing between getDueRequests() and this dispatch would have closed the
+  // request + stamped requester_notified_at via closeMeetingArtifacts; acting on
+  // the stale snapshot would double-DM. Fresh-read closes that race (mirrors the
+  // resolver's post-replay fresh-read of requester_notified_at).
+  const fresh = getRequest(row.id) ?? row;
+  const details = parseDetails<Record<string, unknown>>(fresh) ?? {};
+  // Stale guard: the booking already landed (closeMeetingArtifacts moved this
+  // off in_flight / cleared the flag), it was otherwise resolved, or the
+  // requester was already told. Drop timer.
+  if (fresh.state !== 'in_flight' || details.awaiting_fulfilling_action !== true || fresh.requester_notified_at) {
+    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+    return 'noop';
+  }
+  row = fresh;
+  closeRequest({
+    id: row.id,
+    state: 'resolved',
+    closureReason: 'approved_but_no_fulfilling_action_observed',
+    closedBy: 'system',
+  });
+  if (row.requester_slack_id && !row.requester_notified_at) {
+    try {
+      const conn = getConnection(profile.user.slack_user_id, 'slack');
+      if (conn) {
+        const requesterFirst = row.requester_name?.split(' ')[0] ?? 'there';
+        const ownerFirst = profile.user.name.split(' ')[0];
+        // Neutral subject — never leak the auto-generated "<subkind> needs your
+        // input" meta to a colleague.
+        const subject = row.subject && !row.subject.toLowerCase().endsWith('needs your input')
+          ? ` on ${row.subject}`
+          : '';
+        const body = `Hey ${requesterFirst} — ${ownerFirst} signed off${subject}. I'll follow up if anything else is needed.`;
+        if (row.origin_is_mpim && row.origin_channel) {
+          await conn.postToChannel(row.origin_channel, body, { threadTs: row.origin_thread_ts ?? undefined });
+        } else {
+          await conn.sendDirect(row.requester_slack_id, body);
+        }
+      }
+    } catch (err) {
+      logger.warn('runApprovalActionTimeout — requester relay DM threw', {
+        requestId: row.id, err: String(err).slice(0, 200),
+      });
+    }
+  }
+  logger.info('runApprovalActionTimeout — fulfilling action never landed; relayed approval + closed', {
+    requestId: row.id, requester: row.requester_slack_id,
+  });
   return 'closed';
 }
 
@@ -468,12 +536,23 @@ async function runCoordNudge(row: RequestRow, profile: UserProfile): Promise<'re
     updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
     return 'noop';
   }
+  let sent = 0;
   for (const p of nonResponders) {
     if (!p.slack_id) continue;
     const res = await conn.sendDirect(p.slack_id, `Hi ${p.name}, gentle nudge about "${job.subject}" — let me know when you get a chance.`);
-    if (!res.ok) {
-      logger.warn('coord_nudge (spine) — DM failed for participant', { reason: res.reason, participant: p.name });
-    }
+    if (res.ok) sent++;
+    else logger.warn('coord_nudge (spine) — DM failed for participant', { reason: res.reason, participant: p.name });
+  }
+  if (sent === 0) {
+    // Every nudge DM failed (Slack outage, all deactivated). Do NOT stamp
+    // follow_up_sent_at or arm coord_abandon — abandoning now would tell the
+    // owner "couldn't get a response" when no participant was ever reached.
+    // Re-arm coord_nudge to retry on the next workday start instead.
+    updateRequest(row.id, { nextCheckAt: nextOwnerWorkdayStart(profile), nextCheckHandler: 'coord_nudge' });
+    logger.warn('coord_nudge (spine) — all nudge DMs failed; retrying nudge, not arming abandon', {
+      requestId: row.id, coordId: job.id, attempted: nonResponders.length,
+    });
+    return 'rearmed';
   }
   updateCoordJob(job.id, { follow_up_sent_at: new Date().toISOString() });
   // Re-arm: abandon check +4h, on the request.
@@ -482,7 +561,7 @@ async function runCoordNudge(row: RequestRow, profile: UserProfile): Promise<'re
     nextCheckHandler: 'coord_abandon',
   });
   logger.info('coord_nudge (spine) — nudged + abandon armed', {
-    requestId: row.id, coordId: job.id, nudged: nonResponders.map(p => p.name),
+    requestId: row.id, coordId: job.id, nudged: nonResponders.map(p => p.name), sent,
   });
   return 'rearmed';
 }

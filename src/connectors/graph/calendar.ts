@@ -2161,9 +2161,20 @@ export async function createMeeting(params: CreateMeetingParams): Promise<Create
     ? undefined
     : params.location;
 
-  const defaultBody = params.defaultBodyAuthor
+  // v3.4.2 (D) — the attribution line ("Meeting booked by Maelle, Idan
+  // Assistant") leads EVERY invite, always. Pre-fix it was `params.body ||
+  // attribution`, so the moment the body carried a location block (which it now
+  // does for every physical meeting) the attribution silently vanished — the
+  // owner's "why no 'booked by Maelle' anymore" regression. Now it's always
+  // prepended; the composed body (location block + any extra comment the owner
+  // asked to add, assembled in ops.ts) follows it. Order: attribution → location
+  // → extra.
+  const attributionLine = params.defaultBodyAuthor
     ? `<p>Meeting booked by ${params.defaultBodyAuthor}.</p>`
     : `<p>Meeting scheduled by your executive assistant.</p>`;
+  const composedBody = params.body
+    ? `${attributionLine}\n${params.body}`
+    : attributionLine;
 
   // All-day normalization. Graph requires isAllDay events to start at 00:00
   // of the day and end at 00:00 of the NEXT day (both in user TZ). Any other
@@ -2186,7 +2197,7 @@ export async function createMeeting(params: CreateMeetingParams): Promise<Create
     subject: params.subject,
     body: {
       contentType: 'HTML',
-      content: params.body || defaultBody,
+      content: composedBody,
     },
     start: { dateTime: normalizeForGraph(startIso, params.timezone), timeZone: params.timezone },
     end:   { dateTime: normalizeForGraph(endIso,   params.timezone), timeZone: params.timezone },

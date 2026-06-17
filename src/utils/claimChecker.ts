@@ -90,7 +90,11 @@ function needsCheck(input: ClaimCheckInput): boolean {
   // every word matters; the "shares my name" hallucination was 9 words.
   if (input.mode === 'coda') return true;
   if (input.bookingOccurred) return false;      // deterministic proof of the only booking claim type
-  if (input.reply.length < 60) return false;    // too short to plausibly carry a compound false claim
+  // A short reply still carries a phantom-send claim — "Sent it to Yael ✅"
+  // (18 chars) / Hebrew "שלחתי ליעל" (~10). The 60-char floor predated the
+  // cheap tool-less own-the-miss rewrite and skipped exactly the class the
+  // guard exists for. 30 keeps trivial acks ("Done.", "👍") out.
+  if (input.reply.length < 30) return false;
   return true;
 }
 
@@ -376,26 +380,25 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
  * (which auto-sent on a possibly-wrong verdict).
  *
  * When the checker confirms the draft claims an action that no tool backed
- * this turn, this single TOOL-LESS rewrite re-renders the prose so it
- * HONESTLY surfaces that the action has NOT happened — in the assistant's
- * human voice, owning the slip plainly. Two hard rules baked into the prompt:
- *   1. Make the non-completion UNMISTAKABLE so the owner knows to nudge.
- *   2. Do NOT smooth it into "I'll handle it" (reads as already done).
+ * this turn, this rewrite re-renders the prose so it HONESTLY surfaces that the
+ * action has NOT happened — owning the slip plainly so the owner knows to nudge,
+ * never smoothed into "I'll handle it".
  *
- * v3.4.x — VETO + Sonnet (GH #124/#125). The upstream RULE-A classifier (Haiku)
- * false-positived three times in one day on PROPOSALS / OFFERS / future
- * commitments ("Want me to move Michal?", "once you pick, I'll move it") — the
- * exact cases its own prompt exempts. The shield can't catch them (no tool ran,
- * correctly). So the rewriter no longer blindly trusts the verdict: it FIRST
- * verifies the draft itself and, if the draft only proposes/offers/asks/commits
- * to a future action, returns the literal `UNCHANGED` → caller keeps the
- * original untouched (logged as a veto so we can count classifier wrongness).
- * It runs on SONNET, not Haiku: the veto decision is exactly the judgment Haiku
- * just failed at, and the rewriter fires only a few times a day (flags only),
- * so the stronger model is essentially free here.
+ * v3.4.x — VETO + Sonnet (GH #124/#125): the rewriter no longer blindly trusts
+ * the upstream verdict. It FIRST judges the draft itself and keeps it unchanged
+ * when the draft only proposes/offers/asks/future-commits (the classifier's
+ * common misfire). Runs on Sonnet — the keep-vs-rewrite call is exactly what
+ * Haiku gets wrong — and only on flags (a few/day), so cost is trivial.
  *
- * Tool-less ⇒ it can never duplicate an action. Fails open (returns null, incl.
- * on veto) → caller keeps the original draft.
+ * v3.4.x — STRUCTURED OUTPUT (GH 2026-06-17 leak): the decision comes back as a
+ * forced `verdict` tool call ({verdict, message}), NOT free text. We read only
+ * those fields, so the model's reasoning can NEVER ship as the reply — the bug
+ * where Sonnet "thought out loud" and its monologue (ending in "UNCHANGED")
+ * went straight to the owner because the old exact-token veto didn't match it.
+ *
+ * Tool-less (no write tools) ⇒ it can never duplicate an action. Fails open
+ * (returns null on keep, empty/suspect message, or error) → caller keeps the
+ * original draft.
  */
 export async function rewriteOwningTheMiss(opts: {
   draft: string;
@@ -409,53 +412,85 @@ export async function rewriteOwningTheMiss(opts: {
       ? `sending a message${opts.targetName ? ` to ${opts.targetName}` : ''}`
       : 'that action');
 
-  const prompt = `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your FIRST job is to verify, not to assume.
+  const prompt = `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify, not assume. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
 STEP 1 — Decide what the draft actually does. If the draft only:
 - PROPOSES or OFFERS an action ("Want me to move Michal to Wed?", "I can book that", "Should I reach out to her?"), OR
 - ASKS PERMISSION before acting, OR
-- COMMITS to a FUTURE action conditional on ${opts.ownerFirstName}'s answer ("once you pick, I'll move it", "I'll get that sorted once you confirm"), OR
+- COMMITS to a FUTURE action conditional on ${opts.ownerFirstName}'s answer ("once you pick, I'll move it"), OR
+- states an action that the tools genuinely DID perform, OR
 - simply does NOT state that something is already done / sent / booked / moved / flagged
-then it is NOT a false claim — the checker misfired. Output EXACTLY the single token UNCHANGED and nothing else. Do not rewrite a proposal into an apology.
+then it is NOT a false claim — the checker misfired. Call verdict with verdict="keep" (leave message empty). Do not turn a proposal into an apology.
 
-STEP 2 — ONLY if the draft genuinely STATES a completed action ("Done — booked Wed 12:15", "I've sent it to Yael", "Moved your 17:00 over") that no tool performed: rewrite it so it is HONEST about the gap, warm and human:
+STEP 2 — ONLY if the draft genuinely STATES a completed action ("Done — booked Wed 12:15", "I've sent it to Yael", "Moved your 17:00 over") that no tool performed: call verdict with verdict="rewrite" and put the corrected reply in \`message\`. The rewrite must:
 - Make it UNMISTAKABLE the thing has NOT gone through yet, so ${opts.ownerFirstName} knows it still needs to happen. (e.g. "Actually — hold on, that didn't go out yet, let me sort it.")
-- Do NOT claim it's done/sent/booked/flagged/handled, and do NOT smooth it into "I'll take care of it" (reads as resolved).
+- NOT claim it's done/sent/booked/flagged/handled, and NOT smooth it into "I'll take care of it" (reads as resolved).
 - Keep every other fact intact: names, times, dates, numbers, the rest of the message.
 - Sound like a real person owning a small slip — never a system/error message, no talk of tools or mechanism.
 - Match the language of the draft (Hebrew/English/etc).
-
-Output ONLY the single token UNCHANGED, or ONLY the corrected message text. No preamble, no quotes, no code fences.
 
 Draft:
 ${opts.draft}`;
 
   try {
     const resp = await anthropic.messages.create({
-      // Sonnet — the veto (proposal vs. completed-claim) is the judgment Haiku
-      // misfired on; this path runs only on flags (a few/day), so cost is trivial.
+      // Sonnet — the keep-vs-rewrite judgment is what Haiku misfires on; this
+      // path runs only on flags (a few/day), so the stronger model is cheap here.
       model: 'claude-sonnet-4-6',
       max_tokens: 600,
+      tools: [{
+        name: 'verdict',
+        description: 'Report whether the draft falsely claims a completed action, and if so the corrected reply.',
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            verdict: {
+              type: 'string',
+              enum: ['keep', 'rewrite'],
+              description: '"keep" = the draft is fine (proposal/offer/future-commit, or the action actually happened). "rewrite" = the draft falsely states a completed action no tool performed.',
+            },
+            message: {
+              type: 'string',
+              description: 'Only when verdict="rewrite": the corrected reply text, honest that the action has not happened yet. Omit for "keep".',
+            },
+          },
+          required: ['verdict'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'verdict' },
       messages: [{ role: 'user', content: prompt }],
     });
     logLlmUsage('claim_checker_rewrite', 'claude-sonnet-4-6', resp);
-    const text = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
-    const out = text.replace(/^```(?:\w+)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
 
-    // VETO: the rewriter judged the draft a proposal/offer/future-commit, not a
-    // completed claim → the classifier false-positived. Keep the original draft
-    // untouched and log it (this count tells us if the Haiku classifier itself
-    // needs the Sonnet flip). Tolerant match: "UNCHANGED", "UNCHANGED.", etc.
-    if (out.toUpperCase().replace(/[^A-Z]/g, '') === 'UNCHANGED') {
-      logger.info('claim_checker_rewrite_vetoed — draft is a proposal/offer/future-commit, not a completed claim; keeping original (classifier false-positive)', {
+    // Read ONLY the structured tool fields — never a text block. This is what
+    // makes a reasoning leak impossible: the model's monologue, if any, lives in
+    // text blocks we ignore; only `verdict`/`message` can ever become the reply.
+    const toolUse = resp.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
+    const input = (toolUse?.input ?? {}) as { verdict?: string; message?: string };
+
+    // verdict=keep (or missing/garbled) → classifier misfired → keep original.
+    if (input.verdict !== 'rewrite') {
+      logger.info('claim_checker_rewrite_vetoed — rewriter judged the draft fine (proposal/offer/future-commit or the action did happen); keeping original', {
         action_type: opts.actionType,
         action_summary: opts.actionSummary,
+        verdict: input.verdict ?? '(none)',
         draftPreview: opts.draft.slice(0, 200),
       });
       return null;
     }
 
-    return out.length > 0 ? out : null;
+    // verdict=rewrite. Belt-and-suspenders: a rewrite with no usable message, or
+    // one that smells like leaked reasoning, fails open to the original — we
+    // NEVER ship the model's meta-text as the reply.
+    const message = typeof input.message === 'string' ? input.message.trim() : '';
+    if (message.length === 0 || /\b(the draft|the checker|claimed_action|UNCHANGED|the action was performed)\b/i.test(message)) {
+      logger.warn('claim_checker_rewrite — verdict=rewrite but message empty/meta; keeping original draft', {
+        action_type: opts.actionType,
+        messagePreview: message.slice(0, 160),
+      });
+      return null;
+    }
+    return message;
   } catch (err) {
     logger.warn('rewriteOwningTheMiss threw — caller keeps original draft', {
       err: String(err).slice(0, 200),

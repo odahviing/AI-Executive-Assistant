@@ -38,7 +38,7 @@ const INJECTION_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
   { name: 'role_reassign', pattern: /\brequester\s+is\s+(?:not|actually)\b/i },
 
   // Encoding / evasion
-  { name: 'null_byte', pattern: /\[%00\]|\x00/ },
+  { name: 'null_byte', pattern: /\[%00\]/ },
   { name: 'html_tag_injection', pattern: /&lt;tag&gt;|&#x3c;/i },
 ];
 

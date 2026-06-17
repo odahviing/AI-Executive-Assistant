@@ -43,9 +43,12 @@ const NEWS_MODEL = 'claude-haiku-4-5-20251001';
 
 // Cost controls (code constants — tune after measuring).
 const NEWS_GOAL_CAP = 4;               // max research goals per gather
-const NEWS_MORNING_RECENCY_DAYS = 3;   // daily brief window — fresh, but re-pull re-offers
-                                       // an unshown article for ~3 days (covers a 1-2 day delay)
+const NEWS_MORNING_RECENCY_DAYS = 3;   // daily brief window — fresh. Re-pull MAY re-offer an
+                                       // unshown article for up to ~3 days, but only while it
+                                       // stays in Tavily's top results; a fast-moving topic can
+                                       // push it out within a day (no hard resurface guarantee).
 const NEWS_ONDEMAND_RECENCY_DAYS = 7;  // on-demand "catch me up": up to a week
+const NEWS_ONDEMAND_LOG_CEILING = 7;   // on-demand seen-log cap — matches the "up to 7" surface ceiling
 const NEWS_PER_GOAL_TIMEOUT_MS = 12_000; // a goal slower than this is dropped
 const NEWS_MAX_RESULTS = 15;           // Tavily candidates per goal — deep pool so showing
                                        // up to 7/day over a 3-day window (deduped) doesn't run dry
@@ -613,7 +616,13 @@ Then YOU: write GROUNDED in what it returns and CITE the source links. NEVER ass
       recencyDays: NEWS_ONDEMAND_RECENCY_DAYS,
     });
     // Fire-and-forget: log what we surfaced so the next ask/brief dedupes it.
-    void writeSeenLog(context.profile, bundle).catch(() => { /* non-fatal */ });
+    // The on-demand path can't pass briefText (Sonnet composes the reply AFTER
+    // this tool returns), so we can't shown-filter precisely. Cap the logged
+    // set to the same relevance ceiling Sonnet is told to surface (7) — logging
+    // the full ≤15-item bundle would suppress unshown items for 7 days, the
+    // inverse of the brief-path shown-only discipline.
+    const ondemandToLog = { ...bundle, sources: bundle.sources.slice(0, NEWS_ONDEMAND_LOG_CEILING) };
+    void writeSeenLog(context.profile, ondemandToLog).catch(() => { /* non-fatal */ });
     return {
       goals: bundle.goals,
       sources: bundle.sources,

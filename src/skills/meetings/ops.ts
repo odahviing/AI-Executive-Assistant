@@ -73,10 +73,6 @@ function buildOutOfHoursBusy(
   const officeDays = profile.schedule.office_days.days;
   const homeDays = profile.schedule.home_days.days;
   const dayName = (dt: DateTime) => dt.toFormat('cccc');
-  const hhmmToMinutes = (s: string): number => {
-    const [h, m] = s.split(':').map(n => parseInt(n, 10));
-    return (h * 60) + m;
-  };
   for (let d = rangeStart.startOf('day'); d <= rangeEnd; d = d.plus({ days: 1 })) {
     const name = dayName(d);
     const isOffice = officeDays.includes(name as typeof officeDays[number]);
@@ -138,8 +134,6 @@ function buildOutOfHoursBusy(
         status: 'oof',
       });
     }
-    // hhmmToMinutes still referenced by other paths — keep the function defined.
-    void hhmmToMinutes;
   }
   return blocks;
 }
@@ -167,6 +161,7 @@ import {
   getPersonMemory,
 } from '../../db';
 import { closeMeetingArtifacts } from '../../utils/closeMeetingArtifacts';
+import { reinterpretClockInZone, renderClockInZone } from '../../utils/timezoneConvert';
 
 // ── Calendar event processing ─────────────────────────────────────────────────
 
@@ -1038,14 +1033,10 @@ export class SchedulingSkill {
             ? args.search_window_timezone.trim()
             : '';
           if (searchWindowTz) {
-            const reinterpret = (iso: string): string => {
-              const dt = DateTime.fromISO(iso, { zone: searchWindowTz });
-              if (!dt.isValid) return iso;
-              return dt.setZone(timezone).toISO() ?? iso;
-            };
+            // v3.4.2 (A2) — shared helper, identical to create/move's conversion.
             const fromRequested = effectiveSearchFrom;
-            effectiveSearchFrom = reinterpret(effectiveSearchFrom);
-            effectiveSearchTo = reinterpret(effectiveSearchTo);
+            effectiveSearchFrom = reinterpretClockInZone(effectiveSearchFrom, searchWindowTz, timezone);
+            effectiveSearchTo = reinterpretClockInZone(effectiveSearchTo, searchWindowTz, timezone);
             logger.info('find_available_slots — converted search window from requested TZ to owner TZ', {
               searchWindowTz, from_requested: fromRequested, from_owner: effectiveSearchFrom,
             });
@@ -1798,11 +1789,29 @@ export class SchedulingSkill {
                     return Number.isFinite(hs) && Number.isFinite(he) && ss < he && se > hs;
                   });
                 };
-                const freeOnly = candidateSet.filter(s => !overlapsHold(s as any));
+                const freeOnly = candidateSet.filter(s => !overlapsHold(s));
                 if (freeOnly.length > 0) pickPool = freeOnly;  // hold back held slots while free ones exist
               }
             } catch (err) {
               logger.warn('find_available_slots — hold deprioritization threw, using full set', { err: String(err).slice(0, 120) });
+            }
+            // v3.4.2 — DROP slots already offered in this conversation so "give me
+            // another option" returns NEW times, not the same spread again. The
+            // stash is the UNION of everything shown this conversation; on the
+            // FIRST search it's empty → no-op (no flag, no branch — works on run
+            // one exactly as before). Verifying specific named slots runs in the
+            // candidate_slots path above, not here, so it's unaffected. If
+            // exclusion would empty the pool, keep the full pool (never go silent).
+            try {
+              const { getOfferedSlots } = await import('../../utils/offeredSlotsStash');
+              const offered = getOfferedSlots(context.channelId, context.threadTs) ?? [];
+              if (offered.length > 0) {
+                const offeredMs = new Set(offered.map(o => Date.parse(o.startIso)).filter(Number.isFinite));
+                const fresh = pickPool.filter(s => !offeredMs.has(Date.parse(s.start)));
+                if (fresh.length > 0) pickPool = fresh;
+              }
+            } catch (err) {
+              logger.warn('find_available_slots — offered-slot exclusion threw, using full pool', { err: String(err).slice(0, 120) });
             }
             const chosenStarts = new Set(pickSpreadSlots(pickPool, timezone, 3, anchorDay, args.duration_minutes as number | undefined));
 
@@ -1965,10 +1974,10 @@ export class SchedulingSkill {
               ? args.present_in_timezone.trim()
               : '';
             if (presentTz) {
+              // v3.4.2 (A2) — shared renderer, same string create/move echo back.
               annotatedSlots = annotatedSlots.map((s: any) => {
-                const dt = DateTime.fromISO(s.start, { zone: timezone }).setZone(presentTz);
-                if (!dt.isValid) return s;
-                return { ...s, presentation_local: dt.toFormat('EEE d MMM HH:mm ZZZZ') };
+                const display = renderClockInZone(s.start, timezone, presentTz);
+                return display ? { ...s, presentation_local: display } : s;
               });
             }
             // v3.3.8 — remember what's being OFFERED in this conversation so a
@@ -2084,6 +2093,66 @@ export class SchedulingSkill {
         }
 
       case 'create_meeting': {
+        // v3.4.2 (A1) — deterministic source-timezone conversion. When the time
+        // was GIVEN in a non-owner zone ("9:30 EST" during the Boston trip),
+        // Sonnet tags `start_timezone` (e.g. "America/New_York") and passes the
+        // clock as-stated; we convert to the owner zone HERE via the SAME helper
+        // find_available_slots uses — never letting Sonnet do the arithmetic
+        // (which it got wrong repeatedly). Mutates args in place so every
+        // downstream `args.start` read sees the converted value. No-op when
+        // start_timezone is omitted (time already in owner zone).
+        {
+          const srcTz = typeof args.start_timezone === 'string' ? args.start_timezone.trim() : '';
+          if (srcTz) {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { reinterpretClockInZone } = require('../../utils/timezoneConvert') as
+              typeof import('../../utils/timezoneConvert');
+            if (typeof args.start === 'string') args.start = reinterpretClockInZone(args.start, srcTz, timezone);
+            if (typeof args.end === 'string') args.end = reinterpretClockInZone(args.end as string, srcTz, timezone);
+            logger.info('create_meeting — converted start/end from source TZ to owner TZ', {
+              start_timezone: srcTz, start_owner: args.start, end_owner: args.end,
+            });
+          }
+        }
+        // v3.4.2 (travel context) — when the owner is at a trip location on the
+        // meeting's day and DIDN'T explicitly tag start_timezone, (1) interpret a
+        // bare time in the TRIP timezone (a bare "10am" during a Boston week is
+        // 10am Boston, not 10am Israel), and (2) default the location to the trip
+        // place instead of a home-TZ Huddle / blank. Reuses the SAME reinterpret
+        // helper as the explicit path above and resolveLocation's owner-hint path
+        // for the stamp. No-op when not travelling that day (isAway:false).
+        let tripDisplay: { tz: string; location: string } | null = null;
+        if (typeof args.start === 'string') {
+          try {
+            const dayIso = DateTime.fromISO(args.start as string, { zone: timezone }).toFormat('yyyy-MM-dd');
+            const dayEvents = await getCalendarEvents(userEmail, dayIso, dayIso, timezone);
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { resolveOwnerTravelContextForDate } = require('../../utils/workingElsewhere') as
+              typeof import('../../utils/workingElsewhere');
+            const ctx = await resolveOwnerTravelContextForDate(dayIso, context.profile.user.slack_user_id, timezone, dayEvents);
+            if (ctx.isAway) {
+              tripDisplay = { tz: ctx.effectiveTz, location: ctx.location };
+              if (!args.start_timezone && ctx.effectiveTz !== timezone) {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { reinterpretClockInZone } = require('../../utils/timezoneConvert') as
+                  typeof import('../../utils/timezoneConvert');
+                args.start = reinterpretClockInZone(args.start as string, ctx.effectiveTz, timezone);
+                if (typeof args.end === 'string') args.end = reinterpretClockInZone(args.end as string, ctx.effectiveTz, timezone);
+                logger.info('create_meeting — auto-converted bare time from trip TZ', {
+                  dayIso, tripTz: ctx.effectiveTz, location: ctx.location, start_owner: args.start,
+                });
+              }
+              if (ctx.location
+                  && (typeof args.location !== 'string' || (args.location as string).trim().length === 0)
+                  && args.is_online !== true) {
+                args.location = ctx.location;
+                logger.info('create_meeting — defaulted location to trip place', { dayIso, location: ctx.location });
+              }
+            }
+          } catch (err) {
+            logger.warn('create_meeting — travel-context resolve threw, using time/location as-is', { err: String(err).slice(0, 160) });
+          }
+        }
         // v3.0.7 — runtime array guard. The `as Array<...>` cast is a pure-TS
         // assertion with no runtime check. When Sonnet passes `attendees` as a non-array
         // shape (single object, keyed object, null, omitted — all observed),
@@ -3249,13 +3318,20 @@ export class SchedulingSkill {
             }
           }
 
+          // v3.4.2 (Consumer 3) — when the owner is travelling that day, render
+          // the time in the TRIP timezone with a label ("14:00 Boston time"), not
+          // the stored home-TZ clock — so the confirmation reads in the zone the
+          // owner is actually in and he never has to re-state it.
+          const bookedWhen = tripDisplay
+            ? `${DateTime.fromISO(args.start as string, { zone: timezone }).setZone(tripDisplay.tz).toFormat('HH:mm')}–${DateTime.fromISO(args.end as string, { zone: timezone }).setZone(tripDisplay.tz).toFormat('HH:mm')}${tripDisplay.location ? ` ${tripDisplay.location} time` : ' (local to where you are)'}`
+            : `${formatIsoTime(args.start as string)}–${formatIsoTime(args.end as string)}`;
           return {
             success: true,
             meetingId,
             // v1.8.3 — past-tense summary the reply can quote verbatim. Prevents
             // Sonnet from narrating the post-action calendar state as a fresh
             // discovery instead of the result of her own action (issue #26 bug 1).
-            action_summary: `Booked '${args.subject}' for ${formatIsoTime(args.start as string)}–${formatIsoTime(args.end as string)}.`,
+            action_summary: `Booked '${args.subject}' for ${bookedWhen}.`,
             // #127 — owner booked through a soft own-day rule: surface the
             // heads-up so Maelle mentions it ONCE ("Booked — note this dips your focus floor
             // to 1h55"), never a blocking re-ask. Undefined on clean bookings.
@@ -3493,6 +3569,27 @@ export class SchedulingSkill {
                 if (loc.location !== existing.location) newLocationFromShape = loc.location;
                 if (loc.isOnline !== existing.isOnline) newIsOnlineFromShape = loc.isOnline;
               }
+              // v3.4.2 (travel context) — when the meeting's day is a trip day,
+              // an onsite (internal, not remote-forced) meeting's location is the
+              // TRIP place, not the home day-type default (Huddle/Teams) the
+              // re-eval above produced. This is the placeholder-update path —
+              // adding people to a Boston-week meeting came back "Huddle" because
+              // the re-eval was travel-blind. Mirrors create/move. No-op off-trip.
+              try {
+                const dayIso = DateTime.fromISO(existing.startIso, { zone: timezone }).toFormat('yyyy-MM-dd');
+                const dayEvents = await getCalendarEvents(userEmail, dayIso, dayIso, timezone);
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { resolveOwnerTravelContextForDate } = require('../../utils/workingElsewhere') as
+                  typeof import('../../utils/workingElsewhere');
+                const tctx = await resolveOwnerTravelContextForDate(dayIso, context.profile.user.slack_user_id, timezone, dayEvents);
+                if (tctx.isAway && tctx.location && isExternalNow === false) {
+                  newLocationFromShape = tctx.location;
+                  newIsOnlineFromShape = false;
+                  logger.info('update_meeting — trip day, location → trip place', { dayIso, location: tctx.location });
+                }
+              } catch (err) {
+                logger.warn('update_meeting — travel-context location override threw', { err: String(err).slice(0, 160) });
+              }
               // preserve_existing / ask_owner / room_unavailable — leave the
               // event's location alone. Category change still applies if any.
             } catch (err) {
@@ -3563,6 +3660,55 @@ export class SchedulingSkill {
       }
 
       case 'move_meeting': {
+        // v3.4.2 (A1) — deterministic source-timezone conversion, same helper as
+        // create_meeting + find_available_slots. When the move target was GIVEN
+        // in a non-owner zone ("move it to 9:30 EST"), Sonnet tags
+        // `start_timezone` and we convert new_start/new_end to the owner zone
+        // here — never Sonnet's head-arithmetic (the "9:30 EST → 13:30" thrash).
+        // Mutates args in place; no-op when start_timezone is omitted.
+        {
+          const srcTz = typeof args.start_timezone === 'string' ? args.start_timezone.trim() : '';
+          if (srcTz) {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { reinterpretClockInZone } = require('../../utils/timezoneConvert') as
+              typeof import('../../utils/timezoneConvert');
+            if (typeof args.new_start === 'string') args.new_start = reinterpretClockInZone(args.new_start as string, srcTz, timezone);
+            if (typeof args.new_end === 'string') args.new_end = reinterpretClockInZone(args.new_end as string, srcTz, timezone);
+            logger.info('move_meeting — converted new_start/new_end from source TZ to owner TZ', {
+              start_timezone: srcTz, new_start_owner: args.new_start, new_end_owner: args.new_end,
+            });
+          }
+        }
+        // v3.4.2 (travel context) — bare-time auto-convert + display, mirroring
+        // create_meeting. When the move target day is a trip day and Sonnet
+        // didn't tag start_timezone, interpret the bare new_start in the trip TZ.
+        // (Explicit "9:30 EST" moves are already handled by the block above.)
+        let moveTripDisplay: { tz: string; location: string } | null = null;
+        if (typeof args.new_start === 'string') {
+          try {
+            const dayIso = DateTime.fromISO(args.new_start as string, { zone: timezone }).toFormat('yyyy-MM-dd');
+            const dayEvents = await getCalendarEvents(userEmail, dayIso, dayIso, timezone);
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { resolveOwnerTravelContextForDate } = require('../../utils/workingElsewhere') as
+              typeof import('../../utils/workingElsewhere');
+            const ctx = await resolveOwnerTravelContextForDate(dayIso, context.profile.user.slack_user_id, timezone, dayEvents);
+            if (ctx.isAway) {
+              moveTripDisplay = { tz: ctx.effectiveTz, location: ctx.location };
+              if (!args.start_timezone && ctx.effectiveTz !== timezone) {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { reinterpretClockInZone } = require('../../utils/timezoneConvert') as
+                  typeof import('../../utils/timezoneConvert');
+                args.new_start = reinterpretClockInZone(args.new_start as string, ctx.effectiveTz, timezone);
+                if (typeof args.new_end === 'string') args.new_end = reinterpretClockInZone(args.new_end as string, ctx.effectiveTz, timezone);
+                logger.info('move_meeting — auto-converted bare time from trip TZ', {
+                  dayIso, tripTz: ctx.effectiveTz, new_start_owner: args.new_start,
+                });
+              }
+            }
+          } catch (err) {
+            logger.warn('move_meeting — travel-context resolve threw, using time as-is', { err: String(err).slice(0, 160) });
+          }
+        }
         // v2.2.1 — colleague-path rule-compliance gate. When an inbound colleague
         // DM asks Maelle to move an existing meeting, she can do it autonomously
         // IF the new slot fits the owner's rules (work hours, work days, buffers,
@@ -3802,6 +3948,26 @@ export class SchedulingSkill {
             const movingEvent = dayEvents.find(e => e.id === args.meeting_id);
             const matchedBlock = movingEvent ? blocks.find(b => fb.isFloatingBlockEvent(movingEvent, b)) : null;
             if (matchedBlock) {
+              // v3.4.2 (E1) — preserve the MOVING EVENT's own duration. Pre-fix
+              // a move re-derived the end from the block CONFIG (duration_minutes,
+              // e.g. 25), so moving an owner-stretched 40-min lunch silently reset
+              // it to 25. Read the event's actual span; fall back to config only
+              // if the event's times don't parse. effectiveBlock carries it so the
+              // placement search (findAlignedSlotForBlock) also sizes for the real
+              // duration.
+              const movingDurationMin = (() => {
+                try {
+                  const s = DateTime.fromISO(movingEvent!.start.dateTime, { zone: movingEvent!.start.timeZone ?? 'utc' });
+                  const e = DateTime.fromISO(movingEvent!.end.dateTime, { zone: movingEvent!.end.timeZone ?? 'utc' });
+                  if (s.isValid && e.isValid && e.toMillis() > s.toMillis()) {
+                    return Math.round(e.diff(s, 'minutes').minutes);
+                  }
+                } catch { /* fall through to config */ }
+                return matchedBlock.duration_minutes;
+              })();
+              const effectiveBlock = movingDurationMin !== matchedBlock.duration_minutes
+                ? { ...matchedBlock, duration_minutes: movingDurationMin }
+                : matchedBlock;
               // Build the busy-window list for findAlignedSlotForBlock.
               // Exclude the floating block itself (it's about to move).
               const wStart = fb.windowMsForDay(dayStr, matchedBlock.preferred_start, timezone);
@@ -3835,13 +4001,13 @@ export class SchedulingSkill {
                   : fb.alignNearestQuarter(newStartDt.toMillis(), timezone);
                 const hintStartDt = DateTime.fromMillis(alignedMs, { zone: timezone });
                 const hintStartMs = hintStartDt.toMillis();
-                const hintEndMs = hintStartMs + matchedBlock.duration_minutes * 60 * 1000;
+                const hintEndMs = hintStartMs + movingDurationMin * 60 * 1000;
                 const inWindow = hintStartMs >= wStart && hintEndMs <= wEnd;
                 const overrideOk = args.confirm_outside_window === true;
                 if (inWindow || overrideOk) {
                   effectiveStart = hintStartDt.toISO()!;
                   effectiveEnd = hintStartDt
-                    .plus({ minutes: matchedBlock.duration_minutes })
+                    .plus({ minutes: movingDurationMin })
                     .toISO()!;
                   logger.info(inWindow
                     ? 'move_meeting (owner) — floating block in-window, using hint as-is'
@@ -3888,7 +4054,7 @@ export class SchedulingSkill {
               }
 
               // Colleague-path — keep existing alignment + conflict guard.
-              const alignedMs = fb.findAlignedSlotForBlock(matchedBlock, dayStr, timezone, busy);
+              const alignedMs = fb.findAlignedSlotForBlock(effectiveBlock, dayStr, timezone, busy);
               if (alignedMs === null) {
                 logger.info('move_meeting refused — no in-window slot for floating block', {
                   meetingId: args.meeting_id, block: matchedBlock.name, hint: args.new_start,
@@ -3900,7 +4066,7 @@ export class SchedulingSkill {
                 };
               }
               const alignedDt = DateTime.fromMillis(alignedMs).setZone(timezone);
-              const alignedEndDt = alignedDt.plus({ minutes: matchedBlock.duration_minutes });
+              const alignedEndDt = alignedDt.plus({ minutes: movingDurationMin });
               const alignedStartIso = alignedDt.toISO()!;
               const alignedEndIso   = alignedEndDt.toISO()!;
               if (alignedStartIso !== effectiveStart) {
@@ -4301,7 +4467,11 @@ export class SchedulingSkill {
           // without this, Sonnet could re-read the calendar post-move and narrate
           // the new time as a fresh discovery ("already at 12:30, nothing to change")
           // instead of acknowledging her own action.
-          action_summary: `Moved '${args.meeting_subject}' to ${formatIsoTime(args.new_start as string)}–${formatIsoTime(args.new_end as string)}.`,
+          action_summary: `Moved '${args.meeting_subject}' to ${
+            moveTripDisplay
+              ? `${DateTime.fromISO(args.new_start as string, { zone: timezone }).setZone(moveTripDisplay.tz).toFormat('HH:mm')}–${DateTime.fromISO(args.new_end as string, { zone: timezone }).setZone(moveTripDisplay.tz).toFormat('HH:mm')}${moveTripDisplay.location ? ` ${moveTripDisplay.location} time` : ''}`
+              : `${formatIsoTime(args.new_start as string)}–${formatIsoTime(args.new_end as string)}`
+          }.`,
         };
       }
 

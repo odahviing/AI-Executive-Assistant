@@ -31,6 +31,12 @@ async function sweepExpiredSlotHolds(profiles: Map<string, UserProfile>): Promis
     for (const h of due) {
       releaseSlotHold(h.id, 'expired', true);
       if (!h.holder_slack_id) continue;                 // owner-parked external — no one to DM
+      // Only tell the holder we "freed up" the slot if it's still in the FUTURE.
+      // A hold whose slot already started expires with expires_at=slot-start
+      // (past) → "I freed up Tuesday 2pm" sent on Wednesday reads as nonsense.
+      // Release it silently in that case (the release above already ran).
+      const startMs = Date.parse(h.start_iso);
+      if (Number.isFinite(startMs) && startMs <= Date.now()) continue;
       const profile = profiles.get(h.owner_user_id);
       if (!profile) continue;
       try {

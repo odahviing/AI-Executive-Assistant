@@ -752,7 +752,11 @@ async function runDateVerifierAndMaybeRetry(ctx: DateVerifyContext): Promise<str
       // \b word-boundaries silently fail to match around non-ASCII letters. The
       // weekday token sits at the start of the span in both detector patterns,
       // and the span carries its own date so the replace can't mis-target.
-      const corrected = mm.matchedText.replace(mm.writtenWeekday, mm.correctWeekday);
+      // split/join (not .replace) so a span carrying the weekday twice
+      // ("Thursday — yes, Thursday the 11th") gets BOTH corrected, not just the
+      // first. .replace(string) swaps only the first occurrence and would ship
+      // a wrong weekday in the same span while the guard reports success.
+      const corrected = mm.matchedText.split(mm.writtenWeekday).join(mm.correctWeekday);
       if (corrected !== mm.matchedText && cleanReply.includes(mm.matchedText)) {
         cleanReply = cleanReply.split(mm.matchedText).join(corrected);
       }

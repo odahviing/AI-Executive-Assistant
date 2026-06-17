@@ -46,22 +46,38 @@ function keyFor(channelId: string, threadTs?: string): string {
   return channelId.startsWith('D') ? channelId : `${channelId}|${threadTs ?? '_none_'}`;
 }
 
-/** Record the slots just offered in a conversation (replaces any prior offer). */
+/** Max offered slots retained per conversation (the union across re-asks). */
+const MAX_OFFERED = 12;
+
+/**
+ * Record the slots just offered in a conversation. v3.4.2 — ACCUMULATES (union),
+ * does NOT replace: each new offer ADDS to what's been shown, so "give me
+ * another option" can exclude the union of everything already offered (not just
+ * the last batch) and keep advancing day after day. It also lets a pick bind to
+ * a slot shown in an earlier batch. Deduped by startIso, capped, TTL refreshed.
+ */
 export function recordOfferedSlots(params: {
   channelId: string;
   threadTs?: string;
   timezone: string;                       // owner TZ — display is rendered here
   slots: Array<{ start: string }>;
 }): void {
-  const slots: OfferedSlot[] = [];
+  const fresh: OfferedSlot[] = [];
   for (const s of params.slots.slice(0, 6)) {
     const dt = DateTime.fromISO(s.start, { setZone: true }).setZone(params.timezone);
     if (!dt.isValid) continue;
-    slots.push({ startIso: s.start, display: dt.toFormat('EEEE yyyy-MM-dd HH:mm') });
+    fresh.push({ startIso: s.start, display: dt.toFormat('EEEE yyyy-MM-dd HH:mm') });
   }
-  if (slots.length === 0) return;
-  stash.set(keyFor(params.channelId, params.threadTs), {
-    slots,
+  if (fresh.length === 0) return;
+  const key = keyFor(params.channelId, params.threadTs);
+  const prior = stash.get(key);
+  const merged = prior && Date.now() <= prior.expiresAt ? [...prior.slots] : [];
+  const seen = new Set(merged.map(o => o.startIso));
+  for (const f of fresh) {
+    if (!seen.has(f.startIso)) { merged.push(f); seen.add(f.startIso); }
+  }
+  stash.set(key, {
+    slots: merged.slice(-MAX_OFFERED),
     expiresAt: Date.now() + TTL_MS,
   });
 }

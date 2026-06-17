@@ -165,13 +165,31 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
       case 'finalize_coord_meeting':
       case 'book_floating_block': {
         const outcome = mutationOutcome(result);
-        const subj = (input as any).subject ?? (input as any).meeting_id ?? (input as any).new_start ?? (input as any).date ?? '';
+        // v3.4.2 (NEW-1) — NEVER fall back to meeting_id here. It was rendered
+        // sliced to 40 chars with NO ellipsis, so the pinned action-tape summary
+        // (e.g. `[update_meeting OK AAMkADVmMjY1…40chars]`) looked like a COMPLETE
+        // id — Sonnet copied it back as meeting_id on the next edit → Graph
+        // "ErrorInvalidIdMalformed: The Id is invalid" + a forced re-fetch/retry
+        // (the Boston-thread failures). Use the human-readable subject instead;
+        // the full canonical id reaches Sonnet via get_calendar / the just-booked
+        // event injection, never a truncated summary.
+        const subj = (input as any).subject ?? (input as any).meeting_subject ?? (input as any).new_start ?? (input as any).date ?? '';
         const subjPart = subj ? ` ${String(subj).slice(0, 40)}` : '';
         if (outcome.ok) {
           const idPart = outcome.eventId ? ` event_id=${String(outcome.eventId).slice(0, 16)}…` : '';
           return `[${toolName} OK${subjPart}${idPart}]`;
         }
         return `[${toolName} FAILED${subjPart}${outcome.reason ? `: ${outcome.reason.slice(0, 60)}` : ''}]`;
+      }
+      case 'set_event_category': {
+        // Pure mutation (no read mode) → a non-error result IS success. Emit an
+        // explicit OK marker so the claim-checker can confirm a "Done / updated
+        // / categorized" claim. The generic `default` below carried NO outcome
+        // marker, so legit category updates ("All 7 updated to Weekly") were
+        // flagged as unverifiable and rewritten (GH 2026-06-17 over-fire).
+        // FAILED is already handled by the generic error check at the top.
+        const cat = (input as any).category ?? (input as any).category_id ?? (input as any).label ?? '';
+        return `[set_event_category OK${cat ? ` ${String(cat).slice(0, 40)}` : ''}]`;
       }
       default: {
         // Generic: just tool name + first key-value
@@ -752,6 +770,40 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     }
   }
 
+  // v3.4.2 (F1) — owner-path equivalent of colleagueBookingBlock: the events
+  // the owner created/edited THIS thread, by full event_id (from the in-memory
+  // thread ledger). Lets a later "rename it / add Chris / make it Weekly" edit
+  // by id instead of re-searching by name — which lagged after a write AND
+  // re-resolved the date to the wrong week (the "Week Summary doesn't appear"
+  // miss). Empty when nothing's been booked this thread → no block.
+  let ownerThreadEventsBlock = '';
+  if (isOwnerTurn && input.threadTs) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getThreadEvents, getActivePlanningWindow } = require('../../utils/threadEventLedger') as
+        typeof import('../../utils/threadEventLedger');
+      const evs = getThreadEvents(input.threadTs);
+      if (evs.length > 0) {
+        const ownerFirst = profile.user.name.split(' ')[0];
+        const lines = evs.slice(-10).map(e => `  - "${e.subject}" — event_id=${e.eventId}`);
+        // v3.4.2 (F2) — active-window anchor for bare day references. Pure
+        // conversation signal (the dates booked this session) — NO travel/marker
+        // needed, so it works for a plain "plan my July" thread. Resolves the
+        // "Thursday → wrong calendar week" drift (booked Jul 2, then reverted to
+        // Jun 25).
+        const win = getActivePlanningWindow(input.threadTs);
+        const anchorLine = win
+          ? `This session you've been scheduling for **${win.from} to ${win.until}**. When ${ownerFirst} gives a bare day reference ("Thursday", "the 1st", "that week", "Monday morning") with no full date, resolve it WITHIN that window — NOT the nearest upcoming calendar day. If he clearly names a different week, follow that.\n\n`
+          : '';
+        ownerThreadEventsBlock = `## YOUR SESSION SO FAR (active planning week + event IDs)\n\n${anchorLine}When ${ownerFirst} asks to change one of the events below ("rename it", "add someone", "move it", "make it Weekly", "set its category"), call update_meeting / move_meeting / set_event_category with the matching event_id — do NOT get_calendar to re-find it by name (a just-written event lags a few seconds, and re-resolving by name can land the wrong week):\n\n${lines.join('\n')}`;
+      }
+    } catch (err) {
+      logger.warn('ownerThreadEventsBlock builder threw — proceeding without it', {
+        err: String(err).slice(0, 200),
+      });
+    }
+  }
+
   // Social engagement context — colleague-rapport memory (people_memory-based).
   // v2.2 — only injected on COLLEAGUE turns. Owner turns use the new Social
   // Engine directive below instead.
@@ -1002,6 +1054,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
     threadContextBlock,
     actionTapeBlock,
     colleagueBookingBlock,
+    ownerThreadEventsBlock,
     socialBlock,
     socialDirectiveBlock,
   ].filter(Boolean).join('\n\n');
@@ -1849,11 +1902,54 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
         !('_requires_slack_client' in result)
       ) {
         const r = result as Record<string, unknown>;
+        const wasBooked = bookingOccurred;
         if (toolUse.name === 'create_meeting' && (r.eventId || r.id || r.ok === true)) {
           bookingOccurred = true;
         }
         if (toolUse.name === 'finalize_coord_meeting' && r.ok === true && r.status === 'booked') {
           bookingOccurred = true;
+        }
+        if (!wasBooked && bookingOccurred) {
+          // A real booking landed → drop any offered-slots stash for this
+          // conversation so a later turn can't bind to an already-booked
+          // instant. create_meeting's handler clears on the direct colleague
+          // path; this covers finalize_coord_meeting + an owner self-book in a
+          // colleague DM, which that path misses.
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { clearOfferedSlots } = require('../../utils/offeredSlotsStash') as
+              typeof import('../../utils/offeredSlotsStash');
+            clearOfferedSlots(input.channelId, input.threadTs);
+          } catch { /* non-fatal */ }
+        }
+        // v3.4.2 (F1) — owner-path event ledger: remember events created/edited
+        // THIS thread by full event_id, so a later "rename it / add Chris / make
+        // it Weekly" edits by id instead of re-searching by name — which lagged
+        // right after a write AND re-resolved the date to the wrong week (the
+        // "Week Summary doesn't appear" miss). Records on any successful calendar
+        // mutation; injected into the owner prompt below.
+        if (
+          (toolUse.name === 'create_meeting' || toolUse.name === 'move_meeting' || toolUse.name === 'update_meeting')
+          && (r.success === true || r.ok === true || typeof r.meetingId === 'string' || typeof r.id === 'string')
+        ) {
+          try {
+            const inp = (toolUse.input ?? {}) as Record<string, unknown>;
+            const evId = (r.meetingId ?? r.id ?? r.eventId ?? inp.meeting_id) as string | undefined;
+            const subj = (inp.new_subject ?? inp.subject ?? inp.meeting_subject) as string | undefined;
+            // Event start date in the owner's TZ — the F2 active-window anchor.
+            const startStr = (inp.start ?? inp.new_start) as string | undefined;
+            let dateIso = '';
+            if (typeof startStr === 'string') {
+              const d = DateTime.fromISO(startStr, { zone: profile.user.timezone });
+              if (d.isValid) dateIso = d.toFormat('yyyy-MM-dd');
+            }
+            if (evId && input.threadTs) {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { recordThreadEvent } = require('../../utils/threadEventLedger') as
+                typeof import('../../utils/threadEventLedger');
+              recordThreadEvent(input.threadTs, subj ?? 'a meeting', evId, dateIso);
+            }
+          } catch { /* non-fatal */ }
         }
         // v1.6.4 — remember deleted event ids so the same id can't be deleted
         // twice in one turn. See the short-circuit at the top of the loop.

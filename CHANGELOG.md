@@ -2,6 +2,47 @@
 
 ---
 
+## 3.4.2 — Boston-trip booking bug-bash: travel-aware scheduling + close-loop + honesty/guard fixes
+
+A real-day bug-bash off a long "book my whole week in Boston" thread, plus the parallel guard- and prompt-chats' work folded in. The spine of it: a single **owner travel-context** (the keystone) the booking write-path was missing, so bare trip-times, locations, and week-anchoring now resolve correctly during travel — while the no-marker, in-office flow stays byte-identical (the Working-Elsewhere invariant). Restart required (new utils + in-memory ledgers; no schema change).
+
+### Added — travel-aware scheduling (the keystone)
+- **One travel-context resolver.** `resolveOwnerTravelContextForDate(date) → {isAway, effectiveTz, location}` ([workingElsewhere.ts](src/utils/workingElsewhere.ts)) — built from the owner's all-day Working-Elsewhere marker (+ travel-record fallback), reusing the existing WE detection/tz-resolution. `isAway=false` → home TZ, empty location → every consumer is a no-op, so the in-office flow is unchanged.
+- **Wired into create / move / update_meeting** ([ops.ts](src/skills/meetings/ops.ts)): on a trip day, a **bare time** is interpreted in the trip timezone (a bare "10am" during a Boston week is 10am Boston, not 10am Israel), the **location** defaults to the trip place instead of a home-day Huddle/blank, and confirmations **display in trip time** ("Booked … 14:00 Boston time"). Explicit `start_timezone` still wins; no double-convert.
+- **Deterministic timezone math, shared.** New `timezoneConvert.ts` (`reinterpretClockInZone` + `renderClockInZone`) is now the ONE implementation used by `find_available_slots` (refactored to it) AND the write tools — Sonnet tags the source zone, the tool does the arithmetic. New `start_timezone` arg on `create_meeting` / `move_meeting` ([meetings.ts](src/skills/meetings.ts)).
+- **Owner-path event-id ledger** (F1) — `threadEventLedger.ts` + [orchestrator/index.ts](src/core/orchestrator/index.ts): every event created/edited this thread is remembered by full `event_id` and injected ("EVENTS YOU'VE SET UP THIS SESSION — use these IDs"), so a later "rename it / add Chris / make it Weekly" edits by id instead of re-searching by name (which lagged after a write and re-resolved the wrong week — the "Week Summary doesn't appear" miss).
+- **Active-planning-window anchor** (F2, travel-free) — the ledger also exposes the date span you've been scheduling this session; the owner block anchors bare day references ("Thursday", "the 1st") to that window. Pure conversation signal (no marker needed) → "just plan my July" resolves to the right week.
+
+### Changed
+- **"Booked by Maelle" leads every invite again.** The attribution line was an either/or fallback (`body || attribution`), so the moment a meeting carried a location block (now always, for physical meetings) it vanished. Now always prepended: attribution → location → any extra comment. ([calendar.ts](src/connectors/graph/calendar.ts))
+- **"Give me another option" returns new times.** `find_available_slots` now drops slots already offered this conversation before the spread-pick (the offered-slots stash accumulates the union across re-asks); on the first search the set is empty → no-op. A colleague asking for "another day" gets a genuinely different day instead of the same spread. ([ops.ts](src/skills/meetings/ops.ts), [offeredSlotsStash.ts](src/utils/offeredSlotsStash.ts))
+
+### Fixed — close-loop (2.2 / Daniel-B)
+- **Freeform approvals no longer dead-end.** A colleague-requested approval with no replayable action used to close at approve, orphaning the later booking/cancel so the requester never heard the concrete outcome ("booked Mon 17:00"). It now stays open (`in_flight`) until the action lands and reconnects via `closeMeetingArtifacts`, with a grace timer (`approval_action_timeout`) that relays a neutral "signed off" if nothing lands. ([resolver.ts](src/core/requests/resolver.ts), [runner.ts](src/core/requests/runner.ts), [types.ts](src/core/requests/types.ts))
+
+### Fixed — real-day bugs (Boston thread)
+- **Floating-block move reset the duration.** Moving an owner-stretched 40-min lunch snapped it back to the config 25; now the move preserves the event's own duration. ([ops.ts](src/skills/meetings/ops.ts))
+- **"The Id is invalid" + lost events.** Tool summaries rendered a 40-char-truncated `meeting_id` with no ellipsis, so Sonnet copied that fake-complete id back on the next edit → Graph `ErrorInvalidIdMalformed` + a forced re-fetch. Summaries now show the subject; the full id reaches Sonnet via the ledger / get_calendar. ([orchestrator/index.ts](src/core/orchestrator/index.ts))
+
+### Fixed — honesty + guards (parallel guard chat)
+- **Claim-checker stopped leaking its own reasoning.** The own-the-miss rewriter could ship its internal monologue (ending in "UNCHANGED") straight to the owner when the exact-token veto missed it. The rewriter is restructured so reasoning can never become the reply, with a backstop that keeps the original on any meta-text. ([claimChecker.ts](src/utils/claimChecker.ts))
+- **Category updates stopped being false-flagged.** `set_event_category` now emits an explicit `OK` marker so "All 7 set to Weekly" isn't flagged as unverifiable. ([orchestrator/index.ts](src/core/orchestrator/index.ts))
+- Plus small hardening in `coordGuard` / `securityGate` / `postReply`.
+
+### Fixed — tool descriptions + prompt (parallel prompt chat)
+- **Category changes route to `set_event_category`, never `update_meeting`.** Category is per-user; Maelle wrongly told the owner "can't, someone else organized it" after `update_meeting` returned `not_organizer`. The description now states it works for any event on your calendar. ([calendarHealth.ts](src/skills/calendarHealth.ts))
+- **One-language composition (#3)** — a colleague message is written end-to-end in the reader's one language (no "Hi David," over a Hebrew body; the subject is translated/quoted, not pasted raw). ([systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+- **Suggestion completeness (#129)** — content angles must carry concrete specifics + a source; if a source (e.g. a bot-blocked LinkedIn page) yields nothing, don't invent or propose it. ([general.ts](src/skills/general.ts))
+
+### Invariants preserved
+- **No Working-Elsewhere marker → byte-identical behavior.** Every travel consumer gates on `isAway`; with no marker the resolver returns the home TZ + empty location, so create/move/update do no conversion, no location default, no trip display. The in-office "book two weeks ahead" flow is unchanged (and gains the travel-free F1/F2 week-anchoring).
+
+### Known residuals (not fixed this version)
+- The very first bare-date reference in a thread (empty ledger) may still need a clarify — acceptable (Maelle asks rather than guessing wrong).
+- G1 "stale proposal after a time-shift" — when proposed times change, the free/busy verdict isn't auto-re-run before re-asserting "free" (the booking check still catches it pre-book). Prompt-chat note, low severity.
+
+---
+
 ## 3.4.1 — slot blocker (#30) ships + audit hardening wave + real-day fixes
 
 Big patch: the **slot-blocker feature** (#30) lands, the parallel **audit chat's hardening wave** (V3_4_0_AUDIT_HANDOFF.md, P-1…P-6) is folded in, plus more real-day bug fixes. Restart required (new `slot_holds` table + tool + tick wiring). No destructive migration — the table is `CREATE TABLE IF NOT EXISTS`.

@@ -61,6 +61,61 @@ export function detectWorkingElsewhereDays(
   return out;
 }
 
+/**
+ * v3.4.2 — THE single "where is the owner, and in what timezone, on date D?"
+ * resolver for the booking WRITE path (create_meeting / move_meeting). The slot
+ * finder already resolves per-day travel TZ; this gives the write tools the same
+ * awareness so a bare trip-time ("10am" during a Boston week) stores as Boston,
+ * and an onsite trip meeting stamps the trip location instead of a home-TZ
+ * Huddle. ONE source, fed to the timezone + location + display consumers.
+ *
+ * `isAway=false` (no WE marker, no covering travel record) → effectiveTz is the
+ * home TZ and location is '' → every consumer is a no-op (the WE invariant:
+ * no marker = byte-identical behavior).
+ *
+ * Reuses the owner's already-fetched events (zero extra Graph call when the
+ * caller passes the events it loaded for the rule check). When the WE marker's
+ * location can't be resolved to a TZ, returns isAway=true with effectiveTz=home
+ * (so time math is a safe no-op) but the location still surfaces for the stamp.
+ */
+export interface OwnerTravelContext {
+  isAway: boolean;
+  effectiveTz: string;   // trip TZ when away + resolvable, else the owner home TZ
+  location: string;      // trip location when away, else ''
+}
+
+export async function resolveOwnerTravelContextForDate(
+  dayIso: string,                  // yyyy-MM-dd in the owner's home TZ
+  ownerSlackId: string,
+  homeTz: string,
+  ownerEvents: CalendarEvent[],
+): Promise<OwnerTravelContext> {
+  // 1. All-day WE marker for the day — the owner's actual travel mechanism.
+  try {
+    const day = detectWorkingElsewhereDays(ownerEvents, homeTz).get(dayIso);
+    if (day) {
+      const tz = day.location ? await resolveWorkingElsewhereTz(day.location) : null;
+      return { isAway: true, effectiveTz: tz ?? homeTz, location: day.location };
+    }
+  } catch (err) {
+    logger.warn('resolveOwnerTravelContextForDate — WE detect threw', { err: String(err).slice(0, 160) });
+  }
+  // 2. Travel record fallback (future-inclusive DB read, cheap).
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getTravelRecord } = require('../db/people') as typeof import('../db/people');
+    const rec = getTravelRecord(ownerSlackId);
+    if (rec && dayIso >= rec.from && dayIso <= rec.until) {
+      const tz = await resolveWorkingElsewhereTz(rec.location);
+      return { isAway: true, effectiveTz: tz ?? homeTz, location: rec.location };
+    }
+  } catch (err) {
+    logger.warn('resolveOwnerTravelContextForDate — travel record lookup threw', { err: String(err).slice(0, 160) });
+  }
+  // 3. Home — no conversion, no trip location.
+  return { isAway: false, effectiveTz: homeTz, location: '' };
+}
+
 // Module-level resolution cache: location string → IANA (or null). Resolution
 // happens OFF the slot hot-loop (once per search), so the async static→Sonnet
 // resolver is fine. The static map is just a warm-start; a miss costs one

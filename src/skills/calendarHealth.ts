@@ -312,6 +312,8 @@ When the owner explicitly says to book a floating block at a time OUTSIDE its pr
         name: 'set_event_category',
         description: `Add or update the Outlook category on a calendar event. Categories help with calendar organization and analytics.
 
+Sets the category on YOUR copy of the event — works for ANY event on your calendar, including meetings someone else organized (categories are per-user; you never need to be the organizer). Use this for ALL category changes — never update_meeting (update_meeting's category change requires being the organizer and fails with not_organizer on others' meetings).
+
 Use the owner's own categories listed in the EVENT CATEGORIES block of your system prompt. Names must match EXACTLY (case-sensitive). Do NOT invent category names — if you think a new category should exist, say so in the reply; don't silently create one.`,
         input_schema: {
           type: 'object',

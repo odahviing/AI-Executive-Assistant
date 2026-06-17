@@ -75,6 +75,71 @@ export interface ResolveResult {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
+ * v3.4.2 (2.2 close-loop) — grace window for the "owner approved, fulfilling
+ * action pending" hold. The booking/cancel that fulfills an approved colleague
+ * request is almost always a separate later tool call (the slot wasn't known at
+ * approve time, or Sonnet books it in a follow-up turn). We keep the request
+ * OPEN this long so that action can reconnect via closeMeetingArtifacts and the
+ * requester hears the CONCRETE outcome ("booked Mon 17:00"). If nothing lands
+ * in the window, approval_action_timeout relays a neutral "owner signed off" so
+ * the requester is never left hanging. Tunable; favors catching the booking
+ * over relaying a bare "yes" instantly.
+ */
+const APPROVAL_ACTION_GRACE_HOURS = 4;
+
+/**
+ * Should this approved request stay OPEN until its fulfilling action lands,
+ * instead of closing now? True for a colleague-requested approval the OWNER
+ * just approved with NO replayable action wired — the classic dead-end where
+ * closing at approve orphans the later booking/cancel so the requester never
+ * hears the concrete result (Daniel never heard "booked Mon 17:00").
+ *
+ * Scoped deliberately:
+ *   - kind='approval' only (coord/outreach own their own lifecycle).
+ *   - a real colleague requester (not owner-internal, where there's nobody to
+ *     loop back to — those just close).
+ *   - owner-resolving only (NOT ctx.wasAwaitingColleague — the colleague-
+ *     accepts-counter path keeps its bespoke "locked in" phrasing).
+ */
+function shouldHoldForFulfillingAction(row: RequestRow, ctx: ResolveContext): boolean {
+  return row.kind === 'approval'
+    && !!row.requester_slack_id
+    && row.requester_slack_id !== row.owner_user_id
+    && !ctx.wasAwaitingColleague;
+}
+
+/**
+ * Keep an approved colleague request OPEN (state=in_flight) and arm a grace
+ * timer instead of closing + notifying now. The fulfilling booking/cancel will
+ * reconnect via closeMeetingArtifacts' open-request scan and fire the concrete
+ * close-loop DM; approval_action_timeout is the safety net if it never lands.
+ * Deliberately does NOT notify the requester yet — that's the whole point.
+ */
+function holdForFulfillingAction(row: RequestRow, approveData: Record<string, unknown>): ResolveResult {
+  const details = parseDetails<Record<string, unknown>>(row) ?? {};
+  updateRequest(row.id, {
+    state: 'in_flight',
+    details: {
+      ...details,
+      awaiting_fulfilling_action: true,
+      approved_at: DateTime.now().toISO(),
+      approve_data: approveData,
+    },
+    nextCheckAt: DateTime.now().plus({ hours: APPROVAL_ACTION_GRACE_HOURS }).toUTC().toISO(),
+    nextCheckHandler: 'approval_action_timeout',
+  });
+  logger.info('resolveRequest — owner approved, holding open for the fulfilling action to reconnect (close-loop 2.2)', {
+    id: row.id, requester: row.requester_slack_id, graceHours: APPROVAL_ACTION_GRACE_HOURS,
+  });
+  return {
+    ok: true,
+    request_id: row.id,
+    state: 'in_flight',
+    effect: 'approved — held open so the booking/cancel closes the loop with the concrete result',
+  };
+}
+
+/**
  * Re-check freeBusy against owner + attendees for a target window. Used to
  * catch slots that became stale while an approval sat waiting for the owner.
  * Returns a human-readable conflict description if any non-tentative busy
@@ -433,9 +498,16 @@ export async function resolveRequest(
     });
   }
 
-  // No on_approve — close + notify. Sonnet handles any implied multi-step
-  // work next turn (Module D Y.2 precondition should have routed this
-  // through Sonnet, not auto-resolve, but defensively support either path).
+  // No on_approve — the fulfilling work (book/cancel) is a separate later step
+  // that Sonnet does next. v3.4.2 (2.2 close-loop): for a colleague-requested
+  // approval, DON'T close + notify now — that's the dead-end. Closing here marks
+  // the request terminal, so when the booking lands later closeMeetingArtifacts
+  // (which only scans OPEN requests) can't reconnect, and the requester never
+  // hears the concrete outcome. Hold it open instead; the booking reconnects and
+  // notifies with the real result, and a grace timer is the safety net.
+  if (shouldHoldForFulfillingAction(row, ctx)) {
+    return holdForFulfillingAction(row, approveData);
+  }
   closeRequest({
     id: requestId,
     state: 'resolved',
@@ -469,6 +541,13 @@ async function runApproveCallback(
     logger.warn('resolveRequest — on_approve tool not replayable, closing without firing', {
       id: row.id, tool,
     });
+    // v3.4.2 (2.2 close-loop) — same dead-end guard as the no-callback path: a
+    // colleague-requested approval whose action runs as a separate later step
+    // must stay open so the booking/cancel can reconnect + notify with the
+    // concrete result, rather than closing here and orphaning it.
+    if (shouldHoldForFulfillingAction(row, ctx)) {
+      return holdForFulfillingAction(row, {});
+    }
     closeRequest({
       id: row.id,
       state: 'resolved',
