@@ -143,6 +143,7 @@ type UserProfileType = import('../../config/userProfile').UserProfile;
 import type { UserProfile } from '../../config/userProfile';
 import {
   getCalendarEvents,
+  findDuplicateEvent,
   type CalendarEvent,
   getFreeBusy,
   findAvailableSlots,
@@ -191,15 +192,17 @@ function parseGraphDateTime(dateTimeStr: string, eventTimeZone: string, fallback
 
 /**
  * Returns true when a full-day event belongs to someone else (e.g. a manager's OOO
- * shared on Idan's calendar). Heuristic: title starts with another person's name
- * followed by a dash/colon separator.
- * Matches: "Yael - Meir Hospital", "Brett - NY trip", "Amazia - Conference"
+ * shared on the owner's calendar). The real signal is the organizer (≠ owner);
+ * the title heuristic is a fallback — a leading name token before a dash/colon
+ * that isn't the owner's. Script-agnostic (\p{L}) so a Hebrew/Cyrillic-named
+ * colleague's OOO ("יעל - בית חולים") isn't mistaken for the owner's own day.
+ * Matches: "Yael - Meir Hospital", "Brett - NY trip", "יעל - בית חולים"
  * No match: "Vacation", "Conference", "Office Day", "Idan - offsite"
  */
 function isOtherPersonsAllDayEvent(subject: string, ownerName: string, organizerEmail: string, ownerEmail: string): boolean {
   if (organizerEmail && organizerEmail.toLowerCase() === ownerEmail.toLowerCase()) return false;
   const ownerFirst = ownerName.split(' ')[0].toLowerCase();
-  const match = subject.match(/^([A-Za-zÀ-ÿ]+)\s*[-–—:]\s*/);
+  const match = subject.match(/^(\p{L}+)\s*[-–—:]\s*/u);
   if (match) {
     const leadName = match[1].toLowerCase();
     if (leadName !== ownerFirst) return true;
@@ -2057,12 +2060,23 @@ export class SchedulingSkill {
             // must ASK, never offer home-TZ times.
             const weInfo = diagnosticsOut.workingElsewhere;
             const hasWe = !!weInfo && (weInfo.resolved.length > 0 || weInfo.unresolved.length > 0);
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || hasWe || attendeeEmailWarning || colleagueSoftBlockHint) {
+            // Relaxed (owner-override) search keeps attendee-conflicted slots
+            // instead of dropping them, tagged with `attendee_conflicts`. Tell
+            // the owner WHO's busy / off-hours per slot (rules 6 + 7) — never
+            // present a conflicted slot as clean.
+            const hasAttendeeConflicts = annotatedSlots.some(
+              (s: any) => Array.isArray(s.attendee_conflicts) && s.attendee_conflicts.length > 0,
+            );
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || hasWe || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               if (travelers.length > 0) result.travelers = travelers;
               if (hasDaySummary) result.day_summary = daySummary;
               if (attendeeEmailWarning) Object.assign(result, attendeeEmailWarning);
               if (colleagueSoftBlockHint) Object.assign(result, colleagueSoftBlockHint);
+              if (hasAttendeeConflicts) {
+                result._attendee_conflicts_note =
+                  'You searched with override on, so these include slots where an attendee is busy or outside their working hours — each such slot has `attendee_conflicts: [{email, reason}]`. Present them, but say plainly who is busy / off-hours on those (e.g. "Tue 10:00 — Anna is busy then"). Never present a conflicted slot as clean. The owner can still book any of them.';
+              }
               if (isRecoveryResult) {
                 // Flag so Sonnet knows these slots break soft rules — she
                 // should narrate the trade-off, not present as clean options.
@@ -2348,31 +2362,20 @@ export class SchedulingSkill {
           // collision is the owner manually booking an unrelated event with the
           // same subject; trade-off favors avoiding stale approvals).
           try {
-            const startDt = DateTime.fromISO(args.start as string, { zone: timezone });
-            if (startDt.isValid) {
+            const duplicate = await findDuplicateEvent(userEmail, args.subject as string, args.start as string, timezone);
+            if (duplicate) {
+              const ownerFirst = context.profile.user.name.split(' ')[0];
               const requestedSubject = (args.subject as string).trim();
-              const probeDate = startDt.toFormat('yyyy-MM-dd');
-              const startMs = startDt.toMillis();
-              const existingEvents = await getCalendarEvents(userEmail, probeDate, probeDate, timezone);
-              const duplicate = existingEvents.find(ev => {
-                if (ev.isCancelled) return false;
-                if ((ev.subject ?? '').trim().toLowerCase() !== requestedSubject.toLowerCase()) return false;
-                const evStartMs = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
-                return Math.abs(evStartMs - startMs) <= 2 * 60 * 1000;
+              logger.info('create_meeting colleague-path idempotent short-circuit (early) — already booked', {
+                subject: requestedSubject, existingEventId: duplicate.id, requester: context.userId,
               });
-              if (duplicate) {
-                const ownerFirst = context.profile.user.name.split(' ')[0];
-                logger.info('create_meeting colleague-path idempotent short-circuit (early) — already booked', {
-                  subject: requestedSubject, existingEventId: duplicate.id, requester: context.userId,
-                });
-                return {
-                  success: true,
-                  meetingId: duplicate.id,
-                  idempotent: true,
-                  action_summary: `'${requestedSubject}' is already on ${ownerFirst}'s calendar for ${formatIsoTime(args.start as string)}. Already booked, no action needed.`,
-                  _note: 'A meeting with this exact subject and start was already booked earlier in this thread. Do NOT call create_meeting again. Do NOT escalate to create_approval. Tell the colleague briefly that it is booked and move on.',
-                };
-              }
+              return {
+                success: true,
+                meetingId: duplicate.id,
+                idempotent: true,
+                action_summary: `'${requestedSubject}' is already on ${ownerFirst}'s calendar for ${formatIsoTime(args.start as string)}. Already booked, no action needed.`,
+                _note: 'A meeting with this exact subject and start was already booked earlier in this thread. Do NOT call create_meeting again. Do NOT escalate to create_approval. Tell the colleague briefly that it is booked and move on.',
+              };
             }
           } catch (probeErr) {
             logger.warn('create_meeting colleague-path early idempotency probe failed — proceeding with guards', {
@@ -2704,44 +2707,15 @@ export class SchedulingSkill {
           attendees.push({ name: 'Meeting Room', email: roomEmail });
         }
 
-        // Work day validation — warn if outside work schedule
-        const startDt = DateTime.fromISO(args.start as string, { zone: timezone });
-        const dayName = startDt.toFormat('EEEE');
-        const allWorkDays = [
-          ...context.profile.schedule.office_days.days,
-          ...context.profile.schedule.home_days.days,
-        ];
-        if (!allWorkDays.includes(dayName as any)) {
-          // Check if user explicitly overrode — indicated by override flag in args
-          if (!args.override_work_day) {
-            return {
-              warning: `${dayName} is not a work day. Ask the user briefly: "That's a ${dayName} — want me to book it anyway, or would Sunday work better?" If they confirm, call create_meeting again with override_work_day=true.`,
-              needs_confirmation: true,
-            };
-          }
-          // User confirmed — proceed with booking
-        }
-
-        // v1.8.14 — cross-turn idempotency. If a meeting with the SAME subject
-        // at the SAME start time already exists on the owner's calendar (±2 min
-        // tolerance), return that event id instead of creating a duplicate.
-        // Root cause: date-verifier retries and claim-checker retries can each
-        // re-run the whole orchestrator loop on a new turn. Per-turn dedup
-        // (like delete_meeting has) doesn't help across turns. Graph is the
-        // source of truth — query it.
+        // Cross-turn idempotency — date-verifier / claim-checker retries can
+        // re-run the orchestrator on a new turn; Graph is the source of truth.
+        // (A day-off slot is no longer gated here: checkSlot rule 1 catches it
+        // inside planMeeting — owner books one-step with a heads-up, colleague
+        // escalates — so the old override_work_day re-ask is gone.)
         try {
-          const requestedSubject = (args.subject as string).trim();
-          const probeDate = startDt.toFormat('yyyy-MM-dd');
-          const startMs = startDt.toMillis();
-          const existingEvents = await getCalendarEvents(userEmail, probeDate, probeDate, timezone);
-          const duplicate = existingEvents.find(ev => {
-            if (ev.isCancelled) return false;
-            const evSubject = (ev.subject ?? '').trim();
-            if (evSubject.toLowerCase() !== requestedSubject.toLowerCase()) return false;
-            const evStartMs = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone }).toMillis();
-            return Math.abs(evStartMs - startMs) <= 2 * 60 * 1000;
-          });
+          const duplicate = await findDuplicateEvent(userEmail, args.subject as string, args.start as string, timezone);
           if (duplicate) {
+            const requestedSubject = (args.subject as string).trim();
             logger.warn('create_meeting idempotent short-circuit — same subject+start already on calendar', {
               subject: requestedSubject,
               start: args.start,
@@ -3976,12 +3950,12 @@ export class SchedulingSkill {
                 .map(b => ({ start: Math.max(b.start, wStart), end: Math.min(b.end, wEnd) }));
               // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
 
-              // v2.3.2 (3A) — owner-explicit hint respects target as-is when
-              // in-window. Don't snap to a different slot, don't refuse on
-              // conflict. For owner-explicit moves only the window matters —
-              // owner overrides any conflict (it shows as a normal calendar
-              // overlap she can sort separately). Out-of-window still refuses —
-              // that's policy_exception territory.
+              // v2.3.2 (3A) — owner-explicit hint respects target as-is. Don't
+              // snap to a different slot, don't refuse on conflict. Out-of-window
+              // is NOT refused either: owner override is total and one-step
+              // (rules 1, 6, 11) — moving his own lunch to 16:00 is his call, so
+              // we move it and add a heads-up rather than bouncing for a
+              // confirm_outside_window re-ask.
               const isOwnerPath = context.senderRole === 'owner' || context.isOwnerInGroup === true;
               if (isOwnerPath) {
                 // v3.1.8 (D5) — snap the hint to the quarter grid. The general
@@ -3997,30 +3971,20 @@ export class SchedulingSkill {
                 const hintStartMs = hintStartDt.toMillis();
                 const hintEndMs = hintStartMs + movingDurationMin * 60 * 1000;
                 const inWindow = hintStartMs >= wStart && hintEndMs <= wEnd;
-                const overrideOk = args.confirm_outside_window === true;
-                if (inWindow || overrideOk) {
-                  effectiveStart = hintStartDt.toISO()!;
-                  effectiveEnd = hintStartDt
-                    .plus({ minutes: movingDurationMin })
-                    .toISO()!;
-                  logger.info(inWindow
-                    ? 'move_meeting (owner) — floating block in-window, using hint as-is'
-                    : 'move_meeting (owner) — floating block out-of-window override accepted', {
-                    meetingId: args.meeting_id, block: matchedBlock.name, hint: args.new_start,
-                    window: `${matchedBlock.preferred_start}-${matchedBlock.preferred_end}`,
-                    override_used: !inWindow,
-                  });
-                } else {
-                  logger.info('move_meeting refused — owner hint out of window without override', {
-                    meetingId: args.meeting_id, block: matchedBlock.name, hint: args.new_start,
-                    window: `${matchedBlock.preferred_start}-${matchedBlock.preferred_end}`,
-                  });
-                  return {
-                    success: false,
-                    error: 'out_of_window',
-                    message: `${args.new_start} is outside the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name}. To proceed anyway, retry with confirm_outside_window=true (owner override IS the approval — no separate policy_exception needed).`,
-                  };
-                }
+                effectiveStart = hintStartDt.toISO()!;
+                effectiveEnd = hintStartDt
+                  .plus({ minutes: movingDurationMin })
+                  .toISO()!;
+                logger.info(inWindow
+                  ? 'move_meeting (owner) — floating block in-window, using hint as-is'
+                  : 'move_meeting (owner) — floating block out-of-window, one-step owner override', {
+                  meetingId: args.meeting_id, block: matchedBlock.name, hint: args.new_start,
+                  window: `${matchedBlock.preferred_start}-${matchedBlock.preferred_end}`,
+                  outOfWindow: !inWindow,
+                });
+                const windowNote = inWindow
+                  ? ''
+                  : ` (outside its usual ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window — moved as asked).`;
                 // Skip the colleague-path findAlignedSlotForBlock branch below.
                 return await updateMeeting({
                   userEmail, timezone,
@@ -4041,7 +4005,7 @@ export class SchedulingSkill {
                   const vacated = computeVacatedSlot(preMoveStartIso, effectiveStart, effectiveEnd, timezone);
                   return {
                     success: true,
-                    action_summary: `Moved ${matchedBlock.name} to ${formatIsoTime(effectiveStart)}.`,
+                    action_summary: `Moved ${matchedBlock.name} to ${formatIsoTime(effectiveStart)}.${windowNote}`,
                     ...(vacated ? { vacated } : {}),
                   };
                 });

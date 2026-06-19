@@ -38,6 +38,14 @@ These are the owner's standing principles for this subsystem. They are load-bear
 
 10. **Leave no dead code or dead comments — clean as you go.** Every change should *reduce* lines of code, shrink prompts, and cut spam. When you replace a path, delete the old one — no back-support layers, no "kept for compatibility," no commented-out code. Keep only what's relevant, and only the comments that genuinely guide the next reader; delete the rest. A fix that adds a layer instead of removing one is the wrong fix.
 
+11. **Owner override is total — everywhere, including search.** Rule 6 reaches into `find_available_slots` too: if the owner names a specific time, the search surface must still return it even when validation would reject it (annotated with why), never withhold it. The owner can override every check on every surface in one step. Availability and validation inform the owner; they never refuse him.
+
+12. **Maelle remembers — reference-back just works.** She holds the meetings she booked with a person and the meetings booked in a thread, so the owner can say "change the meeting you just booked to 3pm" or "same time as last time" and she resolves it without re-asking. Booking history is context she carries — per-person (the attendee's memory) and per-thread (the event ledger). Editing a known meeting is edit-by-id, never re-search-by-name; "like last time" pulls the prior slot. If she can't resolve a back-reference, that's a memory gap to fix at the source, not a question to bounce back to the owner.
+
+13. **Build an efficient calendar — connect, don't scatter.** The job isn't just to fit a meeting, it's to shape a day worth having. Don't leave dead gaps for no reason, and don't drop a meeting 15 minutes away from another — short islands between meetings are unfocusable. Prefer connecting meetings back-to-back (the allowed durations already bake in the trailing buffer) over scattering them with stub gaps. When placing or moving, favor the slot that consolidates the day and protects real contiguous focus blocks, not the one that fragments it.
+
+14. **Never a mechanical refusal — always the real reason, always overridable.** (Reinforces rule 7.) If Maelle says no — to the owner or about someone else — she says *why* in human terms, never a system phrase like "tool not allowed," "not permitted," or a bare "I can't." The owner hears the actual reason ("that's his busy/free check," "it'd break your focus floor," "the room's taken") so he can override in one step. A refusal the owner can't understand is a refusal he can't override — and that's not allowed. A leaked tool/mechanism name in a refusal is a bug, not an answer.
+
 ## The discipline — the ONE diagnostic process for every bug
 
 1. **Reproduce from the log.** `logs/maelle-YYYY-MM-DD.log`. Find the turn(s); pull the tool calls, the `find_available_slots`/`checkSlot`/`getFreeBusy` results, the rejection breakdowns, the verdicts. State the root cause as `file:line — what actually happens`. If you can't see it in the log, say so and add a definitive log line before guessing.
@@ -86,7 +94,26 @@ These are the owner's standing principles for this subsystem. They are load-bear
 
 ## Open bug list (carried in — root-cause these, don't re-patch)
 
-### The Isaac / "Brainrocket" incident (2026-06-19 ~14:54–15:05) — the canonical instability case
+### v3.4.4 status — what the first build wave shipped (and what's still open)
+Five collapses landed (net −345 LOC, all typecheck-green, 28-scenario trace + adversarial human-error pass):
+- **A — one validator.** `find_available_slots` routes every owner-rule verdict through `checkSlot` (fed the owner's CalendarEvents), `checkSlot` gained `workHourWindowsOverride`. **Cluster 2 closed at root** — search and book can no longer disagree on owner rules.
+- **D — attendee free/busy is a helper, never a commit-blocker.** The policy_exception replay no longer re-checks attendees (owner consented); the surviving owner-only recheck reads fresh. **The Isaac mechanism (Cluster 1, attendee side) is closed** — an owner-approved booking books on the first approve instead of bouncing on stale "busy."
+- **B — LLM owns coord reply interpretation** (regex/fast-path deleted; `interpretReplyWithAI` is a structured tool call; the job-router gets slot context).
+- **C — one `findDuplicateEvent`** idempotency primitive.
+- **#5** `override_work_day` gate removed (day-off → `checkSlot` rule 1; owner one-step, colleague escalates). **#8** `slotLabelMatchFor` removed. **#10** `requester_is_attending` removed from `coordinate_meeting`. **Low:** owner out-of-window move is one-step; `isOtherPersonsAllDayEvent` script-agnostic. **Rule-6/7 annotation:** relaxed search tags `attendee_conflicts`; `planMeeting` annotates overridden attendee-busy.
+
+**Isaac incident — meeting-subsystem roots CLOSED.** Remaining Isaac roots are NOT this subsystem → route out: R5 endless-clarifying (subject 5× / "who's Yossi" 4×) + R3 model-half (Sonnet setting `relaxed`) → **Prompt agent**; R6 owner↔colleague desync + R7 close-loop distrust → **Guard / coord-relay** (+ the Yael relay below).
+
+**New open holes (next wave — exposed by the adversarial pass, NOT introduced this session):**
+1. **Coord concurrency** (highest value) — no lock/transaction on the `participants` read-modify-write, no debounce before `resolveCoordination → bookCoordination`. Two near-simultaneous replies → lost vote / a mind-change correction can double-book a second slot. Structural; `coord/reply.ts` + `coord/state.ts`.
+2. **Idempotency by subject+start** — a *renamed* meeting at the same slot defeats `findDuplicateEvent` → double-book; plus a write-lag race when two turns submit before Graph reflects the first. Also the thread ledger never removes a *deleted* event's id (blocks rule-12 reference-back after a delete).
+3. **No past-time guard on the book path** — lead-time lives only in search. A named past/earlier-today time books. Natural fix: add `within_lead_time` to `checkSlot` (finishes the one-validator story).
+4. **Typo'd attendee books phantom-free** — `unresolvedAttendees` is wired only to the search handler, not create/move; a mistyped internal email reads as fully free.
+5. **`extendedHours` search-vs-book divergence** — the work-hour override reaches `checkSlot` only from search, not the book path (Collapse A scope edge; mostly masked for coord).
+6. **Rule 13 (efficient calendar) — not yet built.** `pickSpreadSlots` spreads offers ~30 min apart for variety; rule 13 wants placement to PREFER abutting an existing meeting and PENALIZE 15-min islands. New slot-ranking work.
+7. **Rule 14 (never a mechanical refusal)** — booking-core refusals already carry reasons; a bare "tool not allowed" would leak from the guard/permission/orchestrator layer → **Prompt/Guard agents**.
+
+### The Isaac / "Brainrocket" incident (2026-06-19 ~14:54–15:05) — the canonical instability case (meeting-subsystem roots CLOSED in v3.4.4; see status above)
 The owner: *"I suffered, Isaac suffered and wanted to quit. it was just bad."*
 
 **Owner thread** — Maelle asked the owner to book over and over instead of booking:

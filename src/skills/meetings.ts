@@ -158,17 +158,13 @@ AUTO-FILL: on colleague-path (a colleague is the one DMing Maelle), the handler 
 
 OWNER-PATH: when the owner asks you to coord, the owner is the requester — fill with owner's details (name, email).
 
-Replaces the older \`requester_is_attending\` boolean. Both still work for back-compat; \`requester\` placement is preferred.`,
+Attendance is derived from placement: a requester left OUT of both participants and just_invite is the scheduler, not an attendee.`,
               properties: {
                 name: { type: 'string' },
                 email: { type: 'string', description: 'REQUIRED. Used to match against the participants/just_invite lists.' },
                 slack_id: { type: 'string', description: 'OPTIONAL. Filled from context on colleague-path. Required only if you want them DM-polled (case 1 above).' },
               },
               required: ['name', 'email'],
-            },
-            requester_is_attending: {
-              type: 'boolean',
-              description: 'DEPRECATED — use the `requester` field placement instead. Kept for back-compat: when set FALSE, drops the requester from participants AND just_invite (same as omitting them from both in the new model). The new `requester` field handles this naturally — leaving the requester OUT of participants and just_invite indicates they\'re not attending.',
             },
             category: {
               type: 'string',
@@ -463,7 +459,6 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
             location: { type: 'string' },
             category: categoryEnum ? { type: 'string', enum: categoryEnum } : { type: 'string' },
             add_room_email: { type: 'boolean' },
-            override_work_day: { type: 'boolean' },
             start_is_explicit: {
               type: 'boolean',
               description: 'OPTIONAL (default false). Set TRUE only when the owner named an EXACT off-grid time ("book at 14:40", "9:05"). Otherwise the handler snaps the start to the :00/:15/:30/:45 grid. Slots from find_available_slots are already aligned — leave unset for those.',
@@ -856,10 +851,8 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         }
 
         // Third-party scheduler detection — derived from where the requester
-        // appears (NEW MODEL). When the requester is in NEITHER participants
-        // NOR just_invite, Sonnet meant "I'm setting this up between others;
-        // I'm not joining." Old `requester_is_attending: false` still works
-        // for back-compat — treated as the same signal.
+        // appears. When the requester is in NEITHER participants NOR just_invite,
+        // Sonnet meant "I'm setting this up between others; I'm not joining."
         const requesterInParticipants = requesterEmail
           ? (args.participants as any[] ?? []).some((p: any) => (p.email ?? '').toLowerCase() === requesterEmail)
           : false;
@@ -869,10 +862,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         const isThirdPartyScheduler =
           context.senderRole === 'colleague' &&
           requesterEmail &&
-          (
-            args.requester_is_attending === false ||
-            (!requesterInParticipants && !requesterInJustInvite)
-          );
+          !requesterInParticipants && !requesterInJustInvite;
 
         if (isThirdPartyScheduler && context.userId) {
           // Defense-in-depth: drop the requester from both lists if Sonnet
@@ -2248,8 +2238,7 @@ How to decide who goes where when it's still unclear:
 
 THIRD-PARTY SCHEDULER — when the colleague is the COORDINATOR, not an attendee:
 Sometimes the colleague talking to you is just arranging a meeting, not joining it. Examples: an HR/EA scheduling an interview between ${firstName} and an external candidate; a partner asking you to set up a call between ${firstName} and someone else; "I'm helping coordinate a meeting between X and Y". When you see this shape:
-- Set \`requester_is_attending: false\` on coordinate_meeting.
-- Do NOT add the requester to \`participants\` — their availability is irrelevant to the meeting.
+- Leave the requester OUT of both \`participants\` and \`just_invite\` — placement IS the signal that they're the scheduler, not an attendee. Their availability is irrelevant to the meeting.
 - Add them to \`just_invite\` only if they explicitly want a calendar copy. Otherwise leave them off the invite entirely.
 - The cue: anything that signals the requester isn't in the room — "between ${firstName} and the candidate", "I'm scheduling on behalf of...", "set up a meeting for them".
 - When ambiguous (request could go either way) — ASK ONCE: "are you joining or just coordinating?" — then proceed.

@@ -300,6 +300,10 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // heads-up here and fall through to the book return — one step, no re-ask —
   // instead of bouncing a confirm_override (which cost him a 2nd/3rd "yes").
   let ownerOverrideNotice: string | undefined;
+  // Set when the owner overrides (relaxed) onto a slot where an internal
+  // attendee is busy — booked anyway (rule 6: availability never blocks), but
+  // surfaced so the owner is TOLD who's busy (rule 7), never silently.
+  let attendeeBusyNotice: string | undefined;
   if (input.slotStartIso) {
     const ownerDomain = ownerEmail.split('@')[1].toLowerCase();
     const externalEmails: string[] = [];
@@ -458,16 +462,18 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     }
 
     // ── Owner-initiated: check internal-attendee freebusy (v2.7.1) ─────────
-    // Design intent: when the OWNER asks Maelle to book / move a meeting that
-    // has internal attendees, planMeeting must confirm those attendees are
-    // free at the chosen slot. Otherwise the meeting silently lands on top
-    // of someone's existing time. Override path stays open — owner can say
-    // "do it anyway" and the retry with allowRelaxed bypasses the check.
+    // When the OWNER books/moves a meeting with internal attendees, confirm
+    // they're free at the slot. Availability is a HELPER, never a blocker
+    // (rule 6): on the FIRST pass we flag ONCE (confirm_override); once the
+    // owner overrides (allowRelaxed), we DON'T re-ask and we DON'T silently
+    // drop it — we book and ATTACH a heads-up naming who's busy (rule 7), so
+    // the owner is always told. This also covers the policy_exception replay
+    // (which runs with allowRelaxed): it books, and the owner hears who was busy
+    // even if the original approval ask was about a different rule.
     //
-    // Colleague-initiated path is NOT checked here. Slot finder
-    // (annotateSlotsWithAttendeeStatus) already annotates colleague-facing
-    // results with per-attendee status — that's annotation, not a block.
-    if (initiator === 'owner' && !input.allowRelaxed && nonOwnerParticipants.length > 0) {
+    // Colleague-initiated path is NOT checked here. Slot finder already
+    // annotates colleague-facing results with per-attendee status.
+    if (initiator === 'owner' && nonOwnerParticipants.length > 0) {
       const ownerDomainLower = ownerEmail.split('@')[1].toLowerCase();
       const internalEmails: string[] = [];
       for (const p of nonOwnerParticipants) {
@@ -481,6 +487,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
             ownerEmail, internalEmails,
             input.slotStartIso, input.slotEndIso,
             profile.user.timezone,
+            input.allowRelaxed === true,   // override/replay reads fresh — never annotate a stale "busy"
           );
           const slotStart = DateTime.fromISO(input.slotStartIso);
           const slotEnd = DateTime.fromISO(input.slotEndIso);
@@ -524,12 +531,18 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
             });
             const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
             const label = `${who} ${names.length === 1 ? 'is' : 'are'} busy at this time`;
-            const subj = input.subject ?? 'this meeting';
-            const askText = `Heads up — ${who} ${names.length === 1 ? 'is' : 'are'} on another meeting at ${DateTime.fromISO(input.slotStartIso).setZone(profile.user.timezone).toFormat("EEEE 'at' HH:mm")}. Book "${subj}" anyway, or pick a different time?`;
             logger.info('planMeeting — attendee busy collision', {
-              busyAttendees, slot: input.slotStartIso,
+              busyAttendees, slot: input.slotStartIso, overridden: input.allowRelaxed === true,
             });
-            return { action: 'confirm_override', violationLabel: label, suggestedAskText: askText, category };
+            if (input.allowRelaxed) {
+              // Owner override (or approved-replay): book anyway, but TELL him.
+              attendeeBusyNotice = label;
+            } else {
+              // First pass — flag ONCE; owner's "book anyway" comes back relaxed.
+              const subj = input.subject ?? 'this meeting';
+              const askText = `Heads up — ${who} ${names.length === 1 ? 'is' : 'are'} on another meeting at ${DateTime.fromISO(input.slotStartIso).setZone(profile.user.timezone).toFormat("EEEE 'at' HH:mm")}. Book "${subj}" anyway, or pick a different time?`;
+              return { action: 'confirm_override', violationLabel: label, suggestedAskText: askText, category };
+            }
           }
         } catch (err) {
           // Permission errors (Calendars.Read) or transient Graph failures —
@@ -619,7 +632,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     preserveExisting,
     category,
     reasoning: `category=${category ?? 'none'} (${categoryReason}); location=${locationVerdict?.reasoning ?? 'n/a'}`,
-    overrideNotice: ownerOverrideNotice,
+    overrideNotice: [ownerOverrideNotice, attendeeBusyNotice].filter(Boolean).join('; ') || undefined,
   };
 }
 

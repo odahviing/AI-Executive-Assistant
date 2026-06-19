@@ -323,6 +323,38 @@ export async function getCalendarEvents(
   });
 }
 
+/**
+ * findDuplicateEvent — the ONE idempotency primitive. Returns the owner's
+ * existing event whose subject (trim + lowercase) matches and whose start is
+ * within `toleranceMs` of the requested start, else undefined. Callers own
+ * their own short-circuit shape — only the fetch + match lives here.
+ *
+ * Why: date-verifier / claim-checker retries re-run the whole orchestrator on a
+ * new turn, and a direct create_meeting can race a coord book. Graph is the
+ * source of truth — query it before creating so a re-attempt of an
+ * already-booked meeting returns the existing id instead of a duplicate.
+ */
+export async function findDuplicateEvent(
+  userEmail: string,
+  subject: string,
+  startIso: string,
+  timezone: string,
+  toleranceMs = 2 * 60 * 1000,
+): Promise<CalendarEvent | undefined> {
+  const startDt = DateTime.fromISO(startIso, { zone: timezone });
+  if (!startDt.isValid) return undefined;
+  const wantSubject = subject.trim().toLowerCase();
+  const startMs = startDt.toMillis();
+  const probeDate = startDt.toFormat('yyyy-MM-dd');
+  const events = await getCalendarEvents(userEmail, probeDate, probeDate, timezone);
+  return events.find(ev => {
+    if (ev.isCancelled) return false;
+    if ((ev.subject ?? '').trim().toLowerCase() !== wantSubject) return false;
+    const evStartMs = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
+    return Math.abs(evStartMs - startMs) <= toleranceMs;
+  });
+}
+
 async function getCalendarEventsImpl(
   userEmail: string,
   startDate: string,
@@ -521,33 +553,6 @@ export async function getFreeBusy(
 // ── Slot-rule helpers ────────────────────────────────────────────────────────
 
 /**
- * Compute "quality" free time on a day — only counts free chunks ≥ minChunkMinutes.
- * Used for thinking-time protection: skip days where booking would leave the owner
- * with too little uninterrupted free time.
- *
- * v3.1.2 (C) — body moved to `src/utils/scheduleRules.ts` so checkSlot can
- * apply the SAME daily-focus-floor math at write-time as findAvailableSlots
- * applies at search-time. Owner direction: one source of truth, no
- * divergence between search and validate. This is now a thin positional-arg
- * adapter around the shared `computeDayQualityFreeMinutes` export.
- */
-function computeDayQualityFreeMinutes(
-  dayDate: string,
-  timezone: string,
-  workStart: string,
-  workEnd: string,
-  busyBlocks: Array<{ start: Date; end: Date }>,
-  minChunkMinutes: number,
-): number {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const sr = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
-  return sr.computeDayQualityFreeMinutes({
-    dayDate, timezone, workStart, workEnd, busyBlocks, minChunkMinutes,
-  });
-}
-
-
-/**
  * Meeting mode (v1.6.4) — steers the slot search.
  *   in_person : office days only (physical meetings require an office day).
  *   online    : any work day (office or home); day-type is irrelevant.
@@ -685,7 +690,7 @@ export async function findAvailableSlots(params: {
     // excluded. Caller decides how to warn (ops.ts flags owner-domain ones).
     unresolvedAttendees?: string[];
   };
-}): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean }>> {
+}): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
   const maxSearchDays = params.maxSearchDays ?? 21;
@@ -720,7 +725,7 @@ export async function findAvailableSlots(params: {
   const absoluteCap = initialFrom.plus({ days: maxSearchDays });
   let currentTo = initialTo;
 
-  let candidates: Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean }> = [];
+  let candidates: Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }> = [];
 
   while (true) {
     candidates = [];
@@ -804,13 +809,8 @@ export async function findAvailableSlots(params: {
     const bufferMs = (meetingMode === 'custom' || effectiveTravelBufferMinutes > 0)
       ? travelBufferMs
       : 0;
-    const thinkingTimeMinChunk = profile?.meetings.thinking_time_min_chunk_minutes ?? 30;
-    // v1.6.11 — per-day-type thinking-time threshold. Office days usually need
-    // more protected focus time than home days; profile can set each
-    // separately. Home falls back to office value if unset (old profiles).
-    const freeTimeOfficeMin = (profile?.meetings.free_time_per_office_day_hours ?? 0) * 60;
-    const freeTimeHomeMin = ((profile?.meetings.free_time_per_home_day_hours
-      ?? profile?.meetings.free_time_per_office_day_hours ?? 0)) * 60;
+    // Focus-time floor + per-day thinking-time threshold now live in checkSlot
+    // (rule 9), evaluated per candidate via the single-validator call below.
 
     // v2.1 — floating-block feasibility. For every configured floating
     // block (lunch + any custom block, day-scoped via block.days), verify
@@ -822,6 +822,12 @@ export async function findAvailableSlots(params: {
     // the hardcoded lunch-only check below.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fb = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
+    // v3.5 — ONE validator. The per-candidate owner-rule verdict comes from the
+    // same checkSlot the booking path uses (fed the owner's CalendarEvents), so
+    // search can never offer a slot the book path then refuses. Lazy-required to
+    // match this file's idiom and sidestep the type-only cycle with scheduleRules.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { checkSlot } = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
     const floatingBlocks = profile ? fb.getFloatingBlocks(profile) : [];
     // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
 
@@ -1072,36 +1078,6 @@ export async function findAvailableSlots(params: {
       return native;
     };
 
-    // Clamp 1440 → 1439 ("23:59") before formatting. parseRange canonicalizes
-    // a 23:59-ending work window to endMin=1440; an un-clamped "24:00" string
-    // is parsed by DateTime.fromISO as NEXT-day 00:00 downstream
-    // (computeDayQualityFreeMinutes), over-counting the day's free time by a
-    // minute on split-shift/night-shift days. Mirrors formatMinuteOfDay in
-    // utils/workHours (kept inline here to avoid a connector→utils import).
-    const minToStr = (m: number) => {
-      const c = m >= 1440 ? 1439 : m;
-      return `${String(Math.floor(c / 60)).padStart(2, '0')}:${String(c % 60).padStart(2, '0')}`;
-    };
-
-    // Pre-compute per-day quality free time (thinking-time check).
-    // v2.8.1 — multi-window aware: sum free-minutes across all work windows
-    // on the day so a split-shift Tuesday (9-15:30 + 21:30-23:59) gets the
-    // total quality time from BOTH windows, not just one.
-    const dayFreeTimeCache = new Map<string, number>();
-    const getDayQualityFree = (dayDate: string, dayHours: Array<{ startMin: number; endMin: number }>): number => {
-      if (dayFreeTimeCache.has(dayDate)) return dayFreeTimeCache.get(dayDate)!;
-      let totalFree = 0;
-      for (const w of dayHours) {
-        totalFree += computeDayQualityFreeMinutes(
-          dayDate, params.timezone,
-          minToStr(w.startMin), minToStr(w.endMin),
-          allBusy, thinkingTimeMinChunk,
-        );
-      }
-      dayFreeTimeCache.set(dayDate, totalFree);
-      return totalFree;
-    };
-
     // v2.0.9 — walker collects ALL valid 15-min-stepped candidates per day
     // into dayBuckets. After the walker, per-day post-processing picks up to
     // MAX_PER_DAY with 30-min preferred spacing and 15-min fallback. Prior
@@ -1112,7 +1088,7 @@ export async function findAvailableSlots(params: {
     // 10:30, 10:45").
     const MAX_PER_DAY = 4;
     const PREFERRED_GAP_MS = 30 * 60 * 1000;
-    const dayBuckets: Map<string, Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean }>> = new Map();
+    const dayBuckets: Map<string, Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }>> = new Map();
 
     // v2.3.6 (#71a) — diagnostic rejection counters. Helps debug "why was 17:45
     // rejected?" by showing the per-rule breakdown at the end of the search.
@@ -1125,6 +1101,22 @@ export async function findAvailableSlots(params: {
     // Sonnet via diagnosticsOut so she can narrate "Monday was fully booked"
     // instead of fabricating "Monday is a day off."
     const dayReasons = new Map<string, Map<string, number>>();
+    // Map a checkSlot verdict to the search-path reject label so day_summary
+    // narration is unchanged after the validator unification.
+    const mapVerdictToRejectLabel = (kind: string | undefined, dayType: 'office' | 'home' | 'other'): string => {
+      switch (kind) {
+        case 'outside_working_hours': return 'outside_owner_work_hours';
+        case 'floating_block_overlap': return 'floating_block_no_room';
+        case 'focus_time_floor': return dayType === 'home' ? 'focus_time_home' : 'focus_time_office';
+        case 'travel_buffer_collision': return 'travel_buffer_collision';
+        case 'category_day_type': return 'category_day_type';
+        case 'category_per_day': return 'category_per_day';
+        case 'category_per_week': return 'category_per_week';
+        case 'vacation_or_off_day': return 'wrong_day_type';
+        case 'owner_busy_collision':
+        default: return 'owner_busy_collision';
+      }
+    };
     const trackReject = (reason: string, slotIso: string) => {
       rejectedCounts[reason] = (rejectedCounts[reason] ?? 0) + 1;
       if (!rejectedExamples[reason]) rejectedExamples[reason] = [];
@@ -1189,10 +1181,8 @@ export async function findAvailableSlots(params: {
       }
 
       if (!workDays.includes(dayName)) {
-        // Track once per day when this workweek day was excluded by meetingMode
-        // (e.g. home day with mode='in_person'). Pure off-workweek days
-        // (Fri/Sat for Israel) skip silently — they're not interesting to
-        // surface.
+        // meetingMode excluded this workweek day (e.g. home day, mode='in_person').
+        // Pure off-workweek days (Fri/Sat) skip silently.
         if (allWorkweekDays.includes(dayName) && !dayReasons.has(dayKey)) {
           dayReasons.set(dayKey, new Map([['wrong_day_type', 1]]));
         }
@@ -1200,75 +1190,29 @@ export async function findAvailableSlots(params: {
         continue;
       }
       const dayHours = getWorkHoursForDay(dayName);
-      if (dayHours.length === 0) {
-        cursor = new Date(cursor.getTime() + step);
-        continue;
-      }
+      const slotEnd = new Date(cursor.getTime() + durationMs);
+      const cursorLocal = cursorDt;
+      const slotEndLocal = DateTime.fromJSDate(slotEnd).setZone(params.timezone);
       const slotTotalMin = cursorDt.hour * 60 + cursorDt.minute;
       const slotEndMin = slotTotalMin + params.durationMinutes;
-      const inAnyWindow = dayHours.some(w => slotTotalMin >= w.startMin && slotEndMin <= w.endMin);
-      if (!inAnyWindow) {
-        trackReject('outside_owner_work_hours', cursorDt.toISO()!);
-        cursor = new Date(cursor.getTime() + step);
-        continue;
-      }
-      // Per-day requested-time clamp (see bandFromMin setup above). Only set in
-      // the organizer/no-attendee case; honors the requested window on EVERY
-      // day, not just the cursor's first day.
+
+      // ── Search-only filters (not part of the owner-rule verdict) ──
+      // Per-day requested-time clamp (organizer / no-attendee case) — honors the
+      // requested window on EVERY day, not just the cursor's first.
       if (bandFromMin >= 0 && (slotTotalMin < bandFromMin || slotEndMin > bandToMin)) {
         trackReject('outside_requested_window', cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
         continue;
       }
+      // #128 — booking lead time. Labeled (not a silent skip) so day_summary can
+      // name "inside your booking lead time" instead of empty silence.
       if (cursor.getTime() < earliestAllowed.getTime()) {
-        // #128 — was a SILENT continue: same-day slots inside the booking
-        // lead time vanished with no rejection label, so a colleague search
-        // returned an unexplained "no clean slots" while real openings sat
-        // just inside the lead window. Label it so day_summary can name the
-        // reason ("inside your booking lead time") instead of empty silence.
         trackReject('within_lead_time', cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
         continue;
       }
-      const slotEnd = new Date(cursor.getTime() + durationMs);
-      // v2.6.5 — split rejection labels. Pre-split the check lumped actual
-      // overlap with within-buffer collisions under one label
-      // (`owner_busy_or_buffer_collision`). The colleague-path treated both
-      // the same and escalated to policy_exception approval — owner's
-      // 5-min buffer is a HELPER (a preference for healthy back-to-backs),
-      // not a hard rule. With the split, colleague-path can proceed on
-      // buffer-only collisions and reserve approval for genuine overlap.
-      const overlapsBusy = allBusy.find(busy =>
-        cursor.getTime() < busy.end.getTime() &&
-        slotEnd.getTime() > busy.start.getTime()
-      );
-      if (overlapsBusy) {
-        // v2.7.6 — attribute by email. Owner's own busy stays
-        // `owner_busy_collision`; an attendee's busy time becomes
-        // `attendee_busy_collision:<email>` so Sonnet can narrate WHO is
-        // blocking (closes "Monday fully booked" misattribution).
-        const label = overlapsBusy.email === ownerEmailLower
-          ? 'owner_busy_collision'
-          : `attendee_busy_collision:${overlapsBusy.email}`;
-        trackReject(label, cursorDt.toISO()!);
-        cursor = new Date(cursor.getTime() + step);
-        continue;
-      }
-      const withinBuffer = bufferMs > 0 && allBusy.find(busy =>
-        cursor.getTime() < busy.end.getTime() + bufferMs &&
-        slotEnd.getTime() > busy.start.getTime() - bufferMs
-      );
-      if (withinBuffer) {
-        trackReject('owner_buffer_collision', cursorDt.toISO()!);
-        cursor = new Date(cursor.getTime() + step);
-        continue;
-      }
-      // v2.4.1 — forbid candidates that overlap the meeting being moved.
-      // Without this, "options to move 11:00-11:45" would offer 11:00 (no
-      // move at all) and 10:45-11:25 (15-min shift, basically same slot).
-      // Owner direction: "the entire meeting time is block" for offered
-      // alternatives. Pure overlap check (no buffer pad — the moving event
-      // is leaving, no need to keep distance from itself).
+      // v2.4.1 — slots overlapping the meeting being moved are forbidden as move
+      // targets (don't offer 11:00 back when moving the 11:00 meeting).
       if (movingEventForbiddenZones.length > 0) {
         const overlapsMovingEvent = movingEventForbiddenZones.some(zone =>
           cursor.getTime() < zone.end && slotEnd.getTime() > zone.start
@@ -1279,232 +1223,136 @@ export async function findAvailableSlots(params: {
           continue;
         }
       }
-      // v2.2.3 (#43) — per-attendee work-window clip. Drop slots that fall
-      // outside ANY attendee's working window in their own TZ. No Graph cost
-      // (pure math against people_memory data threaded in by the caller).
-      // Attendees with no availability data are skipped (no clip — back-compat).
-      //
-      // Find the FIRST attendee whose window blocks the slot (not just whether
-      // any blocks). Reporting the email lets day_summary.blocked_by attribute
-      // the rejection to a specific person — Sonnet can then narrate "Brett's
-      // working hours (17:00 EST) block this — still want me to force it?"
-      // instead of a generic "outside work hours" handwave.
-      if (params.attendeeAvailability && params.attendeeAvailability.length > 0) {
-        // v3.3.8 — the candidate's owner-TZ calendar day, for travel-window
-        // resolution. Travel dates are calendar-level facts; comparing on the
-        // walked day grid is the defensible granularity.
-        const candidateDayIso = cursorDt.toFormat('yyyy-MM-dd');
-        const blockingAttendee = params.attendeeAvailability.find(att => {
-          try {
-            // v3.3.8 — per-day TZ: a trip covering THIS day uses the travel
-            // TZ; any other day uses the home TZ. Pre-fix the TZ was resolved
-            // once at load time relative to TODAY, so a future trip ("back in
-            // Israel on Tuesday", saved as a dated record) was ignored when
-            // searching that very Tuesday — and a trip ending Friday wrongly
-            // clipped a next-week search (the Daniel incident, 2026-06-11).
-            const tw = att.travelWindow;
-            const effTz = (tw && candidateDayIso >= tw.from && candidateDayIso <= tw.until)
-              ? tw.timezone
-              : (att.homeTimezone ?? att.timezone);
-            const attStart = DateTime.fromJSDate(cursor).setZone(effTz);
-            const attEnd = DateTime.fromJSDate(slotEnd).setZone(effTz);
-            if (!attStart.isValid || !attEnd.isValid) return false;
-            const attDay = attStart.toFormat('EEEE') as 'Sunday'|'Monday'|'Tuesday'|'Wednesday'|'Thursday'|'Friday'|'Saturday';
-            if (!att.workdays.includes(attDay)) return true;  // outside their workdays
-            // Compare HH:MM as minutes-of-day in attendee TZ
-            const [shH, shM] = att.hoursStart.split(':').map(Number);
-            const [ehH, ehM] = att.hoursEnd.split(':').map(Number);
-            const startMin = attStart.hour * 60 + attStart.minute;
-            const endMin = attEnd.hour * 60 + attEnd.minute;
-            const winStart = shH * 60 + shM;
-            const winEnd = ehH * 60 + ehM;
-            // Slot must START at or after winStart AND END at or before winEnd
-            return startMin < winStart || endMin > winEnd;
-          } catch {
-            return false;  // any parse error → don't filter on this attendee
-          }
-        });
-        if (blockingAttendee) {
-          trackReject(`outside_attendee_work_hours:${blockingAttendee.email}`, cursorDt.toISO()!);
-          cursor = new Date(cursor.getTime() + step);
-          continue;
-        }
-      }
-      // v2.3.2 (2A) — focus-time protection skipped in relaxed mode. Owner
-      // explicitly opted in; he sees the trade-off in the narration.
-      if (profile && !params.relaxed) {
-        // v1.6.11 — threshold depends on whether this is an office or home day
-        const dayType = classifyDay(dayName);
-        const thresholdMin =
-          dayType === 'office' ? freeTimeOfficeMin
-          : dayType === 'home' ? freeTimeHomeMin
-          : 0;
-        if (thresholdMin > 0) {
-          const dayDate = cursorDt.toFormat('yyyy-MM-dd');
-          const dayFreeMin = getDayQualityFree(dayDate, dayHours);
-          if (dayFreeMin - params.durationMinutes < thresholdMin) {
-            trackReject(`focus_time_${dayType}`, cursorDt.toISO()!);
+
+      // ── Attendee-side checks are HELPERS, not blockers (rule 6). Non-relaxed:
+      // REJECT conflicted slots so the owner is offered clean options. Relaxed
+      // (owner override, rule 11): KEEP the slot but TAG who's busy / off-hours
+      // so the owner is TOLD (rule 7) — never silently dropped. The OWNER's busy
+      // is owned by checkSlot below, off his CalendarEvents. ──
+      const attendeeConflicts: Array<{ email: string; reason: 'busy' | 'off_hours' }> = [];
+      {
+        // v2.7.6 — attendee busy (free/busy pool), attributed by email.
+        const overlapsAttendee = allBusy.find(busy =>
+          busy.email !== ownerEmailLower &&
+          cursor.getTime() < busy.end.getTime() &&
+          slotEnd.getTime() > busy.start.getTime()
+        );
+        if (overlapsAttendee) {
+          if (params.relaxed) {
+            attendeeConflicts.push({ email: overlapsAttendee.email, reason: 'busy' });
+          } else {
+            trackReject(`attendee_busy_collision:${overlapsAttendee.email}`, cursorDt.toISO()!);
             cursor = new Date(cursor.getTime() + step);
             continue;
           }
         }
-      }
-      // v2.1 — floating-block feasibility (replaces the old hardcoded
-      // lunch-only check). For every block that applies to THIS day,
-      // verify a quarter-aligned buffer-compliant slot still exists in
-      // the window after adding the proposed meeting. Detected events
-      // that ARE this block are excluded from the busy-block pool —
-      // Maelle can reshuffle them inside the window. Blocks that don't
-      // apply on this day (e.g. "Thursday coffee break" on a Monday) or
-      // that are `can_skip:true` and truly have no room simply skip the
-      // feasibility check for this slot.
-      // v2.3.2 (2A) — floating-block feasibility skipped in relaxed mode.
-      // Owner sees the trade-off in narration ("squeezes lunch").
-      if (profile && floatingBlocks.length > 0 && !params.relaxed) {
-        const dayDate = cursorDt.toFormat('yyyy-MM-dd');
-        let blockConflict = false;
-        for (const block of floatingBlocks) {
-          if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
-
-          const winStart = fb.windowMsForDay(dayDate, block.preferred_start, params.timezone);
-          const winEnd = fb.windowMsForDay(dayDate, block.preferred_end, params.timezone);
-          // Proposed slot touches this block's window?
-          if (slotEnd.getTime() <= winStart || cursor.getTime() >= winEnd) continue;
-
-          // Build busyInWindow from OWNER EVENTS for this day,
-          // EXCLUDING any event that looks like THIS block (because
-          // Maelle can move it) and INCLUDING the proposed meeting.
-          const busyInWindow: Array<{ start: number; end: number }> = [];
-          for (const evt of ownerEventsForFb) {
-            if (evt.isCancelled || evt.isAllDay || evt.showAs === 'free') continue;
-            if (fb.isFloatingBlockEvent(
-              { subject: evt.subject, categories: evt.categories },
-              block,
-            )) continue;  // elastic — skip
-            const eStart = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' })
-              .setZone(params.timezone).toMillis();
-            const eEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
-              .setZone(params.timezone).toMillis();
-            if (eStart < winEnd && eEnd > winStart) {
-              busyInWindow.push({
-                start: Math.max(eStart, winStart),
-                end: Math.min(eEnd, winEnd),
-              });
-            }
-          }
-          busyInWindow.push({
-            start: Math.max(cursor.getTime(), winStart),
-            end: Math.min(slotEnd.getTime(), winEnd),
-          });
-
-          // v3.0.7 — stricter feasibility. `findAlignedSlotForBlock` was the
-          // legacy check: tries quarter-aligned positions, accepts if any fits.
-          // That's MORE LENIENT than scheduleRules.checkSlot (used downstream by
-          // planMeeting), which measures the longest contiguous free segment in
-          // the window and rejects if it's smaller than the block's duration.
-          // The mismatch surfaced 2026-05-26 (Eli's "Open questions and feature
-          // requests" booking): slot finder accepted Wed 12:00 because lunch
-          // could quarter-align at 11:30, but planMeeting then escalated for
-          // approval because the after-meeting free segment was only 5 min.
-          // Two layers disagreeing = slot finder offers a slot that the booking
-          // path will then refuse and prompt the owner about. Owner direction:
-          // "I'm ok to MOVE lunch if needed, but not to ignore it." Implement
-          // the same longest-contiguous-free check here so the slot finder and
-          // the booking-path rule check agree: a slot only passes if lunch can
-          // ACTUALLY fit (contiguous duration in remaining window), not just
-          // quarter-align somewhere.
-          let longestFreeMs = 0;
-          {
-            const sorted = [...busyInWindow].sort((a, b) => a.start - b.start);
-            const merged: Array<{ start: number; end: number }> = [];
-            for (const iv of sorted) {
-              const last = merged[merged.length - 1];
-              if (last && iv.start <= last.end) {
-                last.end = Math.max(last.end, iv.end);
-              } else {
-                merged.push({ ...iv });
-              }
-            }
-            let walkCursor = winStart;
-            for (const m of merged) {
-              if (m.start > walkCursor) {
-                longestFreeMs = Math.max(longestFreeMs, m.start - walkCursor);
-              }
-              walkCursor = Math.max(walkCursor, m.end);
-            }
-            if (walkCursor < winEnd) {
-              longestFreeMs = Math.max(longestFreeMs, winEnd - walkCursor);
-            }
-          }
-          const blockDurationMs = block.duration_minutes * 60 * 1000;
-          const fitsContiguous = longestFreeMs >= blockDurationMs;
-
-          // Belt-and-braces: also require the legacy quarter-aligned check to
-          // pass. (For non-quarter-aligned existing events, the contiguous
-          // check alone could pass but the aligned check would fail because
-          // the quarter-snap pushes lunch past gapEnd.)
-          const aligned = fb.findAlignedSlotForBlock(
-            block, dayDate, params.timezone, busyInWindow,
+        // Travel buffer (custom mode / requires_travel_buffer) — an owner-side
+        // preference, enforced only when not overriding; nothing to annotate.
+        if (!params.relaxed) {
+          const withinBuffer = bufferMs > 0 && allBusy.find(busy =>
+            cursor.getTime() < busy.end.getTime() + bufferMs &&
+            slotEnd.getTime() > busy.start.getTime() - bufferMs
           );
-          if ((aligned === null || !fitsContiguous) && !block.can_skip) {
-            blockConflict = true;
-            break;
+          if (withinBuffer) {
+            trackReject('owner_buffer_collision', cursorDt.toISO()!);
+            cursor = new Date(cursor.getTime() + step);
+            continue;
           }
         }
-        if (blockConflict) {
-          trackReject('floating_block_no_room', cursorDt.toISO()!);
+        // #43 / #124 / Daniel — per-attendee work-window clip, own TZ with
+        // per-day travel-window resolution. First blocking attendee wins.
+        if (params.attendeeAvailability && params.attendeeAvailability.length > 0) {
+          const candidateDayIso = cursorDt.toFormat('yyyy-MM-dd');
+          const blockingAttendee = params.attendeeAvailability.find(att => {
+            try {
+              const tw = att.travelWindow;
+              const effTz = (tw && candidateDayIso >= tw.from && candidateDayIso <= tw.until)
+                ? tw.timezone
+                : (att.homeTimezone ?? att.timezone);
+              const attStart = DateTime.fromJSDate(cursor).setZone(effTz);
+              const attEnd = DateTime.fromJSDate(slotEnd).setZone(effTz);
+              if (!attStart.isValid || !attEnd.isValid) return false;
+              const attDay = attStart.toFormat('EEEE') as 'Sunday'|'Monday'|'Tuesday'|'Wednesday'|'Thursday'|'Friday'|'Saturday';
+              if (!att.workdays.includes(attDay)) return true;
+              const [shH, shM] = att.hoursStart.split(':').map(Number);
+              const [ehH, ehM] = att.hoursEnd.split(':').map(Number);
+              const startMin = attStart.hour * 60 + attStart.minute;
+              const endMin = attEnd.hour * 60 + attEnd.minute;
+              const winStart = shH * 60 + shM;
+              const winEnd = ehH * 60 + ehM;
+              return startMin < winStart || endMin > winEnd;
+            } catch {
+              return false;
+            }
+          });
+          if (blockingAttendee) {
+            if (params.relaxed) {
+              attendeeConflicts.push({ email: blockingAttendee.email, reason: 'off_hours' });
+            } else {
+              trackReject(`outside_attendee_work_hours:${blockingAttendee.email}`, cursorDt.toISO()!);
+              cursor = new Date(cursor.getTime() + step);
+              continue;
+            }
+          }
+        }
+      }
+
+      // ── Owner-rule verdict — THE single validator, shared with the booking
+      // path. Work-hours (caller windows passed as override), vacation, category,
+      // floating-block movability, travel buffer, owner-busy, and the daily
+      // focus-time floor all live in checkSlot, fed the SAME owner CalendarEvents
+      // the book path uses — so search can never offer a slot the book path then
+      // refuses (the Eli + Isaac search-vs-book root). allowRelaxed (owner
+      // override) bypasses checkSlot's soft+hard owner rules (rule 11). ──
+      if (profile) {
+        const verdict = checkSlot({
+          profile,
+          slotStartIso: cursorLocal.toISO()!,
+          slotEndIso: slotEndLocal.toISO()!,
+          category: params.category ?? null,
+          events: ownerEventsForFb,
+          excludeEventIds: params.excludeEventIds,
+          allowRelaxed: params.relaxed,
+          workHourWindowsOverride: dayHours,
+        });
+        if (!verdict.passes) {
+          trackReject(mapVerdictToRejectLabel(verdict.violation_kind, classifyDay(dayName)), cursorDt.toISO()!);
           cursor = new Date(cursor.getTime() + step);
           continue;
         }
-      }
-
-      // v2.6 — category scheduling rules. When the caller passed a category,
-      // check this slot against the category's day_type / per_day / per_week
-      // limits. Reject if any rule fires; otherwise let the slot through.
-      // Skipped in relaxed mode (owner override) to mirror floating-block
-      // feasibility behavior — relaxed already implies "show me everything,
-      // I'll narrate the costs."
-      if (params.category && !params.relaxed && params.profile) {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const cr = require('../../utils/categoryRules') as typeof import('../../utils/categoryRules');
-        const result = cr.checkCategorySlot({
-          slotStart: cursorDt,
-          slotEnd: DateTime.fromJSDate(slotEnd).setZone(params.timezone),
-          categoryName: params.category,
-          events: ownerEventsForFb,
-          profile: params.profile,
-        });
-        if (!result.allowed) {
-          const reason = result.rule_broken === 'day_type' ? 'category_day_type'
-                       : result.rule_broken === 'per_day' ? 'category_per_day'
-                       : 'category_per_week';
-          trackReject(reason, cursorDt.toISO()!);
+      } else {
+        // No-profile fallback (degenerate callers with no UserProfile): only
+        // work-hours window + owner busy can be evaluated.
+        const inAnyWindow = dayHours.some(w => slotTotalMin >= w.startMin && slotEndMin <= w.endMin);
+        if (!inAnyWindow) {
+          trackReject('outside_owner_work_hours', cursorDt.toISO()!);
+          cursor = new Date(cursor.getTime() + step);
+          continue;
+        }
+        const overlapsOwner = allBusy.find(busy =>
+          busy.email === ownerEmailLower &&
+          cursor.getTime() < busy.end.getTime() &&
+          slotEnd.getTime() > busy.start.getTime()
+        );
+        if (overlapsOwner) {
+          trackReject('owner_busy_collision', cursorDt.toISO()!);
           cursor = new Date(cursor.getTime() + step);
           continue;
         }
       }
 
       if (!dayBuckets.has(dayKey)) dayBuckets.set(dayKey, []);
-      // v2.4.2 — emit local-zoned ISO with explicit offset (e.g.
-      // "2026-05-05T09:00:00.000+03:00") instead of UTC ("...Z"). Matches the
-      // convention established by the v2.3.4 parseGraphFreeBusySlot chokepoint.
-      // Pre-v2.4.2 used `cursor.toISOString()` which always emits UTC,
-      // forcing Sonnet to mentally convert and narrate "the slots are
-      // returning in UTC, converting to Israel time" — both an INTERNALS
-      // leak and a real risk of conversion errors.
-      const cursorLocal = DateTime.fromJSDate(cursor).setZone(params.timezone);
-      const slotEndLocal = DateTime.fromJSDate(slotEnd).setZone(params.timezone);
-      // v3.2.6 (RC1) — does this slot sit on a floating block's CURRENT
-      // placement? If so, booking here forces the block to shift (allowed, but
-      // not preferred). Consumers prefer slots that leave the block untouched.
+      // v3.2.6 (RC1) — flag slots sitting on a floating block's CURRENT placement
+      // (booking here forces it to shift; consumers prefer non-disturbing slots).
       const slotStartMs = cursor.getTime();
       const slotEndMs = slotEnd.getTime();
       const disturbsBlock = blockRanges.some(r => slotStartMs < r.end && slotEndMs > r.start);
       dayBuckets.get(dayKey)!.push({
-        start: cursorLocal.toISO()!,
+        start: cursorLocal.toISO()!,   // local-zoned ISO with explicit offset (v2.4.2)
         end: slotEndLocal.toISO()!,
         day_type: classifyDay(dayName),
         disturbs_floating_block: disturbsBlock,
+        ...(attendeeConflicts.length ? { attendee_conflicts: attendeeConflicts } : {}),
       });
       cursor = new Date(cursor.getTime() + step);
     }

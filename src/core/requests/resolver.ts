@@ -140,59 +140,47 @@ function holdForFulfillingAction(row: RequestRow, approveData: Record<string, un
 }
 
 /**
- * Re-check freeBusy against owner + attendees for a target window. Used to
- * catch slots that became stale while an approval sat waiting for the owner.
- * Returns a human-readable conflict description if any non-tentative busy
- * overlaps the window, else null.
+ * Owner-busy freshness re-check before committing a slot_pick booking. Reads
+ * FRESH (forceRefresh) — the owner's calendar drifts while an approval sits,
+ * and a STALE cache hit is exactly what bounced a real booking over a slot that
+ * was actually free (the Isaac incident: the recheck read "busy" from a 5-min
+ * cache while a fresh search showed the slot open). Only the OWNER is checked:
+ * a colleague's busy is a HELPER surfaced when slots are offered, never a
+ * commit-time blocker — the owner can book over anyone (owner rule 6).
  *
- * Used by both:
- *   - resolveSlotPickApproval — checks the owner's chosen slot before booking
- *   - runApproveCallback (create_meeting replay path) — same intent for the
- *     deferred-action booking spine, prevents double-booking when an
- *     approval has been sitting overnight and a new meeting now occupies
- *     the target slot
- *
- * Failure to call Graph (network blip, scope error) returns null with a
- * warn log — a freshness-API outage shouldn't block all approvals.
+ * Returns a reason if the owner is now busy, else null. Graph failure → null
+ * (a freshness-API blip shouldn't block all approvals).
  */
-async function recheckFreeBusyForBooking(args: {
+async function recheckOwnerFreeForBooking(args: {
   ownerEmail: string;
-  attendeeEmails: string[];
   startIso: string;
   endIso: string;
   timezone: string;
-  /**
-   * When false, owner-busy slots are ignored — used for policy_exception
-   * replays where the owner has already consented to whatever was on his
-   * calendar at approve time, and we only want to catch NEW attendee
-   * conflicts that arose in the meantime. When true (slot_pick), any
-   * non-tentative busy bounces the booking.
-   */
-  checkOwnerBusy: boolean;
 }): Promise<string | null> {
   try {
     const busy = await getFreeBusy(
       args.ownerEmail,
-      args.attendeeEmails,
+      [args.ownerEmail],
       args.startIso,
       args.endIso,
       args.timezone,
+      true,   // forceRefresh — freshness is the entire point of a pre-commit recheck
     );
     const cStart = DateTime.fromISO(args.startIso).toMillis();
     const cEnd = DateTime.fromISO(args.endIso).toMillis();
     const ownerEmailLower = args.ownerEmail.toLowerCase();
     for (const [email, slots] of Object.entries(busy)) {
-      if (!args.checkOwnerBusy && email.toLowerCase() === ownerEmailLower) continue;
+      if (email.toLowerCase() !== ownerEmailLower) continue;
       const conflict = slots.find(s => {
         if (s.status !== 'busy' && s.status !== 'tentative' && s.status !== 'oof') return false;
         const sStart = DateTime.fromISO(s.start).toMillis();
         const sEnd = DateTime.fromISO(s.end).toMillis();
         return sStart < cEnd && sEnd > cStart;
       });
-      if (conflict) return `${email} is ${conflict.status}`;
+      if (conflict) return `you're ${conflict.status}`;
     }
   } catch (err) {
-    logger.warn('recheckFreeBusyForBooking — Graph call failed, proceeding', {
+    logger.warn('recheckOwnerFreeForBooking — Graph call failed, proceeding', {
       err: String(err).slice(0, 200),
     });
   }
@@ -573,48 +561,13 @@ async function runApproveCallback(
     mergedFromAmend: meta.mergedFromAmend, amendRound: meta.amendRound,
   });
 
-  // Freshness re-check for create_meeting replays. An approval (e.g. a
-  // policy_exception) can sit awaiting_owner for days; in the meantime an
-  // attendee may have become busy in the target window. relaxed=true would
-  // otherwise bypass the busy filter at the skill layer and book on top of
-  // a now-conflicting meeting. Skip owner-busy on purpose — owner already
-  // consented to whatever was on his calendar at approve time; only catch
-  // NEW attendee conflicts.
-  if (tool === 'create_meeting'
-      && typeof replayArgs.start === 'string'
-      && typeof replayArgs.end === 'string') {
-    const attendeeEmails = Array.isArray(replayArgs.attendees)
-      ? (replayArgs.attendees as Array<{ email?: string }>)
-          .map(a => a.email)
-          .filter((e): e is string => typeof e === 'string' && e.length > 0)
-      : [];
-    if (attendeeEmails.length > 0) {
-      const staleConflict = await recheckFreeBusyForBooking({
-        ownerEmail: ctx.profile.user.email,
-        attendeeEmails,
-        startIso: replayArgs.start,
-        endIso: replayArgs.end,
-        timezone: ctx.profile.user.timezone,
-        checkOwnerBusy: false,
-      });
-      if (staleConflict) {
-        logger.warn('runApproveCallback — stale conflict, bouncing back to awaiting_owner', {
-          id: row.id, tool, staleConflict,
-        });
-        mergeRequestDetails(row.id, {
-          stale_conflict: staleConflict,
-          stale_at_iso: replayArgs.start,
-        });
-        return {
-          ok: false,
-          request_id: row.id,
-          state: row.state,
-          effect: `stale_conflict:${tool}`,
-          reason: `attendee no longer free (${staleConflict}) — request stays awaiting_owner for fresh options`,
-        };
-      }
-    }
-  }
+  // No attendee freshness re-check on an approved policy_exception replay. The
+  // owner already SAW the conflict in the approval ask and approved it — a
+  // colleague's busy is a helper, never a commit-time blocker (owner rule 6).
+  // Re-checking attendees here is what bounced a real owner-approved booking
+  // four times on stale "Isaac/Joe busy" while the slot was actually free. The
+  // owner's OWN freshness is handled at slot_pick (recheckOwnerFreeForBooking);
+  // a policy_exception means he consented to his own calendar state too.
 
   // Sync-then-close: run the replay BEFORE marking the request resolved
   // and BEFORE relaying to the requester. On replay failure the request
@@ -710,18 +663,16 @@ async function resolveSlotPickApproval(
     };
   }
   const durationMin = details.duration_min ?? 30;
-  const participantsEmails = details.participants_emails ?? [];
   const subject = details.subject ?? row.subject;
 
-  // Freshness re-check — catch stale slot before we book.
+  // Freshness re-check — catch a slot that went stale on the OWNER's side
+  // before we book (reads fresh; attendee busy is a helper, not a blocker).
   const endDt = chosenDt.plus({ minutes: durationMin });
-  const staleConflict = await recheckFreeBusyForBooking({
+  const staleConflict = await recheckOwnerFreeForBooking({
     ownerEmail: ctx.profile.user.email,
-    attendeeEmails: participantsEmails,
     startIso: chosenDt.toISO()!,
     endIso: endDt.toISO()!,
     timezone: ctx.profile.user.timezone,
-    checkOwnerBusy: true,
   });
 
   if (staleConflict) {

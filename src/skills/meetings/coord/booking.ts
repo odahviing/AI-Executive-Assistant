@@ -29,7 +29,7 @@ import {
   type CoordParticipant,
 } from '../../../db';
 import { getOpenTasksForOwner } from '../../../tasks';
-import { createMeeting, getCalendarEvents, updateMeeting } from '../../../connectors/graph/calendar';
+import { createMeeting, getCalendarEvents, findDuplicateEvent, updateMeeting } from '../../../connectors/graph/calendar';
 import { shadowNotify } from '../../../utils/shadowNotify';
 import { getConnection } from '../../../connections/registry';
 import { registerCoordBookingHandler } from '../../../core/approvals/coordBookingHandler';
@@ -393,28 +393,15 @@ export async function bookCoordination(
         jobId, eventId: newEventId, slot,
       });
     } else {
-      // v2.3.1 (B9 / #65) — cross-turn idempotency check. Mirror the dedup
-      // logic ops.ts create_meeting:824-855 has. Without it, when a direct
-      // create_meeting already booked this slot (e.g. Sonnet bypassing a
-      // gate-stuck coord, see #65), bookCoordination would create a second
-      // event next to the first one. Same subject + same start (±2 min) on
-      // the owner's calendar → return the existing id, skip the create.
+      // v2.3.1 (B9 / #65) — cross-turn idempotency. A direct create_meeting can
+      // already have booked this slot (e.g. Sonnet bypassing a gate-stuck
+      // coord); without this, bookCoordination would create a second event
+      // next to the first. Shared probe with create_meeting.
       try {
-        const requestedSubject = job.subject.trim();
-        const startDt = DateTime.fromISO(slot, { zone: profile.user.timezone });
-        const probeDate = startDt.toFormat('yyyy-MM-dd');
-        const startMs = startDt.toMillis();
-        const existingEvents = await getCalendarEvents(profile.user.email, probeDate, probeDate, profile.user.timezone);
-        const duplicate = existingEvents.find(ev => {
-          if (ev.isCancelled) return false;
-          const evSubject = (ev.subject ?? '').trim();
-          if (evSubject.toLowerCase() !== requestedSubject.toLowerCase()) return false;
-          const evStartMs = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone }).toMillis();
-          return Math.abs(evStartMs - startMs) <= 2 * 60 * 1000;
-        });
+        const duplicate = await findDuplicateEvent(profile.user.email, job.subject, slot, profile.user.timezone);
         if (duplicate) {
           logger.warn('bookCoordination idempotent short-circuit — same subject+start already on calendar', {
-            jobId, subject: requestedSubject, start: slot, existingEventId: duplicate.id,
+            jobId, subject: job.subject.trim(), start: slot, existingEventId: duplicate.id,
           });
           newEventId = duplicate.id;
         }

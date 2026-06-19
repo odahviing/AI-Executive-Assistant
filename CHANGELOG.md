@@ -2,6 +2,35 @@
 
 ---
 
+## 3.4.4 — meeting-planner stabilization: one validator, attendee-as-helper, the Isaac root closed
+
+The dedicated meeting-planner chat's first build wave — five structural collapses replacing months of patch-on-patch with single sources of truth, net **−345 LOC** (790 deleted / 445 added). The headline: the Isaac/"Brainrocket" incident is closed at its root (an owner-approved booking no longer bounces on stale attendee free/busy), and `find_available_slots` + the booking path now share ONE validator, so search can never again offer a slot the book path refuses. No schema change; restart required.
+
+### Changed — the collapses
+- **One validator (A).** `find_available_slots` no longer re-implements the owner rules inline — every candidate's owner-rule verdict (work-hours, vacation, category, floating-block, travel-buffer, owner-busy, focus-floor) comes from the same `checkSlot` the booking path calls, fed the owner's CalendarEvents. Kills the search-offers-it / book-refuses-it class (the Eli + Isaac root). `checkSlot` gained a work-hour-window override so caller-widened hours still win. ~190 lines of duplicated rules + dead focus-floor helpers removed. ([calendar.ts](src/connectors/graph/calendar.ts), [scheduleRules.ts](src/utils/scheduleRules.ts))
+- **Attendee free/busy is a helper, never a commit-blocker (D).** An owner-approved policy_exception no longer re-checks attendees and bounces — it books (the owner consented in the approval); the only surviving pre-commit recheck is owner-only and reads fresh, not from a 5-min cache. This is the Isaac root: a booking that bounced 4× on "Isaac/Joe busy" while a fresh read showed the slot free now books on the first approve. ([resolver.ts](src/core/requests/resolver.ts))
+- **The LLM owns coord reply interpretation (B).** Deleted the English yes/no/ordinal regex branches + the day-name fast-path; `interpretReplyWithAI` is now a forced structured tool call — multilingual, binds a slot when a day/time/ordinal points to exactly one. The job-router gets the offered times so a quoted slot routes right (reasoning, not substring matching). ([coord/reply.ts](src/skills/meetings/coord/reply.ts), [coord/utils.ts](src/skills/meetings/coord/utils.ts))
+- **One idempotency primitive (C).** The "same subject + start ±2min ⇒ existing event" probe, copy-pasted in three places, is now one `findDuplicateEvent` (with the safe TZ fallback two copies had dropped). ([calendar.ts](src/connectors/graph/calendar.ts), [ops.ts](src/skills/meetings/ops.ts), [coord/booking.ts](src/skills/meetings/coord/booking.ts))
+
+### Fixed
+- **Rule-6/7 annotation — availability informs, never hides.** Owner override correctly stopped *blocking* on attendees but had started *silently dropping* the info. Now a relaxed search keeps conflicted slots, tagged with who's busy/off-hours (`attendee_conflicts`), and `planMeeting` annotates an overridden attendee-busy booking ("Booked — heads up, Anna's busy then") instead of hiding it. The owner is always told who isn't free. ([calendar.ts](src/connectors/graph/calendar.ts), [planMeeting.ts](src/skills/meetings/planMeeting.ts), [ops.ts](src/skills/meetings/ops.ts))
+- Owner out-of-window floating-block move is one-step — no `confirm_outside_window` re-ask. ([ops.ts](src/skills/meetings/ops.ts))
+- `isOtherPersonsAllDayEvent` is script-agnostic (`\p{L}`) — a Hebrew/Cyrillic-named colleague's OOO no longer wrongly blocks the owner's day. ([ops.ts](src/skills/meetings/ops.ts))
+
+### Removed
+- The `override_work_day` re-ask gate (#5) — a day-off now flows through `checkSlot` rule 1: owner books one-step with a heads-up, colleague escalates. (+ dead schema arg.)
+- `requester_is_attending` from `coordinate_meeting` (#10) — attendance is derived from placement; the duplicate boolean is gone. (Kept on `find_available_slots`, where it's the only signal.)
+- `slotLabelMatchFor` (#8) — the English date-label job-router; replaced by giving the LLM router the slot context.
+
+### Invariants preserved
+- The non-relaxed (common) search + book paths are behavior-unchanged — the relaxed annotation lives in dedicated arms, the buffer check stays non-relaxed, the first-pass attendee flag-once is intact. Verified by a 28-scenario post-build trace + an adversarial human-error pass (mind-changes, unclear input, mistakes).
+- The Isaac incident's remaining roots (subject/name re-asking, owner↔colleague desync, close-loop distrust) are NOT meeting-subsystem — routed to the prompt/guard chats.
+
+### Process
+- `.claude/MEETING_PLANNER_AGENT.md` — owner rules 1–14 added (no-repeating, no-dedup-code, LLM-not-regex, fix-the-process-not-the-guard, availability-is-a-helper, owner-override-total, few-messages, no-quick-wins, no-dead-code, Maelle-remembers, efficient-calendar, never-mechanical-refusal). Isaac diagnosis + the open-holes list (coord concurrency, subject-key idempotency, past-time guard, typo'd-attendee, slot-ranking for rule 13) recorded for the next wave.
+
+---
+
 ## 3.4.3 — WE-aware availability check + travel-context helper DRY + dedicated meeting-planner agent
 
 A small follow-on patch plus a process change. The code: the Working-Elsewhere framework now reaches the colleague candidate-check path it was missing (the Mike-on-a-WE-day incident), and the travel-context fetch is wrapped in one helper instead of three copies. The process: a **dedicated meeting-planner chat** is spun up (`.claude/MEETING_PLANNER_AGENT.md`) to own that subsystem root-cause-first — the planner has been patched for months without stabilizing, and an afternoon where both the owner and a colleague (Isaac) suffered through a booking made it clear it needs one chat that knows it by heart. Restart required (new helper + WE-aware verdicts); no schema change.

@@ -83,10 +83,6 @@ export async function handleCoordReply(
     } catch { return []; }
   };
 
-  const slotsFor = (j: CoordJob): string[] => {
-    try { return JSON.parse(j.proposed_slots) as string[]; } catch { return []; }
-  };
-
   // v2.3.2 — pending vote check. The recency safety net only fires when the
   // sender hasn't already responded; a colleague who picked yesterday and
   // sends a casual chat today shouldn't get pulled back into the coord.
@@ -98,42 +94,14 @@ export async function handleCoordReply(
     } catch { return false; }
   };
 
-  // v2.3.2 — pre-LLM deterministic gate. Catches the "Amazia quoted the slot
-  // text back" pattern + the "we just DM'd them, anything they say is likely
-  // about it" pattern. Both bypass `isCoordReplyByContext` (which is too
-  // strict on bare confirmations like "it is ok").
-  //
-  // Layer 1: slot-label substring match. If the message text contains a
-  // date-time label that matches one of THIS coord's proposed slots (using
-  // the same format we sent in the DM), confidence is high enough to skip
-  // the LLM gate.
-  //
-  // Layer 2: recency-based softening. If the sender has a pending vote in a
-  // coord whose last DM landed in the last RECENT_REPLY_WINDOW_MIN minutes,
-  // override the gate. The intuition: a colleague who JUST got slot options
-  // and sends a vague "ok" / "sure" / "sounds good" moments later is almost
-  // certainly responding to those slots, not opening a new topic.
+  // v2.3.2 — pre-LLM recency gate. A colleague who JUST got slot options and
+  // sends a vague "ok" / "sure" / "sounds good" moments later is almost
+  // certainly responding to those slots, not opening a new topic —
+  // `isCoordReplyByContext` is too strict on bare confirmations. Recency is
+  // language-independent; the old English slot-label substring matcher was
+  // removed (Sonnet owns natural-language text, not a regex). When recency
+  // doesn't single out one job, the LLM router decides.
   const RECENT_REPLY_WINDOW_MIN = 10;
-
-  const slotLabelMatchFor = (j: CoordJob): boolean => {
-    const slots = slotsFor(j);
-    if (slots.length === 0) return false;
-    const tz = params.profile.user.timezone;
-    const text = params.text;
-    for (const iso of slots) {
-      const dt = DateTime.fromISO(iso).setZone(tz);
-      if (!dt.isValid) continue;
-      // Match the same label format used in `sendCoordDM`
-      // ("Thursday, 30 April at 13:30"). Substring check is enough — we
-      // don't need an exact match, the colleague might prefix/suffix.
-      const fullLabel = dt.toFormat("EEEE, d MMMM 'at' HH:mm");
-      if (text.includes(fullLabel)) return true;
-      // Looser fallback — date + time without "at" wording.
-      const looser = dt.toFormat("d MMMM") + ' ' + dt.toFormat('HH:mm');
-      if (text.includes(looser)) return true;
-    }
-    return false;
-  };
 
   const recentDmTo = (j: CoordJob): boolean => {
     try {
@@ -148,25 +116,38 @@ export async function handleCoordReply(
     } catch { return false; }
   };
 
+  // Formatted offered-times for a job, in the owner's tz — fed to the LLM router
+  // so a reply that quotes/names a slot routes to the right thread (rule 3: the
+  // model reasons over the times; no substring matching).
+  const slotLabelsFor = (j: CoordJob): string[] => {
+    try {
+      const tz = params.profile.user.timezone;
+      return (JSON.parse(j.proposed_slots) as string[])
+        .map(iso => DateTime.fromISO(iso).setZone(tz))
+        .filter(dt => dt.isValid)
+        .map(dt => dt.toFormat("EEEE d MMM 'at' HH:mm"));
+    } catch { return []; }
+  };
+
   let job: CoordJob;
 
-  // Layer 1 + 2 — try deterministic / recency match across pending-vote jobs
-  // first. If exactly one job matches, lock to it and skip the LLM gate.
+  // Recency match across pending-vote jobs first. If exactly one job had a DM
+  // in the last window, lock to it and skip the LLM gate; otherwise the LLM
+  // router (isCoordReplyByContext) decides which thread this belongs to.
   const pendingJobs = jobs.filter(senderHasPendingVote);
-  const deterministicMatch = pendingJobs.filter(j => slotLabelMatchFor(j) || recentDmTo(j));
+  const deterministicMatch = pendingJobs.filter(recentDmTo);
   if (deterministicMatch.length === 1) {
     job = deterministicMatch[0];
-    logger.info('Coord reply: deterministic / recency match — bypassing LLM gate', {
+    logger.info('Coord reply: recent-DM match — bypassing LLM gate', {
       jobId: job.id, sender: params.senderId,
-      reason: slotLabelMatchFor(job) ? 'slot_label_match' : 'recent_dm',
     });
   } else if (jobs.length === 1) {
-    const isRelevant = await isCoordReplyByContext(params.text, jobs[0].subject, namesFor(jobs[0]));
+    const isRelevant = await isCoordReplyByContext(params.text, jobs[0].subject, namesFor(jobs[0]), slotLabelsFor(jobs[0]));
     if (!isRelevant) return false;
     job = jobs[0];
   } else {
     for (const j of jobs) {
-      const isRelevant = await isCoordReplyByContext(params.text, j.subject, namesFor(j));
+      const isRelevant = await isCoordReplyByContext(params.text, j.subject, namesFor(j), slotLabelsFor(j));
       if (isRelevant) {
         job = j;
         break;
@@ -392,37 +373,27 @@ export async function handleCoordReply(
   let suggestedAlternative: string | null = null;
   let locationOverride: string | undefined;
 
-  const numMatch = text.match(/^[123]/);
-  if (numMatch) {
-    const idx = parseInt(numMatch[0]) - 1;
-    if (idx >= 0 && idx < proposedSlots.length) {
-      preferredSlot = proposedSlots[idx];
-      response = 'yes';
-    }
-  } else if (/\b(none|doesn'?t work|no time|can'?t|cannot|busy|not available|nope|no)\b/i.test(text)) {
-    response = 'no';
-  } else if (/\b(any|works|fine|good|ok|sure|yes|yep|yeah|perfect|great|sounds good)\b/i.test(text)) {
-    response = 'yes';
-    preferredSlot = proposedSlots[0];
-  } else {
-    const aiResult = await interpretReplyWithAI(text, proposedSlots, params.profile.user.timezone);
-    response = aiResult.response;
-    suggestedAlternative = aiResult.suggestedAlternative;
-    locationOverride = aiResult.locationOverride ?? undefined;
-    if (aiResult.response === 'yes') {
-      const idx = aiResult.slotIndex ?? 0;
-      preferredSlot = proposedSlots[idx] ?? proposedSlots[0];
-    }
+  // Sonnet owns reply interpretation — yes/no/maybe, which slot, counter-offer,
+  // online/location — in any language. A leading "1/2/3", a day name, an
+  // ordinal, or a quoted slot all resolve here; the model binds the slot index
+  // when exactly one offered slot can match. No keyword pre-parser.
+  const aiResult = await interpretReplyWithAI(text, proposedSlots, params.profile.user.timezone);
+  response = aiResult.response;
+  suggestedAlternative = aiResult.suggestedAlternative;
+  locationOverride = aiResult.locationOverride ?? undefined;
+  if (aiResult.response === 'yes') {
+    const idx = aiResult.slotIndex ?? 0;
+    preferredSlot = proposedSlots[idx] ?? proposedSlots[0];
+  }
 
-    if (aiResult.preferOnline !== undefined || locationOverride) {
-      try {
-        const existingNotes = JSON.parse(job.notes ?? '{}');
-        const updatedNotes: Record<string, unknown> = { ...existingNotes };
-        if (aiResult.preferOnline !== undefined) updatedNotes.isOnline = aiResult.preferOnline;
-        if (locationOverride) updatedNotes.location = locationOverride;
-        updateCoordJob(job.id, { notes: JSON.stringify(updatedNotes) });
-      } catch (_) {}
-    }
+  if (aiResult.preferOnline !== undefined || locationOverride) {
+    try {
+      const existingNotes = JSON.parse(job.notes ?? '{}');
+      const updatedNotes: Record<string, unknown> = { ...existingNotes };
+      if (aiResult.preferOnline !== undefined) updatedNotes.isOnline = aiResult.preferOnline;
+      if (locationOverride) updatedNotes.location = locationOverride;
+      updateCoordJob(job.id, { notes: JSON.stringify(updatedNotes) });
+    } catch (_) {}
   }
 
   logger.info('Coord reply parsed', {

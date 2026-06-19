@@ -129,6 +129,13 @@ export interface RuleCheckInput {
    * events from the result and offer to move them).
    */
   isFloatingBlock?: boolean;
+  /**
+   * Per-day work-hour windows (minutes-of-day) supplied by the caller. When
+   * present, rule 5 uses these INSTEAD of the profile's native windows — so
+   * find_available_slots' caller-overridden / relaxed-widened hours stay the
+   * single source of truth shared with the search loop (one validator).
+   */
+  workHourWindowsOverride?: Array<{ startMin: number; endMin: number }>;
 }
 
 export interface RuleCheckResult {
@@ -157,25 +164,29 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   }
 
   // ── (2-4) category rules ────────────────────────────────────────────────
-  const catCheck = checkCategorySlot({
-    slotStart,
-    slotEnd,
-    categoryName: input.category,
-    events: input.events,
-    profile,
-    excludeEventId: input.excludeEventIds?.[0],  // checkCategorySlot supports single exclude
-  });
-  if (!catCheck.allowed) {
-    const map: Record<string, RuleViolationKind> = {
-      day_type: 'category_day_type',
-      per_day: 'category_per_day',
-      per_week: 'category_per_week',
-    };
-    return {
-      passes: false,
-      violation_kind: map[catCheck.rule_broken!] ?? 'category_day_type',
-      violation_label: catCheck.human_explanation ?? `${input.category} category rule violated`,
-    };
+  // Bypassed under allowRelaxed — owner override is total (rule 11); the search
+  // path likewise skips category in relaxed mode, so the two stay aligned.
+  if (!input.allowRelaxed) {
+    const catCheck = checkCategorySlot({
+      slotStart,
+      slotEnd,
+      categoryName: input.category,
+      events: input.events,
+      profile,
+      excludeEventId: input.excludeEventIds?.[0],  // checkCategorySlot supports single exclude
+    });
+    if (!catCheck.allowed) {
+      const map: Record<string, RuleViolationKind> = {
+        day_type: 'category_day_type',
+        per_day: 'category_per_day',
+        per_week: 'category_per_week',
+      };
+      return {
+        passes: false,
+        violation_kind: map[catCheck.rule_broken!] ?? 'category_day_type',
+        violation_label: catCheck.human_explanation ?? `${input.category} category rule violated`,
+      };
+    }
   }
 
   // ── (5) working hours ───────────────────────────────────────────────────
@@ -185,7 +196,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   if (!input.allowRelaxed) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getOwnerWorkHoursForDay } = require('./workHours') as typeof import('./workHours');
-    const windows = getOwnerWorkHoursForDay(profile, dayName);
+    const windows = input.workHourWindowsOverride ?? getOwnerWorkHoursForDay(profile, dayName);
     const slotStartMin = slotStart.hour * 60 + slotStart.minute;
     const slotEndMin = slotEnd.hour * 60 + slotEnd.minute;
     const fits = windows.some(w => slotStartMin >= w.startMin && slotEndMin <= w.endMin);
@@ -302,9 +313,12 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   }
 
   // ── (7) travel buffer ───────────────────────────────────────────────────
+  // Bypassed under allowRelaxed — owner override is total (rule 11), and the
+  // search loop likewise skips its buffer check in relaxed mode, so the two
+  // stay aligned (a relaxed owner search must still return the slot).
   const cat = getProfileCategoryByName(profile, input.category);
   const needsTravelBuffer = cat?.requires_travel_buffer === true;
-  if (needsTravelBuffer) {
+  if (needsTravelBuffer && !input.allowRelaxed) {
     // No dedicated travel_buffer_minutes field in the schema — default 30min
     // per side for any category flagged requires_travel_buffer.
     const bufMin = 30;
