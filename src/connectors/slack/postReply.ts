@@ -493,8 +493,15 @@ async function runClaimCheckAndMaybeRewrite(ctx: ClaimCheckContext): Promise<str
     const toolSummariesText = (result.toolSummaries ?? []).join(' ');
     const matchingToolAlreadyRan =
       verdict.action_type === 'message'
-        ? /\[message_colleague/.test(toolSummariesText) &&
-          (!verdict.target_name || toolSummariesText.toLowerCase().includes(verdict.target_name.toLowerCase()))
+        ? (/\[message_colleague/.test(toolSummariesText) &&
+            (!verdict.target_name || toolSummariesText.toLowerCase().includes(verdict.target_name.toLowerCase())))
+          // v3.4.x — resolve_approval relays the owner's decision to the original
+          // requester ITSELF (internal DM via the resolver, not message_colleague).
+          // So it backs a "the requester will get it / I'll let them know / they
+          // can confirm" claim after an approval decision. Its summary carries no
+          // requester name, so no target match is possible or required (the
+          // double-DM the old message_colleague retry caused is exactly the harm).
+          || /\[resolve_approval/.test(toolSummariesText)
         : verdict.action_type === 'book'
           // v2.3.4 — `book` covers any calendar mutation, not just
           // create+finalize. The narrower regex let a move_meeting + correct
@@ -518,7 +525,7 @@ async function runClaimCheckAndMaybeRewrite(ctx: ClaimCheckContext): Promise<str
             // for genuine over-claims, and an `other` claim with NONE of these
             // tools present still retries (phantom-claim protection intact).
             : verdict.action_type === 'other'
-            ? /\[(update_my_preferences|manage_preference|note_about_person|note_about_self|log_interaction|confirm_gender|update_person_profile|update_person_memory|manage_routine|manage_calendar_issue|update_task|update_summary_draft|manage_knowledge)/.test(toolSummariesText)
+            ? /\[(update_my_preferences|manage_preference|note_about_person|note_about_self|log_interaction|confirm_gender|update_person_profile|update_person_memory|manage_routine|manage_calendar_issue|update_task|update_summary_draft|manage_knowledge|resolve_approval)/.test(toolSummariesText)
             : false;
 
     // v2.6.1 — when the claim-checker LLM has named a SPECIFIC change the

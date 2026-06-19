@@ -1,6 +1,22 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.4.2** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.4.3** — check `package.json` if unsure; it is the source of truth.
+
+## 🤖 Four agents now run the bug-resolve loop (route work to the right one)
+
+Parallel chats on the same repo — at wrap, `git fetch` + check the working tree for their edits before committing:
+- **Meeting agent** — owns the **meeting planner** subsystem end-to-end, root-cause-first. Its mandate + subsystem map + the full carried-in bug list live in **`.claude/MEETING_PLANNER_AGENT.md`**. Spun up because the planner has been patched for months without stabilizing (the Isaac/"Brainrocket" afternoon was the breaking point — owner + colleague both suffered). Meeting/scheduling/free-busy/timezone/WE/close-loop bugs go here.
+- **Guard agent** — the gate stack (`claimChecker`, `securityGate`, `humanGate`, `coordGuard`, `dateVerifier`, `postReply`). Honesty / leak / false-positive issues.
+- **Prompt agent** — the orchestrator system prompt (`systemPrompt.ts`): language, narration, judgment/tone.
+- **Tenancy agent** — tool descriptions + per-skill prompt sections + de-tenant/learned-preference work.
+
+When a bug's real fix is honesty/leak → guard; tone/judgment → prompt; tool-description/routing → tenancy; the deterministic scheduling core → meeting agent.
+
+## 🔭 v3.4.3 — WE-aware availability check + travel-context DRY + the dedicated meeting-planner chat
+
+Small code follow-on + a process change. Code: `availabilityPreCheck` is now Working-Elsewhere-aware (a colleague proposing times on a WE day gets "he's away that week, tentative, route to him" instead of a flat "not bookable" — the Mike incident), reusing the week events it already fetches (no extra Graph call); the travel-context fetch is wrapped in one `getTravelContextForInstant` helper (was three copies in create/move/update). The guard chat's claim-checker change recognizes `resolve_approval`'s requester relay — **with a caveat**: it assumes the relay lands, and the Yael/Eve incident shows it can silently drop, so that's filed as the meeting chat's **top open root** (see below). Process: the **meeting-planner agent** (`.claude/MEETING_PLANNER_AGENT.md`) is created. **Restart to load.**
+
+**🔴 TOP OPEN ROOT for the meeting chat — the close-loop relay silently drops.** `resolve_approval(amend)` on a colleague-requested approval: requester correctly set, state → `awaiting_colleague`, but the relay DM never reaches the requester (Yael/Eve, 2026-06-18). No send-failure logged, retry killed by dedup, owner had to prompt before it sent. Add a definitive send-result log to `notifyRequesterOfDecision` first, then root-cause. Don't trust the guard's "resolve_approval backs notify" change until this lands reliably.
 
 ## 🔭 v3.4.2 — travel-aware scheduling (the keystone) + close-loop + guard/prompt fixes
 

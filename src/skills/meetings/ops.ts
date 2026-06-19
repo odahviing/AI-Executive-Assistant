@@ -2124,12 +2124,10 @@ export class SchedulingSkill {
         let tripDisplay: { tz: string; location: string } | null = null;
         if (typeof args.start === 'string') {
           try {
-            const dayIso = DateTime.fromISO(args.start as string, { zone: timezone }).toFormat('yyyy-MM-dd');
-            const dayEvents = await getCalendarEvents(userEmail, dayIso, dayIso, timezone);
             // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { resolveOwnerTravelContextForDate } = require('../../utils/workingElsewhere') as
+            const { getTravelContextForInstant } = require('../../utils/workingElsewhere') as
               typeof import('../../utils/workingElsewhere');
-            const ctx = await resolveOwnerTravelContextForDate(dayIso, context.profile.user.slack_user_id, timezone, dayEvents);
+            const ctx = await getTravelContextForInstant(args.start as string, userEmail, context.profile.user.slack_user_id, timezone);
             if (ctx.isAway) {
               tripDisplay = { tz: ctx.effectiveTz, location: ctx.location };
               if (!args.start_timezone && ctx.effectiveTz !== timezone) {
@@ -2139,14 +2137,14 @@ export class SchedulingSkill {
                 args.start = reinterpretClockInZone(args.start as string, ctx.effectiveTz, timezone);
                 if (typeof args.end === 'string') args.end = reinterpretClockInZone(args.end as string, ctx.effectiveTz, timezone);
                 logger.info('create_meeting — auto-converted bare time from trip TZ', {
-                  dayIso, tripTz: ctx.effectiveTz, location: ctx.location, start_owner: args.start,
+                  tripTz: ctx.effectiveTz, location: ctx.location, start_owner: args.start,
                 });
               }
               if (ctx.location
                   && (typeof args.location !== 'string' || (args.location as string).trim().length === 0)
                   && args.is_online !== true) {
                 args.location = ctx.location;
-                logger.info('create_meeting — defaulted location to trip place', { dayIso, location: ctx.location });
+                logger.info('create_meeting — defaulted location to trip place', { location: ctx.location });
               }
             }
           } catch (err) {
@@ -3576,16 +3574,14 @@ export class SchedulingSkill {
               // adding people to a Boston-week meeting came back "Huddle" because
               // the re-eval was travel-blind. Mirrors create/move. No-op off-trip.
               try {
-                const dayIso = DateTime.fromISO(existing.startIso, { zone: timezone }).toFormat('yyyy-MM-dd');
-                const dayEvents = await getCalendarEvents(userEmail, dayIso, dayIso, timezone);
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { resolveOwnerTravelContextForDate } = require('../../utils/workingElsewhere') as
+                const { getTravelContextForInstant } = require('../../utils/workingElsewhere') as
                   typeof import('../../utils/workingElsewhere');
-                const tctx = await resolveOwnerTravelContextForDate(dayIso, context.profile.user.slack_user_id, timezone, dayEvents);
+                const tctx = await getTravelContextForInstant(existing.startIso, userEmail, context.profile.user.slack_user_id, timezone);
                 if (tctx.isAway && tctx.location && isExternalNow === false) {
                   newLocationFromShape = tctx.location;
                   newIsOnlineFromShape = false;
-                  logger.info('update_meeting — trip day, location → trip place', { dayIso, location: tctx.location });
+                  logger.info('update_meeting — trip day, location → trip place', { location: tctx.location });
                 }
               } catch (err) {
                 logger.warn('update_meeting — travel-context location override threw', { err: String(err).slice(0, 160) });
@@ -3686,12 +3682,10 @@ export class SchedulingSkill {
         let moveTripDisplay: { tz: string; location: string } | null = null;
         if (typeof args.new_start === 'string') {
           try {
-            const dayIso = DateTime.fromISO(args.new_start as string, { zone: timezone }).toFormat('yyyy-MM-dd');
-            const dayEvents = await getCalendarEvents(userEmail, dayIso, dayIso, timezone);
             // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { resolveOwnerTravelContextForDate } = require('../../utils/workingElsewhere') as
+            const { getTravelContextForInstant } = require('../../utils/workingElsewhere') as
               typeof import('../../utils/workingElsewhere');
-            const ctx = await resolveOwnerTravelContextForDate(dayIso, context.profile.user.slack_user_id, timezone, dayEvents);
+            const ctx = await getTravelContextForInstant(args.new_start as string, userEmail, context.profile.user.slack_user_id, timezone);
             if (ctx.isAway) {
               moveTripDisplay = { tz: ctx.effectiveTz, location: ctx.location };
               if (!args.start_timezone && ctx.effectiveTz !== timezone) {
@@ -3701,7 +3695,7 @@ export class SchedulingSkill {
                 args.new_start = reinterpretClockInZone(args.new_start as string, ctx.effectiveTz, timezone);
                 if (typeof args.new_end === 'string') args.new_end = reinterpretClockInZone(args.new_end as string, ctx.effectiveTz, timezone);
                 logger.info('move_meeting — auto-converted bare time from trip TZ', {
-                  dayIso, tripTz: ctx.effectiveTz, new_start_owner: args.new_start,
+                  tripTz: ctx.effectiveTz, new_start_owner: args.new_start,
                 });
               }
             }

@@ -2,6 +2,20 @@
 
 ---
 
+## 3.4.3 — WE-aware availability check + travel-context helper DRY + dedicated meeting-planner agent
+
+A small follow-on patch plus a process change. The code: the Working-Elsewhere framework now reaches the colleague candidate-check path it was missing (the Mike-on-a-WE-day incident), and the travel-context fetch is wrapped in one helper instead of three copies. The process: a **dedicated meeting-planner chat** is spun up (`.claude/MEETING_PLANNER_AGENT.md`) to own that subsystem root-cause-first — the planner has been patched for months without stabilizing, and an afternoon where both the owner and a colleague (Isaac) suffered through a booking made it clear it needs one chat that knows it by heart. Restart required (new helper + WE-aware verdicts); no schema change.
+
+### Added / Changed
+- **`availabilityPreCheck` is now Working-Elsewhere-aware.** When a colleague proposes specific times on a WE day, the verdict is no longer a flat "not bookable" (the owner's home rules don't apply when he's away) — it surfaces "he's working elsewhere that week, that time's tentative, route to him via policy_exception." Reuses `resolveOwnerTravelContextForDate` with the week events `availabilityPreCheck` already fetches — no extra Graph call. ([availabilityPreCheck.ts](src/utils/availabilityPreCheck.ts))
+- **`getTravelContextForInstant` helper.** The fetch-day-events → resolve-travel-context block was copy-pasted into create / move / update_meeting; it's now one helper they all call. ([workingElsewhere.ts](src/utils/workingElsewhere.ts), [ops.ts](src/skills/meetings/ops.ts) — net fewer lines)
+- **Claim-checker recognizes `resolve_approval`'s requester relay (guard chat).** On an approve/amend of a colleague-initiated approval, the resolver DMs the requester itself (not via `message_colleague`), so a "the requester will get it" draft is honest — stop flagging it as a phantom message (and never force a `message_colleague` retry, which would double-DM). ([claimChecker.ts](src/utils/claimChecker.ts), [postReply.ts](src/connectors/slack/postReply.ts)) — **CAVEAT:** this assumes the relay reliably lands; the Yael/Eve incident shows it can silently drop, which this change would then mask. Filed as the top open root for the meeting-planner chat; revisit if the relay isn't fixed.
+
+### Process
+- **`.claude/MEETING_PLANNER_AGENT.md`** — starter for a dedicated meeting-planner chat: the mandate (root-cause, one diagnostic spine, no more patch-on-patch), the full subsystem map, the recurring bug clusters, and the carried-in bug list (the Isaac/"Brainrocket" incident verbatim, the Boston-trip thread, the Yael/Eve close-loop relay, the Mike WE candidate-check). Four agents now run the bug-resolve loop: **meeting / guard / prompt / tenancy.**
+
+---
+
 ## 3.4.2 — Boston-trip booking bug-bash: travel-aware scheduling + close-loop + honesty/guard fixes
 
 A real-day bug-bash off a long "book my whole week in Boston" thread, plus the parallel guard- and prompt-chats' work folded in. The spine of it: a single **owner travel-context** (the keystone) the booking write-path was missing, so bare trip-times, locations, and week-anchoring now resolve correctly during travel — while the no-marker, in-office flow stays byte-identical (the Working-Elsewhere invariant). Restart required (new utils + in-memory ledgers; no schema change).

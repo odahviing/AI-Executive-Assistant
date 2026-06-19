@@ -116,6 +116,35 @@ export async function resolveOwnerTravelContextForDate(
   return { isAway: false, effectiveTz: homeTz, location: '' };
 }
 
+/**
+ * v3.4.2 — convenience wrapper: travel context for the DAY of an instant,
+ * fetching that day's events itself. This is the ONE place the create / move /
+ * update_meeting handlers call (they don't have the day's events in hand). The
+ * availabilityPreCheck path reuses `resolveOwnerTravelContextForDate` directly
+ * with the week events it already fetched — no extra Graph call there. Fails
+ * open to "not away" on any error.
+ */
+export async function getTravelContextForInstant(
+  startIso: string,
+  ownerEmail: string,
+  ownerSlackId: string,
+  homeTz: string,
+): Promise<OwnerTravelContext> {
+  const dt = DateTime.fromISO(startIso, { zone: homeTz });
+  if (!dt.isValid) return { isAway: false, effectiveTz: homeTz, location: '' };
+  const dayIso = dt.toFormat('yyyy-MM-dd');
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getCalendarEvents } = require('../connectors/graph/calendar') as
+      typeof import('../connectors/graph/calendar');
+    const events = await getCalendarEvents(ownerEmail, dayIso, dayIso, homeTz);
+    return resolveOwnerTravelContextForDate(dayIso, ownerSlackId, homeTz, events);
+  } catch (err) {
+    logger.warn('getTravelContextForInstant — day fetch threw', { err: String(err).slice(0, 160) });
+    return { isAway: false, effectiveTz: homeTz, location: '' };
+  }
+}
+
 // Module-level resolution cache: location string → IANA (or null). Resolution
 // happens OFF the slot hot-loop (once per search), so the async static→Sonnet
 // resolver is fine. The static map is just a warm-start; a miss costs one
