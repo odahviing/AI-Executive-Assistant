@@ -104,14 +104,25 @@ Five collapses landed (net −345 LOC, all typecheck-green, 28-scenario trace + 
 
 **Isaac incident — meeting-subsystem roots CLOSED.** Remaining Isaac roots are NOT this subsystem → route out: R5 endless-clarifying (subject 5× / "who's Yossi" 4×) + R3 model-half (Sonnet setting `relaxed`) → **Prompt agent**; R6 owner↔colleague desync + R7 close-loop distrust → **Guard / coord-relay** (+ the Yael relay below).
 
-**New open holes (next wave — exposed by the adversarial pass, NOT introduced this session):**
-1. **Coord concurrency** (highest value) — no lock/transaction on the `participants` read-modify-write, no debounce before `resolveCoordination → bookCoordination`. Two near-simultaneous replies → lost vote / a mind-change correction can double-book a second slot. Structural; `coord/reply.ts` + `coord/state.ts`.
-2. **Idempotency by subject+start** — a *renamed* meeting at the same slot defeats `findDuplicateEvent` → double-book; plus a write-lag race when two turns submit before Graph reflects the first. Also the thread ledger never removes a *deleted* event's id (blocks rule-12 reference-back after a delete).
-3. **No past-time guard on the book path** — lead-time lives only in search. A named past/earlier-today time books. Natural fix: add `within_lead_time` to `checkSlot` (finishes the one-validator story).
-4. **Typo'd attendee books phantom-free** — `unresolvedAttendees` is wired only to the search handler, not create/move; a mistyped internal email reads as fully free.
-5. **`extendedHours` search-vs-book divergence** — the work-hour override reaches `checkSlot` only from search, not the book path (Collapse A scope edge; mostly masked for coord).
-6. **Rule 13 (efficient calendar) — not yet built.** `pickSpreadSlots` spreads offers ~30 min apart for variety; rule 13 wants placement to PREFER abutting an existing meeting and PENALIZE 15-min islands. New slot-ranking work.
-7. **Rule 14 (never a mechanical refusal)** — booking-core refusals already carry reasons; a bare "tool not allowed" would leak from the guard/permission/orchestrator layer → **Prompt/Guard agents**.
+### v3.4.5 status — second wave (the open-holes pass)
+
+**Shipped in v3.4.5 (built here, swept into the cross-chat wrap):**
+- **C3 past-time guard** — `checkSlot` rule (0) rejects a slot already started; planMeeting turns it into a ONE-TIME clarify ("did you mean later?"), bypassed by relaxed so the owner can still force. The write-path floor named-time create/move was missing.
+- **C4 typo'd-attendee guard** — `create_meeting` probes internal attendees' free/busy and refuses (with `did_you_mean`) on any the directory can't resolve, instead of booking a phantom who never gets the invite. Shares `enrichUnresolvedInternal` with the search handler (rule 2).
+- **C2(a) ledger dead-id cleanup** — `forgetThreadEvent` drops a deleted event from the thread ledger, so reference-back ("change the one I just booked") can't resolve a dead id (rule 12).
+- **D1 room-busy override** — a busy big-room is no longer a hard refuse under owner override; books without the room (no double-book) + a heads-up (rule 6/11). Last availability check that still blocked the owner.
+- **R5 (meeting half)** — the `meetings.ts` "subject must be specific" clause now governs COMPOSING, not ACCEPTING; a given terse subject ("Brainrocket") is used verbatim, never re-asked. (Orchestrator half stays with the Prompt chat.)
+
+**Deferred with reason (rule 4 — don't build machinery for unobserved cases):**
+- **C1 coord concurrency** — THEORETICAL. Log-verified: coord is demoted, `bookCoordination` barely runs, the dedup guard has fired 0×, no lost-vote/double-book in any log. Revisit ONLY if coord usage grows; then serialize the per-job `participants` read-modify-write + debounce `resolveCoordination → bookCoordination`.
+- **C2(b/c) rename + write-lag idempotency** — genuine edges (rename-to-new-subject-at-same-slot defeats the subject+start key; two turns racing Graph's write-lag), non-trivial fix, zero log occurrences.
+- **C5 `extendedHours` search-vs-book divergence** — narrow, mostly masked for coord (which books without re-validating); the surface is the demoted coord path. Lowest value.
+
+**Tracked elsewhere:**
+- **C6 rule-13 efficient calendar (slot ranking)** → GitHub #133 (Improvement/Medium). `pickSpreadSlots` spreads for variety; rule 13 wants prefer-adjacency + penalize-15-min-islands. New slot-ranking work, not yet built.
+- **C7 mechanical refusal** → mostly closed by `humanGate` (rewrites mechanism leaks on both audiences, fail-open) + the INTERNALS prompt rule. Residual: confirm owner-facing refusals carry the real override-able reason → **Guard chat**.
+- **R5 model-half** (Sonnet setting `relaxed` under force) / **R6 desync** / **R7 close-loop distrust** → **Prompt / Guard / coord-relay** chats.
+- **D2** coord booking-tail shared wrapper → **declined** (a forced options-bag abstraction = rule 9/10; the real dup was already C). **D3** `floatingBlocks.ts:149` config regex → **no action** (owner's own YAML over own calendar — config, not NL-message matching).
 
 ### The Isaac / "Brainrocket" incident (2026-06-19 ~14:54–15:05) — the canonical instability case (meeting-subsystem roots CLOSED in v3.4.4; see status above)
 The owner: *"I suffered, Isaac suffered and wanted to quit. it was just bad."*
