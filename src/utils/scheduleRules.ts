@@ -40,6 +40,7 @@ import { checkCategorySlot, getProfileCategoryByName } from './categoryRules';
 import { getFloatingBlocks, isFloatingBlockEvent } from './floatingBlocks';
 
 export type RuleViolationKind =
+  | 'in_the_past'
   | 'vacation_or_off_day'
   | 'category_day_type'
   | 'category_per_day'
@@ -151,6 +152,22 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   const slotEnd = DateTime.fromISO(input.slotEndIso).setZone(tz);
   const excludeSet = new Set(input.excludeEventIds ?? []);
   const dayName = slotStart.toFormat('EEEE');
+
+  // ── (0) in the past ─────────────────────────────────────────────────────
+  // Never silently book a slot that has already started — a past / earlier-today
+  // time is almost always a typo (a "book at 9am" when it's 2pm). planMeeting
+  // turns this into a ONE-TIME clarify ("did you mean later today?"), and the
+  // owner's "yes/force" comes back allowRelaxed → this bypasses so the confirm
+  // loop terminates (he CAN log a past meeting if he insists). find_available_slots
+  // enforces the fuller booking lead-time for OFFERED slots; this is the
+  // write-path floor that named-time create/move was missing.
+  if (!input.allowRelaxed && slotStart.toMillis() < DateTime.now().toMillis()) {
+    return {
+      passes: false,
+      violation_kind: 'in_the_past',
+      violation_label: 'that time has already passed',
+    };
+  }
 
   // ── (1) vacation / off day ──────────────────────────────────────────────
   const officeDays = profile.schedule.office_days.days as string[];

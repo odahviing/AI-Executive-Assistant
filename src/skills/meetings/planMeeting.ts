@@ -304,6 +304,10 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // attendee is busy — booked anyway (rule 6: availability never blocks), but
   // surfaced so the owner is TOLD who's busy (rule 7), never silently.
   let attendeeBusyNotice: string | undefined;
+  // Set when the owner overrides onto a slot where the big meeting room is taken
+  // and the group's too large for the small-room fallback — booked without the
+  // room (not double-booked), with a heads-up so he grabs space himself.
+  let roomBusyNotice: string | undefined;
   if (input.slotStartIso) {
     const ownerDomain = ownerEmail.split('@')[1].toLowerCase();
     const externalEmails: string[] = [];
@@ -406,6 +410,17 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       allowRelaxed: !!input.allowRelaxed,
       isFloatingBlock: !!input.isFloatingBlock,
     });
+
+    if (!ruleResult.passes && ruleResult.violation_kind === 'in_the_past') {
+      // A past / earlier-today time is almost always a typo, not an override —
+      // so it is NOT one-step-booked (that would book into the past) and NOT
+      // offered alternatives as if it were a soft conflict. Flag ONCE, for both
+      // owner and colleague: "that time's passed — did you mean later?" The
+      // owner's "yes / I meant it" retry comes back allowRelaxed, which checkSlot
+      // then lets through (he can log a past meeting if he truly insists).
+      const askText = `That time has already passed — did you mean later today, or a different day?`;
+      return { action: 'confirm_override', violationLabel: 'that time has already passed', suggestedAskText: askText, category };
+    }
 
     if (!ruleResult.passes && initiator === 'owner') {
       // #127 — owner override is total and ONE-STEP. A broken own-day rule on a
@@ -605,15 +620,28 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           participantCount: participants.length,
         });
       } else if (verdict.kind === 'room_busy_too_big') {
-        logger.info('planMeeting — meeting room busy + group too large for fallback', {
-          slot: input.slotStartIso, participantCount: participants.length,
-        });
-        return {
-          action: 'room_unavailable_large',
-          suggestedAskText: verdict.suggestedAskText,
-          category,
-          reasoning: 'meeting room mailbox busy and ≥6 people — small fallback not viable',
-        };
+        if (input.allowRelaxed) {
+          // Owner override — a busy room is a HELPER signal, never a hard
+          // blocker (rules 6/11). Book anyway; drop the busy room mailbox so we
+          // don't double-book the room, and TELL him it's taken (rule 7) so he
+          // can grab space himself. Was a hard refuse even under override — the
+          // one availability check that still blocked the owner.
+          addRoomEmail = false;
+          roomBusyNotice = 'the meeting room is taken and the group is large — booked without it, you\'ll need to grab space';
+          logger.info('planMeeting — meeting room busy + too large, owner override → booking without the room', {
+            slot: input.slotStartIso, participantCount: participants.length,
+          });
+        } else {
+          logger.info('planMeeting — meeting room busy + group too large for fallback', {
+            slot: input.slotStartIso, participantCount: participants.length,
+          });
+          return {
+            action: 'room_unavailable_large',
+            suggestedAskText: verdict.suggestedAskText,
+            category,
+            reasoning: 'meeting room mailbox busy and ≥6 people — small fallback not viable',
+          };
+        }
       }
     } catch (err) {
       // Fail open: if anything throws, proceed with the original verdict.
@@ -632,7 +660,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     preserveExisting,
     category,
     reasoning: `category=${category ?? 'none'} (${categoryReason}); location=${locationVerdict?.reasoning ?? 'n/a'}`,
-    overrideNotice: [ownerOverrideNotice, attendeeBusyNotice].filter(Boolean).join('; ') || undefined,
+    overrideNotice: [ownerOverrideNotice, attendeeBusyNotice, roomBusyNotice].filter(Boolean).join('; ') || undefined,
   };
 }
 

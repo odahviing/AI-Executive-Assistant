@@ -40,6 +40,20 @@ export function recordThreadEvent(threadTs: string, subject: string, eventId: st
   ledger.set(threadTs, deduped.slice(-MAX_PER_THREAD));
 }
 
+/**
+ * Drop an event from the thread ledger — call when it's DELETED, so a later
+ * reference-back ("change the one I just booked", "move it") never resolves to a
+ * dead event_id. Without this the ledger kept handing Sonnet an id Graph would
+ * 404 on after a delete (rule 12 — reference-back must just work).
+ */
+export function forgetThreadEvent(threadTs: string, eventId: string): void {
+  if (!threadTs || !eventId) return;
+  const existing = ledger.get(threadTs);
+  if (!existing) return;
+  const filtered = existing.filter(e => e.eventId !== eventId);
+  if (filtered.length !== existing.length) ledger.set(threadTs, filtered);
+}
+
 /** All events touched in this thread, oldest→newest. Empty when none. */
 export function getThreadEvents(threadTs: string): LedgerEntry[] {
   if (!threadTs) return [];

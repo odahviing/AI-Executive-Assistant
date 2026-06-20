@@ -211,6 +211,32 @@ function isOtherPersonsAllDayEvent(subject: string, ownerName: string, organizer
 }
 
 /**
+ * Enrich a list of unresolvable internal attendee addresses with a `did_you_mean`
+ * pulled from people_memory (first-name token of the local-part). Shared by
+ * find_available_slots (which already has the unresolved list from the search
+ * diagnostics) and create_meeting (which probes for it) — one did_you_mean
+ * lookup, not two copies. A nonexistent @company mailbox returns no busy data,
+ * so it reads as fully free; both callers must surface it, never book/offer a
+ * ghost. (Splitting the local-part on `._-` is email-format parsing, not NL.)
+ */
+function enrichUnresolvedInternal(emails: string[], ownerDomainLower: string): Array<{ email: string; did_you_mean?: string }> {
+  return emails.map(email => {
+    let didYouMean: string | undefined;
+    try {
+      const token = email.split('@')[0].split(/[._-]/)[0];
+      if (token.length >= 3) {
+        const hit = searchPeopleMemory(token).find(p =>
+          p.email
+          && p.email.toLowerCase() !== email
+          && p.email.toLowerCase().endsWith('@' + ownerDomainLower));
+        didYouMean = hit?.email ?? undefined;
+      }
+    } catch { /* non-fatal — entry ships without the suggestion */ }
+    return { email, ...(didYouMean ? { did_you_mean: didYouMean } : {}) };
+  });
+}
+
+/**
  * A calendar event processed and ready for Claude consumption.
  * Raw ISO timestamps are deliberately REMOVED — Claude only gets human-readable
  * local fields to prevent her from doing her own (error-prone) date arithmetic.
@@ -1542,20 +1568,7 @@ export class SchedulingSkill {
               .filter(e => ownerDomainLower && e.endsWith('@' + ownerDomainLower));
             let attendeeEmailWarning: Record<string, unknown> | undefined;
             if (unresolvedInternal.length > 0) {
-              const entries = unresolvedInternal.map(email => {
-                let didYouMean: string | undefined;
-                try {
-                  const token = email.split('@')[0].split(/[._-]/)[0];
-                  if (token.length >= 3) {
-                    const hit = searchPeopleMemory(token).find(p =>
-                      p.email
-                      && p.email.toLowerCase() !== email
-                      && p.email.toLowerCase().endsWith('@' + ownerDomainLower));
-                    didYouMean = hit?.email ?? undefined;
-                  }
-                } catch { /* non-fatal — warning ships without the suggestion */ }
-                return { email, ...(didYouMean ? { did_you_mean: didYouMean } : {}) };
-              });
+              const entries = enrichUnresolvedInternal(unresolvedInternal, ownerDomainLower);
               attendeeEmailWarning = {
                 unresolved_attendee_emails: entries,
                 _attendee_email_warning: 'These attendee addresses do NOT exist in the company directory — their availability was NOT checked (a nonexistent mailbox reads as fully free). The address is most likely a wrong guess. Re-call find_available_slots with the corrected address (see did_you_mean) or resolve the person via find_slack_user first. Do NOT present any slot as working for that person until the address resolves.',
@@ -2705,6 +2718,38 @@ export class SchedulingSkill {
         const roomEmail = context.profile.meetings.room_email;
         if (args.add_room_email && roomEmail && !attendees.find(a => a.email === roomEmail)) {
           attendees.push({ name: 'Meeting Room', email: roomEmail });
+        }
+
+        // C4 — typo'd internal attendee guard. A nonexistent @company mailbox
+        // returns no busy data → reads as fully free → the meeting books with a
+        // phantom attendee who never gets the invite. Probe internal attendees'
+        // free/busy and refuse (with a did_you_mean) on any the directory can't
+        // resolve, so Sonnet corrects the address instead of booking a ghost.
+        // (External addresses skipped — Graph never has their data; the room
+        // mailbox is excluded. getFreeBusy is cached, so planMeeting reuses it.)
+        try {
+          const ownerDomainLower = userEmail.includes('@') ? userEmail.split('@')[1].toLowerCase() : '';
+          const roomLower = (roomEmail ?? '').toLowerCase();
+          const internalAttendeeEmails = attendees
+            .map(a => (a.email ?? '').toLowerCase())
+            .filter(e => e && ownerDomainLower && e.endsWith('@' + ownerDomainLower) && e !== roomLower);
+          if (internalAttendeeEmails.length > 0) {
+            const fbDiag: { unresolved?: string[] } = {};
+            await getFreeBusy(userEmail, internalAttendeeEmails, args.start as string, args.end as string, timezone, false, fbDiag);
+            const unresolvedInternal = (fbDiag.unresolved ?? []).filter(e => e.endsWith('@' + ownerDomainLower));
+            if (unresolvedInternal.length > 0) {
+              const entries = enrichUnresolvedInternal(unresolvedInternal, ownerDomainLower);
+              logger.warn('create_meeting — unresolved internal attendee email(s), refusing to book a phantom', { entries });
+              return {
+                success: false,
+                error: 'unresolved_attendee',
+                unresolved_attendee_emails: entries,
+                message: 'One or more attendee addresses don\'t exist in the company directory — booking would invite someone who never gets it (a nonexistent mailbox reads as fully free). Most likely a wrong address: use did_you_mean if shown, or find the person via find_slack_user, then re-book with the corrected address. Do NOT say it\'s booked until the address resolves.',
+              };
+            }
+          }
+        } catch (err) {
+          logger.warn('create_meeting — unresolved-attendee pre-check threw, proceeding', { err: String(err).slice(0, 200) });
         }
 
         // Cross-turn idempotency — date-verifier / claim-checker retries can

@@ -801,11 +801,30 @@ async function notifyRequesterOfDecision(
   reason: string | undefined,
   ctx: ResolveContext,
 ): Promise<void> {
+  // Definitive relay tracing (Yael/Eve drop, 2026-06-18). This path used to log
+  // nothing on the common 1:1-DM success route, so a silent miss couldn't be
+  // pinned down. Now every outcome is provable from the log: an entry line, a
+  // positive line at each early-return, and a sent/failed line at the send.
+  // If you see the entry line with NO follow-up line, the body below threw
+  // before reaching the send (lines outside the send try/catch).
+  logger.info('notifyRequesterOfDecision — entry', {
+    id: row.id, kind: row.kind, subkind: row.subkind ?? null,
+    verdict, state: row.state, hasRequester: !!row.requester_slack_id,
+  });
   const requesterSlackId = row.requester_slack_id;
-  if (!requesterSlackId) return;  // owner-internal request, nothing to close back
+  if (!requesterSlackId) {
+    logger.info('notifyRequesterOfDecision — skip: no requester_slack_id (owner-internal)', { id: row.id });
+    return;  // owner-internal request, nothing to close back
+  }
   // For coord/slot_pick the coordinator's own loop-close path handles it.
-  if (row.kind === 'coord') return;
-  if (row.kind === 'approval' && (row.subkind === 'slot_pick' || row.subkind === 'calendar_conflict')) return;
+  if (row.kind === 'coord') {
+    logger.info('notifyRequesterOfDecision — skip: coord kind (coordinator loop-close owns it)', { id: row.id });
+    return;
+  }
+  if (row.kind === 'approval' && (row.subkind === 'slot_pick' || row.subkind === 'calendar_conflict')) {
+    logger.info('notifyRequesterOfDecision — skip: slot_pick/calendar_conflict (coordinator loop-close owns it)', { id: row.id, subkind: row.subkind });
+    return;
+  }
 
   const details = parseDetails(row) ?? {};
   const requesterName = row.requester_name ?? (details.requester_name as string | undefined);
@@ -1075,6 +1094,9 @@ RULES:
         id: row.id, requesterSlackId, reason: res.reason,
       });
     } else {
+      logger.info('notifyRequesterOfDecision — direct DM sent', {
+        id: row.id, requesterSlackId, verdict, threadTs: row.origin_thread_ts ?? null,
+      });
       stampIfTerminal();
     }
     await fireOwnerShadow();

@@ -1105,6 +1105,7 @@ export async function findAvailableSlots(params: {
     // narration is unchanged after the validator unification.
     const mapVerdictToRejectLabel = (kind: string | undefined, dayType: 'office' | 'home' | 'other'): string => {
       switch (kind) {
+        case 'in_the_past': return 'within_lead_time';
         case 'outside_working_hours': return 'outside_owner_work_hours';
         case 'floating_block_overlap': return 'floating_block_no_room';
         case 'focus_time_floor': return dayType === 'home' ? 'focus_time_home' : 'focus_time_office';

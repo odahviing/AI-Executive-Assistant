@@ -2,6 +2,29 @@
 
 ---
 
+## 3.4.5 — open-holes wave: past-time + phantom-attendee guards, dead-id cleanup, room override; Isaac flow-fixes in the prompt; relay diagnostics
+
+A cross-chat bundle on top of the 3.4.4 stabilization. The meeting chat closed three of the open holes its adversarial pass had surfaced (C2/C3/C4) plus made the last hard room-refusal overridable; the prompt chat landed the judgment-side Isaac fixes (accept an answer given once, stop asking under force); and the close-loop relay got definitive send-result logging so the next silent drop is provable. No schema change; restart required.
+
+### Fixed — meeting planner (the open holes)
+- **Past-time book guard (C3) — finishes the one-validator story.** Lead-time used to live only in `find_available_slots` search, so a named past / earlier-today time booked straight through the write path. `checkSlot` gained rule (0) `in_the_past`; `planMeeting` turns it into a ONE-TIME clarify ("that time's passed — did you mean later?") for owner and colleague alike, and the owner's "I meant it" retry comes back `allowRelaxed` so the confirm loop terminates (he can log a past meeting if he insists). Mapped to the `within_lead_time` reject label in search. ([scheduleRules.ts](src/utils/scheduleRules.ts), [planMeeting.ts](src/skills/meetings/planMeeting.ts), [calendar.ts](src/connectors/graph/calendar.ts))
+- **Typo'd internal attendee no longer books a phantom (C4).** A nonexistent `@company` mailbox returns no busy data, so it read as fully free and the meeting booked with someone who never got the invite. `create_meeting` now probes internal attendees' free/busy and refuses (with a `did_you_mean`) on any the directory can't resolve — the same protection `find_available_slots` already had. The `did_you_mean` lookup is one shared `enrichUnresolvedInternal` helper, not a second copy. ([ops.ts](src/skills/meetings/ops.ts))
+- **The thread ledger forgets a deleted event (C2a).** After a delete the ledger kept handing Sonnet the dead `event_id`, so a later "change the one I just booked" resolved to a 404. `forgetThreadEvent` drops it on a successful `delete_meeting` — reference-back (rule 12) just works again. ([threadEventLedger.ts](src/utils/threadEventLedger.ts), [orchestrator/index.ts](src/core/orchestrator/index.ts))
+- **A busy meeting room is overridable too.** `room_busy_too_big` (room taken + group too large for the small-room fallback) was the last availability check that still hard-refused the owner. Under override it now books without the room — drops the room mailbox so nothing's double-booked, and tells him to grab space himself (rules 6/7/11). ([planMeeting.ts](src/skills/meetings/planMeeting.ts))
+- **A terse subject is the subject.** The `create_meeting` tool description now takes a one-word project/company name the user gave ("Brainrocket", "Acme", "onboarding") verbatim and never "upgrades" it or asks for something more specific — the specificity bar applies only to subjects Maelle composes herself. Removes the tool-description half of the "asked 5× what it's about" loop. ([meetings.ts](src/skills/meetings.ts))
+
+### Fixed — Isaac flow-fixes (prompt)
+- **Accept an answer given once (RULE 2b).** An answer the other side just gave — owner OR colleague — is final: a subject is whatever they say it is, a name given once is resolved. Clarify at most once if genuinely unworkable, then accept; re-asking the same thing in different words is the bug. ([systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+- **Explicit force ends the asking (RULE 7).** A repeated or explicit "book it" / "I said book it" / any force after a surfaced conflict executes this turn with override args — a second ask after that is a bug. ([systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+
+### Added — diagnostics
+- **Definitive close-loop relay logging.** `notifyRequesterOfDecision` (the owner→requester relay that silently dropped in the Yael/Eve case) now logs every exit: an entry line, a positive line at each early-return, and the previously-missing 1:1-DM `sent` line. An entry line with no follow-up now pins a throw in body-building — so the next drop is provable from the log instead of inferred. ([resolver.ts](src/core/requests/resolver.ts))
+
+### Still open
+- The relay-drop ROOT is not fixed — only instrumented. The guard chat's claim-checker change that treats `resolve_approval` as backing the requester notify stays unsafe until the relay reliably lands; re-check after the next occurrence with the new logs. Owner↔colleague desync (E2) and close-loop distrust (E4) remain routed to the guard/coord-relay chat.
+
+---
+
 ## 3.4.4 — meeting-planner stabilization: one validator, attendee-as-helper, the Isaac root closed
 
 The dedicated meeting-planner chat's first build wave — five structural collapses replacing months of patch-on-patch with single sources of truth, net **−345 LOC** (790 deleted / 445 added). The headline: the Isaac/"Brainrocket" incident is closed at its root (an owner-approved booking no longer bounces on stale attendee free/busy), and `find_available_slots` + the booking path now share ONE validator, so search can never again offer a slot the book path refuses. No schema change; restart required.

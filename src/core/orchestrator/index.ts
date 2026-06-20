@@ -1955,7 +1955,19 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
         // twice in one turn. See the short-circuit at the top of the loop.
         if (toolUse.name === 'delete_meeting') {
           const eventId = (toolUse.input as any)?.event_id ?? (toolUse.input as any)?.id;
-          if (typeof eventId === 'string') deletedEventIdsThisTurn.add(eventId);
+          if (typeof eventId === 'string') {
+            deletedEventIdsThisTurn.add(eventId);
+            // C2(a) — drop it from the thread ledger too, so a later reference-back
+            // ("change the one I just booked") never resolves to the dead id.
+            if (input.threadTs && (r.success === true || r.deleted === true || r.ok === true)) {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { forgetThreadEvent } = require('../../utils/threadEventLedger') as
+                  typeof import('../../utils/threadEventLedger');
+                forgetThreadEvent(input.threadTs, eventId);
+              } catch { /* non-fatal */ }
+            }
+          }
         }
         // v1.7.4 — remember messaged colleagues so the same colleague can't be
         // messaged twice in one turn. See the short-circuit at the top of the loop.
