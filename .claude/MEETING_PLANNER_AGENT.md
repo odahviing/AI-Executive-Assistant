@@ -14,6 +14,12 @@ So this chat does NOT do more patches. Its job, in order:
 
 Standing rules (same as the main project): **propose-first, never auto-fix; wait for a per-bug "fix it."** Code-first, root-cause, no patch-on-patch. Prompt is a last resort for judgment/tone/format only. Reads (logs, db-query, code) are free; writes need a build signal.
 
+## Operating mode now (v3.4.5+) — ad-hoc fix-it, driven by the bug chat
+
+The big stabilization waves below have **shipped** (Collapses A–D, the open-holes pass; the Isaac meeting-subsystem roots are closed). This agent's day-to-day now is an **ad-hoc problem-solver**: most work arrives as a specific bug or fix **routed from the bug chat**. For each: run the discipline below, root-cause it against the code on disk, fix at the chokepoint following Owner rules 1–14, `trace` to 100%, stop. Still propose-first; still no patch-on-patch; still reduce LOC.
+
+**OUT OF SCOPE — the approval / booking / close-loop spine.** That layer (`src/core/requests/*`, `closeMeetingArtifacts`, the coord booking + requester relay, the legacy `approvals` table) is now owned by a **dedicated approval chat** — see `.claude/APPROVAL_SPINE_HANDOFF.md`. If a meeting bug's real root is the approval→booking→relay reconnection (the Yael / Isaac-desync / Daniel-drop class), it routes THERE. This agent owns the planner's **deterministic core**: search (`find_available_slots`), validate (`checkSlot`), book-decision (`planMeeting`), TZ / WE / floating-blocks, the Graph layer + cache.
+
 ## Owner rules — carry these forward to EVERY future meeting agent
 
 These are the owner's standing principles for this subsystem. They are load-bearing — every diagnosis and every fix is checked against them. The list will grow (owner expects ~20); keep appending in his words, restated as a working prompt.
@@ -85,7 +91,7 @@ These are the owner's standing principles for this subsystem. They are load-bear
 2. **One-validator consistency.** Search (`find_available_slots`) vs candidate-check (`availabilityPreCheck`) vs booking (`planMeeting` → `checkSlot` + `getFreeBusy`) giving different answers for the same slot. "Everyone free" at propose → conflict at book. **Make `checkSlot` the single truth; everything else routes through it.**
 3. **Cross-timezone.** ET↔Israel inversion, an ET time searched as Israel, bare trip-times, WE away-TZ. The shared `timezoneConvert` + travel-context exist — verify every entry point uses them.
 4. **Working-Elsewhere framework.** Partially wired — `find_available_slots`/`planMeeting`/create/move/update are WE-aware; `availabilityPreCheck` just got WE-aware (v3.4.3). `checkSlot` itself is still WE-blind (callers pass `isAway`). Confirm the WE marker is even detected before trusting it.
-5. **Approvals + close-loop relay.** The requester relay silently not landing (the Yael/Eve case: requester correctly set, state → awaiting_colleague, but no DM reached her); dedup blocking the retry; "I'll tell them" promised-without-sending. **This is currently the top open root.**
+5. **Approvals + close-loop relay.** → **MOVED to the approval chat** (`.claude/APPROVAL_SPINE_HANDOFF.md`). The requester-relay drop, the 5-booking-path / 7-relay-path / dual-state-system tangle, and the missing approve→book hard link are no longer this agent's to fix. (The v3.4.5 `closeMeetingArtifacts` stamp-on-ok fix shipped; the architecture remains the approval chat's.)
 6. **Endless clarifying / not accepting an answer.** Asking for the subject 5× when it was given ("Brainrocket"), "who's Yossi" 4×. Circular, infuriating.
 7. **Owner-side ↔ colleague-side desync.** The same meeting negotiated in two threads at once, out of sync (Isaac thread negotiating 11:30 + "waiting for Idan" while the owner thread is force-booking 11:00).
 8. **Don't-ask-just-do under owner force.** Owner says "Force" / "book" repeatedly; Maelle keeps asking. The "For fuck sake!! Don't ask. Book" moment.
@@ -140,7 +146,8 @@ Roots: **endless clarifying / not accepting "Brainrocket" as the subject**; **na
 ### Boston-trip booking thread (2026-06-17) — mostly fixed in v3.4.0–v3.4.3, watch for regressions
 The travel-context keystone (`resolveOwnerTravelContextForDate`) + the create/move/update wiring + F1 ledger + F2 week-anchor + WE-aware `availabilityPreCheck` shipped. Residuals: first bare-date ref may need a clarify; G1 stale-proposal-after-time-shift (free-check not re-run when proposed times change — prompt note). Verify the travel-context fires on a real WE week (bare times → trip TZ, location → trip place, "Thursday" → trip week) and that the no-marker in-office flow is byte-identical.
 
-### Yael / Eve-tour close-loop relay (2026-06-18 ~22:59) — TOP OPEN ROOT
+### Yael / Eve-tour close-loop relay (2026-06-18) — → MOVED to the approval chat
+**This is the approval chat's now** (`.claude/APPROVAL_SPINE_HANDOFF.md`). v3.4.5 shipped the precise relay-drop fix (`closeMeetingArtifacts` stamps `requester_notified_at` only on a confirmed ok send → silent failure becomes a safe retry) + definitive relay diagnostics; the live stuck request was cancelled 6/20. The remaining architecture (5 book paths / 7 relay paths / dual state system / no approve→book hard link) is the approval chat's rethink. Historical detail kept below for context:
 `resolve_approval(amend)` on a policy_exception: requester (Yael) correctly set, origin = her thread, state correctly → `awaiting_colleague` — **but the relay DM never reached her** (she asked "what did he propose?"; no send-failure warn, no owner shadow; `requester_notified_at` null is expected for amend and is NOT the proof). The retry was then **killed by LLM-dedup** (a fresh `create_approval` matched the existing one). The owner had to prompt ("did you send to Yael?") before `message_colleague` finally fired. The resolver's successful 1:1 send logs nothing, so the exact drop point isn't yet provable from the log — **add a definitive send-result log to `notifyRequesterOfDecision` first**, then root-cause. NOTE: a guard-chat change makes the claim-checker treat `resolve_approval` as backing "the requester will get it" — that is **unsafe until this relay reliably lands**, because it would mask exactly this drop. Coordinate.
 
 ### Mike / June-28 WE candidate-check (2026-06-18 ~08:17)
@@ -153,10 +160,11 @@ Mike proposed June-28 (WE week) times; `availabilityPreCheck` (then WE-blind) re
 
 ## The four agents (use during bug resolve)
 
-This chat is the **meeting agent**. Three others run in parallel on the same repo — route work to the right one and check the shared tree at wrap (`git fetch` + working-tree diff):
-- **Meeting agent (this chat)** — the meeting-planner subsystem, end to end.
+This chat is the **meeting agent**. Other chats run in parallel on the same repo — route work to the right one and check the shared tree at wrap (`git fetch` + working-tree diff):
+- **Meeting agent (this chat)** — the meeting-planner **deterministic core** (search / validate / book-decision / TZ / WE / floating-blocks / Graph + cache). NOT the approval spine.
+- **Approval agent** — the approval → booking → close-loop spine (`src/core/requests/*`, `closeMeetingArtifacts`, coord booking + relay, the legacy `approvals` table). See `.claude/APPROVAL_SPINE_HANDOFF.md`. The desync / relay-drop / "did the colleague get told" class lives here now.
 - **Guard agent** — the gate stack: `claimChecker`, `securityGate`, `humanGate`, `coordGuard`, `dateVerifier`, `postReply` pipeline. Honesty/leak/false-positive issues go here.
 - **Prompt agent** — the orchestrator system prompt (`systemPrompt.ts`): language rules, scheduling narration, judgment/tone. The prompt is a budget; rules that belong in code don't go here.
-- **Tenancy agent** — tool descriptions + per-skill prompt sections + de-tenant/learned-preference work (e.g. `set_event_category` routing, one-language composition, suggestion completeness).
+- **Tenancy agent** — tool descriptions + per-skill prompt sections + de-tenant/learned-preference work.
 
-When a meeting bug's real fix is honesty/leak → guard; tone/judgment → prompt; tool-description/routing → tenancy. The meeting agent owns the deterministic core.
+When a meeting bug's real fix is approval/booking/relay → approval chat; honesty/leak → guard; tone/judgment → prompt; tool-description/routing → tenancy. The meeting agent owns the deterministic scheduling core.
