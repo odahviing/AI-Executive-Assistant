@@ -86,8 +86,7 @@ export type NextCheckHandler =
   | 'outreach_decision'      // 2 workdays after no-response → auto-close with "want me to try again?"
   | 'send_scheduled_outreach' // fire a future-dated outreach DM
   | 'reminder_fire'          // fire a reminder DM at due_at
-  | 'research_run'           // run a research prompt through the agent loop, DM the result
-  | 'approval_action_timeout';// owner approved but the fulfilling booking/cancel never landed → relay approval to requester + close (the Daniel close-loop safety net)
+  | 'research_run';          // run a research prompt through the agent loop, DM the result
 
 export interface RequestRow {
   // Identity

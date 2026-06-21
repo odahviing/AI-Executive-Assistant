@@ -567,12 +567,32 @@ export async function bookCoordination(
   try {
     const requesters = JSON.parse(job.requesters || '[]') as Array<{ slack_id: string; name?: string }>;
     const participantSlackIds = new Set(participants.map(p => p.slack_id).filter(Boolean));
+    // v3.4.6 (spine collapse) — thread the requester close-loop into their
+    // ORIGIN thread, matching notifyRequesterOfDecision / closeMeetingArtifacts
+    // so this relay isn't the lone new-top-level-DM offender. We can thread when
+    // the requester matches the coord's linked spine request (the common
+    // single-requester case); extra requesters with no stored thread stay
+    // unthreaded as before.
+    let linkedReqThread: string | undefined;
+    let linkedReqRequester: string | null = null;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getRequest } = require('../../../db/requests') as typeof import('../../../db/requests');
+      const link = getDb().prepare(`SELECT request_id FROM coord_jobs WHERE id = ?`).get(job.id) as
+        { request_id: string | null } | undefined;
+      if (link?.request_id) {
+        const rr = getRequest(link.request_id);
+        if (rr) { linkedReqThread = rr.origin_thread_ts ?? undefined; linkedReqRequester = rr.requester_slack_id; }
+      }
+    } catch (_) { /* best-effort threading */ }
     for (const r of requesters) {
       if (!r.slack_id || participantSlackIds.has(r.slack_id)) continue;
       const rDt = DateTime.fromISO(slot);
+      const threadTs = (linkedReqRequester && linkedReqRequester === r.slack_id) ? linkedReqThread : undefined;
       const res = await slackConn.sendDirect(
         r.slack_id,
         `Following up — I set up "${job.subject}" for ${rDt.toFormat("EEEE, d MMMM 'at' HH:mm")}. All set.`,
+        threadTs ? { threadTs } : undefined,
       );
       if (!res.ok) {
         logger.warn('Could not notify requester of booking', { reason: res.reason, slackId: r.slack_id });

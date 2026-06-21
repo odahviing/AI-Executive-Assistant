@@ -608,51 +608,14 @@ export function updateCoordJob(
     }
   }
 
-  // v1.6.2 — whenever a coord reaches a terminal state, sync its approvals to
-  // a matching terminal state in the same transaction. This is THE single
-  // invariant for "coord done → approvals resolved". Every call site that
-  // booked / abandoned / cancelled a coord previously had to remember to
-  // resolve its approvals; forgetting produced orphans that re-nagged the
-  // owner after the meeting was already on the calendar. Now: impossible to
-  // forget — updateCoordJob is the only gate.
+  // v3.4.6 (spine collapse) — the legacy "sync coord-terminal → approvals
+  // table" block that lived here is GONE. The approvals table is dropped;
+  // the linked spine REQUEST is closed by the terminal cascade below
+  // (getLinkedRequestIdForCoord → closeRequest), which is the single invariant
+  // now. The approval_expiry/approval_reminder TASK cancel was also dead (those
+  // task types no longer exist — approval timing is on the spine).
   const terminal = updates.status;
   if (terminal === 'booked' || terminal === 'cancelled' || terminal === 'abandoned') {
-    const newApprovalStatus =
-      terminal === 'booked' ? 'approved'
-      : 'superseded';  // cancelled | abandoned both mean "not acting on this approval"
-    const pending = db.prepare(
-      `SELECT id FROM approvals WHERE skill_ref = ? AND status = 'pending'`
-    ).all(id) as { id: string }[];
-    for (const a of pending) {
-      db.prepare(`
-        UPDATE approvals
-        SET status = @status,
-            decision_json = COALESCE(decision_json, @decision_json),
-            responded_at = datetime('now'),
-            updated_at = datetime('now')
-        WHERE id = @id
-      `).run({
-        id: a.id,
-        status: newApprovalStatus,
-        decision_json: JSON.stringify({
-          auto_synced: true,
-          coord_terminal_status: terminal,
-          winning_slot: (updates as any).winning_slot ?? null,
-          external_event_id: (updates as any).external_event_id ?? null,
-        }),
-      });
-      // Also cancel the approval_expiry + approval_reminder follow-up tasks
-      // so they don't re-fire after the thing is done (v2.1.3 adds the
-      // halfway-point reminder — same cascade-cancel logic applies).
-      db.prepare(`
-        UPDATE tasks
-        SET status = 'cancelled', updated_at = datetime('now')
-        WHERE type IN ('approval_expiry', 'approval_reminder')
-          AND skill_ref = @approval_id
-          AND status IN ('new','scheduled','in_progress','pending_owner')
-      `).run({ approval_id: a.id });
-    }
-
     // v1.6.9 — write terminal-state history to each key participant's
     // interaction_log. This is legitimate past-tense history ("we booked
     // Subject for Thursday", "we tried to coord Subject, it didn't happen")

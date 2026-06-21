@@ -8,7 +8,7 @@ import { buildSystemPrompt } from '../src/core/orchestrator/systemPrompt';
 import { buildSkillsPromptSection, getActiveSkills } from '../src/skills/registry';
 import { formatPreferencesForPrompt, formatPeopleMemoryForPrompt } from '../src/db';
 import { formatPeopleCatalogSync } from '../src/memory/peopleMemory';
-import { getPendingApprovalsForOwner } from '../src/db/approvals';
+import { getAwaitingOwnerRequests } from '../src/db/requests';
 
 const profileMap = loadAllProfiles();
 const profile = [...profileMap.values()][0];
@@ -107,7 +107,7 @@ const personaActive = (profile.skills as any)?.persona === true;
 const prefs = formatPreferencesForPrompt(profile.user.slack_user_id) || '';
 const people = formatPeopleMemoryForPrompt(profile.user.slack_user_id, undefined, personaActive) || '';
 const catalog = formatPeopleCatalogSync(profile) || '';
-const approvals = getPendingApprovalsForOwner(profile.user.slack_user_id);
+const approvals = getAwaitingOwnerRequests(profile.user.slack_user_id);
 row('preferences (formatPreferencesForPrompt)', prefs);
 row('people memory (formatPeopleMemoryForPrompt)', people);
 row('people catalog (formatPeopleCatalogSync)', catalog);

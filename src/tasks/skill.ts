@@ -810,19 +810,29 @@ Binding — how to pick the right approval_id:
           const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
           const conn = getConnection(ownerUserId, 'slack');
           if (conn) {
-            // v3.1.7 — thread into the owner's original conversation when this
-            // is a relay of a colleague reply to a recent owner-outreach.
-            const ownerSendOpts = relayOwner?.owner_dm_thread_ts
-              ? { threadTs: relayOwner.owner_dm_thread_ts }
-              : undefined;
-            const res = await conn.sendDirect(ownerUserId, dmText, ownerSendOpts);
+            // v3.4.6 (spine collapse) — post the ask into the owner's ONE daily
+            // decision thread (lazily created on the first approval of the day;
+            // day-key honors day_boundary_hour so a 1am ask lands on the prior
+            // workday's thread). terminal_dm_msg_ts = THIS message's ts so ✅
+            // resolves THIS approval regardless of how many share the thread;
+            // owner_dm_thread_ts = the daily root so typed replies route to
+            // content attribution. Supersedes the v3.1.7 outreach-relay
+            // threading (all approvals consolidate into the daily thread now).
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { getOrCreateOwnerDailyThread } = require('../utils/ownerDailyThread') as
+              typeof import('../utils/ownerDailyThread');
+            const daily = await getOrCreateOwnerDailyThread({ profile, conn });
+            const res = daily
+              ? await conn.postToChannel(daily.channel, dmText, { threadTs: daily.rootTs })
+              : await conn.sendDirect(ownerUserId, dmText);  // fallback: plain DM
             if (res.ok) {
               updateRequest(row.id, {
-                ownerDmChannel: res.ref ?? undefined,
+                ownerDmChannel: daily?.channel ?? res.ref ?? undefined,
+                ownerDmThreadTs: daily?.rootTs ?? undefined,
                 terminalDmMsgTs: res.ts ?? undefined,
               });
             } else {
-              logger.error('create_approval — sendDirect to owner failed', {
+              logger.error('create_approval — owner ask post failed', {
                 requestId: row.id, reason: res.reason, detail: res.detail,
               });
             }

@@ -21,12 +21,11 @@ import {
   updateCoordJob,
   getCoordLifecycle,
   getCoordJobsByParticipant,
-  getPendingApprovalsBySkillRef,
-  mergeApprovalPayload,
-  setApprovalDecision,
+  getDb,
   type CoordParticipant,
   type CoordJob,
 } from '../../../db';
+import { mergeRequestDetails } from '../../../db/requests';
 import { shadowNotify } from '../../../utils/shadowNotify';
 import { getConnection } from '../../../connections/registry';
 import { interpretReplyWithAI, isCoordReplyByContext } from './utils';
@@ -294,22 +293,37 @@ export async function handleCoordReply(
         // Fall through to the approval path below on any failure.
       }
 
-      // Existing path: attach counter to pending approval + DM owner for
-      // sign-off. Used for schedule-intent coords, passive mode, counters
-      // outside same week, or counters that break a rule.
-      const pendings = getPendingApprovalsBySkillRef(job.id);
+      // Attach the counter to the SPINE request (the linked coord request owns
+      // the decision now) + DM owner for sign-off. Used for schedule-intent
+      // coords, passive mode, counters outside same week, or counters that
+      // break a rule.
       const proposedLocalLabel = followupIntent.proposed_iso
         ? DateTime.fromISO(followupIntent.proposed_iso).setZone(params.profile.user.timezone).toFormat('EEEE d MMM \'at\' HH:mm')
         : null;
-      for (const ap of pendings) {
-        mergeApprovalPayload(ap.id, {
-          counter_offer: {
-            iso: followupIntent.proposed_iso ?? null,
-            label: proposedLocalLabel,
-            raw_text: params.text.trim(),
-            from_participant: participant.name,
-            received_at: new Date().toISOString(),
-          },
+      // v3.4.6 (spine collapse) — was mergeApprovalPayload on the legacy
+      // approvals table, which no longer has any writer → the counter was
+      // persisted NOWHERE and a "yes, take it" booked the STALE slot. Now we
+      // update the linked request's winning_slot so resolveSlotPickApproval
+      // books the COUNTERED time on approve, and record provenance.
+      try {
+        const linkRow = getDb()
+          .prepare(`SELECT request_id FROM coord_jobs WHERE id = ?`)
+          .get(job.id) as { request_id: string | null } | undefined;
+        if (linkRow?.request_id) {
+          mergeRequestDetails(linkRow.request_id, {
+            ...(followupIntent.proposed_iso ? { winning_slot: followupIntent.proposed_iso } : {}),
+            counter_offer: {
+              iso: followupIntent.proposed_iso ?? null,
+              label: proposedLocalLabel,
+              raw_text: params.text.trim(),
+              from_participant: participant.name,
+              received_at: new Date().toISOString(),
+            },
+          });
+        }
+      } catch (err) {
+        logger.warn('coord counter — failed to persist counter on spine request', {
+          jobId: job.id, err: String(err).slice(0, 200),
         });
       }
       // DM owner so they SEE this (not just log it)
@@ -326,13 +340,12 @@ export async function handleCoordReply(
       return true;
     }
 
-    // Cancellation: participant pulling out. Resolve pending approval as
-    // cancelled (cascading task/coord cleanup is handled by setApprovalDecision).
+    // Cancellation: participant pulling out. v3.4.6 (spine collapse) — the
+    // setApprovalDecision loop on the legacy approvals table is gone (dead: no
+    // writer). updateCoordJob({status:'cancelled'}) runs the terminal cascade
+    // that closes the linked spine request + cancels the coordination task, so
+    // the close is fully handled here.
     if (followupIntent.intent === 'cancel') {
-      const pendings = getPendingApprovalsBySkillRef(job.id);
-      for (const ap of pendings) {
-        setApprovalDecision({ id: ap.id, status: 'cancelled', decision: { reason: `${participant.name} pulled out: ${params.text.trim().slice(0, 160)}` } });
-      }
       updateCoordJob(job.id, { status: 'cancelled', notes: `${participant.name} pulled out` });
       await slackConn.postToChannel(job.owner_channel,
         `${participant.name} pulled out of "${job.subject}": "${params.text.trim().slice(0, 200)}". I've closed it.`,

@@ -20,13 +20,14 @@
  */
 
 import { getDb } from '../db';
+import { getOpenRequestsForOwner } from '../db/requests';
 import { closeMeetingArtifacts } from './closeMeetingArtifacts';
 import { verifyEventDeleted } from '../connectors/graph/calendar';
 import logger from './logger';
 
 interface ArtifactRef {
   meetingId: string;
-  source: 'approval' | 'task' | 'outreach';
+  source: 'request' | 'task' | 'outreach';
 }
 
 /** Pull every meeting_id referenced by an open artifact for this owner. */
@@ -35,17 +36,16 @@ function collectReferencedMeetingIds(ownerUserId: string): ArtifactRef[] {
   const refs: ArtifactRef[] = [];
   const seen = new Set<string>();
 
-  // Pending approvals — payload may carry meeting_id under a few keys
-  const approvalRows = db.prepare(`
-    SELECT payload_json FROM approvals
-    WHERE owner_user_id = ? AND status = 'pending'
-  `).all(ownerUserId) as Array<{ payload_json: string }>;
-  for (const row of approvalRows) {
-    const ids = extractMeetingIds(row.payload_json);
+  // Open spine requests — details may carry meeting_id under a few keys.
+  // v3.4.6 (spine collapse) — approvals are requests now; the legacy approvals
+  // table is dropped, so scan the requests spine instead.
+  const reqRows = getOpenRequestsForOwner(ownerUserId);
+  for (const r of reqRows) {
+    const ids = extractMeetingIds(r.details_json ?? '');
     for (const id of ids) {
       if (!seen.has(id)) {
         seen.add(id);
-        refs.push({ meetingId: id, source: 'approval' });
+        refs.push({ meetingId: id, source: 'request' });
       }
     }
   }
@@ -135,12 +135,12 @@ export async function cleanupVanishedMeetingArtifacts(params: {
     try {
       const stillGone = await verifyEventDeleted(params.ownerEmail, ref.meetingId);
       if (!stillGone) continue; // event still exists — leave artifacts intact
-      const cleaned = closeMeetingArtifacts({
+      const cleaned = await closeMeetingArtifacts({
         ownerUserId: params.ownerUserId,
         meetingId: ref.meetingId,
         reason: 'deleted',
       });
-      const total = cleaned.approvalsResolved + cleaned.tasksCancelled + cleaned.outreachClosed;
+      const total = cleaned.tasksCancelled + cleaned.outreachClosed + cleaned.calendarIssuesResolved;
       if (total > 0) {
         result.cleaned++;
         logger.info('cleanupVanishedMeetingArtifacts: closed orphan artifacts', {

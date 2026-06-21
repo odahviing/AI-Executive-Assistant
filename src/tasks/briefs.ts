@@ -168,6 +168,7 @@ function buildApprovalItem(r: RequestRow, timezone: string): RichItem {
     requester_name: r.requester_name ?? det.requester_name ?? null,
     requester_slack_id: r.requester_slack_id ?? null,
     expires_at: r.expires_at,
+    expires_at_relative: r.expires_at ? relativeTime(r.expires_at, timezone) : null,
     proposed_start: det.proposed_start ?? det.start ?? det.winning_slot ?? null,
     proposed_end: det.proposed_end ?? det.end ?? null,
     winning_slot: det.winning_slot ?? null,
@@ -625,7 +626,7 @@ TASK OWNERSHIP:
 - ONE-PLACE RULE — every item belongs in ONE spot in the brief. Don't narrate the same conflict / approval / status twice (once as a freestanding line and again inside a per-person paragraph, or vice versa). Pick the surface that reads most naturally and put it only there.
 - MULTI-CONFLICT AGGREGATION — bundle, don't enumerate.
 - outreach awaiting_colleague with no decision → "X hasn't replied — want me to try again or drop it?"
-- approval in state="awaiting_colleague" → ${firstName}'s counter was RELAYED to requester_name and they have NOT replied yet. Say "waiting to hear back from <name> on <subject>". NEVER state or imply the requester said something, pushed back, or rejected the counter — there is no reply on record. "Relayed your counter to Eli, no word back yet" ✅. "Eli said the counter doesn't work" ❌ (you have no message from them).
+- approval in state="awaiting_colleague" → ${firstName}'s counter was RELAYED to requester_name and they have NOT replied yet. Say "waiting to hear back from <name> on <subject>". NEVER state or imply the requester said something, pushed back, or rejected the counter — there is no reply on record. "Relayed your counter to Eli, no word back yet" ✅. "Eli said the counter doesn't work" ❌ (you have no message from them). When expires_at_relative is set and close (today/tomorrow), anchor the nudge to it — "waiting on Mike; this lapses tomorrow if he doesn't come back, worth a poke" — so ${firstName} knows it's about to time out, not open indefinitely.
 - kind="tombstoned_colleague" → ONE passive past-tense line about the PERSON in plain human words. ✅ "I'll stop pinging Yael for now — she hasn't replied to a few of my pings, will pick it back up when she's around." ❌ "Yael is no longer active in the system" / "removed from my working list" / "deactivated her record" / any phrasing that exposes internal tracking, system state, or bot framing.
 - kind="auto_categorized":
   - For events in \`applied\` (categories Maelle figured out) → ONE informational past-tense line, NOT a question. ("Tagged 'X' as Weekly.")

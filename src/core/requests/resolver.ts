@@ -75,71 +75,6 @@ export interface ResolveResult {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
- * v3.4.2 (2.2 close-loop) — grace window for the "owner approved, fulfilling
- * action pending" hold. The booking/cancel that fulfills an approved colleague
- * request is almost always a separate later tool call (the slot wasn't known at
- * approve time, or Sonnet books it in a follow-up turn). We keep the request
- * OPEN this long so that action can reconnect via closeMeetingArtifacts and the
- * requester hears the CONCRETE outcome ("booked Mon 17:00"). If nothing lands
- * in the window, approval_action_timeout relays a neutral "owner signed off" so
- * the requester is never left hanging. Tunable; favors catching the booking
- * over relaying a bare "yes" instantly.
- */
-const APPROVAL_ACTION_GRACE_HOURS = 4;
-
-/**
- * Should this approved request stay OPEN until its fulfilling action lands,
- * instead of closing now? True for a colleague-requested approval the OWNER
- * just approved with NO replayable action wired — the classic dead-end where
- * closing at approve orphans the later booking/cancel so the requester never
- * hears the concrete result (Daniel never heard "booked Mon 17:00").
- *
- * Scoped deliberately:
- *   - kind='approval' only (coord/outreach own their own lifecycle).
- *   - a real colleague requester (not owner-internal, where there's nobody to
- *     loop back to — those just close).
- *   - owner-resolving only (NOT ctx.wasAwaitingColleague — the colleague-
- *     accepts-counter path keeps its bespoke "locked in" phrasing).
- */
-function shouldHoldForFulfillingAction(row: RequestRow, ctx: ResolveContext): boolean {
-  return row.kind === 'approval'
-    && !!row.requester_slack_id
-    && row.requester_slack_id !== row.owner_user_id
-    && !ctx.wasAwaitingColleague;
-}
-
-/**
- * Keep an approved colleague request OPEN (state=in_flight) and arm a grace
- * timer instead of closing + notifying now. The fulfilling booking/cancel will
- * reconnect via closeMeetingArtifacts' open-request scan and fire the concrete
- * close-loop DM; approval_action_timeout is the safety net if it never lands.
- * Deliberately does NOT notify the requester yet — that's the whole point.
- */
-function holdForFulfillingAction(row: RequestRow, approveData: Record<string, unknown>): ResolveResult {
-  const details = parseDetails<Record<string, unknown>>(row) ?? {};
-  updateRequest(row.id, {
-    state: 'in_flight',
-    details: {
-      ...details,
-      awaiting_fulfilling_action: true,
-      approved_at: DateTime.now().toISO(),
-      approve_data: approveData,
-    },
-    nextCheckAt: DateTime.now().plus({ hours: APPROVAL_ACTION_GRACE_HOURS }).toUTC().toISO(),
-    nextCheckHandler: 'approval_action_timeout',
-  });
-  logger.info('resolveRequest — owner approved, holding open for the fulfilling action to reconnect (close-loop 2.2)', {
-    id: row.id, requester: row.requester_slack_id, graceHours: APPROVAL_ACTION_GRACE_HOURS,
-  });
-  return {
-    ok: true,
-    request_id: row.id,
-    state: 'in_flight',
-    effect: 'approved — held open so the booking/cancel closes the loop with the concrete result',
-  };
-}
-
-/**
  * Owner-busy freshness re-check before committing a slot_pick booking. Reads
  * FRESH (forceRefresh) — the owner's calendar drifts while an approval sits,
  * and a STALE cache hit is exactly what bounced a real booking over a slot that
@@ -320,7 +255,7 @@ export async function resolveRequest(
     // v2.9.1 — colleague countering owner's counter (amending state). Bounce
     // back to awaiting_owner; owner sees "Yael said: not 14:00, how about
     // 15:30?". Owner re-decides. Same round-cap protection.
-    const MAX_AMEND_ROUNDS_BOUNCE = 5;
+    const MAX_AMEND_ROUNDS_BOUNCE = 3;
     if (wasAwaitingColleague) {
       if (amendRound > MAX_AMEND_ROUNDS_BOUNCE) {
         logger.warn('resolveRequest — colleague-counter amend round cap hit', {
@@ -380,9 +315,9 @@ export async function resolveRequest(
     // PENDING APPROVALS prompt block + Sonnet calls resolve_approval.
     //
     // Cap rounds to prevent infinite ping-pong (owner counters, requester
-    // counters, owner counters again, …). Default cap 5; after that the
-    // request expires.
-    const MAX_AMEND_ROUNDS = 5;
+    // counters, owner counters again, …). Default cap 3; after that the
+    // request expires (owner direction 2026-06-21 — "up to 3 rounds, no more").
+    const MAX_AMEND_ROUNDS = 3;
     if (amendRound > MAX_AMEND_ROUNDS) {
       logger.warn('resolveRequest — amend round cap hit, closing as expired', {
         id: requestId, round: amendRound, cap: MAX_AMEND_ROUNDS,
@@ -486,16 +421,14 @@ export async function resolveRequest(
     });
   }
 
-  // No on_approve — the fulfilling work (book/cancel) is a separate later step
-  // that Sonnet does next. v3.4.2 (2.2 close-loop): for a colleague-requested
-  // approval, DON'T close + notify now — that's the dead-end. Closing here marks
-  // the request terminal, so when the booking lands later closeMeetingArtifacts
-  // (which only scans OPEN requests) can't reconnect, and the requester never
-  // hears the concrete outcome. Hold it open instead; the booking reconnects and
-  // notifies with the real result, and a grace timer is the safety net.
-  if (shouldHoldForFulfillingAction(row, ctx)) {
-    return holdForFulfillingAction(row, approveData);
-  }
+  // No on_approve — this is a PURE yes/no approval (e.g. "ok to share my
+  // number?"): there's no fulfilling booking/cancel to wait for, so close +
+  // relay "owner said yes" now. v3.4.6 (spine collapse) — the old
+  // holdForFulfillingAction bridge + 4h timer is GONE. Booking-implying
+  // approvals carry on_approve (policy_exception auto-stamps deferred_action),
+  // so they go through runApproveCallback → tier-0 relay with the concrete
+  // time; a booking that genuinely lands in a later free turn reconnects via
+  // closeMeetingArtifacts' thread-ts match. Nothing is left hanging either way.
   closeRequest({
     id: requestId,
     state: 'resolved',
@@ -529,13 +462,10 @@ async function runApproveCallback(
     logger.warn('resolveRequest — on_approve tool not replayable, closing without firing', {
       id: row.id, tool,
     });
-    // v3.4.2 (2.2 close-loop) — same dead-end guard as the no-callback path: a
-    // colleague-requested approval whose action runs as a separate later step
-    // must stay open so the booking/cancel can reconnect + notify with the
-    // concrete result, rather than closing here and orphaning it.
-    if (shouldHoldForFulfillingAction(row, ctx)) {
-      return holdForFulfillingAction(row, {});
-    }
+    // v3.4.6 (spine collapse) — close + notify now. The hold/timer bridge is
+    // gone; an unreplayable on_approve.tool means Sonnet's next turn does the
+    // work, and a booking that lands then reconnects via closeMeetingArtifacts'
+    // thread-ts match. The requester hears "owner said yes" here regardless.
     closeRequest({
       id: row.id,
       state: 'resolved',
@@ -555,6 +485,15 @@ async function runApproveCallback(
   } else if (tool !== 'delete_meeting') {
     replayArgs.relaxed = true;
   }
+  // v3.4.6 (spine collapse) — the HARD approve→book link. Stamp the
+  // originating request id onto the replay so the booking-side cleanup
+  // (closeMeetingArtifacts) can identify the EXACT request this booking
+  // fulfills and SKIP it — because THIS function owns its close + relay
+  // (right after the replay returns). That ownership is what kills the
+  // resolver-vs-cascade relay race at the root: no more reconstruct-by-
+  // fuzzy-subject + requester_notified_at refereeing. The id rides through
+  // runDeferredAction → the tool handler → closeMeetingArtifacts.
+  replayArgs._fulfilling_request_id = row.id;
 
   logger.info('resolveRequest — on_approve replay', {
     id: row.id, tool, kind: row.kind, subkind: row.subkind,

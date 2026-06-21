@@ -3125,12 +3125,16 @@ export class SchedulingSkill {
           // attempt never close on the successful retry. Subject is passed so
           // the subject-fallback match catches rows whose details.meeting_id is
           // undefined.
-          closeMeetingArtifacts({
+          await closeMeetingArtifacts({
             ownerUserId: context.profile.user.slack_user_id,
             meetingId,
             reason: 'created',
             subject: args.subject as string | undefined,
             bookingThreadTs: context.threadTs,
+            // v3.4.6 — approve→book link: on a resolver-driven replay this is
+            // the originating request id, so the cascade skips it (resolver owns
+            // its close + relay). Undefined on direct/owner-path books.
+            fulfillingRequestId: args._fulfilling_request_id as string | undefined,
           });
 
           // The booked slot became real, so any tentative hold on it is
@@ -3627,12 +3631,13 @@ export class SchedulingSkill {
           location: newLocationFromShape,
           isOnline: newIsOnlineFromShape,
         });
-        closeMeetingArtifacts({
+        await closeMeetingArtifacts({
           ownerUserId: context.profile.user.slack_user_id,
           meetingId: args.meeting_id as string,
           reason: 'updated',
           subject: (args.new_subject as string | undefined) ?? (args.meeting_subject as string | undefined),
           bookingThreadTs: context.threadTs,
+          fulfillingRequestId: args._fulfilling_request_id as string | undefined,
         });
         auditLog({
           action: 'update_meeting',
@@ -4036,12 +4041,13 @@ export class SchedulingSkill {
                   meetingId: args.meeting_id as string,
                   start: effectiveStart, end: effectiveEnd,
                 }).then(async () => {
-                  closeMeetingArtifacts({
+                  await closeMeetingArtifacts({
                     ownerUserId: context.profile.user.slack_user_id,
                     meetingId: args.meeting_id as string,
                     reason: 'moved',
                     subject: args.meeting_subject as string | undefined,
                     bookingThreadTs: context.threadTs,
+                    fulfillingRequestId: args._fulfilling_request_id as string | undefined,
                   });
                   // v3.2.1 (#120 / 120b) — return the vacated slot here too. The
                   // floating-block move (e.g. lunch) is exactly the case where
@@ -4348,12 +4354,13 @@ export class SchedulingSkill {
           }
         }
 
-        closeMeetingArtifacts({
+        await closeMeetingArtifacts({
           ownerUserId: context.profile.user.slack_user_id,
           meetingId: args.meeting_id as string,
           reason: 'moved',
           subject: args.meeting_subject as string | undefined,
           bookingThreadTs: context.threadTs,
+          fulfillingRequestId: args._fulfilling_request_id as string | undefined,
         });
         // #30 — the move landed on this slot, so release any hold overlapping it
         // (overlap, not exact-start: a move target may not begin exactly at the
@@ -4621,12 +4628,13 @@ export class SchedulingSkill {
             message: `Delete call returned success but "${args.meeting_subject}" is still on the calendar. Tell the owner honestly — don't claim it's deleted.`,
           };
         }
-        closeMeetingArtifacts({
+        await closeMeetingArtifacts({
           ownerUserId: context.profile.user.slack_user_id,
           meetingId: args.meeting_id as string,
           reason: 'deleted',
           subject: args.meeting_subject as string | undefined,
           bookingThreadTs: context.threadTs,
+          fulfillingRequestId: args._fulfilling_request_id as string | undefined,
         });
         // v3.1.7 / #119 — if the deleted event was a floating block (lunch,
         // etc.), record a date-scoped dismissal so active-mode health doesn't

@@ -1904,13 +1904,31 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         const { getRequestByTerminalMsgTs } = await import('../../db/requests');
         const approval = getRequestByTerminalMsgTs(item.ts);
         if (!approval) return;
-        // Map the reaction to a verdict. Conservative set per owner direction.
-        // Approve: white_check_mark, +1, pray, thumbsup, heavy_check_mark.
-        // Reject: x, -1, thumbsdown.
-        // Anything else (clap, eyes, fire, ...) — ignore. Owner can still
-        // resolve via typed reply.
-        const APPROVE_REACTIONS = new Set(['white_check_mark', 'heavy_check_mark', '+1', 'thumbsup', 'pray']);
-        const REJECT_REACTIONS = new Set(['x', 'negative_squared_cross_mark', '-1', 'thumbsdown']);
+        // Map the reaction to a verdict. Widened sets (owner direction
+        // 2026-06-21 — "increase yes/no emoji so 'ok' does yes, as long as
+        // they're not ambiguous; ~10-15 each is fine"). NOT owner-configurable
+        // by design — a clone's owner won't define it; the defaults must just
+        // cover the obvious ones.
+        // Approve: every unambiguous affirmative (check marks, thumbs, ok-hand,
+        //   :ok:, :100:, :pray:/thanks-as-ack).
+        // Reject: every unambiguous negative (x marks, thumbs-down, no-entry,
+        //   :no_good:).
+        // DELIBERATELY excluded (ambiguous — could be neither yes nor no):
+        //   eyes 👀, thinking 🤔, fire 🔥, tada 🎉, clap 👏, raised_hands 🙌,
+        //   v ✌️. Those stay no-ops; the owner can still resolve via typed reply.
+        const APPROVE_REACTIONS = new Set([
+          'white_check_mark', 'heavy_check_mark', 'ballot_box_with_check',
+          'check_mark', 'check', 'white_tick',
+          '+1', 'thumbsup', '+1::skin-tone-2', '+1::skin-tone-3',
+          'ok_hand', 'ok', 'ok_woman',
+          '100', 'pray', 'saluting_face',
+        ]);
+        const REJECT_REACTIONS = new Set([
+          'x', 'negative_squared_cross_mark', 'heavy_multiplication_x',
+          'cross_mark', 'multiplication_x',
+          '-1', 'thumbsdown',
+          'no_entry', 'no_entry_sign', 'no_good', 'prohibited',
+        ]);
         let verdict: 'approve' | 'reject' | null = null;
         if (APPROVE_REACTIONS.has(reaction)) verdict = 'approve';
         else if (REJECT_REACTIONS.has(reaction)) verdict = 'reject';

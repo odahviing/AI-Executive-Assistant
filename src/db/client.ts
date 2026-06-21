@@ -168,6 +168,13 @@ function initSchema(db: Database.Database): void {
   // v1.6.0 — drop legacy `coordination_jobs` table entirely (superseded by coord_jobs)
   try { db.exec(`DROP TABLE IF EXISTS coordination_jobs`); } catch (_) {}
 
+  // v3.4.6 (spine collapse) — drop the legacy `approvals` table entirely.
+  // Approvals are requests now (src/core/requests/, src/db/requests.ts);
+  // createApproval was deleted in v3.0.6 and the last readers (coord-reply
+  // counter/cancel) were migrated to the spine. No history kept — owner
+  // direction: leave no dead storage.
+  try { db.exec(`DROP TABLE IF EXISTS approvals`); } catch (_) {}
+
   const columnMigrations = [
     `ALTER TABLE outreach_jobs ADD COLUMN colleague_tz TEXT`,
     `ALTER TABLE outreach_jobs ADD COLUMN scheduled_at TEXT`,
@@ -767,6 +774,18 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_requests_thread ON requests(origin_thread_ts);
     CREATE INDEX IF NOT EXISTS idx_requests_outcome_event ON requests(outcome_external_event_id);
     CREATE INDEX IF NOT EXISTS idx_requests_target ON requests(target_slack_id, state);
+
+    -- Owner daily decision thread (v3.4.6). One thread per owner per day,
+    -- lazily created by the first approval; all of that day's owner-facing asks
+    -- nest under it. day_key = getEffectiveToday (honors day_boundary_hour).
+    CREATE TABLE IF NOT EXISTS owner_daily_threads (
+      owner_user_id          TEXT NOT NULL,
+      day_key                TEXT NOT NULL,   -- ISO date of the owner's effective day
+      dm_channel             TEXT NOT NULL,   -- owner DM channel id
+      root_ts                TEXT NOT NULL,   -- the dated-header message ts (thread root)
+      created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (owner_user_id, day_key)
+    );
 
     -- Recurring schedules (replaces routines table + cron-typed rows from tasks)
     CREATE TABLE IF NOT EXISTS cron_schedules (

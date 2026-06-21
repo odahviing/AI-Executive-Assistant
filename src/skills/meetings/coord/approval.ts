@@ -124,16 +124,38 @@ export async function emitWaitingOwnerApproval(
   }
 
   // DM the owner. terminal_dm_msg_ts stamped on this row — emoji ✅ binds here.
+  // v3.4.6 (spine collapse) — a coord approval is an owner DECISION, so for a
+  // DM-initiated coord it joins the owner's daily decision thread (same home as
+  // create_approval). A GROUP-initiated coord (owner_channel is a C-channel)
+  // stays in the group, where the owner is already engaged in context — moving
+  // it to a private DM thread would strip that context. owner_dm_thread_ts is
+  // overridden to the daily root so typed replies route to content attribution.
   let ts: string | undefined;
   if (slackConn) {
-    const res = await slackConn.postToChannel(job.owner_channel, askText, {
-      threadTs: job.owner_thread_ts ?? undefined,
-    });
+    const isGroupChannel = job.owner_channel?.startsWith('C') === true;
+    let postChannel = job.owner_channel;
+    let postThread: string | undefined = job.owner_thread_ts ?? undefined;
+    if (!isGroupChannel && profile) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getOrCreateOwnerDailyThread } = require('../../../utils/ownerDailyThread') as
+          typeof import('../../../utils/ownerDailyThread');
+        const daily = await getOrCreateOwnerDailyThread({ profile, conn: slackConn });
+        if (daily) { postChannel = daily.channel; postThread = daily.rootTs; }
+      } catch (err) {
+        logger.warn('emitWaitingOwnerApproval — daily-thread resolve failed, using owner_channel', {
+          jobId: job.id, err: String(err).slice(0, 200),
+        });
+      }
+    }
+    const res = await slackConn.postToChannel(postChannel, askText, { threadTs: postThread });
     if (res.ok) {
       ts = res.ts;
-      if (ts) {
-        updateRequest(requestId, { terminalDmMsgTs: ts });
-      }
+      updateRequest(requestId, {
+        ownerDmChannel: postChannel,
+        ownerDmThreadTs: postThread,
+        terminalDmMsgTs: ts,
+      });
     } else {
       logger.error('emitWaitingOwnerApproval — DM failed', {
         reason: res.reason, detail: res.detail, jobId: job.id,

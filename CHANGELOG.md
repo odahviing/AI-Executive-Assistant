@@ -2,6 +2,34 @@
 
 ---
 
+## 3.4.6 — approval-spine collapse: one approve→book link, one relay, one daily decision thread; legacy approvals table dropped
+
+The dedicated approval chat rethought the approval → booking → close-loop spine, which had regressed into patch-on-patch (relay drops, double-DMs, a 4-tier fuzzy reconnect backstopped by a 4h timer). Root cause: at approve time nothing stamped a shared id linking the approval to the booking that fulfills it, so the booking-side cleanup reconstructed the link by fuzzy subject/thread match and the relays collided. The fix is a collapse, not another layer — a hard approve→book id link lets us DELETE mechanisms rather than add a 13th. Plus a product change the owner asked for: Maelle's approval asks to the owner now live in ONE daily decision thread instead of a fresh DM each. Patch bump per owner direction; restart required (schema migration drops a table).
+
+### Changed — the spine collapse
+- **Hard approve→book link.** The resolver stamps `_fulfilling_request_id` onto the replayed action ([resolver.ts](src/core/requests/resolver.ts)); it rides through `runDeferredAction` → the meeting tool → `closeMeetingArtifacts`, which now has a tier-0 rule: that exact request belongs to the resolver, so the cascade SKIPS it. Exactly one owner per booking — the resolver-vs-cascade relay race is gone by ownership, not refereed by a flag.
+- **One requester relay, consistently threaded.** Every requester close-loop now threads into the requester's `origin_thread_ts` (MPIM channel or 1:1 DM): `closeMeetingArtifacts`, the runner expiry path, and the coord booking requester-notify ([booking.ts](src/skills/meetings/coord/booking.ts)) all match `notifyRequesterOfDecision`. No more close-loop landing as a stray new top-level DM.
+- **Coord counter migrated to the spine.** A participant counter during `waiting_owner` now updates the linked request's `details.winning_slot` ([coord/reply.ts](src/skills/meetings/coord/reply.ts)) so the owner's "yes, take it" books the COUNTERED time — previously it wrote the legacy approvals table (no writer left) and the counter was persisted nowhere.
+
+### Added — owner daily decision thread
+- One lazily-created thread per day ("Discussions — Sat 21 Jun") holds all of that day's owner approval asks + outcomes, instead of a fresh top-level DM per ask. Day-key reuses `getEffectiveToday` (honors `schedule.day_boundary_hour`, so a 1am ask lands on the prior workday's thread). New `src/utils/ownerDailyThread.ts` + `owner_daily_threads` table; `create_approval` and `emitWaitingOwnerApproval` post into it (group-channel coords stay in their group). Emoji ✅/❌ still resolves per-message; typed replies are content-attributed across the day's open approvals (`threadBoundApprovalAutoResolve` rewrite), asking "which one?" only when genuinely ambiguous. Scope is approvals only — brief/health/shadows stay on their own surfaces.
+
+### Removed
+- `holdForFulfillingAction` + the 4h `approval_action_timeout` handler (and its `NextCheckHandler` member): with the booking closing its exact request synchronously, there's nothing to hold open.
+- The fragile exact-subject match tier and the dead `approvals`-table scan in `closeMeetingArtifacts`; the now-dead `approvalsResolved` result field.
+- The legacy `db/approvals.ts` module and its three orphan readers (`getPendingApprovalsBySkillRef`/`setApprovalDecision`/`mergeApprovalPayload`); the obsolete `cutover-to-requests.cjs` + `purge-orphan-approvals.cjs` scripts.
+
+### Migration
+- `DROP TABLE IF EXISTS approvals` runs on startup ([client.ts](src/db/client.ts)) — approvals are requests now; no history kept (owner direction: no dead storage). All readers were removed first: `jobs.ts` coord terminal cascade (the linked-request close at `jobs.ts` is the surviving invariant), `cleanupVanishedMeetingArtifacts` (now scans the requests spine), `measure-prompt.ts`.
+- New `owner_daily_threads` table created on startup.
+
+### Changed — small
+- Ping-pong amend cap 5 → 3 (owner direction). Approve/reject reaction emoji sets widened (✅✔️👍👌🆗💯… / ❌👎🚫⛔…), ambiguous emoji (👀🤔🔥🎉👏) deliberately ignored.
+- Bundles a small other-chat change in [briefs.ts](src/tasks/briefs.ts).
+
+### Invariants preserved
+- Colleague-side relay threading untouched; per-message emoji resolution untouched; coord terminal cascade still closes the linked spine request; phantom-confirmation guard (replay throws on `{error}`/`{ok:false}`) intact. Typecheck clean; 14/14 post-build paper-trace.
+
 ## 3.4.5 — open-holes wave: past-time + phantom-attendee guards, dead-id cleanup, room override; Isaac flow-fixes in the prompt; relay diagnostics
 
 A cross-chat bundle on top of the 3.4.4 stabilization. The meeting chat closed three of the open holes its adversarial pass had surfaced (C2/C3/C4) plus made the last hard room-refusal overridable; the prompt chat landed the judgment-side Isaac fixes (accept an answer given once, stop asking under force); and the close-loop relay got definitive send-result logging so the next silent drop is provable. No schema change; restart required.

@@ -10,10 +10,11 @@
  * This helper is the single choke point. Call it after a successful meeting
  * mutation and it will:
  *
- *   1. Resolve pending approvals whose payload references this meeting_id
- *      (keys: meeting_id / existing_event_id / event_id / external_event_id).
- *      Cancels their sibling approval_expiry + approval_reminder tasks via
- *      the existing setApprovalDecision cascade.
+ *   1. (v3.4.6) Close matching spine REQUESTS — pending approvals are requests
+ *      now (the legacy approvals table is retired). Match order: tier-0
+ *      fulfillingRequestId (skip — the resolver owns it), then
+ *      outcome_external_event_id, details meeting_id, and origin_thread_ts.
+ *      See step 5 for the full cascade.
  *
  *   2. Close outreach_jobs with intent='meeting_reschedule' whose context_json
  *      references this meeting_id. Cancels their outreach_expiry +
@@ -46,13 +47,12 @@ import logger from './logger';
 export type MeetingArtifactReason = 'created' | 'moved' | 'updated' | 'deleted';
 
 export interface CloseMeetingArtifactsResult {
-  approvalsResolved: number;
   tasksCancelled: number;
   outreachClosed: number;
   calendarIssuesResolved: number;
 }
 
-export function closeMeetingArtifacts(params: {
+export async function closeMeetingArtifacts(params: {
   ownerUserId: string;
   meetingId: string;
   reason: MeetingArtifactReason;
@@ -71,12 +71,22 @@ export function closeMeetingArtifacts(params: {
    * more robust than exact-subject equality, which broke when a meeting's final
    * title differed from the request's working title (Dina: request "Gong call"
    * vs booked "Gong <> Reflectiz" → never closed → false expiry tombstone).
-   * Optional; when absent, thread-match is skipped (only id/subject matches run).
+   * Optional; when absent, thread-match is skipped (only id matches run).
    */
   bookingThreadTs?: string;
-}): CloseMeetingArtifactsResult {
+  /**
+   * v3.4.6 (spine collapse) — the HARD approve→book link. When this booking is
+   * a resolver-driven replay fulfilling a specific request, the resolver stamps
+   * that request's id here (via the replay args → tool handler). This function
+   * then SKIPS that exact request — the resolver owns its close + relay right
+   * after the replay returns. This is what removes the resolver-vs-cascade
+   * relay race at the root: exactly one owner per booking, decided by id, not
+   * reconstructed by fuzzy subject/thread match. All OTHER artifacts still
+   * cascade normally.
+   */
+  fulfillingRequestId?: string;
+}): Promise<CloseMeetingArtifactsResult> {
   const result: CloseMeetingArtifactsResult = {
-    approvalsResolved: 0,
     tasksCancelled: 0,
     outreachClosed: 0,
     calendarIssuesResolved: 0,
@@ -87,42 +97,11 @@ export function closeMeetingArtifacts(params: {
   try {
     const db = getDb();
 
-    // 1. Pending approvals whose payload references this meeting
-    const pendingApprovals = db.prepare(`
-      SELECT id, payload_json FROM approvals
-      WHERE owner_user_id = ? AND status = 'pending'
-    `).all(params.ownerUserId) as Array<{ id: string; payload_json: string }>;
-
-    const matchingApprovalIds: string[] = [];
-    for (const row of pendingApprovals) {
-      if (payloadReferencesMeeting(row.payload_json, params.meetingId)) {
-        matchingApprovalIds.push(row.id);
-      }
-    }
-
-    if (matchingApprovalIds.length > 0) {
-      const decisionJson = JSON.stringify({
-        auto_synced: true,
-        closed_by: 'meeting_artifact_cleanup',
-        reason: params.reason,
-        meeting_id: params.meetingId,
-      });
-      const resolveStmt = db.prepare(`
-        UPDATE approvals
-        SET status = 'superseded',
-            decision_json = COALESCE(decision_json, @decision_json),
-            responded_at = datetime('now'),
-            updated_at = datetime('now')
-        WHERE id = @id
-      `);
-      // v3.1.1 — removed the approval_expiry/approval_reminder TASK cancel:
-      // those task types no longer exist (approval timers are spine
-      // next_check_handlers now, cleared by closeRequest). Dead SQL gone.
-      for (const approvalId of matchingApprovalIds) {
-        resolveStmt.run({ id: approvalId, decision_json: decisionJson });
-        result.approvalsResolved++;
-      }
-    }
+    // v3.4.6 (spine collapse) — the legacy `approvals`-table scan that used to
+    // live here is GONE. Nothing writes that table anymore (createApproval was
+    // deleted in v3.0.6; emitWaitingOwnerApproval + create_approval write only
+    // the requests spine), so the scan always matched zero rows. Pending
+    // approvals are spine requests now, closed by the request cascade in step 5.
 
     // 2. Outreach jobs with intent='meeting_reschedule' referencing this meeting
     const outreachRows = db.prepare(`
@@ -209,6 +188,8 @@ export function closeMeetingArtifacts(params: {
 
       const directMatches = getRequestsByExternalEventId(params.ownerUserId, params.meetingId);
       for (const r of directMatches) {
+        // tier-0 skip — the resolver owns this request's close + relay.
+        if (params.fulfillingRequestId && r.id === params.fulfillingRequestId) continue;
         closeRequest({
           id: r.id,
           state: 'cancelled',
@@ -258,38 +239,27 @@ export function closeMeetingArtifacts(params: {
         }
       }
 
-      const subjectLower = (params.subject ?? '').trim().toLowerCase();
       for (const r of open) {
+        // tier-0 skip — the resolver owns this exact request's close + relay
+        // (it stamped its id into the replay). Touching it here is the race we
+        // deleted: leave it entirely to the resolver.
+        if (params.fulfillingRequestId && r.id === params.fulfillingRequestId) continue;
         if (directMatches.some(d => d.id === r.id)) continue;
         let matched = payloadReferencesMeeting(r.details_json, params.meetingId);
 
-        // PRIMARY colleague linkage — the request originated in the booking's
-        // thread and is the sole open colleague candidate there. Robust to the
-        // meeting being titled differently from the request.
+        // Colleague linkage for NON-resolver bookings (direct create, or a
+        // booking that landed in a free turn): the request originated in the
+        // booking's thread and is the sole open colleague candidate there.
+        // Robust to the meeting being titled differently from the request
+        // (Dina: "Gong call" vs "Gong <> Reflectiz"). v3.4.6 — the fragile
+        // exact-subject tier that used to back this up is DELETED; tier-0
+        // (resolver-driven) + this thread-match cover the real cases, and a
+        // renamed meeting never false-matches a stale same-subject request.
         if (!matched && threadMatchId && r.id === threadMatchId) {
           matched = true;
           logger.info('closeMeetingArtifacts — colleague-request thread-match fired', {
             requestId: r.id, subject: r.subject,
             bookingThreadTs: params.bookingThreadTs, meetingId: params.meetingId,
-          });
-        }
-
-        // SECONDARY (legacy) — exact-subject equality for colleague-initiated
-        // requests. Kept as a precise fallback for paths with no thread context
-        // (e.g. owner-path bookings); thread-match above is the robust primary.
-        // Exact equality only, so it can't false-match a renamed meeting.
-        if (
-          !matched
-          && subjectLower
-          && r.requester_slack_id
-          && r.requester_slack_id !== params.ownerUserId
-          && r.subject
-          && r.subject.trim().toLowerCase() === subjectLower
-        ) {
-          matched = true;
-          logger.info('closeMeetingArtifacts — colleague-request subject-match fallback fired', {
-            requestId: r.id, subkind: r.subkind, subject: params.subject,
-            requesterSlackId: r.requester_slack_id, meetingId: params.meetingId,
           });
         }
         if (matched) {
@@ -337,25 +307,36 @@ export function closeMeetingArtifacts(params: {
                 // resolver path. This is the fallback when booking landed
                 // outside the resolver.
                 const text = `Hey ${requesterFirst}, locked in "${subjectText}" — calendar invite is on its way.`;
-                void conn.sendDirect(r.requester_slack_id, text).catch(err => {
-                  logger.warn('closeMeetingArtifacts — requester close-loop DM failed', {
-                    requestId: r.id, requesterSlackId: r.requester_slack_id,
-                    err: String(err).slice(0, 200),
+                // Stamp requester_notified_at ONLY after a confirmed ok send.
+                // On failure (throw OR {ok:false}) leave it UNSET so a later
+                // relay (or the next cascade) can retry — a silent send failure
+                // becomes a safe retry instead of a permanent invisible drop.
+                //
+                // v3.4.6 — consistent requester threading: relay into the
+                // requester's ORIGIN thread (MPIM channel or 1:1 DM), mirroring
+                // notifyRequesterOfDecision, so the close-loop never lands as a
+                // stray new top-level DM. This path only fires for NON-resolver
+                // bookings now (tier-0 hands resolver-driven requests back to
+                // the resolver); the resolver's own relay owns those.
+                try {
+                  const sent = (r.origin_is_mpim && r.origin_channel)
+                    ? await conn.postToChannel(r.origin_channel, text, { threadTs: r.origin_thread_ts ?? undefined })
+                    : await conn.sendDirect(r.requester_slack_id, text, { threadTs: r.origin_thread_ts ?? undefined });
+                  if (sent.ok) {
+                    updateRequest(r.id, { requesterNotifiedAt: new Date().toISOString() });
+                    logger.info('closeMeetingArtifacts — close-loop DM sent + stamped', {
+                      requestId: r.id, requesterSlackId: r.requester_slack_id, subject: subjectText,
+                    });
+                  } else {
+                    logger.warn('closeMeetingArtifacts — close-loop DM not ok, leaving requester_notified_at unset for retry', {
+                      requestId: r.id, requesterSlackId: r.requester_slack_id, reason: sent.reason,
+                    });
+                  }
+                } catch (err) {
+                  logger.warn('closeMeetingArtifacts — close-loop DM threw, leaving requester_notified_at unset for retry', {
+                    requestId: r.id, requesterSlackId: r.requester_slack_id, err: String(err).slice(0, 200),
                   });
-                });
-                // Stamp so the resolver's notify (which runs right after the
-                // replay) skips its own DM. The resolver still fires the owner
-                // shadow off this stamp (115a). v3.1.1 — this stamp is
-                // DELIBERATELY synchronous (not inside the send's .then): the
-                // resolver fresh-reads requester_notified_at immediately after
-                // the replay returns, so an async stamp would race and let the
-                // resolver double-DM. The DM is fire-and-forget; if Slack
-                // rejects it the requester still gets the calendar invite, and
-                // the resolver path (the common case) awaits + stamps-on-ok.
-                updateRequest(r.id, { requesterNotifiedAt: new Date().toISOString() });
-                logger.info('closeMeetingArtifacts — fired close-loop DM to colleague-requester', {
-                  requestId: r.id, requesterSlackId: r.requester_slack_id, subject: subjectText,
-                });
+                }
               }
             } catch (err) {
               logger.warn('closeMeetingArtifacts — requester notify path threw, continuing to close', {
@@ -384,7 +365,7 @@ export function closeMeetingArtifacts(params: {
       });
     }
 
-    if (result.approvalsResolved > 0 || result.tasksCancelled > 0 || result.outreachClosed > 0 || result.calendarIssuesResolved > 0) {
+    if (result.tasksCancelled > 0 || result.outreachClosed > 0 || result.calendarIssuesResolved > 0) {
       logger.info('closeMeetingArtifacts — cascade fired', {
         meetingId: params.meetingId,
         reason: params.reason,
