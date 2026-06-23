@@ -90,6 +90,16 @@ export interface SkillContext {
   isOwnerInGroup?: boolean;           // true when the owner sent this message in an MPIM
   mpimMemberIds?: string[];           // all non-bot member IDs when in MPIM
   /**
+   * v3.4.7 — the turn-scoped set of colleague slack_ids SUCCESSFULLY messaged
+   * (message_colleague returned ok) this turn, by reference. resolve_approval
+   * forwards it to the resolver so notifyRequesterOfDecision skips a relay to a
+   * requester Sonnet already told this turn (the reverse-order double-notify
+   * guard). Success-gated on purpose: a FAILED message_colleague is NOT in here,
+   * so the resolver relay still goes — never a silent drop. Orchestrator-
+   * populated; undefined on other call paths.
+   */
+  messagedColleaguesOkThisTurn?: Set<string>;
+  /**
    * v1.9.0 — which Connection this message arrived on. Used by the router so
    * replies follow the inbound transport (Yael DMs on Slack → Maelle replies
    * on Slack). For now always 'slack' since that's the only Connection; will

@@ -29,6 +29,35 @@ import { isWithinOwnerWorkHours, nextOwnerWorkdayStart } from '../../utils/workH
 import logger from '../../utils/logger';
 
 /**
+ * The ONE notification primitive for the spine sweep: send a DM or channel post
+ * and LOG the outcome (res.ok + reason). A soft Slack failure (res.ok=false, no
+ * throw — channel issue, not-in-channel) must never be swallowed silently — that
+ * was the EXPIRY-SILENT-SEND blind spot, the same class as the close-loop relay
+ * drop. Returns whether it landed. Used by every send below so there's one path,
+ * not a per-site clone.
+ */
+async function sendTracked(
+  conn: NonNullable<ReturnType<typeof getConnection>>,
+  target: { dm: string } | { channel: string },
+  body: string,
+  opts: { threadTs?: string } | undefined,
+  label: string,
+  requestId?: string,
+): Promise<boolean> {
+  try {
+    const res = 'dm' in target
+      ? await conn.sendDirect(target.dm, body, opts)
+      : await conn.postToChannel(target.channel, body, opts);
+    if (res.ok) logger.info(`${label} — sent`, { requestId });
+    else logger.warn(`${label} — send failed`, { requestId, reason: res.reason });
+    return res.ok;
+  } catch (err) {
+    logger.warn(`${label} — send threw`, { requestId, err: String(err).slice(0, 200) });
+    return false;
+  }
+}
+
+/**
  * Sweep all due requests. Called from the main runner loop on the same
  * cadence the legacy task runner uses.
  *
@@ -140,10 +169,13 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
         const what = row.kind === 'coord'
           ? `I never heard back on "${row.subject ?? 'that meeting'}" — I've closed it for now. Want me to pick it back up?`
           : `I never heard back on the approval I asked about. I've closed it, let me know if you want to try again.`;
-        await conn.postToChannel(
-          row.owner_dm_channel,
+        await sendTracked(
+          conn,
+          { channel: row.owner_dm_channel },
           what,
           { threadTs: row.owner_dm_thread_ts ?? undefined },
+          'runExpiry owner tombstone',
+          row.id,
         );
       }
     } catch (err) {
@@ -167,15 +199,17 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
         // requester's origin thread (MPIM channel or 1:1 DM), matching
         // notifyRequesterOfDecision. Pre-fix the 1:1 path dropped the thread,
         // so the close-loop landed as a new top-level DM with no history.
-        if (row.origin_is_mpim && row.origin_channel) {
-          await conn.postToChannel(row.origin_channel, body, {
-            threadTs: row.origin_thread_ts ?? undefined,
-          });
-        } else {
-          await conn.sendDirect(row.requester_slack_id, body, {
-            threadTs: row.origin_thread_ts ?? undefined,
-          });
-        }
+        const target = row.origin_is_mpim && row.origin_channel
+          ? { channel: row.origin_channel }
+          : { dm: row.requester_slack_id };
+        await sendTracked(
+          conn, target, body,
+          { threadTs: row.origin_thread_ts ?? undefined },
+          'runExpiry requester loop-close', row.id,
+        );
+        // Stamp the once-only notify flag (mirrors resolver.notifyRequesterOfDecision)
+        // so no later notify path can double-DM this requester.
+        updateRequest(row.id, { requesterNotifiedAt: new Date().toISOString() });
       }
     } catch (err) {
       logger.warn('runExpiry — requester loop-close DM failed', {

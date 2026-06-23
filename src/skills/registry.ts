@@ -176,10 +176,18 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
     // ("book coffee with Yael"); also lives in the 'venue' scope.
     'find_venue',
   ]),
-  // v3.x (Block 2) — multi-party coordination (DM-poll several people for a
-  // shared time). Rare; the classifier unions 'meetings' when it fires so
-  // Sonnet still has the calendar reads. Kept as code for the future
-  // email-external coordination path — just no longer shipped by default.
+  // ⚠️ DEMOTED + SLATED FOR FULL REMOVAL (v3.4.x). The coordinate_meeting TOOL
+  // is unused, but coord is NOT actually dead: it's still reachable via the
+  // OUTREACH→SCHEDULING HANDOFF (coordinator.ts:604 → initiateCoordination),
+  // which fired HARMFULLY on 2026-06-23 (the Luke incident — a colleague agreed
+  // to a specific time, the handoff discarded it, re-coordinated the whole week,
+  // and reported a fabricated "everyone agreed on Sunday"). Full rip-out is the
+  // next task; the handoff must become a direct create_meeting of the agreed
+  // time. Original bug that demoted it (v3.3.8): coord ran as a PARALLEL track
+  // that desynced from the direct path (orphan nudging + two tracks negotiating
+  // different slots — the Isaac/"Brainrocket" desync). If ever rebuilt (for an
+  // external/calendar-invisible transport), build it FRESH as the SOLE track for
+  // that requester — never parallel to a direct booking path.
   coord: new Set<string>([
     'coordinate_meeting', 'get_active_coordinations', 'cancel_coordination',
     'finalize_coord_meeting',
@@ -302,7 +310,14 @@ function logUnmappedToolOnce(toolName: string): void {
 const COLLEAGUE_ALLOWED_TOOLS = new Set([
   'find_slack_user',
   'get_calendar',
-  'get_free_busy',
+  // get_free_busy is NOT colleague-allowed (removed v3.4.x). It's a raw
+  // open-time lookup that is WE-BLIND — on a Working-Elsewhere/travel day it
+  // reports the owner's HOME work hours as free, so "when's Idan free Sunday?"
+  // answered off it offered Israel hours while he was in Boston (the Gidon
+  // incident). For a colleague, finding time to meet IS find_available_slots —
+  // it's rule-aware AND travel-aware; availabilityPreCheck covers "is X free?".
+  // There is no colleague booking question that get_free_busy answers correctly
+  // that find_available_slots doesn't answer better.
   'find_available_slots',
   // v2.0.7 — store_request retired. Colleague-initiated asks that need owner
   // input now go through create_task + create_approval, both of which ARE in

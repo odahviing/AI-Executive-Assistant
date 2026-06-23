@@ -61,6 +61,67 @@ async function sweepExpiredSlotHolds(profiles: Map<string, UserProfile>): Promis
 }
 
 /**
+ * Reconcile active holds against the REAL calendar: when a held slot has become
+ * an actual meeting WITH the holder on it (e.g. the colleague sent the Outlook
+ * invite themselves — "I sent the invite"), the hold is fulfilled. Release it so
+ * it doesn't dangle or later "I freed up your slot" a meeting that's now real.
+ * Owner-parked holds (no holder_slack_id) are skipped — no attendee to match.
+ */
+async function reconcileFulfilledHolds(profiles: Map<string, UserProfile>): Promise<void> {
+  try {
+    const { getActiveSlotHolds, releaseSlotHold } = await import('../db/slotHolds');
+    const { getPersonMemory } = await import('../db/people');
+    const { getCalendarEvents } = await import('../connectors/graph/calendar');
+    const { DateTime } = await import('luxon');
+    for (const profile of profiles.values()) {
+      const holds = getActiveSlotHolds(profile.user.slack_user_id);
+      for (const h of holds) {
+        if (!h.holder_slack_id) continue;
+        const holderEmail = (getPersonMemory(h.holder_slack_id)?.email ?? '').toLowerCase();
+        if (!holderEmail) continue;
+        const startMs = Date.parse(h.start_iso);
+        const endMs = Date.parse(h.end_iso);
+        if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) continue;
+        const day = DateTime.fromMillis(startMs).setZone(profile.user.timezone).toFormat('yyyy-MM-dd');
+        let events;
+        try {
+          events = await getCalendarEvents(profile.user.email, day, day, profile.user.timezone);
+        } catch { continue; }
+        const fulfilled = events.some(ev => {
+          if (ev.isCancelled) return false;
+          const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
+          const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).toMillis();
+          if (!(evStart < endMs && evEnd > startMs)) return false;   // must overlap the held window
+          return (ev.attendees ?? []).some(a => (a.emailAddress?.address ?? '').toLowerCase() === holderEmail);
+        });
+        if (fulfilled) {
+          releaseSlotHold(h.id, 'fulfilled_by_booking');
+          logger.info('reconcileFulfilledHolds — hold became a real meeting, released', {
+            id: h.id, holder: h.holder_name,
+          });
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn('reconcileFulfilledHolds threw — continuing', { err: String(err).slice(0, 200) });
+  }
+}
+
+// The hold lifecycle (reconcile + expiry) runs on its OWN 30-min cadence, not
+// every 5-min tick — a 2-day-out hold doesn't need 5-min polling, and per the
+// owner that frequency read as spam. The global tick stays 5-min (reminders /
+// routines / request expiry need it); only the hold work is throttled here.
+const HOLD_PROCESS_INTERVAL_MS = 30 * 60 * 1000;
+let lastHoldProcessMs = 0;
+async function processSlotHoldsIfDue(profiles: Map<string, UserProfile>): Promise<void> {
+  const now = Date.now();
+  if (now - lastHoldProcessMs < HOLD_PROCESS_INTERVAL_MS) return;
+  lastHoldProcessMs = now;
+  await reconcileFulfilledHolds(profiles);   // release holds that became real meetings
+  await sweepExpiredSlotHolds(profiles);      // then expire the genuinely-stale ones
+}
+
+/**
  * Starts the 5-minute background timer that runs all periodic tasks.
  */
 export function startBackgroundTimer(
@@ -87,7 +148,7 @@ export function startBackgroundTimer(
     if (!app) return;
     materializeRoutineTasks(profiles)
       .then(() => runDueTasks(app, profiles))
-      .then(() => sweepExpiredSlotHolds(profiles))
+      .then(() => processSlotHoldsIfDue(profiles))
       .catch(err => logger.error('Routine→task pipeline error', { err: String(err) }));
 
     // v3.1 (Path 2 Stage 8) — requests-spine reconciliation + retention. Closes

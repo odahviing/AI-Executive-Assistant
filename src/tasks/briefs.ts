@@ -804,17 +804,29 @@ export async function sendMorningBriefing(
   let slotHoldsSummary: string | undefined;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getActiveSlotHolds } = require('../db/slotHolds') as typeof import('../db/slotHolds');
+    const { getActiveSlotHolds, getRecentlyFulfilledHolds } = require('../db/slotHolds') as typeof import('../db/slotHolds');
     const holds = getActiveSlotHolds(ownerUserId);
+    const lines: string[] = [];
     if (holds.length > 0) {
-      slotHoldsSummary = holds.map(h => {
+      lines.push(...holds.map(h => {
         const when = DateTime.fromISO(h.start_iso).setZone(profile.user.timezone);
         const whenLabel = when.isValid ? when.toFormat('EEE d MMM HH:mm') : h.start_iso;
         const since = DateTime.fromISO((h.created_at || '').replace(' ', 'T'), { zone: 'utc' });
         const ageHrs = since.isValid ? Math.round(DateTime.now().diff(since, 'hours').hours) : null;
         return `- ${h.holder_name}: ${whenLabel}${h.subject ? ` (${h.subject})` : ''}${h.reason ? ` — ${h.reason}` : ''}${ageHrs != null ? `, held ${ageHrs}h` : ''}`;
-      }).join('\n');
+      }));
     }
+    // Auto-resolved holds (became real meetings since the last brief) — a closed
+    // loop to report, not an open reservation.
+    const fulfilled = getRecentlyFulfilledHolds(ownerUserId, 24);
+    if (fulfilled.length > 0) {
+      lines.push(...fulfilled.map(h => {
+        const when = DateTime.fromISO(h.start_iso).setZone(profile.user.timezone);
+        const whenLabel = when.isValid ? when.toFormat('EEE d MMM HH:mm') : h.start_iso;
+        return `- (resolved) the ${whenLabel} hold for ${h.holder_name}${h.subject ? ` (${h.subject})` : ''} became a real meeting — I released the hold.`;
+      }));
+    }
+    if (lines.length > 0) slotHoldsSummary = lines.join('\n');
   } catch (err) {
     logger.warn('briefs — slot-holds gather threw, continuing', { err: String(err).slice(0, 150) });
   }

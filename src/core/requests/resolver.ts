@@ -60,6 +60,17 @@ export interface ResolveContext {
    * said yes").
    */
   wasAwaitingColleague?: boolean;
+  /**
+   * v3.4.7 — reverse-order double-notify guard. The set of colleague slack_ids
+   * Sonnet already messaged (message_colleague) THIS turn. When Sonnet messages
+   * the requester the outcome BEFORE calling resolve_approval in the same turn
+   * (owner said "tell her and approve it"), the resolver's own relay would be a
+   * SECOND DM. notifyRequesterOfDecision skips its relay for a requester in this
+   * set — they already heard it. Populated by the orchestrator from its
+   * turn-scoped messagedColleaguesThisTurn; absent on non-orchestrator paths
+   * (emoji, Module D), where there's no competing message_colleague.
+   */
+  alreadyMessagedRequesterIds?: Set<string>;
 }
 
 export interface ResolveResult {
@@ -661,6 +672,15 @@ async function resolveSlotPickApproval(
       synchronous: true,
     });
     if (result.ok) {
+      // v3.4.7 — stamp requester_notified_at: bookCoordination just told the
+      // requester (it notifies job.requesters + participants on booking). This
+      // brings slot_pick into the single-notification interlock so the
+      // orchestrator's double-notify guard suppresses a redundant same-turn
+      // message_colleague to this requester (the relay here goes via coord, not
+      // notifyRequesterOfDecision, which skips coord/slot_pick).
+      if (row.requester_slack_id && row.requester_slack_id !== row.owner_user_id && !row.requester_notified_at) {
+        try { updateRequest(row.id, { requesterNotifiedAt: new Date().toISOString() }); } catch (_) { /* non-fatal */ }
+      }
       closeRequest({
         id: row.id, state: 'resolved',
         closureReason: 'owner_approved_slot_pick_and_booked',
@@ -762,6 +782,22 @@ async function notifyRequesterOfDecision(
   }
   if (row.kind === 'approval' && (row.subkind === 'slot_pick' || row.subkind === 'calendar_conflict')) {
     logger.info('notifyRequesterOfDecision — skip: slot_pick/calendar_conflict (coordinator loop-close owns it)', { id: row.id, subkind: row.subkind });
+    return;
+  }
+  // v3.4.7 — reverse-order double-notify guard. Sonnet already messaged this
+  // requester THIS turn (message_colleague ran before resolve_approval), so this
+  // relay would be the SECOND DM. Skip it; stamp requester_notified_at on a
+  // terminal verdict so state stays truthful (they WERE told) and downstream
+  // reads it. Symmetric to the orchestrator's forward guard; deterministic, no
+  // clock. (If the message_colleague send had failed it wouldn't be in the set,
+  // so the relay would still go — no silent drop.)
+  if (requesterSlackId && ctx.alreadyMessagedRequesterIds?.has(requesterSlackId)) {
+    logger.info('notifyRequesterOfDecision — skip: requester already messaged this turn (reverse-order double-notify guard)', {
+      id: row.id, requesterSlackId, verdict,
+    });
+    if (verdict === 'approve' || verdict === 'reject') {
+      try { updateRequest(row.id, { requesterNotifiedAt: new Date().toISOString() }); } catch (_) { /* non-fatal */ }
+    }
     return;
   }
 

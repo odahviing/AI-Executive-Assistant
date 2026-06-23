@@ -183,6 +183,19 @@ export function getDueSlotHolds(nowIso: string): SlotHold[] {
   `).all(nowIso) as SlotHold[];
 }
 
+/** Holds released as fulfilled-by-booking in the last `hours` — so the brief can
+ *  tell the owner "the slot I was holding for X became a real meeting." */
+export function getRecentlyFulfilledHolds(ownerUserId: string, hours = 24): SlotHold[] {
+  const db = getDb();
+  return db.prepare(`
+    SELECT * FROM slot_holds
+    WHERE owner_user_id = ? AND status = 'released'
+      AND closure_reason = 'fulfilled_by_booking'
+      AND closed_at >= datetime('now', ?)
+    ORDER BY closed_at DESC
+  `).all(ownerUserId, `-${hours} hours`) as SlotHold[];
+}
+
 /** Drop terminal rows older than 30 days (retention; called from the brief routine). */
 export function cleanOldSlotHolds(): void {
   const db = getDb();

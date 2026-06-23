@@ -922,9 +922,33 @@ Binding — how to pick the right approval_id:
             // only for amending approvals; that's the one case where a reject/
             // amend should bounce back to the owner. An OWNER reject must close.
             resolvedByColleague: context.senderRole !== 'owner',
+            // v3.4.7 — reverse-order double-notify guard: if Sonnet already
+            // successfully message_colleague'd the requester this turn, the
+            // resolver skips its own relay (they were already told).
+            alreadyMessagedRequesterIds: context.messagedColleaguesOkThisTurn,
           });
+          // v3.4.7 — tell Sonnet the canonical close-loop already ran, so she
+          // doesn't reach for message_colleague to tell the SAME requester the
+          // SAME outcome (the double-notify: a second DM in a new thread, Ayala
+          // Geni 2026-06-22). requester_notified is true when the relay landed
+          // (requester_notified_at stamped) or the amend counter was relayed
+          // (state=awaiting_colleague). The orchestrator also hard-suppresses a
+          // same-turn message_colleague to that requester — this is the nudge.
+          let requesterNotified = false;
+          try {
+            const fresh = getRequest(result.request_id);
+            requesterNotified = !!(fresh?.requester_slack_id
+              && (fresh.requester_notified_at || fresh.state === 'awaiting_colleague'));
+          } catch { /* best-effort nudge */ }
           // Surface as approval_id for tool-API back-compat.
-          return { ...result, approval_id: result.request_id };
+          return {
+            ...result,
+            approval_id: result.request_id,
+            requester_notified: requesterNotified,
+            ...(requesterNotified
+              ? { _note: 'I already closed the loop with the requester in their existing thread. Do NOT message_colleague them about this outcome — that lands as a duplicate DM in a new thread. Reference the close-loop that already went out.' }
+              : {}),
+          };
         } catch (err) {
           logger.error('resolve_approval threw', { err: String(err), requestId });
           return { ok: false, reason: `resolver threw: ${err instanceof Error ? err.message : String(err)}` };

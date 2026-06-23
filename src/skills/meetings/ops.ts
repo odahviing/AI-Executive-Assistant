@@ -750,20 +750,36 @@ export class SchedulingSkill {
         const action = args.action as string;
         const sh = await import('../../db/slotHolds');
 
+        // Normalize any provided slot bound to a UTC instant up front, so store,
+        // release-match, and the readers all compare the same zone. Sonnet passes
+        // a bare owner-local clock string ("2026-06-24T16:30:00", no offset);
+        // stored raw, the readers (Date.parse / SQL string-compare vs a UTC
+        // `nowIso`) read it as server-local and drift by the offset off a
+        // non-Israel host. Interpreting in the owner TZ → UTC makes every hold
+        // comparison instant-correct. (An offset-form input passes through —
+        // fromISO honors an explicit offset.)
+        const holdTz = context.profile.user.timezone;
+        const normIso = (s: unknown): string | undefined =>
+          (typeof s === 'string' && s)
+            ? (DateTime.fromISO(s, { zone: holdTz }).toUTC().toISO() ?? s)
+            : undefined;
+        const normStartIso = normIso(args.start_iso);
+        const normEndIso = normIso(args.end_iso);
+
         if (action === 'release') {
           if (typeof args.hold_id === 'string' && args.hold_id) {
             const ok = sh.releaseSlotHold(args.hold_id, isOwner ? 'owner_cancelled' : 'colleague_released');
             return { success: ok, released: ok ? 1 : 0 };
           }
           const released = isOwner
-            ? sh.releaseHoldsForOwner(ownerUserId, { startIso: args.start_iso as string | undefined }, 'owner_cancelled')
-            : sh.releaseHoldsForOwner(ownerUserId, { holderSlackId: context.userId, startIso: args.start_iso as string | undefined }, 'colleague_released');
+            ? sh.releaseHoldsForOwner(ownerUserId, { startIso: normStartIso }, 'owner_cancelled')
+            : sh.releaseHoldsForOwner(ownerUserId, { holderSlackId: context.userId, startIso: normStartIso }, 'colleague_released');
           return { success: true, released: released.length };
         }
 
         // action === 'hold'
-        const startIso = args.start_iso as string | undefined;
-        const endIso = args.end_iso as string | undefined;
+        const startIso = normStartIso;
+        const endIso = normEndIso;
         if (!startIso || !endIso) {
           return { success: false, error: 'missing_slot', message: 'Need start_iso and end_iso to hold a slot.' };
         }

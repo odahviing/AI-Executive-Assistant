@@ -849,6 +849,32 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       if (result.ran && result.promptBlock) {
         availabilityPrecheckBlock = result.promptBlock;
       }
+      // A slot the colleague ASKED about that we confirmed bookable IS a slot
+      // we offered them — record it into the SAME stash find_available_slots
+      // feeds, so the hold gate (which validates "was this offered?") passes on
+      // "is he free at X? → yes → hold it". One source of truth: both
+      // availability surfaces (search + point-check) record what they confirmed;
+      // pre-fix only the search did, so a point-check confirmation couldn't be held.
+      if (result.ran && input.channelId && result.verdicts.length > 0) {
+        const bookableStarts = result.verdicts
+          .filter(v => v.bookable)
+          .map(v => {
+            const dt = DateTime.fromISO(`${v.date}T${v.time}`, { zone: profile.user.timezone });
+            return dt.isValid ? { start: dt.toISO()! } : null;
+          })
+          .filter((s): s is { start: string } => s !== null);
+        if (bookableStarts.length > 0) {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { recordOfferedSlots } = require('../../utils/offeredSlotsStash') as
+            typeof import('../../utils/offeredSlotsStash');
+          recordOfferedSlots({
+            channelId: input.channelId,
+            threadTs: input.threadTs,
+            timezone: profile.user.timezone,
+            slots: bookableStarts,
+          });
+        }
+      }
     } catch (err) {
       logger.warn('availabilityPreCheck threw — proceeding without pre-check', {
         err: String(err).slice(0, 200),
@@ -1273,6 +1299,21 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
   // message_colleague call this turn for the same colleague is a no-op
   // with an explicit signal.
   const messagedColleaguesThisTurn = new Set<string>();
+  // v3.4.7 — colleagues SUCCESSFULLY messaged this turn (message_colleague
+  // returned ok). Distinct from messagedColleaguesThisTurn (which is added
+  // unconditionally to block duplicate ATTEMPTS): this success-only set drives
+  // the reverse-order double-notify guard, so a FAILED message_colleague never
+  // suppresses the resolver's relay (no silent drop). Passed to the resolver.
+  const messagedColleaguesOkThisTurn = new Set<string>();
+  // v3.4.7 — track requesters the resolver ALREADY relayed an approval outcome
+  // to this turn, keyed on requester_slack_id. resolve_approval's canonical
+  // close-loop (notifyRequesterOfDecision, or the coord/cascade equivalent)
+  // is the ONE path that tells a requester the outcome — but Sonnet can't see
+  // that relay fired, so it reaches for message_colleague to "close the loop"
+  // and the requester gets a SECOND DM in a new thread (Ayala Geni, 2026-06-22).
+  // This is the deterministic, clock-free backstop: a same-turn message_colleague
+  // to a requester already relayed-to is suppressed on this fact alone.
+  const relayedRequestersThisTurn = new Set<string>();
   // v2.7.2 — capture the most recent rule_violation deferred_action_hint
   // from a meeting tool's result this turn. When create_approval(kind=
   // policy_exception) fires next, the orchestrator stamps this hint as
@@ -1387,6 +1428,12 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
       isMpim: input.isMpim,
       isOwnerInGroup: input.isOwnerInGroup,
       mpimMemberIds: input.mpimMemberIds,
+      // v3.4.7 — pass the turn's SUCCESSFULLY-messaged set BY REFERENCE so
+      // resolve_approval (a later tool block) sees a message_colleague that
+      // already landed this turn → the resolver skips its relay (reverse-order
+      // double-notify guard). skillContext is rebuilt per response round; the
+      // Set persists across the whole turn.
+      messagedColleaguesOkThisTurn,
       // v1.8.9 — carry the inbound transport through. Today every caller is
       // the Slack transport so this defaults to 'slack'. When email/WhatsApp
       // inbound lands, those callers will set their own id.
@@ -1447,6 +1494,31 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
             }),
           });
           toolCallSummaries.push(`[message_colleague] ${colleagueSlackId} — already messaged this turn, skipped`);
+          continue;
+        }
+        // v3.4.7 — DOUBLE-NOTIFY guard. If resolve_approval already relayed the
+        // outcome to this person this turn, a message_colleague to them is the
+        // duplicate DM in a second thread (Ayala Geni). The resolver's relay is
+        // the canonical, threaded close-loop; suppress the redundant send and
+        // tell Sonnet it's already done so it narrates the ONE relay, not a
+        // phantom second send. Deterministic — keyed on the relayed-to id, no clock.
+        if (typeof colleagueSlackId === 'string' && relayedRequestersThisTurn.has(colleagueSlackId)) {
+          logger.warn('message_colleague to a requester already relayed-to this turn — short-circuiting (double-notify guard)', {
+            senderUserId: input.userId,
+            threadTs,
+            colleagueSlackId,
+          });
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: JSON.stringify({
+              ok: false,
+              reason: 'requester_already_notified_by_resolver',
+              colleague_slack_id: colleagueSlackId,
+              _note: 'resolve_approval ALREADY closed the loop with this person this turn — they received the outcome DM in their existing thread. Do NOT message them again; a second DM lands in a new thread and reads as a duplicate. Your reply should reference the close-loop that already went out.',
+            }),
+          });
+          toolCallSummaries.push(`[message_colleague] ${colleagueSlackId} — requester already notified by resolver, skipped`);
           continue;
         }
       }
@@ -1973,7 +2045,41 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
         // messaged twice in one turn. See the short-circuit at the top of the loop.
         if (toolUse.name === 'message_colleague') {
           const colleagueSlackId = (toolUse.input as any)?.colleague_slack_id;
-          if (typeof colleagueSlackId === 'string') messagedColleaguesThisTurn.add(colleagueSlackId);
+          if (typeof colleagueSlackId === 'string') {
+            messagedColleaguesThisTurn.add(colleagueSlackId);
+            // v3.4.7 — only a CONFIRMED send claims the requester for the
+            // reverse-order guard, so a failed send leaves the resolver relay free.
+            if ((result as { ok?: boolean })?.ok === true) {
+              messagedColleaguesOkThisTurn.add(colleagueSlackId);
+            }
+          }
+        }
+        // v3.4.7 — record requesters the resolver relayed an approval outcome to
+        // this turn, so a same-turn message_colleague to them is suppressed (the
+        // double-notify guard at the top of the loop; Ayala Geni 2026-06-22).
+        // Deterministic, no clock: requester_notified_at is stamped ONLY on a
+        // confirmed relay send, and state=awaiting_colleague means the amend
+        // counter was relayed — either way the requester already heard it. A
+        // failed/skipped relay leaves both unset, so message_colleague stays
+        // available as the fallback (never a silent drop).
+        if (toolUse.name === 'resolve_approval' && input.senderRole === 'owner'
+            && result && typeof result === 'object' && (result as { ok?: boolean }).ok === true) {
+          try {
+            const reqId = (result as { request_id?: string; approval_id?: string }).request_id
+              ?? (result as { approval_id?: string }).approval_id;
+            if (typeof reqId === 'string') {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { getRequest } = require('../../db/requests') as typeof import('../../db/requests');
+              const row = getRequest(reqId);
+              const requester = row?.requester_slack_id;
+              if (requester && requester !== profile.user.slack_user_id
+                  && (row!.requester_notified_at || row!.state === 'awaiting_colleague')) {
+                relayedRequestersThisTurn.add(requester);
+              }
+            }
+          } catch (err) {
+            logger.warn('orchestrator — relayed-requester record threw, non-fatal', { err: String(err).slice(0, 200) });
+          }
         }
       }
 

@@ -61,6 +61,11 @@ export class MeetingsSkill implements Skill {
       // transport directory lookup with people_memory side effects, not a
       // meetings concern. Auto-registered when SlackConnection is registered.
       {
+        // ⚠️ DEAD (v3.4.x) — coordinate_meeting is demoted + unused (0 real calls
+        // since v3.3.8). Shipped only on the rarely-picked 'coord' scope; kept as
+        // a reference for a future external-transport rebuild (build fresh, don't
+        // re-wire). Colleague + owner scheduling go through find_available_slots +
+        // create_meeting. See registry.ts `coord` scope for the full why.
         name: 'coordinate_meeting',
         description: `Set up a NEW multi-party meeting that needs ${profile.user.name.split(' ')[0]}'s INTERNAL attendees DM'd for their availability. The tool DMs each internal participant with proposed slots, collects their responses, negotiates if needed, then books. Use ONLY when there are internal pollable non-owner attendees (slack_id in our workspace + same email domain as ${profile.user.name.split(' ')[0]}). For anything else, use the direct path: find_available_slots + create_meeting.
 

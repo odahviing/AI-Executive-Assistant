@@ -2,6 +2,28 @@
 
 ---
 
+## 3.4.7 — slot-hold hardening + colleague availability is travel-aware + the double-notify killed deterministically
+
+A cross-chat bundle (meeting + approval + prompt). The through-line: stop offering or notifying the wrong thing. Colleague booking questions now always run through the travel-aware slot finder; slot holds reconcile against the real calendar and stop drifting on timezone; resolving an approval notifies the requester exactly once, by turn-state not a clock. No schema change; restart required (new background reconcile + tool-scope change).
+
+### Fixed — slot holds & availability
+- **Colleague "when's he free?" is travel-aware (Bug 1).** `get_free_busy` is removed from the colleague allowlist — it's a raw open-time lookup that is **Working-Elsewhere-blind**, so on a travel day it reported the owner's HOME hours as free ("Sunday 09:00–15:30" while he was in Boston — the Gidon incident). Colleague booking intent now goes through `find_available_slots` (rule-aware AND travel-aware); `availabilityPreCheck` already covers "is X free?". ([registry.ts](src/skills/registry.ts))
+- **A confirmed slot can be held (HOLD-AFTER-ASK).** A colleague who asked "is X free?" and got "yes" can now hold it: the availability pre-check records its confirmed-bookable slots into the same offered-slots stash `find_available_slots` feeds, so the hold gate ("was this offered?") passes. Pre-fix the hold silently bounced to an owner approval. ([orchestrator/index.ts](src/core/orchestrator/index.ts))
+- **Holds reconcile against the real calendar + a saner cadence (INVITE-RECONCILE).** The hold lifecycle (reconcile + expiry) runs on its own 30-min cadence (not the 5-min tick). Each active hold is checked against the calendar — if a real meeting now overlaps the held window with the holder on it (the colleague booked it themselves), the hold is released `fulfilled_by_booking` and the morning brief reports it. No more dangling holds / "I freed up your slot" on a meeting that became real. ([background.ts](src/core/background.ts), [slotHolds.ts](src/db/slotHolds.ts), [briefs.ts](src/tasks/briefs.ts))
+- **Hold timestamps are UTC-normalized (HOLD-TZ).** Holds were stored as bare owner-local clock strings and compared as server-local / against UTC — an offset drift on a non-Israel host. Normalized to a UTC instant in the owner TZ on store + release-match. ([ops.ts](src/skills/meetings/ops.ts))
+
+### Fixed — approval relay (approval chat)
+- **One notification per decision, by turn-state not a clock (DOUBLE-NOTIFY).** Resolving an approval auto-relays to the requester (threaded into their conversation). If Sonnet also `message_colleague`'d the same requester the same turn, they got two DMs in two threads (Ayala, 2026-06-22). Now a deterministic, turn-scoped interlock: `resolve_approval` returns `requester_notified` + a nudge, the orchestrator suppresses a same-turn `message_colleague` to that requester (forward guard), and `notifyRequesterOfDecision` skips its relay for a requester Sonnet already messaged this turn (reverse guard). Success-gated — a FAILED message_colleague isn't in the set, so the relay still goes (never a silent drop). slot_pick/coord stamp `requester_notified_at` to join the interlock. ([resolver.ts](src/core/requests/resolver.ts), [tasks/skill.ts](src/tasks/skill.ts), [types.ts](src/skills/types.ts), [orchestrator/index.ts](src/core/orchestrator/index.ts))
+- **Expiry close-loop hardened.** The expiry handler now stamps `requester_notified_at` after its loop-close DM (idempotent — EXPIRY-NO-STAMP), and all spine-sweep sends route through one `sendTracked` helper that checks `res.ok` and logs the outcome (the EXPIRY-SILENT-SEND blind spot, same class as the relay-drop). ([runner.ts](src/core/requests/runner.ts))
+
+### Changed
+- **Outbound language composes end-to-end in the reader's language (prompt chat).** When mentioning a stored-English detail (a calendar subject) in another language, translate/transliterate it inline rather than pasting it raw; a message sent TO a person is written entirely in their language. ([systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+
+### Marked (not yet removed)
+- **Coord is demoted + slated for full removal.** The `coordinate_meeting` tool is unused, but coord is NOT dead — it's still reached via the outreach→scheduling handoff (`coordinator.ts:604 → initiateCoordination`), which fired harmfully on 2026-06-23 (the Luke incident: a colleague agreed to a time, the handoff discarded it, re-coordinated the whole week, and reported a fabricated "everyone agreed on Sunday"). Markers added at the entry points; full rip-out + replacing the handoff with a direct `create_meeting` is the next task. ([registry.ts](src/skills/registry.ts), [meetings.ts](src/skills/meetings.ts), [coord/state.ts](src/skills/meetings/coord/state.ts))
+
+---
+
 ## 3.4.6 — approval-spine collapse: one approve→book link, one relay, one daily decision thread; legacy approvals table dropped
 
 The dedicated approval chat rethought the approval → booking → close-loop spine, which had regressed into patch-on-patch (relay drops, double-DMs, a 4-tier fuzzy reconnect backstopped by a 4h timer). Root cause: at approve time nothing stamped a shared id linking the approval to the booking that fulfills it, so the booking-side cleanup reconstructed the link by fuzzy subject/thread match and the relays collided. The fix is a collapse, not another layer — a hard approve→book id link lets us DELETE mechanisms rather than add a 13th. Plus a product change the owner asked for: Maelle's approval asks to the owner now live in ONE daily decision thread instead of a fresh DM each. Patch bump per owner direction; restart required (schema migration drops a table).

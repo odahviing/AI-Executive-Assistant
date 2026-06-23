@@ -1,4 +1,15 @@
 /**
+ * ⚠️ DEMOTED + SLATED FOR FULL REMOVAL (v3.4.x). The coordinate_meeting TOOL is
+ * unused, but this module is NOT actually dead — it's still reached via the
+ * OUTREACH→SCHEDULING HANDOFF (coordinator.ts:604 → initiateCoordination), which
+ * fired HARMFULLY on 2026-06-23 (the Luke incident: a colleague agreed to a
+ * specific time, the handoff threw it away, re-coordinated the whole week, and
+ * reported a fabricated "everyone agreed on Sunday"). Full rip-out is the next
+ * task — the handoff must become a direct create_meeting of the agreed time.
+ * If ever rebuilt (external/calendar-invisible transport), build FRESH as the
+ * SOLE track for that requester, never parallel to a direct path. Why it was
+ * demoted (v3.3.8): parallel-track desync + orphan nudging (the Isaac incident).
+ *
  * Coord state machine.
  *
  * Moved from connectors/slack/coord.ts as part of the Connection-interface
