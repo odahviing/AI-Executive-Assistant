@@ -1,16 +1,40 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.4.3** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.5.0** — check `package.json` if unsure; it is the source of truth.
 
 ## 🤖 Four agents now run the bug-resolve loop (route work to the right one)
 
 Parallel chats on the same repo — at wrap, `git fetch` + check the working tree for their edits before committing:
 - **Meeting agent** — owns the **meeting planner** subsystem end-to-end, root-cause-first. Its mandate + subsystem map + the full carried-in bug list live in **`.claude/MEETING_PLANNER_AGENT.md`**. Spun up because the planner has been patched for months without stabilizing (the Isaac/"Brainrocket" afternoon was the breaking point — owner + colleague both suffered). Meeting/scheduling/free-busy/timezone/WE/close-loop bugs go here.
-- **Guard agent** — the gate stack (`claimChecker`, `securityGate`, `humanGate`, `coordGuard`, `dateVerifier`, `postReply`). Honesty / leak / false-positive issues.
+- **Guard agent** — the gate stack (`claimChecker`, `securityGate`, `humanGate`, `dateVerifier`, `weekdayGuard`, `postReply`). Honesty / leak / false-positive issues. (`coordGuard` deleted with the coord rip-out in v3.5.0.)
 - **Prompt agent** — the orchestrator system prompt (`systemPrompt.ts`): language, narration, judgment/tone.
 - **Tenancy agent** — tool descriptions + per-skill prompt sections + de-tenant/learned-preference work.
 
 When a bug's real fix is honesty/leak → guard; tone/judgment → prompt; tool-description/routing → tenancy; the deterministic scheduling core → meeting agent.
+
+## 🧠 NEXT CHAT — REBUILD THE PERSON-MEMORY / STORED-ATTRIBUTE LAYER (top priority)
+
+The memory layer has accumulated a class of bugs and needs a redesign, not more patches. **Symptoms seen live:**
+- **Hebrew name transliteration is wrong.** Yael had to correct Maelle (2026-06-24): *"עידן לא אידן, עדי לא אדי, יעל לא יאל"* — names stored/rendered with the wrong Hebrew spelling (transliteration drift: עדי↔אדי, יעל↔יאל, עידן↔אידן). Outbound uses the corrupted spelling.
+- **Stored attributes freeze from a one-off signal, drive outbound forever, never self-correct.** Ayala's `language_preference=Hebrew` (she writes English → got a Hebrew relay); Gidon's `timezone=Europe/Amsterdam` (he's in Israel now → times presented in Amsterdam). Set once `auto`, never re-confirmed; the inbound detector re-reads the live message but never *updates* the stored attribute.
+- Plus **multiple other memory bugs from the parallel chats that were started and not completed** — sweep them in the rebuild.
+
+**The redraft framework (full "when it keeps data / when not" overview is in the chat that shipped 3.5.0):** the five stores are (1) `user_preferences` table, (2) per-skill learned MD, (3) `people_memory` core attrs via `setCoreFieldWithProvenance` (`owner` vs `auto`), (4) `people_memory` profile_json + MD notes, (5) the end-of-chat capture pass (always `auto`). The lever is the **`owner` vs `auto` provenance**: (a) `auto` attributes that *drive behavior* (language, timezone, name spelling) must be **confirmed before they steer outbound**, or **self-correct** when live signals consistently contradict; (b) the capture pass must stop **promoting a one-off** to a durable attribute; (c) `update_my_preferences(mode='replace')` must **diff + confirm** before dropping unlisted prefs; (d) `owner`-set attrs stay sticky. Also: name spelling/transliteration needs a canonical per-person store, not per-render guessing.
+
+**Also stale after v3.5.0:** `project_architecture.md` (memory) still describes the **coord state machine as live** — it was fully removed; trim that section during the rebuild.
+
+## 🔭 v3.5.0 — coord subsystem removed + weekday/booked-date correctness + coda once/day (multi-chat minor)
+
+The big one: the **multi-party coordination subsystem is fully gone** (−3,400 LOC) — deleted `coord/*`, `coordBookingHandler`, `coordGuard`, the `coordinate_meeting`/`get_active_coordinations`/`cancel_coordination`/`finalize_coord_meeting` tools, the `coord` scope, `kind='coord'`, the `coord_nudge`/`coord_abandon` timers, and the `coord_jobs` table/CRUD. It had booked nothing for months but stayed reachable through the **outreach→scheduling handoff**, which fired harmfully on 2026-06-23 (the Luke incident: colleague agreed to a time → handoff discarded it, re-coordinated the week, reported a fabricated "everyone agreed on Sunday"). That handoff is now a plain **relay-to-owner**. Everything else (find_available_slots — which already intersects attendees' busy/free — create/move/update/delete, check_join_availability, owner approve→book replay) is intact; multi-party scheduling is the direct path. **If coord is ever rebuilt** (external/calendar-invisible transports): build fresh, the SOLE track for that requester, never parallel to a direct path.
+
+Folded in from the four chats this version:
+- **Weekday→date guard (#135b):** `assertWeekdayMatchesDate` (`utils/weekdayGuard.ts`) — one shared check for create/move, number-compare (language-agnostic), corrects in-turn ("move to Thursday" → written Friday class).
+- **Booked-date honesty backstop (#135):** `postReply` verifies the narrated day/time matches where the meeting actually landed; `dateVerifier` corrects vs the in-language anchor, not a bare-weekday guess.
+- **Colleague-requested approvals narrate, not silent-resolve** (Ysrael Gurt): Module D defers them to the orchestrator (`isSilentResolveSafe`) so there's a conversation record + no duplicate DM.
+- **Social coda once/day actually works** — was defeated by a `datetime()` vs `.toISO()` string-compare format mismatch (count always 0 → coda in every chat).
+- (3.4.7, already shipped: slot-hold hardening, travel-aware colleague availability, double-notify killed; Bug-1 `get_free_busy` off the colleague allowlist.)
+
+**Restart (`npm run deploy`)** to load 3.5.0; confirm the boot stamp shows it.
 
 ## 🔭 v3.4.3 — WE-aware availability check + travel-context DRY + the dedicated meeting-planner chat
 
