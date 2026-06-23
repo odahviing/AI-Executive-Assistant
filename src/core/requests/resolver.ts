@@ -3,8 +3,8 @@
  *
  * Single entry point for owner-decision side-effects. The orchestrator never
  * calls book/cancel/DM directly; it calls resolveRequest with the request id
- * and a verdict. This file owns per-kind downstream behavior — booking the
- * meeting on slot_pick approval, notifying the requester, etc.
+ * and a verdict. This file owns per-kind downstream behavior — replaying the
+ * approved action (deferred_action / on_approve), notifying the requester, etc.
  *
  * Then it calls closeRequest, which is the single closure entry. All audit,
  * cascade, and timer-clearing happen there.
@@ -13,13 +13,10 @@
 import type { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
-import { getRequest, mergeRequestDetails, updateRequest } from '../../db/requests';
+import { getRequest, updateRequest } from '../../db/requests';
 import { closeRequest } from './closeRequest';
 import type { RequestRow } from './types';
 import { parseDetails } from './types';
-import { getFreeBusy } from '../../connectors/graph/calendar';
-import { runPostBookingHealthCheck } from '../../utils/postBookingHealthCheck';
-import { getCoordBookingHandler } from '../approvals/coordBookingHandler';
 import {
   extractCallbacks,
   mergeAmendIntoApprove,
@@ -81,56 +78,6 @@ export interface ResolveResult {
   reason?: string;
   subject?: string;
   slot?: string;
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-/**
- * Owner-busy freshness re-check before committing a slot_pick booking. Reads
- * FRESH (forceRefresh) — the owner's calendar drifts while an approval sits,
- * and a STALE cache hit is exactly what bounced a real booking over a slot that
- * was actually free (the Isaac incident: the recheck read "busy" from a 5-min
- * cache while a fresh search showed the slot open). Only the OWNER is checked:
- * a colleague's busy is a HELPER surfaced when slots are offered, never a
- * commit-time blocker — the owner can book over anyone (owner rule 6).
- *
- * Returns a reason if the owner is now busy, else null. Graph failure → null
- * (a freshness-API blip shouldn't block all approvals).
- */
-async function recheckOwnerFreeForBooking(args: {
-  ownerEmail: string;
-  startIso: string;
-  endIso: string;
-  timezone: string;
-}): Promise<string | null> {
-  try {
-    const busy = await getFreeBusy(
-      args.ownerEmail,
-      [args.ownerEmail],
-      args.startIso,
-      args.endIso,
-      args.timezone,
-      true,   // forceRefresh — freshness is the entire point of a pre-commit recheck
-    );
-    const cStart = DateTime.fromISO(args.startIso).toMillis();
-    const cEnd = DateTime.fromISO(args.endIso).toMillis();
-    const ownerEmailLower = args.ownerEmail.toLowerCase();
-    for (const [email, slots] of Object.entries(busy)) {
-      if (email.toLowerCase() !== ownerEmailLower) continue;
-      const conflict = slots.find(s => {
-        if (s.status !== 'busy' && s.status !== 'tentative' && s.status !== 'oof') return false;
-        const sStart = DateTime.fromISO(s.start).toMillis();
-        const sEnd = DateTime.fromISO(s.end).toMillis();
-        return sStart < cEnd && sEnd > cStart;
-      });
-      if (conflict) return `you're ${conflict.status}`;
-    }
-  } catch (err) {
-    logger.warn('recheckOwnerFreeForBooking — Graph call failed, proceeding', {
-      err: String(err).slice(0, 200),
-    });
-  }
-  return null;
 }
 
 // ── Entry ───────────────────────────────────────────────────────────────────
@@ -369,14 +316,6 @@ export async function resolveRequest(
   // ── approve ────────────────────────────────────────────────────────────
   const approveData = verdict.data ?? {};
 
-  // Slot-pick / calendar-conflict subkinds retain their bespoke booking
-  // flow (freshness re-check, coord_job lookup, idempotency guard). Those
-  // paths predate the callback model and run the booking themselves.
-  if ((row.kind === 'approval' || row.kind === 'coord')
-      && (row.subkind === 'slot_pick' || row.subkind === 'calendar_conflict')) {
-    return resolveSlotPickApproval(row, approveData, ctx);
-  }
-
   // v2.9.1 — universal approve path: read on_approve and dispatch.
   // - If callbacks.on_approve.tool is in RESOLVER_REPLAY_TOOLS → replay it
   //   (with relaxed=true / confirm_outside_window=true override flag).
@@ -515,9 +454,8 @@ async function runApproveCallback(
   // owner already SAW the conflict in the approval ask and approved it — a
   // colleague's busy is a helper, never a commit-time blocker (owner rule 6).
   // Re-checking attendees here is what bounced a real owner-approved booking
-  // four times on stale "Isaac/Joe busy" while the slot was actually free. The
-  // owner's OWN freshness is handled at slot_pick (recheckOwnerFreeForBooking);
-  // a policy_exception means he consented to his own calendar state too.
+  // four times on stale "Isaac/Joe busy" while the slot was actually free. A
+  // policy_exception means he consented to his own calendar state too.
 
   // Sync-then-close: run the replay BEFORE marking the request resolved
   // and BEFORE relaying to the requester. On replay failure the request
@@ -568,149 +506,6 @@ async function runApproveCallback(
     ok: true, request_id: row.id, state: 'resolved',
     effect: `approved ${row.kind}/${row.subkind ?? '-'} — replayed ${tool}`,
   };
-}
-
-// ── slot_pick / calendar_conflict booking flow ──────────────────────────────
-
-interface SlotPickDetails {
-  coord_job_id?: string;
-  subject?: string;
-  slots?: Array<{ iso: string; label?: string }>;
-  participants_emails?: string[];
-  duration_min?: number;
-}
-
-async function resolveSlotPickApproval(
-  row: RequestRow,
-  data: Record<string, unknown>,
-  ctx: ResolveContext,
-): Promise<ResolveResult> {
-  const details = (parseDetails<SlotPickDetails & { winning_slot?: string }>(row) ?? {});
-  // Sonnet may omit slot_iso when the slot is already determined (coord
-  // resolved to winning_slot before asking owner). Fall back to that.
-  const chosenIso = (data.slot_iso as string | undefined)
-    ?? details.winning_slot
-    ?? '';
-  if (!chosenIso) {
-    return {
-      ok: false, request_id: row.id, state: row.state,
-      reason: 'slot_pick approve requires data.slot_iso (or details.winning_slot)',
-    };
-  }
-  const chosenDt = DateTime.fromISO(chosenIso);
-  if (!chosenDt.isValid) {
-    return {
-      ok: false, request_id: row.id, state: row.state,
-      reason: `slot_iso "${chosenIso}" is not a valid ISO datetime`,
-    };
-  }
-
-  const coordJobId = details.coord_job_id;
-  if (!coordJobId) {
-    return {
-      ok: false, request_id: row.id, state: row.state,
-      reason: 'slot_pick details missing coord_job_id',
-    };
-  }
-  const durationMin = details.duration_min ?? 30;
-  const subject = details.subject ?? row.subject;
-
-  // Freshness re-check — catch a slot that went stale on the OWNER's side
-  // before we book (reads fresh; attendee busy is a helper, not a blocker).
-  const endDt = chosenDt.plus({ minutes: durationMin });
-  const staleConflict = await recheckOwnerFreeForBooking({
-    ownerEmail: ctx.profile.user.email,
-    startIso: chosenDt.toISO()!,
-    endIso: endDt.toISO()!,
-    timezone: ctx.profile.user.timezone,
-  });
-
-  if (staleConflict) {
-    // Stale slot — flip back to awaiting_owner with conflict_reason in details,
-    // orchestrator's next turn will offer fresh options.
-    mergeRequestDetails(row.id, {
-      stale_conflict: staleConflict,
-      stale_at_iso: chosenIso,
-      slots: [],   // explicitly empty — caller must re-plan
-    });
-    return {
-      ok: false, request_id: row.id, state: 'awaiting_owner',
-      reason: `slot no longer free (${staleConflict}) — request stays awaiting_owner for fresh options`,
-      subject,
-    };
-  }
-
-  // Idempotency: if outcome_external_event_id already set + matches, skip.
-  if (row.outcome_external_event_id) {
-    closeRequest({
-      id: row.id, state: 'resolved',
-      closureReason: 'already_booked_idempotent',
-      closedBy: 'system',
-      outcomeJson: { slot_iso: chosenIso, external_event_id: row.outcome_external_event_id, already_booked: true },
-    });
-    return {
-      ok: true, request_id: row.id, state: 'resolved',
-      effect: 'already booked — idempotent short-circuit',
-      subject, slot: chosenIso,
-    };
-  }
-
-  if (!ctx.app) {
-    return { ok: false, request_id: row.id, state: 'awaiting_owner', reason: 'no Slack app in resolver context — cannot book synchronously' };
-  }
-
-  const handler = getCoordBookingHandler();
-  if (!handler) {
-    return { ok: false, request_id: row.id, state: 'awaiting_owner', reason: 'no coord booking handler registered — MeetingsSkill may be disabled' };
-  }
-
-  try {
-    const result = await handler({
-      jobId: coordJobId,
-      chosenSlotIso: chosenIso,
-      profile: ctx.profile,
-      synchronous: true,
-    });
-    if (result.ok) {
-      // v3.4.7 — stamp requester_notified_at: bookCoordination just told the
-      // requester (it notifies job.requesters + participants on booking). This
-      // brings slot_pick into the single-notification interlock so the
-      // orchestrator's double-notify guard suppresses a redundant same-turn
-      // message_colleague to this requester (the relay here goes via coord, not
-      // notifyRequesterOfDecision, which skips coord/slot_pick).
-      if (row.requester_slack_id && row.requester_slack_id !== row.owner_user_id && !row.requester_notified_at) {
-        try { updateRequest(row.id, { requesterNotifiedAt: new Date().toISOString() }); } catch (_) { /* non-fatal */ }
-      }
-      closeRequest({
-        id: row.id, state: 'resolved',
-        closureReason: 'owner_approved_slot_pick_and_booked',
-        closedBy: 'owner',
-        outcomeExternalEventId: result.externalEventId ?? undefined,
-        outcomeJson: { slot_iso: chosenIso, booked: true, subject: result.subject },
-      });
-      void runPostBookingHealthCheck({
-        profile: ctx.profile,
-        slotIso: chosenIso,
-        subject: result.subject ?? subject ?? 'meeting',
-      });
-      return { ok: true, request_id: row.id, state: 'resolved', effect: 'booked', subject: result.subject, slot: chosenIso };
-    }
-    // Booking failed — leave request awaiting_owner so retry can happen.
-    logger.warn('resolveSlotPickApproval — booking failed, request stays awaiting_owner', {
-      id: row.id, reason: result.reason, status: result.status,
-    });
-    return {
-      ok: false, request_id: row.id, state: 'awaiting_owner',
-      reason: result.reason ?? `booking not completed (${result.status})`,
-      subject: result.subject, slot: chosenIso,
-    };
-  } catch (err) {
-    logger.error('resolveSlotPickApproval — booking threw', { id: row.id, err: String(err) });
-    return {
-      ok: false, request_id: row.id, state: 'awaiting_owner',
-      reason: `booking threw: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
 }
 
 // ── Requester loop-close DM ─────────────────────────────────────────────────
@@ -774,15 +569,6 @@ async function notifyRequesterOfDecision(
   if (!requesterSlackId) {
     logger.info('notifyRequesterOfDecision — skip: no requester_slack_id (owner-internal)', { id: row.id });
     return;  // owner-internal request, nothing to close back
-  }
-  // For coord/slot_pick the coordinator's own loop-close path handles it.
-  if (row.kind === 'coord') {
-    logger.info('notifyRequesterOfDecision — skip: coord kind (coordinator loop-close owns it)', { id: row.id });
-    return;
-  }
-  if (row.kind === 'approval' && (row.subkind === 'slot_pick' || row.subkind === 'calendar_conflict')) {
-    logger.info('notifyRequesterOfDecision — skip: slot_pick/calendar_conflict (coordinator loop-close owns it)', { id: row.id, subkind: row.subkind });
-    return;
   }
   // v3.4.7 — reverse-order double-notify guard. Sonnet already messaged this
   // requester THIS turn (message_colleague ran before resolve_approval), so this
@@ -972,7 +758,7 @@ async function notifyRequesterOfDecision(
       const actionHint =
         deferredTool === 'delete_meeting' ? 'a cancellation'
           : (deferredTool === 'move_meeting' || deferredTool === 'update_meeting') ? 'a change to an existing meeting'
-            : (deferredTool === 'create_meeting' || deferredTool === 'finalize_coord_meeting') ? 'a booking'
+            : (deferredTool === 'create_meeting') ? 'a booking'
               : undefined;
       const outcome = verdict === 'approve'
         ? `${ownerFirst} said yes`

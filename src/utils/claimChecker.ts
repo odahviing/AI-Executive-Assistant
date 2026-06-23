@@ -34,7 +34,7 @@ const anthropic = getAnthropicClient();
 export interface ClaimCheckInput {
   reply: string;
   toolSummaries: string[];    // compact [tool_name: arg] strings from this turn
-  bookingOccurred: boolean;    // deterministic: create_meeting / finalize_coord_meeting succeeded
+  bookingOccurred: boolean;    // deterministic: create_meeting succeeded
   ownerFirstName: string;
   // v1.7.5 — MPIM context. When the reply was drafted in an MPIM/group thread,
   // inline `<@USER>` mentions of people who are PARTICIPANTS in that thread
@@ -187,8 +187,6 @@ Paraphrase, tense, and language don't matter. Judge by meaning. Hebrew, English,
 CRITICAL — tool-aware honesty:
 If TOOL ACTIVITY shows the matching tool already ran this turn — e.g. \`[message_colleague: <name>]\` for a "sent X" claim about that name, \`[create_meeting: ...]\` for a booking claim, \`[create_approval: ...]\` or \`[create_task: ...]\` for a "flagged it" claim — the claim is HONEST regardless of the verb tense or phrasing used. "On its way", "sending now", "I've reached out", "sent", "the message is going out", "on it — I'll send now" are ALL valid when the matching tool ran. Do NOT flag these.
 
-CRITICAL — coordinate_meeting IS a message-sending tool (v3.0.8):
-\`coordinate_meeting\` is the multi-party coord state machine. When it runs, the state machine DMs each participant with slot options (the DMs are sent asynchronously by the coord runner, not by Sonnet directly). A draft saying "I've sent Onn, Oran, and Lital the slot options" / "I've asked them to pick" / "DM'd them with options" / "I'll let you know once everyone confirms" is HONEST when \`[coordinate_meeting: ...]\` appears in TOOL ACTIVITY this turn. The participant DMs ARE going out via the coord runner. Do NOT flag these as phantom sends — the matching mechanism for "told the participants" claims about a coord-meeting subject is \`coordinate_meeting\`, not \`message_colleague\`. Forcing a message_colleague retry creates DOUBLE DMs to each participant (one from coord, one from message_colleague) — the bug we're trying to prevent.
 The whole point of these tools is to queue an action; the model is allowed to narrate the queued action as if it's happening. ONLY flag when the claim is about an action whose matching tool did NOT run this turn.
 
 CRITICAL — resolve_approval relays to the requester ITSELF:
@@ -218,7 +216,6 @@ Calendar mutation tools each cover DIFFERENT fields:
 - \`move_meeting\` — changes START AND END time (caller passes new_start AND new_end as required args). Subject, location, attendees stay the same. Whether the duration changes depends on the caller's args; describing the new time window (e.g. "12:30–12:55") is NOT a specifics mismatch — that's just narrating the move's outcome.
 - \`update_meeting\` — changes any field (subject, duration, location, attendees, body) WITHOUT changing the start time.
 - \`delete_meeting\` — cancels the event.
-- \`finalize_coord_meeting\` — books a coord-resolved slot (new event).
 - \`book_floating_block\` — books a lunch / coffee / focus block.
 
 If the draft claims a SPECIFIC change that the tool that ran does NOT cover — e.g. "renamed it to X" or "added Yael to the invite" when only \`move_meeting\` ran (which doesn't touch subject or attendees), or "moved to a different room" when only \`update_meeting\` ran without a location change — flag claimed_action=true AND set claim_specifics_mismatch=true. The action partially happened, but the specific field claimed didn't.
@@ -234,7 +231,7 @@ NOT a false claim:
 
 IS a false claim:
 - "I've sent a message to X" when NO message_colleague targeting X is in TOOL ACTIVITY THIS TURN.
-- "Done — booked" / "on the calendar" when no create_meeting / finalize_coord_meeting is in TOOL ACTIVITY THIS TURN.
+- "Done — booked" / "on the calendar" when no create_meeting is in TOOL ACTIVITY THIS TURN.
 - "I've flagged this with him" when no create_approval / create_task is in TOOL ACTIVITY THIS TURN.
 - The reply contains a \`<@USERID>\` Slack ping intended to notify someone OUTSIDE the current room, but no message_colleague targeting them is in TOOL ACTIVITY THIS TURN. (For people NOT in the room, inline pings are not how to message them — message_colleague is.)
 - IMPORTANT MPIM EXCEPTION: if MPIM CONTEXT is present above and the \`<@USERID>\` mention is for a PARTICIPANT in the listed group thread, that's LEGITIMATE in-room addressing — NOT a phantom send. Do not flag it. Only flag pings to people NOT in the participant list.

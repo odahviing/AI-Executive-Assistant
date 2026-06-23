@@ -336,7 +336,7 @@ Use the owner's own categories listed in the EVENT CATEGORIES block of your syst
 Actions:
 - list — read active rows (filtered to event_end > now).
 - approve — owner said "it's fine, leave it." Marks the row terminal (won't re-flag).
-- start_resolve — owner said "fix it." Opens a request_id under the row, transitions to in_progress. Caller MUST follow with move_meeting / coordinate_meeting / etc. as appropriate; the row auto-resolves on cascade when the underlying event changes.
+- start_resolve — owner said "fix it." Opens a request_id under the row, transitions to in_progress. Caller MUST follow with move_meeting / etc. as appropriate; the row auto-resolves on cascade when the underlying event changes.
 - owner_will_resolve — owner said "I'll handle it." Row sits in owner_side state until owner declares done OR the underlying event changes.
 - owner_done — owner declared he fixed it. Row transitions to resolved.
 
@@ -1051,149 +1051,17 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                       // meeting on a surprise vacation" case.
                       issue.protection_reasons = prot.reasons;
                     } else {
-                      // Movable — start a move-coord to reschedule outside
-                      // the OOF day. We search the NEXT 7 days forward
-                      // from the day AFTER the OOF (we're not moving it
-                      // earlier — vacation typically starts now).
-                      const mStart = parseGraphDt(conflicting.start.dateTime, conflicting.start.timeZone, timezone);
-                      const mEnd = parseGraphDt(conflicting.end.dateTime, conflicting.end.timeZone, timezone);
-                      const durationMin = Math.round(mEnd.diff(mStart, 'minutes').minutes);
-
-                      // v2.7.4 — only filter 'declined'; 'none' is Graph's
-                      // default (untracked response) and should NOT drop the
-                      // attendee. See parallel fix at line ~981.
-                      const participantsRaw = (conflicting.attendees ?? []).filter(a => {
-                        const status = a.status?.response;
-                        return status !== 'declined';
-                      });
-                      const attendeeEmails = participantsRaw
-                        .map(a => a.emailAddress.address)
-                        .filter(Boolean);
-
-                      // v2.5.2 — bidirectional search. Forward-only (the
-                      // pre-v2.5.2 default) misses the natural "one day early"
-                      // option when vacation starts the next morning: a
-                      // Thursday OOF auto-move would never even consider
-                      // Wednesday. Owner direction: search [-3d, +7d] around
-                      // the OOF day, but never propose a date already in the
-                      // past — clamp the lower bound at today.
-                      const issueDt   = DateTime.fromISO(issue.date, { zone: timezone });
-                      const earliest  = DateTime.now().setZone(timezone).startOf('day');
-                      const lowerBound = DateTime.max(issueDt.minus({ days: 3 }).startOf('day'), earliest);
-                      const searchFrom = lowerBound.toUTC().toISO()!;
-                      let searchTo = issueDt.plus({ days: 7 }).endOf('day').toUTC().toISO()!;
-                      // v2.1.4 — cadence-aware cap for recurring meetings
-                      // displaced by a surprise OOF. Can't push a weekly
-                      // forward into a week that already has its next
-                      // instance; cap at (next occurrence - 1min).
-                      const conflictingSeriesId = (conflicting as unknown as { seriesMasterId?: string }).seriesMasterId;
-                      if (conflictingSeriesId) {
-                        // eslint-disable-next-line @typescript-eslint/no-require-imports
-                        const cal = require('../connectors/graph/calendar') as typeof import('../connectors/graph/calendar');
-                        const nextInstance = await cal.getNextSeriesOccurrenceAfter(
-                          userEmail, conflictingSeriesId, mStart.toUTC().toISO()!,
-                        );
-                        if (nextInstance) {
-                          const capped = DateTime.fromISO(nextInstance).minus({ minutes: 1 }).toUTC().toISO()!;
-                          if (capped < searchTo) searchTo = capped;
-                          logger.info('OOF move-coord: capped search at next series occurrence', {
-                            conflictingId: conflicting.id, seriesMasterId: conflictingSeriesId,
-                            nextInstance, capped,
-                          });
-                        }
-                      }
-                      const slots = await findAvailableSlots({
-                        userEmail,
-                        timezone,
-                        durationMinutes: durationMin,
-                        attendeeEmails: [userEmail, ...attendeeEmails],
-                        searchFrom,
-                        searchTo,
-                        profile,
-                      });
-                      const proposed = slots.slice(0, 3).map(s => ({
-                        start: s.start,
-                        location: 'Online' as string,
-                        isOnline: true,
-                      }));
-                      if (proposed.length === 0) {
-                        issue.fix_failed = true;
-                        issue.fix_error = 'No alternate slot in the next 7 days — leaving for owner.';
-                      } else {
-                        const coordParticipants = participantsRaw
-                          .filter(a => a.emailAddress.address.toLowerCase() !== profile.user.email.toLowerCase())
-                          .map(a => ({
-                            name: a.emailAddress.name || a.emailAddress.address,
-                            email: a.emailAddress.address,
-                            tz: profile.user.timezone,
-                          }));
-                        // eslint-disable-next-line @typescript-eslint/no-require-imports
-                        const stateMod = require('./meetings/coord/state') as typeof import('./meetings/coord/state');
-                        const coordResult = await stateMod.initiateCoordination({
-                          ownerUserId,
-                          ownerChannel: context.channelId,
-                          ownerThreadTs: context.threadTs,
-                          ownerName: profile.user.name,
-                          ownerEmail: profile.user.email,
-                          ownerTz: profile.user.timezone,
-                          subject: conflicting.subject ?? 'Meeting',
-                          durationMin,
-                          participants: coordParticipants as Parameters<typeof stateMod.initiateCoordination>[0]['participants'],
-                          proposedSlots: proposed as Parameters<typeof stateMod.initiateCoordination>[0]['proposedSlots'],
-                          profile,
-                          moveExistingEvent: {
-                            id: conflicting.id,
-                            currentStartIso: mStart.toISO()!,
-                            currentEndIso: mEnd.toISO()!,
-                            conflictReason: `${profile.user.name.split(' ')[0]} is out of office on ${issue.date}`,
-                          },
-                        });
-                        // v2.8.7 (bug 1.5) — honor initiateCoordination's
-                        // 'no_participants' return. Owner-only events have
-                        // coordParticipants=[] after the owner-filter above;
-                        // state.ts returns the sentinel and does nothing.
-                        // Pre-fix the calling code claimed "Started a
-                        // move-coord ... DM'd ." (empty join) as if it
-                        // succeeded, which is a straight lie in the brief
-                        // (2026-05-19 Bookcamp incident). Flag as failed
-                        // instead. Pairs with bug 1.1's solo-event filter —
-                        // belt and suspenders.
-                        if (coordResult === 'no_participants') {
-                          issue.fix_failed = true;
-                          issue.fix_error = `Can't auto-move "${conflicting.subject}" — meeting is owner-only, no one to coordinate with.`;
-                        } else {
-                          issue.fixed = true;
-                          issue.fix_detail = `Started a move-coord to reschedule "${conflicting.subject}" — ${profile.user.name.split(' ')[0]}'s on vacation ${issue.date}. DM'd ${coordParticipants.map(p => p.name).join(' and ')}.`;
-                          fixesApplied += 1;
-                          // v3.1.2 (A1b-fix) — shadow-notify the owner the
-                          // moment an active-mode coord fires. Active mode is
-                          // by design autonomous (no pre-approval gate), but
-                          // owner needs real-time visibility so he can
-                          // countermand BEFORE the colleague responds. Pre-fix
-                          // the owner only saw it in the next morning's
-                          // brief — too late.
-                          try {
-                            // eslint-disable-next-line @typescript-eslint/no-require-imports
-                            const { shadowNotify } = require('../utils/shadowNotify') as
-                              typeof import('../utils/shadowNotify');
-                            await shadowNotify(profile, {
-                              channel: context.channelId,
-                              action: 'Active-mode autofix — OOF conflict',
-                              detail: `${profile.user.name.split(' ')[0]} on vacation ${issue.date}; started move-coord on "${conflicting.subject}" — DMed ${coordParticipants.map(p => p.name).join(', ')}. Say "cancel" to abort.`,
-                            });
-                          } catch (err) {
-                            logger.warn('shadowNotify on active-mode coord threw — continuing', {
-                              err: String(err).slice(0, 200),
-                            });
-                          }
-                        }
-                      }
+                      // v3.4.x — the multi-party move-coord auto-fix was removed
+                      // with the coord subsystem. We no longer poll attendees to
+                      // reschedule the OOF-day meeting automatically. Leave the
+                      // issue SURFACED so the owner can direct the move himself
+                      // (move_meeting, or message the attendee directly).
                     }
                   }
                 } catch (err) {
                   issue.fix_failed = true;
-                  issue.fix_error = `OOF auto-move failed: ${String(err).slice(0, 200)}`;
-                  logger.warn('OOF auto-move failed', {
+                  issue.fix_error = `OOF auto-fix check failed: ${String(err).slice(0, 200)}`;
+                  logger.warn('OOF auto-fix check failed', {
                     issueDate: issue.date, err: String(err).slice(0, 300),
                   });
                 }
@@ -2317,8 +2185,8 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
         const messageByAction: Record<string, string> = {
           approve:            'Issue acknowledged — won\'t be flagged again.',
           start_resolve:      requestId
-            ? 'Request opened. Call move_meeting / coordinate_meeting as appropriate; cascade auto-resolves the row on event change.'
-            : 'Marked for resolution. Call move_meeting / coordinate_meeting as appropriate.',
+            ? 'Request opened. Call move_meeting as appropriate; cascade auto-resolves the row on event change.'
+            : 'Marked for resolution. Call move_meeting as appropriate.',
           owner_will_resolve: 'Marked owner_side — waiting on you to handle.',
           owner_done:         'Issue resolved.',
         };

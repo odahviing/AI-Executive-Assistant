@@ -151,22 +151,16 @@ export function startBackgroundTimer(
       .then(() => processSlotHoldsIfDue(profiles))
       .catch(err => logger.error('Routine→task pipeline error', { err: String(err) }));
 
-    // v3.1 (Path 2 Stage 8) — requests-spine reconciliation + retention. Closes
-    // any open coord request whose backing coord_job went terminal or was
-    // deleted out from under it (the ghost the owner hit: "deleted the orphan
-    // tasks, it's still here"). Then prunes old terminal rows so the spine
-    // stays lean. Fire-and-forget; never blocks the task pipeline.
+    // v3.1 (Path 2 Stage 8) — requests-spine retention. Prunes old terminal
+    // rows so the spine stays lean. Fire-and-forget; never blocks the task
+    // pipeline.
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { reconcileOrphanedRequests, pruneOldTerminalRequests } =
+      const { pruneOldTerminalRequests } =
         require('./requests/reconcile') as typeof import('./requests/reconcile');
-      let reconciled = 0;
-      for (const profile of profiles.values()) {
-        reconciled += reconcileOrphanedRequests(profile.user.slack_user_id);
-      }
       const pruned = pruneOldTerminalRequests();
-      if (reconciled > 0 || pruned > 0) {
-        logger.info('Requests-spine maintenance', { reconciled, pruned });
+      if (pruned > 0) {
+        logger.info('Requests-spine maintenance', { pruned });
       }
       // #30 — slot-hold retention (drop terminal rows >30d), alongside the spine prune.
       try {

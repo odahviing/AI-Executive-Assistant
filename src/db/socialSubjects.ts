@@ -538,10 +538,17 @@ export function countAssistantInitiationsTodayForPerson(
     startOfDay.setUTCHours(0, 0, 0, 0);
     iso = startOfDay.toISOString();
   }
+  // Compare via SQLite datetime() on BOTH sides — markSubjectRaised stores
+  // datetime('now') ("2026-06-23 09:06:33", space-separated) while `iso` is a
+  // luxon .toISO() ("...T...Z"). A raw string >= compares space (0x20) vs 'T'
+  // (0x54), so a subject raised TODAY sorted BEFORE today-start → the count was
+  // always 0 → the once-per-day coda gate never tripped → a coda fired in every
+  // chat. datetime() normalizes both formats to the same UTC clock for a correct
+  // comparison.
   const row = db.prepare(`
     SELECT COUNT(*) as n FROM social_subjects
     WHERE person_slack_id = ?
-      AND last_assistant_initiated_at >= ?
+      AND datetime(last_assistant_initiated_at) >= datetime(?)
   `).get(personSlackId, iso) as { n: number };
   return row.n;
 }

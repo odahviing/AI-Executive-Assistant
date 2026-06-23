@@ -2,6 +2,26 @@
 
 ---
 
+## 3.5.0 — coord subsystem removed; weekday/booked-date correctness; colleague-approval narration; coda capped at once/day
+
+A multi-chat minor. The headline is a big removal — the multi-party coordination subsystem is gone (−3,400 LOC) — alongside a correctness wave from the meeting/guard/approval chats: a deterministic weekday guard, a booked-date honesty backstop, colleague-requested approvals that narrate instead of resolving silently, and a social coda gate that finally works. No schema change (the `coord_jobs` table just stops being created; existing rows linger harmlessly); restart required.
+
+### Removed — the coord (multi-party DM-poll coordination) subsystem
+- Deleted `skills/meetings/coord/*` (state/reply/booking/approval/utils), `coordBookingHandler.ts`, `coordGuard.ts`, the `coordinate_meeting` / `get_active_coordinations` / `cancel_coordination` / `finalize_coord_meeting` tools + the `coord` scope. Spine: dropped `kind='coord'`, the `coord_nudge`/`coord_abandon` timers, the coord cascade in `closeRequest`, the coord-orphan `reconcile`, and all `coord_jobs` CRUD/table. Net **−3,400 LOC**.
+- **Why now:** coord booked nothing for months (Apr 5 → May 1/12 → June 0/3) but stayed reachable via the **outreach→scheduling handoff**, which fired harmfully on 2026-06-23 (the Luke incident): a colleague agreed to a specific time, the handoff **discarded it**, re-coordinated the whole week, and reported a fabricated "everyone agreed on Sunday." That handoff is now a plain **relay-to-owner** — no auto-coordinate, no re-search, no false consensus.
+- **Intact:** `find_available_slots` (already intersects every attendee's busy/free), create/move/update/delete_meeting, `check_join_availability`, the owner approve→book replay (`deferred_action`). Owner + colleague multi-party scheduling now go the direct path; calendar-health's OOF auto-fix surfaces the issue instead of polling. `slot_pick`/`calendar_conflict` subkinds (coord-only) + the orphaned `postBookingHealthCheck` removed. Rebuild note (if ever): build fresh as the SOLE track for a calendar-invisible requester, never parallel to a direct path.
+
+### Fixed
+- **Weekday → date guard (#135b, meeting chat).** New `assertWeekdayMatchesDate` (`utils/weekdayGuard.ts`) — one shared check `create_meeting` and `move_meeting` both call. The model passes the named weekday as a number (1=Mon…7=Sun, language-agnostic); on a mismatch with the resolved date the guard hands back the corrected same-week date so the model re-issues in-turn. Closes the "move it to Thursday" → written as Friday class. ([weekdayGuard.ts](src/utils/weekdayGuard.ts), [ops.ts](src/skills/meetings/ops.ts))
+- **Booked-date honesty backstop (#135, guard chat).** When a create/move succeeds, `postReply` verifies the reply's stated day/time matches where the meeting ACTUALLY landed (resolved instant carried in `mutationActions`) — catches "moved to Friday" narrated as "back on Thursday." Deterministic instant compare; fails open. `dateVerifier` reworked to correct against the in-language anchor rather than guessing a bare weekday. ([postReply.ts](src/connectors/slack/postReply.ts), [dateVerifier.ts](src/utils/dateVerifier.ts))
+- **Colleague-requested approvals narrate, not silent-resolve (Ysrael Gurt, approval chat).** Module D's deterministic auto-resolve now defers a colleague-requested approval to the orchestrator (`isSilentResolveSafe`): the silent path left no conversation record, so Maelle mis-reported "not notified" and the owner prompted a duplicate DM. Owner-internal approvals still fast-resolve. ([threadBoundApprovalAutoResolve.ts](src/utils/threadBoundApprovalAutoResolve.ts))
+- **Proactive social coda now fires at most once/day per person.** The gate existed but was defeated by a date-format mismatch: `markSubjectRaised` stores `datetime('now')` (space-separated) while the gate compared it as a raw string against a luxon `.toISO()` (`…T…Z`) — lexically `space (0x20) < 'T'`, so a subject raised today sorted before today-start → count always 0 → a coda fired in every chat. Normalized both sides with SQLite `datetime()`. ([socialSubjects.ts](src/db/socialSubjects.ts))
+
+### Removed (dead code)
+- Coord cleanup swept the dead remnants: `getOpenCoordRequests`, `'coord'` from the `ToolScope` type + classifier prompt, the dead `slot_pick`/`calendar_conflict` auto-resolve branch, and stale coord/slot_pick comments across the spine.
+
+---
+
 ## 3.4.7 — slot-hold hardening + colleague availability is travel-aware + the double-notify killed deterministically
 
 A cross-chat bundle (meeting + approval + prompt). The through-line: stop offering or notifying the wrong thing. Colleague booking questions now always run through the travel-aware slot finder; slot holds reconcile against the real calendar and stop drifting on timezone; resolving an approval notifies the requester exactly once, by turn-state not a clock. No schema change; restart required (new background reconcile + tool-scope change).

@@ -181,7 +181,7 @@ export function buildThreadActionDirective(
   let body = '';
   if (action === 'book') {
     body = `TASK — book a meeting with the people in this thread.
-- Optimize the time for ${ownerFirst}${vips.length ? ` and the VIP(s): ${vips.map(v => v.name).join(', ')}` : ''}. ALWAYS include their calendars in the availability search (find_available_slots / coordinate_meeting with their emails).
+- Optimize the time for ${ownerFirst}${vips.length ? ` and the VIP(s): ${vips.map(v => v.name).join(', ')}` : ''}. ALWAYS include their calendars in the availability search (find_available_slots with their emails).
 ${nonVips.length ? `- ${nonVips.map(n => n.name).join(', ')} are invite-only — invite them, but a busy slot for them does NOT block the time.\n` : ''}- Propose exactly ONE best time in this thread. If an invite-only person is busy then, propose it anyway and ANNOTATE in human terms ("Tue 1pm works for everyone except ${nonVips[0]?.name ?? 'X'} — can you make it work?"). Free/busy level ONLY — never reveal what an event is.
 - Re-search a nearby time (same week / ±a few days) ONLY if someone actually pushes back. Never start a fresh far-future sweep.
 - Book once the thread agrees (you have ${ownerFirst}'s authority), confirm in-thread, then shadow ${ownerFirst}.`;

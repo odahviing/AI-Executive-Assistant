@@ -259,84 +259,6 @@ function buildOutreachItem(
   return item;
 }
 
-function buildCoordItem(
-  r: RequestRow,
-  ownerCalendarEvents: CalendarEvent[],
-  profile: UserProfile,
-  timezone: string,
-): RichItem {
-  const det = parseDetails<Record<string, unknown>>(r) ?? {};
-  const stateLabel = {
-    in_flight: 'collecting participant responses',
-    awaiting_colleague: 'collecting participant responses',
-    awaiting_owner: 'waiting on your approval',
-    resolved: 'booked',
-    cancelled: 'cancelled',
-    expired: 'abandoned',
-  }[r.state] ?? r.state;
-
-  const winningSlot = (det.winning_slot as string | undefined) ?? null;
-  const slotLabel = winningSlot
-    ? DateTime.fromISO(winningSlot).setZone(timezone).toFormat('EEEE d MMM \'at\' HH:mm')
-    : undefined;
-
-  const participantNames = Array.isArray(det.participant_names) ? (det.participant_names as string[]).join(', ') : 'participants';
-  const firstParticipantSlackId = Array.isArray(det.participants) && (det.participants as any[]).length === 1
-    ? (det.participants as any[])[0]?.slack_id ?? null
-    : null;
-
-  let verified: ScheduleOutcome | null = null;
-  const isTerminal = ['resolved', 'cancelled', 'expired'].includes(r.state);
-  if (!isTerminal && ownerCalendarEvents.length > 0 && det.proposed_slots) {
-    try {
-      // v3.x — proposed_slots may already be a parsed array (parseDetails
-      // deserializes the whole details_json, so a nested array stays an array)
-      // OR a JSON-stringified string (older rows / other writers). JSON.parse
-      // on an array coerces it to "2026-..,2026-.." and parses "2026" as a
-      // number → "Unexpected non-whitespace character after JSON at position 4"
-      // (observed in the morning brief 2026-06-07). Accept both shapes.
-      const raw = det.proposed_slots;
-      const slots: string[] = Array.isArray(raw)
-        ? (raw as string[])
-        : typeof raw === 'string'
-          ? (JSON.parse(raw) as string[])
-          : [];
-      if (Array.isArray(slots) && slots.length > 0) {
-        verified = verifyScheduledOutcome({ proposedSlots: slots, subjectKeyword: r.subject }, ownerCalendarEvents, profile);
-      }
-    } catch (err) {
-      logger.warn('brief verifier — coord verify threw', { id: r.id, err: String(err).slice(0, 200) });
-    }
-  }
-
-  const item: RichItem = {
-    kind: 'coordination',
-    request_id: r.id,
-    state: r.state,
-    colleague: participantNames,
-    subject: r.subject,
-    topic: det.topic ?? undefined,
-    status: stateLabel,
-    proposedSlot: slotLabel,
-    updatedWhen: relativeTime(r.updated_at, timezone),
-    closure_reason: r.closure_reason,
-    closed_at: r.closed_at,
-    closed_at_relative: r.closed_at ? relativeTime(r.closed_at, timezone) : null,
-    recent_context: recentColleagueContext(firstParticipantSlackId, 3),
-  };
-  if (verified && verified.status !== 'none' && verified.event) {
-    const ev = verified.event;
-    const eStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).setZone(timezone);
-    item.verified_outcome = {
-      status: verified.status,
-      event_subject: ev.subject ?? '',
-      event_when: eStart.toFormat('EEEE d MMM \'at\' HH:mm'),
-      issues: verified.issues,
-    };
-  }
-  return item;
-}
-
 function buildTaskItem(r: RequestRow, timezone: string): RichItem {
   const det = parseDetails<Record<string, unknown>>(r) ?? {};
   return {
@@ -363,7 +285,6 @@ function buildItemForRow(
 ): RichItem {
   if (r.kind === 'approval') return buildApprovalItem(r, timezone);
   if (r.kind === 'outreach' || r.kind === 'social_outreach') return buildOutreachItem(r, ownerCalendarEvents, profile, timezone);
-  if (r.kind === 'coord') return buildCoordItem(r, ownerCalendarEvents, profile, timezone);
   return buildTaskItem(r, timezone);
 }
 

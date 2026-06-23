@@ -4,7 +4,7 @@
  * Replaces the ad-hoc `deferred_action` pattern with a structured object that
  * lives in `request.details_json.callbacks`. The resolver reads this and
  * dispatches; the same object covers every approval kind (rule_exception,
- * cancel_confirm, freeform, slot_pick, future non-meeting confirms).
+ * cancel_confirm, freeform, future non-meeting confirms).
  *
  *   on_approve  — tool that fires on yes. When omitted, Module D's Y.2 gate
  *                 skips auto-resolve so Sonnet handles the work via reasoning.
@@ -120,8 +120,8 @@ export function buildConsequenceText(
 
 /**
  * Merge owner's amend counter into on_approve.args. The counter shape is
- * approval-kind-specific (slot_pick: { slot_iso }, freeform: arbitrary keys,
- * etc.). We do a shallow spread: counter wins on key conflict. Caller is
+ * approval-kind-specific (freeform: arbitrary keys, etc.). We do a shallow
+ * spread: counter wins on key conflict. Caller is
  * responsible for ensuring the counter keys correspond to on_approve.args
  * keys — that's a tool-description responsibility, not a code invariant.
  */

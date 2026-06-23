@@ -24,10 +24,10 @@ import { DateTime } from 'luxon';
 // + src/tasks/*.
 const TOOL_NAMES = [
   // Calendar / meeting
-  'analyze_calendar', 'book_floating_block', 'cancel_coordination',
-  'check_calendar_health', 'check_join_availability', 'coordinate_meeting',
-  'create_meeting', 'delete_meeting', 'escalate_to_user', 'finalize_coord_meeting',
-  'find_available_slots', 'get_active_coordinations', 'get_calendar', 'get_free_busy',
+  'analyze_calendar', 'book_floating_block',
+  'check_calendar_health', 'check_join_availability',
+  'create_meeting', 'delete_meeting', 'escalate_to_user',
+  'find_available_slots', 'get_calendar', 'get_free_busy',
   'move_meeting', 'set_event_category', 'update_meeting', 'manage_calendar_issue',
   'manage_working_elsewhere',
   // Slack lookups

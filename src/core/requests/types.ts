@@ -2,13 +2,13 @@
  * The Request spine (v2.7.0).
  *
  * Every user-facing piece of work Maelle tracks is a `request` row. Approvals,
- * outreach, reminders, coord (multi-party meeting booking), research — one
- * table, one lifecycle, one closure API. Replaces the v2.6.x four-table mess
- * (tasks + approvals + coord_jobs + outreach_jobs) that orphaned items every
+ * outreach, reminders, research — one
+ * table, one lifecycle, one closure API. Replaces the v2.6.x multi-table mess
+ * (tasks + approvals + outreach_jobs) that orphaned items every
  * brief because no single layer owned the lifecycle.
  *
- * Hierarchy: a coord request can spawn child outreach requests (one per
- * attendee) via `parent_request_id`. Brief surfaces only top-level rows.
+ * Hierarchy: a request can spawn child requests via `parent_request_id`.
+ * Brief surfaces only top-level rows.
  *
  * Time-based reactions live ON the request row (`next_check_at` +
  * `next_check_handler`) — no separate dispatch table for one-shot expiries.
@@ -21,15 +21,12 @@ export type RequestKind =
   | 'reminder'         // owner-self: "remind me Friday"
   | 'follow_up'        // owner-self: "check back on X in 3 days"
   | 'research'         // owner-self: "look this up and tell me"
-  | 'coord'            // multi-party meeting booking (parent of child outreach rows)
   | 'social_outreach'; // proactive social DM to a colleague
 
 export type ApprovalSubkind =
-  | 'slot_pick'
   | 'duration_override'
   | 'policy_exception'
   | 'unknown_person'
-  | 'calendar_conflict'
   | 'freeform';
 
 export type OutreachSubkind =
@@ -41,7 +38,7 @@ export type OutreachSubkind =
 export type RequestState =
   | 'awaiting_owner'      // owner action blocks progress (most approvals start here)
   | 'awaiting_colleague'  // colleague reply blocks progress (most outreach lives here)
-  | 'in_flight'           // Maelle is working (research running, coord still collecting responses, scheduled outreach not yet sent)
+  | 'in_flight'           // Maelle is working (research running, scheduled outreach not yet sent)
   | 'resolved'            // terminal — closed normally
   | 'cancelled'           // terminal — owner dropped OR auto-cancelled by surfaced_threshold
   | 'expired';            // terminal — no action within window
@@ -60,28 +57,20 @@ export type ClosedBy =
 /**
  * v3.1 (Path 2) — kind-namespaced activity sub-state values. The string union
  * documents the legal phases; `phase` is stored as TEXT so callers pass these
- * literals. Never mix a coord phase onto an outreach request — setPhase
+ * literals. Never mix a phase onto the wrong request kind — setPhase
  * validates the namespace matches the kind.
  */
-export type CoordPhase =
-  | 'coord:collecting'    // DMs out, gathering votes
-  | 'coord:resolving'     // tallying, picking best slot
-  | 'coord:negotiating'   // ping-pong: countered, re-asking
-  | 'coord:waiting_owner';// parked for owner decision (state=awaiting_owner)
-
 export type OutreachPhase =
   | 'outreach:scheduled'      // future send_at, not yet sent (state=in_flight)
   | 'outreach:awaiting_reply' // sent, waiting (state=awaiting_colleague)
   | 'outreach:nudged'         // follow-up sent once
   | 'outreach:no_response';   // window elapsed, pending owner decision
 
-export type RequestPhase = CoordPhase | OutreachPhase;
+export type RequestPhase = OutreachPhase;
 
 export type NextCheckHandler =
   | 'expiry'                 // generic expiry → close with state=expired
   | 'approval_reminder'      // midpoint nag DM, then re-arm for expiry
-  | 'coord_nudge'            // poke silent attendees in a coord
-  | 'coord_abandon'          // close coord if still stuck after nudge window
   | 'outreach_expiry'        // outreach awaiting_colleague past window → flip to outreach_decision
   | 'outreach_decision'      // 2 workdays after no-response → auto-close with "want me to try again?"
   | 'send_scheduled_outreach' // fire a future-dated outreach DM
@@ -112,8 +101,7 @@ export interface RequestRow {
   state: RequestState;
   // v3.1 (Path 2) — kind-namespaced activity sub-state. `state` is the
   // universal lifecycle; `phase` is the finer dance for multi-step kinds.
-  // e.g. coord:collecting | coord:resolving | coord:negotiating |
-  // coord:waiting_owner | outreach:scheduled | outreach:awaiting_reply |
+  // e.g. outreach:scheduled | outreach:awaiting_reply |
   // outreach:nudged | outreach:no_response. NULL for single-step kinds.
   phase: string | null;
   state_changed_at: string;

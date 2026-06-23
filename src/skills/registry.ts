@@ -156,14 +156,10 @@ const ALWAYS_ON_TOOLS = new Set<string>([
 
 const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
   meetings: new Set<string>([
-    // v3.x (Block 2 coord demotion) — the multi-party coordination tools
-    // (coordinate_meeting + get_active_coordinations + cancel_coordination +
-    // finalize_coord_meeting) moved OUT to the 'coord' scope below. They
-    // hadn't legitimately fired in a month — the internal-Slack flow is direct
-    // booking (find_available_slots → create_meeting), and shipping
-    // coordinate_meeting on every scheduling turn was causing wrong-tool picks.
-    // check_join_availability stays: it's the Route-2 "colleague joins an
-    // existing meeting" flow, a live internal path distinct from coordination.
+    // check_join_availability is the Route-2 "colleague joins an existing
+    // meeting" flow — a live internal path. (The multi-party coordination tools
+    // were removed with the coord subsystem in v3.4.x; all scheduling is now the
+    // direct path: find_available_slots → create_meeting.)
     'check_join_availability',
     'find_available_slots', 'get_calendar', 'analyze_calendar', 'get_free_busy',
     'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
@@ -175,22 +171,6 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
     // v2.9 — find_venue is reachable from a meetings-flavored turn
     // ("book coffee with Yael"); also lives in the 'venue' scope.
     'find_venue',
-  ]),
-  // ⚠️ DEMOTED + SLATED FOR FULL REMOVAL (v3.4.x). The coordinate_meeting TOOL
-  // is unused, but coord is NOT actually dead: it's still reachable via the
-  // OUTREACH→SCHEDULING HANDOFF (coordinator.ts:604 → initiateCoordination),
-  // which fired HARMFULLY on 2026-06-23 (the Luke incident — a colleague agreed
-  // to a specific time, the handoff discarded it, re-coordinated the whole week,
-  // and reported a fabricated "everyone agreed on Sunday"). Full rip-out is the
-  // next task; the handoff must become a direct create_meeting of the agreed
-  // time. Original bug that demoted it (v3.3.8): coord ran as a PARALLEL track
-  // that desynced from the direct path (orphan nudging + two tracks negotiating
-  // different slots — the Isaac/"Brainrocket" desync). If ever rebuilt (for an
-  // external/calendar-invisible transport), build it FRESH as the SOLE track for
-  // that requester — never parallel to a direct booking path.
-  coord: new Set<string>([
-    'coordinate_meeting', 'get_active_coordinations', 'cancel_coordination',
-    'finalize_coord_meeting',
   ]),
   tasks: new Set<string>([
     // v2.9 — 4 routine tools merged into manage_routine.
@@ -253,12 +233,11 @@ function filterToolsByScope(
   if (!scopes || scopes.length === 0 || scopes.includes('general')) {
     return allTools;
   }
-  // v3.x — 'coord' and 'calendar' both imply 'meetings': coordination needs the
-  // calendar reads to reason about times, and a calendar-review turn needs the
+  // v3.x — 'calendar' implies 'meetings': a calendar-review turn needs the
   // health/read tools (which live in the meetings scope). Expand deterministically
   // here so the turn is safe even if the classifier emits the sub-scope alone.
   let effectiveScopes = scopes;
-  if ((scopes.includes('coord') || scopes.includes('calendar')) && !scopes.includes('meetings')) {
+  if (scopes.includes('calendar') && !scopes.includes('meetings')) {
     effectiveScopes = [...scopes, 'meetings'];
   }
   // Build the set of allowed tool names: always-on + every tool in any
@@ -324,23 +303,11 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   // this allowlist so a colleague-path Sonnet can flag things up to the owner.
   'create_task',
   'create_approval',
-  // v3.3.8 — coordinate_meeting REMOVED from the colleague allowlist. Data
-  // verdict (June 2026): since the attendee free/busy intersection + direct
-  // booking landed (~mid-May), coord stopped completing — Apr: 5 booked,
-  // May: 1 booked / 12 dead, June: 0 booked / 3 abandoned — while the real
-  // bookings happened on the direct path (find_available_slots intersects
-  // every internal attendee's calendar; create_meeting invites everyone,
-  // externals by email with Outlook's native accept/decline). All a coord
-  // added for an internal requester was a parallel DM thread (#126) and an
-  // orphan job that kept nudging. Owner-path keeps the tool for explicit
-  // "poll them first" asks.
-  //
-  // FUTURE (owner direction, 2026-06-11): when external transports land
-  // (WhatsApp / email — see .claude/WHATSAPP_PROJECT.md), EXTERNAL
-  // requesters get coords back — their calendars are NOT visible, so
-  // slot-polling is the only way to converge on a time with them. The gate
-  // then becomes "requester's calendar visibility", not a blanket block.
-  // The coord state machine + coordGuard stay in place for that.
+  // v3.4.x — the multi-party coordination subsystem (coordinate_meeting + the
+  // DM-poll state machine) was fully removed. Scheduling with the owner goes
+  // through the direct path: find_available_slots intersects every internal
+  // attendee's calendar; create_meeting invites everyone, externals by email
+  // with Outlook's native accept/decline.
   'check_join_availability',
   'web_search',
   // v2.2.1 — inbound reschedule auto-accept. Colleagues can ask Maelle to move
@@ -352,8 +319,7 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   'move_meeting',
   // v2.3.2 — inbound 1:1 booking auto-accept. When a colleague has confirmed
   // slot + duration + subject in this DM, Maelle calls create_meeting directly
-  // instead of falling back to "you send the invite" or kicking off a redundant
-  // coordinate_meeting DM. The handler enforces: single colleague-attendee
+  // instead of falling back to "you send the invite". The handler enforces: single colleague-attendee
   // (themselves), rule-compliant slot, English subject. Auto shadow-DMs owner.
   // Same trust pattern as v2.2.1 move_meeting — rule-compliance is the gate.
   'create_meeting',
@@ -383,7 +349,7 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   //
   // What stays owner-only (still in the hard-block list at assistant.ts):
   //   learn_preference, forget_preference, recall_preferences,
-  //   update_person_memory, get_person_memory, finalize_coord_meeting
+  //   update_person_memory, get_person_memory
   // — these touch owner's catalog or other people's memory and have no
   // self-only equivalent on the colleague side.
   //

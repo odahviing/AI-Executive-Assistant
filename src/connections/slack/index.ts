@@ -143,7 +143,7 @@ CRITICAL — when to call this:
 - You don't already know their Slack ID from @mention or WORKSPACE CONTACTS.
 
 DO NOT call this for booking meetings. Booking uses EMAIL, period.
-- create_meeting and coordinate_meeting take attendees as { name, email }. No Slack ID required for any attendee.
+- create_meeting takes attendees as { name, email }. No Slack ID required for any attendee.
 - An external attendee (email outside the company domain) will NEVER have a Slack ID. That's normal. Outlook delivers calendar invites via email regardless.
 - An internal attendee may not have a Slack ID either (guests, deactivated, fresh hires) — still book via email; the heads-up Slack DM step skips silently.
 
@@ -152,13 +152,13 @@ The result shape:
 - { matches: [], external: true, email, message: ... } — query was an external email; proceed with that email for booking, no Slack DM possible.
 - { matches: [] } — name didn't match anyone in the workspace; try a different spelling, or if the user gave you an email, just book directly without this tool.
 
-If you already have an email for the person, you don't need this tool to book a meeting with them. Just call create_meeting or coordinate_meeting with the email.`,
+If you already have an email for the person, you don't need this tool to book a meeting with them. Just call create_meeting with the email.`,
           input_schema: {
             type: 'object',
             properties: {
               name: {
                 type: 'string',
-                description: 'The person\'s name, partial name, OR email address. When passed an email outside the owner\'s company domain, the tool returns { external: true } so you know to skip Slack and proceed directly with create_meeting / coordinate_meeting.',
+                description: 'The person\'s name, partial name, OR email address. When passed an email outside the owner\'s company domain, the tool returns { external: true } so you know to skip Slack and proceed directly with create_meeting.',
               },
             },
             required: ['name'],
@@ -347,7 +347,7 @@ If you already have an email for the person, you don't need this tool to book a 
               count: 0,
               external: true,
               email: queryRaw.toLowerCase(),
-              message: `${queryRaw} is an external email (outside ${ownerDomain}) — they don't need a Slack ID. Proceed with create_meeting / coordinate_meeting using the email; Outlook will deliver the calendar invite. Don't ask anyone to "forward the invite" — that's automatic.`,
+              message: `${queryRaw} is an external email (outside ${ownerDomain}) — they don't need a Slack ID. Proceed with create_meeting using the email; Outlook will deliver the calendar invite. Don't ask anyone to "forward the invite" — that's automatic.`,
             };
           }
 

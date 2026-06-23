@@ -171,13 +171,12 @@ export function getTasksForPerson(personSlackId: string): Task[] {
 }
 
 /**
- * Returns active tasks linked to a specific thread, plus active coordination/outreach
+ * Returns active tasks linked to a specific thread, plus active outreach
  * jobs whose owner_thread_ts matches. Used to inject thread context into the system
  * prompt so Maelle knows what she already committed to in this conversation.
  */
 export function getActiveJobsForThread(ownerUserId: string, threadTs: string): {
   tasks: Task[];
-  coordJobs: import('../db').CoordJob[];
   outreachJobs: import('../db').OutreachJob[];
 } {
   const db = getDb();
@@ -189,14 +188,6 @@ export function getActiveJobsForThread(ownerUserId: string, threadTs: string): {
     AND status IN ('new', 'in_progress', 'pending_owner', 'pending_colleague')
   `).all(ownerUserId, threadTs) as Task[];
 
-  const coordJobs = db.prepare(`
-    SELECT * FROM coord_jobs
-    WHERE owner_user_id = ?
-    AND owner_thread_ts = ?
-    AND status NOT IN ('booked', 'cancelled', 'abandoned')
-    ORDER BY created_at DESC
-  `).all(ownerUserId, threadTs) as import('../db').CoordJob[];
-
   const outreachJobs = db.prepare(`
     SELECT * FROM outreach_jobs
     WHERE owner_user_id = ?
@@ -205,7 +196,7 @@ export function getActiveJobsForThread(ownerUserId: string, threadTs: string): {
     ORDER BY created_at DESC
   `).all(ownerUserId, threadTs) as import('../db').OutreachJob[];
 
-  return { tasks, coordJobs, outreachJobs };
+  return { tasks, outreachJobs };
 }
 
 // Get tasks that completed but requester hasn't been notified yet

@@ -345,32 +345,13 @@ export function getOpenOutreachForColleague(
   `).all(ownerUserId, colleagueSlackId) as RequestRow[];
 }
 
-// ── v3.1 (Path 2) — coord status queries off the spine ────────────────────────
-// These replace the coord_jobs.status readers (getActiveCoordJobs,
-// getCoordJobsByParticipant, getPendingRequestCountForColleague). The coord's
-// STATUS now lives on its parent request (kind='coord'); coord_jobs keeps only
-// the DATA (participants, slots), joined by request_id when content is needed.
-
-/** Open coord requests for an owner (top-level coord parents still in flight). */
-export function getOpenCoordRequests(ownerUserId: string): RequestRow[] {
-  return getDb().prepare(`
-    SELECT * FROM requests
-    WHERE owner_user_id = ?
-      AND kind = 'coord'
-      AND parent_request_id IS NULL
-      AND state IN ('awaiting_owner','in_flight')
-    ORDER BY created_at ASC
-  `).all(ownerUserId) as RequestRow[];
-}
-
 /** Set the kind-namespaced activity phase, validating the namespace matches kind. */
 export function setPhase(id: string, phase: RequestPhase): void {
   const row = getRequest(id);
   if (!row) return;
   const ns = phase.split(':')[0];
-  // coord phases on coord rows; outreach phases on outreach/social_outreach.
+  // outreach phases on outreach/social_outreach.
   const kindOk =
-    (ns === 'coord' && row.kind === 'coord') ||
     (ns === 'outreach' && (row.kind === 'outreach' || row.kind === 'social_outreach'));
   if (!kindOk) {
     logger.warn('setPhase — namespace/kind mismatch, ignoring', { id, kind: row.kind, phase });

@@ -38,11 +38,6 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
   book_floating_block: 'Blocking the time',
   set_event_category: 'Sorting the meeting',
 
-  // Coordination
-  coordinate_meeting: 'Setting up a time',
-  cancel_coordination: 'Calling off the meeting',
-  finalize_coord_meeting: 'Confirming the time',
-
   // Messaging / lookups
   message_colleague: 'Sending the message',
   find_slack_user: 'Finding the person',
@@ -79,9 +74,6 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
   log_interaction: 'Keeping notes',
   update_person_memory: 'Making a note',
   update_person_profile: 'Updating the details',
-
-  // Coordination (read)
-  get_active_coordinations: "Checking what's in motion",
 
   // Meeting summary
   share_summary: 'Sending the recap',

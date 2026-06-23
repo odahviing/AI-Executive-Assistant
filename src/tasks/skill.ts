@@ -28,11 +28,9 @@ import logger from '../utils/logger';
 type CreateTaskType = 'reminder' | 'follow_up' | 'research';
 
 const APPROVAL_SUBKINDS = [
-  'slot_pick',
   'duration_override',
   'policy_exception',
   'unknown_person',
-  'calendar_conflict',
   'freeform',
 ] as const;
 type ApprovalSubkind = (typeof APPROVAL_SUBKINDS)[number];
@@ -134,11 +132,9 @@ AUTHORITY MODEL:
 - If a colleague asks for something that breaks a rule or needs an owner-only judgment, create_approval — the owner must decide.
 
 Kinds:
-- slot_pick: pick one of N offered meeting slots. Payload: { coord_job_id, subject, slots: [{iso, label}], participants_emails, duration_min }. Resolving calls through to the booking flow automatically.
 - duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
 - policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting, floating-block out-of-window move). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. Once payload is complete, the handler auto-stamps \`payload.deferred_action = { tool: 'create_meeting', args: <those fields> }\` (or \`book_floating_block\` / \`move_meeting\` for floating-block bumps) so the resolver executes the action deterministically on owner approve (no separate booking turn needed). If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE creating the approval.
 - unknown_person: book with someone we don't have full contact info for. Payload: { name, known_fields, missing_fields }.
-- calendar_conflict: the chosen slot went stale — offer fresh options. Payload: { coord_job_id, original_slot, conflict_reason, slots: [...] }.
 - freeform: catch-all yes/no/amend question. Payload: { question, context, subject }.
 
 DEFERRED ACTION (auto-execute on approve) — v2.8.6:
@@ -162,7 +158,6 @@ Behavior:
           properties: {
             kind: { type: 'string', enum: [...APPROVAL_SUBKINDS] },
             payload: { type: 'object', description: 'Kind-specific payload (see tool description).' },
-            skill_ref: { type: 'string', description: 'Optional. For coord-linked approvals, the coord_job_id.' },
             ask_text: { type: 'string', description: 'The exact text to DM the owner as the approval ask.' },
             expires_in_workdays: { type: 'number', description: 'Owner-workdays until expiry. Default 2.' },
             expires_in_hours: { type: 'number', description: 'Sub-workday escape hatch.' },
@@ -180,7 +175,7 @@ Owner short-acks ("yes", "go", "no", "kill it") in a thread bound to a pending a
 - or you need to act on an approval from a different thread.
 
 Verdicts:
-- approve: owner said yes. \`data\` is meaningful in two cases: (1) slot_pick approvals — e.g. \`{ slot_iso: "2026-04-22T10:00:00" }\` to pick a specific slot; (2) a move/booking approval that ALSO asked online-vs-in-person (external attendee, unknown timezone, office day) — pass the owner's answer as \`{ is_online: true }\` for online/Teams or \`{ is_online: false }\` for in-person, or \`{ location: "<place>" }\` for a named place. This is folded into the move/create the approval will replay, so it lands instead of re-asking. For every OTHER approval kind, \`data\` is dropped silently. If the owner wants to change the time/attendees at approve-time, use verdict='amend' with \`counter\` — never approve+data for those.
+- approve: owner said yes. \`data\` is meaningful when a move/booking approval ALSO asked online-vs-in-person (external attendee, unknown timezone, office day) — pass the owner's answer as \`{ is_online: true }\` for online/Teams or \`{ is_online: false }\` for in-person, or \`{ location: "<place>" }\` for a named place. This is folded into the move/create the approval will replay, so it lands instead of re-asking. For every OTHER approval kind, \`data\` is dropped silently. If the owner wants to change the time/attendees at approve-time, use verdict='amend' with \`counter\` — never approve+data for those.
 - reject: owner said no. The linked work is cancelled.
 - amend: owner said "not as asked, but here's an alternative" (e.g. "no, but 13:30 would work"). Provide counter with the alternative.
 
@@ -334,12 +329,6 @@ Binding — how to pick the right approval_id:
               sent_at: det.sent_at ?? null,
               reply: det.reply_text ?? null,
             };
-          } else if (r.kind === 'coord') {
-            base.coordination = {
-              subject: r.subject,
-              participants: det.participant_names ?? [],
-              winning_slot: det.winning_slot ?? null,
-            };
           } else if (r.kind === 'approval') {
             base.approval = {
               kind: r.subkind,
@@ -490,11 +479,8 @@ Binding — how to pick the right approval_id:
         // v2.9.4 (#107b) — booking-kind payload enforcement. Reuses the
         // create_meeting required-field contract (subject, start, end,
         // attendees) — same object, no new type. `policy_exception` is the
-        // only booking-class kind that today carries a loose payload; the
-        // other booking-class kinds (slot_pick, calendar_conflict,
-        // duration_override) already have purpose-built typed payloads with
-        // their own resolver flows. Non-booking kinds (freeform, etc.) stay
-        // loose per owner direction.
+        // booking-class kind that carries a loose payload validated here.
+        // Non-booking kinds (freeform, etc.) stay loose per owner direction.
         //
         // When the required fields are present: validate, then auto-stamp
         // payload.deferred_action with { tool: 'create_meeting', args: ... }
@@ -731,7 +717,6 @@ Binding — how to pick the right approval_id:
             idempotencyKey,
             details: {
               ...payload,
-              coord_job_id: (args.skill_ref as string | undefined) ?? payload.coord_job_id,
             },
           });
         } catch (err) {
@@ -963,7 +948,6 @@ Binding — how to pick the right approval_id:
             id: r.id,
             kind: r.subkind ?? r.kind,
             task_id: r.id,
-            skill_ref: (parseDetails(r) ?? {}).coord_job_id ?? null,
             created_at: r.created_at,
             expires_at: r.expires_at,
             payload: parseDetails(r) ?? {},
@@ -1010,11 +994,9 @@ When the user changes their briefing time, call learn_preference with category="
 Every decision the owner needs to make is a request of kind=approval. Do NOT freelance a DM asking "want me to do X?" — that gets lost in chat history and has no expiry. Use create_approval and let the system track it.
 
 WHEN TO CREATE AN APPROVAL:
-- You found the meeting slot, waiting on the owner to pick → kind=slot_pick
 - Someone requested a non-standard meeting length → kind=duration_override
-- A scheduling rule would be violated → kind=policy_exception (covers floating-block out-of-window moves too)
+- A scheduling rule would be violated → kind=policy_exception (covers floating-block out-of-window moves too; carry payload.deferred_action so the booking fires on approve)
 - Booking with a person you don't have full contact info for → kind=unknown_person
-- The chosen slot just conflicted → kind=calendar_conflict (usually automatic)
 - Any other yes/no/"how about X" question → kind=freeform
 
 WHEN OWNER REPLIES:

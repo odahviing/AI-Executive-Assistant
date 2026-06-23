@@ -21,24 +21,17 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
 import { App } from '@slack/bolt';
-import { DateTime } from 'luxon';
 import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
 import { updateRequest } from '../../db/requests';
 import {
   updateOutreachJob,
   getOutreachJobsByColleague,
-  getCoordJobsByParticipant,
   logEvent,
   getDb,
   appendToConversation,
   type OutreachJob,
 } from '../../db';
-import { findAvailableSlots, pickSpreadSlots } from '../graph/calendar';
-import { initiateCoordination } from '../../skills/meetings/coord/state';
-import { type SlotWithLocation } from '../../skills/meetings/coord/utils';
-import { resolveLocation } from '../../utils/resolveLocation';
-import { searchPeopleMemory, getPersonMemory } from '../../db/people';
 import logger from '../../utils/logger';
 
 // ── Outreach primitives ──────────────────────────────────────────────────────
@@ -344,54 +337,18 @@ export async function handleOutreachReply(
     return true;
   }
 
-  // Scheduling handoff — outreach closes, coordination takes over.
-  //
-  // v2.2.4 (bug 4) — idempotency guard. Without this, every fresh
-  // message_colleague Maelle sends in a back-and-forth creates a new
-  // outreach_job, and every reply from the colleague triggers a fresh handoff
-  // classification — which spawned a new "Handoff from outreach conversation"
-  // coord every cycle (zombie second/third handoffs landing on the colleague
-  // with stale + wrong slot proposals). If a coord_job for this colleague is
-  // already in flight in the last 24h, route as a CONTINUE relay instead —
-  // owner will progress it through the existing coord/reschedule machinery.
+  // Scheduling turn — RELAY TO OWNER. The colleague's reply has turned into a
+  // request to set up a new meeting. We do NOT auto-find slots or coordinate
+  // here (the multi-party coord subsystem was removed). Instead: close the
+  // outreach as replied, complete its task, and DM the owner with the gist so
+  // he can decide and book through the normal direct path (find_available_slots
+  // → create_meeting).
   if (decision.action === 'schedule') {
-    // v3.1 (Path 2 fix) — "is there an active coord for this colleague?" must
-    // read the linked request's open state, NOT coord_jobs.status (now a
-    // vestigial column frozen at its 'collecting' default — it would report
-    // EVERY coord as active, including booked/cancelled ones, and wrongly skip
-    // a genuinely-needed new coord). getCoordJobsByParticipant JOINs requests
-    // for the real open-state + 24h freshness check.
-    const activeForColleague = getCoordJobsByParticipant(params.senderId, params.profile.user.slack_user_id)
-      .filter(c => {
-        const created = Date.parse(c.created_at);
-        return Number.isFinite(created) && created >= Date.now() - 24 * 60 * 60 * 1000;
-      });
-    const recentCoord = activeForColleague.length > 0
-      ? { id: activeForColleague[0].id, subject: activeForColleague[0].subject }
-      : undefined;
-
-    if (recentCoord) {
-      logger.info('Outreach → scheduling handoff SKIPPED (active coord exists, treating as continue)', {
-        jobId: job.id,
-        recentCoordId: recentCoord.id,
-        recentCoordSubject: recentCoord.subject,
-      });
-      // Don't spawn a duplicate coord. Treat as a regular relay — close the
-      // outreach as replied with the reply preserved; owner sees it in their
-      // normal flow and decides.
-      updateOutreachJob(job.id, {
-        status: 'replied',
-        reply_text: params.text,
-        conversation_json: JSON.stringify(conversation),
-      });
-      return true;
-    }
-
-    logger.info('Outreach → scheduling handoff', { jobId: job.id, details: decision.details });
+    logger.info('Outreach → scheduling relay to owner', { jobId: job.id, details: decision.details });
 
     updateOutreachJob(job.id, {
       status: 'replied',
-      reply_text: `[Schedule handoff] ${decision.summary}`,
+      reply_text: `[Schedule] ${decision.summary}`,
       conversation_json: JSON.stringify(conversation),
     });
     getDb().prepare(
@@ -399,278 +356,34 @@ export async function handleOutreachReply(
        WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague')`
     ).run(job.id);
 
-    const peopleMatches = searchPeopleMemory(job.colleague_name);
-    const personInfo = peopleMatches.length > 0 ? peopleMatches[0] : null;
-    // v2.2.6 (S8 critical) — travel-aware TZ resolution. When the colleague is
-    // currently traveling, use their travel TZ for both slot rendering (dual
-    // times in the DM) and downstream participant.tz consumers. Stored TZ is
-    // the baseline; travel record overrides for the active window.
-    let colleagueTz = personInfo?.timezone ?? params.profile.user.timezone;
-    if (job.colleague_slack_id) {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { getCurrentTravel } = require('../../db/people') as typeof import('../../db/people');
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { inferTimezoneFromStateStatic } = require('../../utils/locationTz') as
-          typeof import('../../utils/locationTz');
-        const travel = getCurrentTravel(job.colleague_slack_id);
-        if (travel) {
-          const travelTz = inferTimezoneFromStateStatic(travel.location);
-          if (travelTz) colleagueTz = travelTz;
-        }
-      } catch (_) { /* fail open — keep stored TZ */ }
+    const { preferredDay, preferredTime, subject, durationMin } = decision.details;
+    const dayPart = preferredDay ? ` on ${preferredDay}` : '';
+    const timePart = preferredTime ? ` around ${preferredTime}` : '';
+    const relayMsg = `${job.colleague_name} wants to meet${dayPart}${timePart} for "${subject}" (${durationMin} min). Want me to find a time and book it?`;
+    await app.client.chat.postMessage({
+      token: params.bot_token,
+      channel: job.owner_channel,
+      thread_ts: job.owner_thread_ts ?? undefined,
+      text: relayMsg,
+    });
+    if (job.owner_thread_ts) {
+      appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: relayMsg });
     }
-    const colleagueEmail = personInfo?.email ?? undefined;
+    logEvent({
+      ownerUserId: params.profile.user.slack_user_id,
+      type: 'outreach_reply',
+      title: `${job.colleague_name} — scheduling request`,
+      detail: relayMsg,
+      actor: job.colleague_name,
+      refId: job.id,
+    });
 
-    const { preferredDay, preferredTime, isOnline, subject } = decision.details;
-    const { durationMin } = decision.details;
-
-    // v2.8.6 — the snap to allowed_durations now lives at the create_meeting
-    // handler entry (single chokepoint for direct Sonnet calls, coord
-    // handoffs, and deferred replays). The duplicate snap that used to live
-    // here was removed in the same patch — no behavior change, just one
-    // source of truth.
-
-    const ownerTz = params.profile.user.timezone;
-    const now = DateTime.now().setZone(ownerTz);
-
-    let searchFrom: DateTime;
-    let searchTo: DateTime;
-    if (preferredDay) {
-      const dayLower = preferredDay.toLowerCase();
-      const dayMap: Record<string, number> = {
-        monday: 1, tuesday: 2, wednesday: 3, thursday: 4,
-        friday: 5, saturday: 6, sunday: 7,
-      };
-      const targetDow = dayMap[dayLower];
-      if (targetDow) {
-        const currentDow = now.weekday;
-        const daysAhead = targetDow > currentDow ? targetDow - currentDow : targetDow + 7 - currentDow;
-        searchFrom = now.plus({ days: daysAhead }).startOf('day');
-        searchTo = searchFrom.endOf('day');
-      } else {
-        searchFrom = now.plus({ days: 1 }).startOf('day');
-        searchTo = now.plus({ days: 7 }).endOf('day');
-      }
-    } else {
-      searchFrom = now.plus({ days: 1 }).startOf('day');
-      searchTo = now.plus({ days: 7 }).endOf('day');
-    }
-
-    try {
-      const schedule = params.profile.schedule;
-      const allWorkDays = [
-        ...schedule.office_days.days,
-        ...schedule.home_days.days,
-      ] as string[];
-
-      // v2.2.3 (#43) — build per-attendee work window from people_memory
-      // (effective working hours: manual override → auto from TZ default).
-      // Slots that fall outside an attendee's window get clipped pre-Graph,
-      // so Maelle never proposes 03:30 ET to someone in Boston.
-      const attendeeAvailability: NonNullable<Parameters<typeof findAvailableSlots>[0]['attendeeAvailability']> = [];
-      if (colleagueEmail) {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getEffectiveWorkingHours, defaultWorkingHoursForTz } = require('../../utils/workingHoursDefault') as
-            typeof import('../../utils/workingHoursDefault');
-          const personRow = job.colleague_slack_id ? getPersonMemory(job.colleague_slack_id) : null;
-          if (personRow) {
-            let wh = getEffectiveWorkingHours(personRow);
-            let tz = personRow.timezone;
-            // v2.2.6 (S8 critical) — when colleague is currently traveling, use
-            // the travel TZ + work hours derived from it, not the stored
-            // default. Stored profile is the baseline; travel record overrides
-            // for the active window. Without this, slot search clips to the
-            // colleague's home work hours and misses the right Boston-day
-            // slots when they're actually in Boston.
-            if (job.colleague_slack_id) {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { getCurrentTravel } = require('../../db/people') as typeof import('../../db/people');
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { inferTimezoneFromStateStatic } = require('../../utils/locationTz') as
-                typeof import('../../utils/locationTz');
-              const travel = getCurrentTravel(job.colleague_slack_id);
-              if (travel) {
-                const travelTz = inferTimezoneFromStateStatic(travel.location);
-                if (travelTz) {
-                  tz = travelTz;
-                  const defaults = defaultWorkingHoursForTz(travelTz);
-                  wh = { ...defaults, source: 'auto' };
-                }
-              }
-            }
-            if (wh && tz) {
-              attendeeAvailability.push({
-                email: colleagueEmail,
-                timezone: tz,
-                workdays: wh.workdays,
-                hoursStart: wh.hoursStart,
-                hoursEnd: wh.hoursEnd,
-              });
-            }
-          }
-        } catch (_) { /* fail open — no clip on this attendee */ }
-      }
-
-      const slots = await findAvailableSlots({
-        userEmail: params.profile.user.email,
-        timezone: ownerTz,
-        durationMinutes: durationMin,
-        attendeeEmails: colleagueEmail ? [colleagueEmail] : [],
-        searchFrom: searchFrom.toISO()!,
-        searchTo: searchTo.toISO()!,
-        preferMorning: true,
-        workDays: allWorkDays,
-        // v2.8.1 — calendar.ts reads per-day work_hours via getOwnerWorkHoursForDay; no widening here.
-        minBufferHours: params.profile.meetings.min_slot_buffer_hours ?? 4,
-        meetingMode: 'either',  // coord outreach — location determined later
-        autoExpand: false,
-        profile: params.profile,
-        // v2.2.3 (#43) — owner-only busy filter by default (no
-        // attendeeBusyEmails). Attendee status is annotated on chosen slots
-        // separately, post-pick. Recipient can opt in to deeper search later.
-        attendeeAvailability: attendeeAvailability.length > 0 ? attendeeAvailability : undefined,
-      });
-
-      if (slots.length === 0) {
-        const msg = `My conversation with ${job.colleague_name} turned into scheduling — they want to meet${preferredDay ? ` ${preferredDay}` : ''}${preferredTime ? ` around ${preferredTime}` : ''} for "${subject}" (${durationMin} min). But I couldn't find open slots in your calendar. Want me to look at a wider window?`;
-        await app.client.chat.postMessage({
-          token: params.bot_token,
-          channel: job.owner_channel,
-          thread_ts: job.owner_thread_ts ?? undefined,
-          text: msg,
-        });
-        if (job.owner_thread_ts) {
-          appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: msg });
-        }
-        return true;
-      }
-
-      const chosen = pickSpreadSlots(slots, ownerTz, 3);
-      const participant = {
-        slack_id: job.colleague_slack_id,
-        name: job.colleague_name,
-        tz: colleagueTz,
-        email: colleagueEmail,
-      };
-
-      const ownerDomain = params.profile.user.email.split('@')[1];
-      const isColleagueInternal = colleagueEmail
-        ? colleagueEmail.endsWith(`@${ownerDomain}`)
-        : true;
-
-      // v2.2.4 (bug 8b) — if the colleague is currently traveling, force the
-      // location selector online. "Idan's Office" for someone in Boston is a
-      // lie. getCurrentTravel auto-clears past windows; presence here means
-      // the trip is active.
-      let colleagueTraveling = false;
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { getCurrentTravel } = require('../../db') as typeof import('../../db');
-        colleagueTraveling = !!getCurrentTravel(job.colleague_slack_id);
-      } catch (_) { /* fail open */ }
-
-      const proposedSlots: SlotWithLocation[] = chosen.map(slotStart => {
-        // v2.8.2 — unified location via resolveLocation. 1:1 coord with no
-        // owner/category context yet. If the office-day+external+same/unknown-TZ
-        // ask path fires, default this annotation to online — the question
-        // gets answered at create_meeting time, when ops.ts can refuse with
-        // the ask. Annotation-time is too early to ask the owner.
-        const v = resolveLocation({
-          profile: params.profile,
-          startIso: slotStart,
-          intent: 'new_booking',
-          participantCount: 2,
-          hasExternalAttendee: !isColleagueInternal,
-          anyParticipantRemote: colleagueTraveling,
-        });
-        let location = '';
-        let isOnline = true;
-        if (v.kind === 'resolved') {
-          location = v.location;
-          isOnline = v.isOnline;
-        }
-        // preserve_existing can't fire here (new_booking), ask_owner falls through
-        // to the default-online annotation above.
-        return {
-          start: slotStart,
-          end: DateTime.fromISO(slotStart).plus({ minutes: durationMin }).toISO()!,
-          location,
-          isOnline,
-        };
-      });
-
-      await initiateCoordination({
-        ownerUserId: params.profile.user.slack_user_id,
-        ownerChannel: job.owner_channel,
-        ownerThreadTs: job.owner_thread_ts,
-        ownerName: params.profile.user.name,
-        ownerEmail: params.profile.user.email,
-        ownerTz,
-        subject,
-        // v2.2.4 (bug 4) — drop the literal "Handoff from outreach
-        // conversation" phrase. It was internal framing leaking to the
-        // colleague's DM. Topic is omitted; the subject + the coord DM
-        // wording carries enough context, and Sonnet can compose human
-        // narration when topic is empty.
-        topic: undefined,
-        durationMin,
-        participants: [participant],
-        proposedSlots,
-        profile: params.profile,
-      });
-
-      // v2.2.4 (bug 8a) — gendered pronoun + cleaner framing. The previous
-      // template used "They want / sent them" verbatim regardless of whether
-      // there's one or many participants and ignored the colleague's gender.
-      // Single-person handoff says "she" / "he" / "they" based on people_memory.
-      const pronoun = personInfo?.gender === 'female' ? 'she'
-        : personInfo?.gender === 'male' ? 'he'
-        : 'they';
-      const objectPronoun = pronoun === 'she' ? 'her' : pronoun === 'he' ? 'him' : 'them';
-      const verb = pronoun === 'they' ? 'want' : 'wants';
-      const handoffMsg = `My conversation with ${job.colleague_name} turned into scheduling — ${pronoun} ${verb} time for "${subject}"${preferredDay ? ` on ${preferredDay}` : ''}${preferredTime ? ` around ${preferredTime}` : ''}. I'm sending ${objectPronoun} options now.`;
-      await app.client.chat.postMessage({
-        token: params.bot_token,
-        channel: job.owner_channel,
-        thread_ts: job.owner_thread_ts ?? undefined,
-        text: handoffMsg,
-      });
-
-      logEvent({
-        ownerUserId: params.profile.user.slack_user_id,
-        type: 'outreach_reply',
-        title: `${job.colleague_name} — scheduling handoff`,
-        detail: handoffMsg,
-        actor: job.colleague_name,
-        refId: job.id,
-      });
-
-      if (job.owner_thread_ts) {
-        appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: handoffMsg });
-      }
-
-      logger.info('Outreach→coordination handoff complete', {
-        jobId: job.id,
-        colleague: job.colleague_name,
-        subject,
-      });
-      return true;
-    } catch (err) {
-      logger.error('Outreach→coordination handoff failed', { jobId: job.id, err: String(err) });
-      const fallbackMsg = `${job.colleague_name} wants to schedule "${subject}"${preferredDay ? ` on ${preferredDay}` : ''}${preferredTime ? ` around ${preferredTime}` : ''} (${durationMin} min${isOnline ? ', online' : ''}). I couldn't set it up automatically — can you tell me to coordinate this?`;
-      await app.client.chat.postMessage({
-        token: params.bot_token,
-        channel: job.owner_channel,
-        thread_ts: job.owner_thread_ts ?? undefined,
-        text: fallbackMsg,
-      });
-      if (job.owner_thread_ts) {
-        appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: fallbackMsg });
-      }
-      return true;
-    }
+    logger.info('Outreach → scheduling relay complete', {
+      jobId: job.id,
+      colleague: job.colleague_name,
+      subject,
+    });
+    return true;
   }
 
   // decision.action === 'done'

@@ -391,7 +391,7 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
     // reports_to, collaboration_notes, communication_style, response_speed)
     // are silently dropped on the colleague-self path with a log line.
     if (!isOwner) {
-      const ownerOnlyTools = ['manage_preference', 'update_my_preferences', 'update_person_memory', 'get_person_memory', 'finalize_coord_meeting'];
+      const ownerOnlyTools = ['manage_preference', 'update_my_preferences', 'update_person_memory', 'get_person_memory'];
       if (ownerOnlyTools.includes(toolName)) {
         logger.warn('Colleague attempted owner-only tool', { tool: toolName, userId: context.userId });
         return { error: 'not_permitted', reason: 'This action can only be performed by the owner.' };

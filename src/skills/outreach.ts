@@ -26,7 +26,7 @@ import {
   updateOutreachJob,
   upsertPersonMemory,
 } from '../db';
-import { getLinkedRequestIdForOutreach, getCoordJobsByParticipant, getCoordLifecycle } from '../db/jobs';
+import { getLinkedRequestIdForOutreach } from '../db/jobs';
 import { createTask } from '../tasks';
 import { updateRequest, getOpenRequestsForColleague } from '../db/requests';
 import { calcResponseDeadline } from '../utils/responseDeadline';
@@ -178,38 +178,6 @@ Only send messages the user explicitly asks for — never reach out to people on
           };
         }
         const colleagueSlackId = idResolution.slack_id;
-
-        // v3.0.8 — refuse when there's an active coord_job already DMing this
-        // colleague. Pre-fix the Eli/Isaac/Dina pattern: coordinate_meeting
-        // fires its state machine (which DMs each participant with slot
-        // options), claim-checker on the same turn flagged the draft as
-        // "I'll let you know once they confirm" → forced a message_colleague
-        // retry → participants got DOUBLE DMs (one from coord, one from
-        // message_colleague). With claim-checker now recognizing
-        // coordinate_meeting as a message-sender (above), that path stops
-        // firing — but this is the deterministic backstop in case any
-        // future caller still tries message_colleague for a participant
-        // already in coord. Refuse with a clear error so Sonnet can react.
-        try {
-          const activeCoords = getCoordJobsByParticipant(colleagueSlackId, userId);
-          if (activeCoords.length > 0) {
-            const coord = activeCoords[0];
-            // v3.1 (Path 2 Stage 7) — coord status from the linked request.
-            const coordPhase = (getCoordLifecycle(coord.id).phase ?? 'coord:in_flight').replace(/^coord:/, '');
-            logger.warn('message_colleague refused — active coord_job covers this colleague', {
-              colleagueSlackId, colleagueName: args.colleague_name,
-              coordJobId: coord.id, coordSubject: coord.subject, coordStatus: coordPhase,
-            });
-            return {
-              error: 'active_coord_job',
-              message: `Active coord_job ${coord.id} ("${coord.subject}", status=${coordPhase}) is already DMing ${args.colleague_name as string} via the state machine. Don't double-DM. If you need to relay something different from coord, wait for the coord to terminate (booked / cancelled / abandoned) OR cancel it via cancel_coordination first.`,
-            };
-          }
-        } catch (err) {
-          logger.warn('message_colleague — coord-overlap check threw, proceeding', {
-            err: String(err).slice(0, 200),
-          });
-        }
 
         const sendAt = args.send_at as string | undefined;
         const isFuture = sendAt ? new Date(sendAt) > new Date() : false;
@@ -559,12 +527,10 @@ Steps:
    - intent: "meeting_reschedule"     ← REQUIRED
    - context: { meeting_id, meeting_subject, proposed_start (ISO), proposed_end (ISO), original_start (ISO), original_end (ISO) }     ← REQUIRED
 
-When the colleague replies "yes" → the system automatically calls updateMeeting on the existing event, the calendar moves, the colleague gets the updated invite. NO duplicate coord, NO new meeting spawned.
+When the colleague replies "yes" → the system automatically calls updateMeeting on the existing event, the calendar moves, the colleague gets the updated invite. NO new meeting spawned.
 
 When they decline or propose a different time → the system tells the owner; the owner decides next; if owner accepts the counter, you call message_colleague AGAIN with intent='meeting_reschedule' and the new proposed_start/end so the next yes also auto-moves.
 
-WHAT GOES WRONG IF YOU OMIT THE INTENT TAG: the colleague's reply gets routed to the generic done/continue/schedule classifier, which classifies it as SCHEDULE → spawns a NEW coordination → sends them a fresh DM with new slot options and a generic subject. The original meeting NEVER gets moved on the calendar even after they say yes. Symptom: colleague says "got it, send me the invite" but no invite arrives because nothing was patched.
-
-Use coordinate_meeting ONLY for brand-new meetings that don't exist yet.`;
+WHAT GOES WRONG IF YOU OMIT THE INTENT TAG: the colleague's reply gets routed to the generic done/continue/schedule classifier, which classifies it as SCHEDULE → relays to the owner as a brand-new meeting request. The original meeting NEVER gets moved on the calendar even after they say yes. Symptom: colleague says "got it, send me the invite" but no invite arrives because nothing was patched.`;
   }
 }

@@ -1036,7 +1036,12 @@ export function buildSocialContextBlock(slackId: string, timezone: string, assis
   // OUTREACH path (when Maelle INITIATES) — surfaced on the owner-path contact
   // line instead. Inbound language is governed by detectMessageLanguage's
   // per-turn directive + the CURRENT-TURN-WINS rule.
-  if (profile.working_hours)        profileParts.push(`hours: ${profile.working_hours}`);
+  // #135 — working_hours (free-text) deliberately NOT rendered here. It's a
+  // SCHEDULING fact, and the LLM was repeating it as authority (the Isaac "works
+  // Mon/Thu only" bug — the free-text contradicted his real free/busy + structured
+  // workdays). Availability is owned by find_available_slots / attendeeAvailability
+  // (structured workdays + Graph free/busy), never this relational social blob —
+  // same reasoning as language_preference above.
   if (profile.response_speed)       profileParts.push(`responds: ${profile.response_speed}`);
   if (profile.role_summary)         profileParts.push(`role: ${profile.role_summary}`);
   if (profile.reports_to)           profileParts.push(`reports to: ${profile.reports_to}`);

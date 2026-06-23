@@ -23,11 +23,6 @@ import {
   findSlackUser,
   findSlackChannel,
 } from './coordinator';
-import { initiateCoordination } from '../../skills/meetings/coord/state';
-import { getConnection } from '../../connections/registry';
-import { handleCoordReply } from '../../skills/meetings/coord/reply';
-import { forceBookCoordinationByOwner } from '../../skills/meetings/coord/booking';
-import { type SlotWithLocation } from '../../skills/meetings/coord/utils';
 import {
   transcribeSlackAudio,
   textToSpeech,
@@ -331,16 +326,8 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         logger.warn('Could not identify colleague — proceeding anyway', { senderId, err: String(err) });
       }
 
-      // Step 2: Check if this is a reply to an active coordination or outreach job
+      // Step 2: Check if this is a reply to an active outreach job
       try {
-        const multiHandled = await handleCoordReply({
-          senderId, text, channelId, threadTs, profile,
-        });
-        if (multiHandled) {
-          logger.info('Message handled as coordination reply', { senderId, channelId });
-          return;
-        }
-
         const outreachHandled = await handleOutreachReply(app, {
           senderId, text, profile,
           bot_token: assistant.slack.bot_token,
@@ -845,79 +832,11 @@ export function createSlackAppForProfile(profile: UserProfile): App {
             continue;
           }
 
-          // v2.3.1 (B3) — coordinate_meeting awaited so we know if it
-          // actually started. Previously fire-and-forget, which let the
-          // outer postReply shadow notify the owner that "coord started"
-          // before initiateCoordination had a chance to fail with
-          // no_participants / no_connection. Now: if it returns a failure
-          // status, post a follow-up to the owner explaining what didn't
-          // happen — Maelle's own "I started X" text already went out, so
-          // a heads-up is the honest move. finalize_coord_meeting kept its
-          // own error-posting branch.
-          (async () => {
-            try {
-              if (action.action === 'coordinate_meeting') {
-                const result = await initiateCoordination({
-                  ownerUserId: action.ownerUserId as string,
-                  ownerChannel: channelId,
-                  ownerThreadTs: threadTs,
-                  ownerName: action.ownerName as string,
-                  ownerEmail: action.ownerEmail as string,
-                  ownerTz: action.ownerTz as string,
-                  subject: action.subject as string,
-                  topic: action.topic as string | undefined,
-                  durationMin: action.durationMin as number,
-                  participants: action.participants as any[],
-                  proposedSlots: action.proposedSlots as SlotWithLocation[],
-                  profile,
-                  mpimMemberIds: mpimMemberIds,
-                  needsDurationApproval: action.needsDurationApproval as boolean | undefined,
-                  isUrgent: action.isUrgent as boolean | undefined,
-                  senderRole: action._senderRole as 'owner' | 'colleague' | undefined,
-                  senderUserId: action._senderUserId as string | undefined,
-                });
-                // Failure modes: 'no_participants' (after filtering, nothing
-                // left to DM), 'no_connection' (Slack registry empty). On
-                // success, returns the new coord_job id. Anything other than
-                // those two strings = success.
-                if (result === 'no_participants' || result === 'no_connection') {
-                  const subject = action.subject as string;
-                  const reasonHuman = result === 'no_participants'
-                    ? `I couldn't resolve any participants for the "${subject}" coord — the people I tried to reach didn't have Slack IDs I could use. Want to try again with their IDs in the message, or have them DM me directly?`
-                    : `I tried to start the "${subject}" coord but my Slack connection isn't responding right now. Try again in a moment.`;
-                  try {
-                    const conn = getConnection(action.ownerUserId as string, 'slack');
-                    if (conn) {
-                      await conn.sendDirect(action.ownerUserId as string, reasonHuman, { threadTs });
-                    }
-                  } catch (notifyErr) {
-                    logger.warn('coordinate_meeting failure notify failed', {
-                      err: String(notifyErr).slice(0, 200),
-                    });
-                  }
-                }
-              } else if (action.action === 'finalize_coord_meeting') {
-                const result = await forceBookCoordinationByOwner(
-                  action.job_id as string,
-                  action.slot_iso as string,
-                  profile,
-                );
-                if (!result.ok) {
-                  await app.client.chat.postMessage({
-                    token: assistant.slack.bot_token,
-                    channel: channelId,
-                    thread_ts: threadTs,
-                    text: `Couldn't finalize that booking — ${result.reason ?? 'unknown error'}.`,
-                  });
-                }
-              }
-              // v1.8.11 — `send_outreach_dm` and `post_to_channel` actions
-              // removed: message_colleague now sends synchronously inside
-              // its tool handler via Connection.
-            } catch (err) {
-              logger.error('Slack action failed', { err, action: action.action });
-            }
-          })();
+          // v1.8.11 — `send_outreach_dm` and `post_to_channel` actions
+          // removed: message_colleague now sends synchronously inside its tool
+          // handler via Connection. v3.4.x — coordinate_meeting /
+          // finalize_coord_meeting actions removed with the coord subsystem.
+          // find_slack_user (handled above) is the only Slack action left.
         }
       }
         },  // ← close runner async function (v2.4.3 A1)
@@ -1743,7 +1662,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
           const senderName = (senderInfo?.user as any)?.real_name || (senderInfo?.user as any)?.name || 'the sender';
           // Using `<<GROUP DM ...>>` instead of `[GROUP DM ...]` — consistent
           // with the colleague-DM prefix change, and keeps system-added context
-          // out of the owner_spoof regex range in utils/coordGuard.ts.
+          // out of the injection-scanner's owner_spoof regex range.
           groupContext =
             `<<GROUP DM — participants: ${nameEntries.join(', ')}. ` +
             `Sender: ${senderName}. ` +

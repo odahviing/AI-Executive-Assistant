@@ -33,7 +33,6 @@
  *      shipped same release) so older rows can't be cascaded — they need a
  *      one-shot DB cleanup. Forward-going rows cascade cleanly.
  *
- * The cascade is additive to the coord-terminal cascade in updateCoordJob.
  * Double-cascading is idempotent — an already-resolved approval / issue won't
  * match the active-status filter.
  *

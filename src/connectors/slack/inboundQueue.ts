@@ -57,9 +57,9 @@ const DEBOUNCE_MS = 1500;
 export const WRITE_TOOLS = new Set([
   // Calendar mutations
   'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
-  'finalize_coord_meeting', 'book_floating_block', 'set_event_category',
-  // Coord / outreach (sends DMs externally — irreversible)
-  'coordinate_meeting', 'message_colleague', 'cancel_coordination',
+  'book_floating_block', 'set_event_category',
+  // Outreach (sends DMs externally — irreversible)
+  'message_colleague',
   // Approvals (DM owner)
   'create_approval', 'resolve_approval',
   // Tasks (visible state). v2.9 — edit/cancel merged into update_task.

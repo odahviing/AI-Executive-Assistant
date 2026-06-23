@@ -83,8 +83,5 @@ setInterval(sweep, 60_000).unref();
 
 // ── Register default limiters ───────────────────────────────────────────────
 
-// Colleague tool calls per thread — max 3 coordinate_meeting attempts per 10 min
-registerLimiter('colleague_coord', 10 * 60 * 1000, 3);
-
 // Generic colleague tool call budget — max 10 any-tool calls per 5 min per sender per thread
 registerLimiter('colleague_any_tool', 5 * 60 * 1000, 10);

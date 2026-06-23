@@ -259,24 +259,6 @@ export async function getRecentOutboundContext(params: {
   ownerFirstName: string;
   inboundText: string;
 }): Promise<RecentOutboundContextResult> {
-  // v3.1 (Path 2) — coord takes precedence (closes deferred bug #7). If an
-  // active coord covers this colleague, an inbound from them belongs to the
-  // coord, NOT a parallel outreach. handleCoordReply runs before this in the
-  // inbound path (app.ts), but if it didn't consume the message we must not
-  // let a stale outreach context shadow the live coord. Openness is read off
-  // the requests spine (getCoordJobsByParticipant is request-state-aware as
-  // of Stage 3), so this is reliable even if coord_jobs.status drifted.
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getCoordJobsByParticipant } = require('../../db/jobs') as typeof import('../../db/jobs');
-    if (getCoordJobsByParticipant(params.colleagueSlackId, params.ownerUserId).length > 0) {
-      logger.info('recentOutboundContext — active coord covers colleague, deferring to coord', {
-        colleague: params.colleagueName,
-      });
-      return { matched: false, contextBlock: null };
-    }
-  } catch (_) { /* non-fatal — fall through to outreach matching */ }
-
   const job = findOpenOutboundForColleague({
     ownerUserId: params.ownerUserId,
     colleagueSlackId: params.colleagueSlackId,

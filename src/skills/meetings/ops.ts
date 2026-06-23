@@ -163,6 +163,7 @@ import {
 } from '../../db';
 import { closeMeetingArtifacts } from '../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../utils/timezoneConvert';
+import { checkIntendedWeekday } from '../../utils/weekdayGuard';
 
 // ── Calendar event processing ─────────────────────────────────────────────────
 
@@ -1409,13 +1410,24 @@ export class SchedulingSkill {
             const normalized = candidates
               .filter(c => typeof c?.start === 'string' && c.start.length > 0)
               .map(c => {
-                let endIso = c.end;
+                // #136 — apply the SAME conversion the default branch runs at :1083.
+                // candidate_slots[].start is a clock time tagged with
+                // search_window_timezone (the colleague's zone); reinterpret it into
+                // the owner's zone BEFORE searching. Without this a 10:00-ET candidate
+                // was searched as 10:00 owner-local (the Ayala July-8 bug: tested
+                // 10:00 IL instead of 17:00 IL → a false outside_attendee_work_hours
+                // that masked the real owner_busy reason).
+                const startConv = searchWindowTz
+                  ? reinterpretClockInZone(c.start, searchWindowTz, timezone)
+                  : c.start;
+                let endIso = c.end
+                  ? (searchWindowTz ? reinterpretClockInZone(c.end, searchWindowTz, timezone) : c.end)
+                  : undefined;
                 if (!endIso) {
-                  const s = DateTime.fromISO(c.start, { zone: timezone });
-                  if (s.isValid) endIso = s.plus({ minutes: durationMin }).toISO() ?? c.start;
-                  else endIso = c.start;
+                  const s = DateTime.fromISO(startConv, { zone: timezone });
+                  endIso = s.isValid ? (s.plus({ minutes: durationMin }).toISO() ?? startConv) : startConv;
                 }
-                return { start: c.start, end: endIso as string };
+                return { start: startConv, end: endIso as string };
               });
 
             // Same rule-label mapping as Guard B uses; kept in sync (extract
@@ -2536,7 +2548,7 @@ export class SchedulingSkill {
               return {
                 success: false,
                 error: 'attendee_missing_email',
-                message: `I don't have an email for ${unclassifiable.map(a => a.name).join(', ')}. Without an email I can't add them to the calendar invite. Either call coordinate_meeting (which DMs them for slot pick + collects email), or come back with their email.`,
+                message: `I don't have an email for ${unclassifiable.map(a => a.name).join(', ')}. Without an email I can't add them to the calendar invite. Get their email (ask the owner or via find_slack_user), then re-call.`,
               };
             }
           } catch (err) {
@@ -2766,6 +2778,29 @@ export class SchedulingSkill {
           }
         } catch (err) {
           logger.warn('create_meeting — unresolved-attendee pre-check threw, proceeding', { err: String(err).slice(0, 200) });
+        }
+
+        // #135b — weekday/date sanity. If a weekday was named and the model
+        // resolved `start` to a date whose weekday contradicts it (the F2 class —
+        // "Thursday" written as a Friday), refuse with the corrected same-week
+        // date so the model re-issues in the same turn, instead of booking the
+        // wrong day. Number-vs-number, language-agnostic. Shared with move_meeting.
+        {
+          const wk = checkIntendedWeekday(args.start as string | undefined, args.intended_weekday as number | undefined, timezone);
+          if (!wk.ok) {
+            const namedName = DateTime.fromISO(wk.correctedStartIso, { zone: timezone }).toFormat('EEEE');
+            const resolvedName = DateTime.fromISO(args.start as string, { zone: timezone }).toFormat('EEEE');
+            const correctedDate = DateTime.fromISO(wk.correctedStartIso, { zone: timezone }).toFormat('yyyy-MM-dd');
+            logger.warn('create_meeting — weekday/date mismatch, refusing wrong-day write', {
+              namedWeekday: wk.namedWeekday, resolved: wk.resolvedDate, corrected: wk.correctedStartIso,
+            });
+            return {
+              success: false,
+              error: 'weekday_date_mismatch',
+              corrected_start: wk.correctedStartIso,
+              message: `The start resolves to ${wk.resolvedDate} (a ${resolvedName}), but this time was described as a ${namedName}. The ${namedName} of that week is ${correctedDate}. Re-issue create_meeting with start=${wk.correctedStartIso} (same time, corrected day). If a DIFFERENT week was actually meant, resolve the right ${namedName} from the date list in the prompt and retry — never book the mismatched day.`,
+            };
+          }
         }
 
         // Cross-turn idempotency — date-verifier / claim-checker retries can
@@ -3743,6 +3778,32 @@ export class SchedulingSkill {
             logger.warn('move_meeting — travel-context resolve threw, using time as-is', { err: String(err).slice(0, 160) });
           }
         }
+        // #135c — pure reschedule keeps the meeting's length. When the model
+        // omits new_end (it should, on a plain "move it to Thursday 11:00"),
+        // derive it from the moving event's existing duration and populate
+        // args.new_end HERE — early, before the colleague rule-check, the audit
+        // log, and the success result all read it — so the model never has to
+        // supply (or re-ask the owner for) a length it already knows. One light
+        // event fetch, only on the omit path; 30-min fallback if unreadable.
+        if ((typeof args.new_end !== 'string' || (args.new_end as string).length === 0) && typeof args.new_start === 'string') {
+          let durMin = 30;
+          try {
+            const { getEventType } = await import('../../connectors/graph/calendar');
+            const probe = await getEventType(userEmail, args.meeting_id as string);
+            if (probe?.startDateTime && probe?.endDateTime) {
+              const s0 = DateTime.fromISO(probe.startDateTime, { zone: timezone });
+              const e0 = DateTime.fromISO(probe.endDateTime, { zone: timezone });
+              if (s0.isValid && e0.isValid && e0.toMillis() > s0.toMillis()) durMin = Math.round(e0.diff(s0, 'minutes').minutes);
+            }
+          } catch (err) {
+            logger.warn('move_meeting — duration probe threw; defaulting new_end to 30min', { err: String(err).slice(0, 160) });
+          }
+          args.new_end = DateTime.fromISO(args.new_start as string, { zone: timezone }).plus({ minutes: durMin }).toISO() ?? (args.new_start as string);
+          logger.info('move_meeting — derived new_end from existing duration (new_end omitted)', {
+            meetingId: args.meeting_id, durMin, new_end: args.new_end,
+          });
+        }
+
         // v2.2.1 — colleague-path rule-compliance gate. When an inbound colleague
         // DM asks Maelle to move an existing meeting, she can do it autonomously
         // IF the new slot fits the owner's rules (work hours, work days, buffers,
@@ -3947,6 +4008,29 @@ export class SchedulingSkill {
         // pointer to policy_exception (deferred_action move_meeting). Owner-
         // directed moves no longer ask permission for in-window adjustments
         // — code computes the right answer once.
+        // #135b — weekday/date sanity (shared with create_meeting). Refuse a move
+        // whose resolved new_start weekday contradicts the weekday the owner named
+        // ("return it to Thursday" that resolved to a Friday — the F2 wrong-day
+        // write), handing back the corrected same-week date to retry with.
+        {
+          const wk = checkIntendedWeekday(args.new_start as string | undefined, args.intended_weekday as number | undefined, timezone);
+          if (!wk.ok) {
+            const namedName = DateTime.fromISO(wk.correctedStartIso, { zone: timezone }).toFormat('EEEE');
+            const resolvedName = DateTime.fromISO(args.new_start as string, { zone: timezone }).toFormat('EEEE');
+            const correctedDate = DateTime.fromISO(wk.correctedStartIso, { zone: timezone }).toFormat('yyyy-MM-dd');
+            logger.warn('move_meeting — weekday/date mismatch, refusing wrong-day write', {
+              namedWeekday: wk.namedWeekday, resolved: wk.resolvedDate, corrected: wk.correctedStartIso,
+            });
+            return {
+              success: false,
+              error: 'weekday_date_mismatch',
+              meeting_subject: args.meeting_subject,
+              corrected_start: wk.correctedStartIso,
+              message: `new_start resolves to ${wk.resolvedDate} (a ${resolvedName}), but this was described as a ${namedName}. The ${namedName} of that week is ${correctedDate}. Re-issue move_meeting with new_start=${wk.correctedStartIso} (same time, corrected day). If a DIFFERENT week was actually meant, resolve the right ${namedName} from the date list and retry — never move to the mismatched day.`,
+            };
+          }
+        }
+
         let effectiveStart = args.new_start as string;
         let effectiveEnd   = args.new_end   as string;
         // v3.x — grid-align an off-grid move target to the :00/:15/:30/:45 grid

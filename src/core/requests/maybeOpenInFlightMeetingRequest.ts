@@ -44,12 +44,10 @@ const TRACKED_TOOLS = new Set([
 
 export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
   // Owner-initiated only. Colleague-initiated meeting work is tracked via the
-  // existing coord/outreach/approval flows.
+  // existing outreach/approval flows.
   if (input.initiatorRole !== 'owner') return;
   if (!TRACKED_TOOLS.has(input.toolName)) return;
 
-  // coordinate_meeting already creates its own coord-kind request; skipped
-  // via TRACKED_TOOLS above (it's not in the set).
   const result = (input.toolResult ?? {}) as Record<string, unknown>;
   const toolInput = input.toolInput ?? {};
 

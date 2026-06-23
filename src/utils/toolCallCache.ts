@@ -39,8 +39,6 @@ const WRITE_TOOLS = new Set<string>([
   'update_meeting',
   'delete_meeting',
   'book_floating_block',
-  // Multi-party coord (starts state machine + DMs)
-  'coordinate_meeting',
   // Approval + decision side-effects (writes to requests + sends DMs)
   'create_approval',
   'resolve_approval',

@@ -73,26 +73,6 @@ function initSchema(db: Database.Database): void {
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
-    -- Meeting coordination — coordinate a meeting with one or more attendees
-    CREATE TABLE IF NOT EXISTS coord_jobs (
-      id                TEXT PRIMARY KEY,
-      created_at        TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
-      owner_user_id     TEXT NOT NULL,
-      owner_channel     TEXT NOT NULL,
-      owner_thread_ts   TEXT,
-      subject           TEXT NOT NULL,
-      topic             TEXT,
-      duration_min      INTEGER NOT NULL DEFAULT 40,
-      status            TEXT NOT NULL DEFAULT 'collecting',
-      -- collecting | resolving | negotiating | waiting_owner | confirmed | booked | cancelled
-      proposed_slots    TEXT NOT NULL DEFAULT '[]',  -- JSON array of ISO datetimes (3 options)
-      participants      TEXT NOT NULL DEFAULT '[]',  -- JSON array of {slack_id, name, tz, response, responded_at}
-      winning_slot      TEXT,   -- final confirmed slot
-      notes             TEXT,
-      last_calendar_check TEXT  -- ISO timestamp of last calendar freshness check
-    );
-
     -- General outreach jobs — non-scheduling messages sent to colleagues
     CREATE TABLE IF NOT EXISTS outreach_jobs (
       id              TEXT PRIMARY KEY,
@@ -154,18 +134,9 @@ function initSchema(db: Database.Database): void {
   `);
 
   // ── Migrations — safe to run every startup, idempotent ──────────────────────
-  // Migrate old multi_coord_jobs → coord_jobs (drop old table if it exists)
-  try {
-    const hasOldTable = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='multi_coord_jobs'`).get();
-    if (hasOldTable) {
-      db.exec(`DROP TABLE multi_coord_jobs`);
-      logger.info('Dropped legacy multi_coord_jobs table');
-    }
-  } catch (_) {}
-  // Add last_calendar_check column to coord_jobs
-  try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN last_calendar_check TEXT`); } catch (_) {}
-
-  // v1.6.0 — drop legacy `coordination_jobs` table entirely (superseded by coord_jobs)
+  // v3.4.x — the multi-party coord subsystem was removed. Drop its legacy
+  // tables if they linger from an older DB (harmless no-op on a fresh DB).
+  try { db.exec(`DROP TABLE IF EXISTS multi_coord_jobs`); } catch (_) {}
   try { db.exec(`DROP TABLE IF EXISTS coordination_jobs`); } catch (_) {}
 
   // v3.4.6 (spine collapse) — drop the legacy `approvals` table entirely.
@@ -213,17 +184,6 @@ function initSchema(db: Database.Database): void {
     // classified-as-response 10min-24h), or 24h elapsed.
     `ALTER TABLE outreach_jobs ADD COLUMN followup_closed_at TEXT`,
     `ALTER TABLE outreach_jobs ADD COLUMN followup_close_reason TEXT`,
-    // Defensive: older coord_jobs may be missing subject (was hit by injection-driven writes)
-    `ALTER TABLE coord_jobs ADD COLUMN subject TEXT NOT NULL DEFAULT ''`,
-    `ALTER TABLE coord_jobs ADD COLUMN topic TEXT`,
-    `ALTER TABLE coord_jobs ADD COLUMN duration_min INTEGER NOT NULL DEFAULT 40`,
-    // Bug 1B — follow-up / abandon cron
-    // last_participant_activity_at = most recent participant DM/ack on this coord
-    // follow_up_sent_at            = when we pinged stale non-responders (null until sent)
-    // abandoned_at                 = when the coord auto-closed after no follow-up reply
-    `ALTER TABLE coord_jobs ADD COLUMN last_participant_activity_at TEXT`,
-    `ALTER TABLE coord_jobs ADD COLUMN follow_up_sent_at TEXT`,
-    `ALTER TABLE coord_jobs ADD COLUMN abandoned_at TEXT`,
   ];
   for (const sql of columnMigrations) {
     try { db.exec(sql); } catch (_) { /* column already exists — safe to ignore */ }
@@ -664,20 +624,6 @@ function initSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE approvals ADD COLUMN request_id TEXT`); } catch (_) {}
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_approvals_request_id ON approvals(request_id)`); } catch (_) {}
 
-  // Requesters / idempotency on coord_jobs (v1.5)
-  try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN requesters TEXT NOT NULL DEFAULT '[]'`); } catch (_) {}
-  try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN external_event_id TEXT`); } catch (_) {}
-  try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN request_signature TEXT`); } catch (_) {}
-  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_coord_jobs_req_sig ON coord_jobs(request_signature, status)`); } catch (_) {}
-
-  // v2.1.1 — coord_jobs gains a second intent: MOVE. intent='schedule' books
-  // a new meeting (today's path); intent='move' reshuffles an existing one
-  // via moveMeeting on the existing_event_id. DM phrasing + terminal action
-  // branch on intent. Default 'schedule' so every existing row keeps its
-  // current behavior.
-  try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN intent TEXT NOT NULL DEFAULT 'schedule'`); } catch (_) {}
-  try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN existing_event_id TEXT`); } catch (_) {}
-
   // ── v1.7.2 — Summary skill ────────────────────────────────────────────────
   // One row per per-thread summary session. `current_draft` holds the
   // ephemeral in-progress JSON during stages 1–2; nulled at share or after
@@ -726,8 +672,8 @@ function initSchema(db: Database.Database): void {
 
       parent_request_id        TEXT,            -- NULL for top-level
 
-      kind                     TEXT NOT NULL,   -- 'approval' | 'outreach' | 'reminder' | 'follow_up' | 'research' | 'coord' | 'social_outreach'
-      subkind                  TEXT,            -- 'slot_pick' | 'policy_exception' | 'meeting_reschedule' | etc.
+      kind                     TEXT NOT NULL,   -- 'approval' | 'outreach' | 'reminder' | 'follow_up' | 'research' | 'social_outreach'
+      subkind                  TEXT,            -- 'policy_exception' | 'meeting_reschedule' | etc.
       subject                  TEXT NOT NULL,
       description              TEXT,
 
@@ -857,9 +803,7 @@ function initSchema(db: Database.Database): void {
   // gets a request_id pointing at its user-facing requests-spine row. When the
   // legacy table's status transitions to terminal, the linked request closes.
   try { db.exec(`ALTER TABLE outreach_jobs ADD COLUMN request_id TEXT`); } catch (_) {}
-  try { db.exec(`ALTER TABLE coord_jobs ADD COLUMN request_id TEXT`); } catch (_) {}
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_outreach_jobs_request ON outreach_jobs(request_id)`); } catch (_) {}
-  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_coord_jobs_request ON coord_jobs(request_id)`); } catch (_) {}
 
   // ── v3.1 (Path 2) — `phase`: kind-namespaced activity sub-state ───────────
   // The requests spine becomes the SINGLE source of truth for status. `state`

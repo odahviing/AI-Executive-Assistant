@@ -2,36 +2,18 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from './types';
 import type { UserProfile } from '../config/userProfile';
 import {
-  updateCoordJob,
-  getActiveCoordJobs,
-  getCoordLifecycle,
-  getDb,
-  auditLog,
-  searchPeopleMemory,
-  getPersonMemory,
-  type CoordParticipant,
-} from '../db';
-import {
-  findAvailableSlots,
-  pickSpreadSlots,
   getCalendarEvents,
-  GraphPermissionError,
   updateMeeting,
 } from '../connectors/graph/calendar';
 import { SchedulingSkill as _LegacyOpsSkill } from './meetings/ops';
-import { type SlotWithLocation } from './meetings/coord/utils';
-import { resolveLocation } from '../utils/resolveLocation';
-import { forceBookCoordinationByOwner } from './meetings/coord/booking';
 import logger from '../utils/logger';
 import { DateTime } from 'luxon';
 import { calendarListingFormatRule } from '../utils/calendarListingFormat';
 
 /**
- * MeetingsSkill (v1.6.0) — the single skill responsible for everything about
- * putting a meeting on a calendar. Merges the former SchedulingSkill and
- * CoordinationSkill into one: direct create_meeting / update / move /
- * delete, free-busy lookups, find-slots, AND multi-party coord with DMs,
- * voting, and booking.
+ * MeetingsSkill — the single skill responsible for everything about
+ * putting a meeting on a calendar: direct create_meeting / update / move /
+ * delete, free-busy lookups, and find-slots.
  *
  * If this skill is disabled in the profile, Maelle can't touch the calendar —
  * by design. "Booking meetings in any form" is this skill's whole reason for
@@ -40,7 +22,7 @@ import { calendarListingFormatRule } from '../utils/calendarListingFormat';
 export class MeetingsSkill implements Skill {
   id = 'meetings' as const;
   name = 'Meetings';
-  description = 'Books, coordinates, moves, and cancels meetings — direct calendar operations and multi-party Slack coordination';
+  description = 'Books, moves, and cancels meetings — direct calendar operations';
 
   // Direct-ops helper (former SchedulingSkill, now private). Used via delegate
   // for create_meeting / move_meeting / update_meeting / delete_meeting / etc.
@@ -60,166 +42,6 @@ export class MeetingsSkill implements Skill {
       // v2.6.4 — find_slack_user moved to SlackConnection.getTools(). It's a
       // transport directory lookup with people_memory side effects, not a
       // meetings concern. Auto-registered when SlackConnection is registered.
-      {
-        // ⚠️ DEAD (v3.4.x) — coordinate_meeting is demoted + unused (0 real calls
-        // since v3.3.8). Shipped only on the rarely-picked 'coord' scope; kept as
-        // a reference for a future external-transport rebuild (build fresh, don't
-        // re-wire). Colleague + owner scheduling go through find_available_slots +
-        // create_meeting. See registry.ts `coord` scope for the full why.
-        name: 'coordinate_meeting',
-        description: `Set up a NEW multi-party meeting that needs ${profile.user.name.split(' ')[0]}'s INTERNAL attendees DM'd for their availability. The tool DMs each internal participant with proposed slots, collects their responses, negotiates if needed, then books. Use ONLY when there are internal pollable non-owner attendees (slack_id in our workspace + same email domain as ${profile.user.name.split(' ')[0]}). For anything else, use the direct path: find_available_slots + create_meeting.
-
-🛑 HARD STOP — ${profile.user.name.split(' ')[0]} JUST PICKED A SLOT 🛑
-If your most recent reply to ${profile.user.name.split(' ')[0]} listed N proposed slot options AND his next message picks one ("2 June 12pm" / "Monday 11:00" / "the first one" / "option 2"), DO NOT call coordinate_meeting. Call \`create_meeting\` directly with the chosen time. The attendees' availability was already checked by find_available_slots when you proposed the options — no further DM polling is needed. coordinate_meeting in this case sends redundant slot-picker DMs to attendees AFTER you and the owner already agreed the time, then triggers the claim-checker to retry, then fires message_colleague DMs on top — three layers of noise the colleagues receive for a meeting the owner already locked. The right tool when the owner has named a specific time is ALWAYS create_meeting.
-
-
-Do NOT use to:
-- Move an existing meeting → move_meeting (or message_colleague with intent='meeting_reschedule')
-- Check if the owner can join a colleague's meeting → check_join_availability
-- Just check free/busy without booking → get_free_busy
-- Book a slot already verbally agreed in this conversation → use create_meeting directly
-- Book a 1:1 with an EXTERNAL person whose calendar we can't poll → find_available_slots + create_meeting (one flow, externals get the calendar invite via Outlook on book)
-- Book when YOU (the requester) and ${profile.user.name.split(' ')[0]} are the only real participants and everyone else is external — find_available_slots + create_meeting
-- ${profile.user.name.split(' ')[0]} named a SPECIFIC NARROW WINDOW (a single day / "Monday" / "tomorrow morning") AND attendees are internal → call find_available_slots FIRST. The slot finder surfaces soft-rule trade-offs (focus_time / lunch / work-hours) via relaxed-recovery, so ${profile.user.name.split(' ')[0]} sees what's actually blocking BEFORE we DM attendees. Once a slot is confirmed by him, call create_meeting directly with relaxed:true on a confirmed trade-off — the attendees are already free (slot finder verified), and skipping coord avoids redundant DMs about a pre-confirmed time.
-
-The tool will refuse with error 'no_internal_to_poll' if you call it without internal pollable non-owner attendees — that's the signal to switch to the direct path.
-
-Flow:
-1. Find 3 slots on owner's calendar
-2. DM each internal participant with the 3 options
-3. Collect responses — negotiate if needed (ping-pong then open-ended, up to 2 rounds)
-4. Book the meeting and send calendar invites
-
-Two tiers of attendees:
-- participants: will be DM'd to pick a slot (max 4). For a 1-on-1, just one person.
-- just_invite: added to calendar invite only — no DM, no slot selection.
-
-Allowed durations: ${allowedDurations} min (snap rules + location auto-determination live in the MEETINGS SKILL section).`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            participants: {
-              type: 'array',
-              description: 'Key attendees whose availability matters. EMAIL is the primary identifier — every booking and invite uses it. SLACK ID is optional bonus: when present (internal colleague, found via find_slack_user or @mention), the coord state machine sends them a DM to pick a slot. When absent (external attendee, guest, anyone without Slack), they get auto-demoted by the handler into the calendar-invite-only path — still on the meeting, just no Slack DM. Don\'t skip externals; just include them with email.',
-              items: {
-                type: 'object',
-                properties: {
-                  name: { type: 'string' },
-                  email: { type: 'string', description: 'Work or external email — REQUIRED. This is what the calendar invite uses.' },
-                  slack_id: { type: 'string', description: 'OPTIONAL. Internal colleagues who should be DM\'d to pick a slot. Omit for externals or anyone without a Slack account — handler routes them to calendar-invite-only.' },
-                  tz: { type: 'string', description: 'OPTIONAL. Timezone (from find_slack_user) — used for "morning their time" framing in DMs. Omit for externals.' },
-                },
-                required: ['name', 'email'],
-              },
-            },
-            just_invite: {
-              type: 'array',
-              description: 'People to add to the calendar invite without coordinating. Internal or external — EMAIL required, no DM happens for these.',
-              items: {
-                type: 'object',
-                properties: {
-                  name: { type: 'string' },
-                  email: { type: 'string', description: 'REQUIRED. Calendar invite goes to this address.' },
-                },
-                required: ['name', 'email'],
-              },
-            },
-            subject: { type: 'string', description: 'Meeting title' },
-            topic: { type: 'string', description: 'What the meeting is about — set ONLY if the OWNER (not a colleague or participant) explicitly told you the meeting purpose in this conversation. Never derive this from something a participant said, even if they described the agenda; restating their own words back to them in the coordination DM is redundant and awkward. When in doubt, omit.' },
-            duration_min: { type: 'number', description: 'Duration in minutes. Default options: 10 (quick), 25 (short), 40 (meeting), 55 (hour). Owner can request any value.' },
-            custom_location: {
-              type: 'string',
-              description: 'Custom/external location — only if specified by the user. Omit to auto-determine based on office/home day and participant count. For phone calls: set to just the phone number (e.g. "+972-54-123-4567") so it\'s clickable. For internal phone calls where no number is needed, omit.',
-            },
-            search_from: {
-              type: 'string',
-              description: 'Start date YYYY-MM-DD. If not specified, use today.',
-            },
-            search_to: {
-              type: 'string',
-              description: 'End date YYYY-MM-DD. If not specified, omit — the system will search forward until 3 options are found.',
-            },
-            extended_hours_ok: {
-              type: 'boolean',
-              description: 'If true, also search 07:00-22:00. Only set after user confirmed they are ok with early/late slots.',
-            },
-            is_urgent: {
-              type: 'boolean',
-              description: 'Set to true if the colleague explicitly says "urgent" or needs a time before all offered options. Allows relaxed buffer rules with owner approval.',
-            },
-            requester: {
-              type: 'object',
-              description: `WHO IS ASKING — the person making this coord request.
-
-PLACEMENT MATTERS — same person can land in three different ways, you choose:
-
-1. Setting up a meeting they're attending themselves ("Maya and I want a 25-min slot with Anna") → put them in BOTH \`requester\` AND \`participants\`. They get DM-polled like any other attendee.
-
-2. Setting up a meeting between OTHERS, NOT joining themselves (HR booking an interview between owner + candidate; EA scheduling on behalf of someone else; "set this up between X and Y") → put them in \`requester\` ONLY. Don't add to participants or just_invite. Their availability is NOT factored in; they don't get a DM poll; they don't appear on the calendar invite. Maelle still treats them as the contact for the coord (replies to their thread, etc.).
-
-3. Setting up for someone else but want a calendar copy themselves ("can you set up a meeting between Anna and Mark? Add me to the invite") → put them in \`requester\` AND \`just_invite\`. They get the calendar event but no DM poll.
-
-AUTO-FILL: on colleague-path (a colleague is the one DMing Maelle), the handler auto-fills this field from context if you omit. You can pass it explicitly for clarity, especially case 1 (also-attending) where the participants list might miss the slack_id.
-
-OWNER-PATH: when the owner asks you to coord, the owner is the requester — fill with owner's details (name, email).
-
-Attendance is derived from placement: a requester left OUT of both participants and just_invite is the scheduler, not an attendee.`,
-              properties: {
-                name: { type: 'string' },
-                email: { type: 'string', description: 'REQUIRED. Used to match against the participants/just_invite lists.' },
-                slack_id: { type: 'string', description: 'OPTIONAL. Filled from context on colleague-path. Required only if you want them DM-polled (case 1 above).' },
-              },
-              required: ['name', 'email'],
-            },
-            category: {
-              type: 'string',
-              description: 'OPTIONAL. The category this coord will book under. When set, slot search applies the category rules (per_day / per_week limits, day_type constraints), so slots that would violate are filtered before participants see them. ALWAYS pass when you have a category context (interview, outside meeting, physical, etc.) — otherwise the slots returned ignore category rules and you may propose a time that breaks them. Must match a name from the CATEGORIES list in the prompt.',
-            },
-          },
-          required: ['participants', 'subject', 'duration_min'],
-        },
-      },
-      {
-        name: 'get_active_coordinations',
-        description: 'Check the status of all ongoing meeting coordination tasks — who has responded, what they said, and which meetings are still waiting.',
-        input_schema: {
-          type: 'object',
-          properties: {},
-          required: [],
-        },
-      },
-      {
-        name: 'cancel_coordination',
-        description: 'Cancel an ongoing coordination job.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            job_id: { type: 'string' },
-            reason: { type: 'string' },
-          },
-          required: ['job_id'],
-        },
-      },
-      {
-        name: 'finalize_coord_meeting',
-        description: `Owner-only. Book a pending coordination immediately at the chosen slot — the owner has decided, so the coord is done regardless of which participants have or haven't replied.
-
-Use this when the owner picks a slot from an active coord (one of the options you proposed, or a specific time they called out). This force-books: marks missing responses as yes, sets winning_slot, runs the real calendar booking, and posts the confirmation to everyone involved.
-
-Do NOT use this for ordinary negotiation. Only when the owner has made an explicit decision that overrides waiting for other participants.
-
-DISAMBIGUATION vs resolve_approval:
-- If the coord is in status \`waiting_owner\` (you can see a PENDING APPROVAL for this coord in the system prompt) → use \`resolve_approval\` with verdict=approve + data.slot_iso. The resolver runs freshness re-check + books + closes the requester loop. That's the canonical path.
-- If the coord is NOT waiting on an approval (status is collecting/resolving/negotiating) and the owner says "just book Tuesday 2pm" → \`finalize_coord_meeting\`. There's no approval to resolve; owner's word IS the decision.`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            job_id: { type: 'string', description: 'The coord job ID. Get it from get_active_coordinations if you don\'t already know it.' },
-            slot_iso: { type: 'string', description: 'The chosen slot in ISO format (e.g. "2026-04-19T11:15:00"). Must match one of the proposed_slots, or be a specific time the owner picked.' },
-          },
-          required: ['job_id', 'slot_iso'],
-        },
-      },
       {
         name: 'check_join_availability',
         description: `Check if the owner can join an EXISTING meeting the colleague is organising. Use when a colleague asks "is ${profile.user.name.split(' ')[0]} free at X", "can ${profile.user.name.split(' ')[0]} join our meeting", "we'd love ${profile.user.name.split(' ')[0]} in our call".
@@ -306,7 +128,7 @@ Do NOT use for:
       },
       {
         name: 'find_available_slots',
-        description: `Find bookable slots — ${profile.user.name}'s calendar intersected with every attendee you pass in attendee_emails, with all schedule rules applied. This is THE tool for proposing meeting times, for any attendee count: search → offer the slots → book the pick with create_meeting. (v3.3.8 — the old "coordinate_meeting handles colleague scheduling" doctrine is retired; coord is only for explicitly polling people whose calendars aren't visible.)
+        description: `Find bookable slots — ${profile.user.name}'s calendar intersected with every attendee you pass in attendee_emails, with all schedule rules applied. This is THE tool for proposing meeting times, for any attendee count: search → offer the slots → book the pick with create_meeting.
 
 Before calling this tool: ASK ${profile.user.name.split(' ')[0]} TWO HUMAN QUESTIONS first if you don't already know the answer. Do NOT use the words "meeting_mode" or list four options — that's robotic. Ask like a person:
   • "In person or online?"
@@ -420,7 +242,7 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
       },
       {
         name: 'create_meeting',
-        description: `Create a new calendar event directly — THE booking tool. The agreed time comes from find_available_slots (which already checked every internal attendee's calendar); externals get the invite by email and accept/decline natively. coordinate_meeting exists only for the owner explicitly asking to POLL people for preference. Follow the location / category / work-day rules in the prompt section.
+        description: `Create a new calendar event directly — THE booking tool. The agreed time comes from find_available_slots (which already checked every internal attendee's calendar); externals get the invite by email and accept/decline natively. Follow the location / category / work-day rules in the prompt section.
 
 RESCHEDULING ≠ CREATING. Before booking a recurring 1:1 (Weekly / BiWeekly) to a NEW time: if that person's series already exists on the calendar, you are RESCHEDULING — call move_meeting on the existing occurrence (get its id from get_calendar), NOT create_meeting. Creating a fresh event leaves a duplicate next to the live series. create_meeting is for genuinely NEW meetings only.
 
@@ -448,6 +270,12 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
             start: { type: 'string', description: 'ISO 8601 datetime. In the owner local timezone UNLESS start_timezone is set, in which case it is the clock time in THAT zone.' },
             end: { type: 'string', description: 'ISO 8601 datetime. Same timezone basis as start.' },
             start_timezone: { type: 'string', description: 'IANA timezone the start/end CLOCK times are expressed in (e.g. "America/New_York"). Set this when the meeting time was GIVEN in a non-owner zone — e.g. the owner said "9:30 EST" / "2pm ET", or he is travelling and stated a time in the destination zone: pass start="...T09:30:00" + start_timezone="America/New_York" and the tool converts to the owner timezone deterministically. OMIT when the time is already in the owner timezone. NEVER hand-convert the time yourself — tag the source zone and let the tool do the math.' },
+            intended_weekday: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 7,
+              description: 'OPTIONAL. If the owner/colleague named a WEEKDAY for this time ("book it Thursday", "Monday morning"), set this to that weekday as a number (1=Monday … 7=Sunday). A deterministic safety check refuses the booking if the resolved `start` date\'s weekday doesn\'t match — catching a "Thursday" accidentally resolved to a Friday — and hands back the corrected date to retry with. OMIT when no weekday word was used (e.g. "tomorrow", "the 26th", "next week", or a slot picked from find_available_slots).',
+            },
             attendees: {
               type: 'array',
               items: {
@@ -509,8 +337,14 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             meeting_id: { type: 'string' },
             meeting_subject: { type: 'string' },
             new_start: { type: 'string' },
-            new_end: { type: 'string' },
+            new_end: { type: 'string', description: 'OPTIONAL — omit on a pure reschedule to KEEP the meeting\'s current length (the handler derives new_end = new_start + the existing duration, so you never have to ask "how long?"). Set it ONLY when the duration is actually changing.' },
             start_timezone: { type: 'string', description: 'IANA timezone the new_start/new_end CLOCK times are expressed in (e.g. "America/New_York"). Set this when the move target was GIVEN in a non-owner zone — e.g. "move it to 9:30 EST", or the owner is travelling and stated a destination-zone time: pass new_start="...T09:30:00" + start_timezone="America/New_York" and the tool converts to the owner timezone deterministically. OMIT when the time is already in the owner timezone. NEVER hand-convert yourself — tag the source zone and let the tool do the math.' },
+            intended_weekday: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 7,
+              description: 'OPTIONAL. If the owner named a WEEKDAY for the new time ("move it to Thursday", "back to Monday"), set this to that weekday as a number (1=Monday … 7=Sunday). A deterministic safety check refuses the move if new_start\'s weekday doesn\'t match — catching the "return it to Thursday" that resolved to a Friday — and hands back the corrected date to retry with. OMIT when no weekday word was used (e.g. "tomorrow", "the 26th").',
+            },
             start_is_explicit: {
               type: 'boolean',
               description: 'OPTIONAL (default false). Set TRUE only when the owner named an EXACT off-grid new time ("move it to 14:40"). Otherwise the handler snaps new_start to the :00/:15/:30/:45 grid.',
@@ -532,7 +366,7 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
               description: 'OPTIONAL (default false). Owner-only. The tool refuses with error="slot_on_hold" when the move target is tentatively held for someone else, surfacing "X asked to reserve that — move anyway?". Pass TRUE on the retry after the owner says move it anyway — it moves the meeting, releases the hold, and DMs the holder it was let go.',
             },
           },
-          required: ['meeting_id', 'meeting_subject', 'new_start', 'new_end'],
+          required: ['meeting_id', 'meeting_subject', 'new_start'],
         },
       },
       {
@@ -625,969 +459,6 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
       // v2.6.4 — find_slack_user case removed. The tool now lives on
       // SlackConnection (src/connections/slack/index.ts). Sonnet still calls
       // it the same way; the registry routes it to the Connection automatically.
-
-      case 'coordinate_meeting': {
-        const { email: userEmail, timezone, slack_user_id: ownerUserId, name: ownerName } = profile.user;
-
-        // v2.0.6 — deterministic email fill-in for participants and just_invite.
-        // Sonnet was previously dropping the email field from these arrays even
-        // though we had the email in people_memory, resulting in Graph invites
-        // sent with empty email strings: Outlook showed a red "unresolved
-        // recipient" circle and just_invite folk weren't actually invited.
-        // Fill from DB before any downstream use. If email is still missing
-        // after lookup AND the participant has neither slack_id nor a resolvable
-        // name, refuse the call so Sonnet has to fix the args.
-        const participantsIn = (args.participants as any[] | undefined) ?? [];
-        const justInviteIn = (args.just_invite as any[] | undefined) ?? [];
-        const missingEmails: string[] = [];
-
-        for (const p of participantsIn) {
-          if (p.email && typeof p.email === 'string' && p.email.includes('@')) {
-            // Email already set, but slack_id might still be missing — try to
-            // fill it so the downstream demote at :595 doesn't wrongly move
-            // this person to just_invite when people_memory has the slack_id.
-            if (!p.slack_id && p.name) {
-              const matches = searchPeopleMemory(p.name);
-              const hit = matches.find(m => m.slack_id);
-              if (hit?.slack_id) p.slack_id = hit.slack_id;
-            }
-            continue;
-          }
-          // Try slack_id lookup in people_memory
-          if (p.slack_id) {
-            const mem = getPersonMemory(p.slack_id);
-            if (mem?.email) { p.email = mem.email; continue; }
-          }
-          // Try fuzzy name lookup. Backfill BOTH email AND slack_id so a
-          // participant who came in with `name` only doesn't get mis-classified
-          // as external at the demote step at :595 — pre-fix the lookup filled
-          // p.email but left p.slack_id empty, the demote moved them to
-          // just_invite, hasInternalPollableNonOwner returned false, and the
-          // tool refused with `no_internal_to_poll`.
-          if (p.name) {
-            const matches = searchPeopleMemory(p.name);
-            const hit = matches.find(m => m.email && m.email.includes('@'));
-            if (hit) {
-              p.email = hit.email;
-              if (!p.slack_id && hit.slack_id) p.slack_id = hit.slack_id;
-              continue;
-            }
-          }
-          missingEmails.push(p.name ?? p.slack_id ?? '(unknown)');
-        }
-
-        for (const p of justInviteIn) {
-          if (p.email && typeof p.email === 'string' && p.email.includes('@')) continue;
-          if (p.slack_id) {
-            const mem = getPersonMemory(p.slack_id);
-            if (mem?.email) { p.email = mem.email; continue; }
-          }
-          if (p.name) {
-            const matches = searchPeopleMemory(p.name);
-            const hit = matches.find(m => m.email && m.email.includes('@'));
-            if (hit) { p.email = hit.email; continue; }
-          }
-          missingEmails.push(p.name ?? '(unknown)');
-        }
-
-        if (missingEmails.length > 0) {
-          logger.warn('coordinate_meeting refused — missing emails after DB fill-in', {
-            missingEmails,
-            subject: args.subject,
-          });
-          return {
-            error: 'missing_participant_emails',
-            missing: missingEmails,
-            message: `I can't coordinate this yet — I don't have email addresses for: ${missingEmails.join(', ')}. Email is REQUIRED for booking (Slack ID is optional). Get the email from the owner or via find_slack_user, then re-call.`,
-          };
-        }
-
-        // v2.4.3 (C1) — auto-demote external participants (no slack_id, can't
-        // be DM'd) to just_invite. Pre-v2.4.3 the schema REQUIRED slack_id on
-        // every participant, which forced Sonnet to either hallucinate a slug
-        // (recurring user_not_found bug) or skip externals entirely. Now email
-        // is the only required field on participants; if a participant lacks
-        // a Slack ID, they obviously can't be polled via DM — so we move them
-        // into just_invite (calendar-invite-only) where they belong. Sonnet's
-        // intent is preserved (the person is on the meeting), just the
-        // mechanism shifts to email-only.
-        const demotedExternals: Array<{ name: string; email: string }> = [];
-        const trueParticipants: any[] = [];
-        for (const p of participantsIn) {
-          if (p.slack_id && typeof p.slack_id === 'string' && p.slack_id.length > 0) {
-            trueParticipants.push(p);
-          } else {
-            demotedExternals.push({ name: p.name ?? p.email, email: p.email });
-          }
-        }
-        if (demotedExternals.length > 0) {
-          logger.info('coordinate_meeting — auto-demoted externals from participants to just_invite', {
-            demoted: demotedExternals.map(d => d.email),
-            subject: args.subject,
-          });
-          // Mutate args.participants + args.just_invite so all downstream
-          // logic (slot finder, coord state machine, calendar booking)
-          // sees the corrected lists.
-          (args as any).participants = trueParticipants;
-          const existingJustInvite = (args.just_invite as any[]) ?? [];
-          // Skip dupes — if owner already listed an external in both fields
-          // by mistake, we don't want them in twice.
-          const existingEmails = new Set(existingJustInvite.map(j => (j.email ?? '').toLowerCase()));
-          for (const ext of demotedExternals) {
-            if (!existingEmails.has(ext.email.toLowerCase())) {
-              existingJustInvite.push(ext);
-            }
-          }
-          (args as any).just_invite = existingJustInvite;
-        }
-
-        logger.info('coordinate_meeting — emails filled', {
-          participantCount: ((args as any).participants as any[]).length,
-          justInviteCount: ((args as any).just_invite as any[] | undefined)?.length ?? 0,
-          demotedExternalCount: demotedExternals.length,
-          subject: args.subject,
-        });
-
-        // v2.6.6 — record attendees in thread context so a subsequent
-        // find_available_slots call (Sonnet may forget attendee_emails) can
-        // recover them. Symmetric to the find_available_slots record path.
-        if (context.threadTs) {
-          try {
-            const { recordThreadAttendees } = await import('../utils/threadAttendees');
-            const allEmails: string[] = [];
-            for (const p of [...((args as any).participants as any[]), ...((args as any).just_invite as any[] ?? [])]) {
-              if (p.email && typeof p.email === 'string' && p.email.includes('@')) {
-                allEmails.push(p.email);
-              }
-            }
-            recordThreadAttendees(context.threadTs, allEmails);
-          } catch (_) { /* best-effort */ }
-        }
-
-        const keyParticipantCount = (args.participants as any[]).length;
-        if (keyParticipantCount > 4) {
-          return {
-            error: 'too_many_key_participants',
-            count: keyParticipantCount,
-            message: `You have ${keyParticipantCount} key participants — that's too many to coordinate via DM. Ask the owner: who are the 1-4 people whose schedule truly matters? Everyone else should go in just_invite. Re-call once narrowed down.`,
-          };
-        }
-
-        // ── Owner auto-inclusion for colleague-initiated coord ──────────────────
-        // Maelle is the owner's assistant — any meeting a colleague asks her to
-        // coordinate is implicitly WITH the owner. We don't refuse coords that
-        // left the owner out (that created its own bug class: Maelle would
-        // malform the args, the layer-1 refuse would tell her to reject, and
-        // the colleague would be told nothing was booked). Instead: always
-        // ensure the owner is in `participants` so the calendar pulls his free-
-        // busy into the search. The owner is later filtered out of the "who to
-        // DM for availability" list downstream (he doesn't DM himself).
-        if (context.senderRole === 'colleague') {
-          const participants = (args.participants as any[] | undefined) ?? [];
-          const justInvite   = (args.just_invite   as any[] | undefined) ?? [];
-          const ownerInParticipants = participants.some((p: any) => p.slack_id === ownerUserId);
-          const ownerInJustInvite   = justInvite.some((p: any)   => p.slack_id === ownerUserId);
-          if (!ownerInParticipants) {
-            const ownerEntry = {
-              name: ownerName,
-              slack_id: ownerUserId,
-              email: userEmail,
-              tz: timezone,
-            };
-            args.participants = [ownerEntry, ...participants];
-            // If the owner was only in just_invite for some reason, drop that
-            // duplicate so we don't double-list him.
-            if (ownerInJustInvite) {
-              args.just_invite = justInvite.filter((p: any) => p.slack_id !== ownerUserId);
-            }
-            logger.info('Owner auto-added to colleague-initiated coord', {
-              senderUserId: context.userId,
-              ownerUserId,
-              subject: args.subject,
-              originalParticipants: participants.map((p: any) => ({ name: p.name, slack_id: p.slack_id })),
-            });
-          }
-        }
-
-        // ── Requester field — explicit "who's asking" (v2.6.5) ──────────────────
-        // Replaces the older `requester_is_attending` boolean with explicit
-        // placement. The `requester` object captures who initiated the coord;
-        // Sonnet decides whether they ALSO appear in participants (attending +
-        // DM-polled), in just_invite (calendar-only FYI), or neither (third-
-        // party scheduler — HR booking interview, EA on behalf, etc.).
-        //
-        // Auto-fill on colleague-path: when Sonnet omits the field (or omits
-        // slack_id), fill from context.userId + people_memory. This closes the
-        // gap that demoted Yael to just_invite when she SHOULD have stayed as
-        // a participant — Sonnet didn't pass her slack_id, the auto-demote
-        // logic moved her, the coord became all-just-invite with no DM polling.
-        const requesterRow = context.senderRole === 'colleague' && context.userId
-          ? await (async () => { try { return await getPersonMemory(context.userId); } catch { return null; } })()
-          : null;
-        if (context.senderRole === 'colleague') {
-          const sonnetRequester = (args as any).requester ?? {};
-          (args as any).requester = {
-            name: sonnetRequester.name ?? requesterRow?.name ?? 'colleague',
-            email: sonnetRequester.email ?? requesterRow?.email ?? '',
-            slack_id: sonnetRequester.slack_id ?? context.userId,
-          };
-        }
-        const explicitRequester = (args as any).requester as { name?: string; email?: string; slack_id?: string } | undefined;
-        const requesterEmail = (explicitRequester?.email ?? '').toLowerCase();
-        const requesterSlackId = explicitRequester?.slack_id;
-
-        // Auto-fill slack_id on a participant matching the requester (by
-        // email). Without this, Sonnet passing Yael in participants without
-        // slack_id triggers the auto-demote-to-just_invite path below — which
-        // breaks the entire coord (no real participants → no DM polling).
-        if (requesterEmail && requesterSlackId && Array.isArray(args.participants)) {
-          args.participants = (args.participants as any[]).map((p: any) => {
-            if (
-              p && (p.email ?? '').toLowerCase() === requesterEmail && !p.slack_id
-            ) {
-              return {
-                ...p,
-                slack_id: requesterSlackId,
-                tz: p.tz ?? requesterRow?.timezone,
-              };
-            }
-            return p;
-          });
-        }
-
-        // Third-party scheduler detection — derived from where the requester
-        // appears. When the requester is in NEITHER participants NOR just_invite,
-        // Sonnet meant "I'm setting this up between others; I'm not joining."
-        const requesterInParticipants = requesterEmail
-          ? (args.participants as any[] ?? []).some((p: any) => (p.email ?? '').toLowerCase() === requesterEmail)
-          : false;
-        const requesterInJustInvite = requesterEmail
-          ? (args.just_invite as any[] ?? []).some((p: any) => (p.email ?? '').toLowerCase() === requesterEmail)
-          : false;
-        const isThirdPartyScheduler =
-          context.senderRole === 'colleague' &&
-          requesterEmail &&
-          !requesterInParticipants && !requesterInJustInvite;
-
-        if (isThirdPartyScheduler && context.userId) {
-          // Defense-in-depth: drop the requester from both lists if Sonnet
-          // wrongly added them. Their availability must NOT be factored in;
-          // they're the SCHEDULER, not an attendee.
-          const requesterId = context.userId;
-          const beforePartCount = ((args.participants as any[] | undefined) ?? []).length;
-          const beforeInviteCount = ((args.just_invite as any[] | undefined) ?? []).length;
-          args.participants = ((args.participants as any[] | undefined) ?? [])
-            .filter((p: any) => p.slack_id !== requesterId && (p.email ?? '').toLowerCase() !== requesterEmail);
-          args.just_invite = ((args.just_invite as any[] | undefined) ?? [])
-            .filter((p: any) => p.slack_id !== requesterId && (p.email ?? '').toLowerCase() !== requesterEmail);
-          const afterPartCount = (args.participants as any[]).length;
-          const afterInviteCount = (args.just_invite as any[]).length;
-          if (beforePartCount !== afterPartCount || beforeInviteCount !== afterInviteCount) {
-            logger.info('Third-party-scheduler — requester removed from attendees', {
-              requesterId,
-              participantsRemoved: beforePartCount - afterPartCount,
-              justInviteRemoved: beforeInviteCount - afterInviteCount,
-              subject: args.subject,
-            });
-          }
-        }
-
-        // ── Duration validation (v2.3.1 — B8) ──────────────────────────────────
-        // Owner direction: don't keep two durations alive in the system. Either
-        // pick the right one upfront, or wait for owner approval — never both.
-        // Strategy (i): when colleague requests a non-standard duration with an
-        // OBVIOUS snap target (≤5 min off a standard length), snap immediately
-        // and use the standard. Sonnet tells the requester "I went with N
-        // instead of M since that's standard" in the reply text. If the
-        // requester pushes back, THAT response triggers the original approval
-        // path — but until then, only one duration is alive (the standard one).
-        let durationMin = args.duration_min as number;
-        const requestedDurationMin = durationMin;
-        const allowedDurations = profile.meetings.allowed_durations;
-        const isStandardDuration = allowedDurations.includes(durationMin);
-        let snappedFromNonStandard = false;
-
-        if (!isStandardDuration && context.senderRole === 'colleague') {
-          // Find the closest allowed duration. ≤10 min delta = obvious snap.
-          // Larger deltas (e.g. 90 → 60 or 30) are too consequential — fall
-          // back to approval rather than silently halving.
-          const SNAP_TOLERANCE_MIN = 10;
-          let nearest = allowedDurations[0];
-          let nearestDelta = Math.abs(durationMin - nearest);
-          for (const d of allowedDurations) {
-            const delta = Math.abs(durationMin - d);
-            if (delta < nearestDelta) { nearest = d; nearestDelta = delta; }
-          }
-          if (nearestDelta <= SNAP_TOLERANCE_MIN) {
-            durationMin = nearest;
-            snappedFromNonStandard = true;
-            logger.info('coordinate_meeting — snapped non-standard duration to nearest allowed', {
-              requested: requestedDurationMin, snapped: durationMin, delta: nearestDelta,
-              requester: context.userId,
-            });
-          }
-        }
-
-        // Only escalate to approval when snap failed (delta too large). Owner
-        // sees the gate ONLY for cases where Sonnet couldn't snap cleanly —
-        // most non-standard requests (45 → 40, 50 → 55) snap silently.
-        const isStandardAfterSnap = allowedDurations.includes(durationMin);
-        const needsDurationApproval = !isStandardAfterSnap && context.senderRole === 'colleague';
-
-        // ── Validate slack_ids ──────────────────────────────────────────────────
-        const validatedParticipants = (args.participants as any[]).map((p: any) => {
-          const sid = p.slack_id as string;
-          const isValid = /^U[A-Z0-9]{7,11}$/.test(sid);
-          if (isValid) return p;
-          const matches = searchPeopleMemory(p.name as string);
-          const m0 = matches[0];
-          if (matches.length === 1 && m0.slack_id && /^U[A-Z0-9]{7,11}$/.test(m0.slack_id)) {
-            return { ...p, slack_id: m0.slack_id, tz: m0.timezone ?? p.tz };
-          }
-          return { ...p, _invalid_id: true };
-        });
-
-        const invalidParticipants = validatedParticipants.filter((p: any) => p._invalid_id);
-        if (invalidParticipants.length > 0) {
-          return {
-            error: 'invalid_slack_ids',
-            invalid: invalidParticipants.map((p: any) => p.name),
-            message: `These participant Slack IDs look invalid: ${invalidParticipants.map((p: any) => p.name).join(', ')}. Use find_slack_user to look up their correct IDs before calling coordinate_meeting.`,
-          };
-        }
-        args.participants = validatedParticipants;
-
-        // ── Preflight (v1.8.4) — existing-meeting detection ─────────────────────
-        // If an event with a matching subject AND at least one overlapping
-        // participant already exists on the calendar in the search window, the
-        // owner almost certainly meant to MOVE that existing meeting — not
-        // create a new one. coordinate_meeting creates new meetings; for
-        // rescheduling an existing meeting, message_colleague with a reschedule
-        // intent is the right flow. This check catches the specific "Sonnet
-        // picked coord_meeting when she should have picked message_colleague"
-        // bug (issue #26 aftermath, v1.8.4).
-        try {
-          const requestedSubject = String(args.subject ?? '').trim();
-          const participantNames = (args.participants as any[])
-            .map((p: any) => (p.name ? String(p.name).toLowerCase() : null))
-            .filter((n: string | null): n is string => n !== null && n.length > 0);
-          const participantEmailsAll = (args.participants as any[])
-            .map((p: any) => (p.email ? String(p.email).toLowerCase() : null))
-            .filter((e: string | null): e is string => e !== null && e.length > 0);
-
-          if (requestedSubject.length >= 3 && participantNames.length > 0) {
-            const { getCalendarEvents } = await import('../connectors/graph/calendar');
-            const searchStart = DateTime.now().setZone(timezone).startOf('day').toFormat('yyyy-MM-dd');
-            const searchEnd = DateTime.now().setZone(timezone).plus({ days: 14 }).toFormat('yyyy-MM-dd');
-            const rawEvents = await getCalendarEvents(userEmail, searchStart, searchEnd, timezone);
-
-            const normalize = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
-            const requestedNorm = normalize(requestedSubject);
-
-            for (const ev of rawEvents) {
-              if (ev.isCancelled) continue;
-              const evSubjectNorm = normalize(ev.subject ?? '');
-              if (!evSubjectNorm) continue;
-
-              // Subject match: exact, or either is a substring of the other (handles
-              // "BiWeekly Idan & Yael" vs "BiWeekly Idan Yael" both ways)
-              const subjectMatches =
-                evSubjectNorm === requestedNorm ||
-                evSubjectNorm.includes(requestedNorm) ||
-                requestedNorm.includes(evSubjectNorm);
-              if (!subjectMatches) continue;
-
-              // Participant match: check existing event's attendees for any overlap
-              // with the coord's requested participants (by email or name).
-              const evAttendees = (ev.attendees ?? []).map((a: any) => ({
-                name: (a.emailAddress?.name ?? '').toLowerCase(),
-                email: (a.emailAddress?.address ?? '').toLowerCase(),
-              }));
-              const participantMatches = evAttendees.some((a: any) => {
-                if (a.email && participantEmailsAll.includes(a.email)) return true;
-                if (!a.name) return false;
-                return participantNames.some(pn => a.name.includes(pn) || pn.includes(a.name));
-              });
-              if (!participantMatches) continue;
-
-              // Match found — refuse the coord and steer toward message_colleague
-              const evDateTime = ev.start?.dateTime
-                ? DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone || timezone })
-                : null;
-              const whenStr = evDateTime && evDateTime.isValid
-                ? evDateTime.toFormat('EEE d MMM HH:mm')
-                : 'soon';
-
-              logger.info('coordinate_meeting preflight blocked — existing meeting matched', {
-                requestedSubject,
-                existingSubject: ev.subject,
-                existingStart: ev.start?.dateTime,
-                participantNames,
-              });
-              return {
-                error: 'existing_meeting_on_calendar',
-                existing_subject: ev.subject,
-                existing_start: ev.start?.dateTime,
-                existing_when_local: whenStr,
-                message: `There's already a "${ev.subject}" on the calendar for ${whenStr} with overlapping participants. coordinate_meeting creates NEW meetings — if the owner wants to MOVE or RESCHEDULE the existing one, use message_colleague instead: send a DM asking the participant if the new time works, and when they reply yes, call move_meeting on the existing event. Only call coordinate_meeting again if this is definitely a separate new meeting (not a reschedule).`,
-              };
-            }
-          }
-        } catch (err) {
-          // Fail open — preflight errors should not break legitimate coord calls
-          logger.warn('coordinate_meeting preflight failed — skipping check', { err: String(err) });
-        }
-
-        // ── Date range: default to now, search forward until 3 options found ────
-        const now = DateTime.now().setZone(timezone);
-        // Owner can request urgent same-day meetings — reduce buffer to 1h
-        const isOwnerRequest = context.senderRole === 'owner' || context.isOwnerInGroup === true;
-        const minBufferHours = isOwnerRequest ? 1 : (profile.meetings.min_slot_buffer_hours ?? 4);
-        const earliestSlot = now.plus({ hours: minBufferHours });
-        // v3.0.3 — honor time-of-day when Sonnet passes a full ISO datetime.
-        // Pre-fix the impl always appended `T00:00:00`, silently throwing away
-        // any time component — making the tool description's "ISO 8601 format"
-        // a lie and the per-attendee time-window flow (e.g. Yossi: "free 7-12")
-        // structurally impossible to encode.
-        // v3.2.x — time-of-day in search_from/search_to is a HARD clip ONLY when
-        // the owner/attendee gave a real constraint ("end by noon", "after 3pm").
-        // By DEFAULT it's SOFT: strip the time so the search spans the full work
-        // day. Without this, Sonnet narrowing to e.g. 15:30 clipped off later
-        // work-hour windows — the night-shift slots that overlap a US colleague's
-        // afternoon got dropped (Ayala 6/9: "nothing clean" until she named 3pm
-        // EST). The per-day work-hours + attendee-hours filters still surface only
-        // the real overlap, so a full-day search isn't noisy.
-        const timeWindowHard = args.time_window_is_hard === true;
-        const searchFromArg = args.search_from as string | undefined;
-        const searchFromDate = searchFromArg
-          ? ((timeWindowHard && searchFromArg.includes('T')) ? searchFromArg : `${searchFromArg.split('T')[0]}T00:00:00`)
-          : earliestSlot.toFormat("yyyy-MM-dd'T'HH:mm:ss");
-
-        const extendedHours = args.extended_hours_ok === true;
-        const allWorkDays = [
-          ...context.profile.schedule.office_days.days,
-          ...context.profile.schedule.home_days.days,
-        ] as string[];
-        const ownerDomain = userEmail.split('@')[1];
-        const participantEmails = (args.participants as any[])
-          .map((p: any) => p.email)
-          .filter((e: any) => e && typeof e === 'string' && e.endsWith(`@${ownerDomain}`));
-
-        // v2.3.6 (#70a) — auto-load attendee work-hour availability for the
-        // slot search. Pulls timezone + workdays + hoursStart/hoursEnd from
-        // people_memory for every participant we recognize (internal AND
-        // external). Pre-clips slots to the intersection of everyone's
-        // working window so Brett (Boston/EST) doesn't get proposed 10:15 IL
-        // (3:15 ET). Note: this is WORK-HOUR clipping only — busy/free is
-        // a separate concern handled by `attendeeBusyEmails` (existing,
-        // internal-only) and `annotateSlotsWithAttendeeStatus` (annotation
-        // overlay, not a hard filter).
-        const allParticipantEmails = (args.participants as any[])
-          .map((p: any) => p.email)
-          .filter((e: any) => e && typeof e === 'string' && e.includes('@'));
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { loadAttendeeAvailabilityForEmails } =
-          require('../utils/attendeeAvailability') as typeof import('../utils/attendeeAvailability');
-        const attendeeAvailability = loadAttendeeAvailabilityForEmails(allParticipantEmails, userEmail);
-
-        // Search in expanding windows until we have 3 spread options
-        let allCandidateSlots: Array<{ start: string; end: string }> = [];
-        // v3.0.3 — same time-of-day honoring as search_from above.
-        // Default-derivation clamp: when Sonnet passes a search_from later
-        // than now.endOf('week') without an explicit search_to, the old
-        // `now.endOf('week')` default landed BEFORE search_from → inverted
-        // window → tool spins on auto-expand or returns zero. Anchor the
-        // default to whichever is later so the initial window is always
-        // non-inverted.
-        const searchToArg = args.search_to as string | undefined;
-        const defaultSearchEnd = (() => {
-          const weekEnd = now.endOf('week');
-          const searchFromDt = DateTime.fromISO(searchFromDate, { zone: timezone });
-          const anchor = searchFromDt.isValid && searchFromDt > weekEnd
-            ? searchFromDt.endOf('week')
-            : weekEnd;
-          return anchor.toFormat("yyyy-MM-dd'T'HH:mm:ss");
-        })();
-        let searchEndDate = searchToArg
-          ? ((timeWindowHard && searchToArg.includes('T')) ? searchToArg : `${searchToArg.split('T')[0]}T23:59:59`)
-          : defaultSearchEnd;
-        const MAX_SEARCH_WEEKS = 12;
-
-        for (let attempt = 0; attempt < MAX_SEARCH_WEEKS; attempt++) {
-          try {
-            try {
-              allCandidateSlots = await findAvailableSlots({
-                userEmail,
-                timezone,
-                durationMinutes: durationMin,
-                attendeeEmails: participantEmails,
-                // v2.3.2 — also subtract INTERNAL attendees' busy time. Owner
-                // direction (mixed-case): pre-filter slots by internal
-                // free/busy so externals never see options where Amazia is
-                // already booked. Externals' busy is unreadable via Graph and
-                // stays out of this filter — they get DM'd with the surviving
-                // slots through the regular coord state machine.
-                attendeeBusyEmails: participantEmails,
-                // v2.3.6 (#70a) — clip slots to attendee work-hour windows
-                // in their own TZ. Pure work-hour data, no busy/free involvement.
-                attendeeAvailability,
-                searchFrom: searchFromDate,
-                searchTo: searchEndDate,
-                preferMorning: true,
-                workDays: allWorkDays,
-                // v2.8.1 — workHoursStart/End only matter when extendedHours=true.
-                // Otherwise calendar.ts reads per-day work_hours via getOwnerWorkHoursForDay.
-                ...(extendedHours ? { workHoursStart: '07:00', workHoursEnd: '22:00' } : {}),
-                minBufferHours,
-                profile: context.profile,
-                // coord flow doesn't know mode upfront — location is auto-determined
-                // per slot later in determineSlotLocation. Use 'either' so both day
-                // types are searched and returned tagged.
-                meetingMode: 'either',
-                autoExpand: false,  // coord has its own expansion loop below
-                // v2.6 — coord category passes through to slot search.
-                category: args.category as string | undefined,
-              });
-            } catch (permErr) {
-              if (permErr instanceof GraphPermissionError) {
-                allCandidateSlots = await findAvailableSlots({
-                  userEmail,
-                  timezone,
-                  durationMinutes: durationMin,
-                  attendeeEmails: [],
-                  searchFrom: searchFromDate,
-                  searchTo: searchEndDate,
-                  preferMorning: true,
-                  workDays: allWorkDays,
-                  ...(extendedHours ? { workHoursStart: '07:00', workHoursEnd: '22:00' } : {}),
-                  minBufferHours,
-                  profile: context.profile,
-                  meetingMode: 'either',
-                  autoExpand: false,
-                  // v2.6 — same category passthrough on the permission-denied
-                  // fallback path (owner-only search, no attendee freebusy).
-                  category: args.category as string | undefined,
-                });
-              } else {
-                throw permErr;
-              }
-            }
-          } catch (err) {
-            logger.error('Failed to find slots for coordination', { err });
-            return { error: 'Could not check your calendar availability. Please try again.' };
-          }
-
-          const chosen = pickSpreadSlots(allCandidateSlots, timezone, 3);
-          if (chosen.length >= 3 || args.search_to) break; // User specified end date — don't expand
-
-          // Expand search window by 1 week
-          const currentEnd = DateTime.fromISO(searchEndDate, { zone: timezone });
-          searchEndDate = currentEnd.plus({ weeks: 1 }).toFormat("yyyy-MM-dd'T'HH:mm:ss");
-        }
-
-        // v2.7.6 — auto-relaxed recovery on owner-named narrow windows.
-        // When the strict search returned 0 AND the owner asked about a
-        // specific narrow window AND extended_hours_ok wasn't used yet,
-        // re-run with relaxed=true to surface slots that break soft rules
-        // (focus_time / lunch / work-hours). Owner-path only. Returns the
-        // slots WITH a trade-off flag so Sonnet narrates "X fits but breaks
-        // your focus block — book anyway?" BEFORE initiating coord DMs.
-        // On owner confirm, Sonnet calls create_meeting directly with
-        // relaxed=true (skipping coord because we already verified
-        // attendees are free at the chosen slot).
-        const coordIsOwnerInitiated =
-          context.senderRole === 'owner' || context.isOwnerInGroup === true;
-        const coordUserNamedNarrowWindow = (() => {
-          try {
-            if (!args.search_to) return false;
-            const from = DateTime.fromISO(searchFromDate, { zone: timezone });
-            const to = DateTime.fromISO(searchEndDate, { zone: timezone });
-            if (!from.isValid || !to.isValid) return false;
-            return to.diff(from, 'days').days <= 7;
-          } catch { return false; }
-        })();
-
-        if (allCandidateSlots.length === 0 && coordIsOwnerInitiated && coordUserNamedNarrowWindow && !extendedHours) {
-          // Try relaxed pass — bypasses soft owner rules, attendee busy stays enforced.
-          let relaxedSlots: Array<{ start: string; end: string }> = [];
-          try {
-            relaxedSlots = await findAvailableSlots({
-              userEmail,
-              timezone,
-              durationMinutes: durationMin,
-              attendeeEmails: participantEmails,
-              attendeeBusyEmails: participantEmails,
-              attendeeAvailability,
-              searchFrom: searchFromDate,
-              searchTo: searchEndDate,
-              preferMorning: true,
-              workDays: allWorkDays,
-              // v2.8.1 — calendar.ts reads per-day work_hours via getOwnerWorkHoursForDay; no widening here.
-              minBufferHours,
-              profile: context.profile,
-              meetingMode: 'either',
-              autoExpand: false,
-              category: args.category as string | undefined,
-              relaxed: true,  // bypass focus/lunch/work-hours; attendee busy still enforced
-            });
-          } catch (recErr) {
-            logger.warn('coordinate_meeting — relaxed recovery threw', {
-              err: String(recErr).slice(0, 200),
-            });
-          }
-          if (relaxedSlots.length > 0) {
-            // Spread + return without initiating coord. Owner needs to confirm
-            // the trade-off before we DM attendees.
-            const recoverySpread = pickSpreadSlots(relaxedSlots, timezone, 3);
-            logger.info('coordinate_meeting — relaxed recovery surfaced slots, awaiting owner confirm', {
-              strictAccepted: 0,
-              relaxedAccepted: relaxedSlots.length,
-              presentedToOwner: recoverySpread.length,
-            });
-            return {
-              _relaxed_recovery: true,
-              _needs_owner_confirmation: true,
-              candidate_slots: recoverySpread.map(start => {
-                const startDt = DateTime.fromISO(start, { zone: timezone });
-                return {
-                  start,
-                  end: startDt.plus({ minutes: durationMin }).toISO(),
-                  label: startDt.toFormat('EEE d MMM HH:mm'),
-                };
-              }),
-              message:
-                'Strict pass found 0 slots in the named window. These slots come from a relaxed retry: attendees are free, but the slot breaks one of the owner\'s soft rules (focus_time / lunch / work-hours). Present to the owner with the trade-off named explicitly ("X fits the attendees but eats into your 2h focus block — book anyway?"). On owner confirm, call create_meeting with `relaxed: true` and the chosen slot — DO NOT re-call coordinate_meeting (we already verified the attendees are free). On reject, drop it or look elsewhere.',
-            };
-          }
-        }
-
-        if (allCandidateSlots.length === 0) {
-          if (!extendedHours) {
-            return {
-              no_slots_in_working_hours: true,
-              error: 'No available slots found within normal working hours. Call coordinate_meeting again with extended_hours_ok=true to search 07:00-22:00, but tell the user first: "Nothing works in your normal hours — want me to look at early morning or evening slots too?"',
-            };
-          }
-          return { error: 'No available slots found even in extended hours.' };
-        }
-
-        const chosenStarts = pickSpreadSlots(allCandidateSlots, timezone, 3);
-
-        // ── Determine location per slot ─────────────────────────────────────────
-        const allParticipantsList = [
-          ...(args.participants as any[]),
-          ...((args.just_invite as any[]) ?? []),
-        ];
-        const totalPeople = allParticipantsList.length + 1; // +1 for owner
-        const isInternal = allParticipantsList.every((p: any) =>
-          !p.email || (typeof p.email === 'string' && p.email.endsWith(`@${ownerDomain}`))
-        );
-        const customLocation = args.custom_location as string | undefined;
-
-        // v2.2.4 (bug 8b) — if any participant is currently traveling, force
-        // online. Stops "Idan's Office" landing on a meeting where someone's
-        // in Boston.
-        let anyTraveling = false;
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getCurrentTravel } = require('../db') as typeof import('../db');
-          for (const p of allParticipantsList) {
-            const sid = (p as any).slack_id as string | undefined;
-            if (sid && getCurrentTravel(sid)) { anyTraveling = true; break; }
-          }
-        } catch (_) { /* fail open */ }
-
-        const proposedSlots: SlotWithLocation[] = chosenStarts.map(slotStart => {
-          // v2.8.2 — unified location via resolveLocation. If the office-day
-          // external same/unknown-TZ ask path fires, default this annotation
-          // to online — at coord-state-machine time we can't ask the owner,
-          // and ops.ts will surface the ask later if it still applies.
-          const v = resolveLocation({
-            profile,
-            startIso: slotStart,
-            intent: 'new_booking',
-            participantCount: totalPeople,
-            hasExternalAttendee: !isInternal,
-            anyParticipantRemote: anyTraveling,
-            ownerLocationHint: customLocation,
-          });
-          let location = '';
-          let isOnline = true;
-          if (v.kind === 'resolved') {
-            location = v.location;
-            isOnline = v.isOnline;
-          }
-          return {
-            start: slotStart,
-            end: DateTime.fromISO(slotStart).plus({ minutes: durationMin }).toISO()!,
-            location,
-            isOnline,
-          };
-        });
-
-        // Merge participants + just_invite
-        const justInviteList = ((args.just_invite as any[]) ?? []).map((p: any) => ({
-          slack_id: undefined as string | undefined,
-          name: p.name as string,
-          tz: timezone,
-          email: p.email as string | undefined,
-          just_invite: true,
-        }));
-        const allParticipants = [...(args.participants as any[]), ...justInviteList];
-
-        // ── v2.3.2 (4F) — enrich missing emails for INTERNAL attendees ─────
-        // For internal teammates, Slack already has their email — no need to
-        // ask the owner. Two-step lookup per attendee with a missing email:
-        //   1. people_memory (cheap, by slack_id or name)
-        //   2. Slack collectCoreInfo (by slack_id) — falls back to users.info
-        // Externals that resolve to nothing keep their missing-email status —
-        // they'll trip the missing-email refusal further down.
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { searchPeopleMemory, getPersonMemory: getPersonMemoryRow } =
-            require('../db') as typeof import('../db');
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getConnection: getConn } = require('../connections/registry') as
-            typeof import('../connections/registry');
-          const slackConn = getConn(profile.user.slack_user_id, 'slack');
-          for (const p of allParticipants as any[]) {
-            if (p.email) continue;
-            // Step 1 — people_memory
-            if (p.slack_id) {
-              const row = getPersonMemoryRow(p.slack_id as string);
-              if (row?.email) { p.email = row.email; continue; }
-            }
-            if (!p.email && p.name) {
-              const matches = searchPeopleMemory(p.name as string);
-              const row = matches.find(m => (m.name ?? '').toLowerCase() === (p.name as string).toLowerCase());
-              if (row?.email) {
-                p.email = row.email;
-                if (!p.slack_id && row.slack_id) p.slack_id = row.slack_id;
-                continue;
-              }
-            }
-            // Step 2 — Slack lookup (only when we have a slack_id)
-            if (!p.email && p.slack_id && slackConn?.collectCoreInfo) {
-              try {
-                const info = await slackConn.collectCoreInfo(p.slack_id as string);
-                if (info?.email) {
-                  p.email = info.email;
-                  logger.info('coordinate_meeting — email enriched from Slack', {
-                    slack_id: p.slack_id, name: p.name,
-                  });
-                }
-              } catch (err) {
-                logger.warn('coordinate_meeting — Slack collectCoreInfo threw, skipping enrich', {
-                  slack_id: p.slack_id, err: String(err).slice(0, 200),
-                });
-              }
-            }
-          }
-        } catch (err) {
-          logger.warn('coordinate_meeting — attendee enrichment threw, proceeding with input as-is', {
-            err: String(err).slice(0, 200),
-          });
-        }
-
-        // ── Slot-count transparency ─────────────────────────────────────────
-        // Removed the user-facing "Only N slots came up — want me to extend?"
-        // note: coordinate_meeting dispatches DMs asynchronously via the action
-        // dispatcher, so by the time Maelle's reply reaches the owner the DMs
-        // are already out. Asking the user to "extend" created a race where
-        // either the original DMs had already fired (stale choice) or a second
-        // coordinate_meeting call would spawn a parallel coord job.
-        //
-        // Diagnostic logging retained so we can spot cases where the search
-        // returns few options (usually: LLM passed a narrow search_to, or the
-        // owner's calendar is genuinely saturated in that window).
-        const foundCount = proposedSlots.length;
-        if (foundCount < 3) {
-          logger.info('coordinate_meeting — few slots found', {
-            foundCount,
-            searchFrom: searchFromDate,
-            searchTo: searchEndDate,
-            durationMin,
-            participantCount: (args.participants as any[]).length,
-            participantEmails,
-          });
-        }
-
-        // ── v2.7.2 — refuse when no internal pollable non-owner exists ──────
-        // coordinate_meeting is the multi-party state-machine path: it DMs
-        // each internal attendee to collect their availability, then books.
-        // When there's nobody internal to DM (external-only, owner-only, or
-        // already-decided 1:1), this tool is the wrong choice. Sonnet should
-        // use find_available_slots + create_meeting directly — one flow, one
-        // mutation, no mid-conversation tool switching.
-        //
-        // History: v2.3.2 + v2.6.5 had two "fast path" Cases (A all-internal,
-        // B owner-only-pollable) that bypassed the state machine and returned
-        // slots for Sonnet to present, then asked her to switch to
-        // create_meeting for the booking step. Sonnet sometimes forgot to
-        // switch — she'd re-call coordinate_meeting at the booking moment and
-        // narrate "I'll send the invite" without ever firing the booking
-        // tool. Bug 2.3 / Gidon 2026-05-13: full conversation, slot picked,
-        // email collected, zero tools fired. Owner direction (v2.7.2): kill
-        // the fast path entirely. One flow.
-        const ownerEmailLowerCheck = userEmail.toLowerCase();
-        const ownerDomainCheck = ownerEmailLowerCheck.includes('@') ? ownerEmailLowerCheck.split('@')[1] : '';
-        const hasInternalPollableNonOwner = (args.participants as any[]).some((p: any) => {
-          if (!p.slack_id) return false;
-          const e = (p.email ?? '').toLowerCase();
-          if (!e || e === ownerEmailLowerCheck) return false;
-          return ownerDomainCheck ? e.endsWith('@' + ownerDomainCheck) : false;
-        });
-        if (!hasInternalPollableNonOwner) {
-          logger.info('coordinate_meeting refused — no internal pollable non-owner; use find_available_slots + create_meeting', {
-            participantCount: (args.participants as any[]).length,
-            subject: args.subject,
-            requester: context.userId,
-          });
-          return {
-            error: 'no_internal_to_poll',
-            message: `coordinate_meeting is for multi-party booking that needs internal attendees DM'd for their availability. This ask has no internal attendees to poll — use the direct path instead: call find_available_slots to find ${context.profile.user.name.split(' ')[0]}'s slots, present them to the requester, and once a slot is picked call create_meeting to book. Externals get the calendar invite via Outlook on book.`,
-          };
-        }
-
-        return {
-          _requires_slack_client: true,
-          _status: 'queued_not_sent',
-          _note: snappedFromNonStandard
-            ? `SUCCESS — coord initiated at ${durationMin} min (snapped from requested ${requestedDurationMin} min, which isn't one of ${context.profile.user.name.split(' ')[0]}'s standard durations). When you reply, mention the snap to the requester so it's not surprising — e.g. "set up at ${durationMin} min, that's what ${context.profile.user.name.split(' ')[0]} runs by default — let me know if you actually need ${requestedDurationMin}". If they push back wanting the original duration, call create_approval(kind="duration_override") for owner to decide.`
-            : 'SUCCESS — coord initiated, DMs are dispatching now. This is NOT a failure. Do NOT call coordinate_meeting again this turn (the idempotency guard will refuse it). Do NOT say Done/Sent/Confirmed because DMs haven\'t landed yet — say "On it — I\'ll reach out now" and STOP.',
-          action: 'coordinate_meeting',
-          ownerUserId,
-          ownerName,
-          ownerEmail: userEmail,
-          ownerTz: timezone,
-          participants: allParticipants,
-          subject: args.subject,
-          topic: args.topic,
-          durationMin,
-          requestedDurationMin: snappedFromNonStandard ? requestedDurationMin : undefined,
-          snappedFromNonStandard,
-          proposedSlots,
-          foundSlotCount: foundCount,
-          needsDurationApproval,
-          isUrgent: args.is_urgent === true,
-          _senderRole: context.senderRole,
-          _senderUserId: context.userId,
-        };
-      }
-
-      case 'get_active_coordinations': {
-        const jobs = getActiveCoordJobs(profile.user.slack_user_id).map(job => {
-          const participants = JSON.parse(job.participants) as CoordParticipant[];
-          const proposedSlots = JSON.parse(job.proposed_slots) as string[];
-          const keyParticipants = participants.filter(p => !p.just_invite);
-          const participantSummary = keyParticipants.map(p => ({
-            name: p.name,
-            responded: p.response !== null && p.response !== undefined,
-            response: p.response ?? 'pending',
-            timed_out: !!(p as any)._timed_out,
-            nudged: !!(p as any)._nudged,
-            preferred_slot: p.preferred_slot
-              ? DateTime.fromISO(p.preferred_slot).setZone(profile.user.timezone).toFormat('EEE d MMM HH:mm')
-              : null,
-          }));
-          return {
-            id: job.id,
-            subject: job.subject,
-            topic: job.topic,
-            // v3.1 (Path 2 Stage 7) — status from the linked request. A booked
-            // coord with a future winning_slot is still surfaced here (see
-            // getActiveCoordJobs), but its phase is frozen at its last
-            // mid-flight value (e.g. waiting_owner) — report 'booked' so the
-            // owner isn't told a done meeting is still waiting on him.
-            status: (() => {
-              const lc = getCoordLifecycle(job.id);
-              return lc.booked ? 'booked' : (lc.phase ?? 'coord:in_flight').replace(/^coord:/, '');
-            })(),
-            duration_min: job.duration_min,
-            proposed_slots: proposedSlots.map(s =>
-              DateTime.fromISO(s).setZone(profile.user.timezone).toFormat('EEE d MMM HH:mm')
-            ),
-            participants: participantSummary,
-            all_responded: keyParticipants.every(p => p.response !== null && p.response !== undefined),
-            created_at: job.created_at,
-          };
-        });
-
-        return { coordinations: jobs, count: jobs.length };
-      }
-
-      case 'cancel_coordination': {
-        const jobId = args.job_id as string;
-        updateCoordJob(jobId, { status: 'cancelled', notes: args.reason as string });
-        // Also cancel the linked task row so it doesn't linger in get_my_tasks
-        getDb().prepare(
-          `UPDATE tasks SET status = 'cancelled', updated_at = datetime('now') WHERE skill_ref = ?`
-        ).run(jobId);
-        return { cancelled: true, job_id: jobId };
-      }
-
-      case 'finalize_coord_meeting': {
-        // Owner-only. Force-book a coord at the slot the owner picked, overriding
-        // the wait-for-everyone state.
-        //
-        // SYNCHRONOUS path (D3): when the skill has access to the Slack app,
-        // run the booking inline and return the real outcome to the LLM.
-        // This prevents the LLM from narrating "done — booked" before the
-        // actual booking has run (or after it quietly failed to a conflict).
-        //
-        // Fallback to the legacy async-queue placeholder only if the app
-        // isn't in context (should not happen in normal runtime, but keeps
-        // the surface safe for tests / non-Slack invocation).
-        const jobId = args.job_id as string;
-        const slotIso = args.slot_iso as string;
-        if (!jobId || !slotIso) {
-          return { error: 'job_id and slot_iso are both required.' };
-        }
-        const parsed = DateTime.fromISO(slotIso);
-        if (!parsed.isValid) {
-          return { error: `slot_iso "${slotIso}" is not a valid ISO datetime.` };
-        }
-
-        if (context.app) {
-          try {
-            const result = await forceBookCoordinationByOwner(
-              jobId,
-              slotIso,
-              profile,
-              { synchronous: true },
-            );
-            logger.info('finalize_coord_meeting synchronous result', {
-              jobId,
-              slotIso,
-              ok: result.ok,
-              status: result.status,
-              reason: result.reason,
-            });
-            // When booking succeeded the skill already posted the owner
-            // confirmation is suppressed (silent mode) — but participant DMs
-            // and shadowNotify still ran. The LLM should now narrate the
-            // outcome concisely to the owner. On failure, bookCoordination
-            // already posted a precise explanatory message to the owner —
-            // the LLM should NOT invent an outcome; acknowledge briefly.
-            return result;
-          } catch (err) {
-            logger.error('finalize_coord_meeting synchronous path threw', { err: String(err), jobId, slotIso });
-            return {
-              ok: false,
-              reason: `booking failed: ${err instanceof Error ? err.message : String(err)}`,
-            };
-          }
-        }
-
-        // Fallback — no Slack app in context
-        logger.warn('finalize_coord_meeting falling back to async queue — no app in context', { jobId });
-        return {
-          _requires_slack_client: true,
-          action: 'finalize_coord_meeting',
-          job_id: jobId,
-          slot_iso: slotIso,
-        };
-      }
 
       case 'check_join_availability': {
         const { email: userEmail, timezone } = profile.user;
@@ -1971,7 +842,7 @@ CATEGORY DETECTION + PRIORITY:
 - A meeting with no clear category fits the generic fallback (typically "Meeting" — the last one).
 
 ALWAYS PASS CATEGORY to slot tools:
-- When you have any category context (interview, customer visit, focus block, etc.), pass \`category\` to \`find_available_slots\`, \`coordinate_meeting\`, \`create_meeting\`, and \`move_meeting\`. Otherwise the slot finder ignores the category's per_day / per_week / day_type rules and you may propose a time that violates them.
+- When you have any category context (interview, customer visit, focus block, etc.), pass \`category\` to \`find_available_slots\`, \`create_meeting\`, and \`move_meeting\`. Otherwise the slot finder ignores the category's per_day / per_week / day_type rules and you may propose a time that violates them.
 - Owner asking "when am I free?" with no specific meeting — fine to omit \`category\` (today's behavior, no enforcement).
 - Once the category is decided, it stays the same across find_available_slots → create_meeting in the same turn. Don't switch mid-flow.
 
@@ -2011,23 +882,12 @@ NO WORKING-HOURS PREAMBLE when asking about time.
 When asking \${firstName} or a colleague "what time?" for a booking, JUST ASK. Don't preface with "(Office hours Wednesday are 10:30–19:00.)" or any equivalent recitation of his own hours back at him — he knows his schedule. Working-hours mentions belong in REJECTION explanations ("3:30 is past your hours, want 14:30 instead?"), not in clarifying questions before any slot has been searched.`;
     })();
 
-    // v3.x (Block 2 coord demotion) — the multi-party coordination prose
-    // (coordinate_meeting mechanics: ROUTE 1 details, "go straight to
-    // coordinate_meeting", the state machine) ships ONLY when the 'coord' scope
-    // is active. coordinate_meeting itself is scoped to 'coord' in the registry,
-    // so on a normal scheduling turn the tool isn't present and this prose would
-    // be dead weight (and the "don't present slots, coordinate instead" rule
-    // would actively mislead the direct-booking path). Undefined scopes
-    // (colleague path, classifier off, non-Slack) → include it: colleagues DO
-    // coordinate. ROUTE 2 (join), DIRECT BOOKING, and the MPIM shortcut stay
-    // unconditional — those are the live internal flows.
-    const includeCoord = !scopes || scopes.includes('coord') || scopes.includes('general');
     return `
 MEETINGS SKILL
-Everything about booking meetings — direct calendar operations AND multi-party Slack coordination — lives here. This is the only skill that touches the calendar.
+Everything about booking meetings — direct calendar operations — lives here. This is the only skill that touches the calendar.
 
 ${isOwner === false
-  ? `${firstName.toUpperCase()}'S SCHEDULE IS PRIVATE — you do NOT see or narrate his work hours, days, night-shift, lunch, or focus windows to a colleague. find_available_slots / coordinate_meeting enforce all of it (hours, days, buffers, floating blocks, free-time) server-side — propose only the times the tool returns, and never explain his schedule.`
+  ? `${firstName.toUpperCase()}'S SCHEDULE IS PRIVATE — you do NOT see or narrate his work hours, days, night-shift, lunch, or focus windows to a colleague. find_available_slots enforces all of it (hours, days, buffers, floating blocks, free-time) server-side — propose only the times the tool returns, and never explain his schedule.`
   : `${firstName.toUpperCase()}'S SCHEDULE — these are HARD RULES. Proposing a time outside them is a scheduling error you must flag explicitly.
 - Office days: ${officeDays} · ${officeHours}
 - Home days: ${homeDays} · ${homeHours}
@@ -2114,7 +974,7 @@ A colleague who IS attending needs none of these — their stored timezone alrea
 BOOKING / MOVING a time GIVEN in another zone — same tag-don't-convert contract, on the booking tools. When the time was stated in a non-owner zone ("book it 9:30 EST", "2pm ET", or a destination-zone clock while ${firstName} is travelling), \`create_meeting\` / \`move_meeting\` take \`start_timezone\`: pass the clock EXACTLY as stated (start/new_start = "...T09:30:00") + \`start_timezone\` = that IANA zone, and the tool converts to his local time deterministically. SAME TRAP as the search field above: do NOT also hand-convert the time — passing a converted clock AND start_timezone double-converts it. Omit start_timezone only when the time is already his local zone.
 
 AVAILABILITY VS BOOKING — answer the question, then OFFER to book.
-When a colleague asks "is ${firstName} free at X?" / "is X open Sunday at 14:00?" — that's an AVAILABILITY check, not a booking request. Answer the availability question first ("yes, he's free Sunday 10.5 at 14:00 for 55 min"), THEN offer the next step in the same reply: "want me to send the invite, or are you just checking?" Give them the choice. Don't assume they want it booked, don't assume they don't. The colleague might be lining up multiple options before committing, OR they might be ready to lock it in — let them tell you. ONLY call \`create_meeting\` / \`coordinate_meeting\` after they say go.
+When a colleague asks "is ${firstName} free at X?" / "is X open Sunday at 14:00?" — that's an AVAILABILITY check, not a booking request. Answer the availability question first ("yes, he's free Sunday 10.5 at 14:00 for 55 min"), THEN offer the next step in the same reply: "want me to send the invite, or are you just checking?" Give them the choice. Don't assume they want it booked, don't assume they don't. The colleague might be lining up multiple options before committing, OR they might be ready to lock it in — let them tell you. ONLY call \`create_meeting\` after they say go.
 
 JOINT-ATTENDEE QUERIES — one call, not three.
 When ${firstName} asks "when are WE free?" / "when can I meet with X?" / "is X free?" / "any opening for the meeting with X?", call find_available_slots ONCE with attendee_emails=[X's email]. The tool fetches both calendars and returns slots where everyone is free. NEVER do this as three sequential turns — read his calendar, then read X's calendar, then compute the overlap in your head. That's three turns of work and three Sonnet rounds when one tool call does it. (Externals without people_memory entries: still pass their email; if the tool can't fetch their busy from Graph, slots come back filtered against ${firstName}'s side only and you narrate honestly.)
@@ -2209,67 +1069,24 @@ DELETE-MEETING PROTOCOL — irreversible, follow exactly:
 - get_calendar / get_free_busy / find_available_slots — reads for specific scheduling decisions.
 - analyze_calendar / manage_calendar_issue — weekly review & issue handling.
 
-${includeCoord ? `COORDINATION (when participants need to agree on a time): use coordinate_meeting below.
-
-IMPORTANT — do NOT present slot options to ${firstName} from get_free_busy or get_calendar data before calling coordinate_meeting. Raw free windows do not apply schedule rules and will include times outside office hours. When someone requests a meeting: go directly to coordinate_meeting (it runs find_available_slots internally). The reply to ${firstName} is "On it — I'll reach out to [names]." Nothing more. Presenting intermediate options in the channel is not part of the coord flow.` : ''}
-
 MPIM BOOKING SHORTCUT: When the owner AND the participant are both in this MPIM conversation and the participant has already verbally confirmed a slot in this thread:
 - Call create_meeting with that slot. That is the whole action.
-- Do NOT call coordinate_meeting. It will DM the participant new slot options and re-start a negotiation they already finished.
-- Deciding factor: is the participant reachable right here in this conversation? Yes → create_meeting. No (they are not in this conversation) → coordinate_meeting.
-
-Two routes when a colleague reaches out about a meeting:
-- ROUTE 1 — NEW meeting with ${firstName}: "schedule / book / set up / find time" → coordinate_meeting. Flow: find 3 slots → DM each participant with options → collect → negotiate → book.
-- ROUTE 2 — JOIN an existing meeting: "join / attend / sit in on / come to our meeting" → check_join_availability. Flow: check availability → reply (free → "forward the invite"; partial → offer partial; conflict → decline; rule violation → escalate). No booking — colleague owns the invite.
-- Join-a-meeting-that-isn't-booked-yet edge case: use coordinate_meeting, but ask whether the owner or the colleague sends the invite at the end.
-- Ambiguous → ask: "New meeting, or is this an existing one you want ${firstName} to join?"
-
-${includeCoord ? `--- ROUTE 1 DETAILS ---
-
-Two tiers of attendees:
-- participants: people whose slot selection matters — each gets a DM with the 3 options to choose from
-  → Use for: anyone the user says "sync with", "find time with", "meet with"
-- just_invite: people added directly to the invite — no DM, no slot selection
-  → Use for: anyone the user says "also invite", "loop in", "add to the invite"
-
-PARSE RULE — two-clause phrasing:
-When ${firstName}'s request has the shape "meeting / sync / find time WITH A, [and|also|with] include/invite B and C", A is the participant and B + C are just_invite. The first clause names the principal (whose time must work); subsequent "include / also / and" names are invitees along for the ride. Examples:
-- "40 min with Anna, include Ben and Cara as well" → participant: Anna, just_invite: Ben, Cara.
-- "sync with David, loop in Sarah" → participant: David, just_invite: Sarah.
-- "meeting with the founders" (plural, no hierarchy) → everyone is a participant.
-
-How to decide who goes where when it's still unclear:
-- When in doubt: key decision-makers → participants; observers and FYI attendees → just_invite
-
-THIRD-PARTY SCHEDULER — when the colleague is the COORDINATOR, not an attendee:
-Sometimes the colleague talking to you is just arranging a meeting, not joining it. Examples: an HR/EA scheduling an interview between ${firstName} and an external candidate; a partner asking you to set up a call between ${firstName} and someone else; "I'm helping coordinate a meeting between X and Y". When you see this shape:
-- Leave the requester OUT of both \`participants\` and \`just_invite\` — placement IS the signal that they're the scheduler, not an attendee. Their availability is irrelevant to the meeting.
-- Add them to \`just_invite\` only if they explicitly want a calendar copy. Otherwise leave them off the invite entirely.
-- The cue: anything that signals the requester isn't in the room — "between ${firstName} and the candidate", "I'm scheduling on behalf of...", "set up a meeting for them".
-- When ambiguous (request could go either way) — ASK ONCE: "are you joining or just coordinating?" — then proceed.
+- Deciding factor: is the participant reachable right here in this conversation? Yes → create_meeting (book the agreed slot). No (they are not in this conversation) → find_available_slots, present options, then create_meeting once a time is picked.
 
 THREAD CONTEXT — who to invite when ${firstName} asks for a meeting FROM a channel thread:
 - **If ${firstName} @-mentions specific people in his meeting request** ("Maelle, let's do a meeting about this with @Anna and @Ben"): invite ONLY those named people. Ignore everyone else on the thread, even if they mentioned someone or replied. Explicit names override thread-sweep.
 - **If he asks for a meeting with NO specific names** ("let's do a meeting about this"): invite everyone who was @-mentioned earlier in the thread OR who replied to the thread. Thread participants become the invite list. Skip bots, skip ${firstName} himself, skip duplicates.
 - Subject: derive from the thread content — usually the topic of the discussion ("Understanding why we lost the client", "Q3 planning follow-up"). One-line, specific, don't ask unless context is genuinely ambiguous.
 
-Duration: standards are ${profile.meetings.allowed_durations.join('/')} min (each bakes in ${profile.meetings.buffer_minutes}-min trailing buffer). When a colleague asks for a casual round number ("30 min", "an hour", "45 min", "15 min"), just call coordinate_meeting with their stated value — the system snaps silently to the nearest standard when delta ≤10 min. Don't bounce them with "closest options are X or Y"; that's pedantic. Owner can request anything. Approval only fires for big deltas the snap can't bridge.
-
 Location (auto-determined — do NOT set manually):
 - Office days (${officeDays}): ≤3 people → ${firstName}'s Office + Teams; >3 → Meeting Room + Teams.
 - Home days (${homeDays}): internal → Huddle; external → Teams.
-- Phone call: custom_location = the phone number itself (e.g. "+972-54-123-4567"). For external calls, ask ${firstName} for the number BEFORE coordinate_meeting.
+- Phone call: custom_location = the phone number itself (e.g. "+972-54-123-4567").
 - External venue (WeWork, client office): use custom_location. ASK ${firstName} the one-way travel time first — pad slots on both sides.
 
-Coord slot rules (auto-enforced by find_available_slots): ${profile.meetings.min_slot_buffer_hours}h min buffer from now for colleagues (1h for owner); ≥2h between proposed options, at least one on a different day.
+ROUTE — JOIN an existing meeting: "join / attend / sit in on / come to our meeting" → check_join_availability. Flow: check availability → reply (free → "forward the invite"; partial → offer partial; conflict → decline; rule violation → escalate). No booking — colleague owns the invite.
 
-Negotiation: participants disagree → ping-pong (try existing choices). Still stuck → open-ended renegotiation (up to 2 rounds). Still stuck → escalate to ${firstName}.
-
-LARGE-GROUP PARTITIONING — when ${firstName} asks for a meeting with 5+ people, DON'T call coordinate_meeting with all of them. Too many calendars to reconcile; the coord state machine warns ≥5 key participants. Instead: ask ${firstName} ONCE who are the 1-4 people whose schedule truly matters, and who's there FYI. Everyone he names as key → \`participants\`; the rest → \`just_invite\`. Single clarifying question, then proceed.
-
-RETRY-ON-DECLINE — when you've already run coordinate_meeting and an approval path failed (owner rejected a rule-exception, no slot fit, participant pulled out), AND ${firstName} replies with a new range / extended window / narrowed participant list, you must re-call coordinate_meeting with the new parameters — do NOT report "couldn't find time" a second time without having tried the new constraints. Read the decline reply carefully: "try next week", "two weeks out", "push it later" → extend \`search_from\`/\`search_to\`; "just Anna, skip Ben" → narrow participants. One retry with the fresh constraints before giving up again.` : ''}
-
---- ROUTE 2 DETAILS ---
+--- JOIN-ROUTE DETAILS ---
 
 check_join_availability checks the owner's calendar at the requested time and returns:
 - can_join: true → "forward the invite to ${firstName}"
@@ -2277,26 +1094,18 @@ check_join_availability checks the owner's calendar at the requested time and re
 - can_join: 'needs_approval' → a schedule rule (lunch/buffer) breaks; escalate to ${firstName} with context and wait
 - can_join: false → hard conflict; tell them he can't
 
-GENERAL: if you don't have someone's Slack ID, call find_slack_user first. Route 1: call coordinate_meeting, report "On it — I'll reach out to [names]." Route 2: reply directly to the colleague.
+GENERAL: if you don't have someone's Slack ID, call find_slack_user first, then reply directly to the colleague.
 
-Thread context: "see the thread above / about what we discussed" → derive subject yourself, don't ask. Active contributors = participants; lightly mentioned = just_invite.
+Thread context: "see the thread above / about what we discussed" → derive subject yourself, don't ask.
 
-Important: after coordinate_meeting, don't ask for approval — just "On it." Never claim booked until a participant confirms. Participants can reply outside the thread — system matches by context. When mentioning times to colleagues, use ACTUAL duration (55 min from 14:00 = 14:00–14:55, never 14:00–15:00).
+When mentioning times to colleagues, use ACTUAL duration (55 min from 14:00 = 14:00–14:55, never 14:00–15:00).
 
-NARRATION HONESTY — name only the people getting DMs:
-${firstName} is the IMPLICIT organizer of every coord — coord slots are pre-filtered against ${firstName}'s calendar, so ${firstName} never receives a "pick a slot" DM (the system silently drops him from the DM list). When narrating coord-start (to ${firstName} OR to a colleague), name ONLY the people who are actually being DM'd: the participants. Do NOT say "I'll send slot options to ${firstName} and Amazia" — that's a lie when ${firstName} isn't in the DM list. just_invite folks aren't being DM'd either; they're calendar-only.
-- 1:1 colleague-initiated: "On it — I'll send Anna the options and book on ${firstName}'s calendar once she picks."
-- Multi-participant: "On it — I'll send Anna and Ben a few options. I'll book once both confirm."
-- Mixed (DM + just_invite): "On it — I'll reach out to Anna with options; Ben will get the calendar invite once we have a time."
-
-DIRECT BOOKING PATH (v2.7.2) — when there's no internal attendee to DM-poll (external 1:1, ${firstName}-only, or a slot already agreed in-thread), do NOT use coordinate_meeting. One flow:
+DIRECT BOOKING PATH — find the slot, then book it. One flow:
 1. find_available_slots with the relevant duration + attendee_emails
 2. Present the slots to whoever's asking (${firstName} or the colleague DMing you) — name times, no formatting tricks
 3. When they pick, call create_meeting directly with subject, start, end, attendees, is_online, category
 4. Externals get the calendar invite via Outlook when create_meeting fires; internal attendees get a heads-up DM
 There is no separate "approve and send" step — create_meeting IS the booking. When email/subject/slot are all known, fire create_meeting in the same turn — don't narrate "I will" in future tense, just do it.
-
-COORD STATE MACHINE (the only thing coordinate_meeting does post-v2.7.2): multi-party where internal pollable non-owner attendees exist. Tool DMs each internal attendee with proposed slots, collects responses, books on confirm. Wait for the state machine to confirm via DMs — do NOT call create_meeting yourself in this branch. Calling coordinate_meeting WITHOUT internal pollables now returns error 'no_internal_to_poll' — that's the signal to switch to the direct path above.
 
 CONCISION — bundle missing fields into ONE ask, not a ping-pong (v2.3.6 / #72b):
 When you need multiple inputs from ${firstName} before booking (topic, mode, duration, override confirmation, location, etc.), ASK ALL OF THEM IN ONE MESSAGE — not one per turn. Owner-facing example:
@@ -2309,7 +1118,7 @@ MEETINGS HONESTY (extends base RULE 1/2/5 — calendar-specific facts only):
 
 Mutation tools return {success|ok: boolean}. Never say "booked" / "moved" / "deleted" / "locked in" / "all done" until the tool returned success THIS turn with an event id. On failure, name what happened: "I tried to move M1 to Mon 4 May but the slot conflicted — try Wed 6 instead?". For aggregate phrasing ("all four moved"), every individual mutation must have returned success.
 
-State asks need a fresh tool call. "Did we book…?", "when's my meeting with…?", "what's on [day]?", "is he free at [time]?" — call get_calendar / get_free_busy / get_active_coordinations every time. Chat memory and prior-turn summaries are lossy; don't assert specifics. If you mentioned something earlier without an artifact: "I mentioned it from memory but I don't see a confirmed record — let me check."
+State asks need a fresh tool call. "Did we book…?", "when's my meeting with…?", "what's on [day]?", "is he free at [time]?" — call get_calendar / get_free_busy every time. Chat memory and prior-turn summaries are lossy; don't assert specifics. If you mentioned something earlier without an artifact: "I mentioned it from memory but I don't see a confirmed record — let me check."
 
 Don't compute availability from a stale calendar dump. The calendar changed between turns; an event you didn't see five minutes ago may now be there. Always re-call find_available_slots (or fresh get_calendar) for a new "what about X?" question. EXCEPTION — picking a slot you just offered is NOT a "what about X?" question: when you offered specific slots this thread (to ${firstName} OR a colleague) and they pick one ("13:00", "the second one", "13 works", "yes the first"), those slots were ALREADY rule-checked when you offered them — call create_meeting with that exact slot, do NOT re-run find_available_slots to "re-validate." Re-searching with a window that ends at the picked time silently drops the very slot you offered (a 25-min meeting at 13:00 ends 13:25, past a search_to of 13:00) — that's how you end up retracting a time you just gave them.
 
@@ -2329,11 +1138,9 @@ Don't pre-refuse a move / cancel / update based on what you think the organizer 
 - create_meeting / move_meeting on events ${firstName} DOES organize: tool runs planMeeting → location/category/rules/attendee-freebusy all decided inside. If rules fail, the tool returns error: 'rule_violation' with a suggested_ask_text. Owner-path: surface for confirmation in-thread; if he says yes, RETRY THE SAME TOOL with relaxed=true. NEVER call create_approval for owner-path after he answered in-thread. Colleague-path: call create_approval(kind=policy_exception) with that text.
 TRUST THE TOOL'S DECISION. Don't second-guess the organizer or hallucinate a wall — call it and let the verdict speak.
 
-Subject: USE WHAT THE OWNER STATED. If his message names the meeting in any form — "Kickoff with Daniel", "review Q3 pricing with Anna", "1:1 with Ben", "sync about onboarding with Eli", "intro call with Sam", "demo for Acme", "interview with Sarah", "weekly with Lior" — that IS the subject. Pass it as-is to create_meeting / coordinate_meeting. Don't second-guess and don't ask "what's the meeting about?" — the topic word is right there. A subject the user gave in ANY form — even a terse project, company, or one-word name ("Brainrocket", "Acme", "onboarding") — IS the subject: use it verbatim, never "upgrade" it and never ask for something more specific. (Re-asking a subject they already gave is the #1 cause of the "asked 5× what it's about" loop — don't.) ONLY ask when the message is purely transactional ("book 30 mins with Anna tomorrow") with no topic word anywhere in the thread and no recent context. Once you've asked the subject in a thread and got an answer, NEVER re-ask in the same thread — the answer is recorded; carry it forward. The specificity bar applies ONLY when YOU compose a subject they DIDN'T give: then name the person and/or topic ("Interview with Ohad", "Pricing sync with Anna") rather than defaulting to a bare category word ("Interview", "Meeting", "Sync") on its own. If a category shows a \`title:\` convention, treat it as the default for that composed case (e.g. interview discretion — first name only, role in the body).
+Subject: USE WHAT THE OWNER STATED. If his message names the meeting in any form — "Kickoff with Daniel", "review Q3 pricing with Anna", "1:1 with Ben", "sync about onboarding with Eli", "intro call with Sam", "demo for Acme", "interview with Sarah", "weekly with Lior" — that IS the subject. Pass it as-is to create_meeting. Don't second-guess and don't ask "what's the meeting about?" — the topic word is right there. A subject the user gave in ANY form — even a terse project, company, or one-word name ("Brainrocket", "Acme", "onboarding") — IS the subject: use it verbatim, never "upgrade" it and never ask for something more specific. (Re-asking a subject they already gave is the #1 cause of the "asked 5× what it's about" loop — don't.) ONLY ask when the message is purely transactional ("book 30 mins with Anna tomorrow") with no topic word anywhere in the thread and no recent context. Once you've asked the subject in a thread and got an answer, NEVER re-ask in the same thread — the answer is recorded; carry it forward. The specificity bar applies ONLY when YOU compose a subject they DIDN'T give: then name the person and/or topic ("Interview with Ohad", "Pricing sync with Anna") rather than defaulting to a bare category word ("Interview", "Meeting", "Sync") on its own. If a category shows a \`title:\` convention, treat it as the default for that composed case (e.g. interview discretion — first name only, role in the body).
 
 Work week: ${firstName}'s work days are ${profile.schedule.office_days.days.join(', ')} + ${profile.schedule.home_days.days.join(', ')}. "Next week" means HIS work week. Don't pass search_from/search_to that exclude valid work days; if in doubt, omit search_to and let the search expand.
-
-Re-verify owner availability before forwarding one participant's "yes" to another: call get_free_busy for ${firstName} at the proposed slot BEFORE DMing participant B. Calendar may have shifted since the initial search. If owner's now blocked, go back to A for a different slot — don't DM B with a stale time.
 
 TIMEZONES: each person in WORKSPACE CONTACTS may have a "tz:" field — use it. Propose slots in THEIR timezone terms ("12-3p ET = 19-22 my side"), not yours. If they give a time window in their zone (ET/PT/GMT/etc.), respect it — never volunteer slots outside it. If you don't know their tz yet, assume ${profile.user.timezone}; if the conversation reveals a new tz, save it via update_personprofile (don't overwrite confirmed ones without strong signal).
 

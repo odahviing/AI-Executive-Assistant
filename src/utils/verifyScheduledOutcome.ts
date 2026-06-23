@@ -1,5 +1,5 @@
 /**
- * v2.1.4 — verify whether a pending outreach / coord outcome already landed
+ * v2.1.4 — verify whether a pending outreach outcome already landed
  * on the owner's calendar via a third party.
  *
  * Scenario: Maelle tells Michal "Wed 29 Apr noon works for the bank visit,
@@ -10,8 +10,7 @@
  * match the proposed slots + subject keyword, and if one's there, reports
  * back what happened so the brief can close the loop honestly.
  *
- * Shape-agnostic — works for both `outreach_jobs` (new proposed_slots /
- * subject_keyword columns) and `coord_jobs` (proposed_slots + subject).
+ * Reads `outreach_jobs` (proposed_slots / subject_keyword columns).
  * Returns one of:
  *   - 'none' → no matching event found on any proposed date
  *   - 'booked_compliant' → event found AND its time passes the owner's

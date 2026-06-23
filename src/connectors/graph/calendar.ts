@@ -1722,11 +1722,16 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
   // "owner just deleted this floating block — don't re-book it" later.
   startDateTime?: string;
   startTimeZone?: string;
+  // v3.4.x (#135c) — also surface end so a pure move (new_end omitted) can
+  // preserve the meeting's existing duration without forcing the model to
+  // supply (or re-ask for) a length it already knows.
+  endDateTime?: string;
+  endTimeZone?: string;
 }> {
   const client = getClient();
   const event = await client
     .api(`/users/${userEmail}/events/${meetingId}`)
-    .select('id,type,subject,seriesMasterId,start')
+    .select('id,type,subject,seriesMasterId,start,end')
     .get();
   return {
     type: event?.type,
@@ -1734,6 +1739,8 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
     seriesMasterId: event?.seriesMasterId,
     startDateTime: event?.start?.dateTime,
     startTimeZone: event?.start?.timeZone,
+    endDateTime: event?.end?.dateTime,
+    endTimeZone: event?.end?.timeZone,
   };
 }
 

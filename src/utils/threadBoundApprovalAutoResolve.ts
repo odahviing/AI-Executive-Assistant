@@ -57,6 +57,7 @@ interface BoundCandidate {
   kind: string;
   subkind: string | null;
   subject: string | null;
+  requesterSlackId: string | null;
   details: Record<string, unknown>;
 }
 
@@ -66,6 +67,7 @@ function toCandidate(r: RequestRow): BoundCandidate {
     kind: r.kind,
     subkind: r.subkind,
     subject: r.subject,
+    requesterSlackId: r.requester_slack_id,
     details: parseDetails<Record<string, unknown>>(r) ?? {},
   };
 }
@@ -73,26 +75,55 @@ function toCandidate(r: RequestRow): BoundCandidate {
 /**
  * Replay-path precondition. Auto-resolve is safe ONLY when there's a concrete
  * next-step the resolver can execute without Sonnet: an on_approve callback
- * (replay), or a slot_pick/calendar_conflict (own booking path). Otherwise a
- * freeform approval would hit the "close + notify with nothing executed" path,
+ * (replay). Otherwise a freeform approval with no callback would hit the
+ * "close + notify with nothing executed" path,
  * so we pass to Sonnet to interpret + execute.
  */
 function isReplayEligible(c: BoundCandidate): boolean {
   const callbacks = extractCallbacks(c.details);
-  return !!callbacks.on_approve || c.subkind === 'slot_pick' || c.subkind === 'calendar_conflict';
+  return !!callbacks.on_approve;
 }
 
 /**
- * Find the replay-eligible approvals a reply in `threadTs` could be resolving.
+ * v3.4.8 — silent-resolve is safe ONLY for owner-internal approvals (no
+ * colleague to loop back to). A COLLEAGUE-requested approval (requester_slack_id
+ * set, ≠ owner) must run the normal orchestrator turn instead: Module D skips
+ * Sonnet entirely, so resolving silently leaves NO record of what happened in
+ * the conversation and no narration — Maelle then can't tell the owner she
+ * notified the requester (she did, via the resolver) and misreports / duplicates
+ * (Ysrael Gurt, 2026-06-23: owner approved a colleague's move, resolver relayed
+ * to the colleague, but the silent path left no memory → Maelle said "not
+ * notified" → owner-prompted duplicate DM). Deferring these to the orchestrator
+ * makes them a normal chat turn: Sonnet resolves, sees the requester_notified
+ * result, and narrates in her own words.
+ */
+function isSilentResolveSafe(c: BoundCandidate, ownerUserId: string): boolean {
+  return !c.requesterSlackId || c.requesterSlackId === ownerUserId;
+}
+
+/**
+ * Find the approvals a reply in `threadTs` could SILENTLY resolve (Module D).
  * Per-message match takes priority (precise); else the daily-thread match
- * returns every open approval sharing that day's thread.
+ * returns every open approval sharing that day's thread. Only replay-eligible
+ * AND silent-safe (owner-internal) candidates qualify — colleague-requested
+ * approvals are deliberately left for the orchestrator so Maelle narrates.
  */
 function findCandidates(ownerUserId: string, threadTs: string): BoundCandidate[] {
   const requests = getAwaitingOwnerRequests(ownerUserId);
+  const eligible = (c: BoundCandidate): boolean => {
+    if (!isReplayEligible(c)) return false;
+    if (!isSilentResolveSafe(c, ownerUserId)) {
+      logger.info('autoResolveThreadBound — deferring colleague-requested approval to orchestrator (narration needed)', {
+        requestId: c.id, requesterSlackId: c.requesterSlackId,
+      });
+      return false;
+    }
+    return true;
+  };
   const byMessage = requests.filter(r => r.terminal_dm_msg_ts === threadTs);
-  if (byMessage.length >= 1) return byMessage.map(toCandidate).filter(isReplayEligible);
+  if (byMessage.length >= 1) return byMessage.map(toCandidate).filter(eligible);
   const byDaily = requests.filter(r => !!r.owner_dm_thread_ts && r.owner_dm_thread_ts === threadTs);
-  return byDaily.map(toCandidate).filter(isReplayEligible);
+  return byDaily.map(toCandidate).filter(eligible);
 }
 
 function candidateContextLine(c: BoundCandidate, profile: UserProfile): string {

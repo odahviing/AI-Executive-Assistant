@@ -217,6 +217,32 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     role, colleagueName, isMpim, isOwnerInGroup, mpimMemberIds,
   });
 
+  // Step 3b-2 (v3.4.x, meeting #135) — booked-date honesty backstop. When a
+  // move/create succeeded THIS turn, verify the reply's stated day/time for it
+  // matches where it ACTUALLY landed (the resolved new_start/start carried in
+  // mutationActions). Catches "moved to Friday" narrated as "back on Thursday".
+  // Deterministic compare of resolved instants; the LLM only reads the reply +
+  // the known booking and renders the fix in-language. Backstop to the
+  // meeting-core assertWeekdayMatchesDate (which stops the wrong-day WRITE
+  // upstream); a no-op when the write was right. Runs only when a booking fired,
+  // so the cost is bounded (R9). Fails open — leaves the draft unchanged.
+  try {
+    const bookings = (result.mutationActions ?? [])
+      .filter(m => m.ok && /^(move_meeting|create_meeting|finalize_coord_meeting|book_floating_block)$/.test(m.tool))
+      .map(m => ({ tool: m.tool, subject: m.subject, iso: (m.new_start || m.start) ?? '' }))
+      .filter(b => b.iso.length > 0);
+    if (bookings.length > 0) {
+      const { verifyReplyMatchesBooking } = await import('../../utils/dateVerifier');
+      const corrected = await verifyReplyMatchesBooking(cleanReply, bookings, profile);
+      if (corrected && corrected.trim().length > 0) {
+        cleanReply = formatForSlack(corrected);
+        appendToConversation(threadTs, channelId, { role: 'assistant', content: cleanReply });
+      }
+    }
+  } catch (err) {
+    logger.warn('booked-date honesty check threw — leaving draft unchanged', { err: String(err).slice(0, 200) });
+  }
+
   // Step 3c (v1.8.4) — colleague-path mutation-contradiction check. When a
   // calendar-mutating tool succeeded this turn AND the draft tells the
   // colleague something like "I'll flag it for <owner>" or "he'll decide,"
@@ -227,7 +253,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // log "Meeting booked" while the colleague was told "flagged for Idan").
   if (role === 'colleague' && !isOwnerInGroup) {
     const toolSummariesText = (result.toolSummaries ?? []).join(' ');
-    const mutationRan = /\[(move_meeting|create_meeting|update_meeting|delete_meeting|finalize_coord_meeting)/i.test(toolSummariesText);
+    const mutationRan = /\[(move_meeting|create_meeting|update_meeting|delete_meeting)/i.test(toolSummariesText);
     const ownerFirstName = profile.user.name.split(' ')[0];
     const ownerFnRe = new RegExp(`\\b${ownerFirstName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\b`, 'i');
     const draftDefersToOwner =
@@ -511,7 +537,7 @@ async function runClaimCheckAndMaybeRewrite(ctx: ClaimCheckContext): Promise<str
           // move as someone else's ("looks like it was moved at some point
           // during our conversation"). All five mutation tools should
           // satisfy a book-type claim.
-          ? /\[(create_meeting|finalize_coord_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block)/.test(toolSummariesText)
+          ? /\[(create_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block)/.test(toolSummariesText)
           : verdict.action_type === 'task'
             ? /\[(create_task|create_approval)/.test(toolSummariesText)
             // Extend the false-positive shield to the memory/pref action-verb

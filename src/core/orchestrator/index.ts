@@ -8,7 +8,7 @@ import { generateSocialCoda } from '../social/generateCoda';
 import { getSkillTools, executeSkillTool } from '../../skills/registry';
 import type { UserProfile } from '../../config/userProfile';
 import type { SkillContext, ChannelId } from '../../skills/types';
-import { auditLog, buildSocialContextBlock, getSummarySessionByThread, getCoordLifecycle, getOutreachLifecycle } from '../../db';
+import { auditLog, buildSocialContextBlock, getSummarySessionByThread, getOutreachLifecycle } from '../../db';
 import { getActiveJobsForThread } from '../../tasks';
 import { logLlmUsage } from '../../utils/usageLog';
 import { DateTime } from 'luxon';
@@ -150,8 +150,6 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
         const more = slots.length > 5 ? ` +${slots.length - 5} more` : '';
         return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}${more}]`;
       }
-      case 'coordinate_meeting':
-        return `[coordinate_meeting: "${(input as any).subject}" with ${((input as any).participants as any[])?.map((p: any) => p.name).join(', ')}]`;
       case 'find_slack_user':
         return `[find_slack_user: "${input.name}"]`;
       case 'message_colleague':
@@ -162,7 +160,6 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
       case 'move_meeting':
       case 'update_meeting':
       case 'delete_meeting':
-      case 'finalize_coord_meeting':
       case 'book_floating_block': {
         const outcome = mutationOutcome(result);
         // v3.4.2 (NEW-1) — NEVER fall back to meeting_id here. It was rendered
@@ -214,7 +211,7 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
 // confirmed successes belong on the tape. The closing line acknowledges the
 // tool-trust gap (Graph can return OK on a write that didn't actually land):
 // when the owner pushes back, Maelle re-checks instead of insisting.
-const MUTATION_OK_RE = /\[(?:create_meeting|move_meeting|update_meeting|delete_meeting|finalize_coord_meeting|book_floating_block) OK[^\]]*\]/g;
+const MUTATION_OK_RE = /\[(?:create_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block) OK[^\]]*\]/g;
 
 function extractActionTape(history: Array<{ role: 'user' | 'assistant'; content: string }>): string[] {
   const out: string[] = [];
@@ -649,30 +646,12 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // This prevents her from treating follow-up messages as new requests.
   let threadContextBlock = '';
   if (input.senderRole === 'owner' && threadTs) {
-    const { tasks, coordJobs, outreachJobs } = getActiveJobsForThread(
+    const { tasks, outreachJobs } = getActiveJobsForThread(
       profile.user.slack_user_id,
       threadTs,
     );
 
     const lines: string[] = [];
-
-    for (const job of coordJobs) {
-      // v1.6 — coord_jobs (multi-participant). Parse participants for a short label.
-      let participantLabel = 'participants';
-      try {
-        const parts = JSON.parse(job.participants || '[]') as Array<{ name?: string; just_invite?: boolean }>;
-        const keyNames = parts.filter(p => !p.just_invite).map(p => p.name).filter(Boolean);
-        if (keyNames.length > 0) participantLabel = keyNames.join(', ');
-      } catch (_) {}
-      // v3.1 (Path 2 Stage 7) — coord status reads off the linked request phase.
-      const coordPhase = getCoordLifecycle(job.id).phase;
-      const status =
-        coordPhase === 'coord:collecting' ? 'collecting responses'
-        : coordPhase === 'coord:negotiating' ? 'negotiating time'
-        : coordPhase === 'coord:waiting_owner' ? 'waiting on your approval'
-        : 'in flight';
-      lines.push(`• Coordination job: "${job.subject}" with ${participantLabel} — ${status}`);
-    }
 
     for (const job of outreachJobs) {
       // v2.3.6 (#69a) — surface colleague reply_text into the thread block.
@@ -700,7 +679,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     }
 
     for (const task of tasks) {
-      if (!coordJobs.some(j => j.id === task.skill_ref) && !outreachJobs.some(j => j.id === task.skill_ref)) {
+      if (!outreachJobs.some(j => j.id === task.skill_ref)) {
         lines.push(`• Task: "${task.title}" — ${task.status}`);
       }
     }
@@ -1196,7 +1175,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
           // scheduling decision and would just be drift.
           'get_calendar', 'get_free_busy', 'find_available_slots',
           'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
-          'coordinate_meeting', 'finalize_coord_meeting', 'check_join_availability',
+          'check_join_availability',
         ]);
         // v3.2.1 (#120 / Yariv) — escape hatch for a TRAPPED recovery. When a
         // bound approval's deferred action failed mid-replay needing a
@@ -1258,7 +1237,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
   // current interlocutor (confirm-override, pick-a-slot, rule exception) or a
   // tool failed. Any such tool result this turn flips this true and the coda
   // is suppressed — that's the "not in the middle" guard. Handoff tools
-  // (create_approval / coordinate_meeting / message_colleague) deliberately do
+  // (create_approval / message_colleague) deliberately do
   // NOT set this (they're the lull case the coda is allowed to ride).
   let turnLeftWorkPending = false;
   // v2.8.3+ — rich per-mutation record used by the claim-checker retry path
@@ -1278,13 +1257,6 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
   // (which don't go through dispatchRoutine) ignore the flag and narrate
   // normally so the owner sees the "all clear" verification.
   let healthCheckVacuous = false;
-  // True once coordinate_meeting has successfully queued a coord this turn.
-  // Subsequent coordinate_meeting calls within the same orchestrator invocation
-  // are short-circuited with an idempotent "already initiated" response. This
-  // guards against a retry-loop pattern where the LLM reads the queued response
-  // as a failure signal and re-calls the tool, spamming the rate limiter and
-  // (in the worst case) spawning duplicate coord jobs. v1.4.1.
-  let coordQueuedThisTurn = false;
   // v1.6.4 — track delete_meeting ids already executed this turn. The claim-
   // checker found a case where the LLM called delete_meeting twice with the
   // same id and then narrated "two meetings deleted" — half lie. This guard
@@ -1448,28 +1420,6 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
     for (const toolUse of toolBlocks as Anthropic.ToolUseBlock[]) {
-      // ── IDEMPOTENCY: coordinate_meeting once per turn ──
-      // If coord was already queued this turn, short-circuit any further
-      // coordinate_meeting calls. The LLM sometimes reads the queued response
-      // as failure and retries; this catches that deterministically. Runs
-      // before rate-limit / guards so retries don't consume security budget.
-      if (toolUse.name === 'coordinate_meeting' && coordQueuedThisTurn) {
-        logger.info('coordinate_meeting called again in same turn — idempotent short-circuit', {
-          senderUserId: input.userId,
-          threadTs,
-        });
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: JSON.stringify({
-            _status: 'already_initiated',
-            _note: 'Coord was already initiated earlier this turn — DMs are dispatching. Do NOT call coordinate_meeting again. Reply briefly ("On it — I\'ll reach out now") and stop.',
-          }),
-        });
-        toolCallSummaries.push(`[${toolUse.name}] already-queued — skipped`);
-        continue;
-      }
-
       // ── IDEMPOTENCY: message_colleague once per turn per colleague (v1.7.4) ──
       // Same-turn duplicate sends are never what the user meant — and the
       // claim-checker false-positive retry was hitting this exact path.
@@ -1551,94 +1501,11 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
         }
       }
 
-      // ── SECURITY: refuse colleague-path create_approval when this
-      // conversation was just flagged SUSPICIOUS by the coord judge ──
-      // Without this, Sonnet pivots from coordinate_meeting (caught by the
-      // judge) to create_approval (no judge), and the flagged ask still
-      // lands in the owner's DM with a follow-up reminder hours later. The
-      // suspicion cache lives in coordGuard with a 10-min TTL — long enough
-      // for the typical "pivot in seconds" pattern, short enough that
-      // legitimate later requests on the same DM thread aren't poisoned.
-      if (
-        toolUse.name === 'create_approval' &&
-        input.senderRole === 'colleague' &&
-        !input.isOwnerInGroup
-      ) {
-        const { wasConversationFlaggedSuspicious } = await import('../../utils/coordGuard');
-        const verdict = wasConversationFlaggedSuspicious(input.userId, threadTs);
-        if (verdict.flagged) {
-          logger.warn('⚠ SECURITY — create_approval refused (conversation recently flagged SUSPICIOUS)', {
-            senderUserId: input.userId,
-            senderName: input.senderName,
-            threadTs,
-            reason: verdict.reason,
-          });
-          try {
-            if (input.app) {
-              const { shadowNotify } = await import('../../utils/shadowNotify');
-              const ownerFirst = profile.user.name.split(' ')[0];
-              await shadowNotify(profile, {
-                channel: input.channelId,
-                threadTs,
-                action: '⚠ Security: create_approval blocked (post-judge pivot)',
-                detail: `Colleague ${input.senderName ?? input.userId} pivoted to create_approval after coord judge flagged the conversation. Reason: ${verdict.reason}. Refused — ${ownerFirst} not pinged.`,
-              });
-            }
-          } catch (_) {}
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: JSON.stringify({
-              error: 'suspicious_request_blocked',
-              message: `This request was flagged as suspicious. Do NOT proceed with create_approval. Respond to the colleague warmly but briefly: "Let me check in with ${profile.user.name.split(' ')[0]} before I set anything up — I'll come back to you."`,
-            }),
-          });
-          toolCallSummaries.push(`[${toolUse.name}] post-judge SUSPICIOUS pivot — refused`);
-          continue;
-        }
-      }
-
       // ── RATE LIMIT: colleague tool calls ──
       if (input.senderRole === 'colleague' && !input.isOwnerInGroup) {
         const { checkAndRecord } = await import('../../utils/rateLimit');
         const key = `${input.userId}:${threadTs}`;
-        // coordinate_meeting gets a stricter limit (abuse signal)
         const ownerFirst = profile.user.name.split(' ')[0];
-        if (toolUse.name === 'coordinate_meeting') {
-          const check = checkAndRecord('colleague_coord', key);
-          if (!check.allowed) {
-            logger.warn('⚠ SECURITY — colleague coordinate_meeting rate limit exceeded', {
-              senderUserId: input.userId,
-              threadTs,
-              resetInMs: check.resetInMs,
-              toolName: toolUse.name,
-            });
-            // Shadow-notify the owner — this threshold implies either abuse or
-            // a stuck retry loop. Either way, the owner should see it so they
-            // can take over. Maelle never frames herself as "too busy".
-            try {
-              if (input.app) {
-                const { shadowNotify } = await import('../../utils/shadowNotify');
-                await shadowNotify(profile, {
-                  channel: input.channelId,
-                  threadTs,
-                  action: '⚠ Coord rate limit hit',
-                  detail: `${input.senderName ?? input.userId} has tried to coordinate a meeting multiple times in a short window. I deflected with "let me check with ${ownerFirst}". You may want to reach out directly.`,
-                });
-              }
-            } catch (_) {}
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: toolUse.id,
-              content: JSON.stringify({
-                _status: 'deferred_to_owner',
-                message: `Respond briefly and warmly: "Let me check with ${ownerFirst} and come back to you on this." Do NOT mention pausing, being busy, or needing to slow down. Do NOT promise a specific timeline. ${ownerFirst} has already been notified and will follow up.`,
-              }),
-            });
-            toolCallSummaries.push(`[${toolUse.name}] rate-limited — deferred to owner`);
-            continue;
-          }
-        }
         // Broader tool budget
         const anyCheck = checkAndRecord('colleague_any_tool', key);
         if (!anyCheck.allowed) {
@@ -1669,139 +1536,6 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
           });
           toolCallSummaries.push(`[${toolUse.name}] rate-limited — deferred to owner`);
           continue;
-        }
-
-        // ── COORD GUARDS: injection scan + LLM judge for coordinate_meeting ──
-        // Defense-in-depth. Injection scan catches obvious payloads deterministically;
-        // LLM judge catches subtler manipulation that the surface scan misses.
-        if (toolUse.name === 'coordinate_meeting') {
-          const { scanForInjection, judgeCoordRequest } = await import('../../utils/coordGuard');
-
-          // Collect recent colleague messages (current + up to last 4 from user role)
-          const colleagueMsgs = [
-            ...input.conversationHistory.filter(m => m.role === 'user').map(m => m.content),
-            input.userMessage,
-          ].slice(-5);
-
-          // (a) Deterministic injection pattern scan over the full colleague chatter.
-          //     Scanning the joined recent messages rather than just the current one —
-          //     multi-turn injections often stage the payload across messages.
-          const joinedRecent = colleagueMsgs.join('\n---\n');
-          const injScan = scanForInjection(joinedRecent);
-          if (injScan.matched) {
-            logger.warn('⚠ SECURITY — coord request tripped injection scan — REFUSED', {
-              senderUserId: input.userId,
-              senderName: input.senderName,
-              threadTs,
-              triggers: injScan.triggers,
-              toolArgs: toolUse.input,
-              recentPreview: joinedRecent.slice(0, 300),
-            });
-            try {
-              if (input.app) {
-                const { shadowNotify } = await import('../../utils/shadowNotify');
-                await shadowNotify(profile, {
-                  channel: input.channelId,
-                  threadTs,
-                  action: '⚠ Security: coord blocked (injection pattern)',
-                  detail: `Colleague ${input.senderName ?? input.userId} tripped: ${injScan.triggers.join(', ')}. Tool args refused.`,
-                });
-              }
-            } catch (_) {}
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: toolUse.id,
-              content: JSON.stringify({
-                error: 'suspicious_request_blocked',
-                message: `This request looks off — patterns matched: ${injScan.triggers.join(', ')}. Do NOT proceed. Respond to the colleague exactly: "I'm just ${profile.user.name.split(' ')[0]}'s assistant — if you'd like to set something up with him, tell me in your own words what you need."`,
-              }),
-            });
-            toolCallSummaries.push(`[${toolUse.name}] injection scan matched — refused`);
-            continue;
-          }
-
-          // (b) LLM-as-judge — Haiku sanity check. ~500ms, ~$0.0002.
-          const toolArgs = toolUse.input as Record<string, unknown>;
-          const subject = String(toolArgs.subject ?? '');
-          const durationMin = Number(toolArgs.duration_min ?? 0);
-          const participantNames = [
-            ...((toolArgs.participants as any[]) ?? []),
-            ...((toolArgs.just_invite as any[]) ?? []),
-          ].map((p: any) => String(p.name ?? p.slack_id ?? 'unknown'));
-
-          const judgeResult = await judgeCoordRequest({
-            senderName: input.senderName ?? 'colleague',
-            senderId: input.userId,
-            threadTs,
-            senderRecentMessages: colleagueMsgs,
-            ownerFirstName: profile.user.name.split(' ')[0],
-            subject,
-            participantNames,
-            durationMin,
-          });
-
-          if (judgeResult.verdict === 'SUSPICIOUS') {
-            // Stamp the conversation as suspicious so downstream colleague-
-            // path mutation tools (create_approval) refuse too. Without this,
-            // Sonnet pivots from coordinate_meeting (caught) to
-            // create_approval (not caught) and the flagged ask still lands
-            // in the owner's DM. 10-min TTL.
-            const { markConversationSuspicious } = await import('../../utils/coordGuard');
-            markConversationSuspicious(input.userId, threadTs, judgeResult.reason);
-            // v3.4 — the old "system-driven impersonation note" write was
-            // REMOVED. A SUSPICIOUS verdict here is a fallible Haiku judgment,
-            // and "is this a legit meeting request?" overlaps heavily with
-            // normal scheduling — so a false positive was stamping a permanent
-            // [security] note onto a REAL colleague's people-memory record,
-            // which then fed future judges and the owner's view of that person.
-            // That is the single worst failure-direction in the guard stack: a
-            // fallible LLM verdict corrupting persisted data about a real human.
-            // The in-memory suspicion flag (markConversationSuspicious, above)
-            // already covers the only thing that needs to persist for THIS
-            // conversation — the create_approval-pivot defer, 10-min TTL — and
-            // the owner still gets a shadow notify below. No durable record is
-            // written off a judge-only hunch. (The deterministic injection scan
-            // remains the hard-refuse path; only it deals in certainties.)
-            logger.warn('⚠ SECURITY — coord judge flagged SUSPICIOUS — REFUSED', {
-              senderUserId: input.userId,
-              senderName: input.senderName,
-              threadTs,
-              reason: judgeResult.reason,
-              elapsedMs: judgeResult.elapsedMs,
-              subject,
-              participantNames,
-            });
-            try {
-              if (input.app) {
-                const { shadowNotify } = await import('../../utils/shadowNotify');
-                await shadowNotify(profile, {
-                  channel: input.channelId,
-                  threadTs,
-                  action: '⚠ Security: coord blocked (judge SUSPICIOUS)',
-                  detail: `Colleague ${input.senderName ?? input.userId} — reason: ${judgeResult.reason}. Subject: "${subject.slice(0, 80)}". Participants: ${participantNames.join(', ') || '(none)'}.`,
-                });
-              }
-            } catch (_) {}
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: toolUse.id,
-              content: JSON.stringify({
-                error: 'suspicious_request_blocked',
-                message: `This request was flagged as suspicious. Do NOT proceed. Respond to the colleague warmly but briefly: "Let me check in with ${profile.user.name.split(' ')[0]} before I set anything up — I'll come back to you."`,
-              }),
-            });
-            toolCallSummaries.push(`[${toolUse.name}] judge SUSPICIOUS — refused`);
-            continue;
-          }
-
-          logger.info('Coord judge cleared — proceeding', {
-            senderUserId: input.userId,
-            senderName: input.senderName,
-            threadTs,
-            verdict: judgeResult.verdict,
-            reason: judgeResult.reason,
-            elapsedMs: judgeResult.elapsedMs,
-          });
         }
       }
 
@@ -1957,12 +1691,6 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
         (result as Record<string, unknown>)._requires_slack_client === true
       ) {
         slackActions.push(result as unknown as SlackAction);
-        // Mark coord as queued so subsequent coordinate_meeting calls in the
-        // same turn are short-circuited (see idempotency guard above).
-        const r = result as Record<string, unknown>;
-        if (toolUse.name === 'coordinate_meeting' && r.action === 'coordinate_meeting') {
-          coordQueuedThisTurn = true;
-        }
       }
 
       // Track whether a real booking occurred this turn — used by the
@@ -1978,14 +1706,11 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
         if (toolUse.name === 'create_meeting' && (r.eventId || r.id || r.ok === true)) {
           bookingOccurred = true;
         }
-        if (toolUse.name === 'finalize_coord_meeting' && r.ok === true && r.status === 'booked') {
-          bookingOccurred = true;
-        }
         if (!wasBooked && bookingOccurred) {
           // A real booking landed → drop any offered-slots stash for this
           // conversation so a later turn can't bind to an already-booked
           // instant. create_meeting's handler clears on the direct colleague
-          // path; this covers finalize_coord_meeting + an owner self-book in a
+          // path; this covers an owner self-book in a
           // colleague DM, which that path misses.
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -2097,7 +1822,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
       // reads don't need amend handles.
       const mutationToolNames = new Set([
         'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
-        'finalize_coord_meeting', 'book_floating_block',
+        'book_floating_block',
       ]);
       if (mutationToolNames.has(toolUse.name)) {
         const outcome = mutationOutcome(result);
@@ -2325,11 +2050,6 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
           move_meeting: 'moved the meeting',
           update_meeting: 'updated the meeting',
           delete_meeting: 'removed the meeting',
-          // Coord
-          coordinate_meeting: 'started the coordination',
-          finalize_coord_meeting: 'finalized the booking',
-          cancel_coordination: 'cancelled the coordination',
-          get_active_coordinations: 'checked active coordinations',
           // Calendar health
           check_calendar_health: 'reviewed calendar health',
           book_floating_block: 'blocked the slot',
@@ -2366,8 +2086,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
           // Tier 1 — calendar mutations (the headline)
           'create_meeting', 'move_meeting', 'delete_meeting', 'book_floating_block',
           'update_meeting',
-          // Tier 2 — coord + approvals + tasks
-          'coordinate_meeting', 'finalize_coord_meeting', 'cancel_coordination',
+          // Tier 2 — approvals + tasks
           'create_approval', 'resolve_approval',
           'create_task', 'edit_task', 'cancel_task',
           // Tier 3 — outreach + briefings

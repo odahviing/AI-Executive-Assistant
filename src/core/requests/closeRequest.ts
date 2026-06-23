@@ -4,20 +4,19 @@
  * Principal callers:
  *   1. resolver — owner explicit verdict (approve/reject/amend/cancel)
  *   2. closeLoopOnOwnerHandled scanner — LLM matched owner free-text
- *   3. the spine runner (runner.ts) — expiry / reminder / outreach / coord
+ *   3. the spine runner (runner.ts) — expiry / reminder / outreach
  *      timers firing on next_check_at
  *   4. meeting mutation cascade — calendar event vanished / confirmed
  *   5. outreach reply handler — colleague replied to awaiting_colleague outreach
- *   6. reconcile.ts — orphaned-request sweep (booked-bypass / missing coord_job)
  *   (also: brief itself, when surfaced_count >= 3 → cancelled)
  *
  * No other code path may write `state` directly to a terminal value. Schema
  * doesn't enforce this (SQLite); convention does. Audit happens here.
  *
  * Cascade semantics:
- *   - Closing a parent (e.g. coord) cascades to its children unless
- *     skipChildren=true. Reason: a cancelled coord shouldn't leave 3 child
- *     outreach rows still awaiting_colleague.
+ *   - Closing a parent cascades to its children unless skipChildren=true.
+ *     Reason: a cancelled parent shouldn't leave child outreach rows still
+ *     awaiting_colleague.
  *   - Closing a child does NOT cascade up — sibling children may still be
  *     in flight. Parent rolls up state via its own logic.
  *   - Next-check timers on the same row are cleared (next_check_at = NULL,
@@ -86,36 +85,17 @@ export function closeRequest(input: CloseRequestInput): CloseResult {
     }
   }
 
-  // Legacy-table cascade. v3.1 (Path 2 Stages 6+7 complete): coord_jobs /
-  // outreach_jobs are now DATA-only tables — their `status` columns are
-  // VESTIGIAL (defaulted, never read for lifecycle; the request owns status).
-  // We still flip those columns to a terminal sentinel here as belt-and-braces
-  // for any in-flight reply-guard that hasn't been re-pointed at the request
-  // yet, and to keep the physical rows internally consistent. This is no longer
-  // load-bearing for lifecycle — closing the request is.
-  //   coord_jobs: 'abandoned'  (siblings: 'booked', 'cancelled')
+  // Legacy-table cascade. v3.1 (Path 2 Stages 6+7 complete): outreach_jobs is
+  // now a DATA-only table — its `status` column is VESTIGIAL (defaulted, never
+  // read for lifecycle; the request owns status). We still flip that column to a
+  // terminal sentinel here as belt-and-braces for any in-flight reply-guard that
+  // hasn't been re-pointed at the request yet, and to keep the physical rows
+  // internally consistent. This is no longer load-bearing for lifecycle —
+  // closing the request is.
   //   outreach_jobs: 'cancelled' (siblings: 'replied', 'expired', 'done', 'failed')
   let legacyCascaded = 0;
   try {
     const db = getDb();
-    const coordRow = db.prepare(
-      `SELECT id, status FROM coord_jobs WHERE request_id = ?`
-    ).get(input.id) as { id: string; status: string } | undefined;
-    if (coordRow && !['booked', 'cancelled', 'abandoned'].includes(coordRow.status)) {
-      db.prepare(`
-        UPDATE coord_jobs
-        SET status = 'abandoned',
-            abandoned_at = datetime('now'),
-            notes = COALESCE(notes, '') || ' | cascade from request ' || ? || ': ' || ?,
-            updated_at = datetime('now')
-        WHERE id = ?
-      `).run(input.id, input.closureReason ?? input.state, coordRow.id);
-      legacyCascaded++;
-      logger.info('closeRequest — cascaded to legacy coord_jobs', {
-        requestId: input.id, coordJobId: coordRow.id, priorStatus: coordRow.status,
-      });
-    }
-
     const outreachRow = db.prepare(
       `SELECT id, status FROM outreach_jobs WHERE request_id = ?`
     ).get(input.id) as { id: string; status: string } | undefined;

@@ -49,7 +49,7 @@ export function buildSystemPromptParts(
   mpimMemberIds?: string[],
   // v3.x (Block 2) — the turn's tool scopes (from classifyTurn, owner-path).
   // Threaded into buildSkillsPromptSection so a skill can lazy-load rarely-used
-  // prose (e.g. coordination ROUTE 1 details ship only when 'coord' is active).
+  // prose only when its scope is active.
   // Undefined → render everything (colleague path, classifier off, non-Slack).
   toolScopes?: string[],
 ): { static: string; dynamic: string } {
@@ -200,10 +200,11 @@ ${lines.join('\n')}
 
 Binding rules (critical):
 - When ${firstName} replies in a way that looks like a decision (picks a time, says "yes"/"no"/"ok"/"לא"/"כן", proposes an alternative): call resolve_approval with the right approval_id from the list above.
+- A QUESTION is NOT a decision. If ${firstName} replies with a question — "am I free then?", "isn't that during my trip?", "what time is that for me?", "where am I that day?" — he's seeking info, not deciding: ANSWER it (check calendar / travel / time) and leave the approval OPEN. Only an explicit yes / no / book-it / drop-it resolves one. NEVER resolve_approval(reject) on a question — that cancels the request AND fires a "doesn't work" DM to the requester. (Read the intent in any language; don't pattern-match.)
 - THREAD-BOUND APPROVAL — if a line above is marked "← THIS THREAD", that's the approval whose original DM is the parent of this reply thread. Default to that approval_id unless ${firstName} explicitly named a different one ("no, I meant the Yael one"). When the marker is present and ${firstName} typed a vague "yes" / "ok" / "כן", use the marked approval — that's what he's responding to.
 - No marker present + multiple pending — match on subject, timing, or thread context. If more than one plausibly fits, ask ${firstName} which one (name them by subject).
 - Verdicts:
-  · approve → ${firstName} agreed as-asked. For slot_pick: pass {slot_iso} in data.
+  · approve → ${firstName} agreed as-asked.
   · reject → ${firstName} said no / cancel. Linked work cancels automatically.
   · amend → ${firstName} said "not this but here's an alternative" ("no, but 1:30 works"). Pass the alternative in counter. The request flips to in_flight; next turn you relay the alternative to the original requester.
 - Do NOT reply with your own prose that implies the decision was recorded unless resolve_approval returned ok:true. Always call the tool first.`;

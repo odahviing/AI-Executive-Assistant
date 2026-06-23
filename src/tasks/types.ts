@@ -69,7 +69,7 @@ export interface Task {
   description?: string;
   due_at?: string;
   completed_at?: string;
-  skill_ref?: string;          // links to coord_jobs/outreach_jobs/approvals/calendar_dismissed_issues ID
+  skill_ref?: string;          // links to outreach_jobs/approvals/calendar_dismissed_issues ID
   context: string;             // JSON blob with task-specific data
   who_requested: string;       // slack_user_id of requester, or 'system'
   pending_on?: string;         // JSON array of slack_user_ids we're waiting on
