@@ -312,6 +312,10 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
               type: 'boolean',
               description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
             },
+            we_acknowledged: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). Set TRUE ONLY when retrying after Maelle surfaced a WORKING-ELSEWHERE trip-time confirm (e.g. "that\'s 12:15 Boston / 19:15 your time — book?") and the owner approved THAT time. It confirms the trip-timezone time on a travel day so the handler books instead of re-asking. NEVER set it proactively — it is NOT a general override (that\'s `relaxed`), and `relaxed` does NOT substitute for it on a travel day.',
+            },
             sensitivity: {
               type: 'string',
               enum: ['normal', 'personal', 'private', 'confidential'],
@@ -356,6 +360,10 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             relaxed: {
               type: 'boolean',
               description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
+            },
+            we_acknowledged: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). Set TRUE ONLY when retrying after Maelle surfaced a WORKING-ELSEWHERE trip-time confirm (e.g. "that\'s 12:15 Boston / 19:15 your time — move it?") and the owner approved THAT time. Confirms the trip-timezone time on a travel day so the handler moves instead of re-asking. NEVER set it proactively — NOT a general override (that\'s `relaxed`), and `relaxed` does NOT substitute for it on a travel day.',
             },
             category: {
               type: 'string',
@@ -1136,7 +1144,7 @@ Don't pre-refuse a move / cancel / update based on what you think the organizer 
 - delete_meeting on an event ${firstName} didn't organize → tool runs decline_and_relay path: removes the event from ${firstName}'s side AND auto-DMs the organizer politely. No need to ask ${firstName} for permission first; that's the planMeeting verdict.
 - move_meeting on an event ${firstName} didn't organize → tool returns error: 'not_organizer'. Narrate honestly: "<organizer> set that one up — only they can shift the time. Want me to flag it so ${firstName} can ping them?" Don't DM the organizer automatically (per owner direction).
 - update_meeting on an event ${firstName} didn't organize → same as move_meeting (returns error: 'not_organizer').
-- create_meeting / move_meeting on events ${firstName} DOES organize: tool runs planMeeting → location/category/rules/attendee-freebusy all decided inside. If rules fail, the tool returns error: 'rule_violation' with a suggested_ask_text. Owner-path: surface for confirmation in-thread; if he says yes, RETRY THE SAME TOOL with relaxed=true. NEVER call create_approval for owner-path after he answered in-thread. Colleague-path: call create_approval(kind=policy_exception) with that text.
+- create_meeting / move_meeting on events ${firstName} DOES organize: tool runs planMeeting → location/category/rules/attendee-freebusy all decided inside. If rules fail, the tool returns error: 'rule_violation' with a suggested_ask_text. Owner-path: surface for confirmation in-thread; if he says yes, RETRY THE SAME TOOL with relaxed=true. NEVER call create_approval for owner-path after he answered in-thread. Colleague-path: call create_approval(kind=policy_exception) with that text. EXCEPTION — a WORKING-ELSEWHERE trip-time confirm (the suggested_ask_text shows a dual clock like "12:15 Boston / 19:15 your time"): on his yes, retry with we_acknowledged=true — NOT relaxed — which confirms the trip-timezone time without re-asking. relaxed does NOT skip that trip-time confirm, so on a travel day always carry the trip-time forward with we_acknowledged.
 TRUST THE TOOL'S DECISION. Don't second-guess the organizer or hallucinate a wall — call it and let the verdict speak.
 
 Subject: USE WHAT THE OWNER STATED. If his message names the meeting in any form — "Kickoff with Daniel", "review Q3 pricing with Anna", "1:1 with Ben", "sync about onboarding with Eli", "intro call with Sam", "demo for Acme", "interview with Sarah", "weekly with Lior" — that IS the subject. Pass it as-is to create_meeting. Don't second-guess and don't ask "what's the meeting about?" — the topic word is right there. A subject the user gave in ANY form — even a terse project, company, or one-word name ("Brainrocket", "Acme", "onboarding") — IS the subject: use it verbatim, never "upgrade" it and never ask for something more specific. (Re-asking a subject they already gave is the #1 cause of the "asked 5× what it's about" loop — don't.) ONLY ask when the message is purely transactional ("book 30 mins with Anna tomorrow") with no topic word anywhere in the thread and no recent context. Once you've asked the subject in a thread and got an answer, NEVER re-ask in the same thread — the answer is recorded; carry it forward. The specificity bar applies ONLY when YOU compose a subject they DIDN'T give: then name the person and/or topic ("Interview with Ohad", "Pricing sync with Anna") rather than defaulting to a bare category word ("Interview", "Meeting", "Sync") on its own. If a category shows a \`title:\` convention, treat it as the default for that composed case (e.g. interview discretion — first name only, role in the body).

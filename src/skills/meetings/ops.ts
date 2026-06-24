@@ -2212,14 +2212,14 @@ export class SchedulingSkill {
               // search emitted in his zone); a genuinely trip-LOCAL time is
               // disambiguated by the model passing `start_timezone` (handled
               // above), and every WE booking routes to a dual-TZ confirm/approval
-              // (planMeeting) as the net. ctx is kept ONLY for the location stamp +
-              // dual-TZ display — never to reinterpret the clock.
-              if (ctx.location
-                  && (typeof args.location !== 'string' || (args.location as string).trim().length === 0)
-                  && args.is_online !== true) {
-                args.location = ctx.location;
-                logger.info('create_meeting — defaulted location to trip place', { location: ctx.location });
-              }
+              // (planMeeting) as the net. ctx is kept ONLY for the dual-TZ display
+              // — never to reinterpret the clock or stamp a venue.
+              // #WE-spine fix 2 — the lodging-as-venue auto-stamp was REMOVED: the
+              // WE marker's location is where the owner is STAYING ("Hotel AKA
+              // Boston Common"), NOT a meeting venue — stamping it put a team
+              // meeting in his hotel (the Offensive-hub incident; he wanted the
+              // office). With no explicit location, resolveLocation decides (online
+              // for a multi-person meeting) and the owner can name the office.
             }
           } catch (err) {
             logger.warn('create_meeting — travel-context resolve threw, using time/location as-is', { err: String(err).slice(0, 160) });
@@ -4368,6 +4368,7 @@ export class SchedulingSkill {
             locationHint: args.location as string | undefined,
             isOnlineHint: typeof args.is_online === 'boolean' ? args.is_online : undefined,
             allowRelaxed: args.relaxed === true,
+            weAcknowledged: args.we_acknowledged === true,
           });
           logger.info('move_meeting — planMeeting verdict', {
             action: movePlan.action, meetingId: args.meeting_id,

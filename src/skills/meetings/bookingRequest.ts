@@ -97,6 +97,10 @@ export interface BookingRequest {
   // MPIM-proposed. Handlers should NEVER set this from raw args directly.
   relaxed: boolean;
   relaxedReason: 'owner_direct' | 'owner_in_mpim_proposed' | 'deferred_replay' | 'none';
+  // #WE-spine — owner verified the working-elsewhere trip-time (yes-retry of the
+  // dual-clock confirm). Passed straight from args; NOT gated through relaxed,
+  // because it must survive a proactive relaxed and skip ONLY the trip-time check.
+  weAcknowledged: boolean;
 
   // Cross-cutting signals the downstream pipeline needs. Computed once
   // here so individual rule checks / detectors don't each re-load them.
@@ -195,6 +199,7 @@ export async function normalizeBookingRequest(
     priorSlotEndIso: args.prior_end as string | undefined,
     relaxed,
     relaxedReason,
+    weAcknowledged: args.we_acknowledged === true,
     context: ctx,
     _origin: { tool: toolName, rawArgs: args },
   };

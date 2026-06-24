@@ -89,6 +89,12 @@ export interface PlanMeetingInput {
   // is the authoritative input.
   allowRelaxed?: boolean;
 
+  // #WE-spine — owner verified the working-elsewhere trip-time. Distinct from
+  // allowRelaxed (which only relaxes RULES): this is the ONE signal that skips the
+  // WE trip-time confirm, set on the owner's yes-retry — never proactively — so a
+  // proactive relaxed can't silently book a wrong trip-time.
+  weAcknowledged?: boolean;
+
   // Floating-block booking path (lunch / focus / gym). Skips the owner_busy_collision
   // rule — floating blocks are signals, not competing time. See scheduleRules.checkSlot.
   isFloatingBlock?: boolean;
@@ -135,6 +141,7 @@ export function planInputFromBookingRequest(
     priorSlotStartIso: req.priorSlotStartIso,
     priorSlotEndIso: req.priorSlotEndIso,
     allowRelaxed: req.relaxed,
+    weAcknowledged: req.weAcknowledged,
     isFloatingBlock: req.isFloatingBlock,
     preloadedEvents: extra?.preloadedEvents,
   };
@@ -382,38 +389,53 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     // normal day. The dual-TZ ask renders ONE instant in both zones (slotStartIso
     // is owner-zone after the write-path guess removal), so the owner sees e.g.
     // "11:00 Boston / 18:00 your time" and confirms the right moment.
-    if (!input.allowRelaxed) {
+    let onWorkingElsewhereDay = false;
+    {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const we = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
       const slotDate = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }).toFormat('yyyy-MM-dd');
       const travel = await we.resolveOwnerTravelContextForDate(slotDate, profile.user.slack_user_id, profile.user.timezone, events);
       if (travel.isAway) {
-        const ownerFirst = profile.user.name.split(' ')[0];
-        const loc = travel.location ? ` (${travel.location})` : '';
-        const instant = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone });
-        const awayClock = instant.setZone(travel.effectiveTz);   // same instant, where he is
-        const awayPart = `${awayClock.toFormat('HH:mm')} ${travel.location || 'there'}`;
-        const sameTz = travel.effectiveTz === profile.user.timezone;
-        const whereDay = awayClock.toFormat('EEEE');   // the day where he physically is (decision #2)
-        logger.info('planMeeting — working-elsewhere day, routing to relax+approve', {
-          slotDate, location: travel.location, effectiveTz: travel.effectiveTz, initiator,
-        });
-        if (initiator === 'owner') {
-          const dual = sameTz ? instant.toFormat('HH:mm') : `${awayPart} / ${instant.toFormat('HH:mm')} your time`;
+        onWorkingElsewhereDay = true;   // → relax the home rules in checkSlot below
+        // CRITICAL: this trip-time confirm is DECOUPLED from `relaxed`. `relaxed`
+        // overrides the RULES; it must NOT also skip the time check — else a
+        // proactive relaxed=true ("don't check their time, just do it") silently
+        // books a wrong trip-time (the Offensive-hub "02:15" crash, where the
+        // model mis-resolved "after lunch" and relaxed skipped the confirm). The
+        // ONLY skip is `weAcknowledged`, set on the owner's yes-retry (never
+        // proactively); a colleague's owner-approved replay carries allowRelaxed,
+        // which satisfies the skip on that path.
+        const acknowledged = input.weAcknowledged === true
+          || (initiator !== 'owner' && input.allowRelaxed === true);
+        if (!acknowledged) {
+          const ownerFirst = profile.user.name.split(' ')[0];
+          const loc = travel.location ? ` (${travel.location})` : '';
+          const instant = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone });
+          const awayClock = instant.setZone(travel.effectiveTz);   // same instant, where he is
+          const sameTz = travel.effectiveTz === profile.user.timezone;
+          const awayPart = `${awayClock.toFormat('HH:mm')} ${travel.location || 'there'}`;
+          const whereDay = awayClock.toFormat('EEEE');   // the day where he physically is (decision #2)
+          logger.info('planMeeting — working-elsewhere day, verify trip-time before book', {
+            slotDate, location: travel.location, effectiveTz: travel.effectiveTz, initiator,
+            relaxed: input.allowRelaxed === true,
+          });
+          if (initiator === 'owner') {
+            const dual = sameTz ? instant.toFormat('HH:mm') : `${awayPart} / ${instant.toFormat('HH:mm')} your time`;
+            return {
+              action: 'confirm_override',
+              violationLabel: `working elsewhere${loc}`,
+              suggestedAskText: `You're working elsewhere${loc} on ${whereDay} — this slot is ${dual}. Confirm that's the time you want (your usual rules are relaxed there); on your yes, retry the SAME tool with we_acknowledged=true.`,
+              category,
+            };
+          }
+          const dual = sameTz ? instant.toFormat('HH:mm') : `${awayPart} / ${instant.toFormat('HH:mm')} ${ownerFirst}'s time`;
           return {
-            action: 'confirm_override',
-            violationLabel: `working elsewhere${loc}`,
-            suggestedAskText: `You're working elsewhere${loc} on ${whereDay} — this slot is ${dual}. Your usual rules are relaxed there; book it?`,
+            action: 'escalate_approval',
+            violationLabel: 'owner_working_elsewhere',
+            suggestedAskText: `Heads up — ${ownerFirst} is working elsewhere${loc} on ${whereDay} (this slot is ${dual}), so I'd run it by him before booking. Want me to check with him?`,
             category,
           };
         }
-        const dual = sameTz ? instant.toFormat('HH:mm') : `${awayPart} / ${instant.toFormat('HH:mm')} ${ownerFirst}'s time`;
-        return {
-          action: 'escalate_approval',
-          violationLabel: 'owner_working_elsewhere',
-          suggestedAskText: `Heads up — ${ownerFirst} is working elsewhere${loc} on ${whereDay} (this slot is ${dual}), so I'd run it by him before booking. Want me to check with him?`,
-          category,
-        };
       }
     }
 
@@ -424,7 +446,9 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       category,
       events,
       excludeEventIds: input.existingEventId ? [input.existingEventId] : [],
-      allowRelaxed: !!input.allowRelaxed,
+      // #WE-spine — a travel day relaxes the owner's home rules (they don't apply
+      // in the trip place); the trip-time was already verified by the confirm above.
+      allowRelaxed: !!input.allowRelaxed || onWorkingElsewhereDay,
       isFloatingBlock: !!input.isFloatingBlock,
     });
 
