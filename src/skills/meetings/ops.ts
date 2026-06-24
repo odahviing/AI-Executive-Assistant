@@ -2336,15 +2336,22 @@ export class SchedulingSkill {
               allowed[0]);
               const snapDelta = Math.abs(requestedMin - snapped);
               // v3.2.6 (2.4) — a SMALL snap (≤5 min, e.g. "1 hour" → 55) is the
-              // expected preset-alignment; apply it silently. A LARGE snap (>5 min, e.g.
-              // an explicit 2-hour copy → 55) would silently DESTROY the length
-              // the owner actually asked for. Don't shrink it on our own —
-              // surface a verify question; honor the full length only on owner
-              // confirm (override_duration), or shrink to the preset if they
-              // pass duration_minutes=<preset> instead.
-              if (snapDelta > 5 && !args.override_duration) {
+              // expected preset-alignment; apply it silently. A LARGE snap (>5 min,
+              // e.g. an explicit 2-hour block → 55) would silently DESTROY the
+              // length the owner asked for — surface a verify question instead.
+              // #override-spine — the owner's override here is the SAME `relaxed`
+              // flag every other owner override uses (off-hours, busy-collision,
+              // focus-floor; meetings.ts + the "retry with relaxed=true" prompt
+              // rule). When he sets relaxed=true ("20:00–22:00, just do it"), honor
+              // the full length in ONE step. The old gate keyed off an
+              // `override_duration` flag that was never in the schema (so the model
+              // couldn't set it) AND that buildSlot ignored (so even when guessed it
+              // shrank the length anyway) — a dead end that looped and leaked the
+              // param name. buildSlot mirrors this owner-relaxed carve-out so the
+              // length also survives the normalize snap.
+              if (snapDelta > 5 && !(context.senderRole === 'owner' && args.relaxed === true)) {
                 return {
-                  warning: `You asked for a ${requestedMin}-minute meeting, which is longer than the usual lengths (${allowed.join(', ')} min). Ask briefly: "That's ${requestedMin} min — book the full length, or shorten to ${snapped}?" If they want the full ${requestedMin} min, call create_meeting again with override_duration=true; if ${snapped} is fine, call again with duration_minutes=${snapped}.`,
+                  warning: `You asked for a ${requestedMin}-minute meeting, which is longer than the usual lengths (${allowed.join(', ')} min). Ask briefly: "That's ${requestedMin} min — book the full length, or shorten to ${snapped}?" If they want the full ${requestedMin} min, retry create_meeting with relaxed=true; if ${snapped} is fine, retry with duration_minutes=${snapped}.`,
                   needs_confirmation: true,
                 };
               }
@@ -2356,8 +2363,8 @@ export class SchedulingSkill {
                 });
                 args.end = newEndIso;
               }
-              // snapDelta > 5 && override_duration → fall through: honor the
-              // requested length as-is (no snap).
+              // snapDelta > 5 && owner relaxed → fall through: honor the requested
+              // length as-is (buildSlot also skips its snap for owner-relaxed).
             }
           }
         }
@@ -3419,6 +3426,12 @@ export class SchedulingSkill {
           return {
             success: true,
             meetingId,
+            // #1.5 — surface the ACTUAL booked start/end (after the grid-snap at
+            // :2274 + any TZ convert), so narration, dateVerifier, and the #135
+            // honesty backstop (via the orchestrator's mutationActions) see where
+            // the meeting TRULY landed — not the pre-snap arg Sonnet passed.
+            booked_start: args.start as string,
+            booked_end: args.end as string,
             // v1.8.3 — past-tense summary the reply can quote verbatim. Prevents
             // Sonnet from narrating the post-action calendar state as a fresh
             // discovery instead of the result of her own action (issue #26 bug 1).
@@ -4258,6 +4271,12 @@ export class SchedulingSkill {
                   return {
                     success: true,
                     action_summary: `Moved ${matchedBlock.name} to ${formatIsoTime(effectiveStart)}.${windowNote}`,
+                    // #1.5 — surface the POST-snap booked instant on the floating-block
+                    // owner-move path too (lunch is the canonical case). Without it
+                    // mutationActions falls back to the pre-snap input arg and the reply
+                    // narrates a time the block never landed on (the 11:10-vs-11:15 bug).
+                    booked_start: effectiveStart,
+                    booked_end: effectiveEnd,
                     ...(vacated ? { vacated } : {}),
                   };
                 });
@@ -4666,8 +4685,13 @@ export class SchedulingSkill {
         return {
           success: true,
           moved: args.meeting_subject,
-          new_start: args.new_start,
-          new_end: args.new_end,
+          // #1.5 — the ACTUAL booked time (after the grid-snap at :4156), not the
+          // pre-snap arg. So narration AND the orchestrator's mutationActions
+          // (→ dateVerifier + #135 honesty backstop) reflect where it truly landed.
+          new_start: effectiveStart,
+          new_end: effectiveEnd,
+          booked_start: effectiveStart,
+          booked_end: effectiveEnd,
           // v3.1.8 — the slot that just opened up (old time of the moved meeting).
           ...(vacated ? { vacated } : {}),
           // v3.2.x — a displaced floating block this move could bring home.
@@ -4680,8 +4704,8 @@ export class SchedulingSkill {
           // instead of acknowledging her own action.
           action_summary: `Moved '${args.meeting_subject}' to ${
             moveTripDisplay
-              ? `${DateTime.fromISO(args.new_start as string, { zone: timezone }).setZone(moveTripDisplay.tz).toFormat('HH:mm')}–${DateTime.fromISO(args.new_end as string, { zone: timezone }).setZone(moveTripDisplay.tz).toFormat('HH:mm')}${moveTripDisplay.location ? ` ${moveTripDisplay.location} time` : ''}`
-              : `${formatIsoTime(args.new_start as string)}–${formatIsoTime(args.new_end as string)}`
+              ? `${DateTime.fromISO(effectiveStart, { zone: timezone }).setZone(moveTripDisplay.tz).toFormat('HH:mm')}–${DateTime.fromISO(effectiveEnd, { zone: timezone }).setZone(moveTripDisplay.tz).toFormat('HH:mm')}${moveTripDisplay.location ? ` ${moveTripDisplay.location} time` : ''}`
+              : `${formatIsoTime(effectiveStart)}–${formatIsoTime(effectiveEnd)}`
           }.`,
         };
       }

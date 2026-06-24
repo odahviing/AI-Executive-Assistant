@@ -2,6 +2,31 @@
 
 ---
 
+## 3.5.2 — "book a private block + adapt the calendar" hardening (scheduling honesty + one-step override)
+
+A real-day chat that started clean and degraded — a private 2-hour Bootcamp block plus a same-day reflow of three 1:1s — drove a seven-bug wave fixed across the meeting / guard / prompt chats, plus a calendar-health re-flag fix and a refinement of the owner-location grounding (#134). The throughline: tell the truth about what landed, override in one step, and don't re-flag what the owner already waved off. Patch — fixes only, no new capability; no schema change. Restart required. Traced 12/12 against the chat before shipping.
+
+### Fixed — scheduling (meeting chat)
+- **Duration override is now the one universal `relaxed` flag.** Booking a block whose length isn't a standard duration (a 120-min Bootcamp) looped on "confirm the 2 hours" and dead-ended — the gate told the model to pass `override_duration=true`, a flag never declared in the `create_meeting` schema (and `buildSlot` ignored it anyway, so the length got shrunk even when guessed). The owner override here is now the SAME `relaxed:true` every other rule uses (off-hours, busy-collision, focus-floor): owner states the length → one `relaxed` retry → books in one step, no confirm loop, no undeclared-param dead end. Both snap sites honor it. ([ops.ts](src/skills/meetings/ops.ts), [bookingRequest.ts](src/skills/meetings/bookingRequest.ts), [meetings.ts](src/skills/meetings.ts))
+- **Narrated times now match the calendar (post-snap booked instant).** `move_meeting`/`create_meeting` grid-snap an off-grid start (11:10→11:15) and write the snapped value to Outlook, but the reply + `dateVerifier` + the #135 booked-date backstop all read the model's PRE-snap argument — so the owner was told "Lunch 11:10, Simon 11:35" while the calendar held 11:15 / 11:30. The mutation tools now return `booked_start`/`booked_end` (the actual landed instant, incl. the floating-block owner-move path), and the orchestrator records THAT into `mutationActions`, falling back to the input arg only when absent. ([ops.ts](src/skills/meetings/ops.ts), [orchestrator/index.ts](src/core/orchestrator/index.ts))
+- **Name every event a reflow moved.** A reschedule that silently slid a meeting the owner didn't name (Dina, moved to avoid a collision) must list it — the confirmation now leads with what he asked for, then one "also moved to fit:" clause, so he can rebuild his whole calendar from the reply. ([meetings.ts](src/skills/meetings.ts))
+- **Owner-location grounding is dual-source + cache-backed (#134 refinement).** The per-turn "which days the owner is away" block now reads BOTH the calendar Working-Elsewhere markers (his primary mechanism) and the travel record, through the warm calendar cache (one fetch per ~5-min window, not a per-turn reload) and only on scheduling-relevant turns. Keeps a stale "he's in Boston" from bleeding onto a home day without a marker-only blind spot. ([orchestrator/index.ts](src/core/orchestrator/index.ts))
+
+### Fixed — honesty guards (guard chat)
+- **claimChecker no longer inverts a true prior-turn recap into a lie.** After a mid-turn truncation, Maelle truthfully recapped "Yael moved to 11:30 ✓" (the move ran the previous turn) — claimChecker saw no `move_meeting` in THE CURRENT turn and own-the-miss-rewrote it to "not moved yet," denying real work. The shield now scans prior-turn assistant content (the `[tool OK …]` markers Step 1b persists), so a true recap of an earlier action isn't negated. ([postReply.ts](src/connectors/slack/postReply.ts))
+- **humanGate never ships a flagged leak as the "keep original" fallback.** When a voice-rewrite dropped a load-bearing fact (a meeting time), the gate reverted to the ORIGINAL draft — which was the very leak it flagged ("I don't have an `override_duration` parameter" shipped this way). It now re-rewrites once with the dropped facts pinned and, if still imperfect, ships the cleaned rewrite — never the flagged original. ([humanGate.ts](src/utils/humanGate.ts))
+
+### Fixed — calendar health
+- **A waved-off busy day / over-limit warning stops re-flagging.** The health routine narrated from freshly-detected issues while suppression only blocked the DB write — so a `busy_day` / `category_limit` the owner approved (or that auto-resolved) re-narrated every run ("I keep telling you to ignore this"). `busy_day` now materializes with a stable synthetic id (it had none, so it could never be acknowledged), and the routine's narration consults `getSuppressedEventIds` like the brief/analyze paths already do. ([calendarIssues.ts](src/db/calendarIssues.ts), [calendarHealth.ts](src/skills/calendarHealth.ts))
+
+### Added — diagnostics
+- **max_tokens truncation is now logged.** A reply cut off mid-sentence (the "Now the private block:" crash) shipped a partial with no signal — `stop_reason==='max_tokens'` now logs a warning with the partial that went out. ([orchestrator/index.ts](src/core/orchestrator/index.ts))
+
+### Not changed
+- In-window duration snaps (≤5 min, "1 hour"→55) still apply silently; the colleague-path duration gate still protects (the one-step override is owner-only); the #135 booked-date backstop is unchanged in mechanism — it just now reads the correct post-snap instant.
+
+---
+
 ## 3.5.1 — Working-Elsewhere → timezone "one spine" + person-memory provenance (Phase 1)
 
 A patch by number, a subsystem rework by impact. Two parallel chats: the meeting chat closed the recurring Working-Elsewhere → timezone class at the root (every layer now reads ONE dual-source away-day resolver — no per-tool re-derivation, no clock guessing); the memory-rebuild chat landed Phase 1 of the person-memory / stored-attribute redesign (a guessed fact no longer silently steers outbound — language goes live, a guessed timezone confirms first, names freeze with provenance). Additive schema (person-memory columns); restart required.

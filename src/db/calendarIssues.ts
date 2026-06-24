@@ -493,6 +493,23 @@ export function dismissFloatingBlockGap(opts: {
   `).run(id, opts.ownerUserId, opts.eventId, opts.eventDate, opts.eventEndMs, opts.notes ?? null);
 }
 
+/** v3.5.x — stable synthetic anchor id for a DAY/WINDOW-level issue that isn't
+ *  tied to a single real event. `busy_day` has no real event_id, so without an
+ *  anchor it was dropped at the write step and could never be tracked, approved,
+ *  or suppressed — it re-narrated every routine run. A deterministic id per
+ *  (class, date) lets the row materialize, lets the owner approve it, and lets
+ *  getSuppressedEventIds silence re-narration — the same mechanism
+ *  floatingBlockSyntheticEventId gives missing_floating_block. */
+export function dayLevelIssueSyntheticId(
+  issueClass: 'busy_day' | 'category_limit',
+  date: string,            // YYYY-MM-DD (busy_day: the day; category_limit: window start)
+  key?: string,            // category name for category_limit (independent waivers per category)
+): string {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+  const base = `dli-${issueClass}-${date}`;
+  return key ? `${base}-${norm(key)}` : base;
+}
+
 // ── Status transitions ───────────────────────────────────────────────────────
 
 export function updateCalendarIssueStatus(

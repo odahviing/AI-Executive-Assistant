@@ -1074,34 +1074,44 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
     }
   } catch (_) { /* signal stamping is best-effort */ }
 
-  // #WE-spine (Gidon fix) — per-turn owner-location grounding. When the owner has
-  // an active/upcoming Working-Elsewhere trip in the next 14 days, assert WHICH
-  // days he's away (+ where) and that EVERY OTHER day he is home. Without this a
-  // home day emits NO location signal, so a stale "he's in Boston" bleeds from an
-  // earlier thread onto the wrong day (the Gidon incident). Travel-record-backed
-  // (DB read, ZERO Graph call) so it costs nothing per turn; marker-only trips are
-  // still surfaced by the slot-finder's own WE note when a search runs. Empty (no
-  // block) whenever there's no trip in the window.
+  // #WE-spine (Gidon fix, #134) — per-turn owner-location grounding. Assert WHICH
+  // days the owner is away (+ where) and that other days he's home, so a stale
+  // "he's in Boston" can't bleed from an earlier thread onto a home day. DUAL-
+  // SOURCE: the owner's WE days are CALENDAR MARKERS (his primary mechanism), so
+  // this reads the 14-day calendar (markers) AND the travel record. The read goes
+  // through the warm calendarCache (one fetch per ~5-min window, shared across
+  // turns — NOT a per-tool reload), and ONLY on scheduling-relevant turns
+  // (colleague, or an owner turn scoped to meetings/calendar) so a trivial "thanks"
+  // never pays for it. Empty (no block) when no trip is in the window or the read
+  // fails (fail-open).
   let ownerLocationBlock = '';
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const we = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { DateTime: LuxWe } = require('luxon') as typeof import('luxon');
-    const homeTz = profile.user.timezone;
-    const winFrom = LuxWe.now().setZone(homeTz).toFormat('yyyy-MM-dd');
-    const winTo = LuxWe.now().setZone(homeTz).plus({ days: 14 }).toFormat('yyyy-MM-dd');
-    const awayDays = we.detectOwnerAwayDaysInWindow([], homeTz, profile.user.slack_user_id, winFrom, winTo);
-    if (awayDays.size > 0) {
-      const ownerFirst = profile.user.name.split(' ')[0];
-      const byLoc = new Map<string, string[]>();
-      for (const [date, info] of awayDays) {
-        const key = info.location || 'another location';
-        if (!byLoc.has(key)) byLoc.set(key, []);
-        byLoc.get(key)!.push(date);
+    const weBlockRelevant = input.senderRole === 'colleague'
+      || (Array.isArray(toolScopes) && (toolScopes.includes('meetings') || toolScopes.includes('calendar')));
+    if (weBlockRelevant) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const we = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const calMod = require('../../connectors/graph/calendar') as typeof import('../../connectors/graph/calendar');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { DateTime: LuxWe } = require('luxon') as typeof import('luxon');
+      const homeTz = profile.user.timezone;
+      const winFrom = LuxWe.now().setZone(homeTz).toFormat('yyyy-MM-dd');
+      const winTo = LuxWe.now().setZone(homeTz).plus({ days: 14 }).toFormat('yyyy-MM-dd');
+      let winEvents: import('../../connectors/graph/calendar').CalendarEvent[] = [];
+      try { winEvents = await calMod.getCalendarEvents(profile.user.email, winFrom, winTo, homeTz); } catch { /* fail open → record-only / empty */ }
+      const awayDays = we.detectOwnerAwayDaysInWindow(winEvents, homeTz, profile.user.slack_user_id, winFrom, winTo);
+      if (awayDays.size > 0) {
+        const ownerFirst = profile.user.name.split(' ')[0];
+        const byLoc = new Map<string, string[]>();
+        for (const [date, info] of awayDays) {
+          const key = info.location || 'another location';
+          if (!byLoc.has(key)) byLoc.set(key, []);
+          byLoc.get(key)!.push(date);
+        }
+        const parts = [...byLoc.entries()].map(([locName, dates]) => `${dates.sort().join(', ')} (${locName})`);
+        ownerLocationBlock = `## OWNER LOCATION (next 14 days)\n\n${ownerFirst} is WORKING ELSEWHERE on: ${parts.join('; ')}. On those days his clock and location are the trip's, not home. On any day NOT listed above, treat ${ownerFirst} as in his home base (${homeTz}) — and do NOT carry a trip location/timezone that came up earlier in the conversation onto a day that isn't listed here (that bleed is the bug this prevents).`;
       }
-      const parts = [...byLoc.entries()].map(([locName, dates]) => `${dates.sort().join(', ')} (${locName})`);
-      ownerLocationBlock = `## OWNER LOCATION (next 14 days)\n\n${ownerFirst} is WORKING ELSEWHERE on: ${parts.join('; ')}. On those days his clock and location are the trip's, not home. On any day NOT listed above, treat ${ownerFirst} as in his home base (${homeTz}) — and do NOT carry a trip location/timezone that came up earlier in the conversation onto a day that isn't listed here (that bleed is the bug this prevents).`;
     }
   } catch (err) {
     logger.warn('ownerLocationBlock — resolve threw, skipping', { err: String(err).slice(0, 160) });
@@ -1433,6 +1443,22 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
           .map(b => b.text.slice(0, 80).replace(/\s+/g, ' '))
           .join(' | ')
           .slice(0, 400),
+      });
+    }
+
+    // v3.5.x (#1.3) — diagnostic for the truncated-reply class (the "Now the
+    // private block:" cut-off, 2026-06-24): when the model hits the output cap
+    // mid-sentence the partial text ships as the reply and the turn ends. There
+    // was no signal for it (stop_reason only logged at debug). Surface it loudly
+    // with what actually went out so the next occurrence is one grep away.
+    if (response.stop_reason === 'max_tokens') {
+      logger.warn('Orchestrator — response truncated at max_tokens (reply may be cut off mid-sentence)', {
+        iteration,
+        senderRole: input.senderRole,
+        threadTs,
+        toolBlocks: toolBlocks.length,
+        lastTextLen: lastTextBlock ? lastTextBlock.text.length : 0,
+        finalReplyPreview: finalReply ? finalReply.slice(0, 200) : '(empty)',
       });
     }
 
@@ -1887,13 +1913,22 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
       if (mutationToolNames.has(toolUse.name)) {
         const outcome = mutationOutcome(result);
         const input = toolUse.input as Record<string, unknown>;
+        // #1.5 — prefer the tool RESULT's ACTUAL booked start (post grid-snap) over
+        // the pre-snap input arg. create_meeting / move_meeting now return
+        // booked_start; without this, mutationActions recorded the time Sonnet
+        // ASKED for, so dateVerifier + the #135 honesty backstop compared the reply
+        // against a time the meeting never landed on (an off-grid snap slipped by).
+        // Fallback to the input arg only when the result didn't surface it.
+        const r = (result && typeof result === 'object') ? result as Record<string, unknown> : null;
+        const bookedStart = r && typeof r.booked_start === 'string' ? r.booked_start : undefined;
         mutationActions.push({
           tool: toolUse.name,
           ok: outcome.ok,
           subject: typeof input.subject === 'string' ? input.subject : undefined,
-          start: typeof input.start === 'string' ? input.start
-            : typeof input.new_start === 'string' ? input.new_start : undefined,
-          new_start: typeof input.new_start === 'string' ? input.new_start : undefined,
+          start: bookedStart
+            ?? (typeof input.start === 'string' ? input.start
+              : typeof input.new_start === 'string' ? input.new_start : undefined),
+          new_start: typeof input.new_start === 'string' ? (bookedStart ?? input.new_start) : undefined,
           eventId: outcome.eventId
             ?? (typeof input.meeting_id === 'string' ? input.meeting_id : undefined)
             ?? (typeof input.event_id === 'string' ? input.event_id : undefined),

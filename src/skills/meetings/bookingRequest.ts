@@ -146,7 +146,8 @@ export async function normalizeBookingRequest(
   const participants = await buildParticipants(rawAttendees, ownerEmail, context);
 
   // ── Slot — snap duration to allowed_durations, recompute endIso ──
-  const slot = buildSlot(args, profile);
+  // (owner-relaxed honors the full requested length — see buildSlot)
+  const slot = buildSlot(args, profile, initiator);
 
   // ── Sensitivity — colleague-path gate ──
   const sensitivity = await gateSensitivity(args, context, participants);
@@ -266,7 +267,7 @@ async function buildParticipants(
   return out;
 }
 
-function buildSlot(args: Record<string, unknown>, profile: UserProfile): InternalSlot | undefined {
+function buildSlot(args: Record<string, unknown>, profile: UserProfile, initiator: 'owner' | 'colleague'): InternalSlot | undefined {
   const start = (args.start as string | undefined) ?? (args.new_start as string | undefined);
   const end = (args.end as string | undefined) ?? (args.new_end as string | undefined);
   if (!start || !end) return undefined;
@@ -278,7 +279,13 @@ function buildSlot(args: Record<string, unknown>, profile: UserProfile): Interna
   const requestedMin = Math.round((endMs - startMs) / 60000);
   const allowed = profile.meetings.allowed_durations;
   let snappedMin = requestedMin;
-  if (Array.isArray(allowed) && allowed.length > 0 && !allowed.includes(requestedMin)) {
+  // #override-spine — the owner's explicit `relaxed` override honors the FULL
+  // requested length (e.g. a 120-min block): skip the allowed-durations snap, the
+  // same carve-out the create_meeting verify-gate uses. Without this the gate
+  // would wave the length through but THIS snap would still shrink 120→55, so the
+  // override only half-worked. Owner-path only — a colleague can't bypass the snap.
+  const ownerOverrideDuration = initiator === 'owner' && args.relaxed === true;
+  if (!ownerOverrideDuration && Array.isArray(allowed) && allowed.length > 0 && !allowed.includes(requestedMin)) {
     snappedMin = allowed.reduce((best, candidate) =>
       Math.abs(candidate - requestedMin) < Math.abs(best - requestedMin) ? candidate : best,
     allowed[0]);

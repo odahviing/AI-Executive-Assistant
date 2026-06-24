@@ -85,3 +85,14 @@ This is a **string** `.replace` (first literal occurrence of `## 2026-06-07`). L
 
 ## Posture
 80% of the v3.3.0 audit is still open in the main chat — these eight are the news-cluster slice. Fix the cheap, verified ones (M-4, M-6, M-7); discuss M-5/M-8/L-5/L-6 with the owner if effort > value; skip L-7.
+
+---
+
+## N-12 — news seen-log sits in the CACHED static prompt (from the prompt chat)
+**Found by:** prompt-chat de-tenant / tier audit (`scripts/_dump-prompts.cjs`). Flagging, not fixing — it's your skill's domain.
+**What:** the rolling seen-log renders as `## <date>` sections (e.g. `## 2026-06-24`) inside the **cached static block** of the system prompt — ~1K tokens of date-headed, owner-specific entries, on every owner turn.
+**Why it's a smell (prompt-agent charter R3 tier + R9 de-tenant):**
+- The static block is the *cached* tier — meant to stay stable so the 5-min prompt cache holds. The seen-log is owner-specific runtime data that **changes daily** (date rollover) and whenever news runs → it **busts the static cache** on rollover/refresh (fresh cache-create). Daily-changing data belongs in the **dynamic** block (uncached) or, better, **scope-gated to news turns only** — not baked into cached static.
+- It's per-owner state shipping on every non-news turn too.
+**Direction (verify first):** confirm whether news `getSystemPromptSection` (+ seen-log) is **scope-gated** (ships only when the `news` scope is active) or always-on. If always-on, gate it; if it must be present off-news-turns, move the seen-log into the *dynamic* block so it stops invalidating the cache.
+**Priority:** low — ~1K tokens, cache-efficiency + correct tiering, not behavior. Prompt chat did NOT touch it (news owns the seen-log mechanism + scope wiring).

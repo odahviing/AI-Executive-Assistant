@@ -11,7 +11,7 @@ import {
   deleteMeeting,
   findAvailableSlots,
 } from '../connectors/graph/calendar';
-import { auditLog, getActiveCalendarIssues, updateCalendarIssueStatus, buildClusters, upsertCluster, markStaleResolved, type DetectedIssue, type IssueClass, type IssueStatus, type CalendarIssueRow } from '../db';
+import { auditLog, getActiveCalendarIssues, updateCalendarIssueStatus, buildClusters, upsertCluster, markStaleResolved, getSuppressedEventIds, dayLevelIssueSyntheticId, type DetectedIssue, type IssueClass, type IssueStatus, type CalendarIssueRow } from '../db';
 import logger from '../utils/logger';
 import { displaySubject } from '../utils/displaySubject';
 import { formatSkillPreferencesBlock } from '../utils/skillPreferences';
@@ -186,6 +186,7 @@ interface HealthIssue {
   movable_event_id?: string;      // for double_booking: which side is unprotected (4+ attendees / external / matched rule)
   kept_event_id?: string;         // for double_booking: the protected side
   protection_reasons?: string[];  // for double_booking: WHY the kept side is protected (≥4 attendees, external, ...)
+  synthetic_id?: string;          // v3.5.x — stable anchor id for day/window-level issues (busy_day) that have no real event_id
   fixed?: boolean;                // set by active-mode loop when Maelle acted on this issue
   fix_detail?: string;            // human-readable one-liner describing the fix applied
   fix_failed?: boolean;           // set when active-mode tried to fix and an error was thrown
@@ -335,7 +336,7 @@ Use the owner's own categories listed in the EVENT CATEGORIES block of your syst
 
 Actions:
 - list — read active rows (filtered to event_end > now).
-- approve — owner said "it's fine, leave it." Marks the row terminal (won't re-flag).
+- approve — owner said "it's fine, leave it" / "ignore it" / "stop flagging this" / "I keep telling you to ignore this." Marks the row terminal so it WON'T re-flag on future runs. Use this for a recurring busy-day or category-limit warning the owner has waved off (e.g. "5 weekly 1:1s on Monday, that's intentional"). Get the issue_id from a 'list' call or check_calendar_health's activeTrackedIssues — every detected issue, including busy_day, now has a trackable row.
 - start_resolve — owner said "fix it." Opens a request_id under the row, transitions to in_progress. Caller MUST follow with move_meeting / etc. as appropriate; the row auto-resolves on cascade when the underlying event changes.
 - owner_will_resolve — owner said "I'll handle it." Row sits in owner_side state until owner declares done OR the underlying event changes.
 - owner_done — owner declared he fixed it. Row transitions to resolved.
@@ -860,6 +861,9 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
               issues.push({
                 type: 'busy_day',
                 date: cursor.toISODate() ?? '',
+                // v3.5.x — stable anchor so the row materializes and can be
+                // approved/suppressed (busy_day has no real event_id).
+                synthetic_id: dayLevelIssueSyntheticId('busy_day', cursor.toISODate() ?? ''),
                 description: `${dayLabel} has only ${freeMin} min of free time during work hours (under your ${targetHrs}h ${isOffice ? 'office' : 'home'}-day target). Longest single block: ${longestGap} min.`,
                 free_minutes: freeMin,
                 longest_gap_minutes: longestGap,
@@ -1425,6 +1429,16 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
               dateFallback.set(primaryId, issue.date);
             }
           }
+          // v3.5.x — busy_day has no real event_id; anchor it on the stable
+          // synthetic id so the row materializes (was dropped at `!primaryId`)
+          // and can be approved/suppressed like any other issue.
+          if (cls === 'busy_day' && issue.synthetic_id) {
+            primaryId = issue.synthetic_id;
+            peerId = undefined;
+            const dayEndMs = DateTime.fromISO(issue.date, { zone: timezone }).endOf('day').toMillis();
+            eventEndMs.set(primaryId, dayEndMs);
+            dateFallback.set(primaryId, issue.date);
+          }
           if (!primaryId) continue;
           const endMs = eventEndMs.get(primaryId) ?? 0;
           const peerEnd = peerId ? eventEndMs.get(peerId) : undefined;
@@ -1470,6 +1484,26 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
         // done" (fabrications crept in when fix_failed wasn't narrated
         // honestly). humanGate humanizes the template downstream. One
         // truth source.
+        // v3.5.x — don't re-narrate an issue the owner already acknowledged
+        // (approved/dismissed) or that auto-resolved. The brief & analyze
+        // read-paths already drop these via getSuppressedEventIds; the routine's
+        // summaryText never did, so a busy_day / category_limit re-flagged EVERY
+        // run despite a terminal row — the "I told you 3 times to ignore it" bug.
+        // Only un-fixed "! Detected" lines are gated; fixes/failures still narrate.
+        let suppressedForNarration: Set<string> = new Set();
+        try {
+          suppressedForNarration = getSuppressedEventIds(ownerUserId);
+        } catch (err) {
+          logger.warn('calendar health: suppressed-id load failed — narration unfiltered', {
+            err: String(err).slice(0, 120),
+          });
+        }
+        const isAckSuppressed = (i: HealthIssue): boolean => {
+          if (i.synthetic_id && suppressedForNarration.has(i.synthetic_id)) return true;
+          for (const id of (i.eventIds ?? [])) if (suppressedForNarration.has(id)) return true;
+          return false;
+        };
+
         const summaryLines: string[] = [];
         for (const i of issues) {
           if (i.fixed && i.fix_detail) {
@@ -1480,23 +1514,30 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
             const reason = i.fix_error ?? 'unknown reason';
             summaryLines.push(`× Tried to fix "${i.description}" but couldn't: ${reason}`);
           } else if (mode === 'active') {
+            if (isAckSuppressed(i)) continue;  // acknowledged / resolved — don't re-narrate
             // Detected but no autofix attempted (or autofix skipped). Surface.
             summaryLines.push(`! Detected: ${i.description}`);
           }
         }
+        // Count of issues worth surfacing (un-fixed, un-acknowledged) — drives the
+        // passive-mode fallback line and the vacuous flag so neither re-counts a
+        // waived issue.
+        const narratableCount = issues.filter(i => !i.fixed && !i.fix_failed && !isAckSuppressed(i)).length;
         const summaryText = summaryLines.length > 0
           ? summaryLines.join('\n')
-          : (issues.length === 0
+          : (narratableCount === 0
               ? 'Calendar looks healthy — no issues found.'
-              : `Scanned ${startDate} to ${endDate} — ${issues.length} issue${issues.length === 1 ? '' : 's'} detected.`);
+              : `Scanned ${startDate} to ${endDate} — ${narratableCount} issue${narratableCount === 1 ? '' : 's'} detected.`);
 
         // v3.1.2 fix (#118) — vacuous flag: nothing found, nothing fixed.
         // Routine dispatcher checks this to stay silent on auto-fired runs
         // (the routine prompt already says "stay silent if nothing to report"
         // but Sonnet ignored it). Owner-asked runs from chat don't go through
         // dispatchRoutine, so they ignore this flag and narrate normally so
-        // the owner can verify "all good".
-        const vacuous = issues.length === 0 && fixesApplied === 0;
+        // the owner can verify "all good". v3.5.x — vacuous now means "nothing
+        // worth saying" (all detected issues acknowledged/resolved), so the
+        // routine goes quiet instead of re-sending a waived count.
+        const vacuous = summaryLines.length === 0 && narratableCount === 0 && fixesApplied === 0;
         return {
           issues,
           count: issues.length,

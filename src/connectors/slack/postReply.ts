@@ -516,7 +516,19 @@ async function runClaimCheckAndMaybeRewrite(ctx: ClaimCheckContext): Promise<str
     // tool-re-firing retry (that's gone); it now prevents the own-the-miss
     // rewrite from corrupting an HONEST reply into a false "that didn't go
     // through" claim when the action actually DID happen.
-    const toolSummariesText = (result.toolSummaries ?? []).join(' ');
+    // v3.4.x (#recap, 2026-06-24) — the shield must see PRIOR turns, not just
+    // this one. A TRUTHFUL recap of an action done last turn ("Yael moved to
+    // 11:30 ✓") has no CURRENT-turn tool, so a current-turn-only check flagged
+    // it and own-the-miss NEGATED a true statement (the crash-recovery recap).
+    // Step 1b saves each turn's `[tool OK ...]` markers into the assistant's
+    // conversation content, so the matching tool's marker is in ctx.history —
+    // scan it too. Over-suppressing a genuinely-phantom claim in a thread where
+    // a similar tool ran earlier is a safe MISS (R7); denying real work is not.
+    const priorAssistantText = (ctx.history ?? [])
+      .filter(h => h.role === 'assistant')
+      .map(h => h.content)
+      .join(' ');
+    const toolSummariesText = [(result.toolSummaries ?? []).join(' '), priorAssistantText].join(' ');
     const matchingToolAlreadyRan =
       verdict.action_type === 'message'
         ? (/\[message_colleague/.test(toolSummariesText) &&

@@ -310,6 +310,19 @@ function rewriteDroppedAFact(original: string, rewrite: string): boolean {
   return false;
 }
 
+/** The load-bearing tokens present in `original` but missing from `rewrite` —
+ *  used to PIN them in a re-rewrite. Same token kinds as rewriteDroppedAFact. */
+function missingFacts(original: string, rewrite: string): string[] {
+  const rwRaw = rewrite;
+  const rwTight = rewrite.toLowerCase().replace(/\s+/g, '');
+  const missing: string[] = [];
+  for (const m of original.match(/<@[UW][A-Z0-9]+>/g) ?? []) if (!rwRaw.includes(m)) missing.push(m);
+  for (const m of original.match(/\b\d{1,2}:\d{2}\b/g) ?? []) if (!rwRaw.includes(m)) missing.push(m);
+  for (const m of original.match(/\b\d{1,2}\s*[ap]m\b/gi) ?? []) if (!rwTight.includes(m.toLowerCase().replace(/\s+/g, ''))) missing.push(m);
+  for (const m of original.match(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g) ?? []) if (!rwRaw.includes(m)) missing.push(m);
+  return missing;
+}
+
 /**
  * Run the human gate on a draft. Returns { ok: true, rewrite: null } for
  * clean drafts; { ok: false, rewrite: <rewritten text> } when self-as-machine
@@ -368,16 +381,54 @@ export async function runHumanGate(
     const parsed = JSON.parse(jsonStr ?? text) as { ok?: boolean; rewrite?: string | null };
 
     if (parsed.ok === false && typeof parsed.rewrite === 'string' && parsed.rewrite.trim().length > 0) {
-      // v3.4 — deterministic safety net: never let a voice-rewrite silently
-      // drop a load-bearing fact (@mention / time / date). If it did, the
-      // rewrite is worse than the bot-tell it fixed — keep the original.
+      // v3.4 — deterministic safety net: a voice-rewrite must not silently drop
+      // a load-bearing fact (@mention / time / date / a question).
+      // v3.4.x (2026-06-24) — but DON'T fall back to the flagged original on a
+      // drop: the original may be the very leak humanGate flagged ("I don't have
+      // an override_duration parameter" shipped because the rewrite dropped the
+      // meeting time and we reverted to the leaky original). Re-rewrite ONCE with
+      // the dropped content pinned; if it's still imperfect, ship the cleaned
+      // rewrite — NEVER the flagged original (a flagged draft is never a safe
+      // fallback).
       if (rewriteDroppedAFact(draft, parsed.rewrite)) {
-        logger.warn('humanGate — rewrite dropped a load-bearing fact (@mention/time/date); keeping original draft', {
+        const missing = missingFacts(draft, parsed.rewrite);
+        const questionDropped = /[?？؟]/.test(draft) && !/[?？؟]/.test(parsed.rewrite);
+        const pin = [
+          missing.length ? `keep these EXACT details verbatim: ${missing.join(' · ')}` : '',
+          questionDropped ? 'keep it phrased as a question asking for the same thing' : '',
+        ].filter(Boolean).join('; ') || 'keep every name, time, date and @mention from the original exactly';
+
+        let retry: string | null = null;
+        try {
+          const retryResp = await anthropic.messages.create({
+            model,
+            max_tokens: 600,
+            system: systemPrompt,
+            messages: [{
+              role: 'user',
+              content: `${draft}\n\n[CRITICAL: your previous rewrite dropped required content. Rewrite again with the SAME fix, but ${pin}.]`,
+            }],
+          });
+          logLlmUsage('human_gate_retry', model, retryResp, { audience });
+          const rt = retryResp.content.filter(b => b.type === 'text').map(b => (b as Anthropic.TextBlock).text).join('').trim();
+          const p2 = JSON.parse(extractFirstJsonObject(rt) ?? rt) as { rewrite?: string | null };
+          if (typeof p2.rewrite === 'string' && p2.rewrite.trim().length > 0) retry = p2.rewrite;
+        } catch (_) { /* retry failed — handled below */ }
+
+        if (retry && !rewriteDroppedAFact(draft, retry)) {
+          logger.info('humanGate — re-rewrite preserved the dropped content; using it', { audience });
+          return { ok: false, rewrite: retry };
+        }
+        // Still imperfect — ship the cleaned (leak-free) rewrite, NEVER the
+        // flagged original. Worst case is a missed detail in a clean reply, not
+        // a leak/bot-tell shipping.
+        const best = retry && retry.trim().length > 0 ? retry : parsed.rewrite;
+        logger.warn('humanGate — rewrite still dropped content after one retry; shipping cleaned rewrite, NOT the flagged original', {
           audience,
           originalPreview: draft.slice(0, 120),
-          rewritePreview: parsed.rewrite.slice(0, 120),
+          shippedPreview: best.slice(0, 120),
         });
-        return { ok: true, rewrite: null };
+        return { ok: false, rewrite: best };
       }
       logger.info('humanGate — rewrote draft', {
         audience,
