@@ -2,6 +2,29 @@
 
 ---
 
+## 3.5.1 — Working-Elsewhere → timezone "one spine" + person-memory provenance (Phase 1)
+
+A patch by number, a subsystem rework by impact. Two parallel chats: the meeting chat closed the recurring Working-Elsewhere → timezone class at the root (every layer now reads ONE dual-source away-day resolver — no per-tool re-derivation, no clock guessing); the memory-rebuild chat landed Phase 1 of the person-memory / stored-attribute redesign (a guessed fact no longer silently steers outbound — language goes live, a guessed timezone confirms first, names freeze with provenance). Additive schema (person-memory columns); restart required.
+
+### Fixed — Working Elsewhere / timezone (meeting chat)
+The "wrong time on a travel day" class, closed at root. WE handling was split across layers that each independently re-derived "is he away, in what tz" and disagreed (search vs book vs validate vs prompt). Now one dual-source resolver, every consumer uses it. Verified 11/11 scenarios (incl. DST-mid-trip + non-Israel-home) + the one-source invariant. See `.claude/WE_TIMEZONE_SPINE.md`.
+- **Dual-source detection (the Alliance root).** `find_available_slots` detected WE from the all-day marker ONLY, while booking also reads the `currently_traveling` travel record — so a record-backed trip (no marker) was invisible to search: it offered home-tz slots and booking re-stamped them ("18:00 Israel" booked as 18:00 Boston = 01:00 next day, day-rollover). New `detectOwnerAwayDaysInWindow` merges marker + record; search now sees the trip the way booking does. ([workingElsewhere.ts](src/utils/workingElsewhere.ts), [calendar.ts](src/connectors/graph/calendar.ts))
+- **Bare-time GUESS deleted.** create/move silently reinterpreted a bare time as the trip tz (the rollover); removed — a bare time stays in the owner's zone, a trip-local time tags `start_timezone`. ([ops.ts](src/skills/meetings/ops.ts))
+- **WE → relax + approve.** On a travel day the home rules relax (they don't cleanly apply) and the booking routes to a one-step dual-clock confirm (owner) / approval (colleague) — never a silent auto-book in the wrong clock, never a false "past your usual finish" home-hours flag (the Dirk incident). Both paths, dual-source. ([planMeeting.ts](src/skills/meetings/planMeeting.ts))
+- **Per-turn location grounding (the Gidon incident).** The prompt now asserts the owner's home-vs-away days (travel-record-based, zero Graph), so a stale "he's in Boston" can't bleed onto a home day. ([index.ts](src/core/orchestrator/index.ts))
+- **All away-day consumers migrated to the one source** — calendar-health's auto-fix suppressor (closed a silent wrong-tz auto-write hole), and the get_calendar / analyze_calendar / get_free_busy away-notes. Marker-only detection is now an internal primitive; no consumer is marker-blind. ([calendarHealth.ts](src/skills/calendarHealth.ts), [ops.ts](src/skills/meetings/ops.ts))
+
+### Fixed — person-memory / stored-attribute provenance, Phase 1 (memory-rebuild chat)
+A stored fact about a person couldn't distinguish "the owner taught me" from "I guessed from one message," and couldn't self-correct — so a one-off froze and steered every future reply. Phase 1 applies one rule to the three live bugs: a guess never silently steers; owner/confirmed steers. See `.claude/PERSON_MEMORY_REDESIGN.md`.
+- **Language goes live (Ayala).** Outbound language is derived from the recent inbound thread (default English, owner-pin override) instead of a frozen `language_preference` — no more a Hebrew relay to an English speaker. ([resolver.ts](src/core/requests/resolver.ts), [app.ts](src/connectors/slack/app.ts), [capturePass.ts](src/memory/capturePass.ts))
+- **A guessed timezone confirms before steering (Gidon).** A guessed tz confirms once before it changes a time shown to a human; an owner-set tz steers silently. ([resolver.ts](src/core/requests/resolver.ts))
+- **Names freeze with provenance (Yael).** A person's native-script name now carries guess-vs-owner provenance and is resolved once then frozen (the render rule moves prompt → data); an owner correction sticks — killing the per-reply transliteration drift (עידן↔אידן). Generalized beyond Hebrew. ([people.ts](src/db/people.ts), [systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+
+### Migration
+Additive person-memory columns (attribute provenance + a derived last-inbound-language signal); no backfill — existing rows default to unset/guess. Restart required to load the schema + behavior changes.
+
+---
+
 ## 3.5.0 — coord subsystem removed; weekday/booked-date correctness; colleague-approval narration; coda capped at once/day
 
 A multi-chat minor. The headline is a big removal — the multi-party coordination subsystem is gone (−3,400 LOC) — alongside a correctness wave from the meeting/guard/approval chats: a deterministic weekday guard, a booked-date honesty backstop, colleague-requested approvals that narrate instead of resolving silently, and a social coda gate that finally works. No schema change (the `coord_jobs` table just stops being created; existing rows linger harmlessly); restart required.

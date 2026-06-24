@@ -634,20 +634,12 @@ async function notifyRequesterOfDecision(
   let requesterLang: 'he' | 'en' = 'en';
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getPersonMemory } = require('../../db/people') as typeof import('../../db/people');
+    const { getPersonMemory, resolveOutboundLanguageForPerson } = require('../../db/people') as typeof import('../../db/people');
     const personRow = getPersonMemory(requesterSlackId);
-    if (personRow?.profile_json) {
-      const pj = JSON.parse(personRow.profile_json);
-      const pref = (pj?.language_preference as string | undefined ?? '').toLowerCase().trim();
-      // Explicit whitelist only — the prior outer `pref.includes('he')` guard
-      // accepted any string containing the substring 'he' (e.g. 'they', 'shes',
-      // random pref values), and only the inner whitelist kept things sane.
-      // Dropping the outer guard removes the fragile fail-open and keeps a
-      // single source of truth.
-      if (pref === 'he' || pref === 'hebrew' || pref === 'he-il' || pref.startsWith('hebrew') || pref.includes('עברית')) {
-        requesterLang = 'he';
-      }
-    }
+    // v3.5.x — DERIVE the relay language from their most recent inbound (default
+    // English), not a frozen one-off language_preference (the Ayala bug). The
+    // relay renders he/en only; any non-Hebrew code (en/ru/ar/…) → English.
+    requesterLang = resolveOutboundLanguageForPerson(personRow) === 'he' ? 'he' : 'en';
   } catch { /* fail-open to English */ }
 
   // Format start time in the requester's timezone if known, else owner's.
@@ -656,7 +648,12 @@ async function notifyRequesterOfDecision(
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getPersonMemory } = require('../../db/people') as typeof import('../../db/people');
       const personRow = getPersonMemory(requesterSlackId);
-      const tz = personRow?.timezone || ctx.profile.user.timezone;
+      // v3.5.x — a guessed (auto) timezone must not silently steer a presented
+      // time (the Gidon bug: auto Amsterdam, he's in Israel). Only an EXPLICIT
+      // auto guess falls back to the owner's tz; owner/person-set AND legacy
+      // (NULL set_by) values keep their prior behavior (use the person's tz).
+      const tzIsGuess = personRow?.timezone_set_by === 'auto';
+      const tz = (personRow?.timezone && !tzIsGuess) ? personRow.timezone : ctx.profile.user.timezone;
       const dt = DateTime.fromISO(iso, { zone: tz });
       if (!dt.isValid) return '';
       return requesterLang === 'he'

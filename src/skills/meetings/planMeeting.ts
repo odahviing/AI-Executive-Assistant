@@ -371,32 +371,49 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   if (input.slotStartIso && input.slotEndIso) {
     const events = input.preloadedEvents ?? await loadEventsForCheck(profile, input.slotStartIso);
 
-    // v3.3 — Working Elsewhere gate. If the slot lands on an all-day WE day,
-    // the owner's normal rules are unreliable (different place + timezone). A
-    // COLLEAGUE booking escalates to approval — don't auto-book, and don't
-    // auto-refuse on a rule that may not apply. Owner-path falls through (he's
-    // the authority on his own time). No WE marker → this is a no-op.
-    if (initiator !== 'owner') {
+    // #WE-spine — Working-Elsewhere routing: RELAX + APPROVE. On a day the owner
+    // is travelling his home rules don't cleanly apply (different place + clock),
+    // so we relax them and route the booking to his approval (colleague) / a
+    // one-step dual-TZ confirm (owner) — never silently auto-book a trip-day slot
+    // in the wrong clock. Resolved via the ONE resolver (marker + travel record)
+    // so search and book agree on which days are WE. `allowRelaxed` (the owner
+    // already confirmed, or an approved replay) falls through to book. No marker
+    // and no covering travel record → isAway=false → no-op, byte-identical to a
+    // normal day. The dual-TZ ask renders ONE instant in both zones (slotStartIso
+    // is owner-zone after the write-path guess removal), so the owner sees e.g.
+    // "11:00 Boston / 18:00 your time" and confirms the right moment.
+    if (!input.allowRelaxed) {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const we = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
-      const weDays = we.detectWorkingElsewhereDays(events, profile.user.timezone);
-      if (weDays.size > 0) {
-        const slotDate = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }).toFormat('yyyy-MM-dd');
-        const weInfo = weDays.get(slotDate);
-        if (weInfo) {
-          const ownerFirst = profile.user.name.split(' ')[0];
-          const loc = weInfo.location ? ` (${weInfo.location})` : '';
-          const when = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }).toFormat('EEEE');
-          logger.info('planMeeting — colleague booking on working-elsewhere day, escalating', {
-            slotDate, location: weInfo.location,
-          });
+      const slotDate = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }).toFormat('yyyy-MM-dd');
+      const travel = await we.resolveOwnerTravelContextForDate(slotDate, profile.user.slack_user_id, profile.user.timezone, events);
+      if (travel.isAway) {
+        const ownerFirst = profile.user.name.split(' ')[0];
+        const loc = travel.location ? ` (${travel.location})` : '';
+        const instant = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone });
+        const awayClock = instant.setZone(travel.effectiveTz);   // same instant, where he is
+        const awayPart = `${awayClock.toFormat('HH:mm')} ${travel.location || 'there'}`;
+        const sameTz = travel.effectiveTz === profile.user.timezone;
+        const whereDay = awayClock.toFormat('EEEE');   // the day where he physically is (decision #2)
+        logger.info('planMeeting — working-elsewhere day, routing to relax+approve', {
+          slotDate, location: travel.location, effectiveTz: travel.effectiveTz, initiator,
+        });
+        if (initiator === 'owner') {
+          const dual = sameTz ? instant.toFormat('HH:mm') : `${awayPart} / ${instant.toFormat('HH:mm')} your time`;
           return {
-            action: 'escalate_approval',
-            violationLabel: 'owner_working_elsewhere',
-            suggestedAskText: `Heads up — ${ownerFirst} is working elsewhere${loc} on ${when}, so I can't be sure his usual scheduling rules apply. I'd run this by him before booking. Want me to check with him?`,
+            action: 'confirm_override',
+            violationLabel: `working elsewhere${loc}`,
+            suggestedAskText: `You're working elsewhere${loc} on ${whereDay} — this slot is ${dual}. Your usual rules are relaxed there; book it?`,
             category,
           };
         }
+        const dual = sameTz ? instant.toFormat('HH:mm') : `${awayPart} / ${instant.toFormat('HH:mm')} ${ownerFirst}'s time`;
+        return {
+          action: 'escalate_approval',
+          violationLabel: 'owner_working_elsewhere',
+          suggestedAskText: `Heads up — ${ownerFirst} is working elsewhere${loc} on ${whereDay} (this slot is ${dual}), so I'd run it by him before booking. Want me to check with him?`,
+          category,
+        };
       }
     }
 

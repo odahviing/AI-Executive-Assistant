@@ -910,7 +910,12 @@ export async function findAvailableSlots(params: {
     // below is a no-op and behavior is identical to pre-v3.3.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const we = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
-    const weDays = profile ? we.detectWorkingElsewhereDays(ownerEventsForFb, params.timezone) : new Map<string, import('../../utils/workingElsewhere').WorkingElsewhereDay>();
+    // v3.5.x (WE spine) — DUAL-SOURCE: merge the all-day marker AND the travel
+    // record (clamped to the search window), so search sees a trip the same way
+    // the booking path does. Marker-only detection made a record-backed trip
+    // (no marker) invisible to search → home-tz slots offered → the Alliance
+    // day-rollover. weDays still empty when truly home → every WE branch no-ops.
+    const weDays = profile ? we.detectOwnerAwayDaysInWindow(ownerEventsForFb, params.timezone, profile.user.slack_user_id, params.searchFrom, params.searchTo) : new Map<string, import('../../utils/workingElsewhere').WorkingElsewhereDay>();
 
     // v2.1 — remove floating-block time ranges from the base busy pool.
     // Without this, the isFree collision check below would reject any

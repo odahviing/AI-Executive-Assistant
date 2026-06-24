@@ -927,7 +927,7 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
           const { setCoreFieldWithProvenanceById, setPersonNameHeById, updatePersonProfileById } = require('../db') as typeof import('../db');
           if (timezone && timezone.trim()) setCoreFieldWithProvenanceById(target.personId, 'timezone', timezone.trim(), 'owner');
           if (state && state.trim()) setCoreFieldWithProvenanceById(target.personId, 'state', state.trim(), 'owner');
-          if (nameHe && nameHe.trim()) setPersonNameHeById(target.personId, nameHe.trim());
+          if (nameHe && nameHe.trim()) setPersonNameHeById(target.personId, nameHe.trim(), 'owner');
           updatePersonProfileById(target.personId, {
             communication_style: args.communication_style as string | undefined,
             language_preference: args.language_preference as string | undefined,
@@ -954,7 +954,7 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
         upsertPersonMemory({ slackId, name, timezone, timezoneSetBy: 'owner' });
 
         if (nameHe && nameHe.trim()) {
-          setPersonNameHe(slackId, nameHe.trim());
+          setPersonNameHe(slackId, nameHe.trim(), 'owner');
         }
 
         // v2.2.2 (#46) — STATE: free-text location. Owner-stated → set_by='owner'.

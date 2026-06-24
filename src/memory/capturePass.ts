@@ -84,7 +84,10 @@ interface CaptureDelta {
   state?: string;
   name_he?: string;
   // profile_json fields
-  language_preference?: string;
+  // v3.5.x — language_preference is NO LONGER captured here. Outbound language
+  // is DERIVED from the person's most recent inbound (people.resolveOutbound-
+  // LanguageForPerson), so a one-off ("do you speak Hebrew?") must not freeze
+  // into a durable steering attribute. Owner can still pin via update_person_profile.
   working_hours?: string;
   communication_style?: string;
   response_speed?: 'immediate' | 'fast' | 'hours' | 'day' | 'slow' | 'unreliable';
@@ -106,8 +109,7 @@ Your ONLY job: identify what is genuinely NEW or UPDATED about the colleague bas
 What counts as a learnable fact (operational, changes how Maelle should interact next time):
 - timezone: STRICT IANA Region/City form only — "America/New_York", "Europe/London", "Asia/Tokyo", "Australia/Sydney". When the chat names a nickname (ET, PT, BST, IST, "Sydney time"), map to IANA before emitting. SKIP the field if you can't confidently resolve to a Region/City form. Never emit bare abbreviations — they get rejected downstream.
 - state: city / country mentioned as their location ("Boston", "Tel Aviv", "Israel")
-- name_he: Hebrew spelling of their name if they wrote it or it became clear
-- language_preference: if they consistently write in a language different from Maelle's default
+- name_he: the native-script spelling of their name (Hebrew/Cyrillic/Arabic) if they wrote it or it became clear — capture it so it's never re-guessed
 - working_hours: when they're typically reachable, what days they work
 - communication_style: brief vs lengthy, direct vs warm, asks questions back vs not
 - response_speed: how quickly they replied (immediate/fast/hours/day/slow/unreliable)
@@ -216,11 +218,12 @@ async function applyDelta(
     }
   }
   if (delta.state) setCoreFieldWithProvenance(slackId, 'state', delta.state, 'auto');
-  if (delta.name_he) setPersonNameHe(slackId, delta.name_he);
+  // v3.5.x — capture as an 'auto' guess (provenance-aware): freezes the spelling
+  // so it's reused verbatim, but an owner correction can never be clobbered.
+  if (delta.name_he) setPersonNameHe(slackId, delta.name_he, 'auto');
 
   // profile_json fields — direct merge via updatePersonProfile.
   const profileUpdates: Partial<PersonProfile> = {};
-  if (delta.language_preference) profileUpdates.language_preference = delta.language_preference;
   if (delta.working_hours) profileUpdates.working_hours = delta.working_hours;
   if (delta.communication_style) profileUpdates.communication_style = delta.communication_style;
   if (delta.response_speed) profileUpdates.response_speed = delta.response_speed;
@@ -290,9 +293,8 @@ async function applyDelta(
   }
 
   const commLines: string[] = [];
-  if (delta.language_preference) commLines.push(`Prefers ${delta.language_preference}.`);
   if (delta.communication_style) commLines.push(delta.communication_style);
-  if (delta.name_he) commLines.push(`Hebrew spelling: ${delta.name_he}.`);
+  if (delta.name_he) commLines.push(`Native-script spelling: ${delta.name_he}.`);
   if (commLines.length > 0) {
     await writePersonSection({
       profile, personId, displayName: colleagueName,

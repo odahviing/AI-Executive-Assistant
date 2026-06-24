@@ -62,6 +62,52 @@ export function detectWorkingElsewhereDays(
 }
 
 /**
+ * v3.5.x (WE spine) — the SEARCH's owner-away-day map, DUAL-SOURCE so it matches
+ * the write path. `detectWorkingElsewhereDays` (all-day marker) was the ONLY
+ * source `find_available_slots` consulted, while the booking path's
+ * `resolveOwnerTravelContextForDate` ALSO honors the
+ * `people_memory.currently_traveling` travel record. A trip backed only by the
+ * record (no marker) therefore made SEARCH see "home" (offered home-tz slots)
+ * while BOOK saw "away" and re-stamped them — the Alliance July-1 day-rollover.
+ * This merges both sources, clamped to the search window, keyed by the SAME
+ * owner-home-tz date `detectWorkingElsewhereDays` writes (markers win on a tie).
+ */
+export function detectOwnerAwayDaysInWindow(
+  ownerEvents: CalendarEvent[],
+  ownerTz: string,
+  ownerSlackId: string,
+  fromIso: string,
+  toIso: string,
+): Map<string, WorkingElsewhereDay> {
+  const out = detectWorkingElsewhereDays(ownerEvents, ownerTz);   // markers first — they win
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getTravelRecord } = require('../db/people') as typeof import('../db/people');
+    const rec = getTravelRecord(ownerSlackId);
+    if (rec && rec.location) {
+      const from = DateTime.fromISO(fromIso, { zone: ownerTz }).startOf('day');
+      const to = DateTime.fromISO(toIso, { zone: ownerTz }).startOf('day');
+      if (from.isValid && to.isValid) {
+        let cur = from;
+        let guard = 0;
+        while (cur <= to && guard < 366) {
+          const iso = cur.toFormat('yyyy-MM-dd');
+          // Add a record-covered day only when no marker already claimed it.
+          if (iso >= rec.from && iso <= rec.until && !out.has(iso)) {
+            out.set(iso, { date: iso, location: rec.location });
+          }
+          cur = cur.plus({ days: 1 });
+          guard++;
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn('detectOwnerAwayDaysInWindow — travel record merge threw', { err: String(err).slice(0, 160) });
+  }
+  return out;
+}
+
+/**
  * v3.4.2 — THE single "where is the owner, and in what timezone, on date D?"
  * resolver for the booking WRITE path (create_meeting / move_meeting). The slot
  * finder already resolves per-day travel TZ; this gives the write tools the same
@@ -184,11 +230,19 @@ export async function resolveWorkingElsewhereTz(location: string): Promise<strin
 export async function summarizeWorkingElsewhere(
   events: CalendarEvent[],
   ownerTz: string,
+  // #WE-spine — pass slackId + window to get the DUAL-SOURCE away-day set
+  // (marker + travel record), so the read tools surface a record-backed trip
+  // too, not just all-day markers. Omitted → marker-only (back-compat).
+  ownerSlackId?: string,
+  fromIso?: string,
+  toIso?: string,
 ): Promise<{
   working_elsewhere: { days: Array<{ date: string; away_tz: string | null; location: string }> };
   _working_elsewhere_note: string;
 } | null> {
-  const weDays = detectWorkingElsewhereDays(events, ownerTz);
+  const weDays = (ownerSlackId && fromIso && toIso)
+    ? detectOwnerAwayDaysInWindow(events, ownerTz, ownerSlackId, fromIso, toIso)
+    : detectWorkingElsewhereDays(events, ownerTz);
   if (weDays.size === 0) return null;
   const days: Array<{ date: string; away_tz: string | null; location: string }> = [];
   for (const [date, info] of weDays) {

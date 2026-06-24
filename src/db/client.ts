@@ -259,6 +259,21 @@ function initSchema(db: Database.Database): void {
   // without transliterating at runtime. Populated by Maelle as she observes
   // names written in Hebrew (or learns them from the owner).
   try { db.exec(`ALTER TABLE people_memory ADD COLUMN name_he TEXT`); } catch (_) {}
+  // v3.5.x (person-memory rebuild) — provenance for the native-script name
+  // (`name_he` column; despite the name it holds ANY non-Latin spelling —
+  // Hebrew/Cyrillic/Arabic). Same authority chain as the other core fields
+  // (owner > person > auto). Lets an owner correction ("עידן not אידן") stick
+  // and stops an auto guess from re-overwriting it. Cosmetic rename of the
+  // column to `name_native` is deferred (45 call-sites) — behavior is generic.
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN name_he_set_by TEXT`); } catch (_) {}
+  // v3.5.x (person-memory rebuild) — derived outbound-language signal. We stamp
+  // the dominant SCRIPT of each inbound human message ('he'|'ru'|'ar'|'en')
+  // plus when we saw it. Outbound composition TO a person (relay / outreach /
+  // coord) derives its language from the most RECENT inbound (default English)
+  // instead of a frozen, one-off `language_preference`. Self-correcting: an
+  // English-writing colleague stops getting Hebrew the moment they write.
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN last_inbound_lang TEXT`); } catch (_) {}
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN last_inbound_lang_at TEXT`); } catch (_) {}
   // Migration: gender_confirmed — set to 1 once the person explicitly states
   // their own gender (or the owner confirms). Once confirmed, NO automatic
   // detection path (pronouns, image, name-LLM) may overwrite it. Lower layers

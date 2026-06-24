@@ -1048,11 +1048,71 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
     }
   } catch (_) { /* detection failure is non-fatal — static rule still governs */ }
 
+  // v3.5.x (person-memory rebuild) — persist the colleague's inbound language as
+  // a derived signal. Outbound composition TO them (relay / outreach / coord)
+  // reads the most recent inbound (people.resolveOutboundLanguageForPerson),
+  // default English — so an English-writing colleague never gets a Hebrew DM off
+  // a stale one-off pref (the Ayala bug). Stamp the RAW current-message script
+  // only (not the carried-forward value): a contentless "yes" detects null and
+  // leaves the prior signal intact. Colleague senders only; best-effort.
+  try {
+    if (input.senderRole === 'colleague' && input.userId) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { detectMessageLanguage } = require('../../utils/detectMessageLanguage') as
+        typeof import('../../utils/detectMessageLanguage');
+      const raw = detectMessageLanguage(userMessage);
+      const code = raw === 'Hebrew' ? 'he'
+        : raw === 'Russian' ? 'ru'
+        : raw === 'Arabic' ? 'ar'
+        : raw === 'Latin' ? 'en'
+        : null;
+      if (code) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { setLastInboundLang } = require('../../db/people') as typeof import('../../db/people');
+        setLastInboundLang(input.userId, code);
+      }
+    }
+  } catch (_) { /* signal stamping is best-effort */ }
+
+  // #WE-spine (Gidon fix) — per-turn owner-location grounding. When the owner has
+  // an active/upcoming Working-Elsewhere trip in the next 14 days, assert WHICH
+  // days he's away (+ where) and that EVERY OTHER day he is home. Without this a
+  // home day emits NO location signal, so a stale "he's in Boston" bleeds from an
+  // earlier thread onto the wrong day (the Gidon incident). Travel-record-backed
+  // (DB read, ZERO Graph call) so it costs nothing per turn; marker-only trips are
+  // still surfaced by the slot-finder's own WE note when a search runs. Empty (no
+  // block) whenever there's no trip in the window.
+  let ownerLocationBlock = '';
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const we = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DateTime: LuxWe } = require('luxon') as typeof import('luxon');
+    const homeTz = profile.user.timezone;
+    const winFrom = LuxWe.now().setZone(homeTz).toFormat('yyyy-MM-dd');
+    const winTo = LuxWe.now().setZone(homeTz).plus({ days: 14 }).toFormat('yyyy-MM-dd');
+    const awayDays = we.detectOwnerAwayDaysInWindow([], homeTz, profile.user.slack_user_id, winFrom, winTo);
+    if (awayDays.size > 0) {
+      const ownerFirst = profile.user.name.split(' ')[0];
+      const byLoc = new Map<string, string[]>();
+      for (const [date, info] of awayDays) {
+        const key = info.location || 'another location';
+        if (!byLoc.has(key)) byLoc.set(key, []);
+        byLoc.get(key)!.push(date);
+      }
+      const parts = [...byLoc.entries()].map(([locName, dates]) => `${dates.sort().join(', ')} (${locName})`);
+      ownerLocationBlock = `## OWNER LOCATION (next 14 days)\n\n${ownerFirst} is WORKING ELSEWHERE on: ${parts.join('; ')}. On those days his clock and location are the trip's, not home. On any day NOT listed above, treat ${ownerFirst} as in his home base (${homeTz}) — and do NOT carry a trip location/timezone that came up earlier in the conversation onto a day that isn't listed here (that bleed is the bug this prevents).`;
+    }
+  } catch (err) {
+    logger.warn('ownerLocationBlock — resolve threw, skipping', { err: String(err).slice(0, 160) });
+  }
+
   const systemBlocksDynamic = [
     languageDirectiveBlock,
     priorOutboundBlock,
     availabilityPrecheckBlock,
     offeredSlotsBlock,
+    ownerLocationBlock,
     freeTimePrecheckBlock,
     recentCalendarIssuesBlock,
     promptParts.dynamic,

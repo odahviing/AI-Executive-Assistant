@@ -968,7 +968,12 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
           // already-fetched events; empty set → no-op (normal behavior).
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const weMod = require('../utils/workingElsewhere') as typeof import('../utils/workingElsewhere');
-          const weActiveDays = weMod.detectWorkingElsewhereDays(events, timezone);
+          // #WE-spine — DUAL-SOURCE (marker + travel record), the SAME away-day
+          // set the slot finder / planMeeting use. Marker-only here meant a
+          // record-backed trip (no all-day marker) was NOT suppressed, so active
+          // mode would auto-book lunch / floating blocks (and auto-resolve) on a
+          // travel day in the WRONG timezone — the exact harm WE-mode prevents.
+          const weActiveDays = weMod.detectOwnerAwayDaysInWindow(events, timezone, ownerUserId, startDate, endDate);
           for (const issue of issues) {
             try {
               if (weActiveDays.size > 0 && weActiveDays.has(issue.date)) {

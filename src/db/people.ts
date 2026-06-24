@@ -103,7 +103,8 @@ export interface PersonMemory {
   is_vip?: number;
   slack_id: string | null;
   name: string;
-  name_he?: string;             // Hebrew spelling, used verbatim when writing in Hebrew
+  name_he?: string;             // native-script spelling (Hebrew/Cyrillic/Arabic), used verbatim when writing in that script
+  name_he_set_by?: CoreFieldSetBy; // v3.5.x — provenance for name_he (owner correction sticks; auto can't clobber)
   email?: string;
   timezone?: string;
   timezone_set_by?: CoreFieldSetBy;
@@ -112,6 +113,8 @@ export interface PersonMemory {
   gender: PersonGender;
   gender_confirmed?: number;    // 0/1 — kept for back-compat. New code reads gender_set_by.
   gender_set_by?: CoreFieldSetBy;
+  last_inbound_lang?: string;       // v3.5.x — derived: dominant script of their most recent inbound ('he'|'ru'|'ar'|'en')
+  last_inbound_lang_at?: string;    // v3.5.x — ISO datetime that signal was stamped
   working_hours_auto?: string;  // JSON: { workdays, hoursStart, hoursEnd } — derived from timezone defaults
   // v2.2.4 — travel awareness. JSON: { location, from, until } where location
   // is free text ("Boston", "NYC", "London"), from/until are ISO yyyy-MM-dd.
@@ -315,18 +318,37 @@ export function personIdForSlackId(slackId: string): string | null {
   return row?.person_id ?? null;
 }
 
-/** Set or update the Hebrew spelling of a contact's name. */
-export function setPersonNameHe(slackId: string, nameHe: string): void {
+/**
+ * Set or update the native-script spelling of a contact's name.
+ *
+ * v3.5.x — provenance-aware (owner > person > auto), matching the core-field
+ * authority chain. An owner correction ("עידן not אידן") sticks; an auto guess
+ * (capture pass / first-time transliteration) can't overwrite an owner/person
+ * value. Defaults to 'auto' so legacy callers behave as before. This is what
+ * freezes the spelling: once stored it's reused verbatim, never re-guessed.
+ */
+export function setPersonNameHe(slackId: string, nameHe: string, by: CoreFieldSetBy = 'auto'): void {
   const pid = personIdForSlackId(slackId);
-  if (pid) setPersonNameHeById(pid, nameHe);
+  if (pid) setPersonNameHeById(pid, nameHe, by);
 }
 
-/** v3.2.0 — person_id-keyed worker. */
-export function setPersonNameHeById(personId: string, nameHe: string): void {
+/** v3.2.0 — person_id-keyed worker. v3.5.x — provenance-aware. */
+export function setPersonNameHeById(personId: string, nameHe: string, by: CoreFieldSetBy = 'auto'): void {
+  if (!nameHe || !nameHe.trim()) return;
   const db = getDb();
+  const row = db.prepare(
+    `SELECT name_he as value, name_he_set_by as setBy FROM people_memory WHERE person_id = ?`,
+  ).get(personId) as { value: string | null; setBy: CoreFieldSetBy | null } | undefined;
+  if (!row) return;
+  const currentValue = (row.value ?? '').toString();
+  const currentRank = row.setBy ? SET_BY_RANK[row.setBy] : 0;
+  // Block a lower-rank overwrite of an existing value (auto can't clobber owner).
+  if (currentValue && SET_BY_RANK[by] < currentRank) return;
+  // Same value + same provenance — no-op (don't churn updated_at).
+  if (currentValue === nameHe.trim() && row.setBy === by) return;
   db.prepare(`
-    UPDATE people_memory SET name_he = ?, updated_at = datetime('now') WHERE person_id = ?
-  `).run(nameHe, personId);
+    UPDATE people_memory SET name_he = ?, name_he_set_by = ?, updated_at = datetime('now') WHERE person_id = ?
+  `).run(nameHe.trim(), by, personId);
 }
 
 /**
@@ -440,6 +462,58 @@ export function confirmPersonGenderById(personId: string, gender: PersonGender):
        SET gender = ?, gender_confirmed = 1, updated_at = datetime('now')
      WHERE person_id = ?
   `).run(gender, personId);
+}
+
+// ── v3.5.x — derived outbound language ───────────────────────────────────────
+//
+// Outbound composition TO a person (relay / outreach / coord) should speak the
+// language they're ACTUALLY writing in, not a frozen one-off preference that
+// never self-corrects (the Ayala bug: stored language_preference=Hebrew, she
+// writes English, got a Hebrew relay). We stamp the dominant script of each
+// inbound human message and derive outbound from the most recent one; default
+// English. The owner can still pin a language via update_person_profile, which
+// wins for contacts we haven't heard from inside the recency window.
+
+const LANG_RECENCY_DAYS = 45;
+
+/** Stamp the detected inbound language for a person (cheap, called per turn). */
+export function setLastInboundLang(slackId: string, lang: string): void {
+  if (!lang || !slackId) return;
+  const db = getDb();
+  db.prepare(
+    `UPDATE people_memory SET last_inbound_lang = ?, last_inbound_lang_at = datetime('now'), updated_at = datetime('now') WHERE slack_id = ?`,
+  ).run(lang, slackId);
+}
+
+/**
+ * The language to WRITE TO this person in. Precedence:
+ *   1. recent inbound (within LANG_RECENCY_DAYS) — the live signal wins
+ *   2. stored language_preference (owner pin / legacy) — fallback for contacts
+ *      we haven't heard from recently
+ *   3. English (default)
+ * Returns a short code: 'he' | 'ru' | 'ar' | 'en' | <stored pref lowercased>.
+ */
+export function resolveOutboundLanguageForPerson(person: PersonMemory | null | undefined): string {
+  if (!person) return 'en';
+  // 1. Live signal — most recent inbound, if fresh.
+  if (person.last_inbound_lang && person.last_inbound_lang_at) {
+    const iso = person.last_inbound_lang_at.replace(' ', 'T') + 'Z'; // SQLite datetime() is UTC, no marker
+    const ageDays = (Date.now() - Date.parse(iso)) / 86_400_000;
+    if (Number.isFinite(ageDays) && ageDays <= LANG_RECENCY_DAYS) {
+      return person.last_inbound_lang;
+    }
+  }
+  // 2. Stored preference (owner pin / legacy) for contacts not recently active.
+  try {
+    const pj = JSON.parse(person.profile_json || '{}');
+    const pref = ((pj?.language_preference as string | undefined) ?? '').toLowerCase().trim();
+    if (pref) {
+      if (pref === 'he' || pref === 'he-il' || pref.startsWith('hebrew') || pref.includes('עברית')) return 'he';
+      return pref;
+    }
+  } catch { /* fall through to default */ }
+  // 3. Default.
+  return 'en';
 }
 
 /**
@@ -818,10 +892,13 @@ export function formatThreadPeopleBlock(
     // tz explicitly so Sonnet doesn't infer a city from the IANA tag (the
     // "Asia/Jerusalem → Jerusalem" leak class). A timezone is reliable for
     // time math; it is NOT where the person is.
+    const tzUnconfirmed = p.timezone && p.timezone_set_by === 'auto'
+      ? ' [unconfirmed guess — confirm before presenting their local time]'
+      : '';
     const tz = p.timezone
       ? (p.state
-          ? `${p.timezone} (${p.state})`
-          : `${p.timezone} (city not on file — TZ is reliable for time math; only ask for city when location/venue matters)`)
+          ? `${p.timezone} (${p.state})${tzUnconfirmed}`
+          : `${p.timezone} (city not on file — TZ is reliable for time math; only ask for city when location/venue matters)${tzUnconfirmed}`)
       : 'unknown';
     const gender = p.gender && p.gender !== 'unknown' ? p.gender : 'unknown';
     lines.push(`- ${p.name}: email=${email}, tz=${tz}, gender=${gender}`);
@@ -907,17 +984,24 @@ export function formatPeopleMemoryForPrompt(
     // person could be anywhere in AEST. Adding "(timezone only, city
     // unknown)" inline in the prompt data keeps the constraint visible
     // without needing a separate prompt rule.
+    // v3.5.x — when a timezone is an UNCONFIRMED auto guess, mark it so Maelle
+    // confirms before presenting the person's local time (the Gidon bug: stored
+    // auto Amsterdam, he's in Israel → times shown in Amsterdam silently).
+    // Owner/person-set timezones steer silently — no marker.
+    const tzUnconfirmed = p.timezone && p.timezone_set_by === 'auto'
+      ? ' [unconfirmed guess — confirm before presenting their local time]'
+      : '';
     const tzPart = p.timezone
-      ? `, tz: ${p.timezone}${!p.state ? ' (city not on file — TZ is reliable for time math; only ask for city when location/venue matters)' : ''}`
+      ? `, tz: ${p.timezone}${!p.state ? ' (city not on file — TZ is reliable for time math; only ask for city when location/venue matters)' : ''}${tzUnconfirmed}`
       : '';
 
-    // v3.3.x — surface language_preference on the OWNER-path contact line so
-    // it's available when Maelle INITIATES a message TO this person (outreach /
-    // coord / reminder). It is intentionally NOT on the colleague-path social
-    // block (buildSocialContextBlock) — a reply to the person's own message
-    // mirrors THAT message, not the stored pref. The prompt rule that consumes
-    // this for outbound is owned by the prompt chat (handoff filed).
-    const langPart = profile.language_preference ? `, language_pref: ${profile.language_preference}` : '';
+    // v3.3.x / v3.5.x — surface the OUTBOUND language on the owner-path contact
+    // line: the language to write in when Maelle INITIATES a message TO this
+    // person (outreach / coord / reminder). v3.5.x DERIVES it from their most
+    // recent inbound message (default English) instead of a frozen one-off
+    // preference, so an English-writing colleague never gets a Hebrew DM. The
+    // outbound-language prompt rule consumes this `language_pref` value.
+    const langPart = `, language_pref: ${resolveOutboundLanguageForPerson(p)}`;
     const parts: string[] = [
       `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${travelTag}${tzPart}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}${langPart}${socialPart})`,
     ];

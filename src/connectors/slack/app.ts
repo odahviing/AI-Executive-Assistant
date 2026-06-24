@@ -1874,6 +1874,29 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         logger.info('reaction_added resolved approval via emoji', {
           approvalId: approval.id, verdict, reaction, ok: result.ok,
         });
+        // v3.5.x — leave a MEMORY RECORD of this silent resolve in the owner's
+        // approval-thread history. The emoji path runs NO Sonnet turn, so without
+        // this a later owner turn in the thread has amnesia about what happened:
+        // it misreports "not notified" and fires a duplicate (the Ysrael class,
+        // reached via ✅ instead of a typed "Yes"). A reaction can't narrate, so
+        // we record the fact — including whether the requester was already told
+        // (the resolver relays + stamps requester_notified_at). Best-effort.
+        if (result.ok) {
+          try {
+            const { getRequest } = await import('../../db/requests');
+            const fresh = getRequest(approval.id);
+            const subj = fresh?.subject || approval.subject || 'the request';
+            const who = (fresh?.requester_name ?? approval.requester_name ?? '').split(/\s+/)[0];
+            const notified = !!(fresh?.requester_slack_id && fresh.requester_notified_at);
+            const verb = verdict === 'approve' ? 'approved' : 'declined';
+            const note = `[Resolved via reaction: ${verb} "${subj}"${notified && who ? `; ${who} was notified` : ''}.]`;
+            const histThread = fresh?.owner_dm_thread_ts ?? approval.owner_dm_thread_ts ?? item.ts;
+            const histChannel = fresh?.owner_dm_channel ?? approval.owner_dm_channel ?? item.channel;
+            if (histThread && histChannel) {
+              appendToConversation(histThread, histChannel, { role: 'assistant', content: note });
+            }
+          } catch (_) { /* memory record is best-effort — never block the resolve */ }
+        }
       } catch (err) {
         logger.warn('reaction_added approval path threw', { err: String(err).slice(0, 200) });
       }

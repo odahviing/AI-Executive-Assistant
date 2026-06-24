@@ -849,7 +849,7 @@ export class SchedulingSkill {
         // the owner was in Boston). Null when no WE marker → nothing attached.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const weModGc = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
-        const weNoteGc = await weModGc.summarizeWorkingElsewhere(rawEvents, timezone);
+        const weNoteGc = await weModGc.summarizeWorkingElsewhere(rawEvents, timezone, context.profile.user.slack_user_id, args.start_date as string, args.end_date as string);
 
         // v2.8.6 (99C, Shape A) — when the query window comes back with no
         // events on an owner-DM turn, enrich the result with recent
@@ -951,7 +951,7 @@ export class SchedulingSkill {
         // WE days, so issue-narration is framed in the away timezone too.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const weModAc = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
-        const weNoteAc = await weModAc.summarizeWorkingElsewhere(rawEvents, timezone);
+        const weNoteAc = await weModAc.summarizeWorkingElsewhere(rawEvents, timezone, context.profile.user.slack_user_id, args.start_date as string, args.end_date as string);
         return weNoteAc ? { day_analysis: analysis, ...weNoteAc } : analysis;
       }
 
@@ -984,15 +984,35 @@ export class SchedulingSkill {
           // flip. Steer to find_available_slots, the one tool that intersects
           // everyone's calendar + work hours. (Stronger than the static tool
           // description, which Sonnet ignored — this rides the result it just read.)
+          // #WE-spine — owner free/busy on a travel day: attach the away-tz note
+          // so "am I free Wed 3pm?" on a Boston day isn't answered in a misleading
+          // home clock. Record-based (summarizeWorkingElsewhere with no events →
+          // travel-record only, ZERO Graph) — the SAME one-source the search uses.
+          let weFbNote: string | null = null;
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const weModFb = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
+            const weFb = await weModFb.summarizeWorkingElsewhere([], timezone, context.profile.user.slack_user_id, args.start_date as string, args.end_date as string);
+            weFbNote = weFb?._working_elsewhere_note ?? null;
+          } catch { /* fail open — no note */ }
+          // Daniel-bug (offer-then-retract) — get_free_busy returns RAW per-person
+          // blocks, NOT a validated set of common bookable slots. When it's called
+          // with attendees, presenting its gaps as "both free / best bet" is
+          // owner-only eyeballing that contradicts the booking check (planMeeting
+          // DOES intersect attendees) → the 14:30 "both free" then "both busy"
+          // flip. Steer to find_available_slots, the one tool that intersects
+          // everyone's calendar + work hours. (Stronger than the static tool
+          // description, which Sonnet ignored — this rides the result it just read.)
           const emailsArg = Array.isArray(args.emails) ? (args.emails as string[]) : [];
           const hasOtherAttendees = emailsArg.some(e => e && e.toLowerCase() !== userEmail.toLowerCase());
           if (hasOtherAttendees) {
             return {
               ...(raw as Record<string, unknown>),
+              ...(weFbNote ? { _working_elsewhere_note: weFbNote } : {}),
               _note: 'These are RAW per-person free/busy blocks, NOT a validated set of common bookable slots. To present bookable meeting options across these people (or ANY meeting with attendees), call find_available_slots — it intersects everyone\'s calendar + work hours. Do NOT offer gaps from this result as "both free" / "best bet"; that is owner-only eyeballing and will contradict the attendee check at booking time.',
             };
           }
-          return raw;
+          return weFbNote ? { ...(raw as Record<string, unknown>), _working_elsewhere_note: weFbNote } : raw;
         } catch (err) {
           if (err instanceof GraphPermissionError) {
             return {
@@ -2185,16 +2205,15 @@ export class SchedulingSkill {
             const ctx = await getTravelContextForInstant(args.start as string, userEmail, context.profile.user.slack_user_id, timezone);
             if (ctx.isAway) {
               tripDisplay = { tz: ctx.effectiveTz, location: ctx.location };
-              if (!args.start_timezone && ctx.effectiveTz !== timezone) {
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { reinterpretClockInZone } = require('../../utils/timezoneConvert') as
-                  typeof import('../../utils/timezoneConvert');
-                args.start = reinterpretClockInZone(args.start as string, ctx.effectiveTz, timezone);
-                if (typeof args.end === 'string') args.end = reinterpretClockInZone(args.end as string, ctx.effectiveTz, timezone);
-                logger.info('create_meeting — auto-converted bare time from trip TZ', {
-                  tripTz: ctx.effectiveTz, location: ctx.location, start_owner: args.start,
-                });
-              }
+              // #WE-spine — the bare-time "trip TZ GUESS" was REMOVED. It silently
+              // re-read a search-emitted home-tz time as trip-tz (the Alliance
+              // "18:00 Israel" → 01:00 next-day rollover). A bare time now stays in
+              // the owner's zone (the system default — correct for a slot the
+              // search emitted in his zone); a genuinely trip-LOCAL time is
+              // disambiguated by the model passing `start_timezone` (handled
+              // above), and every WE booking routes to a dual-TZ confirm/approval
+              // (planMeeting) as the net. ctx is kept ONLY for the location stamp +
+              // dual-TZ display — never to reinterpret the clock.
               if (ctx.location
                   && (typeof args.location !== 'string' || (args.location as string).trim().length === 0)
                   && args.is_online !== true) {
@@ -3763,16 +3782,10 @@ export class SchedulingSkill {
             const ctx = await getTravelContextForInstant(args.new_start as string, userEmail, context.profile.user.slack_user_id, timezone);
             if (ctx.isAway) {
               moveTripDisplay = { tz: ctx.effectiveTz, location: ctx.location };
-              if (!args.start_timezone && ctx.effectiveTz !== timezone) {
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { reinterpretClockInZone } = require('../../utils/timezoneConvert') as
-                  typeof import('../../utils/timezoneConvert');
-                args.new_start = reinterpretClockInZone(args.new_start as string, ctx.effectiveTz, timezone);
-                if (typeof args.new_end === 'string') args.new_end = reinterpretClockInZone(args.new_end as string, ctx.effectiveTz, timezone);
-                logger.info('move_meeting — auto-converted bare time from trip TZ', {
-                  tripTz: ctx.effectiveTz, new_start_owner: args.new_start,
-                });
-              }
+              // #WE-spine — bare-time "trip TZ GUESS" REMOVED (same as create). A
+              // bare new_start stays owner-zone; trip-local times tag start_timezone
+              // (handled above); the WE move routes to a dual-TZ confirm/approval
+              // in planMeeting. moveTripDisplay is kept only for dual-TZ narration.
             }
           } catch (err) {
             logger.warn('move_meeting — travel-context resolve threw, using time as-is', { err: String(err).slice(0, 160) });
@@ -3812,36 +3825,102 @@ export class SchedulingSkill {
         // create_approval(kind=meeting_reschedule). Owner-path callers skip this
         // check (owner override IS the approval).
         if (context.senderRole === 'colleague') {
-          // v3.1.4 (Y3) — requester-controls gate. Only the meeting's requester
-          // gets the autonomous rule-compliant auto-move below; any other
-          // colleague → straight to owner approval. Mirrors the update_meeting
-          // gate. (Owner-path skips this whole block.)
+          // v3.5.x — colleague-requested move gate (replaces the v3.1.4
+          // requester-controls gate). Maelle organizes every meeting, so the old
+          // "is the asker the REQUESTER?" test resolved to the owner ~every time
+          // and escalated EVERY colleague move (Ysrael's clean 15:30→14:00 still
+          // pinged the owner). Right axis: a colleague may move a meeting on their
+          // own ONLY IF (1) they're a REQUIRED attendee, (2) every OTHER required
+          // attendee is free at the new slot, (3) it fits the owner's rules. Else
+          // escalate with the SPECIFIC reason. Owner-path skips this whole block —
+          // owner override IS the approval (he can move over anyone).
+          const ownerFirst = context.profile.user.name.split(' ')[0];
+          const ownerEmailLc = userEmail.toLowerCase();
+
+          // Load the meeting's REQUIRED attendees once — reused for the membership
+          // check (step 1) AND the other-attendee free/busy check (step 2). Same
+          // Graph helper update_meeting uses.
+          let requiredAttendees: Array<{ name?: string; email: string }> = [];
+          let attendeesLoaded = false;
           try {
-            const { findMeetingOwner } = await import('./findMeetingOwner');
-            const ownerInfo = await findMeetingOwner({
-              ownerUserId: context.profile.user.slack_user_id,
-              ownerEmail: userEmail,
-              eventId: args.meeting_id as string,
-            });
-            if (ownerInfo.requesterSlackId && ownerInfo.requesterSlackId !== context.userId) {
-              const ownerFirst = context.profile.user.name.split(' ')[0];
-              logger.info('move_meeting — non-requester colleague → escalate', {
-                meetingId: args.meeting_id, requester: context.userId,
-              });
-              return {
-                needs_owner_approval: true,
-                reason: 'colleague_not_requester',
-                meeting_subject: args.meeting_subject,
-                requested_start: args.new_start,
-                requested_end: args.new_end,
-                message: `Only ${ownerFirst} (or whoever requested this meeting) can move "${args.meeting_subject}". Raise create_approval(kind=meeting_reschedule) so he can decide.`,
-              };
+            const { getEventForAttendeeUpdate } = await import('../../connectors/graph/calendar');
+            const ev = await getEventForAttendeeUpdate(userEmail, args.meeting_id as string);
+            if (ev) {
+              requiredAttendees = (ev.attendees ?? [])
+                .filter(a => !a.optional)
+                .map(a => ({ name: a.name, email: a.email.toLowerCase() }));
+              attendeesLoaded = true;
             }
           } catch (err) {
-            logger.warn('move_meeting requester gate — findMeetingOwner threw, falling through to rule check', {
-              err: String(err).slice(0, 200),
-            });
+            logger.warn('move_meeting colleague gate — attendee load threw', { err: String(err).slice(0, 200) });
           }
+
+          // Resolve the asker's email/name (the invite lists emails; match the
+          // asker's slack_id → email via people_memory).
+          let askerEmail: string | undefined;
+          let askerName: string | undefined;
+          try {
+            const { getPersonMemory } = await import('../../db/people');
+            const pm = getPersonMemory(context.userId);
+            askerEmail = pm?.email?.toLowerCase() || undefined;
+            askerName = pm?.name || undefined;
+          } catch (_) { /* treated as non-member below */ }
+          const askerFirst = askerName?.split(/\s+/)[0] ?? 'they';
+
+          // Couldn't read the invite → don't guess; let the owner decide.
+          if (!attendeesLoaded) {
+            return {
+              needs_owner_approval: true,
+              reason: 'attendee_check_failed',
+              meeting_subject: args.meeting_subject,
+              requested_start: args.new_start,
+              requested_end: args.new_end,
+              message: `I couldn't read who's on "${args.meeting_subject}" to check whether ${askerFirst} can move it. Raise create_approval(kind=meeting_reschedule) so ${ownerFirst} decides.`,
+            };
+          }
+
+          // Step 1 — the asker must be a REQUIRED attendee of the meeting.
+          const askerIsRequired = !!askerEmail && requiredAttendees.some(a => a.email === askerEmail);
+          if (!askerIsRequired) {
+            logger.info('move_meeting — asker is not a required attendee → escalate', {
+              meetingId: args.meeting_id, asker: context.userId,
+            });
+            return {
+              needs_owner_approval: true,
+              reason: 'requester_not_attendee',
+              meeting_subject: args.meeting_subject,
+              requested_start: args.new_start,
+              requested_end: args.new_end,
+              message: `${askerName ?? 'Someone'} asked to move "${args.meeting_subject}" but isn't on the invite — a meeting should only be moved by someone who's actually in it, so this needs ${ownerFirst}. Raise create_approval(kind=meeting_reschedule) and tell him ${askerFirst} isn't an attendee.`,
+            };
+          }
+          // Step 1.5 — every OTHER required attendee must be INTERNAL so we can
+          // actually verify their availability. An external attendee (client /
+          // partner, different domain) can't be read cross-tenant — getFreeBusy
+          // returns an empty (= "free all week") result for them, so step 2 would
+          // pass them blindly. Moving a meeting that involves outside people is
+          // high-stakes, so we never auto-move it: escalate to the owner with the
+          // external attendee named.
+          const ownerDomain = ownerEmailLc.includes('@') ? ownerEmailLc.split('@')[1] : '';
+          const externalRequired = requiredAttendees.filter(a =>
+            a.email !== ownerEmailLc
+            && a.email !== askerEmail
+            && (!ownerDomain || !a.email.endsWith('@' + ownerDomain)));
+          if (externalRequired.length > 0) {
+            const names = externalRequired.map(a => a.name?.split(/\s+/)[0] ?? a.email).join(', ');
+            logger.info('move_meeting — external required attendee(s), availability unverifiable → escalate', {
+              meetingId: args.meeting_id, external: externalRequired.map(a => a.email),
+            });
+            return {
+              needs_owner_approval: true,
+              reason: 'external_attendee_unverifiable',
+              meeting_subject: args.meeting_subject,
+              requested_start: args.new_start,
+              requested_end: args.new_end,
+              message: `${askerName ?? 'They'} asked to move "${args.meeting_subject}", but it has external attendee(s) whose availability I can't check (${names}) — moving a meeting with outside people needs ${ownerFirst}. Raise create_approval(kind=meeting_reschedule) and note the external attendee(s).`,
+            };
+          }
+
           const newStart = args.new_start as string | undefined;
           const newEnd = args.new_end as string | undefined;
           if (newStart && newEnd) {
@@ -3860,12 +3939,19 @@ export class SchedulingSkill {
                 const toIso = endDt.toUTC().toISO();
                 let validSlots: Array<{ start: string }> = [];
                 const diagnostics: { rejectedCounts?: Record<string, number>; rejectedExamples?: Record<string, string[]> } = {};
+                // v3.5.x (step 2) — check the OTHER required attendees too: owner
+                // + every required attendee EXCEPT the asker (the asker's own busy
+                // doesn't block their own request). findAvailableSlots' diagnostics
+                // then tell us WHO is busy so the escalation names them.
+                const colleagueMoveCheckEmails = [userEmail, ...requiredAttendees
+                  .map(a => a.email)
+                  .filter(e => e !== ownerEmailLc && e !== askerEmail)];
                 if (fromIso && toIso) {
                   validSlots = await findAvailableSlots({
                     userEmail,
                     timezone,
                     durationMinutes: durationMin,
-                    attendeeEmails: [userEmail],
+                    attendeeEmails: colleagueMoveCheckEmails,
                     searchFrom: fromIso,
                     searchTo: toIso,
                     profile: context.profile,
@@ -3886,12 +3972,15 @@ export class SchedulingSkill {
                 }
                 const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
                 if (!matches) {
-                  const ownerFirst = context.profile.user.name.split(' ')[0];
-                  // v2.6.1 — same rule-name surfacing as create_meeting Guard B.
+                  // Surface the SPECIFIC blocker (step 2 vs step 3) so the
+                  // approval tells the owner — and, downstream, the requester —
+                  // exactly why. Attendee-scoped diagnostic keys
+                  // (`attendee_busy_collision:<email>` /
+                  // `outside_attendee_work_hours:<email>`) name the person; the
+                  // rest are owner-rule violations. (ownerFirst from the gate above.)
                   const labelFor = (reason: string | undefined): string => {
                     switch (reason) {
                       case 'outside_owner_work_hours': return `outside ${ownerFirst}'s work hours`;
-                      case 'outside_attendee_work_hours': return `outside the attendee's working hours`;
                       case 'owner_busy_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
                       // legacy label name kept as alias in case any older diagnostics path still emits it
                       case 'owner_busy_or_buffer_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
@@ -3905,26 +3994,38 @@ export class SchedulingSkill {
                       default: return 'unknown';
                     }
                   };
+                  const nameForEmail = (em: string): string =>
+                    requiredAttendees.find(a => a.email === em.toLowerCase())?.name?.split(/\s+/)[0] ?? 'another attendee';
                   const counts = diagnostics.rejectedCounts ?? {};
                   const fired = Object.keys(counts);
                   const brokenRule = fired[0];
-                  const brokenRuleLabel = labelFor(brokenRule);
-                  logger.info('move_meeting colleague-path refused — new slot breaks owner rules', {
+                  let reasonCode: string;
+                  let humanReason: string;
+                  if (brokenRule && brokenRule.startsWith('attendee_busy_collision')) {
+                    reasonCode = 'attendee_unavailable';
+                    humanReason = `${nameForEmail(brokenRule.split(':')[1] ?? '')} isn't free then`;
+                  } else if (brokenRule && brokenRule.startsWith('outside_attendee_work_hours')) {
+                    reasonCode = 'attendee_unavailable';
+                    humanReason = `it's outside ${nameForEmail(brokenRule.split(':')[1] ?? '')}'s working hours`;
+                  } else {
+                    reasonCode = 'not_rule_compliant';
+                    humanReason = labelFor(brokenRule);
+                  }
+                  logger.info('move_meeting colleague-path refused — new slot blocked', {
                     meetingId: args.meeting_id, newStart, newEnd, requester: context.userId,
-                    broken_rule: brokenRule ?? 'unknown',
-                    broken_rule_label: brokenRuleLabel,
+                    broken_rule: brokenRule ?? 'unknown', reason_code: reasonCode, human_reason: humanReason,
                   });
                   return {
                     needs_owner_approval: true,
-                    reason: 'not_rule_compliant',
+                    reason: reasonCode,
                     broken_rule: brokenRule ?? 'unknown',
-                    broken_rule_label: brokenRuleLabel,
+                    broken_rule_label: humanReason,
                     meeting_subject: args.meeting_subject,
                     requested_start: newStart,
                     requested_end: newEnd,
-                    message: brokenRuleLabel === 'unknown'
-                      ? `That time doesn't pass ${ownerFirst}'s scheduling rules and I can't tell exactly which one flagged it. Call create_approval(kind=meeting_reschedule) — describe the slot honestly and let him decide.`
-                      : `That time is ${brokenRuleLabel} for ${ownerFirst}. I can't move it on my own — call create_approval(kind=meeting_reschedule) and pass the same phrase ("${brokenRuleLabel}") in ask_text so he knows what he's overriding.`,
+                    message: humanReason === 'unknown'
+                      ? `${askerName ?? 'They'} asked to move "${args.meeting_subject}" to that time, but it doesn't pass ${ownerFirst}'s scheduling rules and I can't tell which one. Call create_approval(kind=meeting_reschedule) and let him decide.`
+                      : `${askerName ?? 'They'} asked to move "${args.meeting_subject}" to that time, but ${humanReason}. I can't do it on my own — call create_approval(kind=meeting_reschedule) and pass "${humanReason}" in ask_text so ${ownerFirst} knows what he's deciding.`,
                   };
                 }
               }
