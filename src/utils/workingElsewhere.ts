@@ -19,6 +19,7 @@
 
 import { DateTime } from 'luxon';
 import type { CalendarEvent } from '../connectors/graph/calendar';
+import type { UserProfile } from '../config/userProfile';
 import { inferTimezoneFromState } from './locationTz';
 import logger from './logger';
 
@@ -255,6 +256,43 @@ export async function summarizeWorkingElsewhere(
   return { working_elsewhere: { days }, _working_elsewhere_note: note };
 }
 
+/**
+ * The resolved Working-Elsewhere offer window for ONE search layer. `days` is
+ * the set of weekday long-names to offer at all; the hour/min pairs bound the
+ * band inside each offered day (in the trip tz).
+ */
+export interface WeWindow {
+  days: Set<string>;
+  startHour: number;
+  startMin: number;
+  endHour: number;
+  endMin: number;
+}
+
+/**
+ * Resolve the WE offer window for a search. `relaxed` picks the owner-override
+ * layer (wider net) vs the regular colleague-facing layer. Values come from
+ * `profile.meetings.working_elsewhere`; when that block is absent we fall back
+ * to the owner's normal work-week (office ∪ home days) + a neutral business
+ * band (09:00-17:00 regular / 08:00-20:00 relaxed) so an unconfigured tenant
+ * still behaves sanely. The owner's own values live in YAML, never hardcoded.
+ */
+export function getWeWindow(profile: UserProfile, relaxed: boolean): WeWindow {
+  const cfg = profile.meetings.working_elsewhere?.[relaxed ? 'relaxed' : 'regular'];
+  const days = (cfg?.days && cfg.days.length > 0)
+    ? cfg.days
+    : [...new Set<string>([
+        ...(profile.schedule.office_days.days as string[]),
+        ...(profile.schedule.home_days.days as string[]),
+      ])];
+  const hours = cfg?.hours ?? (relaxed ? '08:00-20:00' : '09:00-17:00');
+  const m = /^(\d{2}):(\d{2})-(\d{2}):(\d{2})$/.exec(hours);
+  const [sh, sm, eh, em] = m
+    ? [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])]
+    : (relaxed ? [8, 0, 20, 0] : [9, 0, 17, 0]);
+  return { days: new Set(days), startHour: sh, startMin: sm, endHour: eh, endMin: em };
+}
+
 export interface TentativeSlot {
   start: string;                         // owner-TZ ISO (absolute instant; same as the rest of the array)
   end: string;
@@ -278,12 +316,16 @@ export function computeTentativeWeSlots(params: {
   durationMinutes: number;
   allBusy: Array<{ start: Date; end: Date }>;
   earliestAllowedMs: number;
-  dayStartHour?: number;                 // away-TZ band start (default 08:00)
-  dayEndHour?: number;                   // away-TZ band end (default 20:00)
+  dayStartHour?: number;                 // away-TZ band start hour (default 08)
+  dayStartMin?: number;                  // away-TZ band start minute (default 00)
+  dayEndHour?: number;                   // away-TZ band end hour (default 20)
+  dayEndMin?: number;                    // away-TZ band end minute (default 00)
   maxPerDay?: number;
 }): TentativeSlot[] {
   const startHour = params.dayStartHour ?? 8;
+  const startMin = params.dayStartMin ?? 0;
   const endHour = params.dayEndHour ?? 20;
+  const endMin = params.dayEndMin ?? 0;
   const maxPerDay = params.maxPerDay ?? 4;
   const stepMs = 15 * 60 * 1000;
   const durMs = params.durationMinutes * 60 * 1000;
@@ -292,8 +334,8 @@ export function computeTentativeWeSlots(params: {
   // Anchor the band on the OWNER-local calendar date, but in the AWAY zone:
   // the day the colleague/owner is asking about, rendered in the traveler's
   // local clock. Use the owner-local date as the anchor day in the away TZ.
-  const bandStart = DateTime.fromISO(`${params.date}T00:00:00`, { zone: params.awayTz }).set({ hour: startHour });
-  const bandEnd = DateTime.fromISO(`${params.date}T00:00:00`, { zone: params.awayTz }).set({ hour: endHour });
+  const bandStart = DateTime.fromISO(`${params.date}T00:00:00`, { zone: params.awayTz }).set({ hour: startHour, minute: startMin });
+  const bandEnd = DateTime.fromISO(`${params.date}T00:00:00`, { zone: params.awayTz }).set({ hour: endHour, minute: endMin });
   if (!bandStart.isValid || !bandEnd.isValid) return [];
 
   const collected: TentativeSlot[] = [];

@@ -1538,9 +1538,17 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
         // worth saying" (all detected issues acknowledged/resolved), so the
         // routine goes quiet instead of re-sending a waived count.
         const vacuous = summaryLines.length === 0 && narratableCount === 0 && fixesApplied === 0;
+        // v3.5.x (#3 follow-up, 2026-06-25) — the routine narrates from `issues`,
+        // not the deterministic `summary_text`, so filtering only summary_text
+        // left an acknowledged issue (the approved "5 weeklies on June 29") in
+        // the array the narrator reads → it re-flagged despite the approval.
+        // Drop acknowledged/resolved-and-unfixed issues from what's RETURNED, so
+        // the narrator can't surface them. Fixed/failed issues stay (Maelle still
+        // reports the action she took). Mirrors the brief/analyze read-paths.
+        const visibleIssues = issues.filter(i => i.fixed || i.fix_failed || !isAckSuppressed(i));
         return {
-          issues,
-          count: issues.length,
+          issues: visibleIssues,
+          count: visibleIssues.length,
           mode,
           fixes_applied: fixesApplied,
           // v2.6.5 — surface internal mutations so the claim-checker doesn't
@@ -1553,11 +1561,11 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
           // from issues[]. humanGate humanizes the template downstream.
           summary_text: summaryText,
           vacuous,
-          summary: issues.length === 0
+          summary: visibleIssues.length === 0
             ? 'Calendar looks healthy — no issues found.'
             : mode === 'active'
-            ? `Scanned ${startDate} to ${endDate}: ${issues.length} issue${issues.length === 1 ? '' : 's'} found, ${fixesApplied} fixed automatically. Remaining need your input.`
-            : `Found ${issues.length} issue${issues.length === 1 ? '' : 's'} across ${startDate} to ${endDate}.${newIssueCount > 0 ? ` ${newIssueCount} new issue(s) tracked for follow-up.` : ''}`,
+            ? `Scanned ${startDate} to ${endDate}: ${visibleIssues.length} issue${visibleIssues.length === 1 ? '' : 's'} found, ${fixesApplied} fixed automatically. Remaining need your input.`
+            : `Found ${visibleIssues.length} issue${visibleIssues.length === 1 ? '' : 's'} across ${startDate} to ${endDate}.${newIssueCount > 0 ? ` ${newIssueCount} new issue(s) tracked for follow-up.` : ''}`,
         };
       }
 

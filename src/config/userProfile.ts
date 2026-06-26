@@ -260,6 +260,24 @@ const UserProfileSchema = z.object({
     issue_exclusions: z.object({
       subjects: z.array(z.string()).default([]),
     }).optional(),
+    // WORKING ELSEWHERE offer window — the two-layer band Maelle uses on a
+    // travel day (any day flagged showAs=workingElsewhere), expressed in the
+    // TRIP timezone. `regular` = colleague / normal search (classic window);
+    // `relaxed` = owner override (wider net). `days` scopes which weekdays are
+    // offered at all; `hours` is "HH:MM-HH:MM". Optional — absent → the slot
+    // finder falls back to the owner's normal work-week + 09:00-17:00/08:00-20:00
+    // (see utils/workingElsewhere.ts getWeWindow). NEVER hardcode the tenant's
+    // values; this is the cloneable home for them.
+    working_elsewhere: z.object({
+      regular: z.object({
+        days: z.array(z.enum(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'])).default([]),
+        hours: z.string().regex(/^\d{2}:\d{2}-\d{2}:\d{2}$/),
+      }),
+      relaxed: z.object({
+        days: z.array(z.enum(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'])).default([]),
+        hours: z.string().regex(/^\d{2}:\d{2}-\d{2}:\d{2}$/),
+      }),
+    }).optional(),
   }).default({
     allowed_durations: [25, 50],
     buffer_minutes: 0,

@@ -2,6 +2,25 @@
 
 ---
 
+## 3.5.3 — real-day small fixes: WE offer-window, slot-hold accumulation, calendar-health re-flag
+
+A bug-wave patch across the meeting / calendar-health chats from a day of real use. Three fixes: Working-Elsewhere days now offer a general away-local window instead of home hours clipped into the trip timezone; slot holds accumulate (you can hold several options) instead of silently replacing each other; and an acknowledged calendar-health issue actually stops re-flagging. No new capability; the one new YAML block is optional. Restart required.
+
+### Fixed — Working Elsewhere offer window (meeting chat)
+- **A travel day offers away-local business hours, not Israel hours in disguise.** The slot finder resolved the owner's normal per-day (home-tz) work hours on a Working-Elsewhere day and merely rendered them in the trip timezone — so a Boston day surfaced "8:00 AM Boston (15:00 Israel)" and a colleague's full-week request collapsed to a single slot. WE days now use a general away-local offer window (config-driven `meetings.working_elsewhere`, trip-tz; neutral 09:00–17:00 regular / 08:00–20:00 owner-relaxed fallback when unset), scoped to the configured weekdays. ([calendar.ts](src/connectors/graph/calendar.ts), [workingElsewhere.ts](src/utils/workingElsewhere.ts), [userProfile.ts](src/config/userProfile.ts))
+- **WE slots group by their trip-tz day.** A Boston-evening slot carries an Israel-next-day date; grouping by home tz scattered one trip day across two and let the "offer ≥2 days" guard pass on what was really one Boston day. WE slots now group by `away_tz` (home slots unchanged — zero regression). ([calendar.ts](src/connectors/graph/calendar.ts))
+
+### Fixed — slot holds (meeting chat)
+- **Holds accumulate instead of silently replacing each other.** Every `hold_slot` call released the holder's prior holds in the thread ("repick-replace"), so "hold these 3 options for me" left only the last one and "all three are held" was a false report. Holds now stack — re-holding the SAME slot is idempotent, a different slot adds — bounded by **≤3 per holder** and **≤2 per meeting** (new `MAX_HOLDS_PER_MEETING`); at the cap the tool refuses so the narration stays honest. The dead repick helper was removed. ([slotHolds.ts](src/db/slotHolds.ts), [ops.ts](src/skills/meetings/ops.ts))
+
+### Fixed — calendar health (calendar chat)
+- **An acknowledged busy-day / over-limit issue stops re-flagging — for real this time.** The prior fix filtered the deterministic `summary_text`, but the routine narrates from the returned `issues` array, so an approved item (the "5 weeklies on Monday" the owner had already waved off) stayed in the list the narrator reads and re-surfaced every run. `check_calendar_health` now returns the suppression-filtered issue list (`getSuppressedEventIds`), so an approved/resolved-and-unfixed issue is never handed to the narrator. Fixed/failed issues still report. ([calendarHealth.ts](src/skills/calendarHealth.ts))
+
+### Migration
+- New OPTIONAL `meetings.working_elsewhere` block in the user profile (regular/relaxed days + hours). Absent → neutral work-week + 09:00–17:00/08:00–20:00 fallback, so existing configs are unaffected. Restart required to load the WE window, hold caps, and calendar-health change.
+
+---
+
 ## 3.5.2 — "book a private block + adapt the calendar" hardening (scheduling honesty + one-step override)
 
 A real-day chat that started clean and degraded — a private 2-hour Bootcamp block plus a same-day reflow of three 1:1s — drove a seven-bug wave fixed across the meeting / guard / prompt chats, plus a calendar-health re-flag fix and a refinement of the owner-location grounding (#134). The throughline: tell the truth about what landed, override in one step, and don't re-flag what the owner already waved off. Patch — fixes only, no new capability; no schema change. Restart required. Traced 12/12 against the chat before shipping.

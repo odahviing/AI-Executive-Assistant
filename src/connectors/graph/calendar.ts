@@ -182,7 +182,7 @@ function toEndOfDayLocal(dateStr: string, timezone: string): string {
  * Output: chronological regardless of internal day walk order.
  */
 export function pickSpreadSlots(
-  slots: Array<{ start: string; disturbs_floating_block?: boolean }>,
+  slots: Array<{ start: string; disturbs_floating_block?: boolean; away_tz?: string }>,
   timezone: string,
   count = 3,
   anchorDay?: string,
@@ -200,7 +200,13 @@ export function pickSpreadSlots(
   // Group candidates by local day.
   const byDay = new Map<string, Array<{ start: string; dt: DateTime; disturbs: boolean }>>();
   for (const s of slots) {
-    const dt = DateTime.fromISO(s.start).setZone(timezone);
+    // WE spine — a Working-Elsewhere slot's day is its TRIP-tz day, not the
+    // owner-home day. Its `start` is owner-tz ISO, so a Boston-evening slot
+    // carries an Israel-NEXT-day date; grouping by home tz scattered one trip
+    // day across two and let the "≥2 days" guard pass on what was really one
+    // Boston day (the "all Monday, nothing Tue–Thu" miss). Home slots have no
+    // away_tz → group by `timezone` exactly as before (zero regression).
+    const dt = DateTime.fromISO(s.start).setZone(s.away_tz ?? timezone);
     const day = dt.toFormat('yyyy-MM-dd');
     let bucket = byDay.get(day);
     if (!bucket) { bucket = []; byDay.set(day, bucket); }
@@ -272,13 +278,13 @@ export function pickSpreadSlots(
       // useful — better to return fewer, distinct options. Only enforced when
       // the caller passed durationMinutes.
       if (durationMinutes && durationMinutes > 0) {
-        const dt = DateTime.fromISO(s.start).setZone(timezone);
+        const dt = DateTime.fromISO(s.start).setZone(s.away_tz ?? timezone);
         const overlaps = chosenDts.some(c => Math.abs(dt.diff(c, 'minutes').minutes) < durationMinutes);
         if (overlaps) continue;
       }
       chosen.push(s.start);
       chosenSet.add(s.start);
-      chosenDts.push(DateTime.fromISO(s.start).setZone(timezone));
+      chosenDts.push(DateTime.fromISO(s.start).setZone(s.away_tz ?? timezone));
     }
   }
 
@@ -1395,13 +1401,21 @@ export async function findAvailableSlots(params: {
     // hot loop), compute busy-aware open gaps in the away-TZ daytime band, tag
     // them tentative, and append. Unresolvable locations are surfaced so the
     // caller asks the owner — NEVER silently offered in his home TZ.
-    if (weDays.size > 0) {
+    if (weDays.size > 0 && profile) {
       const winFromDate = DateTime.fromISO(windowFrom, { zone: params.timezone }).toFormat('yyyy-MM-dd');
       const winToDate = DateTime.fromISO(windowTo, { zone: params.timezone }).toFormat('yyyy-MM-dd');
+      // WE offer window (which weekdays + the hour band) for THIS search layer:
+      // regular (colleague / normal) vs the owner-override `relaxed` net. Config-
+      // driven (profile.meetings.working_elsewhere), trip-tz, work-week fallback.
+      const weWin = we.getWeWindow(profile, params.relaxed === true);
       const weResolved: Array<{ date: string; away_tz: string; location: string }> = [];
       const weUnresolved: Array<{ date: string; location: string }> = [];
       for (const [dateIso, info] of weDays) {
         if (dateIso < winFromDate || dateIso > winToDate) continue;
+        // WE day-of-week scope — offer only the configured weekdays (e.g. regular
+        // Mon–Fri, relaxed Sun–Fri). A calendar date's weekday is tz-stable.
+        const weDayName = DateTime.fromISO(dateIso, { zone: params.timezone }).toFormat('EEEE');
+        if (!weWin.days.has(weDayName)) continue;
         const awayTz = await we.resolveWorkingElsewhereTz(info.location);
         if (!awayTz) {
           weUnresolved.push({ date: dateIso, location: info.location });
@@ -1426,6 +1440,10 @@ export async function findAvailableSlots(params: {
           durationMinutes: params.durationMinutes,
           allBusy: dayBusy,
           earliestAllowedMs: earliestAllowed.getTime(),
+          dayStartHour: weWin.startHour,
+          dayStartMin: weWin.startMin,
+          dayEndHour: weWin.endHour,
+          dayEndMin: weWin.endMin,
         });
         candidates.push(...weSlots);
         weResolved.push({ date: dateIso, away_tz: awayTz, location: info.location });

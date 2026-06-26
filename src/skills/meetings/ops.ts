@@ -813,10 +813,20 @@ export class SchedulingSkill {
         if (!wasOffered) {
           return { success: false, error: 'slot_not_offered', message: 'You can only hold a time I actually offered you in this conversation.' };
         }
-        // Re-pick in the same thread replaces the prior hold (doesn't stack).
-        sh.releaseHoldsForHolderThread(ownerUserId, holderSlackId, context.threadTs, 'replaced_by_repick');
+        // v3.5.x — holds ACCUMULATE; they don't blanket-replace. The old
+        // repick-replace released ALL of the holder's prior holds on every call,
+        // so "hold these 3 options" left only the last — the cap of 3 was
+        // unreachable and "all three are held" was a false narrative (Oran,
+        // 2026-06-25). Now: re-holding the SAME slot is idempotent (drop just
+        // that slot's prior hold, keep the others); a DIFFERENT slot stacks,
+        // bounded by ≤MAX_HOLDS_PER_HOLDER total AND ≤MAX_HOLDS_PER_MEETING for
+        // one meeting (subject). Owner: "3 per holder, no more than 2 per meeting."
+        sh.releaseHoldsForOwner(ownerUserId, { holderSlackId, startIso }, 'replaced_same_slot');
         if (sh.countActiveHoldsForHolder(ownerUserId, holderSlackId) >= sh.MAX_HOLDS_PER_HOLDER) {
           return { success: false, error: 'hold_cap_reached', message: `You already have ${sh.MAX_HOLDS_PER_HOLDER} times on hold — release one before adding another.` };
+        }
+        if (sh.countActiveHoldsForHolderSubject(ownerUserId, holderSlackId, args.subject as string | undefined) >= sh.MAX_HOLDS_PER_MEETING) {
+          return { success: false, error: 'meeting_hold_cap_reached', message: `You already have ${sh.MAX_HOLDS_PER_MEETING} slots on hold for that meeting — release one before holding another for it.` };
         }
         const { getPersonMemory: getPM } = await import('../../db');
         const requesterRow = getPM(holderSlackId);
@@ -2026,6 +2036,19 @@ export class SchedulingSkill {
               });
             }
 
+            // WE spine — pre-render the owner's OWN clock in his trip (away)
+            // timezone, the same verbatim-quote treatment attendees +
+            // present_in_timezone already get. Without it the model had only the
+            // raw `away_tz` IANA string and computed his there-time itself — the
+            // wrong-offset narration (15:45 rendered "7:45" instead of 08:45
+            // Boston, and Craig inverted). renderClockInZone is the shared
+            // deterministic renderer (offset abbr + trip weekday, no raw IANA).
+            annotatedSlots = annotatedSlots.map((s: any) => {
+              if (!s.away_tz) return s;
+              const display = renderClockInZone(s.start, timezone, s.away_tz);
+              return display ? { ...s, away_local_display: display } : s;
+            });
+
             // Presentation timezone — the requester asked for options in a
             // specific zone (e.g. "in ET"), even when no attendee is stored
             // there (an organizer collecting options for US colleagues). Without
@@ -2148,7 +2171,7 @@ export class SchedulingSkill {
               if (hasWe) {
                 result.working_elsewhere = weInfo;
                 result._working_elsewhere_note =
-                  'Some days in this window are marked Working Elsewhere — the owner is in a different place/timezone, so his normal scheduling rules are SUSPENDED. Slots tagged `tentative_working_elsewhere:true` are TENTATIVE openings computed in his away timezone (see each slot\'s `away_tz` + `away_location`): present them in HIS local time there, ideally dual-TZ (e.g. "10:00 Boston / 17:00 your time"), say they need his confirmation, and route any booking through approval — never present as locked. For any day in `working_elsewhere.unresolved` (a marker whose location I could not map to a timezone), DO NOT offer times — ASK the owner what timezone he is in that day. NEVER show his home-timezone clock for a working-elsewhere day.';
+                  'Some days in this window are marked Working Elsewhere — the owner is in a different place/timezone, so his normal scheduling rules are SUSPENDED. Slots tagged `tentative_working_elsewhere:true` are TENTATIVE openings in his trip timezone. Each slot carries `away_local_display` — his clock where he physically is, e.g. "Mon 29 Jun 14:30 EDT" — plus `away_location`; any attendee in another zone carries `per_attendee_local[].local_display`. QUOTE these strings VERBATIM, and group days by the weekday inside `away_local_display` — NEVER compute a timezone or a day yourself. Present dual-clock (his trip time from `away_local_display`, his home time read off the slot `start`), say they need his confirmation, and route any booking through approval — never present as locked. For any day in `working_elsewhere.unresolved` (a marker whose location I could not map to a timezone), DO NOT offer times — ASK the owner what timezone he is in that day. NEVER show his home-timezone clock as his there-time on a working-elsewhere day.';
               }
               return result;
             }
