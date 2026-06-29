@@ -272,39 +272,75 @@ async function buildParticipants(
   return out;
 }
 
+/** v3.5.x — the resolved duration decision for a booking. */
+export interface DurationDecision {
+  endIso: string;        // end to use (silently snapped, or original when honored)
+  durationMin: number;   // resulting duration in minutes
+  requestedMin: number;  // what the caller asked for
+  snappedMin: number;    // nearest allowed preset (for the confirm message)
+  needsConfirm: boolean; // true ONLY for a colleague-path off-preset long duration
+}
+
+/**
+ * THE single place that decides what to do with a booking's requested duration,
+ * shared by the create_meeting verify-gate (ops.ts) and `buildSlot` below — so
+ * the two can't drift. They used to each carry their own snap + owner carve-out
+ * (the "mirror" that let the owner-path fix half-work). Rules:
+ *   - already an allowed preset → unchanged.
+ *   - off by ≤5 min ("1 hour" → 55) → snap silently.
+ *   - off by >5 min:
+ *       · OWNER stated it → honor as-is, ONE step (#127 owner authority) — no
+ *         "book the full 2h or 55?" on a length he explicitly named.
+ *       · COLLEAGUE proposed it → needsConfirm (caller asks / escalates); the
+ *         length is left untouched so the confirm shows the real ask.
+ * Returns null when start/end don't parse — caller leaves the slot as-is.
+ */
+export function resolveDuration(
+  startIso: string,
+  endIso: string,
+  profile: UserProfile,
+  isOwner: boolean,
+): DurationDecision | null {
+  const startMs = Date.parse(startIso);
+  const endMs = Date.parse(endIso);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return null;
+  const requestedMin = Math.round((endMs - startMs) / 60000);
+  const allowed = profile.meetings.allowed_durations;
+  if (!Array.isArray(allowed) || allowed.length === 0 || allowed.includes(requestedMin)) {
+    return { endIso, durationMin: requestedMin, requestedMin, snappedMin: requestedMin, needsConfirm: false };
+  }
+  const snappedMin = allowed.reduce((best, c) =>
+    Math.abs(c - requestedMin) < Math.abs(best - requestedMin) ? c : best, allowed[0]);
+  const snapDelta = Math.abs(requestedMin - snappedMin);
+  if (snapDelta <= 5) {
+    return {
+      endIso: new Date(startMs + snappedMin * 60000).toISOString(),
+      durationMin: snappedMin, requestedMin, snappedMin, needsConfirm: false,
+    };
+  }
+  // >5 min off the nearest preset.
+  if (isOwner) {
+    // Owner stated the length — honor it, one step. No snap, no confirm.
+    return { endIso, durationMin: requestedMin, requestedMin, snappedMin, needsConfirm: false };
+  }
+  // Colleague proposing an off-preset long duration → surface a confirm upstream.
+  return { endIso, durationMin: requestedMin, requestedMin, snappedMin, needsConfirm: true };
+}
+
 function buildSlot(args: Record<string, unknown>, profile: UserProfile, initiator: 'owner' | 'colleague'): InternalSlot | undefined {
   const start = (args.start as string | undefined) ?? (args.new_start as string | undefined);
   const end = (args.end as string | undefined) ?? (args.new_end as string | undefined);
   if (!start || !end) return undefined;
 
-  const startMs = Date.parse(start);
-  const endMs = Date.parse(end);
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return undefined;
-
-  const requestedMin = Math.round((endMs - startMs) / 60000);
-  const allowed = profile.meetings.allowed_durations;
-  let snappedMin = requestedMin;
-  // #override-spine — the owner's explicit `relaxed` override honors the FULL
-  // requested length (e.g. a 120-min block): skip the allowed-durations snap, the
-  // same carve-out the create_meeting verify-gate uses. Without this the gate
-  // would wave the length through but THIS snap would still shrink 120→55, so the
-  // override only half-worked. Owner-path only — a colleague can't bypass the snap.
-  const ownerOverrideDuration = initiator === 'owner' && args.relaxed === true;
-  if (!ownerOverrideDuration && Array.isArray(allowed) && allowed.length > 0 && !allowed.includes(requestedMin)) {
-    snappedMin = allowed.reduce((best, candidate) =>
-      Math.abs(candidate - requestedMin) < Math.abs(best - requestedMin) ? candidate : best,
-    allowed[0]);
-    if (snappedMin !== requestedMin) {
-      logger.info('normalizeBookingRequest: snapped duration to allowed_durations', {
-        requested: requestedMin, snappedTo: snappedMin, allowed,
-      });
-    }
+  // One shared decision (resolveDuration) — no second copy of the snap here.
+  const d = resolveDuration(start, end, profile, initiator === 'owner');
+  if (!d) return undefined;
+  if (d.durationMin !== d.requestedMin) {
+    logger.info('normalizeBookingRequest: snapped duration to allowed_durations', {
+      requested: d.requestedMin, snappedTo: d.durationMin, allowed: profile.meetings.allowed_durations,
+    });
   }
-  const endIso = snappedMin === requestedMin
-    ? end
-    : new Date(startMs + snappedMin * 60000).toISOString();
-
-  return { startIso: start, endIso, durationMin: snappedMin };
+  return { startIso: start, endIso: d.endIso, durationMin: d.durationMin };
 }
 
 async function gateSensitivity(

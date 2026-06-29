@@ -16,6 +16,9 @@ The headline is a 7-hour booking drift while the owner travels: a meeting set fo
 - Anchor a block to an event's end. `create_meeting.start_at_event_end_id` + `duration_minutes` place "a 2h block after my flight" deterministically (read the event's end instant — no model clock math, no "what time does it land?"). One shared `getEventEndInstant`, reused by the `must_be_after_event_id` ordering guard. ([calendar.ts](src/connectors/graph/calendar.ts), [meetings.ts](src/skills/meetings.ts), [ops.ts](src/skills/meetings/ops.ts))
 - Slot spread is round-robin, target 5. `pickSpreadSlots` now takes one slot per day across days first (diversity), then deepens, up to 5; the chronological 30-cap that let one wide-open day dominate is gone (it is the single spreader now). ([calendar.ts](src/connectors/graph/calendar.ts))
 
+### Changed — duration decision unified (cross-chat)
+- One `resolveDuration` now owns the allowed-duration snap, shared by the booking normalizer and the create verify-gate so the two can't drift: an owner-stated length is honored in one step (no "book the full 2h or 55?" on a length he named — #127), a within-5-min miss snaps silently, and a colleague's off-preset long duration surfaces a confirm. ([bookingRequest.ts](src/skills/meetings/bookingRequest.ts), [ops.ts](src/skills/meetings/ops.ts))
+
 ### Fixed — colleague free/busy is a helper, never a blocker (rule 6)
 - A colleague search an attendee zeroes out now falls back to the owner's open times. When strict returns 0 only because attendee(s) are busy/off-hours, the colleague path re-runs owner-only and offers his open slots with a "couldn't confirm the other side" caveat — so Maelle never dead-ends into demanding an attendee's email. ([ops.ts](src/skills/meetings/ops.ts))
 
