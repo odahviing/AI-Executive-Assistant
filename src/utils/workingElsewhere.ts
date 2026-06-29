@@ -320,16 +320,13 @@ export function computeTentativeWeSlots(params: {
   dayStartMin?: number;                  // away-TZ band start minute (default 00)
   dayEndHour?: number;                   // away-TZ band end hour (default 20)
   dayEndMin?: number;                    // away-TZ band end minute (default 00)
-  maxPerDay?: number;
 }): TentativeSlot[] {
   const startHour = params.dayStartHour ?? 8;
   const startMin = params.dayStartMin ?? 0;
   const endHour = params.dayEndHour ?? 20;
   const endMin = params.dayEndMin ?? 0;
-  const maxPerDay = params.maxPerDay ?? 4;
   const stepMs = 15 * 60 * 1000;
   const durMs = params.durationMinutes * 60 * 1000;
-  const preferredGapMs = 30 * 60 * 1000;
 
   // Anchor the band on the OWNER-local calendar date, but in the AWAY zone:
   // the day the colleague/owner is asking about, rendered in the traveler's
@@ -362,13 +359,9 @@ export function computeTentativeWeSlots(params: {
     cursorMs += stepMs;
   }
 
-  // Spread: prefer 30-min spacing, cap at maxPerDay (mirror the main walker).
-  if (collected.length <= maxPerDay) return collected;
-  const picked: TentativeSlot[] = [collected[0]];
-  let lastMs = new Date(collected[0].start).getTime();
-  for (let i = 1; i < collected.length && picked.length < maxPerDay; i++) {
-    const t = new Date(collected[i].start).getTime();
-    if (t - lastMs >= preferredGapMs) { picked.push(collected[i]); lastMs = t; }
-  }
-  return picked;
+  // Emit the FULL free-slot pool — no per-day cap, no pre-spread. pickSpreadSlots
+  // is the single spreader for both paths: the regular walk also emits every
+  // valid slot and lets pickSpreadSlots own the round-robin selection. (This
+  // previously pre-spread to 4/day, double-spreading with pickSpreadSlots.)
+  return collected;
 }

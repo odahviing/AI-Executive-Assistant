@@ -184,28 +184,23 @@ function toEndOfDayLocal(dateStr: string, timezone: string): string {
 export function pickSpreadSlots(
   slots: Array<{ start: string; disturbs_floating_block?: boolean; away_tz?: string }>,
   timezone: string,
-  count = 3,
+  count = 5,
   anchorDay?: string,
-  // v3.1.6 — when provided, the fill pass won't append a slot that OVERLAPS an
-  // already-chosen one ([start, start+duration)). Without this, the fill pass
-  // back-filled overlapping starts to hit `count` — e.g. for a 55-min meeting
-  // it offered 10:30 / 11:00 / 11:30, where 11:00 and 11:30 land inside the
-  // 10:30 slot. Omitted → no overlap guard (back-compat for callers that don't
-  // pass it).
+  // When set, no two returned slots start within `durationMinutes` of each
+  // other (a later start landing inside an earlier slot is never a useful
+  // option). Omitted → no overlap guard.
   durationMinutes?: number,
 ): string[] {
   const MIN_GAP_HOURS = 1;
-  const MAX_PER_DAY = 2;
 
-  // Group candidates by local day.
+  // Group candidates by their EFFECTIVE local day.
   const byDay = new Map<string, Array<{ start: string; dt: DateTime; disturbs: boolean }>>();
   for (const s of slots) {
     // WE spine — a Working-Elsewhere slot's day is its TRIP-tz day, not the
     // owner-home day. Its `start` is owner-tz ISO, so a Boston-evening slot
     // carries an Israel-NEXT-day date; grouping by home tz scattered one trip
-    // day across two and let the "≥2 days" guard pass on what was really one
-    // Boston day (the "all Monday, nothing Tue–Thu" miss). Home slots have no
-    // away_tz → group by `timezone` exactly as before (zero regression).
+    // day across two. Home slots have no away_tz → group by `timezone` exactly
+    // as before (zero regression).
     const dt = DateTime.fromISO(s.start).setZone(s.away_tz ?? timezone);
     const day = dt.toFormat('yyyy-MM-dd');
     let bucket = byDay.get(day);
@@ -213,82 +208,55 @@ export function pickSpreadSlots(
     bucket.push({ start: s.start, dt, disturbs: s.disturbs_floating_block === true });
   }
   // v3.2.6 (RC1) — within each day, prefer slots that DON'T disturb a floating
-  // block (lunch). Stable sort keeps chronological order inside each group, so
-  // the per-day pick below takes the earliest non-disturbing slot first and
-  // only falls to a block-displacing one when nothing else is free.
+  // block (lunch). Stable sort keeps chronological order inside each group.
   for (const bucket of byDay.values()) {
     bucket.sort((a, b) => (a.disturbs ? 1 : 0) - (b.disturbs ? 1 : 0));
   }
 
-  // Chronological day list. Slots from findAvailableSlots are already
-  // chronological so per-day buckets are too; just sort the day keys.
+  // Day walk order — chronological, with a move's anchor (source) day first.
   const allDays = [...byDay.keys()].sort();
   const dayOrder = (anchorDay && byDay.has(anchorDay))
     ? [anchorDay, ...allDays.filter(d => d !== anchorDay)]
     : allDays;
 
+  // ROUND-ROBIN by day: round 1 takes the first viable slot from EACH day
+  // (maximize distinct days), round 2 a second from each (≥1h from that day's
+  // prior pick, no overlapping start), and so on until `count` or no day can
+  // yield more. Diversity first, then depth — e.g. 1 Sun / 3 Mon / 1 Tue when
+  // Monday is the deep day, collapsing to fewer days (2 Tue / 3 Mon, or all one
+  // day) only when that's all that exists — never dropping, just filling what's
+  // there. The ≥1h gap caps how many one day can supply, so a lone day yields
+  // ~2-3 rather than a clustered 5. This is the SINGLE spreader for both the
+  // regular and Working-Elsewhere paths.
   const chosen: string[] = [];
   const chosenDts: DateTime[] = [];
-
-  for (const day of dayOrder) {
-    if (chosen.length >= count) break;
-    const bucket = byDay.get(day)!;
-    let perDay = 0;
-    for (const { start, dt } of bucket) {
+  const cursor = new Map<string, number>();   // next unscanned index per day
+  let progressed = true;
+  while (chosen.length < count && progressed) {
+    progressed = false;
+    for (const day of dayOrder) {
       if (chosen.length >= count) break;
-      if (perDay >= MAX_PER_DAY) break;
-      const tooClose = chosenDts.some(c => Math.abs(dt.diff(c, 'hours').hours) < MIN_GAP_HOURS);
-      if (tooClose) continue;
-      chosen.push(start);
-      chosenDts.push(dt);
-      perDay++;
-    }
-  }
-
-  // HARD constraint: when returning 3, require ≥2 unique days.
-  // If only one day had candidates and we packed 2 from it, we already
-  // returned 2 (loop above exits). If somehow 3 collapsed to one day,
-  // drop to 2.
-  if (chosen.length >= 3) {
-    const uniqueDays = new Set(chosenDts.map(dt => dt.toFormat('yyyy-MM-dd')));
-    if (uniqueDays.size < 2) {
-      chosen.splice(2);
-    }
-  }
-
-  // v3.0.6 — single-shot fill pass. When the spread rules left us short
-  // (< count) but the candidate pool has more leftover slots, append them
-  // chronologically until we reach `count` or run out. This handles the
-  // "meeting with Lital today after 12pm" case: 4 candidates all within
-  // 75min same-day → spread filter accepts 1 (13:15) and rejects the rest
-  // for being within 1h → fill loop adds 13:45 / 14:00 → caller sees 3.
-  // STRICTLY one pass: no recursion, no second-fill, no further rule
-  // bending. If we still come up short after the fill, return what we
-  // have.
-  if (chosen.length < count) {
-    const chosenSet = new Set(chosen);
-    // Walk candidates in source order (already chronological from
-    // findAvailableSlots). Skip ones we already picked.
-    for (const s of slots) {
-      if (chosen.length >= count) break;
-      if (chosenSet.has(s.start)) continue;
-      // v3.1.6 — don't back-fill a slot that OVERLAPS an already-chosen one.
-      // Two slots of length D overlap iff their starts are < D apart. Offering
-      // overlapping start times (10:30 + 11:00 for a 55-min meeting) is never
-      // useful — better to return fewer, distinct options. Only enforced when
-      // the caller passed durationMinutes.
-      if (durationMinutes && durationMinutes > 0) {
-        const dt = DateTime.fromISO(s.start).setZone(s.away_tz ?? timezone);
-        const overlaps = chosenDts.some(c => Math.abs(dt.diff(c, 'minutes').minutes) < durationMinutes);
-        if (overlaps) continue;
+      const bucket = byDay.get(day)!;
+      let i = cursor.get(day) ?? 0;
+      for (; i < bucket.length; i++) {
+        const { start, dt } = bucket[i];
+        // ≥1h from anything already chosen. Only same-day picks can ever be
+        // <1h away (cross-day diffs are far larger), so scanning the whole set
+        // is safe and cheap.
+        if (chosenDts.some(c => Math.abs(dt.diff(c, 'hours').hours) < MIN_GAP_HOURS)) continue;
+        if (durationMinutes && durationMinutes > 0
+          && chosenDts.some(c => Math.abs(dt.diff(c, 'minutes').minutes) < durationMinutes)) continue;
+        chosen.push(start);
+        chosenDts.push(dt);
+        i++;                       // consume this slot before recording the cursor
+        progressed = true;
+        break;                     // one pick per day per round
       }
-      chosen.push(s.start);
-      chosenSet.add(s.start);
-      chosenDts.push(DateTime.fromISO(s.start).setZone(s.away_tz ?? timezone));
+      cursor.set(day, i);
     }
   }
 
-  // Output chronological regardless of day walk order / fill order.
+  // Output chronological regardless of round-robin order.
   chosen.sort((a, b) => DateTime.fromISO(a).toMillis() - DateTime.fromISO(b).toMillis());
   return chosen;
 }
@@ -1558,13 +1526,15 @@ export async function findAvailableSlots(params: {
     currentTo = nextTo;
   }
 
-  // v2.0.9 — cap raised from 10 to 30. With MAX_PER_DAY=4 and up to 5 work
-  // days in a typical week (Sun-Thu in Israel / Mon-Fri elsewhere), 4 × 5 =
-  // 20 is the normal maximum; 30 gives headroom if a multi-week search
-  // window somehow slips through. pickSpreadSlots still narrows to the final
-  // 3. The old cap of 10 combined with chronological candidate accumulation
-  // meant a single open morning could dominate the output.
-  return candidates.slice(0, 30);
+  // pickSpreadSlots is the SINGLE spreader and bound — it round-robins by day
+  // and returns exactly `count`. Do NOT pre-truncate here: a CHRONOLOGICAL cap
+  // (any size) lets one flooded early day dominate — a wide-open Sunday on a
+  // trip week produced 41 Sunday candidates that filled the cap before Mon–Fri
+  // were ever seen ("5 Sunday options"). The earlier 30-cap only stayed hidden
+  // because per-day generation was capped at 4; with that gone, the chronological
+  // cap is actively wrong. The pool is already bounded by the search window, and
+  // only the spread picks reach the model.
+  return candidates;
 }
 
 export interface UpdateMeetingParams {
@@ -1685,6 +1655,40 @@ export async function getEventOrganizer(
 }
 
 /**
+ * v3.5.x — single GET of one event's END instant (resolved to `timezone`) + its
+ * subject. ONE lookup-by-id, no calendarView range-probe. Two callers:
+ *   - create_meeting `start_at_event_end_id` — anchor "X after my flight/meeting"
+ *     deterministically (start = this end; no model clock-arithmetic, nothing to ask).
+ *   - the must_be_after_event_id ordering guard — refuse a start before this end.
+ * Returns null when the event can't be loaded (deleted / permission / bad id);
+ * callers treat null as "skip the check / refuse the anchor."
+ */
+export async function getEventEndInstant(
+  userEmail: string,
+  eventId: string,
+  timezone: string,
+): Promise<{ end: DateTime; subject: string } | null> {
+  try {
+    const client = getClient();
+    const event = await client
+      .api(`/users/${userEmail}/events/${eventId}`)
+      .header('Prefer', `outlook.timezone="${timezone}"`)
+      .select('id,subject,end')
+      .get();
+    const endIso = event?.end?.dateTime;
+    if (!endIso) return null;
+    const dt = DateTime.fromISO(endIso, { zone: event.end.timeZone ?? timezone }).setZone(timezone);
+    if (!dt.isValid) return null;
+    return { end: dt, subject: event.subject ?? 'unknown' };
+  } catch (err) {
+    logger.warn('getEventEndInstant — failed, returning null', {
+      eventId, err: String(err).slice(0, 200),
+    });
+    return null;
+  }
+}
+
+/**
  * v2.9.1 — load just enough event detail for an attendee-update flow:
  * existing attendees (so the handler can compute the new list), start/end
  * (so location resolution can re-evaluate day-type), categories, location,
@@ -1776,7 +1780,15 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
  * shape Sonnet (or any caller) handed us.
  */
 function normalizeForGraph(iso: string, tz: string): string {
-  const dt = DateTime.fromISO(iso, { setZone: true });
+  // CRITICAL: anchor a ZONELESS datetime in the INTENDED tz, not the process's
+  // local tz. `setZone:true` only adopts an offset the string ALREADY carries;
+  // a naive "2026-07-07T10:00:00" has none, so without `zone: tz` Luxon parses
+  // it in the SERVER's local timezone. When Maelle runs on a laptop set to the
+  // owner's TRAVEL zone (e.g. US-East while he's away), a naive Israel-intended
+  // "10:00" became 10:00 EDT → 17:00 Israel on the calendar — a 7h drift that
+  // only ever appeared on trips (at home server-tz == home-tz, so it was a
+  // no-op). `zone: tz` makes the binding canonical regardless of where we run.
+  const dt = DateTime.fromISO(iso, { zone: tz, setZone: true });
   if (!dt.isValid) return iso;  // fail open — let Graph reject if truly malformed
   return dt.setZone(tz).toISO({ includeOffset: false, suppressMilliseconds: true })!;
 }

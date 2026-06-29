@@ -1,4 +1,4 @@
-# Meeting-agent chat — START HERE (handoff, 2026-06-25)
+# Meeting-agent chat — START HERE (handoff, 2026-06-28 · v3.5.4)
 
 You are the **meeting-planner deterministic-core agent** for Maelle. The prior meeting chat got too long; this is your cold-start. Read this whole file, then the two docs it points to, then begin on the open bugs in §4.
 
@@ -51,17 +51,28 @@ The shipped work hardened the **book / confirm** path. The **SEARCH → narratio
 
 ---
 
-## 4. START HERE — the Craig incident (2026-06-25), 5 bugs to root-cause
-Owner asked "when can I do 25 min with Craig Joseph next week?" He's in Boston next week (markers Jun 29 / 30 / Jul 2); Craig is in Chicago (CT). Log: **`logs/maelle-2026-06-25.log`, the Craig thread ~line 515+** (threadTs `1782402092.436459`). Reproduce from the log; root-cause each; propose-first.
+## 4. START HERE — current state (v3.5.4) + the parked bugs
 
-**Bug 1 (KEYSTONE) — the search didn't engage WE; the model improvised "Boston".** `find_available_slots` (line 530) returned `+03:00` **Israel** slots with **0 `working_elsewhere`/`away_tz` tags** the whole conversation — even though the trip markers (Jun 29/30/Jul 2) are in the searched window AND were detected **4× elsewhere** in the same day's log. So the slot finder treated a trip week as home; the model knew "Boston trip" from context and re-narrated home slots as Boston. **Search and narration disagree.** Root NOT yet proven — add a definitive log line / trace: did `find_available_slots`' WE detection miss the all-day markers in its fetch (`ownerEventsForFb` scope?), did the `profile ? detect… : empty` ternary go empty, or did the tags not surface to the result? Prove it before fixing. This is the one that makes everything else go wrong.
+The Craig incident (2026-06-25) is **resolved and shipped in 3.5.4**. What that taught us and what's still open:
 
-**Bug 2 — multi-zone clock times are model-computed and WRONG.** Craig's tz IS correctly resolved (`America/Chicago, 09:00-17:00`, line 527); home is Israel. But the model renders Boston/home/Craig itself and mis-offsets: Israel↔Boston as **8h (winter) not 7h (summer/EDT)** → "7:45 AM Boston" for a slot that's actually 08:45; Craig as Boston **+1 not −1** in turn 1 (said 8:45, real 6:45). The tool returns instants (+ away_tz tag when WE fires) but **not pre-rendered per-zone clock strings**, so the model does the arithmetic and gets DST wrong. Fix direction: surface deterministic `renderClockInZone` strings for the owner-away tz AND each attendee tz; prompt: read them, never compute.
+### Shipped in 3.5.4 (this is now live — don't re-derive it)
+- **The keystone was NEVER "search doesn't engage WE."** WE detection always fired; the slots came back correct Boston-band — the log just couldn't show it (`firstSlots` logs `{start,end}` only, and WE slots emit in owner-tz ISO with the tz as a separate `away_tz` tag). The real keystone was **the model doing its own tz arithmetic** because the tool shipped `away_tz` as a raw string with no pre-rendered clock. Fixed: every WE slot carries `away_local_display`, the create/move confirm carries `_trip_time_display`; prompt says quote, never compute.
+- **`pickSpreadSlots` rewritten** to round-robin by **away-tz day**, target 5 (diversity first, then deepen); the chronological 30-cap removed. Killed "all Monday, nothing Tue–Thu."
+- **WE offer-window is config** (`meetings.working_elsewhere`, regular vs relaxed days+hours, trip-tz; work-week + 09–17/08–20 fallback). The owner's set: regular Mon–Fri 09–17, relaxed Sun–Fri 08–20. WE is display + offer-window + approval-routing **only** — it must NEVER bind a time.
+- **THE 7-HOUR DRIFT ROOT (the big one):** `normalizeForGraph` parsed a zoneless datetime in the SERVER's local tz. Maelle runs on the owner's laptop, which is on the **travel zone** while away — so a canonical "10:00" became 10:00 US-East → 17:00 Israel. **It was NOT the WE framework** (the owner's instinct was right). Fixed at the one chokepoint + a naive-parse sweep (`checkSlot`, `planMeeting`). **Lesson for next-you: any "WE timezone" symptom — check the naive-parse-in-server-tz class FIRST, not the WE markers.**
+- Flight-anchor (`start_at_event_end_id` + `getEventEndInstant`), colleague free/busy backstop (owner-only fallback — rule 6), `update_meeting` location.
 
-**Bug 3 — "nothing opened up Tue–Thu" was FALSE.** The Mon–Thu search (line 555) returned 20 slots **including Tuesday** (06-30T15:00 Israel = 08:00 Boston); the model said "all Monday, nothing Tue-Thu." Per-day searches (lines 580, 606) confirm Tue AND Wed have slots; the owner caught it ("Wednesday is more free than all"). Root: with no WE day-alignment, the spread-picker orders by **Israel** time and the model groups by **Israel** days — a "Monday Boston" slot bleeds into Tue-Israel, front-loading Monday and making Tue–Thu look empty.
+### Parked — meeting core, proposed-not-built (pick these up)
+1. **`move_meeting` location.** Two parts: (a) add explicit `location`/`is_online` to move (mirror `update_meeting` — small); (b) **stop the move re-stamping location → "Huddle" on a day-type change** ([ops.ts ~4560](src/skills/meetings/ops.ts) `movePlanLocation`), which WIPES a custom venue on a pure time-move (the "Going out → Huddle" incident, 2026-06-28). Part (b) has a tradeoff (drops the auto Office↔Huddle flip) — owner leaned toward preserve; get his nod.
+2. **Double-create hardening (defense-in-depth; the tz fix already removes the live trigger).** (a) `findDuplicateEvent` drift-robust: it fetches the whole probe day — match subject-on-day and loosen the ±2min gate (recommended: exact-match first, else the lone same-subject event that day; don't dedup when ≥2 deliberate same-subject events). (b) `created_but_drift` ([ops.ts ~3248](src/skills/meetings/ops.ts)) must RETURN the created event's `meeting_id` + a "reconcile, don't re-create" note. Owner fork: one-shot ask (recommended) vs automatic. Reachable because Module D now runs a full orchestrator turn on colleague approvals.
 
-**Bug 4 — "in Boston all of next week" + offered Sunday.** Markers are Mon/Tue/Thu only — **not Sunday Jun 28**. So "all week" over-claims and offering Sunday-Boston slots is wrong ("Not Sunday"). Also: the owner works Sun–Thu in Israel but the trip is Mon–Fri — Sunday got offered on the Israeli work-week while he's in Boston (the WE work-DAYS question, ties to decision #1/#2).
+### Routed OUT (not meeting-core — paste-blocks were handed to the owner)
+- **Prompt/tenancy:** `requester_is_attending=false` when the requester is organizing for a candidate (Yael-set interview treated her as the attendee); non-owner path must never demand an attendee email (external = uncheckable) — suggest from owner availability + annotate.
+- **Guard:** the `update_meeting` tool-summary the claim-checker reads (`[update_meeting OK <old subject>]`) doesn't reflect what changed (rename/location), so a TRUE "renamed/updated" claim gets rewritten to a false "hasn't gone through" (HubSpot rename + Bosworth incidents). Plus the `created_but_drift`-retry double-create defense.
 
-**Bug 5 — lunch & existing-meeting clocks wrong (turn 5).** "Drive & Lunch 6:30 PM home (1:30 PM Boston)" — 2h apart; "Catch up with Craig 6:00 PM Boston (23:00 home)" — 6 PM Boston is 1 AM home, not 23:00. Same model-tz-arithmetic root as Bug 2.
+### Other parked (cross-cutting / lower)
+- **Shadow-DM duplicate:** `shadowNotify`'s thread anchor is an in-memory `Map` (lost on restart) → duplicate "Conversation with X" owner-DM threads after a restart. Fix: persist the anchor (DB), optionally key per person.
+- **`get_calendar` "0 events" note:** the model logged `0 events` for full days in two incidents though the fetch works (verified single-day returns events) — likely a model-summary artifact; add a definitive log if it recurs.
+- **Google-Maps-link → venue:** Maelle can't resolve a maps short-link to a venue (needs the name typed). Venue-resolver feature.
 
-**The thread:** Bug 1 is the keystone — home slots → the model improvises the Boston framing with self-computed wrong timezones (2/4/5) and mis-grouped days (3). The owner will **add more bugs on top** — fold them in. Then propose fixes (code-first, at the chokepoint), and `trace` to 100% before declaring anything done. Nothing is committed for these yet.
+Discipline unchanged: reproduce from the log, root-cause to `file:line`, fix at the chokepoint code-first, `trace` to 100%, propose-first (build only on an explicit "build it").

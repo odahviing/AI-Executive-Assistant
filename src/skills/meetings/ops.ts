@@ -143,6 +143,7 @@ type UserProfileType = import('../../config/userProfile').UserProfile;
 import type { UserProfile } from '../../config/userProfile';
 import {
   getCalendarEvents,
+  getEventEndInstant,
   findDuplicateEvent,
   type CalendarEvent,
   getFreeBusy,
@@ -1682,7 +1683,46 @@ export class SchedulingSkill {
               && (isOwnerInitiatedSearch || mustBe)
               && userNamedNarrowWindow
               && !isAlreadyRelaxed;
-            if (rawSlots.length === 0 && !shouldRecover) {
+            // Rule 6 backstop — attendee free/busy is a HELPER, never a blocker.
+            // A REGULAR colleague request that strict-failed ONLY because the
+            // attendee(s) are busy/off-hours must NOT dead-end into "give me their
+            // email." Re-run OWNER-ONLY (owner rules still strict): if the owner
+            // has open times, offer THOSE with a "couldn't confirm the other side"
+            // caveat (rule 7 — high level, no calendar detail). If the owner is
+            // himself busy, owner-only also returns 0 → honest "he's booked then."
+            // (mustBe keeps its own relaxed recovery; owner path is unaffected.)
+            let colleagueOwnerOnlySlots: typeof rawSlots = [];
+            if (rawSlots.length === 0 && !isOwnerInitiatedSearch && !mustBe && attendeeEmails.length > 0) {
+              try {
+                colleagueOwnerOnlySlots = await findAvailableSlots({
+                  userEmail,
+                  timezone,
+                  durationMinutes: args.duration_minutes as number,
+                  attendeeEmails: [],   // owner-only — attendees become a caveat, never a filter
+                  searchFrom: effectiveSearchFrom,
+                  searchTo: effectiveSearchTo,
+                  preferMorning: args.prefer_morning as boolean | undefined,
+                  meetingMode: mode as import('../../connectors/graph/calendar').MeetingMode,
+                  travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
+                  autoExpand: !userNamedNarrowWindow,
+                  minBufferHours: context.profile.meetings.min_slot_buffer_hours ?? 4,
+                  profile: context.profile,
+                  relaxed: false,
+                  excludeEventIds: Array.isArray(args.moving_event_ids)
+                    ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
+                    : undefined,
+                  category: args.category as string | undefined,
+                });
+                if (colleagueOwnerOnlySlots.length > 0) {
+                  logger.info('find_available_slots — colleague attendee-blocker backstop: owner-only fallback', {
+                    ownerOnlyCount: colleagueOwnerOnlySlots.length,
+                  });
+                }
+              } catch (err) {
+                logger.warn('find_available_slots — colleague owner-only fallback threw, continuing', { err: String(err).slice(0, 150) });
+              }
+            }
+            if (rawSlots.length === 0 && !shouldRecover && colleagueOwnerOnlySlots.length === 0) {
               // v3.3 — fail loud on an all-Working-Elsewhere window: surface the
               // marker so Sonnet asks about timezone instead of saying "busy."
               const weInfo = diagnosticsOut.workingElsewhere;
@@ -1803,7 +1843,7 @@ export class SchedulingSkill {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const { pickSpreadSlots: pickSpreadMustBe } = require('../../connectors/graph/calendar') as
                   typeof import('../../connectors/graph/calendar');
-                const pickedMustBe = new Set(pickSpreadMustBe(relaxedRecoverySlots, timezone, 3, undefined, args.duration_minutes as number | undefined));
+                const pickedMustBe = new Set(pickSpreadMustBe(relaxedRecoverySlots, timezone, 5, undefined, args.duration_minutes as number | undefined));
                 const ownerFirst = context.profile.user.name.split(' ')[0];
                 const candidates = relaxedRecoverySlots
                   .filter(s => pickedMustBe.has(s.start))
@@ -1841,7 +1881,14 @@ export class SchedulingSkill {
             // violation from the strict day_summary so the owner sees the
             // trade-off explicitly: "12:30 fits everyone but eats into your
             // 2h focus block — want it anyway?"
-            const candidateSet = relaxedRecoverySlots.length > 0 ? relaxedRecoverySlots : rawSlots;
+            // Rule 6 backstop result selection: owner-only fallback feeds the
+            // candidate pool when strict was attendee-blocked to 0 (and no relaxed
+            // recovery ran). Flagged so the result carries the "couldn't confirm
+            // the other side" caveat below.
+            const usedColleagueOwnerOnly = relaxedRecoverySlots.length === 0 && colleagueOwnerOnlySlots.length > 0;
+            const candidateSet = relaxedRecoverySlots.length > 0
+              ? relaxedRecoverySlots
+              : (usedColleagueOwnerOnly ? colleagueOwnerOnlySlots : rawSlots);
             // DEPRIORITIZE held slots: a time tentatively held for someone
             // else is never the first offer. Pick from the FREE candidates; a
             // held time only surfaces (tagged, below) when there's nothing free
@@ -1887,7 +1934,7 @@ export class SchedulingSkill {
             } catch (err) {
               logger.warn('find_available_slots — offered-slot exclusion threw, using full pool', { err: String(err).slice(0, 120) });
             }
-            const chosenStarts = new Set(pickSpreadSlots(pickPool, timezone, 3, anchorDay, args.duration_minutes as number | undefined));
+            const chosenStarts = new Set(pickSpreadSlots(pickPool, timezone, 5, anchorDay, args.duration_minutes as number | undefined));
 
             // v2.9.2 — preferred_slot guarantee. When the requester named a
             // specific time ("preferably 11:30"), pickSpreadSlots' MIN_GAP
@@ -2151,7 +2198,7 @@ export class SchedulingSkill {
             const hasAttendeeConflicts = annotatedSlots.some(
               (s: any) => Array.isArray(s.attendee_conflicts) && s.attendee_conflicts.length > 0,
             );
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || hasWe || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts) {
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || hasWe || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               if (travelers.length > 0) result.travelers = travelers;
               if (hasDaySummary) result.day_summary = daySummary;
@@ -2173,6 +2220,10 @@ export class SchedulingSkill {
                 result._working_elsewhere_note =
                   'Some days in this window are marked Working Elsewhere — the owner is in a different place/timezone, so his normal scheduling rules are SUSPENDED. Slots tagged `tentative_working_elsewhere:true` are TENTATIVE openings in his trip timezone. Each slot carries `away_local_display` — his clock where he physically is, e.g. "Mon 29 Jun 14:30 EDT" — plus `away_location`; any attendee in another zone carries `per_attendee_local[].local_display`. QUOTE these strings VERBATIM, and group days by the weekday inside `away_local_display` — NEVER compute a timezone or a day yourself. Present dual-clock (his trip time from `away_local_display`, his home time read off the slot `start`), say they need his confirmation, and route any booking through approval — never present as locked. For any day in `working_elsewhere.unresolved` (a marker whose location I could not map to a timezone), DO NOT offer times — ASK the owner what timezone he is in that day. NEVER show his home-timezone clock as his there-time on a working-elsewhere day.';
               }
+              if (usedColleagueOwnerOnly) {
+                result._attendee_unverified_note =
+                  `No slot worked once the OTHER attendee(s)' availability was applied, so these are ${context.profile.user.name.split(' ')[0]}'s OWN open times instead — attendee free/busy is a helper, never a blocker. Offer these as options; do NOT demand an attendee's email to proceed (an external attendee can't be checked at all). Say plainly you could not confirm the other side(s) yet ("here are his open times — I'll confirm the other side once you pick"). Do NOT claim the other attendee is free. The pick routes to ${context.profile.user.name.split(' ')[0]}'s approval as usual.`;
+              }
               return result;
             }
             return annotatedSlots;
@@ -2191,6 +2242,41 @@ export class SchedulingSkill {
         }
 
       case 'create_meeting': {
+        // v3.5.x — anchor-to-event-end ("a 2h block after my flight"). When the
+        // model passes start_at_event_end_id + duration_minutes and no explicit
+        // start, resolve start = that event's END instant (read once, tz-correct)
+        // and end = start + duration. Deterministic: no model clock-arithmetic,
+        // and no "what time does your flight land?" for an event already on the
+        // calendar. Done HERE, at the top, so the whole pipeline — travel context,
+        // planMeeting, rules, confirm — sees the real start.
+        {
+          const anchorId = typeof args.start_at_event_end_id === 'string' ? args.start_at_event_end_id.trim() : '';
+          if (anchorId && !args.start) {
+            const dur = typeof args.duration_minutes === 'number' ? args.duration_minutes : 0;
+            if (dur <= 0) {
+              return {
+                success: false,
+                error: 'anchor_needs_duration',
+                message: 'To place a block at the end of an event, pass duration_minutes (the block length in minutes) alongside start_at_event_end_id.',
+              };
+            }
+            const anchor = await getEventEndInstant(userEmail, anchorId, timezone);
+            if (!anchor) {
+              return {
+                success: false,
+                error: 'anchor_event_not_found',
+                message: `I couldn't load the event to anchor this block to (id ${anchorId}). Re-fetch it from the calendar and pass its current id, or give me an explicit start time.`,
+              };
+            }
+            args.start = anchor.end.toISO();
+            args.end = anchor.end.plus({ minutes: dur }).toISO();
+            args.start_is_explicit = true;  // land exactly at the event end — never grid-snap off it
+            delete args.start_timezone;   // start/end are now owner-tz instants — skip the reinterpret
+            logger.info('create_meeting — anchored to event end', {
+              anchorId, anchorSubject: anchor.subject, start: args.start, end: args.end, durationMinutes: dur,
+            });
+          }
+        }
         // v3.4.2 (A1) — deterministic source-timezone conversion. When the time
         // was GIVEN in a non-owner zone ("9:30 EST" during the Boston trip),
         // Sonnet tags `start_timezone` (e.g. "America/New_York") and passes the
@@ -2309,7 +2395,7 @@ export class SchedulingSkill {
         // and produces a strict BookingRequest with owner-in-participants
         // invariant + snapped duration + gated sensitivity + gated relaxed +
         // minimal context (threadTs / isMpim / isOwnerInGroup).
-        const { normalizeBookingRequest } = await import('./bookingRequest');
+        const { normalizeBookingRequest, resolveDuration } = await import('./bookingRequest');
         const { planInputFromBookingRequest } = await import('./planMeeting');
 
         // v2.8.6 (102a) — sensitivity gate on colleague-path. The tool schema
@@ -2341,54 +2427,30 @@ export class SchedulingSkill {
           }
         }
 
-        // v2.8.6 — snap duration to profile.meetings.allowed_durations at the
-        // single chokepoint every booking path reaches (direct Sonnet call,
-        // outreach handoff, deferred-replay). Without this, direct create_meeting
-        // calls ship whatever start/end Sonnet passed and land off-alignment.
+        // v3.5.x — duration decision via the ONE shared resolver (resolveDuration
+        // in bookingRequest), the same call buildSlot makes — so the gate and the
+        // normalize step can't drift (the old code carried two copies of the snap +
+        // owner carve-out; the mirror is gone). Owner-path honors an explicitly
+        // stated length in ONE step (#127) — no "book the full 2h or 55?" on a
+        // duration the owner named (the "After flight" 2h-block ask). A colleague
+        // proposing an off-preset long duration still gets the verify question; a
+        // ≤5-min mismatch ("1 hour"→55) snaps silently for everyone.
         const startIsoIn = args.start as string | undefined;
         const endIsoIn   = args.end   as string | undefined;
         if (typeof startIsoIn === 'string' && typeof endIsoIn === 'string') {
-          const startMs = Date.parse(startIsoIn);
-          const endMs   = Date.parse(endIsoIn);
-          if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
-            const requestedMin = Math.round((endMs - startMs) / 60000);
-            const allowed = context.profile.meetings.allowed_durations;
-            if (Array.isArray(allowed) && allowed.length > 0 && !allowed.includes(requestedMin)) {
-              const snapped = allowed.reduce((best, candidate) =>
-                Math.abs(candidate - requestedMin) < Math.abs(best - requestedMin) ? candidate : best,
-              allowed[0]);
-              const snapDelta = Math.abs(requestedMin - snapped);
-              // v3.2.6 (2.4) — a SMALL snap (≤5 min, e.g. "1 hour" → 55) is the
-              // expected preset-alignment; apply it silently. A LARGE snap (>5 min,
-              // e.g. an explicit 2-hour block → 55) would silently DESTROY the
-              // length the owner asked for — surface a verify question instead.
-              // #override-spine — the owner's override here is the SAME `relaxed`
-              // flag every other owner override uses (off-hours, busy-collision,
-              // focus-floor; meetings.ts + the "retry with relaxed=true" prompt
-              // rule). When he sets relaxed=true ("20:00–22:00, just do it"), honor
-              // the full length in ONE step. The old gate keyed off an
-              // `override_duration` flag that was never in the schema (so the model
-              // couldn't set it) AND that buildSlot ignored (so even when guessed it
-              // shrank the length anyway) — a dead end that looped and leaked the
-              // param name. buildSlot mirrors this owner-relaxed carve-out so the
-              // length also survives the normalize snap.
-              if (snapDelta > 5 && !(context.senderRole === 'owner' && args.relaxed === true)) {
-                return {
-                  warning: `You asked for a ${requestedMin}-minute meeting, which is longer than the usual lengths (${allowed.join(', ')} min). Ask briefly: "That's ${requestedMin} min — book the full length, or shorten to ${snapped}?" If they want the full ${requestedMin} min, retry create_meeting with relaxed=true; if ${snapped} is fine, retry with duration_minutes=${snapped}.`,
-                  needs_confirmation: true,
-                };
-              }
-              if (snapDelta <= 5) {
-                const newEndIso = new Date(startMs + snapped * 60000).toISOString();
-                logger.info('create_meeting — snapped duration to allowed_durations', {
-                  requested: requestedMin, snappedTo: snapped, allowed,
-                  start: startIsoIn, endWas: endIsoIn, endNow: newEndIso,
-                });
-                args.end = newEndIso;
-              }
-              // snapDelta > 5 && owner relaxed → fall through: honor the requested
-              // length as-is (buildSlot also skips its snap for owner-relaxed).
-            }
+          const dur = resolveDuration(startIsoIn, endIsoIn, context.profile, context.senderRole === 'owner');
+          if (dur?.needsConfirm) {
+            return {
+              warning: `You asked for a ${dur.requestedMin}-minute meeting, which is longer than the usual lengths (${context.profile.meetings.allowed_durations.join(', ')} min). Ask briefly: "That's ${dur.requestedMin} min — book the full length, or shorten to ${dur.snappedMin}?" If they want the full ${dur.requestedMin} min, retry create_meeting with relaxed=true; if ${dur.snappedMin} is fine, retry with duration_minutes=${dur.snappedMin}.`,
+              needs_confirmation: true,
+            };
+          }
+          if (dur && dur.endIso !== endIsoIn) {
+            logger.info('create_meeting — snapped duration to allowed_durations', {
+              requested: dur.requestedMin, snappedTo: dur.durationMin,
+              start: startIsoIn, endWas: endIsoIn, endNow: dur.endIso,
+            });
+            args.end = dur.endIso;
           }
         }
 
@@ -2750,29 +2812,24 @@ export class SchedulingSkill {
         const mustBeAfterId = args.must_be_after_event_id as string | undefined;
         if (mustBeAfterId) {
           try {
-            const { DateTime: DT } = await import('luxon');
-            const requestedStart = DT.fromISO(args.start as string, { zone: timezone });
-            const probeFrom = requestedStart.minus({ days: 30 }).toFormat('yyyy-MM-dd');
-            const probeTo = requestedStart.plus({ days: 1 }).toFormat('yyyy-MM-dd');
-            const events = await getCalendarEvents(userEmail, probeFrom, probeTo, timezone);
-            const predecessor = events.find(e => e.id === mustBeAfterId);
+            const requestedStart = DateTime.fromISO(args.start as string, { zone: timezone });
+            // Shared by-id lookup (same helper the start_at_event_end_id anchor uses).
+            const predecessor = await getEventEndInstant(userEmail, mustBeAfterId, timezone);
             if (predecessor) {
-              const predEnd = DT.fromISO(predecessor.end.dateTime, { zone: predecessor.end.timeZone ?? 'utc' })
-                .setZone(timezone);
-              if (requestedStart.toMillis() < predEnd.toMillis()) {
+              if (requestedStart.toMillis() < predecessor.end.toMillis()) {
                 logger.info('create_meeting refused — must_be_after_event_id ordering violated', {
                   predecessorId: mustBeAfterId,
-                  predecessorEnd: predEnd.toISO(),
+                  predecessorEnd: predecessor.end.toISO(),
                   requestedStart: requestedStart.toISO(),
                 });
                 return {
                   success: false,
                   error: 'order_violation',
-                  message: `That start time (${requestedStart.toFormat("EEE d MMM 'at' HH:mm")}) is BEFORE the predecessor meeting "${predecessor.subject ?? 'unknown'}" ends (${predEnd.toFormat("EEE d MMM 'at' HH:mm")}). The series must stay in order. Pick a slot after that.`,
+                  message: `That start time (${requestedStart.toFormat("EEE d MMM 'at' HH:mm")}) is BEFORE the predecessor meeting "${predecessor.subject}" ends (${predecessor.end.toFormat("EEE d MMM 'at' HH:mm")}). The series must stay in order. Pick a slot after that.`,
                 };
               }
             } else {
-              logger.warn('create_meeting — must_be_after_event_id not found in nearby calendar; proceeding without order check', {
+              logger.warn('create_meeting — must_be_after_event_id not found; proceeding without order check', {
                 eventId: mustBeAfterId,
               });
             }
@@ -2913,12 +2970,32 @@ export class SchedulingSkill {
         }
         // Early-return on non-book plans:
         if (plan.action === 'confirm_override' || plan.action === 'escalate_approval') {
+          // v3.5.x (WE confirm render) — on a travel day, hand the model a finished
+          // dual-clock string so the confirm STATES "05:45 EDT (12:45 your time)"
+          // instead of asking "5:45 or 12:45?". tripDisplay is the resolved trip
+          // tz/location (getTravelContextForInstant above); renderClockInZone is
+          // the shared deterministic renderer. The instant is unchanged — only the
+          // display zone is resolved from the trip. No-op off a travel day.
+          let tripTimeDisplay: string | undefined;
+          if (tripDisplay && typeof args.start === 'string' && typeof args.end === 'string') {
+            const tripStart = renderClockInZone(args.start, timezone, tripDisplay.tz);
+            const homeStart = DateTime.fromISO(args.start, { zone: timezone });
+            const homeEnd = DateTime.fromISO(args.end, { zone: timezone });
+            const tripEnd = homeEnd.setZone(tripDisplay.tz);
+            if (tripStart && homeStart.isValid && homeEnd.isValid && tripEnd.isValid) {
+              tripTimeDisplay = `${tripStart}–${tripEnd.toFormat('HH:mm')} (${homeStart.toFormat('HH:mm')}–${homeEnd.toFormat('HH:mm')} your home time)`;
+            }
+          }
           return {
             success: false,
             error: 'rule_violation',
             violation_label: plan.violationLabel,
             suggested_ask_text: plan.suggestedAskText,
             category: plan.category,
+            ...(tripTimeDisplay ? {
+              _trip_time_display: tripTimeDisplay,
+              _trip_note: 'Travel day — when you confirm, state the time using `_trip_time_display` VERBATIM (trip clock + home clock). Do NOT ask the owner which timezone, and do NOT recompute it.',
+            } : {}),
             // v2.7.2 — deferred_action_hint: the original tool call, ready to be
             // stamped on a follow-up create_approval. Orchestrator auto-attaches
             // this to payload.deferred_action when Sonnet raises a
@@ -3725,6 +3802,16 @@ export class SchedulingSkill {
           }
         }
 
+        // v3.5.x — explicit location / is_online change ("update the location to
+        // The Bosworth"). Graph's updateMeeting already supports it; this exposes
+        // it on the tool. An explicit arg WINS over the shape-derived location
+        // (which only fires on an attendee add/remove). Both omitted → undefined →
+        // the event's CURRENT location is preserved (a subject/attendee change
+        // never wipes the venue).
+        const explicitLocation = typeof args.location === 'string' && (args.location as string).trim()
+          ? (args.location as string).trim()
+          : undefined;
+        const explicitIsOnline = typeof args.is_online === 'boolean' ? (args.is_online as boolean) : undefined;
         await updateMeeting({
           userEmail,
           timezone,
@@ -3734,8 +3821,8 @@ export class SchedulingSkill {
             ? [args.category as string]
             : (newCategoryFromShape ? [newCategoryFromShape] : undefined),
           attendees: mergedAttendees,
-          location: newLocationFromShape,
-          isOnline: newIsOnlineFromShape,
+          location: explicitIsOnline === true ? '' : (explicitLocation ?? newLocationFromShape),
+          isOnline: explicitIsOnline ?? newIsOnlineFromShape,
         });
         await closeMeetingArtifacts({
           ownerUserId: context.profile.user.slack_user_id,

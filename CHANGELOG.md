@@ -2,6 +2,28 @@
 
 ---
 
+## 3.5.4 — Working-Elsewhere timezone drift fix + meeting move/booking hardening
+
+The headline is a 7-hour booking drift while the owner travels: a meeting set for "10:00" landed at 17:00 on a Working-Elsewhere week. The root was NOT the WE framework — it was the Graph time normalizer parsing a zoneless datetime in the SERVER's local timezone (Maelle runs on the owner's laptop, which is on the destination zone while away), so a canonical Israel "10:00" was read as 10:00 US-East and stored as 17:00 Israel. Fixed at the one chokepoint plus a sweep of sibling naive-parse sites. Also shipped: deterministic flight-anchor blocks, a round-robin slot spread, an attendee-never-a-blocker backstop, pre-rendered trip clocks, and `update_meeting` can finally change a location. Restart required.
+
+### Fixed — Working-Elsewhere timezone (meeting core)
+- A booking made while traveling no longer drifts by the home↔trip offset. `normalizeForGraph` parsed a zoneless datetime with `{setZone:true}`, which for a naive string falls back to the PROCESS's local timezone — so when Maelle runs on a laptop set to the travel zone, a canonical "10:00" was bound to the trip clock and stored at the wrong instant (the "10:00 → 17:00" incident). It now anchors zoneless times in the intended tz; explicit offsets are still respected. Covers create + move + update. ([calendar.ts](src/connectors/graph/calendar.ts))
+- Naive-parse sweep. Same class fixed in `checkSlot` (the validator was reading the slot in server-local tz — the source of a false "10:00 is outside your work hours" on a travel day) and across `planMeeting` (overlap/prior instants, week anchor, day-type compare, ask-text). All anchor to the home tz; offset-bearing slots unchanged. ([scheduleRules.ts](src/utils/scheduleRules.ts), [planMeeting.ts](src/skills/meetings/planMeeting.ts))
+- WE slot/confirm times are pre-rendered, not model-computed. Each WE slot carries `away_local_display`, and the create/move confirm carries a dual-clock `_trip_time_display`, so the model quotes the trip time verbatim instead of doing (wrong) tz arithmetic. ([ops.ts](src/skills/meetings/ops.ts))
+
+### Added
+- `update_meeting` can change a location. Exposed `location` / `is_online` (Graph already supported it); an explicit value wins, omitted preserves the venue. "Update the location to <venue>" finally works. ([meetings.ts](src/skills/meetings.ts), [ops.ts](src/skills/meetings/ops.ts))
+- Anchor a block to an event's end. `create_meeting.start_at_event_end_id` + `duration_minutes` place "a 2h block after my flight" deterministically (read the event's end instant — no model clock math, no "what time does it land?"). One shared `getEventEndInstant`, reused by the `must_be_after_event_id` ordering guard. ([calendar.ts](src/connectors/graph/calendar.ts), [meetings.ts](src/skills/meetings.ts), [ops.ts](src/skills/meetings/ops.ts))
+- Slot spread is round-robin, target 5. `pickSpreadSlots` now takes one slot per day across days first (diversity), then deepens, up to 5; the chronological 30-cap that let one wide-open day dominate is gone (it is the single spreader now). ([calendar.ts](src/connectors/graph/calendar.ts))
+
+### Fixed — colleague free/busy is a helper, never a blocker (rule 6)
+- A colleague search an attendee zeroes out now falls back to the owner's open times. When strict returns 0 only because attendee(s) are busy/off-hours, the colleague path re-runs owner-only and offers his open slots with a "couldn't confirm the other side" caveat — so Maelle never dead-ends into demanding an attendee's email. ([ops.ts](src/skills/meetings/ops.ts))
+
+### Not changed
+- The post-create verify guard + the approval spine were correct (verify caught the drift and surfaced it honestly). The fix is the timezone binding only — nothing in the verify guard or approval spine.
+
+---
+
 ## 3.5.3 — real-day small fixes: WE offer-window, slot-hold accumulation, calendar-health re-flag
 
 A bug-wave patch across the meeting / calendar-health chats from a day of real use. Three fixes: Working-Elsewhere days now offer a general away-local window instead of home hours clipped into the trip timezone; slot holds accumulate (you can hold several options) instead of silently replacing each other; and an acknowledged calendar-health issue actually stops re-flagging. No new capability; the one new YAML block is optional. Restart required.

@@ -148,8 +148,12 @@ export interface RuleCheckResult {
 export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   const { profile } = input;
   const tz = profile.user.timezone;
-  const slotStart = DateTime.fromISO(input.slotStartIso).setZone(tz);
-  const slotEnd = DateTime.fromISO(input.slotEndIso).setZone(tz);
+  // Anchor a ZONELESS slot in the owner's home tz, not the server's local tz
+  // (the normalizeForGraph drift class — a naive "10:00" was read in the
+  // travel-zone server clock → wrong work-hours verdict). `setZone:true` still
+  // respects an explicit offset on a search-emitted slot.
+  const slotStart = DateTime.fromISO(input.slotStartIso, { zone: tz, setZone: true }).setZone(tz);
+  const slotEnd = DateTime.fromISO(input.slotEndIso, { zone: tz, setZone: true }).setZone(tz);
   const excludeSet = new Set(input.excludeEventIds ?? []);
   const dayName = slotStart.toFormat('EEEE');
 

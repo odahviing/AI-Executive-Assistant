@@ -474,7 +474,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     } else if (!ruleResult.passes) {
       const label = ruleResult.violation_label ?? 'rule violated';
       const subj = input.subject ?? 'this meeting';
-      const askText = `Heads up — booking "${subj}" at ${DateTime.fromISO(input.slotStartIso).setZone(profile.user.timezone).toFormat("EEEE 'at' HH:mm")} would break a rule: ${label}. Want to override?`;
+      const askText = `Heads up — booking "${subj}" at ${DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone, setZone: true }).setZone(profile.user.timezone).toFormat("EEEE 'at' HH:mm")} would break a rule: ${label}. Want to override?`;
       // v3.2.x (#8) — colleague proposed a slot that breaks a rule. Instead of
       // jumping straight to owner approval (colleague waits), offer NEARBY
       // rule-compliant alternatives first — 2 on the requested day + 1 after —
@@ -545,16 +545,16 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
             profile.user.timezone,
             input.allowRelaxed === true,   // override/replay reads fresh — never annotate a stale "busy"
           );
-          const slotStart = DateTime.fromISO(input.slotStartIso);
-          const slotEnd = DateTime.fromISO(input.slotEndIso);
+          const slotStart = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone, setZone: true });
+          const slotEnd = DateTime.fromISO(input.slotEndIso, { zone: profile.user.timezone, setZone: true });
           // v2.8.5 — pre-compute prior-event window for source-event exclusion.
           // When intent==='move' and we have both prior bounds, busy windows
           // matching that exact span on attendee calendars are the meeting
           // being moved (still on their calendar until the move commits).
           // Skip them so the overlap check doesn't flag the source event as
           // a conflict with its own move target.
-          const priorStart = input.priorSlotStartIso ? DateTime.fromISO(input.priorSlotStartIso) : null;
-          const priorEnd = input.priorSlotEndIso ? DateTime.fromISO(input.priorSlotEndIso) : null;
+          const priorStart = input.priorSlotStartIso ? DateTime.fromISO(input.priorSlotStartIso, { zone: profile.user.timezone, setZone: true }) : null;
+          const priorEnd = input.priorSlotEndIso ? DateTime.fromISO(input.priorSlotEndIso, { zone: profile.user.timezone, setZone: true }) : null;
           const hasPriorWindow = !!(priorStart && priorEnd);
           const busyAttendees: string[] = [];
           for (const email of internalEmails) {
@@ -596,7 +596,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
             } else {
               // First pass — flag ONCE; owner's "book anyway" comes back relaxed.
               const subj = input.subject ?? 'this meeting';
-              const askText = `Heads up — ${who} ${names.length === 1 ? 'is' : 'are'} on another meeting at ${DateTime.fromISO(input.slotStartIso).setZone(profile.user.timezone).toFormat("EEEE 'at' HH:mm")}. Book "${subj}" anyway, or pick a different time?`;
+              const askText = `Heads up — ${who} ${names.length === 1 ? 'is' : 'are'} on another meeting at ${DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone, setZone: true }).setZone(profile.user.timezone).toFormat("EEEE 'at' HH:mm")}. Book "${subj}" anyway, or pick a different time?`;
               return { action: 'confirm_override', violationLabel: label, suggestedAskText: askText, category };
             }
           }
@@ -709,7 +709,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
 
 async function loadEventsForCheck(profile: UserProfile, slotStartIso: string): Promise<CalendarEvent[]> {
   const tz = profile.user.timezone;
-  const start = DateTime.fromISO(slotStartIso).setZone(tz).startOf('week');
+  const start = DateTime.fromISO(slotStartIso, { zone: tz, setZone: true }).setZone(tz).startOf('week');
   const end = start.plus({ weeks: 2 });
   try {
     return await getCalendarEvents(profile.user.email, start.toFormat('yyyy-MM-dd'), end.toFormat('yyyy-MM-dd'), tz);
@@ -723,8 +723,8 @@ async function loadEventsForCheck(profile: UserProfile, slotStartIso: string): P
 
 function sameDayType(profile: UserProfile, isoA: string, isoB: string): boolean {
   const tz = profile.user.timezone;
-  const dayA = DateTime.fromISO(isoA).setZone(tz).toFormat('EEEE');
-  const dayB = DateTime.fromISO(isoB).setZone(tz).toFormat('EEEE');
+  const dayA = DateTime.fromISO(isoA, { zone: tz, setZone: true }).setZone(tz).toFormat('EEEE');
+  const dayB = DateTime.fromISO(isoB, { zone: tz, setZone: true }).setZone(tz).toFormat('EEEE');
   const office = profile.schedule.office_days.days as string[];
   const home = profile.schedule.home_days.days as string[];
   const typeOf = (d: string): 'office' | 'home' | 'off' =>

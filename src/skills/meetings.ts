@@ -184,7 +184,7 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
             time_window_is_hard: { type: 'boolean', description: 'Set TRUE only when the owner/attendee gave a REAL time constraint ("must end by noon", "only after 3pm", "available 7–12"). Then the search_from/search_to times are honored as a hard clip. When false/omitted (DEFAULT), those times are treated as SOFT — the tool searches the OWNER\'S FULL WORK DAY (including night-shift hours) and lets the work-hours + attendee-timezone filters surface the real overlap. This prevents accidentally clipping off valid late/night-shift slots that overlap a far-timezone colleague\'s working hours.' },
             present_in_timezone: { type: 'string', description: 'IANA timezone to ALSO render every returned slot in (e.g. "America/New_York", "America/Los_Angeles"). Set this whenever the requester asks for options in a specific timezone — INCLUDING when no attendee is stored in that zone (e.g. an organizer collecting options to hand to US colleagues "in ET"). The tool attaches a pre-rendered `presentation_local` string per slot (e.g. "Tue 16 Jun 09:00 EDT"); quote it verbatim and NEVER do the timezone conversion yourself.' },
             search_window_timezone: { type: 'string', description: 'IANA timezone that the search_from/search_to CLOCK times are expressed in (e.g. "America/New_York"). Set this when the requested meeting time was GIVEN in a non-owner timezone — e.g. the owner/colleague said "9:45 AM ET": pass search_from="...T09:45:00" + search_window_timezone="America/New_York" and the tool converts to the owner timezone for the search. OMIT when the times are already in the owner timezone (e.g. the requester already converted, or said "4pm my time"). NEVER hand-convert the search time yourself — tag the source zone and let the tool convert.' },
-            requester_is_attending: { type: 'boolean', description: 'DEFAULT true — the colleague asking is one of the meeting attendees (their calendar + work-hours are factored, their timezone drives the cross-TZ labels). Set FALSE only when the requester is purely ORGANIZING a meeting they are NOT in (an EA / organizer collecting options to hand to others). When false, the requester\'s own calendar and work-hours are NOT used to filter the search and she is not annotated as "busy" — only the actual attendees (and the owner) constrain the slots.' },
+            requester_is_attending: { type: 'boolean', description: 'DEFAULT true — the colleague asking is one of the meeting attendees (their calendar + work-hours are factored, their timezone drives the cross-TZ labels). Set FALSE whenever the requester is ORGANIZING a meeting they are NOT in — an EA collecting options for others, OR scheduling a candidate / interviewee / third party to meet the owner ("set up the candidate for an interview with him", "find a time for Rubi to meet him"). Then pass the ATTENDEE who will actually be in it (the candidate\'s email) or NO attendee at all — NEVER attendee_emails=[the requester], which clips the search to the organizer\'s own hours. When false, the requester\'s own calendar and work-hours are NOT used to filter the search and she is not annotated as "busy" — only the actual attendees (and the owner) constrain the slots.' },
             prefer_morning: { type: 'boolean', description: 'Prefer morning slots in the user timezone' },
             meeting_mode: {
               type: 'string',
@@ -300,6 +300,14 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
               type: 'string',
               description: 'OPTIONAL. When set, the booking refuses if the proposed start is BEFORE the end of the referenced event. Use when this meeting is part of an ordered series ("M2 must come after M1") to make the order constraint enforceable at booking time. Pass the event id from get_calendar (or from the previous create_meeting return) of the predecessor. Omit when there is no predecessor.',
             },
+            start_at_event_end_id: {
+              type: 'string',
+              description: 'OPTIONAL. Anchor this block to START at the END of an existing event — for "X after my flight", "a block right after my last meeting", etc. Pass that event\'s id (from get_calendar) PLUS `duration_minutes`, and OMIT `start`/`end`: the handler reads the event\'s end INSTANT and sets start there, end = start + duration_minutes. The block lands at the correct moment in the correct timezone — NEVER compute the time yourself and NEVER ask the owner what time the event ends/lands when it is already on the calendar.',
+            },
+            duration_minutes: {
+              type: 'number',
+              description: 'OPTIONAL. Block length in minutes — used ONLY with `start_at_event_end_id` (end = anchored start + this). For a normal booking pass `start`+`end` instead.',
+            },
             is_all_day: {
               type: 'boolean',
               description: 'OPTIONAL (default false). Set TRUE only when the user explicitly asks for a full-day / all-day event ("block the whole day", "full day", "all day", "vacation marker"). When true: the system clamps start/end to midnight of the day → midnight of the next day in the user TZ; you can pass start as the day at any time and the handler normalizes. Owner-only personal blocks (no attendees, focus / prep / vacation marker) → also pass category=Logistic to skip the location stamp.',
@@ -379,7 +387,9 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
       },
       {
         name: 'update_meeting',
-        description: `Update metadata on an existing meeting WITHOUT rescheduling it — change subject or the attendee list.
+        description: `Update metadata on an existing meeting WITHOUT rescheduling it — change subject, attendee list, OR location.
+
+LOCATION (v3.5.x): to change where an existing event is, pass \`location\` (a venue name/address — resolve it via find_venue first if you only have a name or a maps link) or \`is_online: true\` (online/Teams). This is THE way to "update the location" of a meeting already on the calendar. Omit both to leave the location untouched (a pure subject/attendee/reschedule change never wipes the venue).
 
 CATEGORY changes do NOT belong here — use \`set_event_category\` for ALL category changes. It sets the category on the owner's OWN copy of the event and works for ANY event regardless of who organized it (Outlook categories are per-user). update_meeting's category path requires the owner to be the ORGANIZER and returns \`not_organizer\` on a meeting someone else created — which is wrong, since the owner can categorize anything on his calendar. So: category-only change → \`set_event_category\`, always.
 
@@ -396,6 +406,8 @@ ATTENDEES (v2.9.1):
             meeting_subject: { type: 'string' },
             category:        categoryEnum ? { type: 'string', enum: categoryEnum, description: 'AVOID — use set_event_category for category changes (works on any event regardless of organizer). This path only succeeds when the owner organized the meeting.' } : { type: 'string', description: 'AVOID — use set_event_category instead (organizer-independent).' },
             new_subject:     { type: 'string' },
+            location:        { type: 'string', description: 'OPTIONAL. New location for the event — a venue name/address (resolve via find_venue first if you only have a name or a maps link). Sets the calendar location. Omit to leave it unchanged. For an online meeting use is_online instead.' },
+            is_online:       { type: 'boolean', description: 'OPTIONAL. Set true to make the event online (Teams). Omit to leave the location/online state unchanged.' },
             add_attendees: {
               type: 'array',
               description: 'Attendees to ADD to the existing meeting. Each must have an email. Owner-path: any people. Colleague-path: only the requesting colleague themselves.',
@@ -987,6 +999,7 @@ When a colleague asks "is ${firstName} free at X?" / "is X open Sunday at 14:00?
 
 JOINT-ATTENDEE QUERIES — one call, not three.
 When ${firstName} asks "when are WE free?" / "when can I meet with X?" / "is X free?" / "any opening for the meeting with X?", call find_available_slots ONCE with attendee_emails=[X's email]. The tool fetches both calendars and returns slots where everyone is free. NEVER do this as three sequential turns — read his calendar, then read X's calendar, then compute the overlap in your head. That's three turns of work and three Sonnet rounds when one tool call does it. (Externals without people_memory entries: still pass their email; if the tool can't fetch their busy from Graph, slots come back filtered against ${firstName}'s side only and you narrate honestly.)
+ATTENDEE FREE/BUSY IS ANNOTATION, NEVER A GATE. Lead with ${firstName}'s availability — NEVER demand an attendee's email (or any attendee detail) before you'll suggest times. An attendee you can't check — external/gmail, or whose email you don't have yet — is "couldn't confirm their side," not a blocker: offer ${firstName}'s open times and note their side is unconfirmed. The attendee's calendar never withholds a suggestion; only ${firstName}'s does.
 
 USER-NAMED DAYS — narrow the search, don't post-hoc apologize.
 When the user names specific days/dates ("Monday or Thursday", "tomorrow", "next Tuesday or Wednesday"), narrow find_available_slots' search_from / search_to to ONLY those days. Don't widen the search and then narrate around days the user didn't ask about. If the search comes back empty for the named days, say so honestly ("Nothing free on Mon or Thu — want me to widen?"); don't silently surface a Wednesday slot as a fallback because Wednesday had availability. The user's day choice is a constraint, not a suggestion.
