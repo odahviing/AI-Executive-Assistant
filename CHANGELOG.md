@@ -2,6 +2,38 @@
 
 ---
 
+## 3.6.0 — Working-Elsewhere timezone SPINE: one resolver, one renderer, the model conveys the named zone
+
+After a near-give-up trip day (the owner travelling in Boston), Working-Elsewhere scheduling broke every way at once: a stated time became the wrong instant, the dual-clock label inverted, a wrong-day booking survived three corrections, a colleague was mis-gendered and then down-ranked for objecting, and a relayed request booked the relayer as an attendee. Root, proven across the day's log: WE time resolution had **no single source of truth** — "what instant does the stated time mean / how is it shown" was re-decided across 6+ layers that disagreed, and the pivotal "which zone did he mean" was left to the model, whose schema told it *not* to tag the home zone (so "Israel time" was tagged 0/3 times). This version collapses that into ONE spine — one detection, one instant-resolver, one renderer — and changes the model contract so it conveys the named zone *including home*. Bundles fixes from four parallel chats (timezone, gender, social, approval). Restart required.
+
+### Added — the WE time spine (meeting core)
+- `weTimeResolver.ts` — the single owner of WE time. `resolveStatedInstant` (stated clock + which-zone-he-named + travel context → canonical instant; an offset-tagged input is a fixed instant, left untouched — no re-read, the old "Alliance rollover") and `renderWeDualClock` (instant → the ONE dual-clock string, each side pinned by meaning so it can't invert, the lodging never named so it can't read as a venue). Cloud-safe: every zone is passed explicitly (home from config, trip from the WE marker) — the server's own zone is never consulted. A spoken-abbreviation map ("ET"/"EST"/"IL"…→ IANA) catches the model echoing an abbreviation. ([weTimeResolver.ts](src/utils/weTimeResolver.ts), [timezoneConvert.ts](src/utils/timezoneConvert.ts))
+- `weConfirmStash.ts` — a per-conversation, consume-on-use record that the WE trip-time confirm was shown, so the owner's re-issue books deterministically instead of looping the confirm — and, being consume-on-use, can never re-lock a time he is in the middle of correcting (the auto-lock that compounded the disaster). ([weConfirmStash.ts](src/utils/weConfirmStash.ts))
+
+### Changed — one source of truth for WE time
+- create_meeting and move_meeting interpret a stated time through the one `resolveStatedInstant`; the prior split (a separate explicit-`start_timezone` block + a bare-time trip guess) is deleted. ([ops.ts](src/skills/meetings/ops.ts))
+- Every WE display — the owner confirm, the colleague-escalate line, the booked-confirmation, the move summary, the idempotent-duplicate note — quotes the one `renderWeDualClock`; the hand-rolled per-site formatters are gone. ([planMeeting.ts](src/skills/meetings/planMeeting.ts), [ops.ts](src/skills/meetings/ops.ts))
+- Model contract: on create_meeting / move_meeting, `start_timezone` is replaced by `stated_zone` (`home` / `local` / an IANA zone), which the model sets for **any** zone the owner named — *including his home zone*, the case the old description told it to skip (the literal 0/3 "Israel time" root). ([meetings.ts](src/skills/meetings.ts))
+
+### Fixed — the trip-day incident (high-impact)
+- "6:30 PM Israel time" while in Boston no longer books 1:30 AM the next day. With `stated_zone="home"` it resolves to 18:30 Israel today; if the model still omits the tag, the dual-clock now shows the wrong instant plainly ("01:30 your home time") and consume-on-use means the correction sticks — the *silent wrong-day book surviving three corrections* is structurally gone. ([weTimeResolver.ts](src/utils/weTimeResolver.ts), [ops.ts](src/skills/meetings/ops.ts))
+- The dual-clock can no longer invert ("18:00 your Boston time"): one renderer, clocks pinned by meaning, no competing prose string for the model to garble. ([weTimeResolver.ts](src/utils/weTimeResolver.ts), [planMeeting.ts](src/skills/meetings/planMeeting.ts))
+- A colleague who only RELAYED a meeting between others is no longer booked as an attendee or logged as having the meeting. create_meeting honors the existing requester concept (`requester_is_attending`, plus `requester_slack_id` for the owner path the search-drop never reached); one in-place scrub of the attendees array covers the Graph event, the availability check, and the person-memory record. ([ops.ts](src/skills/meetings/ops.ts), [meetings.ts](src/skills/meetings.ts))
+
+### Fixed — sibling chats (same trip-day incident)
+- Gender: the name-based gender guess is removed (it mis-cast a female "Daniel" as male and shipped masculine Hebrew before any real signal); an image/legacy `auto` gender no longer steers gendered Hebrew forms (renders `unknown` until a person/owner confirms); unknown gender now writes gender-NEUTRALLY instead of defaulting masculine. ([genderDetect.ts](src/utils/genderDetect.ts), [people.ts](src/db/people.ts), [systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+- Social: a colleague's negative reply is engagement (a grievance), not a brush-off — any live reply to a coda scores +1; `sentiment` is no longer consulted, so objecting to a mistake can't down-rank the colleague. A down-rank now comes only from an owner directive / revival-aging. ([logEngagement.ts](src/core/social/logEngagement.ts))
+- Stale context: a 1:1 DM no longer re-merges the Slack thread (it misses nothing there), and a channel/MPIM merge is bounded to the DB's recency cap — so a fresh request stops being buried under ~50 messages of an already-finished one. ([app.ts](src/connectors/slack/app.ts))
+- Approval preview: the "If yes → I'll book at X" card is now WE-aware — `resolveConsequenceTravel` (async, fail-open) resolves the meeting-day travel context at the approval call sites and the preview renders via the same `renderWeDualClock`, so a trip-day approval card matches the booked-confirmation. ([approvalCallbacks.ts](src/core/approvals/approvalCallbacks.ts), [resolver.ts](src/core/requests/resolver.ts), [skill.ts](src/tasks/skill.ts))
+
+### Migration
+- `start_timezone` is removed from the create_meeting / move_meeting tool schemas (replaced by `stated_zone`). The handler still reads `args.start_timezone` as a back-compat fallback, and `find_available_slots` keeps `start_timezone` unchanged — so no in-flight call breaks.
+
+### Model-dependency (honest note)
+- The instant is correct **deterministically** when the owner names no zone (defaults to where he physically is, shown in both clocks) and on home-week dates. When he *does* name a zone, first-pass correctness routes through the model setting `stated_zone` — now backstopped by a visible dual-clock confirm and consume-on-use, so a mistag is visible and correctable in one step, never a silent wrong-day booking. The heavier code-only path (linking a relayed request across threads) is deferred.
+
+---
+
 ## 3.5.4 — Working-Elsewhere timezone drift fix + meeting move/booking hardening
 
 The headline is a 7-hour booking drift while the owner travels: a meeting set for "10:00" landed at 17:00 on a Working-Elsewhere week. The root was NOT the WE framework — it was the Graph time normalizer parsing a zoneless datetime in the SERVER's local timezone (Maelle runs on the owner's laptop, which is on the destination zone while away), so a canonical Israel "10:00" was read as 10:00 US-East and stored as 17:00 Israel. Fixed at the one chokepoint plus a sweep of sibling naive-parse sites. Also shipped: deterministic flight-anchor blocks, a round-robin slot spread, an attendee-never-a-blocker backstop, pre-rendered trip clocks, and `update_meeting` can finally change a location. Restart required.

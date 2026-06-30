@@ -430,8 +430,13 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     // The DB only has messages Maelle processed. In channels/MPIMs she may have
     // missed messages (not mentioned, relevance filtered). Fetch the real thread
     // so Claude has the full picture.
+    // v3.5.x — ONLY merge in channels/MPIMs. In a 1:1 DM Maelle misses nothing
+    // (every inbound is processed + appended), so the merge added zero new info
+    // and only re-inflated stale history past the DB's recency cap — burying a
+    // NEW request under ~50 messages of an already-finished one (Daniel,
+    // 2026-06-29: a fresh "meeting with Tal" ask read as a continuation).
     let history = dbHistory;
-    if (threadTs !== ts) {
+    if (threadTs !== ts && (isChannel || isMpim)) {
       try {
         const threadReplies = await client.conversations.replies({
           token: assistant.slack.bot_token,
@@ -459,7 +464,10 @@ export function createSlackAppForProfile(profile: UserProfile): App {
             const tsB = parseFloat(b.ts || '0');
             return tsA - tsB;
           });
-          history = merged;
+          // Bound to the DB's recency cap (conversations.ts:28 keeps last 20) so
+          // a long thread's merge can't re-expand the history the orchestrator
+          // just trimmed — the ratchet that bled stale context in.
+          history = merged.slice(-20);
           logger.info('Thread messages merged from Slack', {
             channelId,
             threadTs,

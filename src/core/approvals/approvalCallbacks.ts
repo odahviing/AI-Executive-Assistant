@@ -22,6 +22,8 @@
  */
 
 import type { UserProfile } from '../../config/userProfile';
+import type { OwnerTravelContext } from '../../utils/workingElsewhere';
+import { renderWeDualClock } from '../../utils/weTimeResolver';
 
 export interface ToolCallback {
   tool: string;
@@ -72,6 +74,14 @@ export function extractCallbacks(details: Record<string, unknown> | null | undef
 export function buildConsequenceText(
   callbacks: ApprovalCallbacks,
   profile: UserProfile,
+  // v3.5.x (WE preview) — pre-resolved owner travel context for the meeting day,
+  // supplied by the async caller (resolveConsequenceTravel). When present, the
+  // ISO-start tools render via the WE dual-clock (trip + home on a trip day,
+  // single home clock otherwise) so this preview matches the post-approve
+  // booked-confirmation, which the meeting chat migrated to the same renderer.
+  // Absent (no start / resolve failed / non-time tool) → home-zone fmtTime,
+  // byte-identical to before. Verbalizer stays SYNC — no Graph here.
+  travel?: OwnerTravelContext,
 ): string | null {
   if (!callbacks.on_approve) return null;
   const { tool, args } = callbacks.on_approve;
@@ -89,15 +99,21 @@ export function buildConsequenceText(
       return new Intl.DateTimeFormat('en-GB', opts).format(dt);
     } catch { return iso; }
   };
+  // WE-aware time render for the ISO-start tools: dual trip/home clock when
+  // travel is resolved, else the home-zone fallback.
+  const fmtStart = (iso: string | undefined, endIso?: string): string => {
+    if (!iso) return '';
+    return travel ? renderWeDualClock(iso, travel, profile.user.timezone, { endIso }) : fmtTime(iso);
+  };
   switch (tool) {
     case 'create_meeting': {
       const subj = (args.subject as string) ?? 'this meeting';
-      const start = fmtTime(args.start as string | undefined);
+      const start = fmtStart(args.start as string | undefined, args.end as string | undefined);
       return start ? `If yes → I'll book "${subj}" at ${start}.` : `If yes → I'll book "${subj}".`;
     }
     case 'move_meeting': {
       const subj = (args.meeting_subject as string) ?? 'the meeting';
-      const newStart = fmtTime(args.new_start as string | undefined);
+      const newStart = fmtStart(args.new_start as string | undefined, args.new_end as string | undefined);
       return newStart ? `If yes → I'll move "${subj}" to ${newStart}.` : `If yes → I'll move "${subj}".`;
     }
     case 'delete_meeting': {
@@ -115,6 +131,37 @@ export function buildConsequenceText(
     }
     default:
       return `If yes → I'll run ${tool}.`;
+  }
+}
+
+/**
+ * v3.5.x (WE preview) — resolve the owner's travel context for the on_approve's
+ * meeting day, so buildConsequenceText can render the WE dual-clock and the
+ * approval preview matches the booked-confirmation. ASYNC (fetches that day's
+ * events via getTravelContextForInstant); call it at the async approval call
+ * sites, then pass the result into the sync verbalizer. Only the time-bearing
+ * tools carry a start; everything else (and a missing/invalid start, or any
+ * failure) returns undefined → the verbalizer falls back to the home clock.
+ */
+export async function resolveConsequenceTravel(
+  callbacks: ApprovalCallbacks,
+  profile: UserProfile,
+): Promise<OwnerTravelContext | undefined> {
+  const args = callbacks.on_approve?.args;
+  const start = (args?.start ?? args?.new_start) as string | undefined;
+  if (typeof start !== 'string' || !start) return undefined;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getTravelContextForInstant } = require('../../utils/workingElsewhere') as
+      typeof import('../../utils/workingElsewhere');
+    return await getTravelContextForInstant(
+      start,
+      profile.user.email,
+      profile.user.slack_user_id,
+      profile.user.timezone,
+    );
+  } catch {
+    return undefined;  // fail-open → home-zone render, never block the approval DM
   }
 }
 

@@ -267,9 +267,9 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
           type: 'object',
           properties: {
             subject: { type: 'string', description: 'Meeting subject — ENGLISH ONLY, even when conversing in Hebrew.' },
-            start: { type: 'string', description: 'ISO 8601 datetime. In the owner local timezone UNLESS start_timezone is set, in which case it is the clock time in THAT zone.' },
-            end: { type: 'string', description: 'ISO 8601 datetime. Same timezone basis as start.' },
-            start_timezone: { type: 'string', description: 'IANA timezone the start/end CLOCK times are expressed in (e.g. "America/New_York"). Set this when the meeting time was GIVEN in a non-owner zone — e.g. the owner said "9:30 EST" / "2pm ET", or he is travelling and stated a time in the destination zone: pass start="...T09:30:00" + start_timezone="America/New_York" and the tool converts to the owner timezone deterministically. OMIT when the time is already in the owner timezone. NEVER hand-convert the time yourself — tag the source zone and let the tool do the math.' },
+            start: { type: 'string', description: 'ISO 8601 datetime — the clock time EXACTLY as the owner stated it, NOT converted. Say which zone that clock is in via `stated_zone`.' },
+            end: { type: 'string', description: 'ISO 8601 datetime. Same zone basis as start.' },
+            stated_zone: { type: 'string', description: 'Which timezone the owner NAMED for this time. Set it WHENEVER he names ANY zone — INCLUDING his home zone (this is the #1 thing to get right while he travels). Values: "home" (he said "Israel time" / "my home time" / "IL time"), "local" (he said "my time" / "local", or named the place he is physically in), or an IANA zone like "America/New_York" (he named a specific OTHER zone, e.g. "ET"/"EST"/"PT"). OMIT ONLY when he names NO zone — then a bare time is read as where he physically is on a travel day, else his home zone. Example: travelling in Boston he says "6:30 PM Israel time" → start="...T18:30:00", stated_zone="home". Pass the clock as-stated; the tool does ALL timezone math — NEVER hand-convert.' },
             intended_weekday: {
               type: 'integer',
               minimum: 1,
@@ -278,11 +278,20 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
             },
             attendees: {
               type: 'array',
+              description: 'The people ATTENDING the meeting. A colleague who only RELAYED a request between OTHERS ("tell Idan I want to meet Tal", "Dana asked me to set up a call with you") is the REQUESTER, NOT an attendee — do NOT list them here. Use requester_is_attending=false (+ requester_slack_id) for them instead.',
               items: {
                 type: 'object',
                 properties: { name: { type: 'string' }, email: { type: 'string' } },
                 required: ['name', 'email'],
               },
+            },
+            requester_is_attending: {
+              type: 'boolean',
+              description: 'OPTIONAL (default true). Set FALSE when the person who ASKED for this meeting is NOT one of its attendees — a colleague relaying a meeting between other people, or an EA booking for others. The handler then drops the requester from attendees, so they are neither invited nor recorded as having this meeting themselves. (Note their relay separately with note_about_person if useful — that is coordination, not a meeting they are in.)',
+            },
+            requester_slack_id: {
+              type: 'string',
+              description: 'OPTIONAL. Slack id of the requester when they are NOT attending (pair with requester_is_attending=false) — e.g. the colleague who relayed the request. Lets the handler drop exactly them even on the owner path, where the requester is not the person currently talking. Omit on the colleague path — it defaults to the colleague who is talking.',
             },
             body: { type: 'string', description: 'Optional meeting body — ENGLISH ONLY.' },
             is_online: {
@@ -348,9 +357,9 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
           properties: {
             meeting_id: { type: 'string' },
             meeting_subject: { type: 'string' },
-            new_start: { type: 'string' },
+            new_start: { type: 'string', description: 'ISO 8601 datetime — the clock time EXACTLY as the owner stated it, NOT converted. Say which zone that clock is in via `stated_zone`.' },
             new_end: { type: 'string', description: 'OPTIONAL — omit on a pure reschedule to KEEP the meeting\'s current length (the handler derives new_end = new_start + the existing duration, so you never have to ask "how long?"). Set it ONLY when the duration is actually changing.' },
-            start_timezone: { type: 'string', description: 'IANA timezone the new_start/new_end CLOCK times are expressed in (e.g. "America/New_York"). Set this when the move target was GIVEN in a non-owner zone — e.g. "move it to 9:30 EST", or the owner is travelling and stated a destination-zone time: pass new_start="...T09:30:00" + start_timezone="America/New_York" and the tool converts to the owner timezone deterministically. OMIT when the time is already in the owner timezone. NEVER hand-convert yourself — tag the source zone and let the tool do the math.' },
+            stated_zone: { type: 'string', description: 'Which timezone the owner NAMED for the new time. Set it WHENEVER he names ANY zone — INCLUDING his home zone. Values: "home" (he said "Israel time" / "my home time"), "local" (he said "my time" / "local", or named the place he is physically in), or an IANA zone like "America/New_York" (he named a specific OTHER zone, e.g. "ET"/"EST"). OMIT ONLY when he names NO zone — then a bare time is read as where he physically is on a travel day, else his home zone. Pass the clock as-stated; the tool does ALL timezone math — NEVER hand-convert.' },
             intended_weekday: {
               type: 'integer',
               minimum: 1,

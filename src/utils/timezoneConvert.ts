@@ -32,6 +32,20 @@ export function reinterpretClockInZone(
 }
 
 /**
+ * True if an ISO datetime carries an explicit zone — a trailing `Z` or `±HH:MM`
+ * offset — i.e. it denotes a FIXED INSTANT, not a zoneless wall-clock. Used to
+ * tell an already-anchored time (a search-emitted slot, or one a source-zone
+ * conversion just produced — leave as-is) from a BARE time the owner typed
+ * (which should be read in the relevant zone, never the server's). The zone
+ * designator only ever follows the time, so we test the post-`T` part — the
+ * date's own hyphens never trip it.
+ */
+export function isoHasExplicitZone(iso: string): boolean {
+  const timePart = iso.split('T')[1] ?? '';
+  return /[+\-Z]/i.test(timePart);
+}
+
+/**
  * Render an owner-zone instant in a target zone for display, with the short
  * offset name (e.g. "Tue 16 Jun 09:00 EDT"). Never emits the raw IANA string
  * (shipping "America/New_York" invites a "→ New York" location paste). Returns

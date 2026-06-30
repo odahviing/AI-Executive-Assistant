@@ -164,6 +164,8 @@ import {
 } from '../../db';
 import { closeMeetingArtifacts } from '../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../utils/timezoneConvert';
+import { recordWeConfirmShown, consumeWeConfirmShown } from '../../utils/weConfirmStash';
+import { resolveStatedInstant, renderWeDualClock } from '../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../utils/weekdayGuard';
 
 // ── Calendar event processing ─────────────────────────────────────────────────
@@ -2277,61 +2279,41 @@ export class SchedulingSkill {
             });
           }
         }
-        // v3.4.2 (A1) — deterministic source-timezone conversion. When the time
-        // was GIVEN in a non-owner zone ("9:30 EST" during the Boston trip),
-        // Sonnet tags `start_timezone` (e.g. "America/New_York") and passes the
-        // clock as-stated; we convert to the owner zone HERE via the SAME helper
-        // find_available_slots uses — never letting Sonnet do the arithmetic
-        // (which it got wrong repeatedly). Mutates args in place so every
-        // downstream `args.start` read sees the converted value. No-op when
-        // start_timezone is omitted (time already in owner zone).
-        {
-          const srcTz = typeof args.start_timezone === 'string' ? args.start_timezone.trim() : '';
-          if (srcTz) {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { reinterpretClockInZone } = require('../../utils/timezoneConvert') as
-              typeof import('../../utils/timezoneConvert');
-            if (typeof args.start === 'string') args.start = reinterpretClockInZone(args.start, srcTz, timezone);
-            if (typeof args.end === 'string') args.end = reinterpretClockInZone(args.end as string, srcTz, timezone);
-            logger.info('create_meeting — converted start/end from source TZ to owner TZ', {
-              start_timezone: srcTz, start_owner: args.start, end_owner: args.end,
-            });
-          }
-        }
-        // v3.4.2 (travel context) — when the owner is at a trip location on the
-        // meeting's day and DIDN'T explicitly tag start_timezone, (1) interpret a
-        // bare time in the TRIP timezone (a bare "10am" during a Boston week is
-        // 10am Boston, not 10am Israel), and (2) default the location to the trip
-        // place instead of a home-TZ Huddle / blank. Reuses the SAME reinterpret
-        // helper as the explicit path above and resolveLocation's owner-hint path
-        // for the stamp. No-op when not travelling that day (isAway:false).
+        // v3.5.x (WE time spine) — ONE place resolves "what instant does the
+        // owner's stated time mean" (resolveStatedInstant), fed the SINGLE travel
+        // detection. A clock that already carries an offset (a search slot, or one
+        // already zone-converted) is a fixed instant, left as-is; a BARE clock is
+        // read in the zone he NAMED (`stated_zone`: home/local, or an explicit
+        // IANA via start_timezone) or — if he named none — where he physically is
+        // on a trip day, never the server zone. This replaces the old split (a
+        // separate explicit-start_timezone block + a bare-trip guess) that let
+        // "6:30 IL time" fall through as bare and become Boston (the 2026-06-29
+        // cascade). tripDisplay (the trip TZ/location) is kept ONLY for the dual-
+        // clock display + the location-not-stamped rule; the lodging is never a venue.
         let tripDisplay: { tz: string; location: string } | null = null;
         if (typeof args.start === 'string') {
           try {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { getTravelContextForInstant } = require('../../utils/workingElsewhere') as
-              typeof import('../../utils/workingElsewhere');
-            const ctx = await getTravelContextForInstant(args.start as string, userEmail, context.profile.user.slack_user_id, timezone);
-            if (ctx.isAway) {
-              tripDisplay = { tz: ctx.effectiveTz, location: ctx.location };
-              // #WE-spine — the bare-time "trip TZ GUESS" was REMOVED. It silently
-              // re-read a search-emitted home-tz time as trip-tz (the Alliance
-              // "18:00 Israel" → 01:00 next-day rollover). A bare time now stays in
-              // the owner's zone (the system default — correct for a slot the
-              // search emitted in his zone); a genuinely trip-LOCAL time is
-              // disambiguated by the model passing `start_timezone` (handled
-              // above), and every WE booking routes to a dual-TZ confirm/approval
-              // (planMeeting) as the net. ctx is kept ONLY for the dual-TZ display
-              // — never to reinterpret the clock or stamp a venue.
-              // #WE-spine fix 2 — the lodging-as-venue auto-stamp was REMOVED: the
-              // WE marker's location is where the owner is STAYING ("Hotel AKA
-              // Boston Common"), NOT a meeting venue — stamping it put a team
-              // meeting in his hotel (the Offensive-hub incident; he wanted the
-              // office). With no explicit location, resolveLocation decides (online
-              // for a multi-person meeting) and the owner can name the office.
+            const { getTravelContextForInstant } = await import('../../utils/workingElsewhere');
+            const travel = await getTravelContextForInstant(args.start, userEmail, context.profile.user.slack_user_id, timezone);
+            if (travel.isAway) tripDisplay = { tz: travel.effectiveTz, location: travel.location };
+            const statedZone = (typeof args.stated_zone === 'string' && args.stated_zone.trim())
+              ? args.stated_zone.trim()
+              : (typeof args.start_timezone === 'string' && args.start_timezone.trim() ? args.start_timezone.trim() : undefined);
+            const resolved = resolveStatedInstant({
+              startIso: args.start,
+              endIso: typeof args.end === 'string' ? args.end : undefined,
+              statedZone, travel, homeTz: timezone,
+            });
+            if (resolved.reinterpreted) {
+              logger.info('create_meeting — stated time resolved to canonical instant', {
+                statedZone: statedZone ?? '(none)', sourceZone: resolved.sourceZone,
+                startWas: args.start, startNow: resolved.startIso, isAway: travel.isAway,
+              });
             }
+            args.start = resolved.startIso;
+            if (resolved.endIso) args.end = resolved.endIso;
           } catch (err) {
-            logger.warn('create_meeting — travel-context resolve threw, using time/location as-is', { err: String(err).slice(0, 160) });
+            logger.warn('create_meeting — WE time resolve threw, using time as-is', { err: String(err).slice(0, 160) });
           }
         }
         // v3.0.7 — runtime array guard. The `as Array<...>` cast is a pure-TS
@@ -2927,7 +2909,7 @@ export class SchedulingSkill {
               success: true,
               meetingId: duplicate.id,
               idempotent: true,
-              action_summary: `'${requestedSubject}' is already on the calendar for ${formatIsoTime(args.start as string)}–${formatIsoTime(args.end as string)}. Did not create a duplicate.`,
+              action_summary: `'${requestedSubject}' is already on the calendar for ${renderWeDualClock(args.start as string, { isAway: !!tripDisplay, effectiveTz: tripDisplay?.tz ?? timezone, location: tripDisplay?.location ?? '' }, timezone, { endIso: args.end as string })}. Did not create a duplicate.`,
               _note: 'A meeting with this exact subject and start time was already on the calendar. Returning the existing event id instead of creating a duplicate. Do NOT call create_meeting again for this slot.',
             };
           }
@@ -2945,6 +2927,57 @@ export class SchedulingSkill {
         // gate, email auto-fill); the normalizer reads those mutated values and
         // produces the canonical shape. See bookingRequest.ts for the invariants
         // the normalizer enforces.
+        // v3.5.x (B) — deterministic WE-confirm carry. If we already showed the
+        // owner this slot's trip-time in this conversation and he's re-issuing the
+        // SAME booking, the trip-time gate is satisfied — don't loop the confirm
+        // again (the 2026-06-29 "11am ET" infinite re-confirm, where the model
+        // never set we_acknowledged on the yes-retry). Owner path only; the
+        // stash only holds instants we actually showed, so a non-WE slot is never
+        // auto-acknowledged. `we_acknowledged` skips ONLY the WE trip-time check.
+        if (context.senderRole === 'owner'
+            && args.we_acknowledged !== true
+            && typeof args.start === 'string'
+            && consumeWeConfirmShown(context.channelId, context.threadTs, args.start)) {
+          logger.info('create_meeting — WE trip-time already confirmed this conversation, auto-acknowledging', {
+            start: args.start, channelId: context.channelId,
+          });
+          args.we_acknowledged = true;
+        }
+        // Bug 4 (2026-06-29) — a colleague who only RELAYED a meeting between OTHERS
+        // ("tell Idan I want to meet Tal") is the REQUESTER, not an attendee, but the
+        // model had added her to attendees → she was invited AND the booking was logged
+        // against her ("What we've discussed"). Reuse the existing requester concept
+        // (requester_is_attending — the find_available_slots flag): when the requester
+        // isn't attending, scrub them from the attendees array IN PLACE — `attendees`
+        // aliases args.attendees, so the one splice covers the normalizer→planMeeting→
+        // Graph event AND recordBooking (which reads this same array). Identity: the
+        // named requester_slack_id (works on the OWNER path, where the relayer isn't the
+        // one talking — the incident), else the colleague currently talking.
+        if (args.requester_is_attending === false) {
+          const requesterId = (typeof args.requester_slack_id === 'string' && args.requester_slack_id.trim())
+            ? args.requester_slack_id.trim()
+            : (context.senderRole === 'colleague' ? context.userId : undefined);
+          if (requesterId) {
+            try {
+              const { getPersonMemory } = await import('../../db');
+              const reqEmail = (getPersonMemory(requesterId)?.email ?? '').toLowerCase();
+              const before = attendees.length;
+              for (let i = attendees.length - 1; i >= 0; i--) {
+                const a = attendees[i];
+                const byId = !!a.slack_id && a.slack_id === requesterId;
+                const byEmail = !!reqEmail && (a.email ?? '').toLowerCase() === reqEmail;
+                if (byId || byEmail) attendees.splice(i, 1);
+              }
+              if (attendees.length < before) {
+                logger.info('create_meeting — requester not attending; scrubbed from attendees (relayer/organizer)', {
+                  requesterId, dropped: before - attendees.length, remaining: attendees.length,
+                });
+              }
+            } catch (err) {
+              logger.warn('create_meeting — requester-drop lookup threw, continuing', { err: String(err).slice(0, 160) });
+            }
+          }
+        }
         const bookingRequest = await normalizeBookingRequest('create_meeting', args, context);
         const plan = await planMeeting(planInputFromBookingRequest(bookingRequest, context.profile));
         logger.info('create_meeting — planMeeting verdict', {
@@ -2970,21 +3003,19 @@ export class SchedulingSkill {
         }
         // Early-return on non-book plans:
         if (plan.action === 'confirm_override' || plan.action === 'escalate_approval') {
-          // v3.5.x (WE confirm render) — on a travel day, hand the model a finished
-          // dual-clock string so the confirm STATES "05:45 EDT (12:45 your time)"
-          // instead of asking "5:45 or 12:45?". tripDisplay is the resolved trip
-          // tz/location (getTravelContextForInstant above); renderClockInZone is
-          // the shared deterministic renderer. The instant is unchanged — only the
-          // display zone is resolved from the trip. No-op off a travel day.
-          let tripTimeDisplay: string | undefined;
-          if (tripDisplay && typeof args.start === 'string' && typeof args.end === 'string') {
-            const tripStart = renderClockInZone(args.start, timezone, tripDisplay.tz);
-            const homeStart = DateTime.fromISO(args.start, { zone: timezone });
-            const homeEnd = DateTime.fromISO(args.end, { zone: timezone });
-            const tripEnd = homeEnd.setZone(tripDisplay.tz);
-            if (tripStart && homeStart.isValid && homeEnd.isValid && tripEnd.isValid) {
-              tripTimeDisplay = `${tripStart}–${tripEnd.toFormat('HH:mm')} (${homeStart.toFormat('HH:mm')}–${homeEnd.toFormat('HH:mm')} your home time)`;
-            }
+          // v3.5.x (WE confirm render) — on a travel day, hand the model the ONE
+          // finished dual-clock string so the confirm STATES the time instead of
+          // asking "5:45 or 12:45?". planMeeting builds it (the single source — it
+          // owns the WE detection + travel context) and pins each clock to its
+          // place; we just surface it VERBATIM. Owner confirm only — the colleague
+          // escalate path carries its own owner-framed dual-clock in
+          // suggested_ask_text, so attaching a "your home time" string there would
+          // mislabel it to the colleague.
+          const tripTimeDisplay = plan.action === 'confirm_override' ? plan.tripTimeDisplay : undefined;
+          // v3.5.x (B) — remember we showed THIS slot's trip-time, so the owner's
+          // re-issue of the same booking books instead of re-confirming forever.
+          if (tripTimeDisplay && context.senderRole === 'owner' && typeof args.start === 'string') {
+            recordWeConfirmShown(context.channelId, context.threadTs, args.start);
           }
           return {
             success: false,
@@ -2994,7 +3025,7 @@ export class SchedulingSkill {
             category: plan.category,
             ...(tripTimeDisplay ? {
               _trip_time_display: tripTimeDisplay,
-              _trip_note: 'Travel day — when you confirm, state the time using `_trip_time_display` VERBATIM (trip clock + home clock). Do NOT ask the owner which timezone, and do NOT recompute it.',
+              _trip_note: 'Travel day — state the time using `_trip_time_display` EXACTLY as written, with its labels intact. The first clock is where you physically are; the second is your home time — NEVER relabel one as the other (do not call the home time a place name like "Boston time"). Do not ask which timezone, and do not recompute it.',
             } : {}),
             // v2.7.2 — deferred_action_hint: the original tool call, ready to be
             // stamped on a follow-up create_approval. Orchestrator auto-attaches
@@ -3516,13 +3547,15 @@ export class SchedulingSkill {
             }
           }
 
-          // v3.4.2 (Consumer 3) — when the owner is travelling that day, render
-          // the time in the TRIP timezone with a label ("14:00 Boston time"), not
-          // the stored home-TZ clock — so the confirmation reads in the zone the
-          // owner is actually in and he never has to re-state it.
-          const bookedWhen = tripDisplay
-            ? `${DateTime.fromISO(args.start as string, { zone: timezone }).setZone(tripDisplay.tz).toFormat('HH:mm')}–${DateTime.fromISO(args.end as string, { zone: timezone }).setZone(tripDisplay.tz).toFormat('HH:mm')}${tripDisplay.location ? ` ${tripDisplay.location} time` : ' (local to where you are)'}`
-            : `${formatIsoTime(args.start as string)}–${formatIsoTime(args.end as string)}`;
+          // v3.5.x (Consumer 3) — the booked-confirmation states the time via the ONE
+          // renderer (dual-clock on a travel day, single clock at home), so the model
+          // quotes it instead of re-narrating from the raw home-zone `booked_start`
+          // and mislabelling it (the "17:00 = 5 PM EDT" inversion, 2026-06-29).
+          const bookedTravel = { isAway: !!tripDisplay, effectiveTz: tripDisplay?.tz ?? timezone, location: tripDisplay?.location ?? '' };
+          const bookedWhen = renderWeDualClock(args.start as string, bookedTravel, timezone, { endIso: args.end as string });
+          const bookedTripNote = tripDisplay
+            ? 'Travel day — state the booked time from `action_summary` VERBATIM (it carries both clocks, correctly labelled). Do NOT recompute it from `booked_start`/`booked_end`, which are the raw home-zone instant kept for verification only.'
+            : undefined;
           return {
             success: true,
             meetingId,
@@ -3536,6 +3569,7 @@ export class SchedulingSkill {
             // Sonnet from narrating the post-action calendar state as a fresh
             // discovery instead of the result of her own action (issue #26 bug 1).
             action_summary: `Booked '${args.subject}' for ${bookedWhen}.`,
+            ...(bookedTripNote ? { _trip_note: bookedTripNote } : {}),
             // #127 — owner booked through a soft own-day rule: surface the
             // heads-up so Maelle mentions it ONCE ("Booked — note this dips your focus floor
             // to 1h55"), never a blocking re-ask. Undefined on clean bookings.
@@ -3873,45 +3907,35 @@ export class SchedulingSkill {
       }
 
       case 'move_meeting': {
-        // v3.4.2 (A1) — deterministic source-timezone conversion, same helper as
-        // create_meeting + find_available_slots. When the move target was GIVEN
-        // in a non-owner zone ("move it to 9:30 EST"), Sonnet tags
-        // `start_timezone` and we convert new_start/new_end to the owner zone
-        // here — never Sonnet's head-arithmetic (the "9:30 EST → 13:30" thrash).
-        // Mutates args in place; no-op when start_timezone is omitted.
-        {
-          const srcTz = typeof args.start_timezone === 'string' ? args.start_timezone.trim() : '';
-          if (srcTz) {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { reinterpretClockInZone } = require('../../utils/timezoneConvert') as
-              typeof import('../../utils/timezoneConvert');
-            if (typeof args.new_start === 'string') args.new_start = reinterpretClockInZone(args.new_start as string, srcTz, timezone);
-            if (typeof args.new_end === 'string') args.new_end = reinterpretClockInZone(args.new_end as string, srcTz, timezone);
-            logger.info('move_meeting — converted new_start/new_end from source TZ to owner TZ', {
-              start_timezone: srcTz, new_start_owner: args.new_start, new_end_owner: args.new_end,
-            });
-          }
-        }
-        // v3.4.2 (travel context) — bare-time auto-convert + display, mirroring
-        // create_meeting. When the move target day is a trip day and Sonnet
-        // didn't tag start_timezone, interpret the bare new_start in the trip TZ.
-        // (Explicit "9:30 EST" moves are already handled by the block above.)
+        // v3.5.x (WE time spine) — the SAME single resolver as create_meeting (see
+        // its block for the full rationale). On a WE day a BARE new_start the owner
+        // typed is trip-LOCAL; a zone he named (`stated_zone`/start_timezone) wins;
+        // an offset-tagged new_start is a fixed instant, left as-is. moveTripDisplay
+        // is kept only for the dual-clock narration.
         let moveTripDisplay: { tz: string; location: string } | null = null;
         if (typeof args.new_start === 'string') {
           try {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { getTravelContextForInstant } = require('../../utils/workingElsewhere') as
-              typeof import('../../utils/workingElsewhere');
-            const ctx = await getTravelContextForInstant(args.new_start as string, userEmail, context.profile.user.slack_user_id, timezone);
-            if (ctx.isAway) {
-              moveTripDisplay = { tz: ctx.effectiveTz, location: ctx.location };
-              // #WE-spine — bare-time "trip TZ GUESS" REMOVED (same as create). A
-              // bare new_start stays owner-zone; trip-local times tag start_timezone
-              // (handled above); the WE move routes to a dual-TZ confirm/approval
-              // in planMeeting. moveTripDisplay is kept only for dual-TZ narration.
+            const { getTravelContextForInstant } = await import('../../utils/workingElsewhere');
+            const travel = await getTravelContextForInstant(args.new_start, userEmail, context.profile.user.slack_user_id, timezone);
+            if (travel.isAway) moveTripDisplay = { tz: travel.effectiveTz, location: travel.location };
+            const statedZone = (typeof args.stated_zone === 'string' && args.stated_zone.trim())
+              ? args.stated_zone.trim()
+              : (typeof args.start_timezone === 'string' && args.start_timezone.trim() ? args.start_timezone.trim() : undefined);
+            const resolved = resolveStatedInstant({
+              startIso: args.new_start,
+              endIso: typeof args.new_end === 'string' ? args.new_end : undefined,
+              statedZone, travel, homeTz: timezone,
+            });
+            if (resolved.reinterpreted) {
+              logger.info('move_meeting — stated time resolved to canonical instant', {
+                statedZone: statedZone ?? '(none)', sourceZone: resolved.sourceZone,
+                newStartWas: args.new_start, newStartNow: resolved.startIso, isAway: travel.isAway,
+              });
             }
+            args.new_start = resolved.startIso;
+            if (resolved.endIso) args.new_end = resolved.endIso;
           } catch (err) {
-            logger.warn('move_meeting — travel-context resolve threw, using time as-is', { err: String(err).slice(0, 160) });
+            logger.warn('move_meeting — WE time resolve threw, using time as-is', { err: String(err).slice(0, 160) });
           }
         }
         // #135c — pure reschedule keeps the meeting's length. When the model
@@ -4813,11 +4837,8 @@ export class SchedulingSkill {
           // without this, Sonnet could re-read the calendar post-move and narrate
           // the new time as a fresh discovery ("already at 12:30, nothing to change")
           // instead of acknowledging her own action.
-          action_summary: `Moved '${args.meeting_subject}' to ${
-            moveTripDisplay
-              ? `${DateTime.fromISO(effectiveStart, { zone: timezone }).setZone(moveTripDisplay.tz).toFormat('HH:mm')}–${DateTime.fromISO(effectiveEnd, { zone: timezone }).setZone(moveTripDisplay.tz).toFormat('HH:mm')}${moveTripDisplay.location ? ` ${moveTripDisplay.location} time` : ''}`
-              : `${formatIsoTime(effectiveStart)}–${formatIsoTime(effectiveEnd)}`
-          }.`,
+          action_summary: `Moved '${args.meeting_subject}' to ${renderWeDualClock(effectiveStart, { isAway: !!moveTripDisplay, effectiveTz: moveTripDisplay?.tz ?? timezone, location: moveTripDisplay?.location ?? '' }, timezone, { endIso: effectiveEnd })}.`,
+          ...(moveTripDisplay ? { _trip_note: 'Travel day — state the moved time from `action_summary` VERBATIM (both clocks, correctly labelled); do not recompute it.' } : {}),
         };
       }
 

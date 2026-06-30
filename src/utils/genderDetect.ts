@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
 import { config } from '../config';
 import { getPersonMemory, setCoreFieldWithProvenance } from '../db';
-import type { PersonGender } from '../db';
+import type { PersonGender, CoreFieldSetBy } from '../db';
 import logger from './logger';
 
 // ── Step 1: Pronouns ──────────────────────────────────────────────────────────
@@ -79,38 +79,11 @@ async function detectGenderFromImage(
   }
 }
 
-// ── Step 3: Name-based LLM inference ──────────────────────────────────────────
-// Works for Hebrew and English names. "Yael", "Rachel", "Dana" → female.
-// "Idan", "David", "Moshe" → male. Names that are ambiguous (Noa, Alex) or
-// genuinely unknown → 'unknown' and Maelle will ask once naturally.
-async function detectGenderFromName(name: string): Promise<PersonGender> {
-  if (!config.ANTHROPIC_API_KEY || !name || !name.trim()) return 'unknown';
-
-  try {
-    const anthropic = getAnthropicClient();
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 5,
-      messages: [{
-        role: 'user',
-        content: `Given this first/full name, what gender is the person most likely to be, based on the name's most common usage internationally? Consider the name's likely cultural origin as well as English usage.
-
-Name: "${name}"
-
-Reply with ONLY one word: male, female, or unknown.
-- "unknown" for genuinely ambiguous or unisex names (Alex, Jordan, Noa, Yuval, Shai, etc. — used across genders) or names you can't place.
-- Prefer "unknown" over a low-confidence guess — a wrong guess is worse than no guess.`,
-      }],
-    });
-    const answer = ((response.content[0] as any)?.text ?? '').toLowerCase().trim();
-    if (answer === 'male')   return 'male';
-    if (answer === 'female') return 'female';
-    return 'unknown';
-  } catch (err) {
-    logger.debug('Gender name-LLM detection failed', { name, err: String(err) });
-    return 'unknown';
-  }
-}
+// v3.5.x — the name-based LLM gender guess was REMOVED. It mis-cast a female
+// "Daniel" as male and shipped masculine Hebrew before any real signal existed
+// (2026-06-29). Guessing gender from a name is unsafe in any language; we now
+// rely only on a self-declaration (pronouns) or a weak image signal, and stay
+// 'unknown' otherwise (the reply goes gender-neutral; ask only if unavoidable).
 
 // ── Orchestrator ──────────────────────────────────────────────────────────────
 
@@ -119,11 +92,11 @@ Reply with ONLY one word: male, female, or unknown.
  *
  * Priority (each tier is a tentative auto-detection — NEVER overrides a
  * gender_confirmed=1 row, enforced in updatePersonGender):
- *   1. Slack pronouns field  → immediate, no API call
- *   2. Profile photo vision  → Claude Haiku, one-shot
- *   3. Name-based LLM guess  → Claude Haiku, covers Hebrew + English names
- *                              (picks up Yael/Dana/Rachel → female, etc.)
- *   4. Stays 'unknown'       → agent will ask once if needed
+ *   1. Slack pronouns field  → self-declaration → recorded as 'person' (steers)
+ *   2. Profile photo vision  → a weak guess → recorded as 'auto' (does NOT steer
+ *                              gendered forms until confirmed — see people.ts)
+ *   3. Stays 'unknown'       → reply stays gender-neutral; ask only if a gendered
+ *                              form is unavoidable. We NEVER guess from the name.
  *
  * Runs fire-and-forget in the background — never blocks message handling.
  * Skips entirely if gender is already known (confirmed or not).
@@ -144,25 +117,22 @@ export async function detectAndSaveGender(params: {
   const existing = getPersonMemory(slackId);
   if (existing?.gender && existing.gender !== 'unknown') return;
 
-  // Step 1 — pronouns (instant)
+  // Step 1 — pronouns. A Slack pronouns field is the person's OWN declaration,
+  // so record it as 'person': it steers gendered forms and an 'auto' signal
+  // can't clobber it (owner can still override).
   let gender = detectGenderFromPronouns(pronouns);
+  let setBy: CoreFieldSetBy = 'person';
 
-  // Step 2 — profile image (async API call)
+  // Step 2 — profile image. A guess, not a declaration → 'auto'. Under the
+  // people.ts render gate an 'auto' gender does NOT steer Hebrew forms until
+  // confirmed, so a wrong photo read can't reproduce the masculine-default bug.
   if (gender === 'unknown' && imageUrl) {
     gender = await detectGenderFromImage(imageUrl, name, botToken);
-  }
-
-  // Step 3 — name-based LLM (covers Hebrew names like Yael, Dana, etc.
-  // where there's no pronouns and image detection didn't succeed).
-  if (gender === 'unknown') {
-    gender = await detectGenderFromName(name);
+    setBy = 'auto';
   }
 
   if (gender !== 'unknown') {
-    // v2.2.2 (#46) — go through the provenance choke-point. set_by='auto' so
-    // any direct statement from the person or owner overrides this guess.
-    // The helper writes the gender column itself; no separate update needed.
-    const wrote = setCoreFieldWithProvenance(slackId, 'gender', gender, 'auto');
-    logger.debug('Gender saved (auto-detected)', { slackId, name, gender, wrote });
+    const wrote = setCoreFieldWithProvenance(slackId, 'gender', gender, setBy);
+    logger.debug('Gender saved', { slackId, name, gender, setBy, wrote });
   }
 }

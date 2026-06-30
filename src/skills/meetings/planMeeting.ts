@@ -26,6 +26,7 @@ import type { UserProfile } from '../../config/userProfile';
 import { getCalendarEvents, getFreeBusy, findAvailableSlots, type CalendarEvent } from '../../connectors/graph/calendar';
 import { resolveLocation, type LocationVerdict } from '../../utils/resolveLocation';
 import { checkSlot, type RuleCheckResult } from '../../utils/scheduleRules';
+import { renderWeDualClock } from '../../utils/weTimeResolver';
 import { detectCategory } from './detectCategory';
 import { findMeetingOwner, type MeetingOwnerInfo } from './findMeetingOwner';
 import { getCurrentTravel, getPersonMemory, searchPeopleMemory } from '../../db/people';
@@ -162,7 +163,7 @@ export type PlanAction =
       overrideNotice?: string;   // #127 — owner booked through a soft own-day rule; surface this heads-up, never re-ask
     }
   | { action: 'find_slots'; category: string | null; reasoning: string }
-  | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; category: string | null }
+  | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; category: string | null; tripTimeDisplay?: string }
   | { action: 'escalate_approval'; violationLabel: string; suggestedAskText: string; category: string | null }
   | { action: 'propose_alternative'; violationLabel: string; suggestedAskText: string; alternatives: Array<{ start: string; end: string; label: string }>; category: string | null }
   | { action: 'decline_and_relay'; organizerName: string | null; organizerEmail: string | null; organizerSlackId: string | null; suggestedDmText: string }
@@ -410,25 +411,28 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         if (!acknowledged) {
           const ownerFirst = profile.user.name.split(' ')[0];
           const loc = travel.location ? ` (${travel.location})` : '';
-          const instant = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone });
-          const awayClock = instant.setZone(travel.effectiveTz);   // same instant, where he is
-          const sameTz = travel.effectiveTz === profile.user.timezone;
-          const awayPart = `${awayClock.toFormat('HH:mm')} ${travel.location || 'there'}`;
-          const whereDay = awayClock.toFormat('EEEE');   // the day where he physically is (decision #2)
+          // The day where he physically is (decision #2) — from the away clock.
+          const whereDay = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone })
+            .setZone(travel.effectiveTz).toFormat('EEEE');
           logger.info('planMeeting — working-elsewhere day, verify trip-time before book', {
             slotDate, location: travel.location, effectiveTz: travel.effectiveTz, initiator,
             relaxed: input.allowRelaxed === true,
           });
           if (initiator === 'owner') {
-            const dual = sameTz ? instant.toFormat('HH:mm') : `${awayPart} / ${instant.toFormat('HH:mm')} your time`;
+            // THE canonical dual-clock the model must quote VERBATIM (ops.ts surfaces
+            // it as `_trip_time_display`) — built by the ONE renderer, pinned by
+            // meaning so a paraphrase can't invert it, lodging never named (it reads
+            // as a venue). The ask text carries NO clock.
             return {
               action: 'confirm_override',
               violationLabel: `working elsewhere${loc}`,
-              suggestedAskText: `You're working elsewhere${loc} on ${whereDay} — this slot is ${dual}. Confirm that's the time you want (your usual rules are relaxed there); on your yes, retry the SAME tool with we_acknowledged=true.`,
+              suggestedAskText: `You're working elsewhere${loc} on ${whereDay} — confirm the shown trip-time is the slot you want; your usual rules are relaxed there. On your yes, retry the SAME tool with we_acknowledged=true.`,
+              tripTimeDisplay: renderWeDualClock(input.slotStartIso, travel, profile.user.timezone, { endIso: input.slotEndIso }),
               category,
             };
           }
-          const dual = sameTz ? instant.toFormat('HH:mm') : `${awayPart} / ${instant.toFormat('HH:mm')} ${ownerFirst}'s time`;
+          // Colleague escalate — same renderer, owner-named framing for the colleague.
+          const dual = renderWeDualClock(input.slotStartIso, travel, profile.user.timezone, { endIso: input.slotEndIso, ownerName: ownerFirst });
           return {
             action: 'escalate_approval',
             violationLabel: 'owner_working_elsewhere',

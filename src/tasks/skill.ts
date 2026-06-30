@@ -777,10 +777,13 @@ Binding — how to pick the right approval_id:
         let dmText = askText;
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { extractCallbacks, buildConsequenceText } = require('../core/approvals/approvalCallbacks') as
+          const { extractCallbacks, buildConsequenceText, resolveConsequenceTravel } = require('../core/approvals/approvalCallbacks') as
             typeof import('../core/approvals/approvalCallbacks');
           const callbacks = extractCallbacks(row.details_json ? JSON.parse(row.details_json) : {});
-          const consequence = buildConsequenceText(callbacks, profile);
+          // v3.5.x (WE preview) — resolve trip context so the preview clock
+          // matches the booked-confirmation on a trip day.
+          const travel = await resolveConsequenceTravel(callbacks, profile);
+          const consequence = buildConsequenceText(callbacks, profile, travel);
           if (consequence) {
             dmText = `${askText}\n\n${consequence}`;
           }

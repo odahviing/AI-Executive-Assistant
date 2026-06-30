@@ -117,10 +117,11 @@ export function applyOrganicMatchSignal(params: {
  * proactive social (v3.2.6).
  *
  * Owner model: a tail-end social coda costs nothing to ignore. So rank only
- * moves on a genuine reply to a coda Maelle raised:
- *   - negative sentiment (explicit brush-off)        → −1
- *   - any other engaged social reply (pos / neutral) → +1
+ * moves UP on a genuine reply to a coda Maelle raised:
+ *   - ANY reply inside the window (pos / neg / neutral) → +1 (engagement)
  *   - no social reply at all → this path never fires → no change
+ * A negative reply is NOT a brush-off — it's usually a grievance, which is
+ * engagement; down-ranking is owner-directive / revival-aging only, never here.
  *
  * Window anchor is `people_memory.last_initiated_at` (set by recordSocialMoment
  * on EVERY coda — continue AND raise_new). The old anchor read the most-recent
@@ -142,10 +143,13 @@ export function adjustRankFromColleagueResponse(params: {
   const sinceMs = Date.now() - new Date(lastInit).getTime();
   if (sinceMs > RANK_RESPONSE_WINDOW_MS) return;
 
-  if (params.sentiment === 'negative') {
-    adjustEngagementRank(params.colleagueSlackId, -1, 'colleague_deflected');
-  } else {
-    adjustEngagementRank(params.colleagueSlackId, 1, 'reply_engaged');
-  }
+  // v3.5.x — ANY live reply inside the window is engagement → +1, regardless of
+  // sentiment. A negative reply is usually a GRIEVANCE ("you mis-gendered me"),
+  // which is high engagement, not a brush-off; scoring it −1 (the old
+  // 'colleague_deflected' branch) penalized the colleague for objecting (Daniel,
+  // 2026-06-29). Ignoring a coda still scores nothing (early return above); a
+  // down-rank now comes only from an owner directive / revival-aging, never from
+  // a colleague's own words. `sentiment` is intentionally no longer consulted.
+  adjustEngagementRank(params.colleagueSlackId, 1, 'reply_engaged');
 }
 

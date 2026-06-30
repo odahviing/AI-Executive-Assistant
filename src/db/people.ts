@@ -900,7 +900,11 @@ export function formatThreadPeopleBlock(
           ? `${p.timezone} (${p.state})${tzUnconfirmed}`
           : `${p.timezone} (city not on file — TZ is reliable for time math; only ask for city when location/venue matters)${tzUnconfirmed}`)
       : 'unknown';
-    const gender = p.gender && p.gender !== 'unknown' ? p.gender : 'unknown';
+    // v3.5.x — an `auto` gender (image/legacy name-guess) is NOT authoritative:
+    // surface it as unknown so it can't drive gendered Hebrew forms (the Daniel
+    // mis-gender). Only a person/owner-confirmed gender steers. Mirrors the tz
+    // unconfirmed-guess gate above.
+    const gender = p.gender && p.gender !== 'unknown' && p.gender_set_by !== 'auto' ? p.gender : 'unknown';
     lines.push(`- ${p.name}: email=${email}, tz=${tz}, gender=${gender}`);
   }
   if (lines.length === 0) return '';
@@ -1002,8 +1006,11 @@ export function formatPeopleMemoryForPrompt(
     // preference, so an English-writing colleague never gets a Hebrew DM. The
     // outbound-language prompt rule consumes this `language_pref` value.
     const langPart = `, language_pref: ${resolveOutboundLanguageForPerson(p)}`;
+    // v3.5.x — only a confirmed (person/owner) gender is authoritative; an `auto`
+    // guess renders 'unknown' so it can't steer gendered Hebrew forms.
+    const genderField = p.gender && p.gender !== 'unknown' && p.gender_set_by !== 'auto' ? p.gender : 'unknown';
     const parts: string[] = [
-      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${travelTag}${tzPart}${p.email ? `, email: ${p.email}` : ''}, gender: ${p.gender}${langPart}${socialPart})`,
+      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${travelTag}${tzPart}${p.email ? `, email: ${p.email}` : ''}, gender: ${genderField}${langPart}${socialPart})`,
     ];
 
     // Profile dimensions moved to per-person markdown files (v2.2.1). Fields

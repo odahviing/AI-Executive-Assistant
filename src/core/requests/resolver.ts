@@ -896,7 +896,7 @@ async function notifyOwnerOfColleaguePushback(
     // line eliminates the "I thought yes meant 14:00, got 16:00" confusion.
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { extractCallbacks, mergeAmendIntoApprove, buildConsequenceText } =
+      const { extractCallbacks, mergeAmendIntoApprove, buildConsequenceText, resolveConsequenceTravel } =
         require('../approvals/approvalCallbacks') as
           typeof import('../approvals/approvalCallbacks');
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -905,7 +905,10 @@ async function notifyOwnerOfColleaguePushback(
       const callbacks = extractCallbacks(details);
       if (callbacks.on_approve && colleagueCounter) {
         const merged = mergeAmendIntoApprove(callbacks.on_approve, colleagueCounter);
-        const consequence = buildConsequenceText({ on_approve: merged }, ctx.profile);
+        // v3.5.x (WE preview) — same trip-aware clock as the create_approval
+        // preview, so the re-decide line matches the booked-confirmation.
+        const travel = await resolveConsequenceTravel({ on_approve: merged }, ctx.profile);
+        const consequence = buildConsequenceText({ on_approve: merged }, ctx.profile, travel);
         if (consequence) {
           body = `${body}\n\n${consequence}`;
         }
