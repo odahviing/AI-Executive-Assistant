@@ -51,7 +51,7 @@ export interface RescheduleContext {
 }
 
 interface RescheduleClassification {
-  status: 'approved' | 'declined' | 'counter';
+  status: 'approved' | 'declined' | 'counter' | 'checking';
   counter_start?: string;  // HH:MM if counter
   counter_end?: string;
   summary: string;
@@ -83,17 +83,18 @@ ${params.colleagueName} replied: "${params.reply}"
 Classify their reply and output strict JSON only (no prose, no fences):
 
 {
-  "status": "approved" | "declined" | "counter",
+  "status": "approved" | "declined" | "counter" | "checking",
   "counter_start": "HH:MM" | null,
   "counter_end": "HH:MM" | null,
   "summary": "one sentence describing what they said"
 }
 
 - "approved": they accepted the proposed time. Examples: "yes", "works", "sounds good", "sure".
-- "declined": they said no and did not propose an alternative. Examples: "no", "can't", "not possible today".
+- "declined": they said no / it doesn't work and offered no alternative. Examples: "no", "can't", "not possible today".
 - "counter": they accepted rescheduling but proposed a different time. Extract the time they offered into counter_start (and counter_end if they gave a range). Example: "yes but 09:30 would be better" → counter_start="09:30".
+- "checking": they acknowledged but have NOT decided yet — they need to check or confirm with someone/something before they can answer. Examples: "let me check", "I'll confirm with the candidate and come back to you", "need to look at my calendar", "will get back to you". This is neither yes, no, nor a counter — it's "not yet." Classify by MEANING in any language, not keywords.
 
-If ambiguous, prefer "declined" over guessing.`;
+Tie-break: a genuine NON-answer (they haven't decided, "I'll get back to you", truly unclear) → "checking". Only prefer "declined" when the reply leans actually-negative but vague ("probably not", "I doubt it").`;
 
   try {
     const resp = await anthropic.messages.create({
@@ -276,6 +277,36 @@ export async function handleRescheduleReply(
       `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
        WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague')`,
     ).run(job.id);
+    return true;
+  }
+
+  // ── Branch: checking → colleague acknowledged but hasn't decided ──────────
+  // v3.5.x — a "let me check / I'll come back to you" is NOT a decline. Do not
+  // move, resolve, or report a decline. Keep the request OPEN (it stays
+  // awaiting_colleague — still genuinely waiting on the colleague) and re-arm ITS
+  // spine timer for a SINGLE re-ask in 24h (reschedule_reask). If the colleague
+  // comes back with a real answer before then, that reply runs this handler
+  // again and resolves normally — clearing this timer. No new state: reuses the
+  // open outreach job + the linked request's next_check.
+  if (decision.status === 'checking') {
+    const ownerMsg = `${job.colleague_name} is checking on "${ctx.meeting_subject}" and will come back to me — nothing decided yet, so I'm keeping the current time and will wait. If I don't hear back I'll nudge once tomorrow.`;
+    await conn.postToChannel(job.owner_channel, ownerMsg, { threadTs: job.owner_thread_ts ?? undefined });
+    if (job.owner_thread_ts) {
+      appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: ownerMsg });
+    }
+    // Persist the colleague reply; DO NOT set a terminal status → job stays open.
+    updateOutreachJob(job.id, { reply_text: replyText, conversation_json: JSON.stringify(conversation) });
+    // Re-arm the request's spine timer: one re-ask at +24h (overrides the
+    // reply-time timer clear above).
+    if (job.request_id) {
+      updateRequest(job.request_id, {
+        nextCheckAt: DateTime.now().plus({ hours: 24 }).toUTC().toISO(),
+        nextCheckHandler: 'reschedule_reask',
+      });
+    }
+    logger.info('Reschedule reply = checking — kept open, armed reschedule_reask +24h', {
+      jobId: job.id, requestId: job.request_id ?? null,
+    });
     return true;
   }
 

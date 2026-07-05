@@ -12,10 +12,12 @@
  *   resolveCategoryByPriority — pick the FIRST matching category from a
  *     candidate list (yaml ORDER is priority)
  *   checkCategorySlot         — is this slot allowed for this category?
- *     fired by find_available_slots, create_meeting, move_meeting,
- *     coordinate_meeting, analyze_calendar
+ *     fired at booking time by find_available_slots, create_meeting,
+ *     move_meeting
  *   countCategoryOccurrences  — how many events of this category fall in
  *     a given window? (per-day / per-week count)
+ *   findCategoryViolations    — report-only sweep of a whole range; fired
+ *     by the daily calendar-health routine AND interactive analyze_calendar
  *
  * The helper is INTENTIONALLY agnostic to category names. It reads
  * profile.categories[] and applies whatever rules each entry carries.

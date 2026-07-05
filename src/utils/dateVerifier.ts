@@ -37,7 +37,7 @@ import { getAnthropicClient } from '../llm/client';
 import logger from './logger';
 import type { UserProfile } from '../config/userProfile';
 import { getEffectiveToday } from './effectiveToday';
-import { extractFirstJsonObject } from './extractJson';
+import { parseFirstJsonObject } from './extractJson';
 import { logLlmUsage } from './usageLog';
 
 const anthropic = getAnthropicClient();
@@ -123,8 +123,13 @@ Output STRICT JSON only, no prose, no code fences:
   logLlmUsage('date_verifier_extract', 'claude-haiku-4-5-20251001', resp);
 
   const raw = ((resp.content[0] as Anthropic.TextBlock)?.text ?? '').trim();
-  const json = extractFirstJsonObject(raw) ?? raw;
-  const parsed = JSON.parse(json) as { pairs?: unknown; weekdayNames?: unknown };
+  // Robust parse — NEVER JSON.parse the raw (fenced/malformed) text; null on
+  // unrecoverable → treat as "no pairs" (safe miss), don't throw.
+  const parsed = parseFirstJsonObject<{ pairs?: unknown; weekdayNames?: unknown }>(raw);
+  if (!parsed) {
+    logger.warn('dateVerifier: extractor output unparseable — treating as no pairs', { rawPreview: raw.slice(0, 120) });
+    return { pairs: [], weekdayNames: [] };
+  }
 
   const pairs: ExtractedPair[] = Array.isArray(parsed.pairs)
     ? (parsed.pairs as unknown[])
@@ -261,9 +266,9 @@ Output STRICT JSON only, no prose, no fences:
     logLlmUsage('date_booking_honesty', 'claude-haiku-4-5-20251001', resp);
 
     const raw = ((resp.content[0] as Anthropic.TextBlock)?.text ?? '').trim();
-    const json = extractFirstJsonObject(raw) ?? raw;
-    const parsed = JSON.parse(json) as { mismatches?: Array<{ span?: unknown; corrected?: unknown }> };
-    const mismatches = Array.isArray(parsed.mismatches) ? parsed.mismatches : [];
+    // Robust parse — NEVER JSON.parse the raw text; null → no mismatches (safe).
+    const parsed = parseFirstJsonObject<{ mismatches?: Array<{ span?: unknown; corrected?: unknown }> }>(raw);
+    const mismatches = parsed && Array.isArray(parsed.mismatches) ? parsed.mismatches : [];
 
     let out = draft;
     let changed = false;

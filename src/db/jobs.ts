@@ -34,6 +34,14 @@ export function getLinkedRequestIdForOutreach(outreachId: string): string | null
   return row?.request_id ?? null;
 }
 
+// v3.5.x — reverse lookup: the outreach detail row for a spine request. Used by
+// the reschedule_reask spine handler to re-ping the colleague from the request's
+// timer (mirrors getCoordJobByRequestId). Reads the existing request_id column —
+// no new state.
+export function getOutreachJobByRequestId(requestId: string): OutreachJob | null {
+  return getDb().prepare(`SELECT * FROM outreach_jobs WHERE request_id = ?`).get(requestId) as OutreachJob | null;
+}
+
 // Count open requests where this colleague is the requester or target — used by
 // the colleague rate-limit gate (max 2 pending requests per colleague). Reads
 // the requests spine (the lifecycle owner), independent of any side table.

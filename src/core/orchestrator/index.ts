@@ -1110,7 +1110,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
           byLoc.get(key)!.push(date);
         }
         const parts = [...byLoc.entries()].map(([locName, dates]) => `${dates.sort().join(', ')} (${locName})`);
-        ownerLocationBlock = `## OWNER LOCATION (next 14 days)\n\n${ownerFirst} is WORKING ELSEWHERE on: ${parts.join('; ')}. On those days his clock and location are the trip's, not home. On any day NOT listed above, treat ${ownerFirst} as in his home base (${homeTz}) — and do NOT carry a trip location/timezone that came up earlier in the conversation onto a day that isn't listed here (that bleed is the bug this prevents).`;
+        ownerLocationBlock = `## OWNER LOCATION (next 14 days)\n\n${ownerFirst} is WORKING ELSEWHERE on: ${parts.join('; ')}. On those days his clock and location are the trip's, not home. On any day NOT listed above, treat ${ownerFirst} as in his home base (${homeTz}) — and do NOT carry a trip location/timezone that came up earlier in the conversation onto a day that isn't listed here (that bleed is the bug this prevents).\n\nOn one of his working-elsewhere days, lead with the destination-local time (e.g. "10:45 Boston / 17:45 your usual time"), not home-first. And when flagging an over-hours or conflict on such a day, name the real reason in one clause — don't say "past your usual finish" unless it is actually true in the timezone he is in that day.`;
       }
     }
   } catch (err) {

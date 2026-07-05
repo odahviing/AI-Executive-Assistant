@@ -145,6 +145,31 @@ export interface RuleCheckResult {
   violation_label?: string;          // short human phrase suitable for an approval ask_text
 }
 
+/**
+ * requiredFreeMinutesForWorkDay — THE single source of truth for "how much free
+ * time a work day should have," derived from that day's TOTAL work-window
+ * minutes (morning + night shift summed). Length-based: 1 free hour per
+ * `workHoursPerFreeHour` hours worked, rounded UP to the next 15-minute step.
+ *
+ * bug 1.13 — replaces the old fixed free_time_per_office/home_day_hours that
+ * was read independently in analyze_calendar, checkSlot rule 9, and the
+ * calendar-health sweep (three copies, drift-prone). The RATIO stays per-owner
+ * config (de-tenant: v3.2.x deliberately moved free-time off a hardcoded value
+ * so one owner's focus theory isn't imposed on every tenant) — unset / ≤0 →
+ * 0 min, i.e. no floor imposed.
+ *
+ *   ratio 4:  4h day → 60m · 6h → 90m · 8h → 120m · 12h → 180m
+ *             2.5h → 37.5 → ceil-15 → 45m · 3h → 45m
+ */
+export function requiredFreeMinutesForWorkDay(
+  workTotalMin: number,
+  workHoursPerFreeHour: number | undefined,
+): number {
+  if (!workHoursPerFreeHour || workHoursPerFreeHour <= 0) return 0;
+  if (!(workTotalMin > 0)) return 0;
+  return Math.ceil((workTotalMin / workHoursPerFreeHour) / 15) * 15;
+}
+
 export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   const { profile } = input;
   const tz = profile.user.timezone;
@@ -419,11 +444,20 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
     const isOffice = officeDays.has(dayName);
     const isHome = homeDays.has(dayName);
     if (isOffice || isHome) {
-      const requiredHours = isOffice
-        ? (profile.meetings.free_time_per_office_day_hours ?? 0)
-        : (profile.meetings.free_time_per_home_day_hours
-            ?? profile.meetings.free_time_per_office_day_hours ?? 0);
-      const requiredMin = requiredHours * 60;
+      // bug 1.13 — length-based floor via the shared helper (1h free per
+      // work_hours_per_free_hour worked, ceil to 15 min). Same source of truth
+      // as analyze_calendar + calendar-health, so search, book, and review can
+      // never disagree about the floor.
+      const dayWindowsForFloor = (profile.schedule.work_hours as Record<string, string[]>)[dayName] ?? [];
+      let workTotalMinForFloor = 0;
+      for (const win of dayWindowsForFloor) {
+        const [ws, we] = win.split('-');
+        if (!ws || !we) continue;
+        const [wsh, wsm] = ws.split(':').map(Number);
+        const [weh, wem] = we.split(':').map(Number);
+        workTotalMinForFloor += (weh * 60 + wem) - (wsh * 60 + wsm);
+      }
+      const requiredMin = requiredFreeMinutesForWorkDay(workTotalMinForFloor, profile.meetings.work_hours_per_free_hour);
       if (requiredMin > 0) {
         const minChunk = profile.meetings.thinking_time_min_chunk_minutes ?? 30;
         // Build busyBlocks from this day's events, minus excluded ids.
@@ -477,7 +511,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
             return {
               passes: false,
               violation_kind: 'focus_time_floor',
-              violation_label: `Booking this leaves ${profile.user.name.split(' ')[0]} with ${Math.round(dayFreeMin)} min of focus time on ${dayName} — below his ${requiredHours}h ${isOffice ? 'office' : 'home'}-day floor.`,
+              violation_label: `Booking this leaves ${profile.user.name.split(' ')[0]} with ${Math.round(dayFreeMin)} min of free time on ${dayName} — below the ${requiredMin}-min floor for a ${workTotalMinForFloor}-min work day.`,
             };
           }
         }

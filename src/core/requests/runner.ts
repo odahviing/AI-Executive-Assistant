@@ -20,6 +20,7 @@ import { DateTime } from 'luxon';
 import type { App } from '@slack/bolt';
 import type { UserProfile } from '../../config/userProfile';
 import { getDueRequests, updateRequest } from '../../db/requests';
+import { getOutreachJobByRequestId } from '../../db/jobs';
 import { closeRequest } from './closeRequest';
 import type { NextCheckHandler, RequestRow } from './types';
 import { parseDetails } from './types';
@@ -115,6 +116,9 @@ async function dispatchHandler(
 
     case 'research_run':
       return runResearchRun(row, profile, app);
+
+    case 'reschedule_reask':
+      return runRescheduleReask(row, profile);
 
     case 'outreach_expiry':
     case 'outreach_decision':
@@ -342,6 +346,58 @@ async function runResearchRun(row: RequestRow, profile: UserProfile, app: App | 
     closedBy: 'system',
   });
   return 'closed';
+}
+
+/**
+ * v3.5.x — reschedule "checking" re-ask. A colleague replied "let me check /
+ * I'll come back to you" to a meeting_reschedule ask; the reply handler kept the
+ * request open and armed this at +24h. Fires ONCE: re-ping the colleague with the
+ * original proposal, then re-arm to the normal outreach_expiry — so it never
+ * re-asks a second time, and eventual silence still closes cleanly (owner
+ * tombstone). A real reply before now would have run handleRescheduleReply and
+ * cleared this timer, so reaching here means still-waiting. No new state — reads
+ * the outreach detail row by request_id.
+ */
+async function runRescheduleReask(row: RequestRow, profile: UserProfile): Promise<'rearmed' | 'noop'> {
+  const job = getOutreachJobByRequestId(row.id);
+  // Stale/settled guard — the REQUEST state is the lifecycle truth: a real reply
+  // (approve/decline/counter) would have cascaded the request off
+  // awaiting_colleague AND cleared this timer. So reaching here in any other
+  // state, or with no reschedule job, means nothing to re-ask → drop the timer.
+  if (row.state !== 'awaiting_colleague' || !job || job.intent !== 'meeting_reschedule') {
+    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+    return 'noop';
+  }
+  const conn = getConnection(profile.user.slack_user_id, 'slack');
+  if (!conn) {
+    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+    return 'noop';
+  }
+  let ctx: { meeting_subject?: string; proposed_start?: string } = {};
+  try { ctx = job!.context_json ? JSON.parse(job!.context_json) : {}; } catch { /* fall back to generic */ }
+  const tz = profile.user.timezone;
+  const whenLocal = ctx.proposed_start
+    ? DateTime.fromISO(ctx.proposed_start, { zone: tz }).toFormat("EEEE d MMM 'at' HH:mm")
+    : 'the new time';
+  const subj = ctx.meeting_subject ?? 'the meeting';
+  const first = (job!.colleague_name ?? '').split(/\s+/)[0] || 'there';
+  const msg = `Hi ${first}, just circling back on "${subj}" — were you able to check on moving it to ${whenLocal}? No rush, just want to lock it in when you can.`;
+  try {
+    if (job!.dm_channel_id) await conn.postToChannel(job!.dm_channel_id, msg, { threadTs: job!.dm_message_ts ?? undefined });
+    else await conn.sendDirect(job!.colleague_slack_id, msg);
+  } catch (err) {
+    logger.warn('reschedule_reask — re-ping DM failed', { requestId: row.id, err: String(err).slice(0, 200) });
+  }
+  // Re-arm to the NORMAL no-response expiry — guarantees exactly one re-ask and
+  // a clean eventual close. Never back to reschedule_reask.
+  updateRequest(row.id, {
+    nextCheckAt: DateTime.now().plus({ hours: 48 }).toUTC().toISO(),
+    nextCheckHandler: 'outreach_expiry',
+  });
+  logger.info('reschedule_reask — re-pinged colleague once, re-armed to outreach_expiry', {
+    requestId: row.id, jobId: job!.id,
+  });
+  return 'rearmed';
 }
 
 /**

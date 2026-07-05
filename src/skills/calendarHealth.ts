@@ -773,11 +773,6 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
           // they already exist; defaults inline for the rest.
           {
             const isOffice = (profile.schedule.office_days.days as string[]).includes(dayName);
-            const freeTimeThresholdHours = isOffice
-              ? profile.meetings.free_time_per_office_day_hours
-              : (profile.meetings.free_time_per_home_day_hours
-                ?? profile.meetings.free_time_per_office_day_hours);
-            const freeTimeThresholdMin = freeTimeThresholdHours * 60;
 
             // v2.8.7 (bug 1.3) — per-window aware. Pre-fix (v2.8.1 multi-
             // window introduction) used a bounding-box approach: clip busy
@@ -796,6 +791,11 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
               ? windows
               : [{ startMin: 9 * 60, endMin: 18 * 60 }];
             const workTotalMin = totalWorkMinutes(fallbackWindows);
+            // bug 1.13 — length-based free-time floor via the shared helper (one
+            // source of truth with analyze_calendar + checkSlot rule 9).
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { requiredFreeMinutesForWorkDay } = require('../utils/scheduleRules') as typeof import('../utils/scheduleRules');
+            const freeTimeThresholdMin = requiredFreeMinutesForWorkDay(workTotalMin, profile.meetings.work_hours_per_free_hour);
 
             // Parse busy events ONCE; per-window calc reuses these.
             const allBusy = nonAllDay
@@ -846,25 +846,24 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
             // v2.5.6 (re-enabled) — busy_day flagging restored. Was removed
             // in v2.3.1 (#67) per prior owner direction; reversed in 2026-05
             // after a real-world test where almost every office day was under
-            // the 2h focus target and the owner never heard about it. Fires
-            // on a single signal: total free time during work hours falls
-            // below profile.meetings.free_time_per_office_day_hours (or
-            // _per_home_day_hours) for that day type. Pure report-only — no
-            // auto-fix; owner decides which meeting to move. The longestGap
-            // value rides along in the issue payload so Sonnet can narrate
-            // honest detail without recomputing ("only 80 min of focus, your
-            // 2h target needs more").
-            if (freeMin < freeTimeThresholdMin) {
+            // the focus target and the owner never heard about it. Fires on a
+            // single signal: total free time during work hours falls below the
+            // length-based floor (requiredFreeMinutesForWorkDay — bug 1.13, the
+            // same source of truth as analyze_calendar + checkSlot rule 9).
+            // Pure report-only — no auto-fix; owner decides which meeting to
+            // move. The longestGap value rides along in the issue payload so
+            // Sonnet can narrate honest detail without recomputing.
+            if (freeTimeThresholdMin > 0 && freeMin < freeTimeThresholdMin) {
               const dayLabel = cursor.toFormat('EEEE d MMMM');
               const freeHrs = (freeMin / 60).toFixed(1);
-              const targetHrs = (freeTimeThresholdMin / 60).toFixed(0);
+              const targetHrs = (freeTimeThresholdMin / 60).toFixed(1);
               issues.push({
                 type: 'busy_day',
                 date: cursor.toISODate() ?? '',
                 // v3.5.x — stable anchor so the row materializes and can be
                 // approved/suppressed (busy_day has no real event_id).
                 synthetic_id: dayLevelIssueSyntheticId('busy_day', cursor.toISODate() ?? ''),
-                description: `${dayLabel} has only ${freeMin} min of free time during work hours (under your ${targetHrs}h ${isOffice ? 'office' : 'home'}-day target). Longest single block: ${longestGap} min.`,
+                description: `${dayLabel} has only ${freeMin} min of free time during work hours (under your ${targetHrs}h free-time target for the day). Longest single block: ${longestGap} min.`,
                 free_minutes: freeMin,
                 longest_gap_minutes: longestGap,
                 threshold_minutes: freeTimeThresholdMin,

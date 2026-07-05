@@ -2,6 +2,40 @@
 
 ---
 
+## 3.6.1 — real-day bug wave: review accuracy, move correctness, slot narration, one free-time source of truth
+
+A 14-item real-day bug wave off a week-review + reschedule thread, fixed across four parallel chats (meeting, prompt, guard, approval) and bundled into one patch. The spine of it: the calendar *review* under-counted free time and never flagged category limits; a "move X" turned into a duplicate; the free-time floor lived as three drifting copies; and owner-facing narration leaked internals or blamed the wrong party. Restart required.
+
+### Fixed — calendar-review accuracy (meeting core)
+- Free-time no longer over-counts: `analyzeCalendar` now counts a meeting that STARTS before work hours but runs into them — a private block 08:30–10:30 on a 09:00 start used to leave 09:00–10:30 reading as free (the "1h55 free" Sunday that was really ~20 min). Only the in-hours portion is counted. ([ops.ts](src/skills/meetings/ops.ts))
+- Interactive `analyze_calendar` now flags category per-day / per-week limit breaches (4 Weeklies on a 3/day cap). The detection (`findCategoryViolations`) already ran in the daily health sweep; it was never wired into the on-demand review. ([ops.ts](src/skills/meetings/ops.ts))
+
+### Changed — one source of truth for the free-time floor
+- The daily free-time floor is now LENGTH-based: 1 free hour per N hours actually worked that day (total work-window minutes, morning + night shift summed), rounded up to 15 min. One helper — `requiredFreeMinutesForWorkDay` ([scheduleRules.ts](src/utils/scheduleRules.ts)) — is the SINGLE source of truth, called by the review (`analyzeCalendar`), the booking validator (`checkSlot` rule 9), and the calendar-health sweep; the three previously read the config independently and drifted. Free-time is counted per work-window (a split-shift off-period is never counted) and any gap under 15 min is dropped, not shaved by a buffer.
+- The fixed `free_time_per_office_day_hours` / `free_time_per_home_day_hours` config is replaced by a single per-owner ratio knob `work_hours_per_free_hour` (unset → no floor, de-tenant neutral). The old per-gap `buffer_minutes` shave is gone from this calc (`buffer_minutes` still applies in `check_join_availability`).
+
+### Fixed — meeting move / create (meeting core)
+- create-vs-move slop guard: `findReschedulableSibling` ([calendar.ts](src/connectors/graph/calendar.ts)) catches "move X" → `create_meeting` duplicating a live series (the 2026-07-05 Simon double-book across two days). Matches WHO + WHAT within a ~3-week window, time-independent; surface-and-ask, with a `force_new` escape so a genuine second 1:1 with the same person still books.
+- Weekly 1:1 category detection: a cadence-worded subject ("… BiWeekly") with a single non-owner invitee now classifies as Weekly regardless of the recurrence flag, so a moved single occurrence keeps its Weekly category instead of demoting to generic "Meeting". (category description; tenant-local yaml)
+
+### Fixed — reschedule close-loop (approval)
+- A colleague's "let me check and come back to you" is no longer misread as a decline. A new `checking` status keeps the request open, re-pings once at +24h (`reschedule_reask` timer), and resolves on the real reply — no more "Yael declined" when Yael never declined. ([meetingReschedule.ts](src/skills/meetingReschedule.ts), [runner.ts](src/core/requests/runner.ts))
+
+### Fixed — owner-facing narration + persona (prompt)
+- Historical calendar reads: the DATE LOOKUP table is a relative-date helper, not a capability limit. On the owner path, an explicit past date / month / year ("my flights from 2019") is passed straight to `get_calendar` — Maelle no longer claims she "can't see back that far"; if a real query is empty she says she searched and found none (may predate mailbox retention). Colleague path stays scoped — no multi-year sweeps. ([systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+- In a 1:1 DM the owner is addressed as "you," never third-person by name; internal tool/feature names ("the analyzer", "the classifier") are banned from owner-facing narration; a direct "what is X?" gets answered instead of dodged. ([systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+- On a working-elsewhere day, narration leads with the destination-local time and names the real reason for an over-hours / conflict flag (never "past your usual finish" unless it's true in the zone he's actually in). ([index.ts](src/core/orchestrator/index.ts))
+
+### Fixed — output guards
+- humanGate no longer fails open on a fenced JSON reply — the parse failure was passing the un-vetted draft through unchanged. ([humanGate.ts](src/utils/humanGate.ts))
+- securityGate scrubs raw Slack IDs (`<@U…>`, `<#C…>`, bare `U…`/`W…`, `req_`/`task_`) from colleague-facing replies — the 2026-07-01 Oran leak, where a failed `find_slack_user` narrated internal IDs to a colleague. ([securityGate.ts](src/utils/securityGate.ts))
+
+### Not changed (by owner call)
+- The owner's own soft-rule override at booking already books in one step with a heads-up (#127); the extra "book anyway?" in the thread came from pre-validating an explicit owner time with `find_available_slots`, folded into the narration work above.
+- Social coda riding a calendar-triage turn — left as-is for now.
+
+---
+
 ## 3.6.0 — Working-Elsewhere timezone SPINE: one resolver, one renderer, the model conveys the named zone
 
 After a near-give-up trip day (the owner travelling in Boston), Working-Elsewhere scheduling broke every way at once: a stated time became the wrong instant, the dual-clock label inverted, a wrong-day booking survived three corrections, a colleague was mis-gendered and then down-ranked for objecting, and a relayed request booked the relayer as an attendee. Root, proven across the day's log: WE time resolution had **no single source of truth** — "what instant does the stated time mean / how is it shown" was re-decided across 6+ layers that disagreed, and the pivotal "which zone did he mean" was left to the model, whose schema told it *not* to tag the home zone (so "Israel time" was tagged 0/3 times). This version collapses that into ONE spine — one detection, one instant-resolver, one renderer — and changes the model contract so it conveys the named zone *including home*. Bundles fixes from four parallel chats (timezone, gender, social, approval). Restart required.

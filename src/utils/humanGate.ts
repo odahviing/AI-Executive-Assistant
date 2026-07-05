@@ -248,6 +248,8 @@ ${aud.refusalExamples}
 
 Same rule in Hebrew, French, etc. — never expose mechanism in any language.
 
+INTERNAL IDENTIFIERS ARE MACHINE-VOICE. A raw Slack ID ("U0ARK5814PQ", "<@U…>", a "#C…" channel id) or an internal request/task id ("req_…", "task_…") never belongs in a message to a person — a human EA refers to people by NAME, never by an account id. If ${assistantName} can't resolve who's meant, she asks ("who should I loop in?"), she never reads out the id. Narrating an id to the reader is ok=false.
+
 Output strict JSON only, no prose, no markdown:
 { "ok": true | false, "rewrite": "<rewrite if ok=false>" | null }
 
@@ -324,6 +326,61 @@ function missingFacts(original: string, rewrite: string): string[] {
 }
 
 /**
+ * Parse a humanGate verdict from LLM output. Balanced-object extract (fences
+ * stripped by extractFirstJsonObject) → JSON.parse; on failure, recover the
+ * ok/rewrite fields by regex. Returns null ONLY when nothing is recoverable —
+ * and CRUCIALLY never JSON.parses the raw fenced text (the fail-open where a
+ * ```json-fenced reply threw "Unexpected token '`'" and the gate passed the
+ * draft through unchecked).
+ */
+function parseGateVerdict(raw: string): { ok?: boolean; rewrite?: string | null } | null {
+  if (!raw || !raw.trim()) return null;
+  const obj = extractFirstJsonObject(raw);
+  if (obj) {
+    try { return JSON.parse(obj) as { ok?: boolean; rewrite?: string | null }; } catch { /* fall through to regex recovery */ }
+  }
+  // Field-level recovery — malformed JSON, stray fences, unescaped chars.
+  const okM = raw.match(/"ok"\s*:\s*(true|false)/i);
+  if (okM) {
+    const ok = okM[1].toLowerCase() === 'true';
+    let rewrite: string | null = null;
+    const rwM = raw.match(/"rewrite"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (rwM) { try { rewrite = JSON.parse(`"${rwM[1]}"`) as string; } catch { rewrite = rwM[1]; } }
+    return { ok, rewrite };
+  }
+  return null;
+}
+
+/**
+ * Last-resort net for when the gate can't reach a verdict (unparseable output
+ * after a retry, or an API error). Only the most common bot-tells + structured
+ * IDs — enough to avoid shipping an OBVIOUS leak, while a clean-looking draft
+ * still passes through so a transient glitch doesn't nuke a good reply. NOT the
+ * primary detector (the LLM gate + securityGate are), so its English bias is
+ * acceptable for a fallback-of-a-fallback.
+ */
+function draftLooksLeaky(draft: string): boolean {
+  return /\bmy\s+(?:system|routine|backend|tools?|prompts?|instructions|functions?|api)\b/i.test(draft)
+    || /\b(?:access denied|not_permitted|permission denied|i don'?t have permission)\b/i.test(draft)
+    || /<@[UW][A-Z0-9]{6,}>|<#C[A-Z0-9]{6,}|\b[UW](?=[A-Z0-9]*\d)[A-Z0-9]{7,}\b|\b#?(?:req|task|coord|out|ci)_[a-z0-9_]+\b/i.test(draft);
+}
+
+function safeFallback(draft: string, audience: HumanGateAudience, reason: string): HumanGateResult {
+  if (draftLooksLeaky(draft)) {
+    const safe = audience === 'owner'
+      ? 'Sorry — I hit a snag on this one. Let me sort it and come back to you.'
+      : 'Let me look into this and come back to you.';
+    logger.warn('humanGate — could not verify a leaky-looking draft; substituting a safe line (NOT passing it through)', {
+      audience, reason, draftPreview: draft.slice(0, 120),
+    });
+    return { ok: false, rewrite: safe };
+  }
+  // Clean-looking draft + a transient gate failure → ship it. Replacing a good
+  // reply with a canned line on every glitch would be its own bug.
+  return { ok: true, rewrite: null };
+}
+
+/**
  * Run the human gate on a draft. Returns { ok: true, rewrite: null } for
  * clean drafts; { ok: false, rewrite: <rewritten text> } when self-as-machine
  * framing, fake-capability promises, or audience-wrong third-person was
@@ -371,14 +428,30 @@ export async function runHumanGate(
       .join('')
       .trim();
 
-    // Tolerate code fences AND arbitrary prose prefix. Sonnet sometimes
-    // ignores "no prose" instructions and writes "This message is fine.
-    // {ok: true, ...}" or similar — strict JSON.parse on the whole string
-    // throws SyntaxError("Unexpected token 'T'..."). Extract the first
-    // balanced-looking {...} block and parse THAT. Same pattern as
-    // skills/meetingReschedule.ts and other JSON-output gates.
-    const jsonStr = extractFirstJsonObject(text);
-    const parsed = JSON.parse(jsonStr ?? text) as { ok?: boolean; rewrite?: string | null };
+    // Parse the verdict robustly (balanced-object extract → JSON → field-regex
+    // recovery). NEVER JSON.parse the raw fenced text — that's the fail-open we
+    // hit when a ```json reply broke extraction.
+    let parsed = parseGateVerdict(text);
+
+    // v3.6.x — an unparseable verdict must not fail OPEN. Retry the gate once
+    // (asking for bare JSON); if it's STILL unparseable, don't ship the
+    // un-vetted draft blind — safeFallback substitutes a safe line for a
+    // leaky-looking draft and passes a clean-looking one through.
+    if (!parsed) {
+      logger.warn('humanGate — verdict unparseable, retrying once', { audience });
+      try {
+        const retryResp = await anthropic.messages.create({
+          model, max_tokens: 600, system: systemPrompt,
+          messages: [{ role: 'user', content: `${draft}\n\n[Reply with ONLY the JSON object {"ok":…,"rewrite":…}. No code fences, no prose.]` }],
+        });
+        logLlmUsage('human_gate_reparse', model, retryResp, { audience });
+        const rt = retryResp.content.filter(b => b.type === 'text').map(b => (b as Anthropic.TextBlock).text).join('').trim();
+        parsed = parseGateVerdict(rt);
+      } catch (_) { /* handled by the fallback below */ }
+    }
+    if (!parsed) {
+      return safeFallback(draft, audience, 'verdict unparseable after retry');
+    }
 
     if (parsed.ok === false && typeof parsed.rewrite === 'string' && parsed.rewrite.trim().length > 0) {
       // v3.4 — deterministic safety net: a voice-rewrite must not silently drop
@@ -411,8 +484,8 @@ export async function runHumanGate(
           });
           logLlmUsage('human_gate_retry', model, retryResp, { audience });
           const rt = retryResp.content.filter(b => b.type === 'text').map(b => (b as Anthropic.TextBlock).text).join('').trim();
-          const p2 = JSON.parse(extractFirstJsonObject(rt) ?? rt) as { rewrite?: string | null };
-          if (typeof p2.rewrite === 'string' && p2.rewrite.trim().length > 0) retry = p2.rewrite;
+          const p2 = parseGateVerdict(rt);
+          if (p2 && typeof p2.rewrite === 'string' && p2.rewrite.trim().length > 0) retry = p2.rewrite;
         } catch (_) { /* retry failed — handled below */ }
 
         if (retry && !rewriteDroppedAFact(draft, retry)) {
@@ -440,9 +513,7 @@ export async function runHumanGate(
 
     return { ok: true, rewrite: null };
   } catch (err) {
-    logger.warn('humanGate — failed to evaluate draft, passing through unchanged', {
-      err: String(err).slice(0, 200),
-    });
-    return { ok: true, rewrite: null };
+    // An API/other error means no verdict — don't blind-pass a leaky draft.
+    return safeFallback(draft, audience, `gate threw: ${String(err).slice(0, 120)}`);
   }
 }

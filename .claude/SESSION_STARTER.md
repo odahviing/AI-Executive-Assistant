@@ -1,6 +1,6 @@
 # Maelle session context
 
-We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.5.0** — check `package.json` if unsure; it is the source of truth.
+We're working on the Maelle project at `E:/Code/Maelle`. **Current version: v3.6.0** — check `package.json` if unsure; it is the source of truth.
 
 ## 🤖 Four agents now run the bug-resolve loop (route work to the right one)
 
@@ -12,16 +12,25 @@ Parallel chats on the same repo — at wrap, `git fetch` + check the working tre
 
 When a bug's real fix is honesty/leak → guard; tone/judgment → prompt; tool-description/routing → tenancy; the deterministic scheduling core → meeting agent.
 
-## 🧠 NEXT CHAT — REBUILD THE PERSON-MEMORY / STORED-ATTRIBUTE LAYER (top priority)
+## ✅ SHIPPED since 3.5.0 — person-memory provenance + the WE timezone spine + a real-day bug arc
 
-The memory layer has accumulated a class of bugs and needs a redesign, not more patches. **Symptoms seen live:**
-- **Hebrew name transliteration is wrong.** Yael had to correct Maelle (2026-06-24): *"עידן לא אידן, עדי לא אדי, יעל לא יאל"* — names stored/rendered with the wrong Hebrew spelling (transliteration drift: עדי↔אדי, יעל↔יאל, עידן↔אידן). Outbound uses the corrupted spelling.
-- **Stored attributes freeze from a one-off signal, drive outbound forever, never self-correct.** Ayala's `language_preference=Hebrew` (she writes English → got a Hebrew relay); Gidon's `timezone=Europe/Amsterdam` (he's in Israel now → times presented in Amsterdam). Set once `auto`, never re-confirmed; the inbound detector re-reads the live message but never *updates* the stored attribute.
-- Plus **multiple other memory bugs from the parallel chats that were started and not completed** — sweep them in the rebuild.
+The "rebuild person-memory" priority is **DONE** (Phase 1, 3.5.1) and the Working-Elsewhere timezone class is **rebuilt as one spine** (3.6.0). Version arc:
+- **3.5.1** — person-memory Phase 1: a *guess* (`auto`) no longer silently steers outbound. Language derives from the recent inbound thread (default English); a guessed timezone confirms before it steers; native-script names carry provenance + freeze-once (no more עידן↔אידן per-render drift). + WE→timezone one-spine started.
+- **3.5.2** — Bootcamp real-day wave: duration override folded into the universal `relaxed` flag; narrated times match the post-snap booked instant; reflow names every moved event; #134 owner-location grounding.
+- **3.5.3** — WE away-local offer window (`meetings.working_elsewhere` yaml); slot holds **accumulate** (3/holder + 2/meeting); calendar-health stops re-flagging an acknowledged issue.
+- **3.5.4 / 3.6.0** — the meeting chat's **Working-Elsewhere timezone SPINE**: one resolver, one renderer, the model conveys the named zone. (This swept in the Daniel-audit fixes below.)
 
-**The redraft framework (full "when it keeps data / when not" overview is in the chat that shipped 3.5.0):** the five stores are (1) `user_preferences` table, (2) per-skill learned MD, (3) `people_memory` core attrs via `setCoreFieldWithProvenance` (`owner` vs `auto`), (4) `people_memory` profile_json + MD notes, (5) the end-of-chat capture pass (always `auto`). The lever is the **`owner` vs `auto` provenance**: (a) `auto` attributes that *drive behavior* (language, timezone, name spelling) must be **confirmed before they steer outbound**, or **self-correct** when live signals consistently contradict; (b) the capture pass must stop **promoting a one-off** to a durable attribute; (c) `update_my_preferences(mode='replace')` must **diff + confirm** before dropping unlisted prefs; (d) `owner`-set attrs stay sticky. Also: name spelling/transliteration needs a canonical per-person store, not per-render guessing.
+**Daniel-audit fixes that landed in 3.6.0** (log audit of the 2026-06-29 bad travel day): gender no longer guessed from the name + an `auto` gender doesn't steer Hebrew forms (`genderDetect.ts`, `people.ts`); a grievance no longer down-ranks a colleague (`logEngagement.ts`); the 1:1-DM history merge is skipped + bounded so a new request isn't read as an old finished meeting (`app.ts`).
 
-**Also stale after v3.5.0:** `project_architecture.md` (memory) still describes the **coord state machine as live** — it was fully removed; trim that section during the rebuild.
+## 🔧 OPEN HANDOFFS for the parallel chats (not yet landed)
+- **Guard chat — IN PROGRESS (uncommitted in tree: `humanGate.ts`, `securityGate.ts`).** securityGate now scrubs raw Slack IDs (`<@U…>`, `<#C…>`, bare `U…`/`W…`, `req_`/`task_`) from colleague replies + a humanGate machine-voice note — the confirmed **Oran leak, 2026-07-01** (a failed `find_slack_user` made Maelle narrate `U0ARK5814PQ … I have him as U0F28CK6H` straight to Oran). Guard chat owns the commit. Also still open there: **claimChecker prior-turn recap inversion** (a true "moved it ✓" recap of a prior-turn action rewritten to "not done yet") + **humanGate must never ship the flagged original** as its dropped-fact fallback.
+- **Prompt chat — gender phrasing.** Change `systemPrompt.ts:501` "gender unknown → use male default" → **neutral phrasing when gender unknown in a gendered language; ask only if a gendered form is unavoidable** (owner decision: "neutral now, ask only if needed"). The code side (no name-guess, `auto` doesn't steer) already shipped in 3.6.0.
+- **Meeting chat — requester ≠ attendee.** `create_meeting` must honor the existing `requester_is_attending` (a colleague who *relayed* a meeting between others is not an attendee — the Daniel "with Tal" booking added Daniel + logged it against her). Reuse the flag, don't add a new one. Plus two smaller items from the "After flight" chat: **anchor a block to an event's end** ("2h after my flight" — extend `must_be_after_event_id` to anchor, not just refuse) and reconsider **`confirm_override` on the owner's OWN travel-day block** (one-step per #127).
+
+**Stale doc:** `project_architecture.md` (memory) still describes the **coord state machine as live** — coord was fully removed in 3.5.0; trim that section next time it's touched.
+
+## 🏠 NEXT — new build, back home
+Owner is travelling back to Israel; a fresh build starts next session. Standing mode unchanged: real-day bugs, propose-first, code-first, wait for a per-bug "fix it", ship in one bundle at wrap. The parallel-chat handoffs above are queued for guard / prompt / meeting to land.
 
 ## 🔭 v3.5.0 — coord subsystem removed + weekday/booked-date correctness + coda once/day (multi-chat minor)
 

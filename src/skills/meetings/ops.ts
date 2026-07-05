@@ -145,6 +145,7 @@ import {
   getCalendarEvents,
   getEventEndInstant,
   findDuplicateEvent,
+  findReschedulableSibling,
   type CalendarEvent,
   getFreeBusy,
   findAvailableSlots,
@@ -386,7 +387,7 @@ export function processCalendarEvents(
 // ── Calendar analysis (detect issues) ────────────────────────────────────────
 
 interface CalendarIssue {
-  type: 'oof_with_meetings' | 'no_buffer' | 'missing_floating_block' | 'back_to_back' | 'overlap' | 'work_on_day_off';
+  type: 'oof_with_meetings' | 'no_buffer' | 'missing_floating_block' | 'back_to_back' | 'overlap' | 'work_on_day_off' | 'category_over_limit';
   severity: 'high' | 'medium' | 'low';
   detail: string;
   suggestedFix?: string;
@@ -430,13 +431,14 @@ export function analyzeCalendar(
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const fb = require('../../utils/floatingBlocks') as typeof import('../../utils/floatingBlocks');
   const floatingBlocks = fb.getFloatingBlocks(profile);
-  const bufferMin = profile.meetings.buffer_minutes ?? 15;
-  // v1.6.11 — per-day-type focus-time threshold. Office days usually need
-  // more protected focus time than home days; profile can set each
-  // separately. Home falls back to office value when not set.
-  const requiredFreeOfficeMin = (profile.meetings.free_time_per_office_day_hours ?? 0) * 60;
-  const requiredFreeHomeMin = ((profile.meetings.free_time_per_home_day_hours
-    ?? profile.meetings.free_time_per_office_day_hours ?? 0)) * 60;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { requiredFreeMinutesForWorkDay } = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
+  // v3.6.x (bug 1.13) — required free time is now LENGTH-based, not a fixed
+  // office/home target: 1h free per 4h worked, rounded UP to the next 15 min,
+  // off the TOTAL work-window minutes for the day (morning + night shift
+  // summed). The old fixed free_time_per_office/home_day_hours and the
+  // buffer_minutes shave are gone from this calc (buffer_minutes still lives in
+  // check_join_availability). Computed per day in the loop below via workTotalMin.
 
   // Iterate every calendar day in the range
   const results: DayAnalysis[] = [];
@@ -510,17 +512,27 @@ export function analyzeCalendar(
       });
     }
 
-    // Time-block analysis (only non-all-day meetings within work hours)
+    // Time-block analysis — any non-all-day meeting that OVERLAPS work hours,
+    // not only those that START inside them. An event beginning before work
+    // hours but running into them (e.g. a private block 08:30–10:30 when work
+    // starts 09:00) occupies real in-hours time; filtering by start alone
+    // dropped it entirely and counted 09:00–10:30 as free (the Sunday "1h55
+    // free" overcount). Only the in-hours portion is ever counted: the gap /
+    // duration loop below starts prevEndMin at workStartMin and caps evEnd at
+    // workEndMin, so the pre-work and post-work slivers are clamped away.
     const timedMeetings = nonAllDayMeetings.filter(e => {
-      const [h, m] = e._localStartTime.split(':').map(Number);
-      const startMin = h * 60 + m;
-      return startMin >= workStartMin && startMin < workEndMin;
+      const [sh, sm] = e._localStartTime.split(':').map(Number);
+      const [eh, em] = e._localEndTime.split(':').map(Number);
+      const startMin = sh * 60 + sm;
+      const endMin = eh * 60 + em;
+      return endMin > workStartMin && startMin < workEndMin;
     });
 
-    // Compute gaps (free blocks) between meetings
+    // Compute gaps (free blocks) between meetings + detect overlaps. gaps[] and
+    // totalMeetingMin feed floating-block detection + stats below; free-time is
+    // computed per-window afterward (bug 1.13) so split shifts read correctly.
     let totalMeetingMin = 0;
     let prevEndMin = workStartMin;
-    let freeMin = 0;
     const gaps: Array<{ start: number; end: number }> = [];
 
     for (const ev of timedMeetings) {
@@ -531,11 +543,7 @@ export function analyzeCalendar(
       const evDur   = Math.max(0, evEnd - Math.max(evStart, prevEndMin));
 
       if (evStart > prevEndMin) {
-        const gapSize = evStart - prevEndMin;
         gaps.push({ start: prevEndMin, end: evStart });
-        // Only count time BEYOND the transition buffer as productive focus time.
-        // A 5-min gap between meetings is just breathing room, not thinking time.
-        freeMin += Math.max(0, gapSize - bufferMin);
       }
 
       // v2.0.8 — true overlap detection. A new meeting starting BEFORE the
@@ -568,20 +576,53 @@ export function analyzeCalendar(
       totalMeetingMin += evDur;
       prevEndMin = Math.max(prevEndMin, evEnd);
     }
-    // Gap from last meeting to end of work day (counts fully — no transition needed)
+    // Trailing gap from the last meeting to end of the work span — for the
+    // floating-block detection below (free-time uses its own per-window pass).
     if (prevEndMin < workEndMin) {
-      const trailingGap = workEndMin - prevEndMin;
       gaps.push({ start: prevEndMin, end: workEndMin });
-      freeMin += trailingGap;
     }
 
-    // Buffer check (cumulative free time < required for THIS day type)
-    const requiredFreeMin = isOffice ? requiredFreeOfficeMin : requiredFreeHomeMin;
-    if (freeMin < requiredFreeMin) {
+    // ── Free time (bug 1.13) ───────────────────────────────────────────────
+    // Sum free gaps INSIDE each work window only — the off-period between a
+    // morning and a night shift is never counted (it isn't work time). No buffer
+    // shave; any single gap under 15 min is dropped entirely, not trimmed.
+    // required = 1h free per 4h worked, rounded UP to the next 15 min, off the
+    // summed work-window length (workTotalMin).
+    const freeWindows = windows.length > 0 ? windows : [{ startMin: workStartMin, endMin: workEndMin }];
+    const meetingIntervals = timedMeetings.map(ev => {
+      const [sh, sm] = ev._localStartTime.split(':').map(Number);
+      const [eh, em] = ev._localEndTime.split(':').map(Number);
+      return { start: sh * 60 + sm, end: eh * 60 + em };
+    });
+    let freeMin = 0;
+    for (const w of freeWindows) {
+      // Clamp meetings to this window, drop empties, sort, merge overlaps.
+      const busy = meetingIntervals
+        .map(m => ({ start: Math.max(m.start, w.startMin), end: Math.min(m.end, w.endMin) }))
+        .filter(m => m.end > m.start)
+        .sort((a, b) => a.start - b.start);
+      const merged: Array<{ start: number; end: number }> = [];
+      for (const b of busy) {
+        const last = merged[merged.length - 1];
+        if (last && b.start <= last.end) last.end = Math.max(last.end, b.end);
+        else merged.push({ ...b });
+      }
+      let cursor = w.startMin;
+      for (const b of merged) {
+        const gap = b.start - cursor;
+        if (gap >= 15) freeMin += gap;   // full gap; sub-15 fragments don't count
+        cursor = Math.max(cursor, b.end);
+      }
+      const trailing = w.endMin - cursor;
+      if (trailing >= 15) freeMin += trailing;
+    }
+
+    const requiredFreeMin = requiredFreeMinutesForWorkDay(workTotalMin, profile.meetings.work_hours_per_free_hour);
+    if (requiredFreeMin > 0 && freeMin < requiredFreeMin) {
       issues.push({
         type: 'no_buffer',
         severity: 'high',
-        detail: `Only ${freeMin} min free during work hours (${workTotalMin} min total). Need at least ${requiredFreeMin} min for focus/planning on a ${isOffice ? 'office' : 'home'} day.`,
+        detail: `Only ${freeMin} min free inside your ${workTotalMin}-min work day; you want at least ${requiredFreeMin} min (1h free per 4h worked; gaps under 15 min don't count).`,
         suggestedFix: 'Consider moving or shortening some meetings.',
       });
     }
@@ -960,6 +1001,34 @@ export class SchedulingSkill {
         const _suppressed = getSuppressedEventIds(context.profile.user.slack_user_id);
         void _suppressed;
         const analysis = analyzeCalendar(processed, args.start_date as string, args.end_date as string, context.profile);
+        // v3.6.x (bug 1.2) — category per-day / per-week limit breaches. The
+        // detection logic already exists (findCategoryViolations, run by the
+        // daily calendar-health sweep) but was never wired into the INTERACTIVE
+        // review, so "how does my week look?" never flagged e.g. 4 Weeklies on a
+        // day whose limit is 3. Mirror calendarHealth's pass and merge each
+        // violation into the day it lands on (per_week → its week-start day, or
+        // day 0 when that week-start falls outside the queried range).
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { findCategoryViolations } = require('../../utils/categoryRules') as
+            typeof import('../../utils/categoryRules');
+          const rangeStart = DateTime.fromISO(args.start_date as string, { zone: timezone }).startOf('day');
+          const rangeEnd = DateTime.fromISO(args.end_date as string, { zone: timezone }).endOf('day');
+          const violations = findCategoryViolations({ events: rawEvents, profile: context.profile, rangeStart, rangeEnd });
+          for (const v of violations) {
+            const target = analysis.find(d => d.date === v.window_start) ?? analysis[0];
+            if (!target) continue;
+            const where = v.rule_broken === 'per_day' ? `on ${v.window_label}` : `in the ${v.window_label}`;
+            target.issues.push({
+              type: 'category_over_limit',
+              severity: 'medium',
+              detail: `${v.category_name} ${v.rule_broken.replace('_', '-')} limit is ${v.rule_value}; ${where} there ${v.current_count === 1 ? 'is' : 'are'} ${v.current_count}.`,
+              suggestedFix: 'Move one to another day, or confirm it\'s intentional.',
+            });
+          }
+        } catch (err) {
+          logger.warn('analyze_calendar — category violation pass threw, skipping', { err: String(err).slice(0, 200) });
+        }
         // v3.3 (fix #2) — attach the Working Elsewhere note when the range has
         // WE days, so issue-narration is framed in the away timezone too.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1472,8 +1541,8 @@ export class SchedulingSkill {
                 case 'owner_busy_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
                 case 'owner_busy_or_buffer_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
                 case 'overlaps_meeting_being_moved': return `overlaps the meeting being moved`;
-                case 'focus_time_office': return `breaks ${ownerFirst}'s focus-time protection (office day)`;
-                case 'focus_time_home': return `breaks ${ownerFirst}'s focus-time protection (home day)`;
+                case 'focus_time_office': return `would leave ${ownerFirst} under the free-time floor (office day)`;
+                case 'focus_time_home': return `would leave ${ownerFirst} under the free-time floor (home day)`;
                 case 'floating_block_no_room': return `would leave no room for one of ${ownerFirst}'s daily blocks (lunch / break / etc.)`;
                 case 'category_day_type': return `wrong day type for this category (e.g. office-only category on a home day)`;
                 case 'category_per_day': return `over ${ownerFirst}'s per-day limit for this category`;
@@ -2215,7 +2284,7 @@ export class SchedulingSkill {
                 // should narrate the trade-off, not present as clean options.
                 result._relaxed_recovery = true;
                 result._recovery_note =
-                  'Strict pass returned 0 in the named window. These slots come from a relaxed retry that bypassed soft rules (focus_time / lunch / work-hours). Read day_summary.top_reasons to see WHICH rule each slot is breaking, and present with that trade-off explicitly ("X fits but eats into your focus block — book anyway?"). Owner gets the final say.';
+                  'Strict pass returned 0 in the named window. These slots come from a relaxed retry that bypassed soft rules (free-time floor / lunch / work-hours). Read day_summary.top_reasons to see WHICH rule each slot is breaking, and present with that trade-off explicitly ("X fits but dips under the free-time floor — book anyway?"). Owner gets the final say.';
               }
               if (hasWe) {
                 result.working_elsewhere = weInfo;
@@ -2730,8 +2799,8 @@ export class SchedulingSkill {
                     // legacy label name kept as alias in case any older diagnostics path still emits it
                     case 'owner_busy_or_buffer_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
                     case 'overlaps_meeting_being_moved': return `overlaps the meeting being moved`;
-                    case 'focus_time_office': return `breaks ${ownerFirst}'s focus-time protection (office day)`;
-                    case 'focus_time_home': return `breaks ${ownerFirst}'s focus-time protection (home day)`;
+                    case 'focus_time_office': return `would leave ${ownerFirst} under the free-time floor (office day)`;
+                    case 'focus_time_home': return `would leave ${ownerFirst} under the free-time floor (home day)`;
                     case 'floating_block_no_room': return `would leave no room for one of ${ownerFirst}'s daily blocks (lunch / break / etc.)`;
                     case 'category_day_type': return `wrong day type for this category (e.g. office-only category on a home day)`;
                     case 'category_per_day': return `over ${ownerFirst}'s per-day limit for this category`;
@@ -2976,6 +3045,43 @@ export class SchedulingSkill {
             } catch (err) {
               logger.warn('create_meeting — requester-drop lookup threw, continuing', { err: String(err).slice(0, 160) });
             }
+          }
+        }
+        // Create-vs-move slop guard (2026-07-05 Simon double-book). On an explicit
+        // "move X to <day>" the model sometimes calls create_meeting (it needs no
+        // event id) → a duplicate beside the still-live original. Before booking,
+        // look for an existing same-subject + shared-attendee event ELSEWHERE in
+        // the planning window (findReschedulableSibling — time-independent, no NL
+        // match). If found, SURFACE-AND-ASK (never a hard block): redirect to
+        // move_meeting on the existing id so history/duration/attendees are kept;
+        // a genuine second meeting with the same person still books on force_new
+        // (the false-fire escape that kept the older description-only fix soft).
+        if (args.force_new !== true && typeof args.start === 'string' && typeof args.subject === 'string') {
+          try {
+            const attendeeEmails = attendees
+              .map(a => (typeof a.email === 'string' ? a.email : ''))
+              .filter(e => e.length > 0);
+            const sibling = await findReschedulableSibling({
+              userEmail, ownerEmail, subject: args.subject, attendeeEmails,
+              startIso: args.start, timezone,
+            });
+            if (sibling) {
+              const whenStr = DateTime.fromISO(sibling.start.dateTime, { zone: sibling.start.timeZone ?? timezone })
+                .setZone(timezone).toFormat('EEE d MMM HH:mm');
+              logger.info('create_meeting — reschedulable sibling found; surfacing move-instead-of-create', {
+                existingEventId: sibling.id, existingWhen: whenStr, subject: args.subject,
+              });
+              return {
+                success: false,
+                error: 'possible_reschedule',
+                existing_meeting_id: sibling.id,
+                existing_subject: sibling.subject,
+                existing_when: whenStr,
+                message: `There's already "${sibling.subject}" on ${whenStr} with the same person. If you're MOVING it, call move_meeting on meeting_id ${sibling.id} (keeps its attendees, duration, and history) — do NOT create a second one. Only if you truly want a SEPARATE additional meeting, retry create_meeting with force_new=true.`,
+              };
+            }
+          } catch (err) {
+            logger.warn('create_meeting — reschedulable-sibling check threw, proceeding with create', { err: String(err).slice(0, 160) });
           }
         }
         const bookingRequest = await normalizeBookingRequest('create_meeting', args, context);
@@ -4132,8 +4238,8 @@ export class SchedulingSkill {
                       // legacy label name kept as alias in case any older diagnostics path still emits it
                       case 'owner_busy_or_buffer_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
                       case 'overlaps_meeting_being_moved': return `overlaps the meeting being moved`;
-                      case 'focus_time_office': return `breaks ${ownerFirst}'s focus-time protection (office day)`;
-                      case 'focus_time_home': return `breaks ${ownerFirst}'s focus-time protection (home day)`;
+                      case 'focus_time_office': return `would leave ${ownerFirst} under the free-time floor (office day)`;
+                      case 'focus_time_home': return `would leave ${ownerFirst} under the free-time floor (home day)`;
                       case 'floating_block_no_room': return `would leave no room for one of ${ownerFirst}'s daily blocks (lunch / break / etc.)`;
                       case 'category_day_type': return `wrong day type for this category (e.g. office-only category on a home day)`;
                       case 'category_per_day': return `over ${ownerFirst}'s per-day limit for this category`;

@@ -329,6 +329,61 @@ export async function findDuplicateEvent(
   });
 }
 
+/**
+ * findReschedulableSibling (v3.6.x) — the create-vs-move slop guard's finder. A
+ * sibling of findDuplicateEvent (idempotency), widened for the reschedule case:
+ * returns an existing owner event that looks like the SAME meeting as the one
+ * about to be created — same subject (trim+lowercase) AND ≥1 shared non-owner
+ * attendee — within a ~3-week window around the requested start, EXCLUDING
+ * the requested instant itself (that exact-time case is findDuplicateEvent's
+ * job). Time-INDEPENDENT by design: a reschedule lands on a different day/time,
+ * so we match WHO + WHAT, never WHEN. Structured fields only — no NL match, so
+ * it's language-neutral. Returns the sibling nearest the requested start (the
+ * occurrence the owner most likely means to move), else undefined.
+ *
+ * Caller uses it as surface-and-ask, NOT a block: offer move_meeting on this id,
+ * and still book a genuine second meeting on force_new — so a legit second 1:1
+ * with the same person stays bookable (the false-fire that kept the older
+ * description-only fix soft). Catches "move X" → create_meeting duplicating a
+ * live series (the 2026-07-05 Simon double-book across two days).
+ */
+export async function findReschedulableSibling(params: {
+  userEmail: string;
+  ownerEmail: string;
+  subject: string;
+  attendeeEmails: string[];
+  startIso: string;
+  timezone: string;
+}): Promise<CalendarEvent | undefined> {
+  const startDt = DateTime.fromISO(params.startIso, { zone: params.timezone });
+  const wantSubject = params.subject.trim().toLowerCase();
+  if (!startDt.isValid || !wantSubject) return undefined;
+  const ownerLower = params.ownerEmail.toLowerCase();
+  const wantAttendees = new Set(
+    params.attendeeEmails.map(e => e.toLowerCase()).filter(e => e && e !== ownerLower),
+  );
+  if (wantAttendees.size === 0) return undefined;  // need a shared attendee to be confident
+  const startMs = startDt.toMillis();
+  // ~3-week window: 1 week back + 2 weeks forward. Forward-weighted because the
+  // occurrence being rescheduled is usually the upcoming one, and covers a
+  // biweekly series' next instance; wide enough for the common same-week move,
+  // bounded to keep this one extra fetch cheap.
+  const from = startDt.minus({ days: 7 }).toFormat('yyyy-MM-dd');
+  const to = startDt.plus({ days: 14 }).toFormat('yyyy-MM-dd');
+  const events = await getCalendarEvents(params.userEmail, from, to, params.timezone);
+  const evMsOf = (ev: CalendarEvent): number =>
+    DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
+  const matches = events.filter(ev => {
+    if (ev.isCancelled) return false;
+    if ((ev.subject ?? '').trim().toLowerCase() !== wantSubject) return false;
+    if (Math.abs(evMsOf(ev) - startMs) <= 2 * 60 * 1000) return false;  // exact-time = idempotency's job
+    return (ev.attendees ?? []).some(a => wantAttendees.has((a.emailAddress?.address ?? '').toLowerCase()));
+  });
+  if (matches.length === 0) return undefined;
+  matches.sort((a, b) => Math.abs(evMsOf(a) - startMs) - Math.abs(evMsOf(b) - startMs));
+  return matches[0];
+}
+
 async function getCalendarEventsImpl(
   userEmail: string,
   startDate: string,
