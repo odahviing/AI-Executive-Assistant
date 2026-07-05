@@ -2,6 +2,18 @@
 
 ---
 
+## 3.6.2 — Teams online-meeting rendering + retire the booked-date honesty backstop
+
+Two fixes bundled across the meeting and guard chats. A booked Teams meeting rendered wrong in the new Outlook — the "Teams meeting" toggle showed off and the location read as an "Unknown" URL — because a post-create patch stamped the raw join link into the location field. And the output-path "booked-date honesty" check was retired: a fourth LLM call per booking reply, fed by an unreliable instant, that never caught a real error and once corrected a correct one. Restart required.
+
+### Fixed — Teams online meetings (meeting core)
+- A native Teams meeting no longer has its location overwritten with the raw join URL. The post-create `teamsUrlAsLocation` patch (create + move) set `location.displayName` = joinUrl, overwriting the "Microsoft Teams Meeting" label Graph sets natively — so the new Outlook showed the URL as an "Unknown" location and dropped the Teams toggle even though the meeting was genuinely online (the 2026-07-05 Catchup booking; the join link, Meeting ID, and passcode were always valid). A Teams meeting is fully defined by `isOnlineMeeting` + `onlineMeetingProvider` in the create POST — nothing to stamp afterward; the join link already lives in the body + Join button. ([ops.ts](src/skills/meetings/ops.ts))
+
+### Removed — output-path booked-date backstop (guard)
+- Retired `verifyReplyMatchesBooking` (the post-reply "moved to Friday narrated as Thursday" check) and its call site. It was a 4th output-path LLM call on every booking reply, fed by a `booked_start` that sometimes arrived as a display string (→ a false correction of an already-correct reply, 2026-07-05), with zero real catches — the wrong-day WRITE is already stopped upstream by the meeting-core weekday guard (`assertWeekdayMatchesDate`). Bad data source + no catches + one false alarm = not worth the call. ([postReply.ts](src/connectors/slack/postReply.ts), [dateVerifier.ts](src/utils/dateVerifier.ts))
+
+---
+
 ## 3.6.1 — real-day bug wave: review accuracy, move correctness, slot narration, one free-time source of truth
 
 A 14-item real-day bug wave off a week-review + reschedule thread, fixed across four parallel chats (meeting, prompt, guard, approval) and bundled into one patch. The spine of it: the calendar *review* under-counted free time and never flagged category limits; a "move X" turned into a duplicate; the free-time floor lived as three drifting copies; and owner-facing narration leaked internals or blamed the wrong party. Restart required.

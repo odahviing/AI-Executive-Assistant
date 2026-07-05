@@ -3192,14 +3192,13 @@ export class SchedulingSkill {
         const planLocation: string = plan.location;
         const planCategory: string | null = plan.category;
         const planAddRoomEmail = plan.addRoomEmail === true;
-        const planTeamsUrlAsLocation = plan.teamsUrlAsLocation === true;
         // #127 — owner booked through a soft own-day rule (focus floor, hours,
         // lunch, his own busy-collision). Captured here (where `plan` is narrowed
         // to 'book') so it survives into the createMeeting().then() closure below.
         const planOverrideNotice = plan.overrideNotice;
-        // skipLocationField fires when resolveLocation gave us no physical
-        // string AND we're not in the Teams-URL-as-location flow (those get
-        // patched post-create, so the create call sends empty location).
+        // skipLocationField fires when resolveLocation gave us no physical string —
+        // the create call sends an empty location, and for an online meeting Graph
+        // fills it natively with "Microsoft Teams Meeting" (we never stamp a URL).
         const skipLocationField = planLocation.trim().length === 0;
         if (planCategory && !args.category) {
           args.category = planCategory;
@@ -3389,33 +3388,15 @@ export class SchedulingSkill {
             };
           }
 
-          // v2.8.2 / v3.1.x — Teams-URL-as-location patch, now FIRE-AND-FORGET.
-          // When the location decision tree said "online with Teams URL as the
-          // location" (travel-
-          // override, non-work-day default, etc.), patch the event's
-          // location.displayName to the joinUrl so the invite shows the link as
-          // its location. PURELY COSMETIC — the meeting was already created WITH
-          // the online meeting in the single createMeeting POST
-          // (isOnlineMeeting:true), so the Teams link + Join button exist in the
-          // body regardless. Fired AFTER verify (so we only patch a
-          // confirmed-good event) and NOT awaited, keeping the ~2.5s PATCH off
-          // the critical path. Worst case on failure: location shows the auto
-          // label instead of the URL.
-          if (planTeamsUrlAsLocation && createdMeeting.joinUrl) {
-            void (async () => {
-              try {
-                const { updateMeeting } = await import('../../connectors/graph/calendar');
-                await updateMeeting({ userEmail, timezone, meetingId, location: createdMeeting.joinUrl });
-                logger.info('create_meeting — patched location with Teams join URL (async)', {
-                  meetingId, joinUrl: createdMeeting.joinUrl,
-                });
-              } catch (err) {
-                logger.warn('create_meeting — Teams URL location patch failed, leaving as auto', {
-                  meetingId, err: String(err).slice(0, 200),
-                });
-              }
-            })();
-          }
+          // v3.6.x — the Teams-URL-as-location patch was REMOVED. It overwrote the
+          // location Graph auto-sets on an online meeting ("Microsoft Teams
+          // Meeting") with the raw joinUrl → the new Outlook then showed the URL as
+          // an "Unknown" location AND dropped the native Teams rendering (the toggle
+          // went off) even though isOnlineMeeting stayed true (the 2026-07-05
+          // Catchup bug). A native Teams meeting needs NOTHING after create:
+          // isOnlineMeeting + provider (in the createMeeting POST) already give the
+          // toggle, the Join button, the body block, and the location label. Never
+          // write the raw joinUrl into location.
 
           // v2.2.3 (scenario 8 row 7) — post-mutation floating-block rebalance.
           try {
@@ -4563,7 +4544,6 @@ export class SchedulingSkill {
         let movePlanIsOnline: boolean | undefined;
         let movePlanCategories: string[] | undefined;
         let movePlanPreserveExisting = false;
-        let movePlanTeamsUrlAsLocation = false;
         try {
           const { planMeeting: planMove } = await import('./planMeeting');
           // Pull existing event metadata (categories, current location) for
@@ -4682,7 +4662,6 @@ export class SchedulingSkill {
           }
           if (movePlan.action === 'book') {
             movePlanPreserveExisting = movePlan.preserveExisting === true;
-            movePlanTeamsUrlAsLocation = movePlan.teamsUrlAsLocation === true;
             // (v2.8.2) preserveExisting: leave location/isOnline undefined so the
             // Graph PATCH doesn't touch them. Re-stamping the BiWeekly's "Huddle"
             // with the office address on every move is exactly what we're killing.
@@ -4756,35 +4735,11 @@ export class SchedulingSkill {
           categories: movePlanCategories,
         });
 
-        // v2.8.2 — post-move Teams URL patch. When the move flipped into an
-        // online location-flavor, the updateMeeting call above set isOnline=true
-        // but left location empty. Read the event back to get joinUrl and
-        // patch location.displayName with it.
-        if (movePlanTeamsUrlAsLocation) {
-          try {
-            const { getCalendarEvents: getCal, updateMeeting: updateMeeting2 } = await import('../../connectors/graph/calendar');
-            const dayStart = DateTime.fromISO(effectiveStart, { zone: timezone }).toFormat('yyyy-MM-dd');
-            const dayEnd = DateTime.fromISO(effectiveStart, { zone: timezone }).plus({ days: 1 }).toFormat('yyyy-MM-dd');
-            const refreshed = await getCal(userEmail, dayStart, dayEnd, timezone);
-            const ev = refreshed.find(e => e.id === args.meeting_id);
-            const joinUrl = (ev as any)?.onlineMeeting?.joinUrl as string | undefined;
-            if (joinUrl) {
-              await updateMeeting2({
-                userEmail,
-                timezone,
-                meetingId: args.meeting_id as string,
-                location: joinUrl,
-              });
-              logger.info('move_meeting — patched location with Teams join URL', {
-                meetingId: args.meeting_id, joinUrl,
-              });
-            }
-          } catch (err) {
-            logger.warn('move_meeting — Teams URL location patch failed', {
-              meetingId: args.meeting_id, err: String(err).slice(0, 200),
-            });
-          }
-        }
+        // v3.6.x — the post-move Teams-URL-as-location patch was REMOVED (same
+        // root as the create path): overwriting the online meeting's location with
+        // the raw joinUrl broke Outlook's native Teams rendering. isOnlineMeeting
+        // stays true through the move, so Graph keeps the toggle / Join button /
+        // "Microsoft Teams Meeting" label — nothing to stamp.
 
         // v2.2.5 (#54) — post-move verification. Graph PATCH can return 200 OK
         // without the change landing (sync delays, race conditions). Re-read

@@ -217,31 +217,13 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     role, colleagueName, isMpim, isOwnerInGroup, mpimMemberIds,
   });
 
-  // Step 3b-2 (v3.4.x, meeting #135) — booked-date honesty backstop. When a
-  // move/create succeeded THIS turn, verify the reply's stated day/time for it
-  // matches where it ACTUALLY landed (the resolved new_start/start carried in
-  // mutationActions). Catches "moved to Friday" narrated as "back on Thursday".
-  // Deterministic compare of resolved instants; the LLM only reads the reply +
-  // the known booking and renders the fix in-language. Backstop to the
-  // meeting-core assertWeekdayMatchesDate (which stops the wrong-day WRITE
-  // upstream); a no-op when the write was right. Runs only when a booking fired,
-  // so the cost is bounded (R9). Fails open — leaves the draft unchanged.
-  try {
-    const bookings = (result.mutationActions ?? [])
-      .filter(m => m.ok && /^(move_meeting|create_meeting|finalize_coord_meeting|book_floating_block)$/.test(m.tool))
-      .map(m => ({ tool: m.tool, subject: m.subject, iso: (m.new_start || m.start) ?? '' }))
-      .filter(b => b.iso.length > 0);
-    if (bookings.length > 0) {
-      const { verifyReplyMatchesBooking } = await import('../../utils/dateVerifier');
-      const corrected = await verifyReplyMatchesBooking(cleanReply, bookings, profile);
-      if (corrected && corrected.trim().length > 0) {
-        cleanReply = formatForSlack(corrected);
-        appendToConversation(threadTs, channelId, { role: 'assistant', content: cleanReply });
-      }
-    }
-  } catch (err) {
-    logger.warn('booked-date honesty check threw — leaving draft unchanged', { err: String(err).slice(0, 200) });
-  }
+  // (v3.6.x — the "booked-date honesty" backstop that used to run here was
+  // RETIRED. It was a 4th output-path LLM call on every booking reply, it
+  // depended on a clean ISO instant it didn't reliably get (booked_start
+  // sometimes arrives as a display string → a false correction of a correct
+  // reply, 2026-07-05), and its job — the wrong-day WRITE — is already stopped
+  // upstream by the meeting-core weekday guard. Backstop with a bad data source
+  // + zero real catches + one false alarm = not worth the call. R1 / R9.)
 
   // Step 3c (v1.8.4) — colleague-path mutation-contradiction check. When a
   // calendar-mutating tool succeeded this turn AND the draft tells the
