@@ -156,7 +156,6 @@ export type PlanAction =
       isOnline: boolean;
       location: string;
       addRoomEmail?: boolean;          // ops.ts adds profile.meetings.room_email as optional attendee
-      teamsUrlAsLocation?: boolean;    // ops.ts patches location.displayName with onlineMeeting.joinUrl after create
       preserveExisting?: boolean;      // ops.ts leaves the existing event's location/isOnline alone (move case)
       category: string | null;
       reasoning: string;
@@ -621,13 +620,11 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   let isOnline: boolean;
   let location: string;
   let addRoomEmail: boolean | undefined;
-  let teamsUrlAsLocation: boolean | undefined;
   let preserveExisting: boolean | undefined;
   if (locationVerdict && locationVerdict.kind === 'resolved') {
     isOnline = locationVerdict.isOnline;
     location = locationVerdict.location;
     addRoomEmail = locationVerdict.addRoomEmail;
-    teamsUrlAsLocation = locationVerdict.teamsUrlAsLocation;
   } else if (locationVerdict && locationVerdict.kind === 'preserve_existing') {
     isOnline = locationVerdict.isOnline;
     location = locationVerdict.location;
@@ -701,7 +698,6 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     isOnline,
     location,
     addRoomEmail,
-    teamsUrlAsLocation,
     preserveExisting,
     category,
     reasoning: `category=${category ?? 'none'} (${categoryReason}); location=${locationVerdict?.reasoning ?? 'n/a'}`,

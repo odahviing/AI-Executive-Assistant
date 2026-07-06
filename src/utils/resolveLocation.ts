@@ -37,9 +37,8 @@
  *      OOF refusal. Default to online; teams URL as location.
  *
  * Output flavors:
- *   - resolved          : caller stamps location/isOnline directly, plus
- *                         optional addRoomEmail + teamsUrlAsLocation flags
- *                         that ops.ts acts on after create.
+ *   - resolved          : caller stamps location/isOnline directly, plus an
+ *                         optional addRoomEmail flag that ops.ts acts on.
  *   - preserve_existing : caller leaves existing event location/isOnline as-is.
  *   - ask_owner         : caller refuses + relays the suggested ask.
  */
@@ -93,7 +92,6 @@ export type LocationVerdict =
       isOnline: boolean;
       location: string;
       addRoomEmail?: boolean;          // ops.ts adds profile.meetings.room_email as optional attendee
-      teamsUrlAsLocation?: boolean;    // ops.ts patches location.displayName with joinUrl after create
       reasoning: string;
     }
   | { kind: 'preserve_existing'; isOnline: boolean; location: string; reasoning: string }
@@ -170,9 +168,7 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
     return {
       kind: 'resolved',
       isOnline: true,
-      location: '',
-      teamsUrlAsLocation: true,
-      reasoning: 'owner-explicit is_online=true → Teams URL as location',
+      location: '',      reasoning: 'owner-explicit is_online=true → Teams URL as location',
     };
   }
   // Owner explicit is_online=false with no location → physical, but we still
@@ -203,9 +199,7 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
     return {
       kind: 'resolved',
       isOnline: true,
-      location: '',
-      teamsUrlAsLocation: true,
-      reasoning: 'participant traveling/remote — online with Teams URL as location',
+      location: '',      reasoning: 'participant traveling/remote — online with Teams URL as location',
     };
   }
 
@@ -232,9 +226,7 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
         return {
           kind: 'resolved',
           isOnline: true,
-          location: '',
-          teamsUrlAsLocation: true,
-          reasoning: 'office day + external in different TZ → online (Teams URL as location)',
+          location: '',          reasoning: 'office day + external in different TZ → online (Teams URL as location)',
         };
       }
       // (3b) Owner forced physical → stamp full address, no ask needed.
@@ -259,9 +251,7 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
         return {
           kind: 'resolved',
           isOnline: true,
-          location: '',
-          teamsUrlAsLocation: true,
-          reasoning: 'office day + external (colleague-path) → default online, no owner approval',
+          location: '',          reasoning: 'office day + external (colleague-path) → default online, no owner approval',
         };
       }
       return {
@@ -299,9 +289,7 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
       return {
         kind: 'resolved',
         isOnline: true,
-        location: '',
-        teamsUrlAsLocation: true,
-        reasoning: 'home day + external → online (Teams URL as location)',
+        location: '',        reasoning: 'home day + external → online (Teams URL as location)',
       };
     }
     if (input.hasExternalAttendee && ownerForcedPhysical) {
@@ -338,8 +326,6 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   return {
     kind: 'resolved',
     isOnline: true,
-    location: '',
-    teamsUrlAsLocation: true,
-    reasoning: 'non-work day → default online (Teams URL as location)',
+    location: '',    reasoning: 'non-work day → default online (Teams URL as location)',
   };
 }
