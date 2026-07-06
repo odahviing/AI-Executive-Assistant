@@ -12,6 +12,9 @@ Two fixes bundled across the meeting and guard chats. A booked Teams meeting ren
 ### Removed — output-path booked-date backstop (guard)
 - Retired `verifyReplyMatchesBooking` (the post-reply "moved to Friday narrated as Thursday" check) and its call site. It was a 4th output-path LLM call on every booking reply, fed by a `booked_start` that sometimes arrived as a display string (→ a false correction of an already-correct reply, 2026-07-05), with zero real catches — the wrong-day WRITE is already stopped upstream by the meeting-core weekday guard (`assertWeekdayMatchesDate`). Bad data source + no catches + one false alarm = not worth the call. ([postReply.ts](src/connectors/slack/postReply.ts), [dateVerifier.ts](src/utils/dateVerifier.ts))
 
+### Fixed — social coda in group threads (orchestrator)
+- The end-of-turn social coda (a per-person rapport ping) now fires in 1:1 DMs only — suppressed in every MPIM and channel. In a multi-party thread it has no single target and reads as Maelle making personal small-talk with a colleague in front of the owner (the Rita MPIM, 2026-07-06). The eligibility guard now also checks `!isMpim && !isChannel`; owner-DM and colleague-DM codas are unchanged. ([index.ts](src/core/orchestrator/index.ts))
+
 ---
 
 ## 3.6.1 — real-day bug wave: review accuracy, move correctness, slot narration, one free-time source of truth

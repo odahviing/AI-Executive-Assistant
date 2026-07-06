@@ -2323,6 +2323,13 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
     && finalReply
     && finalReply.trim().length > 0
     && toolCallSummaries.length > 0
+    // v3.6.2 — 1:1 DMs ONLY. The coda is a per-person rapport ping (people
+    // memory + social ranking); in a multi-party thread it has no single target
+    // and reads as Maelle doing personal small-talk with a colleague in front of
+    // the owner (the Rita MPIM, 2026-07-06 — "she can't ask it when I'm there").
+    // Suppress in every MPIM and channel; owner-DM and colleague-DM still get it.
+    && !input.isMpim
+    && !input.isChannel
     // v2.5.2 — fire on BOTH owner-path AND colleague-path turns. People memory
     // + social engagement EXIST so Maelle is socially smarter with colleagues
     // (and warm with the owner). The model: resolve the task FIRST, then add
