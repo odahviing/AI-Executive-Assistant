@@ -2,6 +2,28 @@
 
 ---
 
+## 3.6.3 — colleague meeting-coordination wave: resolve attendees first, no offered-then-bounced, structured booking approval
+
+Off a real chat where a colleague (Maayan) asked to set up a meeting between the owner and Lori (East Coast) and it broke end to end: a named attendee was never resolved so the search ran a partial list; a freeform approval carried no meeting structure, so on approve the booking re-derived everything in the owner's thread and drifted (regenerated subject, re-asked attendees, a window instead of a time); and the slot search offered a conflicted time repeatedly, then refused it at booking. Fixed across four parallel chats (meeting, approval, guard, prompt). Restart required.
+
+### Fixed — colleague meeting coordination (meeting core)
+- Strict-0 owner-tagged backstop: when no slot works for all attendees, `find_available_slots` now returns the owner's genuinely-open times with each attendee's conflict tagged, in ONE call — instead of an empty result that pushed Sonnet into a blind `ignore_attendee_availability` search that offered owner-only slots and then bounced them at booking (the "offered 16:15 five times, then conflict" loop). The backstop wins over relaxing the owner's own soft rules; the `ignore_attendee_availability` escape hatch is untouched. ([ops.ts](src/skills/meetings/ops.ts))
+
+### Fixed — booking approvals carry structure (approval / tasks)
+- A meeting booking never goes through a freeform approval. freeform carries no attendees or time, so on approve the booking re-derived everything and drifted (subject "Sync with Lori and Maayan" instead of "Offensive GTM Q&A", re-asked attendees, a search window instead of the booked slot). Colleague meeting bookings go through `create_meeting` → `policy_exception` with an auto-stamped `deferred_action` that replays the exact booking (subject + attendees + time preserved) on owner approve. ([tasks/skill.ts](src/tasks/skill.ts))
+
+### Fixed — recap honesty (guard)
+- The claim-checker no longer inverts a true "renamed ✓" into "hasn't gone through yet." `update_meeting`'s tool summary now carries the NEW subject/fields, so the checker can verify a rename/field-change claim instead of reading a stale label and denying a done action. ([index.ts](src/core/orchestrator/index.ts))
+
+### Fixed — attendee resolution + slot narration (prompt / tool descriptions)
+- Resolve WHO before WHEN: every named attendee is resolved (`find_slack_user` → people_memory) before searching. A bare internal first name resolves from the directory (never ask a colleague for a teammate's email you can look up); an unknown/ambiguous name asks the requester; an external needs an email; a slack_id yields email + timezone. `attendee_emails` must be the full resolved set — a partial list produces slots that fail at booking. ([meetings.ts](src/skills/meetings.ts))
+- Slot narration: show a chooser the open times TOGETHER as a set (no one-at-a-time drip-feed); a cross-timezone overlap is normal EA work — never ask permission for it ("OK on EST?" / "late slot?"); never manufacture a rejection reason for times not actually offered ("3–5am, too early"); don't re-ask a timezone or attendee the requester already gave. ([meetings.ts](src/skills/meetings.ts))
+
+### Not changed
+- Non-meeting owner searches (no attendees) are byte-identical — the backstop is gated on attendee conflicts.
+
+---
+
 ## 3.6.2 — Teams online-meeting rendering + retire the booked-date honesty backstop
 
 Two fixes bundled across the meeting and guard chats. A booked Teams meeting rendered wrong in the new Outlook — the "Teams meeting" toggle showed off and the location read as an "Unknown" URL — because a post-create patch stamped the raw join link into the location field. And the output-path "booked-date honesty" check was retired: a fourth LLM call per booking reply, fed by an unreliable instant, that never caught a real error and once corrected a correct one. Restart required.

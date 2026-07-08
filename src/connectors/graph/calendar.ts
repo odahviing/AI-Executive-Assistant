@@ -636,6 +636,17 @@ export async function findAvailableSlots(params: {
     homeTimezone?: string;     // stored profile IANA
     travelWindow?: { from: string; until: string; timezone: string; location: string };
   }>;
+  // Rule 6 — attendee free/busy is a HELPER, never a blocker. When true, a slot
+  // where an attendee is busy / off-hours is KEPT and TAGGED (attendee_conflicts)
+  // instead of dropped — WITHOUT relaxing any of the OWNER's own rules (his
+  // work-hours, own busy, focus floor, floating blocks all still apply via
+  // checkSlot). This is the decoupled half of `relaxed`: `relaxed` tags attendee
+  // conflicts too, but as part of a TOTAL owner-rule override (rule 11); this
+  // flag tags them while the owner's day stays strict — so the owner-path
+  // backstop can surface "his genuinely open times + who can't make each" when
+  // no slot is clean for everyone. Requires attendeeBusyEmails/attendeeAvailability
+  // to be passed (that's what populates the conflict data). No effect otherwise.
+  tagAttendeeConflicts?: boolean;
   // Owner-override "show me everything" mode. When true:
   //   - skips focus-time protection (free_time_per_office/home_day_hours)
   //   - skips floating-block feasibility check (lunch/coffee/etc. windows)
@@ -1259,11 +1270,14 @@ export async function findAvailableSlots(params: {
         }
       }
 
-      // ── Attendee-side checks are HELPERS, not blockers (rule 6). Non-relaxed:
-      // REJECT conflicted slots so the owner is offered clean options. Relaxed
-      // (owner override, rule 11): KEEP the slot but TAG who's busy / off-hours
-      // so the owner is TOLD (rule 7) — never silently dropped. The OWNER's busy
-      // is owned by checkSlot below, off his CalendarEvents. ──
+      // ── Attendee-side checks are HELPERS, not blockers (rule 6). Default:
+      // REJECT conflicted slots so the owner is offered clean options. When the
+      // caller opts into keeping them (`relaxed` = total owner override, rule 11;
+      // or `tagAttendeeConflicts` = owner rules stay strict, attendee busy is a
+      // helper only): KEEP the slot but TAG who's busy / off-hours so the owner
+      // is TOLD (rule 7) — never silently dropped. The OWNER's busy is owned by
+      // checkSlot below, off his CalendarEvents. ──
+      const keepAttendeeConflicts = params.relaxed || params.tagAttendeeConflicts;
       const attendeeConflicts: Array<{ email: string; reason: 'busy' | 'off_hours' }> = [];
       {
         // v2.7.6 — attendee busy (free/busy pool), attributed by email.
@@ -1273,7 +1287,7 @@ export async function findAvailableSlots(params: {
           slotEnd.getTime() > busy.start.getTime()
         );
         if (overlapsAttendee) {
-          if (params.relaxed) {
+          if (keepAttendeeConflicts) {
             attendeeConflicts.push({ email: overlapsAttendee.email, reason: 'busy' });
           } else {
             trackReject(`attendee_busy_collision:${overlapsAttendee.email}`, cursorDt.toISO()!);
@@ -1321,7 +1335,7 @@ export async function findAvailableSlots(params: {
             }
           });
           if (blockingAttendee) {
-            if (params.relaxed) {
+            if (keepAttendeeConflicts) {
               attendeeConflicts.push({ email: blockingAttendee.email, reason: 'off_hours' });
             } else {
               trackReject(`outside_attendee_work_hours:${blockingAttendee.email}`, cursorDt.toISO()!);

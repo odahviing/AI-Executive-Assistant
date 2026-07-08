@@ -162,6 +162,24 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
       case 'delete_meeting':
       case 'book_floating_block': {
         const outcome = mutationOutcome(result);
+        const idPart = outcome.ok && outcome.eventId ? ` event_id=${String(outcome.eventId).slice(0, 16)}…` : '';
+
+        // v3.6.x — update_meeting changes FIELDS (subject / attendees / category
+        // / location). The identifying subject alone doesn't show WHAT changed,
+        // so the claim-checker couldn't verify "renamed to X" / "added Yael" and
+        // inferred the change failed → fabricated a "not done yet" on a done
+        // action (2026-07-08). On success, render the tool's OWN action_summary —
+        // it enumerates the actual post-change values (R4: the log carries what
+        // HAPPENED, not the stale label used to find the meeting).
+        if (toolName === 'update_meeting' && outcome.ok) {
+          const changes = typeof (result as { action_summary?: unknown }).action_summary === 'string'
+            ? (result as { action_summary: string }).action_summary.replace(/\s+/g, ' ').trim().slice(0, 140)
+            : '';
+          return changes
+            ? `[update_meeting OK — ${changes}${idPart}]`
+            : `[update_meeting OK ${String((input as any).new_subject ?? (input as any).meeting_subject ?? '').slice(0, 40)}${idPart}]`;
+        }
+
         // v3.4.2 (NEW-1) — NEVER fall back to meeting_id here. It was rendered
         // sliced to 40 chars with NO ellipsis, so the pinned action-tape summary
         // (e.g. `[update_meeting OK AAMkADVmMjY1…40chars]`) looked like a COMPLETE
@@ -173,7 +191,6 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
         const subj = (input as any).subject ?? (input as any).meeting_subject ?? (input as any).new_start ?? (input as any).date ?? '';
         const subjPart = subj ? ` ${String(subj).slice(0, 40)}` : '';
         if (outcome.ok) {
-          const idPart = outcome.eventId ? ` event_id=${String(outcome.eventId).slice(0, 16)}…` : '';
           return `[${toolName} OK${subjPart}${idPart}]`;
         }
         return `[${toolName} FAILED${subjPart}${outcome.reason ? `: ${outcome.reason.slice(0, 60)}` : ''}]`;

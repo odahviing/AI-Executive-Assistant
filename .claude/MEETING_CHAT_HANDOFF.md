@@ -1,78 +1,55 @@
-# Meeting-agent chat — START HERE (handoff, 2026-06-28 · v3.5.4)
+# Meeting-agent chat — START HERE (handoff, 2026-07-06 · v3.6.2)
 
-You are the **meeting-planner deterministic-core agent** for Maelle. The prior meeting chat got too long; this is your cold-start. Read this whole file, then the two docs it points to, then begin on the open bugs in §4.
+You are the **meeting-planner deterministic-core agent** for Maelle. The prior meeting chat got long; this is your cold-start. Read this file, then the two docs in §0, then work the open items in §4. Propose-first — build only on an explicit "build it".
 
 ---
 
 ## 0. Read these first (your constitution)
-1. **`.claude/MEETING_PLANNER_AGENT.md`** — THE CHARTER. Your mandate, the **14 owner rules** (load-bearing — every fix is checked against them), the diagnostic discipline, the subsystem map, the recurring bug clusters. Non-negotiable.
-2. **`.claude/WE_TIMEZONE_SPINE.md`** — the big Working-Elsewhere → timezone project: the design, the adversarial audit, the owner-revised **relax + approve** model, and exactly what shipped.
-3. **`CHANGELOG.md`** 3.5.0 → 3.5.2 — what's in the code now.
+1. **`.claude/MEETING_PLANNER_AGENT.md`** — THE CHARTER: your mandate, the **11 owner rules** (load-bearing — every fix is checked against them), the diagnostic discipline, the subsystem map, the recurring bug clusters. Non-negotiable. **Consolidated this session** (15→11: near-duplicate rules merged, and *leave-no-dead-code* moved to the shared working-rules memory since it's general dev discipline, not meeting-domain). New concepts baked in: **Rule 11** (time comes from config + calendar, never the server clock) and the **Rule 4 corollary** (one resolver/spine for a recurring instability — each symptom-patch is another voice in a judge-less argument).
+2. **`.claude/WE_TIMEZONE_SPINE_BUILD.md`** — the WE timezone spine: the diagnosis, design, and exactly what shipped. The through-line of recent work.
+3. **`CHANGELOG.md`** 3.6.0 → 3.6.2 — what's in the code now (canonical; not duplicated here).
 
-The charter's subsystem map tells you where everything lives (`skills/meetings.ts` tool surface, `skills/meetings/ops.ts` handlers, `planMeeting.ts` the decision spine, `scheduleRules.ts` the ONE validator `checkSlot`, `connectors/graph/calendar.ts` the slot search + cache, `utils/workingElsewhere.ts` the WE engine). **Note: coord was fully removed in 3.5.0** — the charter still names `coord/*`; ignore that.
-
----
-
-## 1. How to work (owner's standing rules — he has corrected on these, honor them)
-- **Propose-first, NEVER auto-fix.** Root-cause each bug to `file:line — what happens` from the log, prove it, then propose. Build only on a per-bug **"build it" / "fix it."**
-- **NEVER commit / bump version / wrap without an explicit ship word** ("wrap" / "commit" / "ship"). "do it" / "yes" on a fix means *make the edit and leave it UNCOMMITTED.* (The prior chat over-stepped twice — don't.) `git push` is pre-authorized *after* a commit. `git add -A` sweeps other chats' WIP — fine only at a coordinated wrap ("take them all"), never on an unrequested commit.
-- **Code-first; fix at the chokepoint; one validator; reduce LOC; no dedup (extract one fn); no NL regex (Maelle is multilingual); `trace` to 100% before "done."**
-- **Shell:** never prepend `cd`; one logical command per Bash call; `gh ... --body-file` (write body to a temp file). Reads (logs, `node scripts/db-query.cjs`, grep, code) are free.
-- **Parallel chats share one tree** (meeting / approval / guard / prompt / tenancy). Your lane = the **meeting deterministic core** (search / validate / book-decision / TZ / WE / floating-blocks / Graph + cache). **NOT** the approval spine (`core/requests/*`) — that routes to the approval chat.
+Subsystem map is in the charter. **coord was removed in 3.5.0** — ignore charter refs to `coord/*`.
 
 ---
 
-## 2. The big WE → timezone project (the through-line of recent work)
-**The problem:** the owner travels ("Working Elsewhere"). For months, timezone handling on WE days was split across layers that each re-derived "is he away, in what tz?" and **disagreed** → wrong-time bookings + wrong narration. The recurring instability the whole project targets.
-
-**The owner's MODEL (locked — build to this):** on a WE day, **RELAX the home rules** (they don't cleanly apply in the trip place), **present options in the correct trip timezone**, and **route the booking to APPROVAL** (he eyeballs the trip-time before commit). Decisions he confirmed:
-- **#1** WE work-hours = a plain **09–18 in the trip tz** (an offer window, relaxed not enforced).
-- **#2** the day is **where he physically is** (a Boston-Wed-evening is Wednesday, even if it's already Thursday in Israel).
-- **#3** WE → **relax + approve** (he decides; the trip-time gets a dual-clock confirm).
-- **#4** drop the "tentative" concept.
-
-**Data source (critical):** the owner's WE days are **all-day `showAs=workingElsewhere` calendar MARKERS** — his PRIMARY mechanism. The `people_memory.currently_traveling` travel **record** is for COLLEAGUES (the owner's own record is NULL). Detection is **dual-source (marker ∪ record)**, but for the owner it is effectively **marker-driven** — so any WE path that only reads the record misses his trips, and any path that only reads markers misses a colleague's. Home = `Asia/Jerusalem`; example trip = Boston `America/New_York` (≈7h, **DST matters** — see below).
-
-**What SHIPPED (3.5.1 + 3.5.2, committed; the latest follow-up `4556e45` may still need a restart to be live):**
-- **ONE dual-source resolver** — `detectOwnerAwayDaysInWindow` (range) + `resolveOwnerTravelContextForDate` (one day) in `utils/workingElsewhere.ts`. Marker-only `detectWorkingElsewhereDays` is now an internal primitive; every consumer routes through the one source.
-- Consumers migrated: `find_available_slots` (calendar.ts), `planMeeting`, `availabilityPreCheck`, `calendarHealth` auto-fix suppressor, `get_calendar`/`analyze_calendar`/`get_free_busy` notes, and the per-turn prompt `ownerLocationBlock` (orchestrator/index.ts).
-- The create/move **bare-time GUESS deleted** (it silently re-stamped a slot's home-tz time as trip-tz → the "1 AM" rollover).
-- `planMeeting` WE routing: **relax + dual-clock confirm (owner) / approval (colleague)**, and the confirm is **DECOUPLED from `relaxed`** via a dedicated **`we_acknowledged`** flag (so a proactive `relaxed=true` like "just do it" can't skip the trip-time check). On a WE day `checkSlot` relaxes the home rules.
-- **Lodging-marker location auto-stamp removed** (a team meeting was landing in the owner's hotel).
-- **Booked-instant surfaced**: create/move return `booked_start`/`booked_end` (post grid-snap) and the orchestrator records THAT into `mutationActions` → dateVerifier + the #135 honesty backstop see where it truly landed.
-- Duration-override folded into the one `relaxed` path.
-
-**What the audit flagged as untested geometries (watch these):** DST changing mid-trip (offset isn't constant — always `setZone`, never fixed-offset arithmetic), a non-Israel (west-of-UTC) home owner, multi-attendee in a third tz.
+## 1. How to work (owner's standing rules — honor them)
+- **Propose-first, NEVER auto-fix.** Root-cause each bug to `file:line — what happens` from the log, prove it, then propose. Build only on a per-bug "build it" / "fix it." "do it" / "go" / "ok" = make the edit, leave it UNCOMMITTED (stop at typecheck).
+- **NEVER commit / bump / wrap without an explicit ship word** ("wrap" / "commit" / "ship" / "bundle"). `git push` is pre-authorized *after* a commit. `git add -A` sweeps other chats' WIP — fine ONLY at a coordinated wrap where the owner says "take them all / include the other chats," never on an unrequested commit (check `git status` first; stage explicitly if unsure).
+- **Code-first; fix at the chokepoint; ONE source of truth per decision; reduce LOC; no dedup (extract one fn); no NL regex (multilingual); `trace` to 100% before "done."**
+- **Shell:** never prepend `cd`; one logical command per Bash call; `gh … --body-file`. Reads (logs, `node scripts/db-query.cjs`, grep, code) are free.
+- **Your lane = the meeting deterministic core** (search / validate / book-decision / TZ / WE / floating-blocks / Graph + cache). **Route OUT:** approval→booking→relay (approval chat); systemPrompt narration/judgment (prompt chat); tool *descriptions* + tenancy (tenancy chat); the gate stack (guard chat). When a "meeting bug" is really prompt/tone/tool-description → hand it a paste-block, don't build it here.
 
 ---
 
-## 3. The honest gap the spine did NOT close
-The shipped work hardened the **book / confirm** path. The **SEARCH → narration** path on a trip week is **still broken** — that's the live incident below. When the owner asks "when can I do X," the slot finder returned home-tz slots with no WE tagging, and the model improvised the trip framing with self-computed (wrong) timezones. The fix focus is now: make `find_available_slots` reliably engage WE for the search the owner actually uses, and hand the model **deterministic per-zone rendered times** so it never does tz arithmetic.
+## 2. The WE timezone SPINE — SHIPPED (3.6.0), the source of truth. DON'T re-scatter it.
+For months, "what instant does the owner's stated time mean, and how is it shown" was re-decided across 6+ layers that disagreed — the recurring instability. Now there is ONE spine (`src/utils/weTimeResolver.ts`):
+- **`resolveStatedInstant`** — stated clock + `stated_zone` + travel ctx → canonical instant. An offset-tagged input is a fixed instant (left as-is); a bare clock is read in the zone the owner NAMED (`stated_zone`: `home`/`local`/IANA, `ABBREV_TO_IANA` maps "ET"/"IL"/…), else where he physically is on a trip day.
+- **`renderWeDualClock`** — the ONE display string ("… where you are now / … your home time"), quoted verbatim by confirm / booked-confirmation / move summary / colleague-escalate / approval-preview. Clocks pinned by meaning (can't invert); lodging never named (it's not a venue).
+- **`resolveOwnerTravelContextForDate`** — the ONE "where am I / what zone" detector.
+- **`weConfirmStash.consumeWeConfirmShown`** — the WE trip-time confirm carries once (consume-on-use); a re-issue of the same instant books, and it can't re-lock a time the owner is correcting.
+- **Rule 11:** zones come from config (home) + the WE marker (trip) — NEVER the server clock (the v3.5.4 drift root; cloud-safe).
+- **Model contract:** `stated_zone` replaced `start_timezone` on create/move (the model conveys the named zone INCLUDING home — the old 0/3 "Israel time" root); handler still reads `start_timezone` as back-compat; `find_available_slots` keeps it.
+- **Residual BY DESIGN:** when the owner NAMES a zone, first-pass correctness routes through the model setting `stated_zone` — backstopped by the visible dual-clock confirm + consume-on-use (a mistag is visible + one-step correctable, never a silent wrong-day book). No-zone-named → deterministic trip default; home-week dates → deterministic.
 
 ---
 
-## 4. START HERE — current state (v3.5.4) + the parked bugs
+## 3. What else shipped 3.6.0 → 3.6.2 (see CHANGELOG for detail)
+- **Create-vs-move slop guard** (`findReschedulableSibling`, calendar.ts): "move X" → create_meeting duplicating a live series is caught — surface-and-ask redirect to `move_meeting`, `force_new` escape, ~3-week window, subject + shared-attendee match (structured, no NL).
+- **Requester ≠ attendee** (Bug 4): `requester_is_attending` / `requester_slack_id` scrub in create_meeting — a relayer isn't booked as an attendee (one in-place scrub covers event + recordBooking).
+- **Free-time floor = one source** (`requiredFreeMinutesForWorkDay`, scheduleRules) + label renamed "free-time floor" (was the misleading "focus-time protection"). `work_hours_per_free_hour` ratio knob.
+- **Teams online meetings** (3.6.2): removed the post-create `teamsUrlAsLocation` stamp (create + move) — a native Teams meeting is defined by `isOnlineMeeting` + `onlineMeetingProvider` at create; never stamp the join URL into location.
+- **Sibling chats** (bundled): gender (name-guess removed; `auto` gender doesn't steer Hebrew; unknown→neutral), social (a grievance is engagement, not a deflection), stale-context (1:1 DM no longer re-merges Slack history), approval-preview WE-aware, retired the output-path `verifyReplyMatchesBooking` honesty check.
 
-The Craig incident (2026-06-25) is **resolved and shipped in 3.5.4**. What that taught us and what's still open:
+---
 
-### Shipped in 3.5.4 (this is now live — don't re-derive it)
-- **The keystone was NEVER "search doesn't engage WE."** WE detection always fired; the slots came back correct Boston-band — the log just couldn't show it (`firstSlots` logs `{start,end}` only, and WE slots emit in owner-tz ISO with the tz as a separate `away_tz` tag). The real keystone was **the model doing its own tz arithmetic** because the tool shipped `away_tz` as a raw string with no pre-rendered clock. Fixed: every WE slot carries `away_local_display`, the create/move confirm carries `_trip_time_display`; prompt says quote, never compute.
-- **`pickSpreadSlots` rewritten** to round-robin by **away-tz day**, target 5 (diversity first, then deepen); the chronological 30-cap removed. Killed "all Monday, nothing Tue–Thu."
-- **WE offer-window is config** (`meetings.working_elsewhere`, regular vs relaxed days+hours, trip-tz; work-week + 09–17/08–20 fallback). The owner's set: regular Mon–Fri 09–17, relaxed Sun–Fri 08–20. WE is display + offer-window + approval-routing **only** — it must NEVER bind a time.
-- **THE 7-HOUR DRIFT ROOT (the big one):** `normalizeForGraph` parsed a zoneless datetime in the SERVER's local tz. Maelle runs on the owner's laptop, which is on the **travel zone** while away — so a canonical "10:00" became 10:00 US-East → 17:00 Israel. **It was NOT the WE framework** (the owner's instinct was right). Fixed at the one chokepoint + a naive-parse sweep (`checkSlot`, `planMeeting`). **Lesson for next-you: any "WE timezone" symptom — check the naive-parse-in-server-tz class FIRST, not the WE markers.**
-- Flight-anchor (`start_at_event_end_id` + `getEventEndInstant`), colleague free/busy backstop (owner-only fallback — rule 6), `update_meeting` location.
+## 4. Open / pending — pick up here
+- **Relative-week resolution + empty-window fallback (ROUTED to the prompt chat, not yet shipped).** 2026-07-06 Mike incident: colleague asked "next week, 3 slots"; the model resolved "next week" to 7–11 Jul (this week's tail + weekend, empty) despite a correct WEEK BOUNDARIES table, then fell back to a SINGLE day → 2 same-day options. Paste-block sent to the prompt chat: (1) empty-window fallback = the next coherent WORK-WEEK as a day-spread, never one day; (2) echo the searched window so a wrong week is visible + one-round correctable; (3) offer the count asked for. **Meeting-core is NOT at fault** (`pickSpreadSlots` spreads correctly given a multi-day window; the tool already returns the searched window + daySummary). **Optional code nudge OFFERED, not built** (owner chose prompt-first): on 0 results, return the next-work-week's dates in the tool result so the model's right next move is in the tool output, not a static table it can ignore. Revisit if the prompt fix doesn't hold.
+- **Teams toggle-off in Outlook (NOT our bug — know this before "fixing" it again).** After 3.6.2 the location is clean; the meeting IS a valid Teams meeting (join link / Meeting ID / passcode all real, attendees join fine). The organizer-view "Teams meeting" toggle showing OFF is a **Microsoft behavior for Graph-API-created online meetings**, not something our create params corrupt (we removed the one thing that was ours — the URL-stamp). Possible tenant factor the OWNER checks as admin: Teams "Outlook add-in" / Meeting Scheduling policy. Don't re-open this as a create-code bug.
 
-### Parked — meeting core, proposed-not-built (pick these up)
-1. **`move_meeting` location.** Two parts: (a) add explicit `location`/`is_online` to move (mirror `update_meeting` — small); (b) **stop the move re-stamping location → "Huddle" on a day-type change** ([ops.ts ~4560](src/skills/meetings/ops.ts) `movePlanLocation`), which WIPES a custom venue on a pure time-move (the "Going out → Huddle" incident, 2026-06-28). Part (b) has a tradeoff (drops the auto Office↔Huddle flip) — owner leaned toward preserve; get his nod.
-2. **Double-create hardening (defense-in-depth; the tz fix already removes the live trigger).** (a) `findDuplicateEvent` drift-robust: it fetches the whole probe day — match subject-on-day and loosen the ±2min gate (recommended: exact-match first, else the lone same-subject event that day; don't dedup when ≥2 deliberate same-subject events). (b) `created_but_drift` ([ops.ts ~3248](src/skills/meetings/ops.ts)) must RETURN the created event's `meeting_id` + a "reconcile, don't re-create" note. Owner fork: one-shot ask (recommended) vs automatic. Reachable because Module D now runs a full orchestrator turn on colleague approvals.
+## Carried-forward watch items (from the charter's open list)
+- `checkSlot` is still WE-blind (callers pass relaxed/away); the spine relaxes home rules on a WE day upstream — fine, but if a WE validation bug appears, check the naive-parse-in-server-tz class FIRST (Rule 11), not the WE markers.
+- Shadow-DM duplicate after restart (in-memory anchor) — persist if it recurs.
+- Google-Maps-link → venue resolution (needs the name typed) — feature, not a bug.
 
-### Routed OUT (not meeting-core — paste-blocks were handed to the owner)
-- **Prompt/tenancy:** `requester_is_attending=false` when the requester is organizing for a candidate (Yael-set interview treated her as the attendee); non-owner path must never demand an attendee email (external = uncheckable) — suggest from owner availability + annotate.
-- **Guard:** the `update_meeting` tool-summary the claim-checker reads (`[update_meeting OK <old subject>]`) doesn't reflect what changed (rename/location), so a TRUE "renamed/updated" claim gets rewritten to a false "hasn't gone through" (HubSpot rename + Bosworth incidents). Plus the `created_but_drift`-retry double-create defense.
-
-### Other parked (cross-cutting / lower)
-- **Shadow-DM duplicate:** `shadowNotify`'s thread anchor is an in-memory `Map` (lost on restart) → duplicate "Conversation with X" owner-DM threads after a restart. Fix: persist the anchor (DB), optionally key per person.
-- **`get_calendar` "0 events" note:** the model logged `0 events` for full days in two incidents though the fetch works (verified single-day returns events) — likely a model-summary artifact; add a definitive log if it recurs.
-- **Google-Maps-link → venue:** Maelle can't resolve a maps short-link to a venue (needs the name typed). Venue-resolver feature.
-
-Discipline unchanged: reproduce from the log, root-cause to `file:line`, fix at the chokepoint code-first, `trace` to 100%, propose-first (build only on an explicit "build it").
+Discipline: reproduce from the log → root-cause to `file:line` → fix at the chokepoint, code-first, ONE source → `trace` to 100% → propose-first. Check every fix against the 11 charter rules.

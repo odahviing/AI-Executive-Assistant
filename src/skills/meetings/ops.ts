@@ -1754,36 +1754,53 @@ export class SchedulingSkill {
               && (isOwnerInitiatedSearch || mustBe)
               && userNamedNarrowWindow
               && !isAlreadyRelaxed;
-            // Rule 6 backstop — attendee free/busy is a HELPER, never a blocker.
-            // A REGULAR colleague request that strict-failed ONLY because the
-            // attendee(s) are busy/off-hours must NOT dead-end into "give me their
-            // email." Re-run OWNER-ONLY (owner rules still strict): if the owner
-            // has open times, offer THOSE with a "couldn't confirm the other side"
-            // caveat (rule 7 — high level, no calendar detail). If the owner is
-            // himself busy, owner-only also returns 0 → honest "he's booked then."
-            // (mustBe keeps its own relaxed recovery; owner path is unaffected.)
+            // ── Rule 6 backstop (shared) — attendee free/busy is a HELPER,
+            // never a blocker. When the STRICT pass returned 0 ONLY because
+            // attendee(s) are busy/off-hours, don't dead-end. Re-run the SAME
+            // window recovering the owner's real openings, presented per
+            // audience. ONE function, two callers (rule 2 — no parallel copies):
+            //   'owner_tagged'         — owner rules stay STRICT (his day / focus
+            //       / own busy all enforced via checkSlot); attendee conflicts
+            //       come back TAGGED (attendee_conflicts[]) so he sees his open
+            //       times + who can't make each and books whom he likes (rules
+            //       6/7/11). This is what stops the "0 clean → Sonnet flips
+            //       ignore_attendee_availability → offered-then-bounced" loop
+            //       (Maayan+Lori, 2026-07-08): the tool hands back the annotated
+            //       truth in ONE call, so Sonnet never guesses a blind 2nd search.
+            //   'colleague_owner_only' — owner-only (attendees drop to a high-
+            //       level caveat; a colleague never sees calendar detail, rule 7).
+            //       If the owner is himself busy, owner-only also returns 0 →
+            //       honest "he's booked then."
+            const recoverAttendeeBlockedSlots = (audience: 'owner_tagged' | 'colleague_owner_only') => {
+              const ownerAudience = audience === 'owner_tagged';
+              return findAvailableSlots({
+                userEmail,
+                timezone,
+                durationMinutes: args.duration_minutes as number,
+                attendeeEmails: ownerAudience ? attendeeEmails : [],   // colleague: owner-only, attendees become a caveat
+                attendeeBusyEmails: ownerAudience ? attendeeEmails : undefined,
+                attendeeAvailability: ownerAudience ? attendeeAvailability : undefined,
+                tagAttendeeConflicts: ownerAudience,   // owner: keep his day strict, TAG attendee busy (never drop)
+                searchFrom: effectiveSearchFrom,
+                searchTo: effectiveSearchTo,
+                preferMorning: args.prefer_morning as boolean | undefined,
+                meetingMode: mode as import('../../connectors/graph/calendar').MeetingMode,
+                travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
+                autoExpand: !userNamedNarrowWindow,
+                minBufferHours: ownerAudience ? 1 : (context.profile.meetings.min_slot_buffer_hours ?? 4),
+                profile: context.profile,
+                relaxed: false,
+                excludeEventIds: Array.isArray(args.moving_event_ids)
+                  ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
+                  : undefined,
+                category: args.category as string | undefined,
+              });
+            };
+            // Colleague path: strict-failed only on attendee busy → owner-only.
             let colleagueOwnerOnlySlots: typeof rawSlots = [];
             if (rawSlots.length === 0 && !isOwnerInitiatedSearch && !mustBe && attendeeEmails.length > 0) {
               try {
-                colleagueOwnerOnlySlots = await findAvailableSlots({
-                  userEmail,
-                  timezone,
-                  durationMinutes: args.duration_minutes as number,
-                  attendeeEmails: [],   // owner-only — attendees become a caveat, never a filter
-                  searchFrom: effectiveSearchFrom,
-                  searchTo: effectiveSearchTo,
-                  preferMorning: args.prefer_morning as boolean | undefined,
-                  meetingMode: mode as import('../../connectors/graph/calendar').MeetingMode,
-                  travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
-                  autoExpand: !userNamedNarrowWindow,
-                  minBufferHours: context.profile.meetings.min_slot_buffer_hours ?? 4,
-                  profile: context.profile,
-                  relaxed: false,
-                  excludeEventIds: Array.isArray(args.moving_event_ids)
-                    ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
-                    : undefined,
-                  category: args.category as string | undefined,
-                });
+                colleagueOwnerOnlySlots = await recoverAttendeeBlockedSlots('colleague_owner_only');
                 if (colleagueOwnerOnlySlots.length > 0) {
                   logger.info('find_available_slots — colleague attendee-blocker backstop: owner-only fallback', {
                     ownerOnlyCount: colleagueOwnerOnlySlots.length,
@@ -1793,7 +1810,29 @@ export class SchedulingSkill {
                 logger.warn('find_available_slots — colleague owner-only fallback threw, continuing', { err: String(err).slice(0, 150) });
               }
             }
-            if (rawSlots.length === 0 && !shouldRecover && colleagueOwnerOnlySlots.length === 0) {
+            // Owner path: strict-failed only on attendee busy → surface HIS
+            // genuinely open times with each attendee conflict tagged, instead of
+            // returning empty (which drove Sonnet to the blind ignore flag). Not
+            // run when the owner already opted into ignore_attendee_availability
+            // (attendees intentionally off) or already searched relaxed.
+            let ownerAttendeeTaggedSlots: typeof rawSlots = [];
+            if (
+              rawSlots.length === 0 && isOwnerInitiatedSearch
+              && !ignoreAttendeeBusy && !isAlreadyRelaxed
+              && attendeeEmails.length > 0
+            ) {
+              try {
+                ownerAttendeeTaggedSlots = await recoverAttendeeBlockedSlots('owner_tagged');
+                if (ownerAttendeeTaggedSlots.length > 0) {
+                  logger.info('find_available_slots — owner attendee-blocker backstop: owner-strict + tagged conflicts', {
+                    taggedCount: ownerAttendeeTaggedSlots.length,
+                  });
+                }
+              } catch (err) {
+                logger.warn('find_available_slots — owner attendee-tagged backstop threw, continuing', { err: String(err).slice(0, 150) });
+              }
+            }
+            if (rawSlots.length === 0 && !shouldRecover && colleagueOwnerOnlySlots.length === 0 && ownerAttendeeTaggedSlots.length === 0) {
               // v3.3 — fail loud on an all-Working-Elsewhere window: surface the
               // marker so Sonnet asks about timezone instead of saying "busy."
               const weInfo = diagnosticsOut.workingElsewhere;
@@ -1819,7 +1858,10 @@ export class SchedulingSkill {
             }
             let relaxedRecoverySlots: typeof rawSlots = [];
             const strictDaySummary = diagnosticsOut.daySummary;
-            if (shouldRecover) {
+            // Owner-tagged backstop wins over relaxing soft rules: his genuinely
+            // open times (attendee-conflicted) beat times that break his focus /
+            // lunch / work-hours. Only relax when he has no open slot at all.
+            if (shouldRecover && ownerAttendeeTaggedSlots.length === 0) {
               try {
                 relaxedRecoverySlots = await findAvailableSlots({
                   userEmail,
@@ -1952,14 +1994,22 @@ export class SchedulingSkill {
             // violation from the strict day_summary so the owner sees the
             // trade-off explicitly: "12:30 fits everyone but eats into your
             // 2h focus block — want it anyway?"
-            // Rule 6 backstop result selection: owner-only fallback feeds the
-            // candidate pool when strict was attendee-blocked to 0 (and no relaxed
-            // recovery ran). Flagged so the result carries the "couldn't confirm
-            // the other side" caveat below.
-            const usedColleagueOwnerOnly = relaxedRecoverySlots.length === 0 && colleagueOwnerOnlySlots.length > 0;
-            const candidateSet = relaxedRecoverySlots.length > 0
-              ? relaxedRecoverySlots
-              : (usedColleagueOwnerOnly ? colleagueOwnerOnlySlots : rawSlots);
+            // Rule 6 backstop result selection. Precedence:
+            //   1) owner-tagged backstop — his open times, attendee-conflicted
+            //      (best: his day untouched; carries attendee_conflicts tags).
+            //   2) relaxed recovery — times that break his soft rules.
+            //   3) colleague owner-only — his open times, attendees uncheckable.
+            //   4) rawSlots (the clean strict result).
+            // (1) and (2) are mutually exclusive by construction — the relaxed
+            // recovery is gated off when the owner-tagged backstop found slots.
+            const usedOwnerAttendeeTagged = ownerAttendeeTaggedSlots.length > 0;
+            const usedColleagueOwnerOnly = !usedOwnerAttendeeTagged
+              && relaxedRecoverySlots.length === 0 && colleagueOwnerOnlySlots.length > 0;
+            const candidateSet = usedOwnerAttendeeTagged
+              ? ownerAttendeeTaggedSlots
+              : relaxedRecoverySlots.length > 0
+                ? relaxedRecoverySlots
+                : (usedColleagueOwnerOnly ? colleagueOwnerOnlySlots : rawSlots);
             // DEPRIORITIZE held slots: a time tentatively held for someone
             // else is never the first offer. Pick from the FREE candidates; a
             // held time only surfaces (tagged, below) when there's nothing free
@@ -2269,15 +2319,25 @@ export class SchedulingSkill {
             const hasAttendeeConflicts = annotatedSlots.some(
               (s: any) => Array.isArray(s.attendee_conflicts) && s.attendee_conflicts.length > 0,
             );
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || hasWe || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly) {
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || hasWe || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               if (travelers.length > 0) result.travelers = travelers;
               if (hasDaySummary) result.day_summary = daySummary;
               if (attendeeEmailWarning) Object.assign(result, attendeeEmailWarning);
               if (colleagueSoftBlockHint) Object.assign(result, colleagueSoftBlockHint);
-              if (hasAttendeeConflicts) {
+              if (hasAttendeeConflicts && !usedOwnerAttendeeTagged) {
                 result._attendee_conflicts_note =
                   'You searched with override on, so these include slots where an attendee is busy or outside their working hours — each such slot has `attendee_conflicts: [{email, reason}]`. Present them, but say plainly who is busy / off-hours on those (e.g. "Tue 10:00 — Anna is busy then"). Never present a conflicted slot as clean. The owner can still book any of them.';
+              }
+              if (usedOwnerAttendeeTagged) {
+                // The owner-tagged backstop: no slot was clean for everyone, so
+                // these are his genuinely open times with each attendee conflict
+                // tagged. Distinct from the override note above (he did NOT search
+                // with override — the tool recovered these) so the framing is
+                // honest: "nothing works for all, here's who can't + widen?".
+                const ownerFirst = context.profile.user.name.split(' ')[0];
+                result._no_all_attendee_free_note =
+                  `No time in this window is free for EVERYONE, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee conflict tagged in \`attendee_conflicts: [{email, reason}]\`. Present them and say plainly, per slot, who can't make it (e.g. "Tue 16:15 — Maayan's busy then", "Tue 16:30 — both are busy"). NEVER present a conflicted slot as clean. ${ownerFirst} can book any of them — it's his call. ALSO offer to look at a different timeframe or widen the window, since nothing here works for all.`;
               }
               if (isRecoveryResult) {
                 // Flag so Sonnet knows these slots break soft rules — she
@@ -3980,7 +4040,15 @@ export class SchedulingSkill {
           updateChanges.push(`removed ${rawRemove.join(', ')}`);
         }
         if (newCategoryFromShape) updateChanges.push(`category re-tagged ${newCategoryFromShape} (attendee shape changed)`);
-        if (newLocationFromShape !== undefined) updateChanges.push(`location updated to "${newLocationFromShape}"`);
+        // v3.6.x — narrate EXPLICIT location / online changes too (not just the
+        // shape-derived one), so action_summary — and therefore the claim-checker
+        // — can verify a "moved to X" / "switched to online" claim instead of
+        // seeing no evidence and flagging a done change as not-done. Explicit
+        // wins over shape (matches the apply at updateMeeting above).
+        if (explicitLocation) updateChanges.push(`location set to "${explicitLocation}"`);
+        else if (newLocationFromShape !== undefined) updateChanges.push(`location updated to "${newLocationFromShape}"`);
+        if (explicitIsOnline === true) updateChanges.push('switched to online');
+        else if (explicitIsOnline === false) updateChanges.push('switched to in-person');
         return {
           success: true,
           updated: args.meeting_subject,
