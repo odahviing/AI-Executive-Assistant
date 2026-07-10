@@ -1360,6 +1360,33 @@ export class SchedulingSkill {
             }
           }
 
+          // v3.6.4 — union the internal colleagues the orchestrator resolved
+          // from THIS turn's named participants (deterministic pre-search pass).
+          // This is the guarantee that a KNOWN named colleague is in the search
+          // even when Sonnet passed a partial attendee_emails (Lori dropped,
+          // 07-08) or the wrong shape — resolution no longer depends on Sonnet
+          // remembering to call find_slack_user. Per-turn set (no thread
+          // staleness), owner AND colleague paths, deduped; the owner-self and
+          // any ambiguous/external names were already filtered out upstream.
+          if (Array.isArray(context.resolvedMeetingAttendees) && context.resolvedMeetingAttendees.length > 0) {
+            const existingLower = new Set(attendeeEmails.map(e => e.toLowerCase()));
+            const added: string[] = [];
+            for (const email of context.resolvedMeetingAttendees) {
+              const lower = (email ?? '').toLowerCase().trim();
+              if (!lower.includes('@') || existingLower.has(lower)) continue;
+              attendeeEmails.push(email);
+              existingLower.add(lower);
+              added.push(email);
+            }
+            if (added.length > 0) {
+              logger.info('find_available_slots — unioned orchestrator-resolved internal attendees', {
+                added,
+                finalAttendees: attendeeEmails,
+                senderRole: context.senderRole,
+              });
+            }
+          }
+
           // Auto-fill from this thread's prior attendee context. When Sonnet
           // calls find_available_slots WITHOUT attendee_emails but a previous
           // call in this thread already established who the meeting is for,

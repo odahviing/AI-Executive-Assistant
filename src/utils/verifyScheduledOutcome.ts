@@ -91,13 +91,14 @@ function checkCompliance(
 
   // 1. Work hours check (v2.8.1 — multi-window aware).
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { getOwnerWorkHoursForDay } = require('./workHours') as typeof import('./workHours');
+  const { getOwnerWorkHoursForDay, slotDayMinutes } = require('./workHours') as typeof import('./workHours');
   const windows = getOwnerWorkHoursForDay(profile, dayName);
   if (windows.length === 0) {
     issues.push(`booked on ${dayName} (${eStart.toFormat('d MMM')}) — not a work day`);
   } else {
-    const startMin = eStart.hour * 60 + eStart.minute;
-    const endMin = eEnd.hour * 60 + eEnd.minute;
+    // start + duration — a booking ending past midnight must not wrap and look
+    // like it fits a daytime window (the checkSlot night-booking bug's twin).
+    const { startMin, endMin } = slotDayMinutes(eStart, eEnd);
     const fits = windows.some(w => startMin >= w.startMin && endMin <= w.endMin);
     if (!fits) {
       const summary = windows

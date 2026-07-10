@@ -2,6 +2,19 @@
 
 ---
 
+## 3.6.4 — deterministic attendee resolution: resolve WHO before WHEN, in code
+
+The recurring colleague-scheduling break — Maelle failing to resolve a named attendee (Lori 2026-07-08, Simon 2026-07-09) and then searching a partial list or asking for an email she already has — is now fixed in CODE, not prompt. 3.6.3 tried it as a prompt rule ("resolve via find_slack_user first") and Sonnet ignored it on the very next use (find_slack_user called 0×, no scheduling tools fired). This version moves resolution into the turn pipeline so it no longer depends on the model. Restart required.
+
+### Fixed — attendee resolution (meeting core)
+- `classifyTurn` now extracts the participant names from a scheduling request (raw extraction, no fuzzy match). The orchestrator resolves the KNOWN INTERNAL colleagues among them **deterministically** from the directory (`resolveNamedInternalAttendees` — single unambiguous internal match only) and threads them into this turn's `find_available_slots`, so a named internal attendee (Lori, Simon) is in the search whether or not Sonnet remembers to call `find_slack_user`. A resolved-participants block tells the model these are already added: don't re-resolve, don't ask who they are, don't ask for an email she has. ([classifyTurn.ts](src/core/social/classifyTurn.ts), [resolveAttendeeEmails.ts](src/skills/meetings/resolveAttendeeEmails.ts), [index.ts](src/core/orchestrator/index.ts), [ops.ts](src/skills/meetings/ops.ts))
+- External / unknown attendees never block showing options. A named person not matched to an internal colleague is surfaced as "search the owner's side and show his open times now; collect their email only at booking, to send the invite" — so a colleague who just wants options for a candidate isn't forced to hand over an email up front. The external-vs-unknown judgment stays with the model; the internal resolution is code-enforced. ([index.ts](src/core/orchestrator/index.ts))
+
+### Fixed — cross-timezone slot correctness (meeting core)
+- Attendee work-hours now handle a candidate slot that crosses the attendee's local midnight (`slotDayMinutes`), so a cross-TZ overlap near a day boundary is clipped correctly. ([workHours.ts](src/utils/workHours.ts), [scheduleRules.ts](src/utils/scheduleRules.ts), [ops.ts](src/skills/meetings/ops.ts))
+
+---
+
 ## 3.6.3 — colleague meeting-coordination wave: resolve attendees first, no offered-then-bounced, structured booking approval
 
 Off a real chat where a colleague (Maayan) asked to set up a meeting between the owner and Lori (East Coast) and it broke end to end: a named attendee was never resolved so the search ran a partial list; a freeform approval carried no meeting structure, so on approve the booking re-derived everything in the owner's thread and drifted (regenerated subject, re-asked attendees, a window instead of a time); and the slot search offered a conflicted time repeatedly, then refused it at booking. Fixed across four parallel chats (meeting, approval, guard, prompt). Restart required.

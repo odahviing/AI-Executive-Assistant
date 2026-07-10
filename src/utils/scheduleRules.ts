@@ -241,10 +241,11 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // 09:00-15:30 + 21:30-23:59 — a 21:45-22:10 slot is valid).
   if (!input.allowRelaxed) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getOwnerWorkHoursForDay } = require('./workHours') as typeof import('./workHours');
+    const { getOwnerWorkHoursForDay, slotDayMinutes } = require('./workHours') as typeof import('./workHours');
     const windows = input.workHourWindowsOverride ?? getOwnerWorkHoursForDay(profile, dayName);
-    const slotStartMin = slotStart.hour * 60 + slotStart.minute;
-    const slotEndMin = slotEnd.hour * 60 + slotEnd.minute;
+    // start + duration, so a slot ending past midnight (23:30–00:10) does NOT
+    // wrap to a small minute-of-day and spuriously fit a daytime window.
+    const { startMin: slotStartMin, endMin: slotEndMin } = slotDayMinutes(slotStart, slotEnd);
     const fits = windows.some(w => slotStartMin >= w.startMin && slotEndMin <= w.endMin);
     if (!fits) {
       const windowsLabel = windows.length === 0

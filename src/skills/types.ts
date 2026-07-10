@@ -114,6 +114,16 @@ export interface SkillContext {
    * policy_exception escalation. Empty array when caller didn't pass history.
    */
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /**
+   * v3.6.4 — internal colleagues the orchestrator resolved from the participant
+   * names in THIS turn's scheduling request (deterministic pre-pass, single
+   * unambiguous people_memory match only). find_available_slots UNIONS these
+   * into attendee_emails so a known named colleague is never dropped because
+   * Sonnet forgot to resolve the name (Lori 07-08, Simon 07-09). Per-turn (no
+   * thread accumulation → no stale bleed). Empty/undefined on non-scheduling
+   * turns and when nothing resolved.
+   */
+  resolvedMeetingAttendees?: string[];
 }
 
 /** All supported communication channels */

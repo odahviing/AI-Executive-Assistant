@@ -85,6 +85,14 @@ export interface ClassifyTurnResult {
    * (those go through precheckAvailability separately).
    */
   freeTimeInquiry: boolean;
+  /**
+   * v3.6.4 — people named as participants in a scheduling request, as written
+   * (any language/script). Empty when not a scheduling turn or none named. The
+   * orchestrator resolves the internal ones deterministically and threads them
+   * into the search — so a known colleague is never dropped because Sonnet
+   * forgot to resolve the name. Never fuzzy-matched here; this is raw extraction.
+   */
+  meetingPeople: string[];
 }
 
 /** Pure-ack short-circuit — shared by both halves. Bare ack/greeting/close-out
@@ -106,20 +114,26 @@ export async function classifyTurn(params: {
   profile: UserProfile;
   needIntent: boolean;
   needScopes: boolean;
+  /** v3.6.4 — also extract the people named as MEETING PARTICIPANTS, so the
+   *  orchestrator can resolve known internal colleagues deterministically
+   *  BEFORE the search instead of trusting Sonnet to call find_slack_user
+   *  (the recurring dropped-attendee bug: Lori 07-08, Simon 07-09). */
+  needMeetingPeople?: boolean;
   senderRole?: 'owner' | 'colleague';
   senderName?: string;
   recentContext?: string;
 }): Promise<ClassifyTurnResult> {
   const { anthropic, message, profile, needIntent, needScopes, recentContext } = params;
+  const needMeetingPeople = params.needMeetingPeople === true;
 
   // Nothing requested — return safe defaults (caller shouldn't get here, but
   // be defensive).
-  if (!needIntent && !needScopes) {
-    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false };
+  if (!needIntent && !needScopes && !needMeetingPeople) {
+    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };
   }
 
   if (!message || message.trim().length === 0) {
-    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false };
+    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };
   }
 
   // Pure-ack short-circuit — no LLM call for either half. Intent='other'
@@ -127,7 +141,7 @@ export async function classifyTurn(params: {
   // RULE 3: cut the ack word, nothing substantive left → other), and scope
   // widens to general. Saves the whole roundtrip on "ok" / "thanks" / etc.
   if (looksLikePureAck(message)) {
-    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false };
+    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };
   }
 
   // v3.1.6 — low-signal short reply (1-3 words): "meeting", "book it",
@@ -141,8 +155,8 @@ export async function classifyTurn(params: {
   // tools anyway. Word-count is language-agnostic (not regex on meaning).
   // Scope only — intent classification still runs when needed.
   const isLowSignalShortReply = message.trim().split(/\s+/).length <= 3;
-  if (isLowSignalShortReply && !needIntent) {
-    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false };
+  if (isLowSignalShortReply && !needIntent && !needMeetingPeople) {
+    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };
   }
 
   const ownerFirst = profile.user.name.split(' ')[0];
@@ -219,10 +233,18 @@ How to choose scopes:
 - DO NOT include scopes not listed above.
 ` : '';
 
+  const meetingPeopleSection = needMeetingPeople ? `
+MEETING PARTICIPANTS (meeting_people) — set this ONLY when ${senderName} is asking to set up, schedule, move, or book a MEETING. List the people that meeting is WITH, exactly as each is named in the message (first name, full name, nickname, @handle — however written; any language or script).
+- Include everyone named as a participant EXCEPT ${assistantName} (you) and ${senderName} (the person writing this message).
+- "${isOwner ? 'book 30 min with Lori and Simon' : `I need a meeting with ${ownerFirst} and Simon`}" → the participants named are the OTHER people (e.g. Lori, Simon${isOwner ? '' : `, ${ownerFirst}`}).
+- NOT a scheduling request, or nobody named → return an empty array.
+- Do NOT invent, translate, or normalize names — copy them as written. Do NOT guess who a vague reference means; only list explicitly named people.
+` : '';
+
   const systemPrompt = `You classify a single message from ${senderName} (${isOwner ? `${ownerFirst} — the executive who owns this account` : `a colleague talking to ${assistantName}`}) to ${assistantName}.
 
 Output EXACTLY ONE call to classify_turn. No prose.
-${intentSection}${scopeSection}${recentContext ? `\nRecent conversation (classify the LAST message from ${senderName}):\n${recentContext}\n` : ''}`;
+${intentSection}${scopeSection}${meetingPeopleSection}${recentContext ? `\nRecent conversation (classify the LAST message from ${senderName}):\n${recentContext}\n` : ''}`;
 
   // ── Build the tool schema — include only the requested fields ──
   const properties: Record<string, any> = {};
@@ -260,6 +282,15 @@ ${intentSection}${scopeSection}${recentContext ? `\nRecent conversation (classif
     };
     required.push('scopes');
   }
+  if (needMeetingPeople) {
+    properties.meeting_people = {
+      type: 'array',
+      description: 'People named as participants in a scheduling request, copied as written. Empty array when this is not a scheduling request or nobody is named.',
+      items: { type: 'string' },
+    };
+    // Deliberately NOT in `required` — an empty array (the common non-scheduling
+    // case) must be a first-class answer, not a forced hallucination.
+  }
 
   try {
     const resp = await anthropic.messages.create({
@@ -277,7 +308,7 @@ ${intentSection}${scopeSection}${recentContext ? `\nRecent conversation (classif
     logLlmUsage('classify_turn', MODEL, resp);
 
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const raw = toolUse?.input as (OwnerIntentClassification & { scopes?: string[]; free_time_inquiry?: boolean }) | undefined;
+    const raw = toolUse?.input as (OwnerIntentClassification & { scopes?: string[]; free_time_inquiry?: boolean; meeting_people?: unknown }) | undefined;
 
     // ── Resolve intent ──
     let intent: OwnerIntentClassification = INTENT_OTHER;
@@ -321,6 +352,15 @@ ${intentSection}${scopeSection}${recentContext ? `\nRecent conversation (classif
       }
     }
 
+    // ── Resolve meeting participants (raw extraction only; the deterministic
+    //    name→email resolution is the orchestrator's job) ──
+    const meetingPeople = (needMeetingPeople && Array.isArray(raw?.meeting_people))
+      ? (raw!.meeting_people as unknown[])
+          .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+          .map(s => s.trim())
+          .slice(0, 12)
+      : [];
+
     logger.info('classifyTurn', {
       ...(needIntent ? {
         kind: intent.kind,
@@ -330,14 +370,15 @@ ${intentSection}${scopeSection}${recentContext ? `\nRecent conversation (classif
         sentiment: intent.social?.sentiment,
       } : {}),
       ...(needScopes ? { scopes: scope.scopes } : {}),
+      ...(needMeetingPeople && meetingPeople.length > 0 ? { meetingPeople } : {}),
       preview: message.slice(0, 80),
     });
 
     const freeTimeInquiry = isOwner && needIntent && raw?.free_time_inquiry === true;
 
-    return { intent, scope, freeTimeInquiry };
+    return { intent, scope, freeTimeInquiry, meetingPeople };
   } catch (err) {
     logger.warn('classifyTurn threw — defaulting to other / general', { err: String(err).slice(0, 300) });
-    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false };
+    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };
   }
 }

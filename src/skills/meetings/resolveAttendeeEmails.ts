@@ -77,3 +77,117 @@ export function resolveAttendeeEmail(input: AttendeeContactInput): ResolvedAtten
 export function resolveAttendeeEmails(list: AttendeeContactInput[]): ResolvedAttendeeContact[] {
   return list.map(resolveAttendeeEmail);
 }
+
+export interface ResolvedInternalAttendee {
+  name: string;   // the people_memory name (canonical), for narration
+  email: string;  // resolved, lowercased, internal (owner-domain)
+}
+
+/**
+ * Does `query` name this person for real — a WHOLE-name / token match, not a
+ * loose substring? searchPeopleMemory uses SQL LIKE '%q%', so a bare "Lori"
+ * substring-matches "Gloria" and "Simon" matches "Simone". That's fine for a
+ * fuzzy people search, but the deterministic attendee resolver must NEVER
+ * bind the wrong person — so we re-check the match here on word boundaries.
+ * Language-agnostic (splits on whitespace/punctuation; a Hebrew token compares
+ * as a Hebrew token). A one-word query must equal a name token (first/last),
+ * never a substring of one; a multi-word query must have all its tokens present.
+ */
+function nameGenuinelyMatches(candidateName: string | undefined, candidateEmail: string | undefined, query: string): boolean {
+  const q = query.toLowerCase().trim();
+  if (!q) return false;
+  const name = (candidateName ?? '').toLowerCase().trim();
+  const emailLower = (candidateEmail ?? '').toLowerCase().trim();
+  const emailLocal = emailLower.split('@')[0];
+  if (name === q || emailLower === q || emailLocal === q) return true;
+  const tokenize = (s: string) => s.split(/[\s.\-_,]+/).filter(Boolean);
+  const nameTokens = tokenize(name);
+  const qTokens = tokenize(q);
+  if (qTokens.length === 0 || nameTokens.length === 0) return false;
+  // Single-word query ("Lori") → must equal a whole name token, so "Gloria"
+  // and "Simone" no longer match. Multi-word ("Lori Sarsfield") → every query
+  // token must be present as a name token.
+  return qTokens.every(t => nameTokens.includes(t));
+}
+
+/**
+ * v3.6.4 — deterministic resolution of NAMED people to KNOWN INTERNAL
+ * colleagues, for the orchestrator's pre-search attendee pass.
+ *
+ * Given the raw participant names a colleague/owner used ("Simon", "Lori"),
+ * resolve ONLY those that map to a SINGLE UNAMBIGUOUS internal colleague in
+ * people_memory (same email domain as the owner). This is the "resolve WHO
+ * before searching WHEN" guarantee moved into code — it must not depend on
+ * Sonnet remembering to call find_slack_user.
+ *
+ * Deliberately conservative (owner's constraint — never mis-resolve):
+ *   - 1 genuine internal match → resolved (added to the search).
+ *   - 0 internal matches  → UNRESOLVED (external / unknown — email only at
+ *     booking; never blocks showing options). Returned in `unresolved` so the
+ *     caller can tell Sonnet "show times now, don't demand their email."
+ *   - >1 internal matches → UNRESOLVED (ambiguous — the model disambiguates;
+ *     we never fuzzy-guess which "Lori").
+ *   - the owner himself is DROPPED from both lists — he's the search BASE, not
+ *     an attendee, and must never be flagged as an unresolved/external person.
+ *     Any excludeEmails (e.g. the requester) are dropped from `resolved` too.
+ *
+ * The external-vs-unknown JUDGMENT on an unresolved name stays model-side (owner
+ * rule); this function only guarantees the deterministic part — a KNOWN internal
+ * person is always resolved, and never mis-bound.
+ *
+ * Pure + fail-open: any DB hiccup skips that name, never throws.
+ */
+export function resolveNamedInternalAttendees(params: {
+  names: string[];
+  ownerEmail: string;
+  ownerName?: string;
+  excludeEmails?: string[];
+}): { resolved: ResolvedInternalAttendee[]; unresolved: string[] } {
+  const { names, ownerEmail, ownerName } = params;
+  if (!Array.isArray(names) || names.length === 0) return { resolved: [], unresolved: [] };
+  const ownerLower = ownerEmail.toLowerCase();
+  const ownerDomain = ownerLower.includes('@') ? ownerLower.split('@')[1] : '';
+  if (!ownerDomain) return { resolved: [], unresolved: [] };
+  const exclude = new Set<string>([ownerLower, ...(params.excludeEmails ?? []).map(e => e.toLowerCase().trim())]);
+  const resolved: ResolvedInternalAttendee[] = [];
+  const unresolved: string[] = [];
+  const seen = new Set<string>();
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { searchPeopleMemory } = require('../../db/people') as typeof import('../../db/people');
+    for (const rawName of names) {
+      const name = (rawName ?? '').trim();
+      if (!name) continue;
+      // The owner himself (named as the meeting subject, e.g. "meeting with
+      // Idan and Simon") is the search base — never an attendee, never external.
+      if (ownerName && nameGenuinelyMatches(ownerName, ownerEmail, name)) continue;
+      let matches: Array<{ name?: string; email?: string }>;
+      try {
+        matches = searchPeopleMemory(name) ?? [];
+      } catch {
+        unresolved.push(name);  // a bad lookup ≠ resolved; let the model handle it
+        continue;
+      }
+      // Internal = a resolvable email on the owner's own domain AND a genuine
+      // whole-name match (not a loose LIKE substring — no Lori→Gloria binds).
+      const internal = matches.filter(m =>
+        m.email && m.email.includes('@') && m.email.toLowerCase().endsWith('@' + ownerDomain)
+        && nameGenuinelyMatches(m.name, m.email, name),
+      );
+      // SINGLE UNAMBIGUOUS internal match only — never fuzzy-guess.
+      if (internal.length !== 1) {
+        unresolved.push(name);  // 0 (external/unknown) or >1 (ambiguous)
+        continue;
+      }
+      const email = internal[0].email!.toLowerCase();
+      if (exclude.has(email)) continue;   // requester etc. — handled elsewhere, not "external"
+      if (seen.has(email)) continue;
+      seen.add(email);
+      resolved.push({ name: internal[0].name ?? name, email });
+    }
+  } catch (err) {
+    logger.warn('resolveNamedInternalAttendees threw — returning what resolved', { err: String(err).slice(0, 200) });
+  }
+  return { resolved, unresolved };
+}

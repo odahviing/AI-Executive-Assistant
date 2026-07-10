@@ -86,6 +86,25 @@ export function getOwnerWorkHoursForDay(
 }
 
 /**
+ * A slot's [startMin, endMin] as minutes-from-midnight of the START day, with
+ * the end computed as start + DURATION so it NEVER wraps past midnight.
+ *
+ * The bug this fixes: computing endMin as `slotEnd.hour*60 + slotEnd.minute`
+ * wraps for a slot ending after midnight — 23:30–00:10 gave endMin=10, so
+ * `endMin <= window.endMin` (10 <= 19:00) was trivially true and a late meeting
+ * "fit" EVERY day's hours, booking the owner at night on a non-night-shift day.
+ * Owner/attendee windows never cross midnight (parseRange caps them at 1440), so
+ * a slot ending past midnight (endMin > 1440) is always outside working hours.
+ * Duration-based end is DST/TZ-safe and matches the slot finder's own
+ * `startMin + durationMinutes`.
+ */
+export function slotDayMinutes(slotStart: DateTime, slotEnd: DateTime): { startMin: number; endMin: number } {
+  const startMin = slotStart.hour * 60 + slotStart.minute;
+  const durationMin = Math.max(0, Math.round(slotEnd.diff(slotStart, 'minutes').minutes));
+  return { startMin, endMin: startMin + durationMin };
+}
+
+/**
  * True iff [slotStartMin, slotEndMin) fits fully inside ANY window in the day.
  */
 export function isSlotInWorkHours(

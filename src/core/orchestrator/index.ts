@@ -519,6 +519,13 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // pre-check can fire below for owner buffer/free-time questions, replacing
   // the leaky meetings.ts:2044 prompt rule.
   let isFreeTimeInquiry = false;
+  // v3.6.4 — participant names classifyTurn extracted from a scheduling
+  // request, and the internal colleagues we deterministically resolved from
+  // them. Threaded into the search so a known colleague is never dropped
+  // because Sonnet forgot to resolve the name (Lori 07-08, Simon 07-09).
+  let turnMeetingPeople: string[] = [];
+  let resolvedMeetingAttendees: string[] = [];
+  let resolvedAttendeesBlock = '';
   // v3.2.6 (6.4) — never run the social directive/coda on a non-interactive
   // (routine/system) turn; a scheduled report isn't a conversation.
   const needIntent = socialActive && input.interactive !== false && !!userMessage && userMessage.trim().length > 1;
@@ -526,7 +533,14 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     && isOwnerTurn
     && !!userMessage
     && userMessage.trim().length > 0;
-  if (needIntent || needScopes) {
+  // v3.6.4 — extract meeting participants on any substantive INTERACTIVE turn
+  // (owner OR colleague). Cheap (rides the classifyTurn call that already runs
+  // for these turns) and returns [] on non-scheduling messages. This is what
+  // makes attendee resolution deterministic instead of a prompt rule Sonnet
+  // ignores. Skipped on non-interactive (routine/system) turns — no colleague
+  // scheduling request there.
+  const needMeetingPeople = input.interactive !== false && !!userMessage && userMessage.trim().length > 1;
+  if (needIntent || needScopes || needMeetingPeople) {
     try {
       // Last few turns of context so the classifier can read conversation
       // state (e.g. "Maelle asked a social question and they answered" →
@@ -541,6 +555,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         profile,
         needIntent,
         needScopes,
+        needMeetingPeople,
         senderRole: turnSenderRole,
         senderName: input.senderName,
         recentContext: recentContext || undefined,
@@ -548,6 +563,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
 
       if (needScopes) toolScopes = turnResult.scope.scopes;
       if (isOwnerTurn) isFreeTimeInquiry = turnResult.freeTimeInquiry === true;
+      if (needMeetingPeople) turnMeetingPeople = turnResult.meetingPeople ?? [];
       // v3.x (Block 3 — calendar prose lazy-load). A free-time / buffer / "how
       // packed" question needs the calendar-health guidance. Deterministically
       // union the 'calendar' scope so that prose loads even if the classifier
@@ -597,6 +613,54 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       socialDirective = noDirective();
       socialClassification = null;
       toolScopes = undefined;  // → getSkillTools ships all tools (safe widen)
+    }
+  }
+
+  // v3.6.4 — DETERMINISTIC attendee resolution (the "resolve WHO before WHEN"
+  // guarantee, moved from a prompt rule Sonnet ignored into code). Resolve the
+  // participant names classifyTurn extracted into KNOWN INTERNAL colleagues
+  // (single unambiguous people_memory match only — never fuzzy-guessed). The
+  // resolved set is (a) threaded into the search via skillContext so
+  // find_available_slots can't run a partial list, and (b) surfaced to Sonnet as
+  // a resolved-participants block so she searches instead of asking who they are
+  // / for an email she already has. External / unknown names are deliberately
+  // left out — they never block showing options; their email matters only at
+  // booking. Fail-open: any error → empty, Sonnet's normal flow takes over.
+  if (turnMeetingPeople.length > 0) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { resolveNamedInternalAttendees } = require('../../skills/meetings/resolveAttendeeEmails') as
+        typeof import('../../skills/meetings/resolveAttendeeEmails');
+      const { resolved, unresolved } = resolveNamedInternalAttendees({
+        names: turnMeetingPeople,
+        ownerEmail: profile.user.email,
+        ownerName: profile.user.name,
+      });
+      resolvedMeetingAttendees = resolved.map(r => r.email);
+      if (resolved.length > 0 || unresolved.length > 0) {
+        const ownerFirst = profile.user.name.split(' ')[0];
+        const sections: string[] = ['## MEETING PARTICIPANTS (deterministic — use this, do not re-derive)'];
+        if (resolved.length > 0) {
+          const list = resolved.map(r => `- ${r.name} <${r.email}>`).join('\n');
+          sections.push(`Known internal colleagues, resolved from the directory — do NOT call find_slack_user for these and do NOT ask who they are or for their email. I have ALREADY added them to this turn's find_available_slots search; search now and offer times that work for everyone, never propose without them:\n${list}`);
+        }
+        if (unresolved.length > 0) {
+          // The external-vs-unknown JUDGMENT stays with the model (owner rule);
+          // code only enforces the invariant: never withhold ${ownerFirst}'s
+          // times, never demand an email just to search. This is the "Yael asks
+          // for dates, then checks with the external candidate later" flow.
+          sections.push(`Named, but NOT matched to an internal colleague: ${unresolved.join(', ')}. Do NOT demand an email or withhold times for these. If external (candidate / another company / personal domain) — search ${ownerFirst}'s side and show his open times NOW; you only need their email at BOOKING, to send the invite (never up front). If instead it's an internal person you don't recognize, you may ask "who is <name>?" — but never ask for an email you'd only use to send an invite.`);
+        }
+        resolvedAttendeesBlock = sections.join('\n\n');
+        logger.info('orchestrator — attendee pre-resolution', {
+          named: turnMeetingPeople,
+          resolved: resolvedMeetingAttendees,
+          unresolved,
+          senderRole: turnSenderRole,
+        });
+      }
+    } catch (err) {
+      logger.warn('orchestrator — attendee pre-resolution threw, continuing', { err: String(err).slice(0, 200) });
     }
   }
 
@@ -1138,6 +1202,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
     languageDirectiveBlock,
     priorOutboundBlock,
     availabilityPrecheckBlock,
+    resolvedAttendeesBlock,
     offeredSlotsBlock,
     ownerLocationBlock,
     freeTimePrecheckBlock,
@@ -1518,6 +1583,10 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
       // is plenty for "did owner just suggest this time?" detection; passing
       // the whole history would bloat every handler call.
       conversationHistory: conversationHistory.slice(-8),
+      // v3.6.4 — internal colleagues resolved from this turn's named
+      // participants; find_available_slots unions them so a known attendee is
+      // never dropped. Per-turn (rebuilt each response round with the turn's set).
+      resolvedMeetingAttendees,
     };
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];

@@ -6,6 +6,7 @@ import { config } from '../../config';
 import logger from '../../utils/logger';
 import { auditLog } from '../../db';
 import type { UserProfile } from '../../config/userProfile';
+import { slotDayMinutes } from '../../utils/workHours';
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -1325,8 +1326,9 @@ export async function findAvailableSlots(params: {
               if (!att.workdays.includes(attDay)) return true;
               const [shH, shM] = att.hoursStart.split(':').map(Number);
               const [ehH, ehM] = att.hoursEnd.split(':').map(Number);
-              const startMin = attStart.hour * 60 + attStart.minute;
-              const endMin = attEnd.hour * 60 + attEnd.minute;
+              // start + duration — a slot crossing the attendee's midnight must
+              // not wrap and look in-hours (same bug as owner-side checkSlot).
+              const { startMin, endMin } = slotDayMinutes(attStart, attEnd);
               const winStart = shH * 60 + shM;
               const winEnd = ehH * 60 + ehM;
               return startMin < winStart || endMin > winEnd;
