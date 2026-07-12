@@ -390,14 +390,15 @@ export async function initProfile(
   // the live recordBooking path when the owner actually books a meeting (with a
   // non-human attendee filter); catch-up is a pick-list the owner chooses from.
 
-  // Catch up on any messages sent while the bot was offline. Gap-scoped to the
-  // persisted socket watermark (the last moment the socket was known alive).
-  // No watermark (first-ever boot / lost file) → gap starts NOW → replay
-  // nothing pre-existing ("what's gone is gone"). See catchUpMissedMessages.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { getLastSocketAlive } = require('../connectors/slack/socketWatermark') as
-    typeof import('../connectors/slack/socketWatermark');
-  await catchUpMissedMessages(app, profile, dmChannel, getLastSocketAlive(profile.user.slack_user_id) ?? undefined);
+  // Startup catch-up is deliberately NOT run here. initProfile is the FAST
+  // local setup (idempotent migrations + seeding) — it must stay quick because
+  // index.ts awaits it BEFORE the Slack socket opens. The ~40s, all-DMs catch-up
+  // scan now runs in the BACKGROUND right after the socket opens (index.ts
+  // Phase 4), so a restart no longer leaves Maelle deaf while it runs. Ordering
+  // is safe: markProcessed (processedDedup.ts) is a shared atomic claim, so a
+  // re-delivered message races between the live handler and the background scan
+  // and exactly one wins — see replayMissedMessage's mid-flight guard. index.ts
+  // captures the pre-boot watermark before stamping the socket alive.
 }
 
 // ── Catch-up on missed messages ──────────────────────────────────────────────
@@ -437,6 +438,29 @@ function shouldLogHeartbeatScan(): boolean {
 // note below), NOT a 24h lookback.
 // `isHeartbeat` is set by the 10-min periodic safety-net caller so its routine
 // "scanning DMs" log line is throttled to ≤1/hour (the scan still runs).
+// Bounded-concurrency runner for the per-DM scan. The catch-up loop used to be
+// strictly serial: with ~30+ DMs and ≥2 Slack Web-API calls each (top-level
+// history + panel-thread discovery), that's 60+ sequential Tier-3 round-trips →
+// ~40s wall time. A small worker pool overlaps the round-trips (far shorter wall
+// time) while staying modest enough not to trip Slack's per-method rate limits
+// into a 429 backoff storm. Order-independent — each DM is scanned in isolation
+// and dedup is per-message-ts. Tunable via CATCHUP_SCAN_CONCURRENCY.
+const CATCHUP_SCAN_CONCURRENCY = 5;
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+}
+
 export async function catchUpMissedMessages(
   app: App,
   profile: UserProfile,
@@ -497,7 +521,7 @@ export async function catchUpMissedMessages(
   if (!isHeartbeat || shouldLogHeartbeatScan()) {
     logger.info('Catch-up: scanning DMs for missed messages', { dmCount: channels.size, sinceMs });
   }
-  for (const channelId of channels) {
+  await runWithConcurrency([...channels], CATCHUP_SCAN_CONCURRENCY, async (channelId) => {
     const opts: CheckOpts = {
       app, profile, botToken, botUserId,
       channelId,
@@ -536,7 +560,7 @@ export async function catchUpMissedMessages(
     } catch (err) {
       logger.warn('Catch-up: panel discovery threw — continuing', { channelId, err: String(err).slice(0, 200) });
     }
-    if (candidates.length === 0) continue;
+    if (candidates.length === 0) return;
     // Dedup by thread — keep the latest unanswered message per distinct thread,
     // so an overlap (a panel parent surfacing both as a top-level candidate and
     // a thread candidate) is answered once, not twice.
@@ -552,7 +576,7 @@ export async function catchUpMissedMessages(
         logger.warn('Catch-up: replay error, continuing', { channelId, threadTs: c.postThreadTs, err: String(err).slice(0, 200) });
       }
     }
-  }
+  });
 }
 
 /** A thread's latest unanswered message (top-level DM stream or a panel thread). */

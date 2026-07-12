@@ -22,7 +22,7 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
-import { getCalendarEvents } from '../connectors/graph/calendar';
+import { getCalendarEvents, findAvailableSlots } from '../connectors/graph/calendar';
 import { checkSlot, type RuleViolationKind } from './scheduleRules';
 import { resolveOwnerTravelContextForDate } from './workingElsewhere';
 import { getAnthropicClient } from '../llm/client';
@@ -40,9 +40,12 @@ const TIME_PATTERN = /\b(\d{1,2}):(\d{2})\b/g;
 // d/m pair if the year is missing — guarded by the month<=12 check downstream.
 const DATE_PATTERN = /\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b/g;
 
-// Question markers — both English and Hebrew. Cheap union test.
-const QUESTION_PATTERN =
-  /\b(is\s+\w+\s+(?:free|available)|works?\s+for|can\s+\w+\s+do|free\s+at|available\s+at|(?:is|are|will)\s+(?:he|she|they|you))|פנוי|פנויה|פנים|זמין|מתאים|מתאימה|יש\s+זמן|אפשר/i;
+// Language-NEUTRAL question mark (Latin + Hebrew share "?"; Arabic "؟"; CJK
+// "？"). Structural signal only — NO language words (R8). It just decides
+// whether to spend a Haiku call; the Haiku normalizer below is the real,
+// language-agnostic detector and returns empty for non-availability messages.
+// (Replaced the old English+Hebrew word regex — a clone-limiting check.)
+const QUESTION_MARK = /[?？؟]/;
 
 // v3.1.2 (#116) — TZ-cue trigger. Only when one of these appears do we
 // pay the Haiku normalization cost; otherwise the cheap regex extraction
@@ -76,6 +79,14 @@ interface NormalizedInstant {
    * exactly like create_meeting would, so verdict and booking agree.
    */
   duration_minutes?: number;
+  /**
+   * v3.6.x — true when the colleague is asking HOW MUCH is free at/from this
+   * time ("how much is free there?", "how long do we have?"), not whether a
+   * specific slot works. We then probe the largest bookable standard duration
+   * from this start instead of a yes/no verdict — so the reply states the real
+   * free length (the "said 10 min, actually 25" fabrication).
+   */
+  gap_query?: boolean;
 }
 
 /**
@@ -127,6 +138,7 @@ The colleague is proposing specific meeting times. They may state each slot in t
 RULES:
 - One entry per slot the colleague actually proposed (not one per number in the message).
 - When the colleague named a meeting LENGTH — a range ("11:00-11:15" → start 11:00, duration_minutes 15) or an explicit duration ("for 20 min", "חצי שעה" → 30) — include duration_minutes. Omit it when only a start time was given.
+- When the colleague is asking HOW MUCH time is free — the SIZE of a gap ("how much is free there?", "how long do we have then?", "how big is that window?") — rather than whether a specific slot works, set gap_query=true and use the START of the window/slot they mean (resolve "there"/"then" from the RECENT THREAD). Omit gap_query for a normal "does X work?" ask.
 - Resolve relative day words in ANY language — "tomorrow"/"מחר", weekday names ("Tuesday"/"ביום שלישי"), "next week" — against today's date above.
 - When a time carries NO day in the current message, use the day under discussion in the RECENT THREAD (e.g. the colleague said "tomorrow at 17:00" a message earlier, then asks "13:00/13:30?" — those are TOMORROW). Only when no day reference exists anywhere, assume today.
 - When the message gives both a foreign time AND an explicit owner-local "(your X:Y)" pair for the SAME slot, prefer the owner-local — it's the most reliable anchor.
@@ -155,6 +167,7 @@ Output EXACTLY ONE call to normalize_instants.`;
                 properties: {
                   instant_iso: { type: 'string', description: 'ISO 8601 with offset, e.g. 2026-06-09T19:00:00+03:00' },
                   duration_minutes: { type: 'number', description: 'Meeting length in minutes, ONLY when the colleague named one (a range like 11:00-11:15, or "for 20 min"). Omit otherwise.' },
+                  gap_query: { type: 'boolean', description: 'true when the colleague asks HOW MUCH time is free at/from this start ("how much is free there?"), not whether a specific slot works. Omit/false otherwise.' },
                 },
                 required: ['instant_iso'],
               },
@@ -168,7 +181,7 @@ Output EXACTLY ONE call to normalize_instants.`;
     });
     logLlmUsage('availability_tz_normalize', 'claude-haiku-4-5-20251001', resp);
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const raw = toolUse?.input as { instants?: Array<{ instant_iso?: string; duration_minutes?: number }> } | undefined;
+    const raw = toolUse?.input as { instants?: Array<{ instant_iso?: string; duration_minutes?: number; gap_query?: boolean }> } | undefined;
     const out: NormalizedInstant[] = [];
     for (const entry of raw?.instants ?? []) {
       if (typeof entry?.instant_iso !== 'string') continue;
@@ -177,7 +190,11 @@ Output EXACTLY ONE call to normalize_instants.`;
       const dur = typeof entry.duration_minutes === 'number' && entry.duration_minutes >= 5 && entry.duration_minutes <= 480
         ? entry.duration_minutes
         : undefined;
-      out.push({ instant_iso: dt.toISO()!, ...(dur ? { duration_minutes: dur } : {}) });
+      out.push({
+        instant_iso: dt.toISO()!,
+        ...(dur ? { duration_minutes: dur } : {}),
+        ...(entry.gap_query === true ? { gap_query: true } : {}),
+      });
     }
     return out;
   } catch (err) {
@@ -198,6 +215,10 @@ interface SlotVerdict {
   /** v3.4.2 — set when the proposed day is a Working-Elsewhere day: the owner's
    * home rules don't apply, so the verdict is "away/tentative", not bookable/not. */
   working_elsewhere?: { location: string };
+  /** v3.6.x — gap query ("how much is free there?"): maxFreeMinutes is the
+   * largest bookable standard duration from this start (null = nothing fits). */
+  gapQuery?: boolean;
+  maxFreeMinutes?: number | null;
 }
 
 export interface AvailabilityPreCheckResult {
@@ -233,10 +254,17 @@ export async function precheckAvailability(params: {
 
   if (!params.message || params.message.trim().length === 0) return empty;
 
-  // Cheap pre-filter: must have BOTH a question marker AND a time pattern.
-  // Without time, there's nothing specific to verify; without a question,
-  // it's not an availability ask.
-  if (!QUESTION_PATTERN.test(params.message)) return empty;
+  // Language-NEUTRAL cheap gate (R8 — no language words): spend a Haiku call
+  // only when the message carries a schedulable signal — a time, a TZ cue, or a
+  // question mark. That's the whole gate; the Haiku normalizer is the real,
+  // language-agnostic detector and returns empty for non-availability messages.
+  // A miss here → no pre-check → she answers as before (status quo), never a
+  // wrong injection (R7).
+  const hasSchedulableSignal =
+    QUESTION_MARK.test(params.message)
+    || TZ_CUE_PATTERN.test(params.message)
+    || extractTimes(params.message).length > 0;
+  if (!hasSchedulableSignal) return empty;
 
   const tz = params.profile.user.timezone;
   const today = DateTime.now().setZone(tz).toFormat('yyyy-MM-dd');
@@ -257,7 +285,10 @@ export async function precheckAvailability(params: {
   // empty. Cost-bounded: one Haiku call, only on question-marked colleague
   // messages that contain a time pattern.
   let pairs: Pair[] = [];
-  if (TZ_CUE_PATTERN.test(params.message) || extractTimes(params.message).length > 0) {
+  {
+    // The gate above already confirmed a schedulable signal (incl. a bare "?"
+    // gap question with no time), so always let the language-agnostic Haiku
+    // normalizer read it — it returns empty for non-availability messages.
     const instants = await normalizeAvailabilityInstantsWithHaiku(params.message, params.profile, params.recentThread);
     if (instants.length > 0) {
       const seen = new Set<string>();
@@ -269,7 +300,11 @@ export async function precheckAvailability(params: {
         const key = `${date}T${time}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        pairs.push({ date, time, ...(inst.duration_minutes ? { durationMin: inst.duration_minutes } : {}) });
+        pairs.push({
+          date, time,
+          ...(inst.duration_minutes ? { durationMin: inst.duration_minutes } : {}),
+          ...(inst.gap_query ? { gapQuery: true } : {}),
+        });
       }
       logger.info('availabilityPreCheck — Haiku normalized instants', {
         instant_count: instants.length, pair_count: pairs.length,
@@ -311,6 +346,31 @@ export async function precheckAvailability(params: {
     try {
       const startDt = DateTime.fromISO(`${pair.date}T${pair.time}`, { zone: tz });
       if (!startDt.isValid) continue;
+
+      // v3.6.x — GAP query ("how much is free there?"). Probe the LARGEST
+      // standard duration that fits from this start via findAvailableSlots
+      // (the SAME rule-aware engine the booking flow uses — R2/R4, no
+      // reimplemented rule logic), descending, first hit wins. Injecting the
+      // real free length stops the "said 10 min, it was 25" fabrication.
+      if (pair.gapQuery) {
+        let maxFit: number | null = null;
+        for (const d of [...allowedDurations].sort((a, b) => b - a)) {
+          const slots = await findAvailableSlots({
+            userEmail: params.profile.user.email,
+            timezone: tz,
+            durationMinutes: d,
+            attendeeEmails: [],
+            searchFrom: startDt.toISO()!,
+            searchTo: startDt.toISO()!,   // zero-width → engine checks a d-min meeting AT this start
+            autoExpand: false,
+            profile: params.profile,
+          });
+          if (slots.length > 0) { maxFit = d; break; }
+        }
+        verdicts.push({ date: pair.date, time: pair.time, bookable: maxFit !== null, gapQuery: true, maxFreeMinutes: maxFit });
+        continue;
+      }
+
       // Duration: the asked length when the colleague named one, snapped to
       // allowed_durations exactly like create_meeting snaps (nearest). An
       // "11:00-11:15" ask checks 11:00+10min — the same meeting booking
@@ -433,7 +493,7 @@ function extractDates(text: string, tz: string, monthFirst: boolean): DateMatch[
   return out;
 }
 
-interface Pair { date: string; time: string; durationMin?: number }
+interface Pair { date: string; time: string; durationMin?: number; gapQuery?: boolean }
 
 function pairTimesWithDates(
   _text: string,
@@ -480,6 +540,13 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile): strin
   const ownerFirst = profile.user.name.split(' ')[0];
   const lines = verdicts.map(v => {
     const when = fmt(v.date, v.time);
+    // v3.6.x — gap query ("how much is free there?"): report the REAL largest
+    // bookable length so the reply states it instead of estimating a smaller one.
+    if (v.gapQuery) {
+      return v.maxFreeMinutes && v.maxFreeMinutes > 0
+        ? `  - around ${when}: up to ${v.maxFreeMinutes} min is free per ${ownerFirst}'s rules — state THIS length, do not estimate a shorter one.`
+        : `  - around ${when}: nothing bookable there per ${ownerFirst}'s rules.`;
+    }
     // v3.4.2 — Working-Elsewhere day: not a bookable/not-bookable verdict. The
     // owner is away that day; his home rules don't apply and availability there
     // is tentative. Tell the colleague he's away (don't say free/busy), and

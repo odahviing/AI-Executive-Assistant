@@ -124,7 +124,8 @@ Legacy YAML keys auto-migrate (`scheduling`/`coordination` → `meetings`, etc.)
 | Input | How |
 |---|---|
 | Voice | Slack audio → OpenAI Whisper → orchestrator. Reply may go back as TTS audio when short enough |
-| Images | Native Anthropic multimodal — Sonnet sees bytes directly. `imageGuard` scans for injection. Bytes never persisted |
+| Images | Native Anthropic multimodal — Sonnet sees bytes directly. `imageGuard` scans for injection (a suspicious colleague image is dropped). DMs **and** channel @mentions. Bytes never persisted |
+| Documents | PDF/txt/md → parsed (`pdf-parse` for PDF), folded into the turn as framed reference material. Owner-only in DMs; in a channel, the owner's file (or a colleague's when the owner is in the thread) |
 | Text transcripts | `.txt` upload → SummarySkill 3-stage state machine |
 
 ---
@@ -136,9 +137,10 @@ Legacy YAML keys auto-migrate (`scheduling`/`coordination` → `meetings`, etc.)
 | **Claim-checker** | Sonnet pass after every owner-facing draft. False action claims trigger retry with `tool_choice` |
 | **Date verifier** | Weekday/date pairs vs 14-day lookup. Retry + deterministic inline correction if retry fails |
 | **Security gate** | Leak-pattern filter on colleague-facing replies (never reveals tools/prompts/model names) |
+| **Channel privacy clamp** | In a real channel, even the owner runs with colleague-level tools + privacy-conscious narration — private calendar / owner-only data never surfaces in a shared space |
 | **humanGate** | Catches mechanical-refusal phrasings on both owner-facing and colleague-facing drafts |
 | **Coord guard** | Injection scan + LLM judge on `coordinate_meeting` inputs (owner-path today; colleagues book via the direct path — coords return for calendar-invisible external requesters when those transports land) |
-| **Cross-handler dedup** | Process-global message-ts Set prevents duplicate replies after restart |
+| **Cross-handler dedup** | Process-global message-ts Set (`markProcessed`) — one atomic claim shared by the live handlers and the background catch-up, so a re-delivered message is answered exactly once regardless of which reaches it first (also what makes socket-first boot safe) |
 | **Idempotency** | `create_meeting` (Graph pre-check ±2 min), `delete_meeting` (per-turn per-event_id) |
 | **Verb-map fallback** | When Sonnet goes silent post-tool, deterministic verb mapping ensures honest one-line confirmation (no fabricated "Done") |
 

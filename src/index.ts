@@ -1,11 +1,11 @@
 import { config } from './config';
 import { App } from '@slack/bolt';
 import { createSlackAppForProfile, startSocketWatchdog } from './connectors/slack/app';
-import { stampSocketAlive, flushSocketWatermark } from './connectors/slack/socketWatermark';
+import { stampSocketAlive, flushSocketWatermark, getLastSocketAlive } from './connectors/slack/socketWatermark';
 import { startWhatsApp } from './connectors/whatsapp';
-import { loadAllProfiles } from './config/userProfile';
+import { loadAllProfiles, type UserProfile } from './config/userProfile';
 import { getDb } from './db';
-import { startBackgroundTimer, initProfile } from './core/background';
+import { startBackgroundTimer, initProfile, catchUpMissedMessages } from './core/background';
 import { seedAssistantSelf } from './core/assistantSelf';
 import { seedOwnerSelf } from './core/ownerSelf';
 import logger from './utils/logger';
@@ -94,15 +94,17 @@ async function main(): Promise<void> {
   // bumps are visible via CHANGELOG.md + git log; the owner doesn't need a
   // boot ping.
 
-  // ── Phase 2: catch up missed messages (sockets still CLOSED) ─────────────
-  // Running catch-up BEFORE `app.start()` closes the double-reply race on
-  // restart: `processedDedup`'s in-memory Set is empty after a process restart.
-  // If we opened the socket first, Slack's at-least-once queue would flush
-  // events to the live handler before catch-up could mark them processed —
-  // catch-up later sees the same user message (Slack's history endpoint
-  // not yet indexed for our just-posted reply) and posts a second "↩ Catching
-  // up…" reply. Catch-up-first populates the dedup Set; when Phase 3 opens
-  // the socket, the live handler dedups against it and skips the queued copy.
+  // ── Phase 2: fast per-profile setup (sockets still CLOSED) ───────────────
+  // Idempotent LOCAL setup only — migrations, seeding, briefing cron. Fast, no
+  // Slack API fan-out, so it doesn't delay the socket. The slow all-DMs catch-up
+  // scan that used to run here (gating inbound for ~40s on every restart) now
+  // runs in the BACKGROUND after the socket opens (Phase 4).
+  //
+  // We ALSO capture, per profile, the pre-boot socket watermark + owner DM
+  // channel for Phase 4. Capturing the watermark HERE is essential: it must be
+  // read before the socket is stamped alive (Phase 4 watchdog / any live
+  // inbound), or the recovery gap collapses to zero and nothing is recovered.
+  const catchUpQueue: Array<{ app: App; profile: UserProfile; dmChannel: string; sinceMs?: number }> = [];
   for (const [, profile] of profiles) {
     const ownerApp = runningApps.find(a => a.name === profile.assistant.name);
     if (!ownerApp) continue;
@@ -113,10 +115,13 @@ async function main(): Promise<void> {
       });
       const dmChannel = (dmResult.channel as any)?.id;
       if (!dmChannel) continue;
-      // Await — was fire-and-forget. We MUST finish catch-up before any
-      // socket opens, otherwise the race the rest of this block describes
-      // re-opens.
       await initProfile(ownerApp.app, profile, dmChannel);
+      catchUpQueue.push({
+        app: ownerApp.app,
+        profile,
+        dmChannel,
+        sinceMs: getLastSocketAlive(profile.user.slack_user_id) ?? undefined,
+      });
     } catch (err) {
       logger.warn('Could not initialise profile (continuing)', {
         user: profile.user.name, err: String(err),
@@ -125,12 +130,13 @@ async function main(): Promise<void> {
   }
 
   // ── Phase 3: open sockets ─────────────────────────────────────────────────
-  // Catch-up has populated `processedDedup` for every message it replied to.
-  // Slack now flushes queued events to the live handler; `hasProcessed(ts)`
-  // returns true for catch-up's targets → live handler skips. Fresh messages
-  // that arrived during catch-up (or before catch-up ran) flow through
-  // normally. Each app starts independently — a failure on one doesn't block
-  // the others.
+  // The socket opens as soon as the fast local setup (Phase 2) is done, so
+  // Maelle is responsive within ~1s of boot instead of after the ~40s catch-up
+  // scan. Slack flushes any queued (re-delivered) events to the live handler;
+  // those dedup against the SAME atomic `markProcessed` claim the Phase 5
+  // background catch-up uses, so a message re-delivered here and also seen by
+  // catch-up is answered exactly once. Each app starts independently — a
+  // failure on one doesn't block the others.
   for (const { app, name, profileName } of runningApps) {
     try {
       await app.start();
@@ -180,6 +186,21 @@ async function main(): Promise<void> {
     } catch (err) {
       logger.warn('Could not start socket watchdog (continuing)', { name, err: String(err).slice(0, 200) });
     }
+  }
+
+  // ── Phase 5: background catch-up (sockets are OPEN — she's already live) ──
+  // Recover messages missed during downtime WITHOUT gating inbound: the socket
+  // is up, so a fresh message is answered immediately by the live handler while
+  // this scan runs behind it. Double-reply is impossible — markProcessed is a
+  // shared atomic claim, so whichever of {live handler, this scan} reaches a
+  // re-delivered message first wins and the other skips (replayMissedMessage's
+  // mid-flight guard). Fire-and-forget per profile; one failure never blocks the
+  // others or the process. Uses the pre-boot watermark captured in Phase 2.
+  for (const ctx of catchUpQueue) {
+    void catchUpMissedMessages(ctx.app, ctx.profile, ctx.dmChannel, ctx.sinceMs)
+      .catch(err => logger.warn('Background catch-up failed (continuing)', {
+        user: ctx.profile.user.name, err: String(err).slice(0, 200),
+      }));
   }
 
   // Background timer — runs every 5 minutes
