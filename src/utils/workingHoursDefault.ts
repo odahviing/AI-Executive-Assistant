@@ -1,7 +1,7 @@
 /**
  * Default working-hours derivation from a person's IANA timezone (v2.2.2, #46).
  *
- * Israel TZ → Sun–Thu, 09:00–17:00 (Israeli workweek).
+ * Israel TZ → Sun–Thu, 09:00–18:00 (Israeli workweek).
  * Anywhere else → Mon–Fri, 09:00–17:00 (Western default).
  *
  * Persisted into `people_memory.working_hours_auto` whenever the timezone is
@@ -27,7 +27,7 @@ export interface WorkingHours {
 const ISRAEL_DEFAULT: Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'> = {
   workdays:   ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'],
   hoursStart: '09:00',
-  hoursEnd:   '17:00',
+  hoursEnd:   '18:00',
 };
 
 const WESTERN_DEFAULT: Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'> = {

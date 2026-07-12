@@ -2,6 +2,21 @@
 
 ---
 
+## 3.6.5 — optional-join meetings (timed Working-Elsewhere) + weekly-rundown day-shift guard + quieter socket logs
+
+One new capability and two fixes, bundled from the meeting, guard, and transport chats. Restart required.
+
+### Added — optional-join meetings (meeting core)
+- A **timed** `workingElsewhere` event is now a "join if free" **soft/optional** meeting — a third availability tier between free and busy. It's visible and known to Maelle, but bookable-over: the slot finder offers a slot sitting over it (`over_optional`-tagged) **only** when clean slots can't fill the option spread, always ranking clean slots first (a WE-soft slot never edges out a clean one), and it sits **strictly below** the relaxed tier — a slot that also breaks a real rule never becomes WE-soft (real rule wins). Booking over leaves the optional event in place (owner drops it). Calendar-health treats it as **reclaimable free time** — no overlap / busy-day / free-time-floor flags against it. Split from the travel feature by `isAllDay`: **all-day** `workingElsewhere` is unchanged (the travel-day marker → the WE timezone spine); **timed** is this new optional tier. ([calendar.ts](src/connectors/graph/calendar.ts), [ops.ts](src/skills/meetings/ops.ts), [workingElsewhere.ts](src/utils/workingElsewhere.ts), [scheduleRules.ts](src/utils/scheduleRules.ts))
+
+### Fixed — weekly-rundown day-shift (guard)
+- `dateVerifier` no longer slides an entire multi-day report onto the wrong weekdays. When every weekday/date mismatch shares the **same offset** (a uniform date-column drift, not per-word typos), the weekday sequence is the trustworthy axis — so it leaves the weekdays alone instead of rewriting them to match the drifted dates. Previously it rewrote all six weekdays and shifted Sunday's content under Monday, etc. (2026-07-11 weekly rundown). An isolated single mismatch still gets its weekday corrected as before. ([dateVerifier.ts](src/utils/dateVerifier.ts))
+
+### Fixed — socket-mode log noise (transport)
+- A custom Bolt logger downgrades the known socket-mode transients (`server explicit disconnect` / the finity "Unhandled event '…' in state '…'") to debug, so a handled reconnect blip no longer dumps a full multi-line stack per attempt. Real Bolt errors still log at error; index.ts already survives these and logs one clean warn. ([app.ts](src/connectors/slack/app.ts))
+
+---
+
 ## 3.6.4 — deterministic attendee resolution: resolve WHO before WHEN, in code
 
 The recurring colleague-scheduling break — Maelle failing to resolve a named attendee (Lori 2026-07-08, Simon 2026-07-09) and then searching a partial list or asking for an email she already has — is now fixed in CODE, not prompt. 3.6.3 tried it as a prompt rule ("resolve via find_slack_user first") and Sonnet ignored it on the very next use (find_slack_user called 0×, no scheduling tools fired). This version moves resolution into the turn pipeline so it no longer depends on the model. Restart required.

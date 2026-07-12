@@ -79,7 +79,7 @@ If the meeting is NOT yet booked and they need to find a time together, use find
       // ── Direct calendar ops (from former SchedulingSkill) ─────────────
       {
         name: 'get_calendar',
-        description: "Read the user's calendar events for a given date range. Use for specific scheduling decisions (finding slots, checking a meeting exists, etc.). For weekly reviews or issue detection, use analyze_calendar instead. Also call this before sending any reminder or message that references a specific meeting — always verify the exact title and time from the calendar before using it.",
+        description: "Read the user's calendar events for a given date range — to SEE what's on the calendar, confirm a meeting exists, or verify a meeting's exact title/time before referencing it in a reminder or message. It LISTS events; it does NOT compute availability — never read these events to state free time, gaps, or a bookable duration. Any availability or duration claim ('25 min free there', 'the day is packed', 'free at 3') must come from find_available_slots (which applies the schedule rules), or from analyze_calendar for a whole-day review. For weekly reviews or issue detection, use analyze_calendar.",
         input_schema: {
           type: 'object',
           properties: {
@@ -144,14 +144,18 @@ Then YOU pick the right meeting_mode based on what they said:
 
 ONLINE ≠ "AT HOME". meeting_mode='online' is a scheduling flag — it tells the tool the meeting does NOT require physical presence at the office, so all day types are searched. It does NOT mean ${profile.user.name.split(' ')[0]} attends from home. An online meeting can land on an office day; he may be at the office while joining via Teams/Zoom. Never frame online and in-person as mutually exclusive places — they describe the meeting's connection method, not where he sits.
 
-EXPLAINING WHY A DAY ISN'T OFFERED. The tool returns a \`day_summary\` array with one entry per workday touched: \`{ date, accepted, top_reasons }\`. When the user pushes back ("what about Monday?" / "nothing on Tuesday?"), look up that date in \`day_summary\` and narrate the actual reason:
+EXPLAINING WHY A DAY ISN'T OFFERED. The tool returns a \`day_summary\` array with one entry per workday touched: \`{ date, accepted, top_reasons, blocked_by? }\`. When the user pushes back ("what about Monday?" / "nothing on Tuesday?"), look up that date in \`day_summary\` and narrate the actual reason:
   • \`accepted: 0, top_reasons: ['owner_busy_collision', 'focus_time_office']\` → "Monday is fully booked — back-to-back meetings, and what's left would put you under your free-time floor."
   • \`accepted: 0, top_reasons: ['wrong_day_type']\` → "Monday is a home day, in-person needs an office day."
   • \`accepted: 0, top_reasons: ['category_per_day']\` → "Already at the daily cap for that category."
+  • \`attendee_busy_collision\` (also in \`blocked_by\`) → the attendee's OWN calendar is genuinely busy during your shared hours — real evidence. Scope it ("X is booked during your shared hours Thursday"), don't inflate to "unavailable all day."
+  • \`outside_attendee_work_hours\` → the only openings fall outside the attendee's ASSUMED hours (a timezone-derived default, usually NOT their real schedule). Do NOT say "X isn't available" — say it no-overlap and hedge: "your free time Thursday is outside X's likely working hours."
   • \`accepted: >0\` → the day HAS options; if Sonnet's spread picker didn't surface one, say "there are slots that day, want me to pull them?"
   • Date not in \`day_summary\` at all → "I didn't search that day — it's outside the window I checked."
 
-NEVER fabricate a reason. Don't say "day off" / "not a workday" unless \`top_reasons\` is \`['wrong_day_type']\`. The data has the truth — use it.
+NEVER fabricate a reason. Don't say "day off" / "not a workday" unless \`top_reasons\` is \`['wrong_day_type']\`. The data has the truth — use it. And NEVER blame the colleague for the owner's full day: "X isn't available / can't make it" is honest ONLY with positive evidence from X's calendar (\`attendee_busy_collision\` / \`blocked_by\`). When the real block is the owner's own calendar, or you lack positive evidence he's free then, say it owner-first / no-overlap ("your Thursday is full", "no opening that works for both of you Thursday") — never a false absolute about the colleague.
+
+A SPREAD IS A SAMPLE. The 2–5 options find_available_slots surfaces are a sample of the day, not the whole set — NEVER narrate the un-shown time as gone ("that's all", "the rest of the day is packed"). More may be free; offer to pull more, or to check a specific time.
 
 The search window auto-expands up to 21 days if fewer than 3 slots are found.
 
@@ -278,11 +282,11 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
             },
             attendees: {
               type: 'array',
-              description: 'The people ATTENDING the meeting. A colleague who only RELAYED a request between OTHERS ("tell Idan I want to meet Tal", "Dana asked me to set up a call with you") is the REQUESTER, NOT an attendee — do NOT list them here. Use requester_is_attending=false (+ requester_slack_id) for them instead.',
+              description: 'The people ATTENDING the meeting, each as {name, email?}. Internal colleagues\' emails are resolved automatically from the directory — pass the name and NEVER ask (owner or colleague) for an internal teammate\'s email you can look up; it is filled in for you, so BOOK instead of asking. Supply an email yourself ONLY for a genuinely EXTERNAL person (candidate / other company / personal domain), and only at the moment of booking. The one legitimate reason to ask about a named person is that the name is AMBIGUOUS (more than one match) or you cannot place them at all — then ask WHICH person, never for an email you already have in hand. A colleague who only RELAYED a request between OTHERS ("tell Idan I want to meet Tal", "Dana asked me to set up a call with you") is the REQUESTER, NOT an attendee — do NOT list them here. Use requester_is_attending=false (+ requester_slack_id) for them instead.',
               items: {
                 type: 'object',
-                properties: { name: { type: 'string' }, email: { type: 'string' } },
-                required: ['name', 'email'],
+                properties: { name: { type: 'string' }, email: { type: 'string', description: 'Only for a clearly EXTERNAL attendee — internal emails resolve automatically, so leave this off for colleagues on file.' } },
+                required: ['name'],
               },
             },
             requester_is_attending: {

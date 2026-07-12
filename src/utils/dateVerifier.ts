@@ -173,6 +173,7 @@ export async function verifyDates(draft: string, profile: UserProfile, _userMess
     return { ok: true, mismatches };
   }
 
+  const offsets: number[] = [];
   for (const pair of extracted.pairs) {
     if (!pair.isoDate) continue;
     const correctNum = lookup.byIso.get(pair.isoDate);
@@ -188,6 +189,30 @@ export async function verifyDates(draft: string, profile: UserProfile, _userMess
       date: pair.isoDate,
       matchedText: pair.span,
     });
+    // Weekday offset (0..6) between the date's real weekday and the written
+    // one — used to detect a uniform DATE-COLUMN shift below.
+    offsets.push(((correctNum - pair.writtenWeekdayNum) % 7 + 7) % 7);
+  }
+
+  // v3.6.x — uniform-shift guard (2026-07-11 weekly-rundown incident). When
+  // EVERY mismatch shares the SAME nonzero offset, the dates aren't per-word
+  // typos — the whole date column is drifted a constant amount, so the WEEKDAY
+  // sequence (Sun, Mon, Tue…) is the internally-consistent axis and the dates
+  // are the error. Rewriting the weekdays to match the dates (what we do for an
+  // isolated typo) would then slide every event onto the wrong weekday — a far
+  // worse corruption than the cosmetic wrong date number. So on a uniform shift
+  // we BACK OFF: correct nothing, log it. We don't rewrite the dates either —
+  // the guard can't map report lines to calendar events, so choosing an axis is
+  // a guess; a wrong date number with content on the RIGHT weekday is the safe
+  // miss (R7). Single / non-uniform mismatches still get the weekday fix — the
+  // guard's core job (the "written Friday, it's Thursday" class) is untouched.
+  if (mismatches.length >= 2 && offsets[0] !== 0 && offsets.every(o => o === offsets[0])) {
+    logger.warn('dateVerifier: uniform weekday/date shift across all pairs — the DATE column is drifted, not per-word typos; backing off (NOT rewriting weekdays, which would slide the content a day)', {
+      offset: offsets[0],
+      mismatchCount: mismatches.length,
+      mismatches,
+    });
+    return { ok: true, mismatches: [] };
   }
 
   if (mismatches.length > 0) {

@@ -302,6 +302,11 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
         if (ev.isCancelled) continue;
         if (excludeSet.has(ev.id)) continue;
         if ((ev as any).showAs === 'free') continue;
+        // v3.6.4 — a timed optional-join (WE-soft) yields to a floating block:
+        // the owner drops the optional to keep lunch, so it never occupies the
+        // window for feasibility. Keeps this rule consistent with the search /
+        // health pools that also treat timed-WE as reclaimable free time.
+        if (!(ev as any).isAllDay && (ev as any).showAs === 'workingElsewhere') continue;
         const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
         const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
         // Skip if event doesn't overlap the window.
@@ -410,6 +415,14 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       if (ev.isCancelled) continue;
       if (excludeSet.has(ev.id)) continue;
       if ((ev as any).showAs === 'free') continue;  // free/tentative blocks don't collide
+      // v3.6.4 — a TIMED workingElsewhere event is an OPTIONAL-join (join only
+      // if free), NOT a hard commitment: it must never count as an owner-busy
+      // collision. This is the single validator for search AND booking, so this
+      // one skip is what lets the slot finder TAG a slot over it as WE-soft
+      // (instead of dropping it) and lets a booking sit over it with no conflict
+      // flag, leaving the optional event in place. All-day WE (travel) is the
+      // spine's concern and is deliberately NOT skipped here.
+      if (!(ev as any).isAllDay && (ev as any).showAs === 'workingElsewhere') continue;
       if (floatingBlockDefs.some(b => isFloatingBlockEvent(ev, b))) continue;
       const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
       const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
@@ -469,6 +482,11 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
           if (ev.isCancelled) continue;
           if (excludeSet.has(ev.id)) continue;
           if ((ev as any).showAs === 'free') continue;
+          // v3.6.4 — a timed optional-join is reclaimable free time, so it does
+          // NOT count against the daily focus-time floor (same treatment as the
+          // search + calendar-health pools; keeps booking-time and search
+          // consistent so one never floor-rejects what the other allowed).
+          if (!(ev as any).isAllDay && (ev as any).showAs === 'workingElsewhere') continue;
           if ((ev as any).isAllDay) continue;
           // Parse zone-aware (matches rules 6 + 8). Graph returns dateTime as a
           // bare wall-clock string with the zone in `.timeZone`; `new Date(str)`

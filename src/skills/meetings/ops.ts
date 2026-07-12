@@ -521,6 +521,12 @@ export function analyzeCalendar(
     // duration loop below starts prevEndMin at workStartMin and caps evEnd at
     // workEndMin, so the pre-work and post-work slivers are clamped away.
     const timedMeetings = nonAllDayMeetings.filter(e => {
+      // v3.6.4 — a TIMED workingElsewhere event is an OPTIONAL-join (e.g. a
+      // daily standup) — free time the owner can reclaim, not a real
+      // commitment. Exclude it so it never counts as busy, never reduces the
+      // free-time floor, and a real meeting overlapping it is NOT flagged as a
+      // conflict. (All-day WE is already excluded — these are non-all-day only.)
+      if (e.showAs === 'workingElsewhere') return false;
       const [sh, sm] = e._localStartTime.split(':').map(Number);
       const [eh, em] = e._localEndTime.split(':').map(Number);
       const startMin = sh * 60 + sm;
@@ -985,7 +991,15 @@ export class SchedulingSkill {
           };
         }
 
-        return weNoteGc ? { events: processed, ...weNoteGc } : processed;
+        // v3.6.4 — visibility for the optional-join tier. A TIMED
+        // workingElsewhere event is a "join only if free" meeting (e.g. a daily
+        // standup), not a hard commitment. Tag the result so Sonnet lists it but
+        // never treats it as blocking, and knows a booking can sit over it.
+        const optionalJoinNote = rawEvents.some(e => !e.isAllDay && !e.isCancelled && e.showAs === 'workingElsewhere')
+          ? { _optional_join_note: 'Any listed event with showAs "workingElsewhere" that is NOT all-day is an OPTIONAL-join meeting (the owner attends only if free — e.g. a standup), NOT a hard commitment. Present it as "optional, joins if free"; it never blocks the owner and a new meeting may be booked over it (he simply skips it). (An ALL-DAY workingElsewhere event is a travel day — a different thing entirely.)' }
+          : undefined;
+        const gcNotes = { ...(weNoteGc ?? {}), ...(optionalJoinNote ?? {}) };
+        return Object.keys(gcNotes).length > 0 ? { events: processed, ...gcNotes } : processed;
       }
 
       case 'analyze_calendar': {
@@ -2346,7 +2360,12 @@ export class SchedulingSkill {
             const hasAttendeeConflicts = annotatedSlots.some(
               (s: any) => Array.isArray(s.attendee_conflicts) && s.attendee_conflicts.length > 0,
             );
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || hasWe || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged) {
+            // v3.6.4 — any surfaced slot that sits over an optional-join event.
+            // Only ever present when clean slots were too few to fill the spread
+            // (the tier holds them back otherwise), so their appearance IS the
+            // signal to narrate the trade-off.
+            const hasOverOptional = annotatedSlots.some((s: any) => typeof s.over_optional === 'string' && s.over_optional.length > 0);
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || hasWe || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               if (travelers.length > 0) result.travelers = travelers;
               if (hasDaySummary) result.day_summary = daySummary;
@@ -2365,6 +2384,10 @@ export class SchedulingSkill {
                 const ownerFirst = context.profile.user.name.split(' ')[0];
                 result._no_all_attendee_free_note =
                   `No time in this window is free for EVERYONE, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee conflict tagged in \`attendee_conflicts: [{email, reason}]\`. Present them and say plainly, per slot, who can't make it (e.g. "Tue 16:15 — Maayan's busy then", "Tue 16:30 — both are busy"). NEVER present a conflicted slot as clean. ${ownerFirst} can book any of them — it's his call. ALSO offer to look at a different timeframe or widen the window, since nothing here works for all.`;
+              }
+              if (hasOverOptional) {
+                result._over_optional_note =
+                  'Some slots carry `over_optional: "<subject>"` — they sit over an OPTIONAL meeting the owner joins only if free (e.g. a daily standup), not a hard commitment. They only appear because clean times were too few. Present them AFTER any clean options and say the trade-off plainly ("Wed 16:00 — over your optional <subject>, which you\'d drop"). Booking one is fine and needs NO approval — the optional event stays on the calendar (he just skips it); do NOT delete it, do NOT flag a conflict.';
               }
               if (isRecoveryResult) {
                 // Flag so Sonnet knows these slots break soft rules — she
@@ -2496,6 +2519,31 @@ export class SchedulingSkill {
           };
         }
         const attendees = rawAttendees as Array<{ name?: string; email?: string; slack_id?: string }>;
+        // v3.6.4 — recover resolved internal attendees into the booking. The
+        // orchestrator already resolved this turn's named participants
+        // (context.resolvedMeetingAttendees — a known internal colleague's email
+        // is in hand, owner + requester excluded upstream). Union any Sonnet left
+        // out of args.attendees so the invite includes them DETERMINISTICALLY and
+        // never depends on her re-supplying — or asking a colleague for — an email
+        // we already resolved (the "what's Simon's email?" bug). `attendees`
+        // aliases args.attendees, so the push is what the normalizer reads. Dedupe
+        // by email; per-turn set, so nothing stale from earlier in the thread.
+        if (Array.isArray(context.resolvedMeetingAttendees) && context.resolvedMeetingAttendees.length > 0) {
+          const present = new Set(attendees.map(a => (a.email ?? '').toLowerCase().trim()).filter(Boolean));
+          const added: string[] = [];
+          for (const email of context.resolvedMeetingAttendees) {
+            const lower = (email ?? '').toLowerCase().trim();
+            if (!lower.includes('@') || present.has(lower)) continue;
+            attendees.push({ email });
+            present.add(lower);
+            added.push(email);
+          }
+          if (added.length > 0) {
+            logger.info('create_meeting — recovered resolved internal attendees into booking', {
+              added, subject: args.subject, senderRole: context.senderRole,
+            });
+          }
+        }
         const assistantEmail = context.profile.assistant.email;
         const ownerEmail = context.profile.user.email;
 

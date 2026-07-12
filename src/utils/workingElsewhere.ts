@@ -13,8 +13,18 @@
  * returning a non-empty map. With no all-day workingElsewhere marker, none of
  * this code path executes and behavior is identical to pre-v3.3.
  *
- * Scope: ALL-DAY workingElsewhere events only (the travel-day marker). Timed
- * workingElsewhere events keep their existing (busy) behavior — untouched.
+ * Scope — the `isAllDay` flag disambiguates two DIFFERENT features that both
+ * ride Outlook's "Working Elsewhere" status:
+ *   • ALL-DAY workingElsewhere  = the TRAVEL-DAY marker → THIS spine (trip TZ,
+ *     rule suspension, approval routing). Owned here; gated on `isAllDay`.
+ *   • TIMED workingElsewhere     = a SOFT / OPTIONAL-JOIN event (v3.6.4), e.g. a
+ *     daily standup the owner joins only if free. It must NOT hard-block the
+ *     calendar (bookable-over as a fallback) but stays visible. Handled by the
+ *     slot finder's soft tier + calendar-health (see calendar.ts `softOccupied`)
+ *     — NOT here. `detectWorkingElsewhereDays` ignores it via the isAllDay gate.
+ * Convention (multi-tenant, not owner-specific): timed showAs=workingElsewhere
+ * means "optional, join if free." Any tenant marking a recurring event that way
+ * gets the soft tier.
  */
 
 import { DateTime } from 'luxon';

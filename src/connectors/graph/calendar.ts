@@ -183,7 +183,7 @@ function toEndOfDayLocal(dateStr: string, timezone: string): string {
  * Output: chronological regardless of internal day walk order.
  */
 export function pickSpreadSlots(
-  slots: Array<{ start: string; disturbs_floating_block?: boolean; away_tz?: string }>,
+  slots: Array<{ start: string; disturbs_floating_block?: boolean; away_tz?: string; over_optional?: string }>,
   timezone: string,
   count = 5,
   anchorDay?: string,
@@ -194,68 +194,72 @@ export function pickSpreadSlots(
 ): string[] {
   const MIN_GAP_HOURS = 1;
 
-  // Group candidates by their EFFECTIVE local day.
-  const byDay = new Map<string, Array<{ start: string; dt: DateTime; disturbs: boolean }>>();
-  for (const s of slots) {
-    // WE spine — a Working-Elsewhere slot's day is its TRIP-tz day, not the
-    // owner-home day. Its `start` is owner-tz ISO, so a Boston-evening slot
-    // carries an Israel-NEXT-day date; grouping by home tz scattered one trip
-    // day across two. Home slots have no away_tz → group by `timezone` exactly
-    // as before (zero regression).
-    const dt = DateTime.fromISO(s.start).setZone(s.away_tz ?? timezone);
-    const day = dt.toFormat('yyyy-MM-dd');
-    let bucket = byDay.get(day);
-    if (!bucket) { bucket = []; byDay.set(day, bucket); }
-    bucket.push({ start: s.start, dt, disturbs: s.disturbs_floating_block === true });
-  }
-  // v3.2.6 (RC1) — within each day, prefer slots that DON'T disturb a floating
-  // block (lunch). Stable sort keeps chronological order inside each group.
-  for (const bucket of byDay.values()) {
-    bucket.sort((a, b) => (a.disturbs ? 1 : 0) - (b.disturbs ? 1 : 0));
-  }
-
-  // Day walk order — chronological, with a move's anchor (source) day first.
-  const allDays = [...byDay.keys()].sort();
-  const dayOrder = (anchorDay && byDay.has(anchorDay))
-    ? [anchorDay, ...allDays.filter(d => d !== anchorDay)]
-    : allDays;
-
-  // ROUND-ROBIN by day: round 1 takes the first viable slot from EACH day
-  // (maximize distinct days), round 2 a second from each (≥1h from that day's
-  // prior pick, no overlapping start), and so on until `count` or no day can
-  // yield more. Diversity first, then depth — e.g. 1 Sun / 3 Mon / 1 Tue when
-  // Monday is the deep day, collapsing to fewer days (2 Tue / 3 Mon, or all one
-  // day) only when that's all that exists — never dropping, just filling what's
-  // there. The ≥1h gap caps how many one day can supply, so a lone day yields
-  // ~2-3 rather than a clustered 5. This is the SINGLE spreader for both the
-  // regular and Working-Elsewhere paths.
   const chosen: string[] = [];
   const chosenDts: DateTime[] = [];
-  const cursor = new Map<string, number>();   // next unscanned index per day
-  let progressed = true;
-  while (chosen.length < count && progressed) {
-    progressed = false;
-    for (const day of dayOrder) {
-      if (chosen.length >= count) break;
-      const bucket = byDay.get(day)!;
-      let i = cursor.get(day) ?? 0;
-      for (; i < bucket.length; i++) {
-        const { start, dt } = bucket[i];
-        // ≥1h from anything already chosen. Only same-day picks can ever be
-        // <1h away (cross-day diffs are far larger), so scanning the whole set
-        // is safe and cheap.
-        if (chosenDts.some(c => Math.abs(dt.diff(c, 'hours').hours) < MIN_GAP_HOURS)) continue;
-        if (durationMinutes && durationMinutes > 0
-          && chosenDts.some(c => Math.abs(dt.diff(c, 'minutes').minutes) < durationMinutes)) continue;
-        chosen.push(start);
-        chosenDts.push(dt);
-        i++;                       // consume this slot before recording the cursor
-        progressed = true;
-        break;                     // one pick per day per round
-      }
-      cursor.set(day, i);
+
+  // Fill `chosen` (up to `count`) from ONE tier of candidates, round-robin by
+  // day: round 1 takes the first viable slot from EACH day (maximize distinct
+  // days), round 2 a second from each (≥1h from that day's prior pick, no
+  // overlapping start), and so on. Diversity first, then depth. Respects the
+  // ≥1h / duration gap against slots ALREADY chosen (by an earlier tier), so a
+  // later tier never lands on top of an earlier-tier pick. This is the SINGLE
+  // spreader for the regular, Working-Elsewhere-travel, and optional-join paths.
+  const fillFrom = (pool: typeof slots) => {
+    if (chosen.length >= count || pool.length === 0) return;
+    // Group candidates by their EFFECTIVE local day. WE-travel slot's day is its
+    // TRIP-tz day (away_tz set); home slots group by `timezone` exactly as
+    // before (zero regression).
+    const byDay = new Map<string, Array<{ start: string; dt: DateTime; disturbs: boolean }>>();
+    for (const s of pool) {
+      const dt = DateTime.fromISO(s.start).setZone(s.away_tz ?? timezone);
+      const day = dt.toFormat('yyyy-MM-dd');
+      let bucket = byDay.get(day);
+      if (!bucket) { bucket = []; byDay.set(day, bucket); }
+      bucket.push({ start: s.start, dt, disturbs: s.disturbs_floating_block === true });
     }
-  }
+    // v3.2.6 (RC1) — within each day, prefer slots that DON'T disturb a floating
+    // block (lunch). Stable sort keeps chronological order inside each group.
+    for (const bucket of byDay.values()) {
+      bucket.sort((a, b) => (a.disturbs ? 1 : 0) - (b.disturbs ? 1 : 0));
+    }
+    const allDays = [...byDay.keys()].sort();
+    const dayOrder = (anchorDay && byDay.has(anchorDay))
+      ? [anchorDay, ...allDays.filter(d => d !== anchorDay)]
+      : allDays;
+    const cursor = new Map<string, number>();   // next unscanned index per day
+    let progressed = true;
+    while (chosen.length < count && progressed) {
+      progressed = false;
+      for (const day of dayOrder) {
+        if (chosen.length >= count) break;
+        const bucket = byDay.get(day)!;
+        let i = cursor.get(day) ?? 0;
+        for (; i < bucket.length; i++) {
+          const { start, dt } = bucket[i];
+          // ≥1h from anything already chosen. Only same-day picks can ever be
+          // <1h away (cross-day diffs are far larger), so scanning the whole set
+          // is safe and cheap.
+          if (chosenDts.some(c => Math.abs(dt.diff(c, 'hours').hours) < MIN_GAP_HOURS)) continue;
+          if (durationMinutes && durationMinutes > 0
+            && chosenDts.some(c => Math.abs(dt.diff(c, 'minutes').minutes) < durationMinutes)) continue;
+          chosen.push(start);
+          chosenDts.push(dt);
+          i++;                       // consume this slot before recording the cursor
+          progressed = true;
+          break;                     // one pick per day per round
+        }
+        cursor.set(day, i);
+      }
+    }
+  };
+
+  // v3.6.4 — TIER: clean slots FIRST. An optional-join (WE-soft) slot never
+  // surfaces while clean slots satisfy the spread; only if the clean tier comes
+  // up short do we complete the quota from WE-soft (each tagged "over your
+  // optional …"). Explicit priority: clean › book-over-optional. (The relaxed
+  // recovery — break a real rule — is a separate, lower tier handled upstream.)
+  fillFrom(slots.filter(s => !s.over_optional));
+  fillFrom(slots.filter(s => !!s.over_optional));
 
   // Output chronological regardless of round-robin order.
   chosen.sort((a, b) => DateTime.fromISO(a).toMillis() - DateTime.fromISO(b).toMillis());
@@ -731,7 +735,7 @@ export async function findAvailableSlots(params: {
     // excluded. Caller decides how to warn (ops.ts flags owner-domain ones).
     unresolvedAttendees?: string[];
   };
-}): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }>> {
+}): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
   const maxSearchDays = params.maxSearchDays ?? 21;
@@ -766,7 +770,7 @@ export async function findAvailableSlots(params: {
   const absoluteCap = initialFrom.plus({ days: maxSearchDays });
   let currentTo = initialTo;
 
-  let candidates: Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }> = [];
+  let candidates: Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }> = [];
 
   while (true) {
     candidates = [];
@@ -800,7 +804,11 @@ export async function findAvailableSlots(params: {
     for (const [emailKey, slots] of Object.entries(busyMap)) {
       const email = emailKey.toLowerCase();
       for (const slot of slots) {
-        if (slot.status !== 'free') {
+        // 'workingElsewhere' is NOT a hard block. All-day WE = travel (handled
+        // by the WE spine; those days are skipped in the walk). Timed WE = a
+        // soft/optional-join event (v3.6.4) — collected into `softOccupied`
+        // below (with its subject) and avoided-if-possible, never hard-blocked.
+        if (slot.status !== 'free' && slot.status !== 'workingElsewhere') {
           allBusy.push({
             start: DateTime.fromISO(slot.start).toJSDate(),
             end:   DateTime.fromISO(slot.end).toJSDate(),
@@ -943,6 +951,23 @@ export async function findAvailableSlots(params: {
           .setZone(params.timezone).endOf('day').toJSDate();
         allBusy.push({ start: dayStart, end: dayEnd, email: ownerEmailLower });
       }
+    }
+
+    // v3.6.4 — SOFT / OPTIONAL tier. A TIMED workingElsewhere event (e.g. a
+    // daily standup the owner joins only if free) is not a hard block: it's
+    // avoided when clean slots exist, but bookable-over as a fallback, and it
+    // stays visible. Collect these ranges (with subject) from the owner's own
+    // events — getFreeBusy has no subject, and we already excluded them from
+    // allBusy above. All-day WE is the travel marker (handled separately); only
+    // TIMED WE is soft. Empty on the common no-such-event case → zero effect.
+    const softOccupied: Array<{ start: number; end: number; subject: string }> = [];
+    for (const evt of ownerEventsForFb) {
+      if (evt.isAllDay || evt.isCancelled) continue;
+      if (evt.showAs !== 'workingElsewhere') continue;
+      const s = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' });
+      const e = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' });
+      if (!s.isValid || !e.isValid) continue;
+      softOccupied.push({ start: s.toMillis(), end: e.toMillis(), subject: (evt.subject ?? '').trim() || 'an optional meeting' });
     }
 
     // v3.3 — Working Elsewhere detection. ALL-DAY workingElsewhere markers
@@ -1134,7 +1159,7 @@ export async function findAvailableSlots(params: {
     // 10:30, 10:45").
     const MAX_PER_DAY = 4;
     const PREFERRED_GAP_MS = 30 * 60 * 1000;
-    const dayBuckets: Map<string, Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }>> = new Map();
+    const dayBuckets: Map<string, Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }>> = new Map();
 
     // v2.3.6 (#71a) — diagnostic rejection counters. Helps debug "why was 17:45
     // rejected?" by showing the per-rule breakdown at the end of the search.
@@ -1398,11 +1423,19 @@ export async function findAvailableSlots(params: {
       const slotStartMs = cursor.getTime();
       const slotEndMs = slotEnd.getTime();
       const disturbsBlock = blockRanges.some(r => slotStartMs < r.end && slotEndMs > r.start);
+      // v3.6.4 — this candidate is rule-clean (it passed checkSlot + owner-busy
+      // above) but sits over a TIMED optional-join event → WE-soft. Tag it with
+      // the subject; pickSpreadSlots deprioritizes it below clean slots and only
+      // surfaces it to fill the spread. A slot that ALSO breaks a real rule never
+      // reaches here (dropped above) — real rule wins, so WE-soft is strictly
+      // above the relaxed tier and strictly below clean.
+      const softHit = softOccupied.find(r => slotStartMs < r.end && slotEndMs > r.start);
       dayBuckets.get(dayKey)!.push({
         start: cursorLocal.toISO()!,   // local-zoned ISO with explicit offset (v2.4.2)
         end: slotEndLocal.toISO()!,
         day_type: classifyDay(dayName),
         disturbs_floating_block: disturbsBlock,
+        ...(softHit ? { over_optional: softHit.subject } : {}),
         ...(attendeeConflicts.length ? { attendee_conflicts: attendeeConflicts } : {}),
       });
       cursor = new Date(cursor.getTime() + step);
@@ -1414,6 +1447,10 @@ export async function findAvailableSlots(params: {
     // Owner preference: "10, 10:30, 11:30, 14:00" > "10, 10:15, 10:30, 10:45".
     for (const [, daySlots] of dayBuckets) {
       if (daySlots.length === 0) continue;
+      // v3.6.4 — sink WE-soft (optional-join) slots so the per-day cap keeps
+      // CLEAN slots first and a clean slot is never dropped in favour of a soft
+      // one. Stable sort → chronological order preserved within each tier.
+      daySlots.sort((a, b) => (a.over_optional ? 1 : 0) - (b.over_optional ? 1 : 0));
       const picked: typeof daySlots = [daySlots[0]];
       let lastTime = new Date(daySlots[0].start).getTime();
       for (let i = 1; i < daySlots.length && picked.length < MAX_PER_DAY; i++) {

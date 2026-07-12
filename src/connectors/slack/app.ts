@@ -64,12 +64,40 @@ import logger from '../../utils/logger';
 export function createSlackAppForProfile(profile: UserProfile): App {
   const { assistant, user } = profile;
 
+  // v3.6.x — custom Bolt logger. @slack/socket-mode logs the finity
+  // reconnect-race throw ("Unhandled event '…' in state '…'" / "server explicit
+  // disconnect") at ERROR with a full stack on EVERY transient — spamming the
+  // console with a multi-line stack per blip even though index.ts already
+  // survives these and logs one clean warn. Without a custom logger Bolt uses a
+  // default ConsoleLogger; here we route Bolt through winston and downgrade the
+  // known socket transients to debug, so real Bolt errors still surface but the
+  // handled reconnect noise doesn't. Same signature as index.ts isTransientSocketError.
+  const boltLevel = config.NODE_ENV === 'development' ? LogLevel.WARN : LogLevel.ERROR;
+  const SOCKET_TRANSIENT = /server explicit disconnect|Unhandled event '.*?' in state '.*?'|SocketModeClient|@slack\/socket-mode|finity/i;
+  const boltLogger = {
+    debug: (...m: unknown[]) => logger.debug(`bolt: ${m.map(String).join(' ')}`),
+    info: (...m: unknown[]) => logger.info(`bolt: ${m.map(String).join(' ')}`),
+    warn: (...m: unknown[]) => logger.warn(`bolt: ${m.map(String).join(' ')}`),
+    error: (...m: unknown[]) => {
+      const text = m.map(x => (x instanceof Error ? `${x.message}\n${x.stack ?? ''}` : String(x))).join(' ');
+      if (SOCKET_TRANSIENT.test(text)) {
+        logger.debug(`bolt socket transient (downgraded): ${text.slice(0, 180)}`);
+        return;
+      }
+      logger.error(`bolt: ${text}`);
+    },
+    setLevel: () => {},
+    getLevel: () => boltLevel,
+    setName: () => {},
+  };
+
   const app = new App({
     token: assistant.slack.bot_token,
     appToken: assistant.slack.app_token,
     signingSecret: assistant.slack.signing_secret,
     socketMode: true,
-    logLevel: config.NODE_ENV === 'development' ? LogLevel.WARN : LogLevel.ERROR,
+    logLevel: boltLevel,
+    logger: boltLogger,
   });
 
   // v1.9.0 — register SlackConnection for this profile so skills (via the
