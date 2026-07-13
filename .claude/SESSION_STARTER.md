@@ -12,9 +12,13 @@ This is the general **features + bugs** chat (not bugs-only anymore). Real-day b
 - **Prompt is a budget, not a junk drawer.** Enforcement → code (a chokepoint guard, a return-value the model reacts to, a tool that owns the decision). Prompt only for judgment / tone / format / language. **Lesson re-learned this arc:** a prompt rule Sonnet ignored *twice* (attendee resolution) only held once it moved to code — never ship enforcement as prompt.
 - **CHANGELOG = meaningful changes only.** Tactical one-liners ship with a clear commit message, no CHANGELOG line.
 
+## Next run — planned BIG BUG RUN (core / internal issues)
+
+The next working session is a **deep bug hunt**, not a real-day patch wave. The goal is to find **core / architectural / internal** issues and resolve many at once — the recent waves (3.6.x → 3.7.1) were mostly surface real-day bugs; this one goes deeper into the internals. Lean on the **`audit` skill** (parallel deep-read across subsystems, paper-traced, STRICT propose-only) to produce an atomic bug list ranked by severity, then work fix-waves with the owner. Expect structural findings in the load-bearing subsystems — the scheduling **rule engines** (search vs `checkSlot` consistency), the **requests-spine**, the **gate stack** (`humanGate`/`claimChecker`/`securityGate`), **boot/recovery**, cross-TZ scheduling — not just one-off symptoms. Same bar (propose-first, code-first, root-cause), wider scope. Route deep findings to the owning agent chat (see below).
+
 ## Parallel chats on the same repo — route work to the right one
 
-At wrap: `git fetch` + check the working tree for their **uncommitted** edits before committing — every recent wrap bundled 2–4 chats' work.
+These chats are **actively working the repo right now** — assume 2–4 of them have uncommitted edits in the tree at any time. At wrap: `git fetch` + read the FULL working tree (not just this chat's files) and bundle theirs too. Concrete: **3.7.1 bundled the guard chat's `humanGate` fix and the meeting chat's availability-rule fix** alongside this chat's work — both landed as uncommitted edits from handoffs. Never commit only your own files without checking the rest.
 
 - **Meeting agent** — the meeting-planner subsystem end-to-end: scheduling core, free/busy, slot finder, timezone/WE, create/move/close-loop. Mandate + map in `.claude/MEETING_PLANNER_AGENT.md`.
 - **Guard agent** — the gate stack: `claimChecker`, `securityGate`, `humanGate`, `dateVerifier`, `weekdayGuard`, `postReply`. Honesty / leak / false-positive / recap-inversion.

@@ -2,6 +2,31 @@
 
 ---
 
+## 3.7.2 — real-day bug wave II: approval mis-bind, auto-fix memory + revert, requester-aware colleague actions, short-window free/busy root fix
+
+Four chats from one real day, each fix traced 100% against the day's actual incidents before shipping. The load-bearing fixes are on the approval spine — a bare "yes" typed in the wrong thread could resolve and book a colleague's *pending* meeting before the owner had actually approved it — and on the autonomous auto-fix, which re-moved a meeting the owner had just reverted because it kept no memory of the rejection. Plus: a colleague can now act on a meeting they requested instead of a flat refusal, the slot finder stopped changing its answer when a colleague clarified the duration, and the Graph free/busy fault that spuriously escalated short meetings to approval is fixed at its root. Restart required.
+
+### Fixed — a bare "yes" could resolve the wrong approval and book before you approved (approval)
+- resolve_approval no longer binds a bare acknowledgement ("yes"/"ok") to an approval unless the reply is in that approval's own thread (matching its `terminal_dm_msg_ts` or `owner_dm_thread_ts`); the "pick the most recently created awaiting_owner request" nudge that invited the cross-thread misbind is removed. Closes the incident where a "Yes" meant for a lunch-bump offer booked Oran's pending "Athena" meeting before the owner approved it — surfaced as both #137 ("booked before I approved") and #140 ("I approved a lunch-bump, got an Athena confirmation"), one root. ([skill.ts](src/tasks/skill.ts), [systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+- The approve reply no longer leaks the internal `policy_exception` subkind ("the policy exception approved") to the owner, and no longer hedges-and-announces in one breath: the resolver captures the replayed booking's result and returns it (`booked`/`subject`/`start`) so the model narrates a clean confirmation instead of guessing, and the claim-checker is taught that `resolve_approval` books. ([resolver.ts](src/core/requests/resolver.ts), [deferredActionReplay.ts](src/core/requests/deferredActionReplay.ts), [claimChecker.ts](src/utils/claimChecker.ts))
+
+### Fixed / Added — the auto-fix has memory now, and you can undo it (calendar)
+- The active-mode double-booking detector skips any overlap the owner has dismissed OR that Maelle auto-moved in the last 12h, so a meeting the owner reverts (by hand or via the new revert tool) is no longer re-moved on the next sweep — the Ysrael BiWeekly that came back an hour after "put it back" (2026-07-13). ([calendarHealth.ts](src/skills/calendarHealth.ts), [requests.ts](src/db/requests.ts), [calendarIssues.ts](src/db/calendarIssues.ts))
+- New owner-only `revert_last_auto_move` tool: "put it back" / "revert that" undoes the most recent auto-move (≤12h) — restores the original time, re-notifies whoever was told, and records the rejection so it won't be re-moved. ([meetings.ts](src/skills/meetings.ts), [ops.ts](src/skills/meetings/ops.ts))
+- The rebalance sweep no longer flags a floating block whose window already passed today (it was offering to "bump" a lunch that happened 90 minutes earlier), and the overlap offer now names the conflicting event and the window instead of "overlaps another event, bump it?". ([rebalanceFloatingBlocks.ts](src/utils/rebalanceFloatingBlocks.ts))
+
+### Fixed — a colleague can act on a meeting they requested (meeting)
+- When a colleague asks to move or cancel a meeting they requested (booked through Maelle) but aren't an attendee of, it now routes to the owner's approval — the same path a cancel already took — instead of a flat "ask Idan directly" refusal; a colleague who neither requested nor is in the meeting gets a clean decline that never explains the calendar clamp or leaks a meeting's existence. A reverse requester lookup (`getMeetingsRequestedBy`) plus a broadened colleague context block surface the meetings a colleague can act on, and approval-booked meetings link their event id at book time so they're reachable too. (#141) ([requests.ts](src/db/requests.ts), [index.ts](src/core/orchestrator/index.ts), [ops.ts](src/skills/meetings/ops.ts))
+
+### Fixed — slot-finder consistency (meeting)
+- Answering "how long?" no longer returns a different set of times: the "give me another option" exclusion fires only on a genuine re-ask (identical search params), not when a colleague is clarifying the duration — so still-valid slots aren't silently dropped. ([offeredSlotsStash.ts](src/utils/offeredSlotsStash.ts), [ops.ts](src/skills/meetings/ops.ts))
+- A stated duration now searches at the nearest allowed preset (30 min → 25), matching what booking snaps to, so the offered slots and the booked meeting agree. ([meetings.ts](src/skills/meetings.ts))
+
+### Fixed — short free/busy windows no longer 400 (meeting, #137 root)
+- `getFreeBusy` derives a valid `availabilityViewInterval` for short windows: a 10-minute slot check hardcoded a 15-minute interval, which Graph deterministically rejects (`ErrorInvalidMergedFreeBusyInterval`). That fault was escalating rule-compliant short meetings to a `policy_exception` approval (the trigger behind the #137 Athena cascade) and spamming the attendee-availability check; windows ≥16 min are unchanged (the busy blocks read are identical). A colleague-supplied invite body (the "Phase A text") is now carried into the approval replay, and the tool contract requires it be passed when promised. ([calendar.ts](src/connectors/graph/calendar.ts), [ops.ts](src/skills/meetings/ops.ts), [meetings.ts](src/skills/meetings.ts))
+
+---
+
 ## 3.7.1 — real-day bug wave: calendar-read crash, rule-bypass in availability, coda cadence, self-shadows, @mention mangling + auto-moves on the spine
 
 Bundles four chats from one real day. Fixes a `get_calendar` crash that surfaced as "trouble pulling up the calendar," a colleague availability pre-check that confirmed slots the search would reject (a rule bypass), the social coda firing on every turn instead of once a day, Maelle sending herself shadow receipts for her own actions in group DMs, and humanGate mangling valid @mentions. Plus: autonomous calendar auto-moves are now recorded on the requests-spine. Restart required.

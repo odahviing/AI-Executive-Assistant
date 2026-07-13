@@ -78,6 +78,14 @@ export interface ResolveResult {
   reason?: string;
   subject?: string;
   slot?: string;
+  // 138c (GH #140) — concrete replay outcome so Sonnet narrates the booking
+  // cleanly instead of hedging + announcing in the same breath. `booked` is set
+  // only for booking tools; `action_summary` is the tool's own past-tense,
+  // travel-aware confirmation line (quote it verbatim). Absent on non-replay
+  // resolves.
+  booked?: boolean;
+  start?: string;
+  action_summary?: string;
 }
 
 // ── Entry ───────────────────────────────────────────────────────────────────
@@ -387,9 +395,12 @@ export async function resolveRequest(
     outcomeJson: { approved: true, data: approveData },
   });
   await notifyRequesterOfDecision(row, 'approve', approveData, undefined, ctx);
+  // 138a — no kind/subkind jargon in the owner-facing return (same leak class
+  // as the replay path): a pure yes/no approval just closes, Sonnet does any
+  // follow-up work in chat.
   return {
     ok: true, request_id: requestId, state: 'resolved',
-    effect: `approved ${row.kind}/${row.subkind ?? '-'} (no callback, Sonnet handles work)`,
+    effect: 'approved — no action to replay (handled in chat)',
   };
 }
 
@@ -466,8 +477,9 @@ async function runApproveCallback(
   // idempotent (no-op on terminal rows) so a closeMeetingArtifacts
   // cascade firing during replay won't conflict with the explicit close
   // below.
+  let replayResult: Record<string, unknown> | undefined;
   try {
-    await runDeferredAction({
+    replayResult = await runDeferredAction({
       ownerUserId: row.owner_user_id,
       profile: ctx.profile,
       tool,
@@ -487,12 +499,27 @@ async function runApproveCallback(
     };
   }
 
+  // #141 Change 5 — link the booked event id on the approval row when a
+  // colleague requested it. The replay runs as a SYNTHETIC owner
+  // (deferredActionReplay forces senderRole:'owner'), so the direct colleague
+  // requester-link at ops.ts:3869 never fires for approval-booked meetings, and
+  // no id was ever recorded — a colleague who requested a meeting via approval
+  // then couldn't move it (the "Talia" gap). Stamping the event id onto the
+  // approval row (which already carries requester_slack_id) lets
+  // getMeetingsRequestedBy reverse-resolve it. One arg on the close we already do.
+  const bookedEventId = typeof replayResult?.meetingId === 'string'
+    ? (replayResult.meetingId as string)
+    : undefined;
+
   // Replay succeeded — close and relay.
   closeRequest({
     id: row.id,
     state: 'resolved',
     closureReason: `owner approved ${row.subkind ?? row.kind} (auto-replayed ${tool})`,
     closedBy: 'owner',
+    ...(row.requester_slack_id && bookedEventId
+      ? { outcomeExternalEventId: bookedEventId }
+      : {}),
     outcomeJson: {
       approved: true,
       replayed: tool,
@@ -502,9 +529,32 @@ async function runApproveCallback(
   });
 
   await notifyRequesterOfDecision(row, 'approve', { replayed: tool }, undefined, ctx);
+
+  // 138a + 138c (GH #140) — surface the CONCRETE outcome, not resolver jargon.
+  // Pre-fix this returned `approved approval/policy_exception — replayed
+  // create_meeting`, which Sonnet relayed to the owner as "the policy exception
+  // approved" (internal-meta leak, 138a), and it carried no booking signal, so
+  // the model hedged AND announced completion at once (138c). Now the return is
+  // the booking itself: `action_summary` is the tool's ready-to-quote,
+  // travel-aware line (same one the direct-book path gives her); `booked` marks
+  // it a real booking. No kind/subkind string ever reaches the model.
+  const isBookingTool = tool === 'create_meeting' || tool === 'book_floating_block';
+  const replayStart = typeof replayResult?.booked_start === 'string'
+    ? (replayResult.booked_start as string)
+    : (typeof replayArgs.start === 'string' ? (replayArgs.start as string) : undefined);
+  const replaySubject = typeof replayArgs.subject === 'string'
+    ? (replayArgs.subject as string)
+    : (row.subject ?? undefined);
+  const replaySummary = typeof replayResult?.action_summary === 'string'
+    ? (replayResult.action_summary as string)
+    : undefined;
   return {
     ok: true, request_id: row.id, state: 'resolved',
-    effect: `approved ${row.kind}/${row.subkind ?? '-'} — replayed ${tool}`,
+    effect: 'approved — action replayed',
+    ...(isBookingTool ? { booked: true } : {}),
+    ...(replaySubject ? { subject: replaySubject } : {}),
+    ...(replayStart ? { start: replayStart } : {}),
+    ...(replaySummary ? { action_summary: replaySummary } : {}),
   };
 }
 

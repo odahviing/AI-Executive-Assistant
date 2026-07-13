@@ -171,6 +171,20 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         zone: blockEvent.end.timeZone ?? 'utc',
       }).setZone(tz).toMillis();
 
+      // v3.7.x (#140) — never rebalance a block whose slot has already passed
+      // today. On a same-day sweep at 13:01 a lunch that already sat at
+      // 11:30-11:55 was surfaced as "overlaps — want me to bump it outside?",
+      // which is meaningless (the block is ~90 min in the past; a bump lands
+      // nowhere useful). Once the block event has ended for today its slot is
+      // spent — skip it. Future days are unaffected (blockEndMs > now).
+      if (blockEndMs <= DateTime.now().setZone(tz).toMillis()) {
+        logger.info('rebalanceFloatingBlocks: block skipped — slot already passed today', {
+          block: block.name, date: dateStr,
+          blockEndLocal: DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm'),
+        });
+        continue;
+      }
+
       // Block sits OUTSIDE its preferred window. We never AUTO-move it back —
       // it may be owner-pinned on purpose (confirm_outside_window / manual
       // Outlook edit), and silently undoing that is the regression the v2.x
@@ -348,7 +362,11 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
             await shadowNotify(profile, {
               channel: '',
               action: 'Floating block overlap',
-              detail: `${block.name} on ${slotDt.toFormat('EEE d MMM')} overlaps another event and can't fit elsewhere in its window. Want me to bump it outside?`,
+              // v3.7.x (#140c) — name the block, the conflicting event, and the
+              // window so the owner knows WHAT is moving and WHY (his #140
+              // complaint: "I didn't know the reason, or what I'm moving").
+              // Owner-facing shadow → no subject masking needed.
+              detail: `Your ${block.name.replace(/_/g, ' ')} on ${slotDt.toFormat('EEE d MMM')} overlaps "${overlapping.subject}" and there's no free spot left inside its ${block.preferred_start}–${block.preferred_end} window. Want me to bump the ${block.name.replace(/_/g, ' ')} outside that window?`,
             });
           } catch { /* shadow failure non-fatal */ }
         }

@@ -318,6 +318,77 @@ export function getRequestsByExternalEventId(ownerUserId: string, eventId: strin
   `).all(ownerUserId, eventId) as RequestRow[];
 }
 
+/**
+ * v3.7.x (#139 / auto-fix Part B) — the most-recent active-mode auto-move that
+ * is still revertible: resolved (the move executed), tagged `auto_move_executed`
+ * (a revert relabels the closure_reason, so a reverted one drops out), within
+ * the last 12h (the record's own expiry TTL). Owner-scoped, newest first. The
+ * row carries outcome_json (original/new times, event id, who was notified) so
+ * the revert tool can undo deterministically. NULL when there's nothing to undo.
+ */
+export function getRevertibleAutoMove(ownerUserId: string): RequestRow | null {
+  const cutoff = DateTime.now().minus({ hours: 12 }).toUTC().toISO()!;
+  return (getDb().prepare(`
+    SELECT * FROM requests
+    WHERE owner_user_id = ?
+      AND kind = 'follow_up' AND subkind = 'auto_move'
+      AND state = 'resolved'
+      AND closure_reason = 'auto_move_executed'
+      AND closed_at >= ?
+    ORDER BY closed_at DESC
+    LIMIT 1
+  `).get(ownerUserId, cutoff) as RequestRow | null) ?? null;
+}
+
+/**
+ * v3.7.x (#139) — event ids the owner's calendar-health auto-moved in the last
+ * 12h (executed, not yet reverted). The double_booking detector consults this so
+ * that when a cleared clash RE-APPEARS — meaning the owner reverted the move (by
+ * hand or via revert_last_auto_move) — active mode does NOT re-move it. This is
+ * the "auto-fix has memory" guard; it reads the record 3.7.1 already writes.
+ */
+export function getRecentlyAutoMovedEventIds(ownerUserId: string): Set<string> {
+  const cutoff = DateTime.now().minus({ hours: 12 }).toUTC().toISO()!;
+  const rows = getDb().prepare(`
+    SELECT DISTINCT outcome_external_event_id AS id FROM requests
+    WHERE owner_user_id = ?
+      AND kind = 'follow_up' AND subkind = 'auto_move'
+      AND state = 'resolved'
+      AND closure_reason = 'auto_move_executed'
+      AND closed_at >= ?
+      AND outcome_external_event_id IS NOT NULL
+  `).all(ownerUserId, cutoff) as Array<{ id: string }>;
+  return new Set(rows.map(r => r.id));
+}
+
+/**
+ * v3.7.x (#141) — the inverse of findMeetingOwner (which goes event_id →
+ * requester). Meetings a COLLEAGUE requested (booked through Maelle), so a
+ * requester can act on a meeting they set up even when it isn't on their shared
+ * calendar — the colleague get_calendar clamp hides meetings they aren't an
+ * attendee of. Matches `colleague_booking_record` rows (which link an event id);
+ * with `includeApprovals`, also `approval` rows that name a requester (the
+ * approval-booked case — requester provable even before the event id is linked
+ * back). Newest first.
+ */
+export function getMeetingsRequestedBy(
+  ownerUserId: string,
+  requesterSlackId: string,
+  opts?: { sinceIso?: string; includeApprovals?: boolean; withEventIdOnly?: boolean },
+): RequestRow[] {
+  if (!ownerUserId || !requesterSlackId) return [];
+  const clauses = ['owner_user_id = ?', 'requester_slack_id = ?'];
+  const params: unknown[] = [ownerUserId, requesterSlackId];
+  clauses.push(opts?.includeApprovals
+    ? "(subkind = 'colleague_booking_record' OR kind = 'approval')"
+    : "subkind = 'colleague_booking_record'");
+  if (opts?.withEventIdOnly) clauses.push('outcome_external_event_id IS NOT NULL');
+  if (opts?.sinceIso) { clauses.push('datetime(created_at) >= datetime(?)'); params.push(opts.sinceIso); }
+  return getDb().prepare(
+    `SELECT * FROM requests WHERE ${clauses.join(' AND ')} ORDER BY datetime(created_at) DESC`
+  ).all(...params) as RequestRow[];
+}
+
 /** For closeLoopOnOwnerHandled scanner — collect open top-level requests for the LLM. */
 export function getOpenScannerItems(ownerUserId: string): RequestRow[] {
   return getDb().prepare(`

@@ -103,6 +103,14 @@ If the meeting is NOT yet booked and they need to find a time together, use find
         },
       },
       {
+        name: 'revert_last_auto_move',
+        description: `Undo the most recent meeting that active-mode calendar-health AUTONOMOUSLY moved to clear a clash (the "🔍 I moved X to clear a conflict, let me know if you'd rather…" notices). Use when ${profile.user.name.split(' ')[0]} pushes back on such an auto-move — "put it back", "revert that", "return it to its original time", "undo the move", "no, leave it where it was". It restores the original time, re-notifies anyone who was told about the move, AND records the rejection so the auto-fix won't re-move it. Owner-only; only reverts an auto-move from the last 12 hours, and says so if there's nothing to undo. Do NOT use for a normal reschedule ${profile.user.name.split(' ')[0]} requested (that's move_meeting) — ONLY for undoing Maelle's OWN autonomous move.`,
+        input_schema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+      {
         name: 'get_free_busy',
         description: `Check free/busy data for ${profile.user.name.split(' ')[0]}'s own calendar over a date range — e.g. "when is ${profile.user.name.split(' ')[0]} free this week?".
 
@@ -179,7 +187,7 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
               return {
                 type: 'number' as const,
                 enum: allowed,
-                description: `Meeting duration in minutes. DEFAULT TO ${defaultDur} whenever the conversation hasn't stated an explicit length — "when can I meet X?", "list my options", "find a time", "schedule an interview / catch-up / sync" all use ${defaultDur}. Use a longer value ONLY when a duration is explicitly named ("an hour", "30 min", "let's do 45"). NEVER infer length from the meeting TYPE — an "interview", "catch-up", or "review" is still ${defaultDur} unless a number is stated. Don't pick a longer enum just to surface more options.`,
+                description: `Meeting duration in minutes. DEFAULT TO ${defaultDur} whenever the conversation hasn't stated an explicit length — "when can I meet X?", "list my options", "find a time", "schedule an interview / catch-up / sync" all use ${defaultDur}. When a length IS explicitly named, pick the NEAREST allowed preset to the stated minutes (with these presets: "30 min" → 25, "45" → 40, "an hour" → 55) — this matches what booking snaps to, so the search and the booked meeting never disagree. NEVER infer length from the meeting TYPE — an "interview", "catch-up", or "review" is still ${defaultDur} unless a number is stated. Don't pick a longer enum just to surface more options.`,
               };
             })(),
             attendee_emails: { type: 'array', items: { type: 'string' }, description: 'Emails of attendees whose calendars should constrain the search (intersected with the owner\'s). Known internal colleagues named in the request are resolved from the directory and added for you automatically — you do NOT need to resolve names or call find_slack_user first. Pass any emails you already have. You do NOT need an EXTERNAL attendee\'s email to search (candidate / other company / personal domain): their calendar isn\'t visible, so the tool searches the owner\'s side and you collect their email only at BOOKING. Never demand an email — or withhold times — just to run the search.' },
@@ -301,7 +309,7 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
               type: 'boolean',
               description: 'OPTIONAL (default false). If the owner is RESCHEDULING an existing meeting (e.g. "move my Simon 1:1 to Monday"), do NOT create — use move_meeting on the existing event. The handler will detect a same-subject + same-person event already in the calendar and hand you its id to move instead. Set force_new=true ONLY when the owner genuinely wants a SEPARATE, ADDITIONAL meeting with the same people (not a reschedule) and has confirmed it after that heads-up.',
             },
-            body: { type: 'string', description: 'Optional meeting body — ENGLISH ONLY.' },
+            body: { type: 'string', description: 'Optional meeting body — ENGLISH ONLY. FOLLOW-THROUGH: if you told the owner or requester that specific text they gave you (a summary / agenda / notes / "the X text") would be in the invite, you MUST pass that exact text here, on the booking call itself — promising it and leaving body unset ships an empty invite (and an approval replay only carries the body you set).' },
             is_online: {
               type: 'boolean',
               description: 'OPTIONAL. Pass ONLY when conversation explicitly said online (Zoom/Teams/video/call) or in-person (at office/come over/meet). When no explicit signal, OMIT — the handler picks per day-type + party shape (internal+home=Huddle, internal+office=Office, external=Teams). Defaulting to true silently corrupts the location decision.',
@@ -780,6 +788,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
       case 'update_meeting':
       case 'delete_meeting':
       case 'hold_slot':
+      case 'revert_last_auto_move':
         return await this.ops.executeToolCall(toolName, args, context);
 
       default:

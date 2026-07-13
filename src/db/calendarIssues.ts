@@ -493,6 +493,49 @@ export function dismissFloatingBlockGap(opts: {
   `).run(id, opts.ownerUserId, opts.eventId, opts.eventDate, opts.eventEndMs, opts.notes ?? null);
 }
 
+/** v3.7.x (#139) — record that the owner REJECTED an active-mode auto-move of an
+ *  overlapping meeting (via revert_last_auto_move). Writes a terminal `dismissed`
+ *  overlap row anchored on the meeting's event id (+ the peer it clashed with,
+ *  when known) so getSuppressedEventIds returns it and the double_booking
+ *  detector stops re-flagging + re-moving it — the "if I said no, it's no"
+ *  guarantee, using the SAME dismissal mechanism as floating-block gaps.
+ *  Occurrence-anchored: only this event/occurrence is suppressed; other
+ *  occurrences of a recurring series still surface. Idempotent: an existing
+ *  `approved` waiver is left alone; anything else is ensured terminal-dismissed. */
+export function dismissOverlapIssue(opts: {
+  ownerUserId: string;
+  eventId: string;
+  peerEventId?: string | null;
+  eventDate: string;      // YYYY-MM-DD (owner-local)
+  eventEndMs: number;     // when this occurrence stops mattering (past-filtered on read)
+  notes?: string;
+}): void {
+  if (!opts.ownerUserId || !opts.eventId) return;
+  const db = getDb();
+  const existing = db.prepare(
+    `SELECT id, status FROM calendar_issues WHERE owner_user_id = ? AND event_id = ?`,
+  ).get(opts.ownerUserId, opts.eventId) as { id: string; status: string } | undefined;
+  if (existing) {
+    if (existing.status === 'approved') return;  // don't downgrade an explicit approval
+    db.prepare(`
+      UPDATE calendar_issues
+      SET status = 'dismissed',
+          peer_event_id = COALESCE(?, peer_event_id),
+          notes = COALESCE(?, notes),
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(opts.peerEventId ?? null, opts.notes ?? null, existing.id);
+    return;
+  }
+  const id = `ci_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  db.prepare(`
+    INSERT INTO calendar_issues
+      (id, owner_user_id, event_id, peer_event_id, event_date, event_end_ms,
+       issue_class, status, notes, request_id)
+    VALUES (?, ?, ?, ?, ?, ?, 'overlap', 'dismissed', ?, NULL)
+  `).run(id, opts.ownerUserId, opts.eventId, opts.peerEventId ?? null, opts.eventDate, opts.eventEndMs, opts.notes ?? null);
+}
+
 /** v3.5.x — stable synthetic anchor id for a DAY/WINDOW-level issue that isn't
  *  tied to a single real event. `busy_day` has no real event_id, so without an
  *  anchor it was dropped at the write step and could never be tracked, approved,

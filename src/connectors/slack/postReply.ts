@@ -235,7 +235,16 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // log "Meeting booked" while the colleague was told "flagged for Idan").
   if (role === 'colleague' && !isOwnerInGroup) {
     const toolSummariesText = (result.toolSummaries ?? []).join(' ');
-    const mutationRan = /\[(move_meeting|create_meeting|update_meeting|delete_meeting)/i.test(toolSummariesText);
+    // v3.7.x (#137b) — require the SUCCESS marker, not just the tool name. The
+    // tool log renders `[<tool> OK …]` on success and `[<tool> FAILED: …]` on
+    // failure (summarizeToolCall). Matching the bare name treated a FAILED
+    // booking as done: Oran's create_meeting FAILED (rule_check_failed) then
+    // escalated via create_approval, and the name-only regex fired the retry —
+    // inverting the CORRECT "flagged it for Idan" escalation into a false
+    // "booking it now". A failed mutation means she did NOT act, so deferring to
+    // the owner is honest and must not be rewritten. Same OK-only convention as
+    // MUTATION_OK_RE in the orchestrator.
+    const mutationSucceeded = /\[(?:move_meeting|create_meeting|update_meeting|delete_meeting) OK\b/i.test(toolSummariesText);
     const ownerFirstName = profile.user.name.split(' ')[0];
     const ownerFnRe = new RegExp(`\\b${ownerFirstName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\b`, 'i');
     const draftDefersToOwner =
@@ -243,8 +252,8 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       (/\blet\s+\S+\s+know\b/i.test(cleanReply) && ownerFnRe.test(cleanReply)) ||
       (/\bcheck\s+with\s+\S+/i.test(cleanReply) && ownerFnRe.test(cleanReply)) ||
       /\bhe'?ll\s+(?:likely|probably|need|decide|confirm|jump)/i.test(cleanReply);
-    if (mutationRan && draftDefersToOwner) {
-      logger.warn('Colleague draft defers to owner after mutation ran — retrying', {
+    if (mutationSucceeded && draftDefersToOwner) {
+      logger.warn('Colleague draft defers to owner after mutation succeeded — retrying', {
         senderId, threadTs,
         toolSummaries: result.toolSummaries,
         draftPreview: cleanReply.slice(0, 160),

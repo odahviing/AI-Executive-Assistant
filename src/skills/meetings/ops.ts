@@ -987,7 +987,7 @@ export class SchedulingSkill {
           return {
             events: sharedProcessed,
             _colleague_view: true,
-            _scope_note: 'COLLEAGUE VIEW — this list contains ONLY the meetings this colleague is on (their shared meetings with the owner). The rest of the owner\'s calendar is not visible here and must never be described or enumerated. This is NOT an availability source: whether the owner is free/busy at any time comes ONLY from find_available_slots (or check_join_availability for joining an existing meeting) — never from the absence or presence of events in this list.',
+            _scope_note: `COLLEAGUE VIEW — this list contains ONLY the meetings this colleague is on (their shared meetings with the owner). The rest of the owner's calendar is not visible here and must never be described or enumerated. This is NOT an availability source: whether the owner is free/busy at any time comes ONLY from find_available_slots (or check_join_availability for joining an existing meeting) — never from the absence or presence of events in this list. v3.7.x (#141): if this colleague asks about or to CHANGE a meeting that is NOT in this list, do NOT explain why you can't see it and do NOT speculate about how the owner got it (e.g. "he may have received the invite directly"). If it's one THEY requested (see "MEETINGS YOU REQUESTED"), act on it by its event_id — a move/cancel routes to ${context.profile.user.name.split(' ')[0]}'s approval. Otherwise, simply say you can't action that one for them and they should ask ${context.profile.user.name.split(' ')[0]} directly.`,
           };
         }
 
@@ -1002,6 +1002,93 @@ export class SchedulingSkill {
         return Object.keys(gcNotes).length > 0 ? { events: processed, ...gcNotes } : processed;
       }
 
+      case 'revert_last_auto_move': {
+        // v3.7.x (#139 / auto-fix Part B) — owner-only deterministic undo of the
+        // most recent active-mode auto-move (the "I moved X to clear a clash"
+        // notice). Restores the original time, re-notifies who was told, relabels
+        // the spine record as reverted, and writes a terminal dismissal so the
+        // sweep won't re-move it ("if I said no, it's no").
+        if (context.senderRole !== 'owner') {
+          return { success: false, error: 'owner_only', message: 'Only the owner can revert an auto-move.' };
+        }
+        const ownerUserId = context.profile.user.slack_user_id;
+        const { getRevertibleAutoMove, updateRequest } = await import('../../db/requests');
+        const rec = getRevertibleAutoMove(ownerUserId);
+        if (!rec) {
+          return { success: false, error: 'nothing_to_revert', message: 'There is no recent auto-move to undo.' };
+        }
+        let oc: Record<string, unknown> = {};
+        try { oc = rec.outcome_json ? JSON.parse(rec.outcome_json) as Record<string, unknown> : {}; } catch { /* keep empty */ }
+        const eventId = rec.outcome_external_event_id;
+        const originalStart = typeof oc.original_start === 'string' ? oc.original_start : undefined;
+        const originalEnd = typeof oc.original_end === 'string' ? oc.original_end : undefined;
+        const revNewStart = typeof oc.new_start === 'string' ? oc.new_start : undefined;
+        const revSubject = typeof oc.subject === 'string' ? oc.subject : 'the meeting';
+        const keptEventId = typeof oc.kept_event_id === 'string' ? oc.kept_event_id : null;
+        const notifiedSlackIds = Array.isArray(oc.notified_slack_ids)
+          ? (oc.notified_slack_ids as unknown[]).filter((x): x is string => typeof x === 'string')
+          : [];
+        if (!eventId || !originalStart || !originalEnd) {
+          return {
+            success: false, error: 'record_incomplete',
+            message: `I found the auto-move of "${revSubject}" but its record is missing the original time, so I can't safely undo it — you can move it back manually.`,
+          };
+        }
+        // Don't clobber a later change: if the meeting is no longer where the
+        // auto-move put it, someone already moved it — nothing to revert.
+        if (revNewStart) {
+          try {
+            const { getEventType } = await import('../../connectors/graph/calendar');
+            const probe = await getEventType(userEmail, eventId);
+            if (probe?.startDateTime) {
+              const curMs = DateTime.fromISO(probe.startDateTime, { zone: timezone }).toUTC().toMillis();
+              const newMs = DateTime.fromISO(revNewStart).toUTC().toMillis();
+              if (Number.isFinite(curMs) && Number.isFinite(newMs) && Math.abs(curMs - newMs) > 5 * 60_000) {
+                return {
+                  success: false, error: 'already_changed',
+                  message: `"${revSubject}" isn't where I auto-moved it anymore — it's already been changed, so there's nothing to revert.`,
+                };
+              }
+            }
+          } catch (e) { logger.warn('revert_last_auto_move — position probe threw; proceeding', { err: String(e).slice(0, 160) }); }
+        }
+        await updateMeeting({ userEmail, timezone, meetingId: eventId, start: originalStart, end: originalEnd });
+        // Relabel the record so it's no longer revertible, and write the dismissal
+        // so active-mode won't re-move this pair.
+        try { updateRequest(rec.id, { closureReason: 'auto_move_reverted' }); } catch { /* best-effort */ }
+        try {
+          const { dismissOverlapIssue } = await import('../../db/calendarIssues');
+          dismissOverlapIssue({
+            ownerUserId,
+            eventId,
+            peerEventId: keptEventId,
+            eventDate: DateTime.fromISO(originalStart, { zone: timezone }).toFormat('yyyy-MM-dd'),
+            eventEndMs: DateTime.fromISO(originalEnd, { zone: timezone }).toMillis(),
+            notes: 'owner reverted auto-move — leave it',
+          });
+        } catch (e) { logger.warn('revert_last_auto_move — dismissal write failed', { err: String(e).slice(0, 160) }); }
+        // Re-notify anyone the auto-move told.
+        let reNotified = 0;
+        if (notifiedSlackIds.length > 0) {
+          try {
+            const { getConnection } = await import('../../connections/registry');
+            const conn = getConnection(ownerUserId, 'slack');
+            const origLocal = DateTime.fromISO(originalStart, { zone: timezone }).toFormat('EEE d MMM HH:mm');
+            for (const sid of notifiedSlackIds) {
+              try {
+                await conn?.sendDirect(sid, `Quick update: "${revSubject}" is back to its original time (${origLocal}) — please disregard my earlier note about moving it.`);
+                reNotified++;
+              } catch { /* skip one */ }
+            }
+          } catch { /* messaging unavailable */ }
+        }
+        const restoredLocal = DateTime.fromISO(originalStart, { zone: timezone }).toFormat('EEE d MMM HH:mm');
+        logger.info('revert_last_auto_move — done', { requestId: rec.id, eventId, restoredLocal, reNotified });
+        return {
+          success: true, reverted: true, subject: revSubject, restored_to: restoredLocal, re_notified: reNotified,
+          message: `Put "${revSubject}" back to ${restoredLocal}${reNotified ? ` and let ${reNotified} ${reNotified === 1 ? 'person' : 'people'} know` : ''}. I won't auto-move it again.`,
+        };
+      }
       case 'analyze_calendar': {
         const rawEvents = await getCalendarEvents(
           userEmail,
@@ -2078,17 +2165,32 @@ export class SchedulingSkill {
             } catch (err) {
               logger.warn('find_available_slots — hold deprioritization threw, using full set', { err: String(err).slice(0, 120) });
             }
+            // v3.7.2 (#142a) — fingerprint THIS search's shaping params so the
+            // exclusion below can tell a real "give me another option" (same
+            // shape) from a refinement (duration / window / attendee change).
+            // Colleague-controlled axes only; raw window (pre-expand) for stability.
+            const attendeesFp = Array.isArray(args.attendee_emails)
+              ? [...(args.attendee_emails as unknown[])].map(e => String(e).trim().toLowerCase()).filter(Boolean).sort().join(',')
+              : '';
+            const offerFingerprint = `${args.duration_minutes ?? ''}|${args.search_from ?? ''}|${args.search_to ?? ''}|${attendeesFp}`;
             // v3.4.2 — DROP slots already offered in this conversation so "give me
             // another option" returns NEW times, not the same spread again. The
             // stash is the UNION of everything shown this conversation; on the
-            // FIRST search it's empty → no-op (no flag, no branch — works on run
-            // one exactly as before). Verifying specific named slots runs in the
-            // candidate_slots path above, not here, so it's unaffected. If
+            // FIRST search it's empty → no-op. Verifying specific named slots runs
+            // in the candidate_slots path above, not here, so it's unaffected. If
             // exclusion would empty the pool, keep the full pool (never go silent).
+            // v3.7.2 (#142a) — gated on a fingerprint MATCH: a refinement (a "30
+            // min" clarification, a narrowed window, an added attendee) is the SAME
+            // ask re-parametrized, NOT "another day", so its best slots must not be
+            // dropped just because an earlier, differently-shaped search showed them
+            // (Michal 2026-07-13 — "30 min" returned a disjoint set, hiding 12:45 &
+            // 13:45). Bias to SKIP: a false skip merely re-shows a slot; a false
+            // exclude hides an open one.
             try {
-              const { getOfferedSlots } = await import('../../utils/offeredSlotsStash');
+              const { getOfferedSlots, getOfferedSearchFingerprint } = await import('../../utils/offeredSlotsStash');
               const offered = getOfferedSlots(context.channelId, context.threadTs) ?? [];
-              if (offered.length > 0) {
+              const priorFingerprint = getOfferedSearchFingerprint(context.channelId, context.threadTs);
+              if (offered.length > 0 && priorFingerprint !== null && priorFingerprint === offerFingerprint) {
                 const offeredMs = new Set(offered.map(o => Date.parse(o.startIso)).filter(Number.isFinite));
                 const fresh = pickPool.filter(s => !offeredMs.has(Date.parse(s.start)));
                 if (fresh.length > 0) pickPool = fresh;
@@ -2291,6 +2393,7 @@ export class SchedulingSkill {
                   threadTs: context.threadTs,
                   timezone,
                   slots: annotatedSlots as Array<{ start: string }>,
+                  searchFingerprint: offerFingerprint,
                 });
               } catch (err) {
                 logger.warn('offeredSlotsStash record failed — continuing', {
@@ -2888,7 +2991,7 @@ export class SchedulingSkill {
               // which leads to "rule-non-compliant" + fabricated reasons).
               const diagnostics: { rejectedCounts?: Record<string, number>; rejectedExamples?: Record<string, string[]> } = {};
               if (fromIso && toIso) {
-                validSlots = await findAvailableSlots({
+                const runSlotCheck = () => findAvailableSlots({
                   userEmail,
                   timezone,
                   durationMinutes: durationMin,
@@ -2912,6 +3015,24 @@ export class SchedulingSkill {
                   // requested start). Disable it.
                   autoExpand: false,
                 });
+                // v3.7.x (#137) — a transient Graph free/busy fault (e.g.
+                // ErrorInvalidMergedFreeBusyInterval) must NOT masquerade as a
+                // rule violation. A single blip on this verification fetch was
+                // escalating a rule-COMPLIANT colleague slot to a
+                // policy_exception approval, which then mis-bound and booked
+                // without real owner approval (#137/#138). Retry once; only a
+                // REPEATED failure falls through to the outer catch (a genuine
+                // "couldn't verify" → honest escalation).
+                try {
+                  validSlots = await runSlotCheck();
+                } catch (firstErr) {
+                  logger.warn('create_meeting colleague-path rule check threw — retrying once before escalating', {
+                    err: String(firstErr).slice(0, 200),
+                  });
+                  delete diagnostics.rejectedCounts;
+                  delete diagnostics.rejectedExamples;
+                  validSlots = await runSlotCheck();
+                }
               }
               const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
               if (!matches) {
@@ -2986,6 +3107,12 @@ export class SchedulingSkill {
               success: false,
               error: 'rule_check_failed',
               message: `I couldn't verify whether that slot fits ${ownerFirst}'s rules right now. Raise create_approval(kind=policy_exception) so he can decide.`,
+              // v3.7.x (#137a) — carry the full args (incl. any invite `body` the
+              // requester supplied) into the follow-up approval, so an owner-approve
+              // replays create_meeting WITH the body instead of shipping an empty
+              // invite. Matches the not_rule_compliant path above; only reached now
+              // if BOTH free/busy attempts throw (rare, after the #137 root fix).
+              _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
             };
           }
         }
@@ -4262,16 +4389,45 @@ export class SchedulingSkill {
           // Step 1 — the asker must be a REQUIRED attendee of the meeting.
           const askerIsRequired = !!askerEmail && requiredAttendees.some(a => a.email === askerEmail);
           if (!askerIsRequired) {
-            logger.info('move_meeting — asker is not a required attendee → escalate', {
+            // v3.7.x (#141) — a non-attendee can still act on a meeting THEY
+            // REQUESTED (booked through Maelle): route it to the owner's approval,
+            // exactly like a cancel does ("if you can ask to book it, you can ask
+            // to move it"). A non-attendee who did NOT request it gets a clean
+            // decline — never a leak about the owner's calendar, never bothering
+            // him with someone else's meeting. This is the #141 fix: move becomes
+            // consistent with cancel instead of an inconsistent flat refusal.
+            let askerIsRequester = false;
+            try {
+              const { findMeetingOwner } = await import('./findMeetingOwner');
+              const mo = await findMeetingOwner({
+                ownerUserId: context.profile.user.slack_user_id,
+                ownerEmail: userEmail,
+                eventId: args.meeting_id as string,
+              });
+              askerIsRequester = !!mo.requesterSlackId && mo.requesterSlackId === context.userId;
+            } catch (err) {
+              logger.warn('move_meeting — requester lookup threw', { err: String(err).slice(0, 160) });
+            }
+            if (!askerIsRequester) {
+              logger.info('move_meeting — asker is neither attendee nor requester → clean decline', {
+                meetingId: args.meeting_id, asker: context.userId,
+              });
+              return {
+                success: false,
+                error: 'not_your_meeting',
+                message: `That's not a meeting you're in or one you set up, so I can't move it for you — best to ask ${ownerFirst} directly.`,
+              };
+            }
+            logger.info('move_meeting — asker is the requester (not an attendee) → escalate to owner approval', {
               meetingId: args.meeting_id, asker: context.userId,
             });
             return {
               needs_owner_approval: true,
-              reason: 'requester_not_attendee',
+              reason: 'requester_move_needs_owner',
               meeting_subject: args.meeting_subject,
               requested_start: args.new_start,
               requested_end: args.new_end,
-              message: `${askerName ?? 'Someone'} asked to move "${args.meeting_subject}" but isn't on the invite — a meeting should only be moved by someone who's actually in it, so this needs ${ownerFirst}. Raise create_approval(kind=meeting_reschedule) and tell him ${askerFirst} isn't an attendee.`,
+              message: `${askerName ?? 'They'} asked to move "${args.meeting_subject}", which they set up with ${ownerFirst}. Raise create_approval(kind=meeting_reschedule) so ${ownerFirst} confirms the new time.`,
             };
           }
           // Step 1.5 — every OTHER required attendee must be INTERNAL so we can

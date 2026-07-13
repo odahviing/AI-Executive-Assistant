@@ -486,6 +486,18 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
         }
 
         const issues: HealthIssue[] = [];
+        // v3.7.x (#139) — auto-fix MEMORY. Two owner-scoped reads, consulted by
+        // the double_booking detector below so active mode never re-flags or
+        // re-moves a clash the owner already settled:
+        //   • dismissedEventIds — issues he dismissed/approved/resolved (a revert
+        //     writes a dismissal). "If I said no, it's no."
+        //   • recentlyAutoMovedIds — meetings I auto-moved in the last 12h. If a
+        //     cleared clash is BACK, he reverted it (by hand or via
+        //     revert_last_auto_move); re-moving is the exact "no memory" bug.
+        const dismissedEventIds = getSuppressedEventIds(context.profile.user.slack_user_id);
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const recentlyAutoMovedIds = (require('../db/requests') as typeof import('../db/requests'))
+          .getRecentlyAutoMovedEventIds(context.profile.user.slack_user_id);
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
         // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -581,6 +593,13 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
               // brief narration, no auto-book attempt.
               const synth = fb.floatingBlockSyntheticEventId(profile, block.name, dayStr, timezone);
               if (synth && waivedBlockGapIds.has(synth.eventId)) continue;
+              // v3.7.x (#140) — don't flag a missing block whose booking window
+              // has already closed for TODAY; offering to book a lunch at 13:01
+              // when its window has passed only yields a past-dated auto-book.
+              // Future days are unaffected (winEndMs > now), so the day-of
+              // auto-book still fires normally.
+              const winEndMs = fb.windowMsForDay(dayStr, block.preferred_end, timezone);
+              if (Number.isFinite(winEndMs) && winEndMs <= DateTime.now().setZone(timezone).toMillis()) continue;
               issues.push({
                 type: 'missing_floating_block',
                 date: dayStr,
@@ -663,6 +682,18 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
               const bEnd = parseGraphDt(b.end.dateTime, b.end.timeZone, timezone);
 
               if (aStart < bEnd && aEnd > bStart) {
+                // v3.7.x (#139) — auto-fix memory: skip a pair the owner already
+                // settled. (a) dismissed/approved/resolved → he told us to leave
+                // it. (b) I auto-moved one side in the last 12h and the clash is
+                // BACK → he reverted it; re-detecting would re-move it (the "no
+                // memory" bug). Either way don't re-flag or re-move. Occurrence-
+                // anchored via event ids; other occurrences still surface.
+                if (
+                  dismissedEventIds.has(a.id) || dismissedEventIds.has(b.id)
+                  || recentlyAutoMovedIds.has(a.id) || recentlyAutoMovedIds.has(b.id)
+                ) {
+                  continue;
+                }
                 // Protection assessment for both sides + internal-only check
                 const aProt = protection.isProtected(a, profile);
                 const bProt = protection.isProtected(b, profile);
@@ -1257,6 +1288,7 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                           outcomeJson: {
                             original_start: mStart.toISO(), original_end: mEnd.toISO(),
                             new_start: newStartIso, new_end: newEndIso, subject: subj,
+                            kept_event_id: issue.kept_event_id,
                           },
                           idempotencyKey: `auto_move:${movable.id}:${Date.now()}`,
                           nextCheckAt: DateTime.now().plus({ hours: 12 }).toUTC().toISO()!,
@@ -1335,6 +1367,7 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                               original_start: mStart.toISO(), original_end: mEnd.toISO(),
                               new_start: newStartIso, new_end: newEndIso, subject: subj,
                               notified_slack_ids: notifiedSlackIds,
+                              kept_event_id: issue.kept_event_id,
                             },
                           });
                         } catch (reqErr) {

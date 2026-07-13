@@ -537,11 +537,23 @@ export async function getFreeBusy(
 
   const client = getClient();
   try {
+    // v3.7.x (#137) — availabilityViewInterval must be < the requested window or
+    // Graph 400s with ErrorInvalidMergedFreeBusyInterval. A single-slot
+    // verification window (colleague-path Guard B / move-check) for a SHORT
+    // meeting (e.g. a 10-min slot) is narrower than the hardcoded 15, which failed
+    // DETERMINISTICALLY and mis-escalated a rule-COMPLIANT booking to a
+    // policy_exception approval (#137 — a same-params retry can't fix a malformed
+    // request). Derive a valid interval for short windows; windows ≥16 min keep 15
+    // (no behavior change — scheduleItems, the busy blocks we actually read, are
+    // returned regardless of the view interval).
+    const availabilityViewInterval = windowMinutes >= 16
+      ? 15
+      : Math.max(5, Math.floor(windowMinutes) - 1);
     const response = await client.api(`/users/${callerEmail}/calendar/getSchedule`).post({
       schedules: emails,
       startTime: { dateTime: startDate, timeZone: timezone },
       endTime: { dateTime: endDate, timeZone: timezone },
-      availabilityViewInterval: 15,
+      availabilityViewInterval,
     });
 
     const result: Record<string, FreeBusySlot[]> = {};

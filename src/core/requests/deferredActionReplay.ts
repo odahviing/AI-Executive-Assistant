@@ -42,8 +42,15 @@ export interface RunDeferredActionInput {
  * wrap the throw in a swallow: that resurrects the phantom-confirmed-booking bug
  * (owner approves → replay fails silently → requester told "invite incoming" →
  * nothing booked).
+ *
+ * Returns the tool result on success (GH #140 / 138c) so the resolver can
+ * surface the concrete outcome — `booked_start`, `action_summary`, etc. —
+ * instead of a bare "replayed create_meeting". Without it the resolver returned
+ * no booking signal, so Sonnet hedged ("confirming that's what you mean?") AND
+ * announced completion ("booking went through") in the same breath. Returns
+ * undefined on the no-op paths (no connection / unsupported tool).
  */
-export async function runDeferredAction(input: RunDeferredActionInput): Promise<void> {
+export async function runDeferredAction(input: RunDeferredActionInput): Promise<Record<string, unknown> | undefined> {
   const { ownerUserId, profile, tool, args, requestId } = input;
 
   // Resolve the Slack connection so meeting handlers can shadow-DM the owner.
@@ -52,7 +59,7 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
     logger.warn('runDeferredAction — no Slack connection registered, skipping replay', {
       requestId, tool,
     });
-    return;
+    return undefined;
   }
 
   // Build a minimal SkillContext that the tool handlers will accept. The
@@ -90,11 +97,11 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
       skill = new (m as unknown as { CalendarHealthSkill: new () => unknown }).CalendarHealthSkill() as typeof skill;
     } else {
       logger.warn('runDeferredAction — unsupported tool, skipping replay', { requestId, tool });
-      return;
+      return undefined;
     }
     if (!skill?.executeToolCall) {
       logger.warn('runDeferredAction — skill has no executeToolCall, skipping replay', { requestId, tool });
-      return;
+      return undefined;
     }
     const result = await skill.executeToolCall(tool, args, context);
 
@@ -125,6 +132,7 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
         ? JSON.stringify(result).slice(0, 240)
         : String(result).slice(0, 240),
     });
+    return (r && typeof r === 'object') ? r : undefined;
   } catch (err) {
     // Surface to caller — the resolver's outer try/catch keeps the request
     // in awaiting_owner so the owner can retry. Log here for visibility.

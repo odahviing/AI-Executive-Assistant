@@ -35,6 +35,11 @@ export interface OfferedSlot {
 interface Entry {
   slots: OfferedSlot[];
   expiresAt: number;
+  // v3.7.2 (#142a) — the shaping params (duration | window | attendees) of the
+  // search that produced these offers. The exclusion only drops offered slots
+  // when a later search REPEATS this shape (a true "give me another option"); a
+  // refinement re-parametrizes the same ask and must NOT exclude.
+  searchFingerprint?: string;
 }
 
 /** Offers go stale with the conversation — 2h covers a same-sitting pick. */
@@ -61,6 +66,10 @@ export function recordOfferedSlots(params: {
   threadTs?: string;
   timezone: string;                       // owner TZ — display is rendered here
   slots: Array<{ start: string }>;
+  // v3.7.2 (#142a) — fingerprint of THIS search's shape (duration|window|
+  // attendees). Passed by the spread-search recorder; OMITTED by the point-check
+  // recorder — preserve-on-omit below keeps the spread fingerprint intact.
+  searchFingerprint?: string;
 }): void {
   const fresh: OfferedSlot[] = [];
   for (const s of params.slots.slice(0, 6)) {
@@ -71,7 +80,8 @@ export function recordOfferedSlots(params: {
   if (fresh.length === 0) return;
   const key = keyFor(params.channelId, params.threadTs);
   const prior = stash.get(key);
-  const merged = prior && Date.now() <= prior.expiresAt ? [...prior.slots] : [];
+  const priorFresh = prior && Date.now() <= prior.expiresAt ? prior : undefined;
+  const merged = priorFresh ? [...priorFresh.slots] : [];
   const seen = new Set(merged.map(o => o.startIso));
   for (const f of fresh) {
     if (!seen.has(f.startIso)) { merged.push(f); seen.add(f.startIso); }
@@ -79,11 +89,15 @@ export function recordOfferedSlots(params: {
   stash.set(key, {
     slots: merged.slice(-MAX_OFFERED),
     expiresAt: Date.now() + TTL_MS,
+    // Preserve-on-omit: the point-check recorder omits searchFingerprint, so an
+    // interleaved "is he free at X?" confirmation can't wipe the spread search's.
+    searchFingerprint: params.searchFingerprint ?? priorFresh?.searchFingerprint,
   });
 }
 
-/** The offer currently on the table for this conversation, or null. */
-export function getOfferedSlots(channelId: string, threadTs?: string): OfferedSlot[] | null {
+/** TTL-guarded entry lookup — evicts a stale conversation on read. ONE expiry
+ *  rule, shared by the slot accessor and the fingerprint accessor (no dup). */
+function getLiveEntry(channelId: string, threadTs?: string): Entry | null {
   const key = keyFor(channelId, threadTs);
   const entry = stash.get(key);
   if (!entry) return null;
@@ -91,7 +105,23 @@ export function getOfferedSlots(channelId: string, threadTs?: string): OfferedSl
     stash.delete(key);
     return null;
   }
-  return entry.slots;
+  return entry;
+}
+
+/** The offer currently on the table for this conversation, or null. */
+export function getOfferedSlots(channelId: string, threadTs?: string): OfferedSlot[] | null {
+  return getLiveEntry(channelId, threadTs)?.slots ?? null;
+}
+
+/**
+ * The search fingerprint tied to the current offer, or null. The offered-slots
+ * exclusion compares it to the incoming search: SAME shape → a real "give me
+ * another option" (exclude what was shown); DIFFERENT shape → a refinement of
+ * the same ask (do NOT exclude — excluding dropped Michal's still-valid slots on
+ * a "30 min" clarification, 2026-07-13).
+ */
+export function getOfferedSearchFingerprint(channelId: string, threadTs?: string): string | null {
+  return getLiveEntry(channelId, threadTs)?.searchFingerprint ?? null;
 }
 
 /**

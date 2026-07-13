@@ -805,23 +805,25 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   let colleagueBookingBlock = '';
   if (input.senderRole === 'colleague' && input.userId) {
     try {
+      // v3.7.x (#141) — meetings THIS colleague requested (booked through Maelle),
+      // via the shared reverse-requester helper. Broadened from the just-booked 3h
+      // window to the recent (7d) window so a requester can act on a meeting they
+      // set up days ago: the colleague get_calendar clamp hides meetings they
+      // aren't an attendee of, so without these ids Maelle "can't see" a meeting
+      // the requester legitimately controls (#141). A move/cancel routes to owner.
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getDb } = require('../../db') as typeof import('../../db');
-      const rows = getDb().prepare(`
-        SELECT subject, outcome_external_event_id, created_at
-        FROM requests
-        WHERE owner_user_id = ?
-          AND requester_slack_id = ?
-          AND outcome_external_event_id IS NOT NULL
-          AND datetime(created_at) >= datetime('now', '-3 hours')
-        ORDER BY datetime(created_at) DESC
-        LIMIT 3
-      `).all(profile.user.slack_user_id, input.userId) as Array<{
-        subject: string; outcome_external_event_id: string; created_at: string;
-      }>;
+      const { getMeetingsRequestedBy } = require('../../db/requests') as typeof import('../../db/requests');
+      const requestedSinceIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const rows = getMeetingsRequestedBy(profile.user.slack_user_id, input.userId, {
+        // includeApprovals: an approval-booked meeting (Talia-shaped) gets its
+        // event id linked back at book time (#141 Ch5), so once linked it must
+        // surface here too — else the requester still can't act on it. #141.
+        sinceIso: requestedSinceIso, withEventIdOnly: true, includeApprovals: true,
+      }).slice(0, 5);
       if (rows.length > 0) {
+        const ownerFirst = profile.user.name.split(' ')[0];
         const lines = rows.map(r => `  - "${r.subject}" — event_id=${r.outcome_external_event_id}`);
-        colleagueBookingBlock = `## MEETINGS YOU JUST SET UP FOR THIS PERSON (use these IDs)\n\nIf they ask to change one of these ("add someone", "rename it", "move it"), call update_meeting / move_meeting with the matching event_id below — do NOT get_calendar to re-find it (a just-booked event can lag in the calendar for a few seconds):\n\n${lines.join('\n')}`;
+        colleagueBookingBlock = `## MEETINGS YOU REQUESTED (use these IDs to change one)\n\nThese are meetings you asked ${ownerFirst} to set up. If you ask to change one ("add someone", "rename it", "move it", "cancel it"), use the matching event_id below — do NOT get_calendar to re-find it. You can add/rename directly; a MOVE or CANCEL of one of these needs ${ownerFirst}'s OK, so route it to him for approval:\n\n${lines.join('\n')}`;
       }
     } catch (err) {
       logger.warn('colleagueBookingBlock builder threw — proceeding without it', {

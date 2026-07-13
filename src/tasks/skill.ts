@@ -181,8 +181,8 @@ Verdicts:
 
 Binding — how to pick the right approval_id:
 - Look for an explicit id token in the owner's reply first.
-- If none, pick the most recently created awaiting_owner request for this owner.
-- If multiple are ambiguous, call list_pending_approvals and ask the owner to clarify.`,
+- Otherwise bind ONLY the approval whose decision thread the owner is replying in (the one marked "← THIS THREAD" in PENDING APPROVALS). A bare "yes"/"no" resolves THAT one.
+- If the reply is NOT in an approval's thread, or names none while several are open, do NOT guess — call list_pending_approvals and ask which one (by subject). Never bind a bare ack to an approval from an unrelated thread; the tool refuses an unanchored bare ack.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -884,6 +884,39 @@ Binding — how to pick the right approval_id:
               userId: context.userId, requestId, requesterSlackId: probe.requester_slack_id,
             });
             return { error: 'not_permitted', reason: 'Only the original requester can respond to an amending approval.' };
+          }
+        }
+
+        // v3.7.2 — cross-thread bare-ack anchor gate (GH #137/#140). On the
+        // owner path a bare approve/reject must be ANCHORED to the approval it
+        // resolves: the owner is replying in the approval's own DM thread
+        // (terminal_dm_msg_ts) or the daily decision thread (owner_dm_thread_ts).
+        // Pre-fix the owner-path prompt injected ALL awaiting_owner approvals
+        // with no thread scoping and nudged "pick the most recently created", so
+        // a bare "Yes" typed in an UNRELATED thread — a fire-and-forget shadow
+        // offer that has no request row of its own — bound to the only pending
+        // approval and booked it (Athena, 2026-07-13 10:07; the owner meant a
+        // lunch-bump offer in another thread). Module D and the orchestrator's
+        // thread-lock both correctly declined on the mismatch; this is the same
+        // gate at the tool chokepoint, where Sonnet's free-bind lands. `amend`
+        // carries a specific counter (never a stray ack) and is exempt.
+        if (context.senderRole === 'owner' && verdict !== 'amend') {
+          const ownerRow = getRequest(requestId);
+          if (ownerRow) {
+            const anchored = !!context.threadTs
+              && (context.threadTs === ownerRow.terminal_dm_msg_ts
+                || context.threadTs === ownerRow.owner_dm_thread_ts);
+            if (!anchored) {
+              logger.warn('resolve_approval — bare ack not anchored to the approval thread; refusing to bind', {
+                requestId, verdict, threadTs: context.threadTs,
+                terminalDm: ownerRow.terminal_dm_msg_ts, ownerDaily: ownerRow.owner_dm_thread_ts,
+              });
+              return {
+                ok: false,
+                needs_clarification: true,
+                reason: `Not anchored: this reply isn't in ${requestId}'s decision thread (neither its own DM thread nor a daily approval thread), so a bare yes/no is too ambiguous to bind here — the owner may be responding to something else in this thread. Do NOT resolve it. Tell him you're not sure which approval he means, name the open ones by subject, and ask him to confirm in the approval's own thread (or the daily decision thread).`,
+              };
+            }
           }
         }
 
