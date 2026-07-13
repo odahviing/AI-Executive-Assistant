@@ -248,7 +248,7 @@ ${aud.refusalExamples}
 
 Same rule in Hebrew, French, etc. — never expose mechanism in any language.
 
-INTERNAL IDENTIFIERS ARE MACHINE-VOICE. A raw Slack ID ("U0ARK5814PQ", "<@U…>", a "#C…" channel id) or an internal request/task id ("req_…", "task_…") never belongs in a message to a person — a human EA refers to people by NAME, never by an account id. If ${assistantName} can't resolve who's meant, she asks ("who should I loop in?"), she never reads out the id. Narrating an id to the reader is ok=false.
+RAW IDENTIFIERS ARE MACHINE-VOICE — BUT A PROPER MENTION IS NOT. Slack renders "<@U…>" as a person's @name and "<#C…>" as a #channel: those are the CORRECT way to address someone or point at a channel. ALWAYS leave a "<@…>" or "<#…>" mention exactly as written — it is not a leak, and stripping it breaks the addressing (the reader stops getting tagged). What IS machine-voice is a RAW id shown as literal text: an unwrapped account id ("U0ARK5814PQ"), or an internal request/task id ("req_…", "task_…", "coord_…"). A human EA never reads a raw account or request id aloud — if ${assistantName} can't resolve who's meant she asks ("who should I loop in?"), she never reads out the id. Narrating a RAW id (NOT a rendered "<@…>"/"<#…>" mention) is ok=false.
 
 Output strict JSON only, no prose, no markdown:
 { "ok": true | false, "rewrite": "<rewrite if ok=false>" | null }
@@ -362,7 +362,11 @@ function parseGateVerdict(raw: string): { ok?: boolean; rewrite?: string | null 
 function draftLooksLeaky(draft: string): boolean {
   return /\bmy\s+(?:system|routine|backend|tools?|prompts?|instructions|functions?|api)\b/i.test(draft)
     || /\b(?:access denied|not_permitted|permission denied|i don'?t have permission)\b/i.test(draft)
-    || /<@[UW][A-Z0-9]{6,}>|<#C[A-Z0-9]{6,}|\b[UW](?=[A-Z0-9]*\d)[A-Z0-9]{7,}\b|\b#?(?:req|task|coord|out|ci)_[a-z0-9_]+\b/i.test(draft);
+    // Proper "<@U…>" / "<#C…>" mentions are NOT leaks — Slack renders them as a
+    // name/channel and they must survive (rewriteDroppedAFact enforces it too).
+    // Only a RAW unwrapped account id or a structured req_/task_/coord_ id is a
+    // tell. The (?<![@<]) skips an id sitting inside a proper "<@U…>" wrapper.
+    || /(?<![@<])\b[UW](?=[A-Z0-9]*\d)[A-Z0-9]{7,}\b|\b#?(?:req|task|coord|out|ci)_[a-z0-9_]+\b/i.test(draft);
 }
 
 function safeFallback(draft: string, audience: HumanGateAudience, reason: string): HumanGateResult {
@@ -492,11 +496,31 @@ export async function runHumanGate(
           logger.info('humanGate — re-rewrite preserved the dropped content; using it', { audience });
           return { ok: false, rewrite: retry };
         }
-        // Still imperfect — ship the cleaned (leak-free) rewrite, NEVER the
-        // flagged original. Worst case is a missed detail in a clean reply, not
-        // a leak/bot-tell shipping.
+        // Still imperfect after one pinned retry — the rewrite keeps dropping a
+        // load-bearing token (@mention / time / date) or flipped a question into
+        // a statement. We're now choosing between two bad drafts, and R7 decides:
+        // a dropped mention / wrong-or-missing time is a CORRUPTION, a residual
+        // bot-tell is a MISS. Which is safe to ship depends on the audience.
+        //   - owner → ship the ORIGINAL. A mild bot-tell to the operator is
+        //     tolerable; broken addressing / a wrong time is not — and there is
+        //     no colleague-facing leak to contain (the reader IS the owner).
+        //     Reverses the 2026-06-24 "never the flagged original" rule for this
+        //     path only: that rule guarded against a leaky original, but on the
+        //     owner path there's no leak, and it was itself corrupting correct
+        //     replies (the stripped-@mention incident).
+        //   - colleague/external → keep the cleaned rewrite. securityGate has
+        //     already scrubbed hard leaks upstream (Step 4, before this gate) and
+        //     a colleague-facing bot-tell is the worse harm there, so a clean but
+        //     fact-dropped line still beats reverting to the flagged original.
+        if (audience === 'owner') {
+          logger.warn('humanGate — rewrite kept dropping load-bearing content after one retry (owner path); shipping the ORIGINAL draft, not a corrupted rewrite (R7 safe-miss)', {
+            audience,
+            originalPreview: draft.slice(0, 120),
+          });
+          return { ok: true, rewrite: null };
+        }
         const best = retry && retry.trim().length > 0 ? retry : parsed.rewrite;
-        logger.warn('humanGate — rewrite still dropped content after one retry; shipping cleaned rewrite, NOT the flagged original', {
+        logger.warn('humanGate — rewrite still dropped content after one retry (colleague path); shipping cleaned rewrite, NOT the flagged original', {
           audience,
           originalPreview: draft.slice(0, 120),
           shippedPreview: best.slice(0, 120),

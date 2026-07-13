@@ -1230,6 +1230,42 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                       const newEndIso = DateTime.fromISO(newStartIso).plus({ minutes: durationMin }).toUTC().toISO()!;
                       const conflictReason = protection.sanitizeConflictReason(kept, profile.user.name.split(' ')[0], profile);
 
+                      // v3.7.x — record this autonomous auto-move on the requests-spine
+                      // as the "initial idea", BEFORE executing, so "revert" has a
+                      // deterministic handle (event id + original/new times) instead of
+                      // reconstructing from chat. kind='follow_up'/subkind='auto_move',
+                      // state in_flight → resolved once the move + notify succeed below.
+                      // Best-effort: a record hiccup must NEVER block the actual move.
+                      // Not awaiting_owner (stays out of the resolver / approvals block /
+                      // brief auto-park); TTL via `expiry` cleans an orphan if the move
+                      // throws before we resolve.
+                      let autoMoveReq: { id: string } | null = null;
+                      try {
+                        // eslint-disable-next-line @typescript-eslint/no-require-imports
+                        const { createRequest } = require('../db/requests') as typeof import('../db/requests');
+                        autoMoveReq = createRequest({
+                          ownerUserId,
+                          initiatedBy: ownerUserId,
+                          initiatedByRole: 'system',
+                          kind: 'follow_up',
+                          subkind: 'auto_move',
+                          subject: `Auto-moved "${subj}" to clear a clash`,
+                          description: issue.description,
+                          state: 'in_flight',
+                          ownerDmChannel: context.channelId,
+                          outcomeExternalEventId: movable.id,
+                          outcomeJson: {
+                            original_start: mStart.toISO(), original_end: mEnd.toISO(),
+                            new_start: newStartIso, new_end: newEndIso, subject: subj,
+                          },
+                          idempotencyKey: `auto_move:${movable.id}:${Date.now()}`,
+                          nextCheckAt: DateTime.now().plus({ hours: 12 }).toUTC().toISO()!,
+                          nextCheckHandler: 'expiry',
+                        });
+                      } catch (reqErr) {
+                        logger.warn('auto-move request-record create failed — proceeding with the move', { err: String(reqErr).slice(0, 160) });
+                      }
+
                       await updateMeeting({ userEmail, timezone, meetingId: movable.id, start: newStartIso, end: newEndIso });
                       // Headless move — slide any floating block it landed on, in code.
                       try {
@@ -1248,6 +1284,7 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                       // eslint-disable-next-line @typescript-eslint/no-require-imports
                       const { getPersonByEmail } = require('../db') as typeof import('../db');
                       const notified: string[] = [];
+                      const notifiedSlackIds: string[] = [];  // v3.7.x — captured for the revert record
                       for (const a of participantsRaw) {
                         const email = a.emailAddress.address;
                         if (!email || email.toLowerCase() === profile.user.email.toLowerCase()) continue;
@@ -1269,6 +1306,7 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                           conflictReason,
                         });
                         notified.push((a.emailAddress.name || row.name || email).split(' ')[0]);
+                        if (row.slack_id) notifiedSlackIds.push(row.slack_id);
                       }
 
                       const newLocal = DateTime.fromISO(newStartIso, { zone: timezone }).toFormat('EEE d MMM HH:mm');
@@ -1281,6 +1319,28 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                         tool: 'move_meeting',
                         detail: `Auto-moved "${subj}" to ${newLocal} (overlap autofix)${notified.length ? ` — notified ${notified.join(', ')}` : ''}`,
                       });
+                      // Move + notify done → resolve the spine record, now carrying who
+                      // was notified so a later "revert" can re-notify them. Best-effort.
+                      if (autoMoveReq) {
+                        try {
+                          // eslint-disable-next-line @typescript-eslint/no-require-imports
+                          const { closeRequest } = require('../core/requests/closeRequest') as typeof import('../core/requests/closeRequest');
+                          closeRequest({
+                            id: autoMoveReq.id,
+                            state: 'resolved',
+                            closureReason: 'auto_move_executed',
+                            closedBy: 'system',
+                            outcomeExternalEventId: movable.id,
+                            outcomeJson: {
+                              original_start: mStart.toISO(), original_end: mEnd.toISO(),
+                              new_start: newStartIso, new_end: newEndIso, subject: subj,
+                              notified_slack_ids: notifiedSlackIds,
+                            },
+                          });
+                        } catch (reqErr) {
+                          logger.warn('auto-move request-record resolve failed — move already done', { err: String(reqErr).slice(0, 160) });
+                        }
+                      }
                       // Shadow-notify owner in real time — keeps autonomy, gives him
                       // a chance to "revert" before the colleague even replies.
                       try {

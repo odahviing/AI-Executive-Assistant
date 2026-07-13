@@ -40,7 +40,8 @@ export function reinterpretClockInZone(
  * designator only ever follows the time, so we test the post-`T` part — the
  * date's own hyphens never trip it.
  */
-export function isoHasExplicitZone(iso: string): boolean {
+export function isoHasExplicitZone(iso: string | undefined | null): boolean {
+  if (!iso) return false;  // no string → no explicit zone (never .split undefined)
   const timePart = iso.split('T')[1] ?? '';
   return /[+\-Z]/i.test(timePart);
 }

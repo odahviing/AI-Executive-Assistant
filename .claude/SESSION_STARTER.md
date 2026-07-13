@@ -1,6 +1,6 @@
 # Maelle session context
 
-Working on Maelle at `E:/Code/Maelle`. **Current version: v3.7.0** — `package.json` is the source of truth; the boot log stamps `version` + `gitSha`, confirm it matches HEAD after any restart.
+Working on Maelle at `E:/Code/Maelle`. **Current version: v3.7.1** — `package.json` is the source of truth; the boot log stamps `version` + `gitSha`, confirm it matches HEAD after any restart.
 
 ## This chat = FEATURES **and** BUGS
 
@@ -27,9 +27,10 @@ Routing rule of thumb: honesty/leak → guard · narration/tone/tool-wording/yam
 ## Open / deferred
 
 - **Channel document attachment — SHIPPED 3.7.0.** A channel @mention carrying a document (PDF/txt/md) or image is now read: extracted on the `app_mention` path, gated on owner-presence (owner's own file always; a colleague's file only in a thread the owner has posted in, fail-closed otherwise), documents folded into the directive as framed do-not-follow-instructions reference material, images through the existing injection guard (owner proceeds, suspicious colleague image dropped). Scoping call resolved: **owner + present-colleague**; **PDF + images** (audio in channels out of scope). Shared PDF-parse / image-scan cores now used by both the DM and channel paths. Watch live (below). See CHANGELOG 3.7.0.
+- **Auto-move REVERT tool — NOT built (Part B).** 3.7.1 landed the spine RECORD (a `follow_up`/`auto_move` request written when active-mode calendar-health auto-moves a meeting — intent before execute, resolved after with `notified_slack_ids`, in `outcome_json` + `outcome_external_event_id`). What's missing is the tool that CONSUMES it: `db/requests.ts` `getRevertibleAutoMove(owner)` (most-recent resolved auto_move ≤12h, no `reverted_at`); a **owner-only** `revert_last_auto_move` tool in `meetings.ts` getTools; an `ops.ts` handler (read record → verify meeting still at `new_start` → `updateMeeting` back to `original_start/end` → re-notify `notified_slack_ids` → stamp `reverted_at`). Deterministic, sidesteps the close-loop scanner (record is resolved/terminal). Design locked; calendar/approval territory.
 - **Stale memory:** `project_architecture.md` still describes the coord state machine as live — coord was removed in 3.5.0. Trim when next touched.
 
-## Recent arc — 3.6.0 → 3.7.0 (CHANGELOG.md is canonical; memory holds architecture)
+## Recent arc — 3.6.0 → 3.7.1 (CHANGELOG.md is canonical; memory holds architecture)
 
 - **3.6.0** — Working-Elsewhere **timezone spine**: one resolver (`weTimeResolver.ts`), one renderer, the model conveys the named zone. Memory: `project_we_timezone_spine.md`.
 - **3.6.1** — review accuracy (free-time boundary, category limits in the interactive review) + **one free-time source of truth** (length-based floor, `requiredFreeMinutesForWorkDay`) + slot narration + create-vs-move guard.
@@ -38,6 +39,7 @@ Routing rule of thumb: honesty/leak → guard · narration/tone/tool-wording/yam
 - **3.6.4** — **deterministic attendee resolution**: `classifyTurn` extracts named participants → orchestrator resolves known internal colleagues in code → threaded into the search. Replaced a prompt rule Sonnet ignored.
 - **3.6.5** — **optional-join meetings**: a **timed** `workingElsewhere` event is a "join if free" soft tier (visible, bookable-over, offered only when clean slots fall short, health treats it as reclaimable free time — split from the travel marker by `isAllDay`); + `dateVerifier` **uniform day-shift guard** (the 2026-07-11 Sun→Mon rundown); + quieter socket-mode logs.
 - **3.7.0** — **channels get files + a privacy clamp** (a channel @mention reads PDF/image attachments, gated on owner-presence; owner is colleague-clamped in channels so private calendar/owner-only data never leaks into a shared space) + **instant restart** (socket opens ~1s instead of ~40s — catch-up moved off the boot-blocking path to a parallelized background scan, dedup via the shared atomic `markProcessed` claim) + **availability pre-check** is language-neutral (structural `?`/TZ/time gate, no per-language regex) and answers "how much is free there?" with the real largest-bookable length (meeting chat).
+- **3.7.1** — real-day bug wave (4 chats): `get_calendar` crash guard (undefined date → `.split` throw → "trouble pulling up the calendar"; fixed at the `datePart` chokepoint) + **availability pre-check now enforces the SAME category-cap/work-hours rules as the search** and escalates owner-overridable violations to approval (closes the colleague rule-bypass) + **coda once-per-day** actually holds (gate reads `people_memory.last_initiated_at`, covers `raise_new`) + colleague-path **self-shadow** suppressed when the actor is the owner-clamped-in-MPIM/channel + humanGate keeps valid `<@…>` mentions (owner path ships the original over a corrupted rewrite) + **autonomous auto-moves recorded on the requests-spine** (`follow_up`/`auto_move`, intent-before-execute → resolved; substrate for a deterministic revert — the revert TOOL itself is NOT built yet).
 
 ## Watch live (first real use)
 

@@ -144,17 +144,27 @@ export interface CreateMeetingParams {
  * Fix: use Luxon to produce a full ISO string with offset, e.g. "2025-04-14T00:00:00+03:00"
  * so Graph uses the correct local midnight, not UTC midnight.
  */
-function toStartOfDayLocal(dateStr: string, timezone: string): string {
-  const datePart = dateStr.split('T')[0];
+// The yyyy-MM-dd prefix of a date/ISO string. Guards a missing/blank arg:
+// an undefined start_date/end_date reaching here used to crash the WHOLE
+// calendar query (`undefined.split('T')` → TypeError, surfaced to the owner as
+// "trouble pulling up the calendar", 2026-07-13). A missing date now degrades
+// to "today" in the mailbox zone instead of throwing — so every caller of
+// getCalendarEvents / getFreeBusy is protected at this one chokepoint, not
+// per-handler.
+function datePart(dateStr: string | undefined | null, timezone: string): string {
+  if (!dateStr || !dateStr.trim()) return DateTime.now().setZone(timezone).toISODate()!;
+  return dateStr.split('T')[0];
+}
+
+function toStartOfDayLocal(dateStr: string | undefined | null, timezone: string): string {
   // Convert to UTC so the value ends in Z — passing +HH:00 in a query param encodes + as space
-  return DateTime.fromISO(`${datePart}T00:00:00`, { zone: timezone })
+  return DateTime.fromISO(`${datePart(dateStr, timezone)}T00:00:00`, { zone: timezone })
     .toUTC()
     .toISO({ suppressMilliseconds: true })!;
 }
 
-function toEndOfDayLocal(dateStr: string, timezone: string): string {
-  const datePart = dateStr.split('T')[0];
-  return DateTime.fromISO(`${datePart}T23:59:59`, { zone: timezone })
+function toEndOfDayLocal(dateStr: string | undefined | null, timezone: string): string {
+  return DateTime.fromISO(`${datePart(dateStr, timezone)}T23:59:59`, { zone: timezone })
     .toUTC()
     .toISO({ suppressMilliseconds: true })!;
 }

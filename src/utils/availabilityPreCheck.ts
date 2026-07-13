@@ -108,9 +108,13 @@ async function normalizeAvailabilityInstantsWithHaiku(
   message: string,
   profile: UserProfile,
   recentThread?: Array<{ role: 'user' | 'assistant'; content: string }>,
-): Promise<NormalizedInstant[]> {
+): Promise<{ instants: NormalizedInstant[]; category: string | null }> {
   const anthropic = getAnthropicClient();
   const ownerFirst = profile.user.name.split(' ')[0];
+  // v3.7.x — category names the same call can infer from the message, so the
+  // verdict's checkSlot enforces the SAME per-day/day-type category rules the
+  // search enforces (the "confirmed free, but it's over the interview cap" gap).
+  const categoryNames = (profile.categories ?? []).map(c => c.name).filter(Boolean);
   const tz = profile.user.timezone;
   const now = DateTime.now().setZone(tz);
   const today = now.toFormat('yyyy-MM-dd');
@@ -146,6 +150,7 @@ RULES:
 - When no TZ is given for a time, treat it as ${tz} (owner-local).
 - ISO format with offset, e.g. "2026-06-09T19:00:00+03:00" — never bare wall-clock.
 - If the message contains no specific slot proposals, return an empty list.
+${categoryNames.length > 0 ? `- Also set \`category\` to the meeting's TYPE when the message makes it clear — the single best match from: ${categoryNames.join(', ')}. E.g. an external candidate / "interview" / "candidate" → the interview category. Omit when the type is unclear or it's not one of these.` : ''}
 
 Output EXACTLY ONE call to normalize_instants.`;
 
@@ -172,6 +177,7 @@ Output EXACTLY ONE call to normalize_instants.`;
                 required: ['instant_iso'],
               },
             },
+            category: { type: 'string', description: 'The meeting TYPE if identifiable from the message, matching one of the owner\'s category names given above (e.g. "Interview"). Omit when unclear.' },
           },
           required: ['instants'],
         },
@@ -181,7 +187,7 @@ Output EXACTLY ONE call to normalize_instants.`;
     });
     logLlmUsage('availability_tz_normalize', 'claude-haiku-4-5-20251001', resp);
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const raw = toolUse?.input as { instants?: Array<{ instant_iso?: string; duration_minutes?: number; gap_query?: boolean }> } | undefined;
+    const raw = toolUse?.input as { instants?: Array<{ instant_iso?: string; duration_minutes?: number; gap_query?: boolean }>; category?: string } | undefined;
     const out: NormalizedInstant[] = [];
     for (const entry of raw?.instants ?? []) {
       if (typeof entry?.instant_iso !== 'string') continue;
@@ -196,12 +202,17 @@ Output EXACTLY ONE call to normalize_instants.`;
         ...(entry.gap_query === true ? { gap_query: true } : {}),
       });
     }
-    return out;
+    // Validate the category against the owner's real category names — a
+    // hallucinated one would silently misfire the cap. Unmatched → null.
+    const category = (typeof raw?.category === 'string' && categoryNames.includes(raw.category))
+      ? raw.category
+      : null;
+    return { instants: out, category };
   } catch (err) {
     logger.warn('availabilityPreCheck — Haiku normalize threw, falling back to regex', {
       err: String(err).slice(0, 200),
     });
-    return [];
+    return { instants: [], category: null };
   }
 }
 
@@ -285,11 +296,15 @@ export async function precheckAvailability(params: {
   // empty. Cost-bounded: one Haiku call, only on question-marked colleague
   // messages that contain a time pattern.
   let pairs: Pair[] = [];
+  // v3.7.x — category the normalizer inferred, threaded into checkSlot so the
+  // verdict enforces per-day/day-type category caps (matches the search).
+  let detectedCategory: string | null = null;
   {
     // The gate above already confirmed a schedulable signal (incl. a bare "?"
     // gap question with no time), so always let the language-agnostic Haiku
     // normalizer read it — it returns empty for non-availability messages.
-    const instants = await normalizeAvailabilityInstantsWithHaiku(params.message, params.profile, params.recentThread);
+    const { instants, category } = await normalizeAvailabilityInstantsWithHaiku(params.message, params.profile, params.recentThread);
+    detectedCategory = category;
     if (instants.length > 0) {
       const seen = new Set<string>();
       for (const inst of instants) {
@@ -364,6 +379,7 @@ export async function precheckAvailability(params: {
             searchTo: startDt.toISO()!,   // zero-width → engine checks a d-min meeting AT this start
             autoExpand: false,
             profile: params.profile,
+            ...(detectedCategory ? { category: detectedCategory } : {}),
           });
           if (slots.length > 0) { maxFit = d; break; }
         }
@@ -410,7 +426,7 @@ export async function precheckAvailability(params: {
         profile: params.profile,
         slotStartIso: startDt.toISO()!,
         slotEndIso: endDt.toISO()!,
-        category: null,
+        category: detectedCategory,   // enforce the SAME category cap the search does (was null → cap skipped)
         events,
       });
       if (check.passes) {
@@ -563,10 +579,28 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile): strin
     // protections) from hard (real meetings / work hours): a soft block is
     // "his day is loaded" + escalatable, not a flat refusal. Kinds are
     // checkSlot's RuleViolationKind values (verdicts run checkSlot now).
-    const SOFT: string[] = ['focus_time_floor', 'floating_block_overlap'];
-    const isSoft = !!v.rejection_reason && SOFT.includes(v.rejection_reason);
-    if (isSoft) {
-      return `  - ${when}: NOT CLEAN (soft) — his day is loaded around then, not a hard conflict. If the colleague INSISTS on this exact time, raise create_approval(kind=policy_exception) with it so he decides — don't refuse outright, don't book.`;
+    // v3.7.x — OWNER-OVERRIDABLE violations are escalatable, never a flat
+    // refuse. A colleague-proposed time that breaks one of these is the owner's
+    // call — route it to him via policy_exception, matching planMeeting (which
+    // offers alternatives then escalates). This is what makes the pre-check
+    // AGREE with the booking path: before, work-hours + category caps rendered
+    // as flat "NOT BOOKABLE" here while planMeeting escalated them — so a
+    // US-evening or over-cap proposal got refused upfront and never reached the
+    // owner's approval. Truly-hard states (owner genuinely busy, in the past)
+    // still fall through to NOT BOOKABLE.
+    const ESCALATABLE = new Set<string>([
+      'focus_time_floor', 'floating_block_overlap',
+      'outside_working_hours', 'category_per_day', 'category_per_week', 'category_day_type',
+    ]);
+    if (v.rejection_reason && ESCALATABLE.has(v.rejection_reason)) {
+      // High-level phrasing hint by kind — NEVER leak the rule name or the cap
+      // to a colleague (rule 7). All route to owner approval on insist.
+      const why = v.rejection_reason === 'outside_working_hours'
+        ? `that's outside ${ownerFirst}'s usual hours`
+        : v.rejection_reason.startsWith('category_')
+          ? `${ownerFirst} is already at his limit for that kind of meeting that day`
+          : `${ownerFirst}'s day is loaded around then`;
+      return `  - ${when}: NOT CLEAN — ${why}; NOT a hard conflict and it's ${ownerFirst}'s to override. Phrase it high-level to the colleague (never name the rule or the limit). If they INSIST on this exact time, raise create_approval(kind=policy_exception) so ${ownerFirst} decides — don't refuse outright, don't book.`;
     }
     return `  - ${when}: NOT BOOKABLE`;
   });
@@ -576,5 +610,5 @@ I pre-checked the times in this colleague's question against ${profile.user.name
 
 ${lines.join('\n')}
 
-If a slot is NOT BOOKABLE, say so honestly ("he's booked then" / "that doesn't work"). If it's NOT CLEAN (soft), say his day is too loaded around then — and if the colleague pushes for that exact time, escalate via create_approval(kind=policy_exception) instead of refusing. If it's BOOKABLE, you can confirm. The verdicts above are what \`find_available_slots\` would return — the same source of truth the actual booking flow uses, so your answer here will match what happens at booking time.`;
+If a slot is NOT BOOKABLE, say so honestly ("he's booked then" / "that doesn't work"). If it's NOT CLEAN, it breaks one of ${profile.user.name.split(' ')[0]}'s OWN rules (outside his usual hours, a per-day category limit, or his day-load protection) — it is HIS to override, so do NOT flatly refuse and do NOT book: use the high-level reason on that line, and if the colleague wants that exact time, escalate via create_approval(kind=policy_exception) so he decides. If it's BOOKABLE, you can confirm. These verdicts run the SAME checkSlot the booking flow uses (work hours, buffer, focus blocks, category limits) — so your answer here matches what happens at booking time; never eyeball get_calendar and disagree.`;
 }

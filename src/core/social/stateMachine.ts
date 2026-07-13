@@ -180,6 +180,20 @@ export function directiveForProactiveSlot(params: {
     const sinceMs = Date.now() - new Date(lastInit).getTime();
     if (sinceMs < ONE_DAY_MS) return withLegacyShape(noDirectiveRaw());
   }
+  // Per-person gate. The two checks above read social_subjects, which a
+  // `raise_new` coda never stamps (it has no subject row) — so a raise_new coda
+  // left the daily gate un-armed and fired on EVERY turn (owner got 3 codas in
+  // 8 min, 2026-07-13). `recordSocialMoment(person, 'maelle')` writes
+  // people_memory.last_initiated_at on every appended coda (continue AND
+  // raise_new) — it is literally the per-person 24h gate field — so read it here
+  // to make once-per-day hold regardless of mode.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getPersonMemory } = require('../../db') as typeof import('../../db');
+  const personLastInit = getPersonMemory(personSlackId)?.last_initiated_at;
+  if (personLastInit) {
+    const sinceMs = Date.now() - new Date(personLastInit).getTime();
+    if (sinceMs < ONE_DAY_MS) return withLegacyShape(noDirectiveRaw());
+  }
 
   // EC6: random over active categories; if <3 active, mix in a raise_new chance.
   const activeCategories = getActiveCategoryEngagementForPerson(personSlackId);

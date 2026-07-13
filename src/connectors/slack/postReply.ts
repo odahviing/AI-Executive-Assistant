@@ -374,6 +374,10 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   if (
     role === 'colleague' &&
     !isOwnerInGroup &&
+    // The owner clamped to colleague-context in a channel (v3.7.0) is not a real
+    // colleague — don't shadow him about his own conversation. (!isOwnerInGroup
+    // already handles the MPIM clamp; this closes the channel case.)
+    senderId !== profile.user.slack_user_id &&
     !result.requiresApproval &&
     cleanReply &&
     cleanReply.trim().length > 0

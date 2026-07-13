@@ -2,6 +2,30 @@
 
 ---
 
+## 3.7.1 — real-day bug wave: calendar-read crash, rule-bypass in availability, coda cadence, self-shadows, @mention mangling + auto-moves on the spine
+
+Bundles four chats from one real day. Fixes a `get_calendar` crash that surfaced as "trouble pulling up the calendar," a colleague availability pre-check that confirmed slots the search would reject (a rule bypass), the social coda firing on every turn instead of once a day, Maelle sending herself shadow receipts for her own actions in group DMs, and humanGate mangling valid @mentions. Plus: autonomous calendar auto-moves are now recorded on the requests-spine. Restart required.
+
+### Fixed — get_calendar crash on a missing date range (transport)
+- `toStartOfDayLocal`/`toEndOfDayLocal` are guarded via a shared `datePart(...)`: an undefined `start_date`/`end_date` used to `.split` undefined and throw, killing the entire calendar read (owner saw "trouble pulling up the calendar", 2026-07-13). A missing date now degrades to today, and the guard sits at the chokepoint so **every** `getCalendarEvents`/`getFreeBusy` caller is protected. Same-class guard added to `isoHasExplicitZone`. ([calendar.ts](src/connectors/graph/calendar.ts), [timezoneConvert.ts](src/utils/timezoneConvert.ts))
+
+### Fixed — availability pre-check bypassed the owner's rules (meeting)
+- The colleague availability pre-check now runs `checkSlot` with the **same** per-day/day-type category caps and work-hours the search enforces, and routes owner-overridable violations (work-hours, category caps) to owner approval (`policy_exception`) rather than confirming them outright or flat-refusing. Closes the gap where a colleague could propose an off-hours / over-cap slot the search rejected and get it confirmed and booked without the owner's call. ([availabilityPreCheck.ts](src/utils/availabilityPreCheck.ts))
+
+### Fixed — social coda fired on every turn (social)
+- The once-per-day-per-person gate now reads `people_memory.last_initiated_at` (written on every coda, including `raise_new`) instead of only `social_subjects` — a `raise_new` coda stamped no subject row, so the gate never armed and a coda appended on every owner turn (3 in 8 minutes, 2026-07-13). ([stateMachine.ts](src/core/social/stateMachine.ts))
+
+### Fixed — self-shadow in group DMs / channels (transport)
+- Colleague-path shadow notices (booking, reschedule, inbound-conversation) skip when the "colleague" is actually the owner clamped to colleague-context in an MPIM/channel — no more "Idan confirmed slot in DM — booked…" receipt sent to the owner for his own action. Genuine colleague shadows are unchanged. ([ops.ts](src/skills/meetings/ops.ts), [postReply.ts](src/connectors/slack/postReply.ts))
+
+### Fixed — humanGate mangled valid @mentions (guard)
+- humanGate now distinguishes a proper `<@U…>` mention (valid Slack addressing — kept) from a raw unwrapped id (a leak — stripped), ending the strip-vs-preserve retry churn; and on the owner path, when a rewrite keeps dropping a load-bearing token it ships the **original** (no colleague-facing leak to contain there) instead of a corrupted rewrite. ([humanGate.ts](src/utils/humanGate.ts))
+
+### Added — autonomous auto-moves recorded on the requests-spine (calendar)
+- When active-mode calendar-health auto-moves a meeting to clear a clash, it records the action as a `follow_up`/`auto_move` request — the intent before executing, resolved after with who was notified. A first-class spine entry (and the substrate for a deterministic "revert"). Best-effort so it never blocks the move; stays out of the resolver / approvals block / close-loop scanner; self-expires. ([calendarHealth.ts](src/skills/calendarHealth.ts))
+
+---
+
 ## 3.7.0 — channels get files + a privacy clamp, restarts respond instantly, availability answers the real free length
 
 Three chats bundled. Maelle can now read documents and images @mentioned to her in a channel (she was deaf to them before), and in a channel she runs with colleague-level tools + privacy even when the owner is the one asking, so nothing private lands in a shared space. Separately, a restart no longer leaves her unresponsive for ~1-2 minutes — the Slack socket opens in ~1s and the missed-message catch-up moved to the background. Plus a meeting-planner accuracy pass. Restart required.

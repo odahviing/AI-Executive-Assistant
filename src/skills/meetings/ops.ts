@@ -3601,7 +3601,10 @@ export class SchedulingSkill {
           // move_meeting shadow on inbound reschedule. Threaded under the
           // colleague conversation key so all shadows from this thread group
           // together in the owner's DM.
-          if (context.senderRole === 'colleague') {
+          // Skip when the "colleague" is really the OWNER clamped to colleague-
+          // context in an MPIM/channel: he booked it himself and was right there,
+          // so a self-shadow ("Idan confirmed slot in DM — booked…") is nonsense.
+          if (context.senderRole === 'colleague' && context.userId !== context.profile.user.slack_user_id) {
             try {
               const { shadowNotify } = await import('../../utils/shadowNotify');
               const { getPersonMemory } = await import('../../db');
@@ -4964,7 +4967,9 @@ export class SchedulingSkill {
         // sees the move happen even when he wasn't in the approval loop.
         // v2.3.2 — threaded under the colleague conversation key so all
         // shadows from this thread group together in the owner's DM.
-        if (context.senderRole === 'colleague') {
+        // Skip the OWNER clamped to colleague-context in an MPIM/channel — he
+        // moved it himself and was present; no self-shadow.
+        if (context.senderRole === 'colleague' && context.userId !== context.profile.user.slack_user_id) {
           try {
             const { shadowNotify } = await import('../../utils/shadowNotify');
             const { getPersonMemory } = await import('../../db');
