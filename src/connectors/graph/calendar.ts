@@ -744,20 +744,12 @@ export async function findAvailableSlots(params: {
        */
       blocked_by?: Array<{ email: string; slots_blocked: number }>;
     }>;
-    // v3.3 — Working Elsewhere summary for the window. `resolved` days carry
-    // tentative slots (already in the returned array, tagged); `unresolved`
-    // days had a marker whose location couldn't be resolved to a timezone —
-    // the caller must ASK the owner, never offer home-TZ slots for them.
-    workingElsewhere?: {
-      resolved: Array<{ date: string; away_tz: string; location: string }>;
-      unresolved: Array<{ date: string; location: string }>;
-    };
     // v3.3.7 (#124h) — attendee addresses Graph could not resolve to a mailbox
     // (their "busy" was empty by nonexistence, not by freedom). Owner email
     // excluded. Caller decides how to warn (ops.ts flags owner-domain ones).
     unresolvedAttendees?: string[];
   };
-}): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }>> {
+}): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
   const maxSearchDays = params.maxSearchDays ?? 21;
@@ -792,7 +784,7 @@ export async function findAvailableSlots(params: {
   const absoluteCap = initialFrom.plus({ days: maxSearchDays });
   let currentTo = initialTo;
 
-  let candidates: Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; tentative_working_elsewhere?: boolean; away_tz?: string; away_location?: string; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }> = [];
+  let candidates: Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }> = [];
 
   while (true) {
     candidates = [];
@@ -826,10 +818,12 @@ export async function findAvailableSlots(params: {
     for (const [emailKey, slots] of Object.entries(busyMap)) {
       const email = emailKey.toLowerCase();
       for (const slot of slots) {
-        // 'workingElsewhere' is NOT a hard block. All-day WE = travel (handled
-        // by the WE spine; those days are skipped in the walk). Timed WE = a
+        // 'workingElsewhere' is NOT a hard block. A timed WE event is a
         // soft/optional-join event (v3.6.4) — collected into `softOccupied`
         // below (with its subject) and avoided-if-possible, never hard-blocked.
+        // An all-day WE status simply isn't busy; the owner's own away days now
+        // come from the per-date schedule override (#143) and are walked
+        // normally with that day's effective windows + tz.
         if (slot.status !== 'free' && slot.status !== 'workingElsewhere') {
           allBusy.push({
             start: DateTime.fromISO(slot.start).toJSDate(),
@@ -899,6 +893,10 @@ export async function findAvailableSlots(params: {
     // match this file's idiom and sidestep the type-only cycle with scheduleRules.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { checkSlot } = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
+    // v3.7.x (#143) — the per-date effective work context, so the walker gates +
+    // hours + tz come from the SAME accessor checkSlot validates against.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getEffectiveWorkDayForInstant: getEffectiveWorkDayForInstantCal } = require('../../utils/workHours') as typeof import('../../utils/workHours');
     const floatingBlocks = profile ? fb.getFloatingBlocks(profile) : [];
     // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
 
@@ -959,10 +957,11 @@ export async function findAvailableSlots(params: {
         if (!evt.isAllDay) continue;
         if (evt.isCancelled) continue;
         if (evt.showAs === 'free') continue;  // PTO marked free / WFH "available" / etc
-        // v3.3 — an all-day Working Elsewhere marker is NOT a block. The owner
-        // is working, just somewhere else; that day is handled by the separate
-        // tentative-availability path (the main walk skips it, and WE slots are
-        // appended after). Leaving it out of allBusy keeps the day open.
+        // an all-day Working Elsewhere marker is NOT a block. The owner is
+        // working, just somewhere else — leaving it out of allBusy keeps the day
+        // open so the walk offers that day's effective windows. The owner's own
+        // away days now come from the per-date schedule override (#143); there
+        // is no separate tentative-availability path.
         if (evt.showAs === 'workingElsewhere') continue;
         // All-day busy / oof / tentative → full-day block.
         // Graph all-day events span midnight-to-midnight in their declared zone;
@@ -992,18 +991,10 @@ export async function findAvailableSlots(params: {
       softOccupied.push({ start: s.toMillis(), end: e.toMillis(), subject: (evt.subject ?? '').trim() || 'an optional meeting' });
     }
 
-    // v3.3 — Working Elsewhere detection. ALL-DAY workingElsewhere markers
-    // flag days where the owner's rule layer is unreliable (different place +
-    // timezone). Empty map (the common case — no marker) → every WE branch
-    // below is a no-op and behavior is identical to pre-v3.3.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const we = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
-    // v3.5.x (WE spine) — DUAL-SOURCE: merge the all-day marker AND the travel
-    // record (clamped to the search window), so search sees a trip the same way
-    // the booking path does. Marker-only detection made a record-backed trip
-    // (no marker) invisible to search → home-tz slots offered → the Alliance
-    // day-rollover. weDays still empty when truly home → every WE branch no-ops.
-    const weDays = profile ? we.detectOwnerAwayDaysInWindow(ownerEventsForFb, params.timezone, profile.user.slack_user_id, params.searchFrom, params.searchTo) : new Map<string, import('../../utils/workingElsewhere').WorkingElsewhereDay>();
+    // v3.7.x (#143) — no all-day WE detection in search. An away day is a
+    // per-date override (explicit tz + stated hours) resolved per-day by
+    // getEffectiveWorkDay in the walk below, so it is walked like any other day in
+    // its own zone. No marker/record away-day set, no separate tentative path.
 
     // v2.1 — remove floating-block time ranges from the base busy pool.
     // Without this, the isFree collision check below would reject any
@@ -1147,24 +1138,19 @@ export async function findAvailableSlots(params: {
     // a slot is valid if it falls within any one of them. Splits on the
     // yaml `schedule.work_hours[dayName]` if defined; otherwise falls back
     // to legacy office_days/home_days hours.
-    const getWorkHoursForDay = (dayName: string): Array<{ startMin: number; endMin: number }> => {
+    const getWorkHoursForDay = (eff: import('../../utils/workHours').EffectiveWorkDay | null): Array<{ startMin: number; endMin: number }> => {
       const widened = {
         startMin: defaultStartHour * 60 + defaultStartMin,
         endMin: defaultEndHour * 60 + defaultEndMin,
       };
-      if (!profile) return [widened];
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getOwnerWorkHoursForDay } = require('../../utils/workHours') as
-        typeof import('../../utils/workHours');
-      const native = getOwnerWorkHoursForDay(profile, dayName);
-      // `relaxed` / `extendedHours` override path: UNION the widened
-      // default window with the day's native work_hours instead of
-      // collapsing to the single widened window. Pre-fix the override
-      // dropped multi-window days entirely — on a night-shift Tuesday
-      // (`["09:00-15:30","21:30-23:59"]`) a 22:30 candidate was rejected
-      // as outside hours when relaxed=true, the opposite of override's
-      // intent. Union preserves split-shift windows + adds widened
-      // coverage outside them.
+      if (!profile || !eff) return [widened];
+      // v3.7.x (#143) — native windows come from the effective day (yaml base +
+      // per-date override), so the walker sees a per-date hours/away override
+      // exactly as checkSlot validates it. `relaxed` / `extendedHours` still
+      // UNION the widened default window with the day's native work_hours instead
+      // of collapsing to the single widened window (owner "show me everything"),
+      // preserving split-shift windows + adding widened coverage outside them.
+      const native = eff.windows;
       if (params.extendedHours || params.relaxed) {
         return mergeRanges([widened, ...native]);
       }
@@ -1265,25 +1251,32 @@ export async function findAvailableSlots(params: {
       const cursorDt = DateTime.fromJSDate(cursor).setZone(params.timezone);
       const dayName = cursorDt.toFormat('EEEE');
       const dayKey = cursorDt.toFormat('yyyy-MM-dd');
+      // v3.7.x (#143) — the day's effective work context (yaml + per-date override).
+      const effectiveDay = profile ? getEffectiveWorkDayForInstantCal(cursorDt.toISO()!, profile) : null;
+      // Day type from the effective location (an override can flip office↔home or
+      // mark an away day), else the yaml classifier for the no-profile path.
+      const dayType: 'office' | 'home' | 'other' = effectiveDay
+        ? (effectiveDay.location === 'office' ? 'office' : effectiveDay.location === 'home' ? 'home' : 'other')
+        : classifyDay(dayName);
 
-      // v3.3 — Working Elsewhere days are NOT walked with the normal rule
-      // engine (his office/home/work-hours/floor are unreliable while away).
-      // They're handled by the tentative away-TZ path appended after the walk.
-      if (weDays.size > 0 && weDays.has(dayKey)) {
+      // Workday gate. effectiveDay folds in per-date off/on overrides (profile
+      // path); no-profile falls back to the yaml/meetingMode day-name set. No
+      // override → byte-identical to the old name gate.
+      const dayIsWorkday = effectiveDay ? effectiveDay.isWorkday : workDays.includes(dayName);
+      if (!dayIsWorkday) {
         cursor = new Date(cursor.getTime() + step);
         continue;
       }
-
-      if (!workDays.includes(dayName)) {
-        // meetingMode excluded this workweek day (e.g. home day, mode='in_person').
-        // Pure off-workweek days (Fri/Sat) skip silently.
+      // meetingMode: in-person requires an office-type day; a home / away day in
+      // in_person mode is a wrong-day-type exclusion (narrated in day_summary).
+      if (effectiveDay && meetingMode === 'in_person' && dayType !== 'office') {
         if (allWorkweekDays.includes(dayName) && !dayReasons.has(dayKey)) {
           dayReasons.set(dayKey, new Map([['wrong_day_type', 1]]));
         }
         cursor = new Date(cursor.getTime() + step);
         continue;
       }
-      const dayHours = getWorkHoursForDay(dayName);
+      const dayHours = getWorkHoursForDay(effectiveDay);
       const slotEnd = new Date(cursor.getTime() + durationMs);
       const cursorLocal = cursorDt;
       const slotEndLocal = DateTime.fromJSDate(slotEnd).setZone(params.timezone);
@@ -1411,12 +1404,43 @@ export async function findAvailableSlots(params: {
           events: ownerEventsForFb,
           excludeEventIds: params.excludeEventIds,
           allowRelaxed: params.relaxed,
-          workHourWindowsOverride: dayHours,
+          // v3.7.x (#143) — the SAME effective day the walker gated on, so search
+          // and book evaluate work-hours / floor in the same windows + timezone.
+          effectiveDay: effectiveDay ?? undefined,
         });
         if (!verdict.passes) {
-          trackReject(mapVerdictToRejectLabel(verdict.violation_kind, classifyDay(dayName)), cursorDt.toISO()!);
+          trackReject(mapVerdictToRejectLabel(verdict.violation_kind, dayType), cursorDt.toISO()!);
           cursor = new Date(cursor.getTime() + step);
           continue;
+        }
+        // v3.7.2 (#142d) — PROPOSALS never offer a slot where the owner is
+        // committed to an EXTERNAL meeting, even under relaxed. `relaxed` lets the
+        // owner bypass his own SOFT rules in the SEARCH; an external commitment is
+        // not soft and is never a real "option" — surfacing a 13:00 slot the owner
+        // had an external attorney meeting on, then booking it, was the 2026-07-14
+        // break. checkSlot drops ALL owner-busy when NOT relaxed, so this only
+        // bites the relaxed pass. INTERNAL double-book stays offerable (the owner's
+        // call); only EXTERNAL is hard-excluded from proposals. He can still
+        // DIRECTLY book over it via create_meeting — a separate chain, owner-only,
+        // deliberately untouched here.
+        if (params.relaxed) {
+          const ownerDomain = ownerEmailLower.includes('@') ? ownerEmailLower.split('@')[1] : '';
+          const overlapsExternalOwnerMtg = ownerDomain !== '' && (ownerEventsForFb ?? []).some(ev => {
+            if (ev.isCancelled) return false;
+            if ((ev as any).showAs === 'free') return false;
+            if (!(ev as any).isAllDay && (ev as any).showAs === 'workingElsewhere') return false;
+            const evS = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
+            const evE = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
+            if (!evS.isValid || !evE.isValid) return false;
+            if (!(evS.toMillis() < slotEnd.getTime() && evE.toMillis() > cursor.getTime())) return false;
+            const addrs = [ev.organizer?.emailAddress?.address, ...(ev.attendees ?? []).map(a => a.emailAddress?.address)];
+            return addrs.some(a => { const e = (a ?? '').toLowerCase().trim(); return e.includes('@') && !e.endsWith('@' + ownerDomain); });
+          });
+          if (overlapsExternalOwnerMtg) {
+            trackReject('owner_busy_collision', cursorDt.toISO()!);
+            cursor = new Date(cursor.getTime() + step);
+            continue;
+          }
         }
       } else {
         // No-profile fallback (degenerate callers with no UserProfile): only
@@ -1455,7 +1479,7 @@ export async function findAvailableSlots(params: {
       dayBuckets.get(dayKey)!.push({
         start: cursorLocal.toISO()!,   // local-zoned ISO with explicit offset (v2.4.2)
         end: slotEndLocal.toISO()!,
-        day_type: classifyDay(dayName),
+        day_type: dayType,
         disturbs_floating_block: disturbsBlock,
         ...(softHit ? { over_optional: softHit.subject } : {}),
         ...(attendeeConflicts.length ? { attendee_conflicts: attendeeConflicts } : {}),
@@ -1494,65 +1518,10 @@ export async function findAvailableSlots(params: {
       candidates.push(...picked);
     }
 
-    // v3.3 — Working Elsewhere tentative availability. For each WE day in the
-    // window, resolve the away-TZ from the marker's location (cached; off the
-    // hot loop), compute busy-aware open gaps in the away-TZ daytime band, tag
-    // them tentative, and append. Unresolvable locations are surfaced so the
-    // caller asks the owner — NEVER silently offered in his home TZ.
-    if (weDays.size > 0 && profile) {
-      const winFromDate = DateTime.fromISO(windowFrom, { zone: params.timezone }).toFormat('yyyy-MM-dd');
-      const winToDate = DateTime.fromISO(windowTo, { zone: params.timezone }).toFormat('yyyy-MM-dd');
-      // WE offer window (which weekdays + the hour band) for THIS search layer:
-      // regular (colleague / normal) vs the owner-override `relaxed` net. Config-
-      // driven (profile.meetings.working_elsewhere), trip-tz, work-week fallback.
-      const weWin = we.getWeWindow(profile, params.relaxed === true);
-      const weResolved: Array<{ date: string; away_tz: string; location: string }> = [];
-      const weUnresolved: Array<{ date: string; location: string }> = [];
-      for (const [dateIso, info] of weDays) {
-        if (dateIso < winFromDate || dateIso > winToDate) continue;
-        // WE day-of-week scope — offer only the configured weekdays (e.g. regular
-        // Mon–Fri, relaxed Sun–Fri). A calendar date's weekday is tz-stable.
-        const weDayName = DateTime.fromISO(dateIso, { zone: params.timezone }).toFormat('EEEE');
-        if (!weWin.days.has(weDayName)) continue;
-        const awayTz = await we.resolveWorkingElsewhereTz(info.location);
-        if (!awayTz) {
-          weUnresolved.push({ date: dateIso, location: info.location });
-          continue;
-        }
-        // Real meetings on this day = owner's timed (non-all-day) events.
-        const dayBusy = ownerEventsForFb
-          .filter(e => !e.isAllDay && !e.isCancelled && e.showAs !== 'free')
-          .map(e => ({
-            start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' }).toJSDate(),
-            end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'utc' }).toJSDate(),
-          }))
-          .filter(b => {
-            const bDay = DateTime.fromJSDate(b.start).setZone(params.timezone).toFormat('yyyy-MM-dd');
-            return bDay === dateIso;
-          });
-        const weSlots = we.computeTentativeWeSlots({
-          date: dateIso,
-          awayTz,
-          awayLocation: info.location,
-          ownerTz: params.timezone,
-          durationMinutes: params.durationMinutes,
-          allBusy: dayBusy,
-          earliestAllowedMs: earliestAllowed.getTime(),
-          dayStartHour: weWin.startHour,
-          dayStartMin: weWin.startMin,
-          dayEndHour: weWin.endHour,
-          dayEndMin: weWin.endMin,
-        });
-        candidates.push(...weSlots);
-        weResolved.push({ date: dateIso, away_tz: awayTz, location: info.location });
-      }
-      if (params.diagnosticsOut && (weResolved.length > 0 || weUnresolved.length > 0)) {
-        params.diagnosticsOut.workingElsewhere = {
-          resolved: weResolved,
-          unresolved: weUnresolved,
-        };
-      }
-    }
+    // v3.7.x (#143) — the WE tentative away-TZ path is GONE. An away day is a
+    // per-date override (explicit tz + stated hours); it is walked by the normal
+    // loop above with its effectiveDay, so its slots are real (not tentative) and
+    // computed in the away tz via checkSlot. No separate marker/offer-band path.
 
     // v2.3.6 (#71a) — diagnostic log for rejection reasons. When a slot
     // search returns fewer slots than expected (or zero), this log line

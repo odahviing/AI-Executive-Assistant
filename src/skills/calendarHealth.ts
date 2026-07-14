@@ -16,6 +16,7 @@ import logger from '../utils/logger';
 import { displaySubject } from '../utils/displaySubject';
 import { formatSkillPreferencesBlock } from '../utils/skillPreferences';
 import type { PreferPosition, AnchorEvent } from '../utils/floatingBlocks';
+import { getEffectiveWorkDay } from '../utils/workHours';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -629,10 +630,13 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
           //      owner's life, not work-tracking territory)
           // v2.8.1 — multi-window aware. workStart = earliest window start,
           // workEnd = latest window end on this day.
+          // v3.7.x (#143) — hours from the date's effective work day so an
+          // override (custom hours / day off) shapes the issue-detection
+          // bounding box + its TEXT, not raw weekday yaml.
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getOwnerWorkHoursForDay: _getWH, formatMinuteOfDay: _fmtMin } = require('../utils/workHours') as
+          const { getEffectiveWorkDay: _getEff, formatMinuteOfDay: _fmtMin } = require('../utils/workHours') as
             typeof import('../utils/workHours');
-          const wins = _getWH(profile, dayName);
+          const wins = _getEff(dayStr, profile).windows;
           const dayHoursStart = wins.length > 0
             ? _fmtMin(wins[0].startMin)
             : '09:00';
@@ -814,10 +818,13 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
             // counted as "free", producing the impossible "0 free time +
             // 110-min gap" narration on 2026-05-19. The fix walks each
             // window separately and aggregates.
+            // v3.7.x (#143) — windows from the date's effective work day so an
+            // override (custom hours / day off) drives the busy-day free-time
+            // math, not raw weekday yaml.
             // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { getOwnerWorkHoursForDay, totalWorkMinutes } = require('../utils/workHours') as
+            const { getEffectiveWorkDay, totalWorkMinutes } = require('../utils/workHours') as
               typeof import('../utils/workHours');
-            const windows = getOwnerWorkHoursForDay(profile, dayName);
+            const windows = getEffectiveWorkDay(dayStr, profile).windows;
             const fallbackWindows = windows.length > 0
               ? windows
               : [{ startMin: 9 * 60, endMin: 18 * 60 }];
@@ -996,22 +1003,15 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
           logger.info('Calendar health: active mode — running fix loop', {
             ownerUserId, startDate, endDate, issueCount: issues.length,
           });
-          // v3.3 — Working Elsewhere days: the owner's rule layer is unreliable
-          // (different place + timezone), so DON'T auto-fix on them (no auto-add
-          // lunch in the wrong timezone, no auto-resolve). Detection off the
-          // already-fetched events; empty set → no-op (normal behavior).
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const weMod = require('../utils/workingElsewhere') as typeof import('../utils/workingElsewhere');
-          // #WE-spine — DUAL-SOURCE (marker + travel record), the SAME away-day
-          // set the slot finder / planMeeting use. Marker-only here meant a
-          // record-backed trip (no all-day marker) was NOT suppressed, so active
-          // mode would auto-book lunch / floating blocks (and auto-resolve) on a
-          // travel day in the WRONG timezone — the exact harm WE-mode prevents.
-          const weActiveDays = weMod.detectOwnerAwayDaysInWindow(events, timezone, ownerUserId, startDate, endDate);
+          // v3.7.x (#143) — DON'T auto-fix on a per-date override day (day off,
+          // custom hours, office/home flip, or a travel/away day). The override
+          // reshapes the day, so auto-adding lunch or auto-resolving on it is
+          // exactly the harm the old WE suppressor prevented — now generalized to
+          // EVERY override (no floating blocks on ANY override day, owner rule).
           for (const issue of issues) {
             try {
-              if (weActiveDays.size > 0 && weActiveDays.has(issue.date)) {
-                logger.info('Calendar health: skipping auto-fix on working-elsewhere day', {
+              if (getEffectiveWorkDay(issue.date, profile).hasOverride) {
+                logger.info('Calendar health: skipping auto-fix on schedule-override day', {
                   date: issue.date, type: issue.type,
                 });
                 continue;
@@ -1680,6 +1680,18 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
 
         const blockLabel = block.default_subject ?? (block.name.charAt(0).toUpperCase() + block.name.slice(1).replace(/_/g, ' '));
         const dayName = DateTime.fromISO(date, { zone: timezone }).toFormat('EEEE');
+
+        // v3.7.x (#143) — no floating blocks on ANY per-date override day (day
+        // off, custom hours, office/home flip, or a travel day). The override
+        // reshapes the day; lunch/gym/focus don't auto-slot onto it. Clear the
+        // override to restore them. Covers both the active-mode auto-book and an
+        // explicit owner request.
+        if (getEffectiveWorkDay(date, profile).hasOverride) {
+          return {
+            error: 'override_day',
+            message: `${date} has a schedule override, so I don't book ${blockLabel} that day. Clear the override for that date if you want your floating blocks back.`,
+          };
+        }
 
         // Owner-override path — owner explicitly directs an out-of-window
         // (or off-schedule-day) booking. The flag IS the approval; the same

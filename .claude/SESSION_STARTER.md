@@ -1,6 +1,6 @@
 # Maelle session context
 
-Working on Maelle at `E:/Code/Maelle`. **Current version: v3.7.1** — `package.json` is the source of truth; the boot log stamps `version` + `gitSha`, confirm it matches HEAD after any restart.
+Working on Maelle at `E:/Code/Maelle`. **Current version: v3.7.3** — `package.json` is the source of truth; the boot log stamps `version` + `gitSha`, confirm it matches HEAD after any restart.
 
 ## This chat = FEATURES **and** BUGS
 
@@ -31,10 +31,12 @@ Routing rule of thumb: honesty/leak → guard · narration/tone/tool-wording/yam
 ## Open / deferred
 
 - **Channel document attachment — SHIPPED 3.7.0.** A channel @mention carrying a document (PDF/txt/md) or image is now read: extracted on the `app_mention` path, gated on owner-presence (owner's own file always; a colleague's file only in a thread the owner has posted in, fail-closed otherwise), documents folded into the directive as framed do-not-follow-instructions reference material, images through the existing injection guard (owner proceeds, suspicious colleague image dropped). Scoping call resolved: **owner + present-colleague**; **PDF + images** (audio in channels out of scope). Shared PDF-parse / image-scan cores now used by both the DM and channel paths. Watch live (below). See CHANGELOG 3.7.0.
-- **Auto-move REVERT tool — NOT built (Part B).** 3.7.1 landed the spine RECORD (a `follow_up`/`auto_move` request written when active-mode calendar-health auto-moves a meeting — intent before execute, resolved after with `notified_slack_ids`, in `outcome_json` + `outcome_external_event_id`). What's missing is the tool that CONSUMES it: `db/requests.ts` `getRevertibleAutoMove(owner)` (most-recent resolved auto_move ≤12h, no `reverted_at`); a **owner-only** `revert_last_auto_move` tool in `meetings.ts` getTools; an `ops.ts` handler (read record → verify meeting still at `new_start` → `updateMeeting` back to `original_start/end` → re-notify `notified_slack_ids` → stamp `reverted_at`). Deterministic, sidesteps the close-loop scanner (record is resolved/terminal). Design locked; calendar/approval territory.
+- **Auto-move REVERT tool — SHIPPED 3.7.2.** `revert_last_auto_move` (owner-only) undoes the last active-mode auto-move ≤12h + re-notifies + writes a terminal `dismissed` overlap row; paired with dismissal memory (the double_booking detector skips a pair the owner dismissed OR auto-moved in the last 12h). "If I said no, it's no." See CHANGELOG 3.7.2.
+- **Work-time overrides + WE-spine deletion — SHIPPED 3.7.3 (#143).** Per-date `owner_schedule_overrides` (yaml default → date-row wins → fail-safe) via `getEffectiveWorkDay` / `getEffectiveWorkDayForInstant`; owner-only `set_work_schedule_override` / `get_work_schedule_overrides`; away days (row with an explicit tz) book DIRECTLY in that zone (no relax/confirm), tz resolved per-instant (far-west/east midnight-crossing correct). The **full-day WE travel-marker spine is DELETED** (`weConfirmStash`, `we_acknowledged`, `detectWorkingElsewhereDays`, `getWeWindow`, `computeTentativeWeSlots`, `resolveWorkingElsewhereTz`); `weTimeResolver` dual-clock + the timed optional-join WE event KEPT. Full map: `.claude/143_BUILD_SPEC.md`; memory `project_we_timezone_spine.md` (rewritten).
+- **GitHub bugs #137–#142 — fixed + shipped (3.7.2/3.7.3) but still OPEN on GitHub.** Close them with a fixed-in-SHA comment when convenient (owner never auto-closes without a nod).
 - **Stale memory:** `project_architecture.md` still describes the coord state machine as live — coord was removed in 3.5.0. Trim when next touched.
 
-## Recent arc — 3.6.0 → 3.7.1 (CHANGELOG.md is canonical; memory holds architecture)
+## Recent arc — 3.6.0 → 3.7.3 (CHANGELOG.md is canonical; memory holds architecture)
 
 - **3.6.0** — Working-Elsewhere **timezone spine**: one resolver (`weTimeResolver.ts`), one renderer, the model conveys the named zone. Memory: `project_we_timezone_spine.md`.
 - **3.6.1** — review accuracy (free-time boundary, category limits in the interactive review) + **one free-time source of truth** (length-based floor, `requiredFreeMinutesForWorkDay`) + slot narration + create-vs-move guard.
@@ -44,6 +46,8 @@ Routing rule of thumb: honesty/leak → guard · narration/tone/tool-wording/yam
 - **3.6.5** — **optional-join meetings**: a **timed** `workingElsewhere` event is a "join if free" soft tier (visible, bookable-over, offered only when clean slots fall short, health treats it as reclaimable free time — split from the travel marker by `isAllDay`); + `dateVerifier` **uniform day-shift guard** (the 2026-07-11 Sun→Mon rundown); + quieter socket-mode logs.
 - **3.7.0** — **channels get files + a privacy clamp** (a channel @mention reads PDF/image attachments, gated on owner-presence; owner is colleague-clamped in channels so private calendar/owner-only data never leaks into a shared space) + **instant restart** (socket opens ~1s instead of ~40s — catch-up moved off the boot-blocking path to a parallelized background scan, dedup via the shared atomic `markProcessed` claim) + **availability pre-check** is language-neutral (structural `?`/TZ/time gate, no per-language regex) and answers "how much is free there?" with the real largest-bookable length (meeting chat).
 - **3.7.1** — real-day bug wave (4 chats): `get_calendar` crash guard (undefined date → `.split` throw → "trouble pulling up the calendar"; fixed at the `datePart` chokepoint) + **availability pre-check now enforces the SAME category-cap/work-hours rules as the search** and escalates owner-overridable violations to approval (closes the colleague rule-bypass) + **coda once-per-day** actually holds (gate reads `people_memory.last_initiated_at`, covers `raise_new`) + colleague-path **self-shadow** suppressed when the actor is the owner-clamped-in-MPIM/channel + humanGate keeps valid `<@…>` mentions (owner path ships the original over a corrupted rewrite) + **autonomous auto-moves recorded on the requests-spine** (`follow_up`/`auto_move`, intent-before-execute → resolved; substrate for a deterministic revert — the revert TOOL itself is NOT built yet).
+- **3.7.2** — real-day bug wave II (4 chats): approval bare-"yes" cross-thread misbind gated + policy_exception jargon / self-contradiction fixed; auto-fix **dismissal memory** + owner-only **`revert_last_auto_move`**; **requester-aware colleague move/cancel** (`getMeetingsRequestedBy`) with a no-leak decline; slot offered-exclusion gating + duration search=book; **`getFreeBusy` short-window interval** root fix (the deterministic Graph 400 behind #137).
+- **3.7.3** — **work-time overrides replace the full-day WE spine (#143)**: per-date `owner_schedule_overrides` drive every work-hours consumer via `getEffectiveWorkDay` / `getEffectiveWorkDayForInstant`; away days book directly in their stated tz (tz resolved per-instant → far-west/east midnight-crossing correct); the full-day WE marker spine is deleted (`weTimeResolver` dual-clock + timed optional-join WE kept); + bundled approval-honesty fixes (daily-thread bare-"yes" binding, a hard double-book NAMED in the ask).
 
 ## Watch live (first real use)
 
@@ -53,12 +57,14 @@ Routing rule of thumb: honesty/leak → guard · narration/tone/tool-wording/yam
 - **Channel files (3.7.0)** — @mention Maelle in a channel with a PDF/image: she should read + act on it (owner always; a colleague only in a thread you're in). Confirm the injection guard drops a suspicious colleague image.
 - **Channel clamp (3.7.0)** — @mention her in a channel yourself: she should stay colleague-limited (no `get_free_busy`, no private-calendar narration) even though you're the owner.
 - **Restart latency (3.7.0)** — after `npm run deploy`, `Assistant online` should land right after `Database ready` (was ~40s later); first reply in seconds, and missed-DM catch-up still lands (in the background).
+- **Revert auto-move (3.7.2)** — after an active-mode auto-move, "put it back / revert that" restores the original time, re-notifies, and does NOT re-move on the next sweep.
+- **Work-time overrides (3.7.3, #143)** — "next week I'm in Boston 9-5 EST" / "working Monday night" / "off Tuesday" / "office Wednesday" → search + checkSlot + free/busy all follow it; a Boston day books directly in EST with a dual-clock; "what are my overrides?" lists them. Watch timezone correctness first (far-west/east midnight crossings).
 
 ## Operational
 
 - **Restart to load code:** `npm run deploy` (build → `pm2 restart maelle` → tail). Single PM2-fork process. Boot stamp prints version + gitSha.
 - **Exactly ONE Slack socket** — two Maelle processes on the same app → Slack `server explicit disconnect` (too_many_connections). Never run local + another at once (critical for the GCP cutover).
-- **GitHub:** bugs flow through chat / the spawned-task chip; **never** `gh issue create` without an explicit "file it." Open Bug list is currently empty.
+- **GitHub:** bugs flow through chat / the spawned-task chip; **never** `gh issue create` without an explicit "file it." Bug issues **#137–#142 are fixed + shipped (3.7.2 / 3.7.3) but still OPEN** — close with a fixed-in-SHA comment when convenient.
 - **Typecheck** (from the main repo, not a worktree): `npx tsc --noEmit -p E:/Code/Maelle/tsconfig.json`.
 
 Read at session start: memory `project_architecture.md`, `project_overview.md`, `project_we_timezone_spine.md`, `project_gcp_migration.md`, and the `feedback_*` memories (auto-load via `MEMORY.md`).

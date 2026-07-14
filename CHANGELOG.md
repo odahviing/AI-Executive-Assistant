@@ -2,6 +2,29 @@
 
 ---
 
+## 3.7.3 — chat-driven work-time overrides replace the full-day Working-Elsewhere spine
+
+The owner can now tell Maelle his schedule for a specific date — "next week I'm in Boston, 9-5 EST", "working Monday night", "off Tuesday", "from the office Wednesday" — and every scheduling surface follows it. This replaces the old all-day Working-Elsewhere travel-marker spine (which relaxed the rules and forced a trip-time confirm) with ONE per-date override record: YAML is the default, a date's override wins, no override = YAML (fail-safe). An away override with a stated timezone is now a normal, fully-validated work day in that zone that books DIRECTLY (no forced approval), dual-clock preserved. Bundles two approval-honesty fixes from a parallel chat (the "Keren double-approve"). Restart required; the new table auto-creates on boot.
+
+### Added — per-date work-schedule overrides (#143)
+- New `owner_schedule_overrides` table (per owner+date: is_workday / windows / location / timezone) + `db/scheduleOverrides.ts`, and ONE accessor pair — `getEffectiveWorkDay(date)` / `getEffectiveWorkDayForInstant(instant)` — that overlays a per-column override on the yaml base and fails safe to yaml. Every work-hours consumer now routes through it (slot search, `checkSlot` work-hours + off-day + focus-floor + category day_type, `resolveLocation`, the `get_free_busy` / `analyze_calendar` day blocks, the brief's outside-hours check), so search and validate can never disagree on a date. ([workHours.ts](src/utils/workHours.ts), [scheduleOverrides.ts](src/db/scheduleOverrides.ts))
+- New owner-only tools `set_work_schedule_override` (a date or range → one row per day; hours / location / timezone / off / clear) and `get_work_schedule_overrides` (view upcoming overrides). Relative dates + hours are composed by the model from the prompt's date table + base hours — no NL regex. ([meetings.ts](src/skills/meetings.ts), [ops.ts](src/skills/meetings/ops.ts))
+
+### Changed — away days are direct-bookable in their own timezone
+- A stated-hours travel day ("Boston 9-5 EST") is now walked, rule-validated, and booked IN the stated timezone with no forced approval/confirm — the old relax-and-confirm existed only because the hours were unknown; supplying them removes it. Timezone is resolved PER INSTANT (`getEffectiveWorkDayForInstant`), so a far-west (US) or far-east (Asia) window that crosses home-tz midnight is attributed to the correct trip day on both search and validate. The `weTimeResolver` dual-clock render is preserved (now fed the override's explicit IANA — less inference than the old location-string guess). A day with ANY override skips floating blocks (lunch/gym) — simple; revisit later. ([calendar.ts](src/connectors/graph/calendar.ts), [scheduleRules.ts](src/utils/scheduleRules.ts), [planMeeting.ts](src/skills/meetings/planMeeting.ts), [workingElsewhere.ts](src/utils/workingElsewhere.ts))
+
+### Removed — the full-day Working-Elsewhere spine
+- Deleted the all-day travel-marker path: `weConfirmStash.ts`, the `we_acknowledged` arg, and the marker-only helpers (`detectWorkingElsewhereDays`, `resolveWorkingElsewhereTz`, `getWeWindow`, `computeTentativeWeSlots`). The owner's away days now come only from the chat override (an Outlook all-day WE event is no longer read as an owner away-signal). The TIMED optional-join WE event (a non-all-day `workingElsewhere` standup) and colleague travel (`currently_traveling`) are unchanged. ([workingElsewhere.ts](src/utils/workingElsewhere.ts))
+
+### Fixed — approval honesty (bundled, parallel chat; "Keren" 2026-07-14)
+- A bare "yes" in the daily decision thread now binds to the approval it answers: the thread-bound marker keys on the daily-thread root (`owner_dm_thread_ts`), not just the approval's own DM ts — so Maelle stops asking "which one?" for an approval he just answered. When several approvals share the daily thread, a bare yes is treated as ambiguous (named + asked). ([systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+- A policy_exception ask now NAMES a hard double-book ("you already have 'X' at 13:00 — book over it?") instead of dressing it as a soft free-time/buffer nudge: the handler re-derives the true per-slot rule from the live calendar via `checkSlot` rather than trusting the model's aggregate reason. (#142c) ([skill.ts](src/tasks/skill.ts))
+
+### Migration
+- `owner_schedule_overrides` is created idempotently on boot — no manual step, no data migration. The deleted WE-spine files leave no residual state; the retired `meetings.working_elsewhere` yaml block is unread (kept for back-compat).
+
+---
+
 ## 3.7.2 — real-day bug wave II: approval mis-bind, auto-fix memory + revert, requester-aware colleague actions, short-window free/busy root fix
 
 Four chats from one real day, each fix traced 100% against the day's actual incidents before shipping. The load-bearing fixes are on the approval spine — a bare "yes" typed in the wrong thread could resolve and book a colleague's *pending* meeting before the owner had actually approved it — and on the autonomous auto-fix, which re-moved a meeting the owner had just reverted because it kept no memory of the rejection. Plus: a colleague can now act on a meeting they requested instead of a flat refusal, the slot finder stopped changing its answer when a colleague clarified the duration, and the Graph free/busy fault that spuriously escalated short meetings to approval is fixed at its root. Restart required.

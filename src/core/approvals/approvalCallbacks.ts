@@ -137,11 +137,12 @@ export function buildConsequenceText(
 /**
  * v3.5.x (WE preview) — resolve the owner's travel context for the on_approve's
  * meeting day, so buildConsequenceText can render the WE dual-clock and the
- * approval preview matches the booked-confirmation. ASYNC (fetches that day's
- * events via getTravelContextForInstant); call it at the async approval call
- * sites, then pass the result into the sync verbalizer. Only the time-bearing
- * tools carry a start; everything else (and a missing/invalid start, or any
- * failure) returns undefined → the verbalizer falls back to the home clock.
+ * approval preview matches the booked-confirmation. getTravelContextForInstant
+ * resolves the per-date schedule override synchronously (#143 — no Graph fetch);
+ * this wrapper is kept async for the approval call sites, then its result is
+ * passed into the sync verbalizer. Only the time-bearing tools carry a start;
+ * everything else (and a missing/invalid start, or any failure) returns
+ * undefined → the verbalizer falls back to the home clock.
  */
 export async function resolveConsequenceTravel(
   callbacks: ApprovalCallbacks,
@@ -154,12 +155,7 @@ export async function resolveConsequenceTravel(
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getTravelContextForInstant } = require('../../utils/workingElsewhere') as
       typeof import('../../utils/workingElsewhere');
-    return await getTravelContextForInstant(
-      start,
-      profile.user.email,
-      profile.user.slack_user_id,
-      profile.user.timezone,
-    );
+    return getTravelContextForInstant(start, profile);
   } catch {
     return undefined;  // fail-open → home-zone render, never block the approval DM
   }

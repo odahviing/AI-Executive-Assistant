@@ -17,6 +17,7 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
+import { getScheduleOverride } from '../db/scheduleOverrides';
 
 export interface WorkHourRange {
   startMin: number;  // inclusive, minutes since local midnight
@@ -85,6 +86,102 @@ export function getOwnerWorkHoursForDay(
   return ranges.sort((a, b) => a.startMin - b.startMin);
 }
 
+export interface EffectiveWorkDay {
+  isWorkday: boolean;
+  windows: WorkHourRange[];              // minute-of-day, interpreted in `timezone`
+  location: 'office' | 'home' | 'elsewhere';
+  timezone: string;                      // effective IANA (home tz unless an override sets one)
+  isAway: boolean;                       // timezone !== the owner's home tz
+  hasOverride: boolean;                  // an override row exists for this date
+  source: 'yaml' | 'override';
+}
+
+/**
+ * v3.7.x (#143) — THE accessor for a date's effective work context: YAML is the
+ * base, a per-date chat override wins per-column, no row = YAML (fail-safe). Sync
+ * (a better-sqlite3 read) so the hot validator checkSlot stays sync. An override
+ * with an explicit `timezone` marks an away day (windows evaluated in that zone,
+ * booked directly — no forced approval); with no timezone the day stays in the
+ * owner's home tz ("Tuesday 9-3" is home-tz 9-3). Every work-hours consumer
+ * (slot search, checkSlot, resolveLocation, "is he working now") routes through
+ * this, so search and validate can never disagree on a date.
+ */
+export function getEffectiveWorkDay(dateIso: string, profile: UserProfile): EffectiveWorkDay {
+  const homeTz = profile.user.timezone;
+  const dayName = DateTime.fromISO(dateIso, { zone: homeTz }).toFormat('EEEE');
+  const baseWindows = getOwnerWorkHoursForDay(profile, dayName);
+  const officeDays = (profile.schedule.office_days?.days ?? []) as string[];
+  const homeDays = (profile.schedule.home_days?.days ?? []) as string[];
+  const baseLoc: 'office' | 'home' | 'elsewhere' =
+    officeDays.includes(dayName) ? 'office' : homeDays.includes(dayName) ? 'home' : 'elsewhere';
+  const baseIsWorkday = baseWindows.length > 0 || officeDays.includes(dayName) || homeDays.includes(dayName);
+
+  let row: ReturnType<typeof getScheduleOverride> = null;
+  try { row = getScheduleOverride(profile.user.slack_user_id, dateIso); }
+  catch { row = null; }  // fail-safe → yaml base
+
+  if (!row) {
+    return { isWorkday: baseIsWorkday, windows: baseWindows, location: baseLoc, timezone: homeTz, isAway: false, hasOverride: false, source: 'yaml' };
+  }
+
+  const tz = row.timezone ?? homeTz;
+  let windows = baseWindows;
+  if (row.windows) {
+    const parsed: WorkHourRange[] = [];
+    for (const r of row.windows) { const p = parseRange(r); if (p) parsed.push(p); }
+    windows = parsed.sort((a, b) => a.startMin - b.startMin);
+  }
+  const isWorkday = row.isWorkday != null ? row.isWorkday : (windows.length > 0 || baseIsWorkday);
+  if (!isWorkday) windows = [];
+  const location: 'office' | 'home' | 'elsewhere' = row.location ?? (row.timezone ? 'elsewhere' : baseLoc);
+  return { isWorkday, windows, location, timezone: tz, isAway: tz !== homeTz, hasOverride: true, source: 'override' };
+}
+
+/**
+ * v3.7.x (#143) — instant-aware variant for SLOT-level consumers (the search
+ * walk, checkSlot's hours rule, the dual-clock/location resolver). A far-west
+ * away window (e.g. Chicago 9-5 CDT, ~8h behind home) crosses home-tz midnight,
+ * so ONE home-tz date hosts slots from TWO trip days — a plain date lookup then
+ * evaluates a Chicago-afternoon slot (which is home-tz next-day 00:30) against
+ * HOME hours and wrongly rejects it. Resolve by which trip-day actually OWNS the
+ * instant: an away override owns it iff, in that override's OWN timezone, the
+ * instant falls on that override's date. Check the home date first (a home-tz
+ * override or an owning away override wins), then either neighbouring home date
+ * (west trips spill into the next, east trips into the previous). Otherwise fall
+ * through to getEffectiveWorkDay(homeDate) —
+ * byte-identical to today for every non-far-west case (no override, a home-tz
+ * override, or Boston/east where the home date owns the instant).
+ */
+export function getEffectiveWorkDayForInstant(instantIso: string, profile: UserProfile): EffectiveWorkDay {
+  const homeTz = profile.user.timezone;
+  const dt = DateTime.fromISO(instantIso, { setZone: true });
+  if (!dt.isValid) return getEffectiveWorkDay(instantIso, profile);  // defensive — let the date path handle a bad input
+  const homeDate = dt.setZone(homeTz).toFormat('yyyy-MM-dd');
+
+  // The home-date override wins UNLESS it is a far-west away override whose window
+  // does not actually cover this instant (the instant belongs to the previous trip day).
+  let homeRow: ReturnType<typeof getScheduleOverride> = null;
+  try { homeRow = getScheduleOverride(profile.user.slack_user_id, homeDate); } catch { homeRow = null; }
+  if (homeRow && (!homeRow.timezone || dt.setZone(homeRow.timezone).toFormat('yyyy-MM-dd') === homeDate)) {
+    return getEffectiveWorkDay(homeDate, profile);
+  }
+
+  // Neighbour spillover: a far-WEST away window spills into the NEXT home date,
+  // a far-EAST one into the PREVIOUS — an away override owns the instant iff, in
+  // ITS OWN zone, the instant falls on ITS date. Check both neighbours so the fix
+  // is symmetric (US trips west of home AND Asia/Pacific trips east of home).
+  for (const delta of [-1, 1]) {
+    const neighbour = dt.setZone(homeTz).plus({ days: delta }).toFormat('yyyy-MM-dd');
+    let nRow: ReturnType<typeof getScheduleOverride> = null;
+    try { nRow = getScheduleOverride(profile.user.slack_user_id, neighbour); } catch { nRow = null; }
+    if (nRow?.timezone && dt.setZone(nRow.timezone).toFormat('yyyy-MM-dd') === neighbour) {
+      return getEffectiveWorkDay(neighbour, profile);
+    }
+  }
+
+  return getEffectiveWorkDay(homeDate, profile);
+}
+
 /**
  * A slot's [startMin, endMin] as minutes-from-midnight of the START day, with
  * the end computed as start + DURATION so it NEVER wraps past midnight.
@@ -132,11 +229,17 @@ export function totalWorkMinutes(windows: WorkHourRange[]): number {
  * evening windows is honored if yaml defines it).
  */
 export function isWithinOwnerWorkHours(profile: UserProfile, now: DateTime): boolean {
-  const day = now.toFormat('EEEE');
-  const windows = getOwnerWorkHoursForDay(profile, day);
-  if (windows.length === 0) return false;
-  const minutes = now.hour * 60 + now.minute;
-  for (const w of windows) {
+  // v3.7.x (#143) — date-aware: a per-date override (day off, custom hours, or an
+  // away/tz day) reshapes "is he working now." Resolve the effective day for the
+  // instant's home-tz date, then evaluate the moment in that day's effective tz
+  // (an away override shifts it). No override → home tz + yaml windows → identical
+  // to the old weekday lookup. This is the #141 "is he working now" tail.
+  const homeTz = profile.user.timezone;
+  const eff = getEffectiveWorkDay(now.setZone(homeTz).toFormat('yyyy-MM-dd'), profile);
+  if (!eff.isWorkday || eff.windows.length === 0) return false;
+  const local = now.setZone(eff.timezone);
+  const minutes = local.hour * 60 + local.minute;
+  for (const w of eff.windows) {
     if (minutes >= w.startMin && minutes < w.endMin) return true;
   }
   return false;
@@ -245,18 +348,22 @@ export function workTimeBaseFromNow(profile: UserProfile): string {
  * 14 days lookahead (defensive — should never hit).
  */
 export function nextOwnerWorkdayStart(profile: UserProfile): string {
-  const cursor = DateTime.now().setZone(profile.user.timezone);
+  const homeTz = profile.user.timezone;
+  const cursor = DateTime.now().setZone(homeTz);
 
   for (let i = 0; i < 14; i++) {
     const candidate = cursor.plus({ days: i });
-    const day = candidate.toFormat('EEEE');
-    const windows = getOwnerWorkHoursForDay(profile, day);
-    if (windows.length === 0) continue;
+    // v3.7.x (#143) — per-date effective day: an override day off is skipped, an
+    // override work day (or away day) is honored with its own windows + tz. No
+    // override → identical to the old weekday work_hours lookup.
+    const eff = getEffectiveWorkDay(candidate.toFormat('yyyy-MM-dd'), profile);
+    if (!eff.isWorkday || eff.windows.length === 0) continue;
     // Find the earliest window start that's still in the future (or first
-    // window of a future day). Multi-window: a slot at 21:30 after the
-    // current 17:30 cutoff is still "next work-time start" for the same day.
-    for (const w of windows) {
-      const dt = candidate.set({
+    // window of a future day). Multi-window: a slot at 21:30 after the current
+    // 17:30 cutoff is still "next work-time start" for the same day. Window
+    // starts are minute-of-day in the day's EFFECTIVE tz.
+    for (const w of eff.windows) {
+      const dt = DateTime.fromISO(candidate.toFormat('yyyy-MM-dd'), { zone: eff.timezone }).set({
         hour: Math.floor(w.startMin / 60),
         minute: w.startMin % 60,
         second: 0,

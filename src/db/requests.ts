@@ -382,11 +382,37 @@ export function getMeetingsRequestedBy(
   clauses.push(opts?.includeApprovals
     ? "(subkind = 'colleague_booking_record' OR kind = 'approval')"
     : "subkind = 'colleague_booking_record'");
+  // v3.7.x (#143 residual #3) — exclude records whose meeting was cancelled/
+  // deleted. The delete cascade marks the colleague_booking_record 'cancelled'
+  // (it's created 'resolved', so the open-state request cascade skips it). Without
+  // this the stale event id surfaced in the MEETINGS-YOU-REQUESTED block and a
+  // move/cancel attempt pinged the owner about a meeting that no longer exists.
+  clauses.push("state != 'cancelled'");
   if (opts?.withEventIdOnly) clauses.push('outcome_external_event_id IS NOT NULL');
   if (opts?.sinceIso) { clauses.push('datetime(created_at) >= datetime(?)'); params.push(opts.sinceIso); }
   return getDb().prepare(
     `SELECT * FROM requests WHERE ${clauses.join(' AND ')} ORDER BY datetime(created_at) DESC`
   ).all(...params) as RequestRow[];
+}
+
+/**
+ * v3.7.x (#143 residual #3) — when a colleague-requested meeting is DELETED, mark
+ * its colleague_booking_record cancelled. That record is created 'resolved' at
+ * book time, so the open-state cascade in closeMeetingArtifacts never touches it;
+ * a direct UPDATE is needed to retire the stale requester→event link so
+ * getMeetingsRequestedBy stops surfacing a dead meeting. Idempotent (skips rows
+ * already cancelled). Only fires on delete — a MOVED meeting stays live so the
+ * requester can still act on it.
+ */
+export function cancelColleagueBookingRecordsForEvent(ownerUserId: string, eventId: string): void {
+  if (!ownerUserId || !eventId) return;
+  getDb().prepare(`
+    UPDATE requests
+    SET state = 'cancelled', closure_reason = 'meeting_deleted', closed_by = 'meeting_cascade',
+        closed_at = datetime('now'), state_changed_at = datetime('now'), updated_at = datetime('now')
+    WHERE owner_user_id = ? AND subkind = 'colleague_booking_record'
+      AND outcome_external_event_id = ? AND state != 'cancelled'
+  `).run(ownerUserId, eventId);
 }
 
 /** For closeLoopOnOwnerHandled scanner — collect open top-level requests for the LLM. */

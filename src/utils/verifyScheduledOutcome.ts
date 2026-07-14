@@ -90,9 +90,12 @@ function checkCompliance(
   const dayName = eStart.toFormat('EEEE');
 
   // 1. Work hours check (v2.8.1 — multi-window aware).
+  // v3.7.x (#143) — windows come from the event date's effective work day so a
+  // chat override (custom hours / day off) drives the "outside work hours" flag,
+  // not raw weekday yaml.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { getOwnerWorkHoursForDay, slotDayMinutes } = require('./workHours') as typeof import('./workHours');
-  const windows = getOwnerWorkHoursForDay(profile, dayName);
+  const { getEffectiveWorkDay, slotDayMinutes } = require('./workHours') as typeof import('./workHours');
+  const windows = getEffectiveWorkDay(eStart.toFormat('yyyy-MM-dd'), profile).windows;
   if (windows.length === 0) {
     issues.push(`booked on ${dayName} (${eStart.toFormat('d MMM')}) — not a work day`);
   } else {

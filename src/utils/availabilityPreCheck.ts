@@ -24,7 +24,6 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import { getCalendarEvents, findAvailableSlots } from '../connectors/graph/calendar';
 import { checkSlot, type RuleViolationKind } from './scheduleRules';
-import { resolveOwnerTravelContextForDate } from './workingElsewhere';
 import { getAnthropicClient } from '../llm/client';
 import { logLlmUsage } from './usageLog';
 import logger from './logger';
@@ -223,9 +222,6 @@ interface SlotVerdict {
   time: string;        // HH:MM
   bookable: boolean;
   rejection_reason?: string;
-  /** v3.4.2 — set when the proposed day is a Working-Elsewhere day: the owner's
-   * home rules don't apply, so the verdict is "away/tentative", not bookable/not. */
-  working_elsewhere?: { location: string };
   /** v3.6.x — gap query ("how much is free there?"): maxFreeMinutes is the
    * largest bookable standard duration from this start (null = nothing fits). */
   gapQuery?: boolean;
@@ -408,20 +404,11 @@ export async function precheckAvailability(params: {
         );
         eventsByWeek.set(weekKey, events);
       }
-      // v3.4.2 — Working-Elsewhere awareness. On a WE day the owner's HOME
-      // rules (work hours, focus, busy in home-TZ) don't apply — he's away in
-      // another timezone — so checkSlot's flat "NOT BOOKABLE" would be both
-      // wrong and info-less (the Mike-on-June-28 incident: 5 times rejected
-      // with no hint the owner was away). Surface the away context + route to
-      // the owner instead. Reuses the week `events` already fetched — no extra
-      // Graph call. Fails through to the normal verdict on any error.
-      try {
-        const tctx = await resolveOwnerTravelContextForDate(pair.date, params.profile.user.slack_user_id, tz, events);
-        if (tctx.isAway) {
-          verdicts.push({ date: pair.date, time: pair.time, bookable: false, working_elsewhere: { location: tctx.location } });
-          continue;
-        }
-      } catch { /* not away / resolve failed → normal check below */ }
+      // v3.7.x (#143) — no WE short-circuit. An away day is a per-date override
+      // carrying a timezone; checkSlot self-resolves that effective day and
+      // validates the slot against the stated hours IN the away tz, so the
+      // colleague pre-check reports bookable correctly (away, in-hours = bookable)
+      // and the booking path agrees.
       const check = checkSlot({
         profile: params.profile,
         slotStartIso: startDt.toISO()!,
@@ -562,14 +549,6 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile): strin
       return v.maxFreeMinutes && v.maxFreeMinutes > 0
         ? `  - around ${when}: up to ${v.maxFreeMinutes} min is free per ${ownerFirst}'s rules — state THIS length, do not estimate a shorter one.`
         : `  - around ${when}: nothing bookable there per ${ownerFirst}'s rules.`;
-    }
-    // v3.4.2 — Working-Elsewhere day: not a bookable/not-bookable verdict. The
-    // owner is away that day; his home rules don't apply and availability there
-    // is tentative. Tell the colleague he's away (don't say free/busy), and
-    // route any real intent to the owner — never book directly on a WE day.
-    if (v.working_elsewhere) {
-      const loc = v.working_elsewhere.location ? ` (${v.working_elsewhere.location})` : '';
-      return `  - ${when}: ${ownerFirst} is WORKING ELSEWHERE${loc} that day — his usual hours/rules don't apply and his availability is tentative. Do NOT say "free" or "not free"; tell the colleague ${ownerFirst} is away${loc} that day so any time is tentative, and if they want it, raise create_approval(kind=policy_exception) so ${ownerFirst} confirms. Never book it directly.`;
     }
     if (v.bookable) return `  - ${when}: BOOKABLE per ${ownerFirst}'s rules`;
     // v3.3.x — precheckAvailability runs ONLY on the colleague path

@@ -27,6 +27,7 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import type { CalendarEvent } from '../connectors/graph/calendar';
+import { getEffectiveWorkDayForInstant } from './workHours';
 import logger from './logger';
 
 export type CategoryRuleBroken =
@@ -149,10 +150,16 @@ export function checkCategorySlot(opts: {
   const dayType = cat.day_type ?? 'any';
   if (dayType !== 'any') {
     const dayName = opts.slotStart.toFormat('EEEE');
-    const officeDays = opts.profile.schedule.office_days.days as string[];
-    const homeDays = opts.profile.schedule.home_days.days as string[];
-    const allowedDays = dayType === 'office_days' ? officeDays : homeDays;
-    if (!allowedDays.includes(dayName)) {
+    // v3.7.x (#143) — the day's office/home identity comes from its EFFECTIVE
+    // location, so a per-date chat override (office↔home flip, or an away day)
+    // is honored instead of the raw weekday yaml. With no override this is the
+    // yaml office_days/home_days sets (baseLoc), so behavior is unchanged.
+    const location = getEffectiveWorkDayForInstant(opts.slotStart.toISO()!, opts.profile).location;
+    const requiredLoc = dayType === 'office_days' ? 'office' : 'home';
+    if (location !== requiredLoc) {
+      const officeDays = opts.profile.schedule.office_days.days as string[];
+      const homeDays = opts.profile.schedule.home_days.days as string[];
+      const allowedDays = dayType === 'office_days' ? officeDays : homeDays;
       return {
         allowed: false,
         rule_broken: 'day_type',

@@ -38,6 +38,7 @@ import type { UserProfile } from '../config/userProfile';
 import type { CalendarEvent } from '../connectors/graph/calendar';
 import { checkCategorySlot, getProfileCategoryByName } from './categoryRules';
 import { getFloatingBlocks, isFloatingBlockEvent } from './floatingBlocks';
+import { getEffectiveWorkDayForInstant, slotDayMinutes, type EffectiveWorkDay } from './workHours';
 
 export type RuleViolationKind =
   | 'in_the_past'
@@ -131,12 +132,15 @@ export interface RuleCheckInput {
    */
   isFloatingBlock?: boolean;
   /**
-   * Per-day work-hour windows (minutes-of-day) supplied by the caller. When
-   * present, rule 5 uses these INSTEAD of the profile's native windows — so
-   * find_available_slots' caller-overridden / relaxed-widened hours stay the
-   * single source of truth shared with the search loop (one validator).
+   * v3.7.x (#143) — the slot date's effective work context (yaml base + per-date
+   * override, resolved by getEffectiveWorkDay). When present, rules 1/5/9 read the
+   * day's workday-ness, windows, LOCATION, and TIMEZONE from it — so an away
+   * override day validates against its stated hours in its own zone. When ABSENT,
+   * checkSlot resolves it itself from the slot's date, so a caller that doesn't
+   * thread it still gets override-correct rules. find_available_slots passes the
+   * SAME effectiveDay it walked with, so search and book can never disagree.
    */
-  workHourWindowsOverride?: Array<{ startMin: number; endMin: number }>;
+  effectiveDay?: EffectiveWorkDay;
 }
 
 export interface RuleCheckResult {
@@ -181,6 +185,10 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   const slotEnd = DateTime.fromISO(input.slotEndIso, { zone: tz, setZone: true }).setZone(tz);
   const excludeSet = new Set(input.excludeEventIds ?? []);
   const dayName = slotStart.toFormat('EEEE');
+  // v3.7.x (#143) — the slot date's effective work context: threaded by the
+  // search (so search + book agree) or self-resolved from the slot's home-tz
+  // date. Rules 1/5/9 read workday-ness, windows, location + timezone from it.
+  const effectiveDay = input.effectiveDay ?? getEffectiveWorkDayForInstant(input.slotStartIso, profile);
 
   // ── (0) in the past ─────────────────────────────────────────────────────
   // Never silently book a slot that has already started — a past / earlier-today
@@ -199,13 +207,17 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   }
 
   // ── (1) vacation / off day ──────────────────────────────────────────────
-  const officeDays = profile.schedule.office_days.days as string[];
-  const homeDays = profile.schedule.home_days.days as string[];
-  if (!officeDays.includes(dayName) && !homeDays.includes(dayName)) {
+  // v3.7.x (#143) — via the effective day, so a per-date "off" override and a
+  // normally-off yaml day read the same. No override → identical to the old
+  // office/home name check.
+  if (!effectiveDay.isWorkday) {
+    const firstName = profile.user.name.split(' ')[0];
     return {
       passes: false,
       violation_kind: 'vacation_or_off_day',
-      violation_label: `${dayName} isn't one of ${profile.user.name.split(' ')[0]}'s working days`,
+      violation_label: effectiveDay.hasOverride
+        ? `${firstName} has ${slotStart.toFormat('EEEE d MMM')} off`
+        : `${dayName} isn't one of ${firstName}'s working days`,
     };
   }
 
@@ -240,21 +252,26 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // owner's work-hour windows for the day (e.g. Tuesday split into
   // 09:00-15:30 + 21:30-23:59 — a 21:45-22:10 slot is valid).
   if (!input.allowRelaxed) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getOwnerWorkHoursForDay, slotDayMinutes } = require('./workHours') as typeof import('./workHours');
-    const windows = input.workHourWindowsOverride ?? getOwnerWorkHoursForDay(profile, dayName);
-    // start + duration, so a slot ending past midnight (23:30–00:10) does NOT
-    // wrap to a small minute-of-day and spuriously fit a daytime window.
-    const { startMin: slotStartMin, endMin: slotEndMin } = slotDayMinutes(slotStart, slotEnd);
+    // v3.7.x (#143) — windows from the effective day, and the slot's minute-of-day
+    // evaluated in the day's EFFECTIVE timezone. For an away override ("Boston 9-5
+    // EST") the windows are stated in that zone, so the instant is converted there
+    // before the fit check. No override → effectiveTz is the home tz → identical to
+    // reading the home clock. start + duration so a slot ending past midnight does
+    // NOT wrap to a small minute-of-day and spuriously fit a daytime window.
+    const windows = effectiveDay.windows;
+    const slotStartEff = slotStart.setZone(effectiveDay.timezone);
+    const slotEndEff = slotEnd.setZone(effectiveDay.timezone);
+    const { startMin: slotStartMin, endMin: slotEndMin } = slotDayMinutes(slotStartEff, slotEndEff);
     const fits = windows.some(w => slotStartMin >= w.startMin && slotEndMin <= w.endMin);
     if (!fits) {
       const windowsLabel = windows.length === 0
         ? '(no work hours configured for this day)'
         : windows.map(w => `${String(Math.floor(w.startMin/60)).padStart(2,'0')}:${String(w.startMin%60).padStart(2,'0')}–${String(Math.floor(w.endMin/60)).padStart(2,'0')}:${String(w.endMin%60).padStart(2,'0')}`).join(', ');
+      const zoneNote = effectiveDay.isAway ? ` (${effectiveDay.timezone})` : '';
       return {
         passes: false,
         violation_kind: 'outside_working_hours',
-        violation_label: `Slot ${slotStart.toFormat('HH:mm')}–${slotEnd.toFormat('HH:mm')} is outside working hours (${windowsLabel})`,
+        violation_label: `Slot ${slotStartEff.toFormat('HH:mm')}–${slotEndEff.toFormat('HH:mm')}${zoneNote} is outside working hours (${windowsLabel})`,
       };
     }
   }
@@ -275,7 +292,10 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   //      that remain inside the window.
   //   5. If max(free interval length) >= block.duration_minutes → pass.
   //      Otherwise: fail with a label naming the block.
-  if (!input.allowRelaxed) {
+  // v3.7.x (#143) — skip on an override day: no floating blocks live there, so
+  // there's no lunch/gym window to protect (and a normal meeting isn't blocked
+  // for a block that won't be booked that day).
+  if (!input.allowRelaxed && !effectiveDay.hasOverride) {
     const blocks = profile.meetings?.floating_blocks ?? [];
     for (const block of blocks) {
       const [psH, psM] = block.preferred_start.split(':').map(Number);
@@ -452,87 +472,63 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // signals that coexist with meetings; the math already ignores showAs=free
   // anyway, but skip to match the rest of the relaxed semantics).
   if (!input.allowRelaxed && !input.isFloatingBlock) {
-    const officeDays = new Set(profile.schedule.office_days.days as string[]);
-    const homeDays = new Set(profile.schedule.home_days.days as string[]);
-    const dayName = slotStart.toFormat('EEEE');
-    const isOffice = officeDays.has(dayName);
-    const isHome = homeDays.has(dayName);
-    if (isOffice || isHome) {
-      // bug 1.13 — length-based floor via the shared helper (1h free per
-      // work_hours_per_free_hour worked, ceil to 15 min). Same source of truth
-      // as analyze_calendar + calendar-health, so search, book, and review can
-      // never disagree about the floor.
-      const dayWindowsForFloor = (profile.schedule.work_hours as Record<string, string[]>)[dayName] ?? [];
+    // v3.7.x (#143) — office/home via the effective day; an away day (elsewhere)
+    // skips the focus floor (a trip day isn't held to the home focus-time theory).
+    // The window + total come from effectiveDay.windows, so a per-date hours
+    // override ("Tuesday 9-3") is measured against the overridden hours, and the
+    // free-time math runs in the effective timezone. No override → identical to the
+    // old yaml-window floor. Same source of truth as analyze_calendar +
+    // calendar-health, so search, book, and review can never disagree.
+    if (effectiveDay.location === 'office' || effectiveDay.location === 'home') {
       let workTotalMinForFloor = 0;
-      for (const win of dayWindowsForFloor) {
-        const [ws, we] = win.split('-');
-        if (!ws || !we) continue;
-        const [wsh, wsm] = ws.split(':').map(Number);
-        const [weh, wem] = we.split(':').map(Number);
-        workTotalMinForFloor += (weh * 60 + wem) - (wsh * 60 + wsm);
-      }
+      for (const w of effectiveDay.windows) workTotalMinForFloor += (w.endMin - w.startMin);
       const requiredMin = requiredFreeMinutesForWorkDay(workTotalMinForFloor, profile.meetings.work_hours_per_free_hour);
-      if (requiredMin > 0) {
+      if (requiredMin > 0 && effectiveDay.windows.length > 0) {
         const minChunk = profile.meetings.thinking_time_min_chunk_minutes ?? 30;
         // Build busyBlocks from this day's events, minus excluded ids.
         // showAs='free' events don't block focus time; isAllDay doesn't either
-        // (vacation markers etc.). isCancelled out.
+        // (vacation markers etc.); a timed optional-join (WE-soft) is reclaimable
+        // free time and is skipped too (matches the search + calendar-health
+        // pools). Parse zone-aware (Graph dateTime is bare wall-clock + .timeZone)
+        // so an off-owner-TZ host doesn't skew the blocks.
         const busyBlocks: Array<{ start: Date; end: Date }> = [];
         for (const ev of input.events) {
           if (ev.isCancelled) continue;
           if (excludeSet.has(ev.id)) continue;
           if ((ev as any).showAs === 'free') continue;
-          // v3.6.4 — a timed optional-join is reclaimable free time, so it does
-          // NOT count against the daily focus-time floor (same treatment as the
-          // search + calendar-health pools; keeps booking-time and search
-          // consistent so one never floor-rejects what the other allowed).
           if (!(ev as any).isAllDay && (ev as any).showAs === 'workingElsewhere') continue;
           if ((ev as any).isAllDay) continue;
-          // Parse zone-aware (matches rules 6 + 8). Graph returns dateTime as a
-          // bare wall-clock string with the zone in `.timeZone`; `new Date(str)`
-          // would interpret it in the Node PROCESS timezone, so on a host whose
-          // TZ ≠ the owner's the busy blocks shift by the offset → the focus
-          // floor mis-fires (phantom free time → over-book, or false floor
-          // violations). This is the write-path validator for named-time picks,
-          // so the skew silently diverged search from validate off-owner-TZ.
           busyBlocks.push({
             start: DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toJSDate(),
             end: DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).toJSDate(),
           });
         }
         // Add the proposed slot itself — checking what's left after booking.
-        busyBlocks.push({
-          start: slotStart.toJSDate(),
-          end: slotEnd.toJSDate(),
+        busyBlocks.push({ start: slotStart.toJSDate(), end: slotEnd.toJSDate() });
+        // Union window bounds (earliest start … latest end) across the day's
+        // effective windows, formatted for the free-time helper.
+        let earliestMin = 24 * 60;
+        let latestMin = 0;
+        for (const w of effectiveDay.windows) {
+          if (w.startMin < earliestMin) earliestMin = w.startMin;
+          if (w.endMin > latestMin) latestMin = w.endMin;
+        }
+        const hhmm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+        const dayDate = slotStart.setZone(effectiveDay.timezone).toFormat('yyyy-MM-dd');
+        const dayFreeMin = computeDayQualityFreeMinutes({
+          dayDate,
+          timezone: effectiveDay.timezone,
+          workStart: hhmm(earliestMin),
+          workEnd: hhmm(Math.min(latestMin, 1439)),
+          busyBlocks,
+          minChunkMinutes: minChunk,
         });
-        // Work-hours window for the day. Multi-window aware: union of all
-        // windows for the floor calc. For simplicity use earliest start and
-        // latest end of the day's configured windows.
-        const dayWindows = (profile.schedule.work_hours as Record<string, string[]>)[dayName] ?? [];
-        if (dayWindows.length > 0) {
-          let earliestStart = '23:59';
-          let latestEnd = '00:00';
-          for (const win of dayWindows) {
-            const [s, e] = win.split('-');
-            if (s && s < earliestStart) earliestStart = s;
-            if (e && e > latestEnd) latestEnd = e;
-          }
-          const dayDate = slotStart.toFormat('yyyy-MM-dd');
-          const dayFreeMin = computeDayQualityFreeMinutes({
-            dayDate,
-            timezone: tz,
-            workStart: earliestStart,
-            workEnd: latestEnd,
-            busyBlocks,
-            minChunkMinutes: minChunk,
-          });
-          if (dayFreeMin < requiredMin) {
-            return {
-              passes: false,
-              violation_kind: 'focus_time_floor',
-              violation_label: `Booking this leaves ${profile.user.name.split(' ')[0]} with ${Math.round(dayFreeMin)} min of free time on ${dayName} — below the ${requiredMin}-min floor for a ${workTotalMinForFloor}-min work day.`,
-            };
-          }
+        if (dayFreeMin < requiredMin) {
+          return {
+            passes: false,
+            violation_kind: 'focus_time_floor',
+            violation_label: `Booking this leaves ${profile.user.name.split(' ')[0]} with ${Math.round(dayFreeMin)} min of free time on ${dayName} — below the ${requiredMin}-min floor for a ${workTotalMinForFloor}-min work day.`,
+          };
         }
       }
     }

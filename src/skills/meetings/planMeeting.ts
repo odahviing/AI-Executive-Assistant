@@ -26,7 +26,6 @@ import type { UserProfile } from '../../config/userProfile';
 import { getCalendarEvents, getFreeBusy, findAvailableSlots, type CalendarEvent } from '../../connectors/graph/calendar';
 import { resolveLocation, type LocationVerdict } from '../../utils/resolveLocation';
 import { checkSlot, type RuleCheckResult } from '../../utils/scheduleRules';
-import { renderWeDualClock } from '../../utils/weTimeResolver';
 import { detectCategory } from './detectCategory';
 import { findMeetingOwner, type MeetingOwnerInfo } from './findMeetingOwner';
 import { getCurrentTravel, getPersonMemory, searchPeopleMemory } from '../../db/people';
@@ -90,12 +89,6 @@ export interface PlanMeetingInput {
   // is the authoritative input.
   allowRelaxed?: boolean;
 
-  // #WE-spine — owner verified the working-elsewhere trip-time. Distinct from
-  // allowRelaxed (which only relaxes RULES): this is the ONE signal that skips the
-  // WE trip-time confirm, set on the owner's yes-retry — never proactively — so a
-  // proactive relaxed can't silently book a wrong trip-time.
-  weAcknowledged?: boolean;
-
   // Floating-block booking path (lunch / focus / gym). Skips the owner_busy_collision
   // rule — floating blocks are signals, not competing time. See scheduleRules.checkSlot.
   isFloatingBlock?: boolean;
@@ -142,7 +135,6 @@ export function planInputFromBookingRequest(
     priorSlotStartIso: req.priorSlotStartIso,
     priorSlotEndIso: req.priorSlotEndIso,
     allowRelaxed: req.relaxed,
-    weAcknowledged: req.weAcknowledged,
     isFloatingBlock: req.isFloatingBlock,
     preloadedEvents: extra?.preloadedEvents,
   };
@@ -162,7 +154,7 @@ export type PlanAction =
       overrideNotice?: string;   // #127 — owner booked through a soft own-day rule; surface this heads-up, never re-ask
     }
   | { action: 'find_slots'; category: string | null; reasoning: string }
-  | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; category: string | null; tripTimeDisplay?: string }
+  | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; category: string | null }
   | { action: 'escalate_approval'; violationLabel: string; suggestedAskText: string; category: string | null }
   | { action: 'propose_alternative'; violationLabel: string; suggestedAskText: string; alternatives: Array<{ start: string; end: string; label: string }>; category: string | null }
   | { action: 'decline_and_relay'; organizerName: string | null; organizerEmail: string | null; organizerSlackId: string | null; suggestedDmText: string }
@@ -378,70 +370,12 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   if (input.slotStartIso && input.slotEndIso) {
     const events = input.preloadedEvents ?? await loadEventsForCheck(profile, input.slotStartIso);
 
-    // #WE-spine — Working-Elsewhere routing: RELAX + APPROVE. On a day the owner
-    // is travelling his home rules don't cleanly apply (different place + clock),
-    // so we relax them and route the booking to his approval (colleague) / a
-    // one-step dual-TZ confirm (owner) — never silently auto-book a trip-day slot
-    // in the wrong clock. Resolved via the ONE resolver (marker + travel record)
-    // so search and book agree on which days are WE. `allowRelaxed` (the owner
-    // already confirmed, or an approved replay) falls through to book. No marker
-    // and no covering travel record → isAway=false → no-op, byte-identical to a
-    // normal day. The dual-TZ ask renders ONE instant in both zones (slotStartIso
-    // is owner-zone after the write-path guess removal), so the owner sees e.g.
-    // "11:00 Boston / 18:00 your time" and confirms the right moment.
-    let onWorkingElsewhereDay = false;
-    {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const we = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
-      const slotDate = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }).toFormat('yyyy-MM-dd');
-      const travel = await we.resolveOwnerTravelContextForDate(slotDate, profile.user.slack_user_id, profile.user.timezone, events);
-      if (travel.isAway) {
-        onWorkingElsewhereDay = true;   // → relax the home rules in checkSlot below
-        // CRITICAL: this trip-time confirm is DECOUPLED from `relaxed`. `relaxed`
-        // overrides the RULES; it must NOT also skip the time check — else a
-        // proactive relaxed=true ("don't check their time, just do it") silently
-        // books a wrong trip-time (the Offensive-hub "02:15" crash, where the
-        // model mis-resolved "after lunch" and relaxed skipped the confirm). The
-        // ONLY skip is `weAcknowledged`, set on the owner's yes-retry (never
-        // proactively); a colleague's owner-approved replay carries allowRelaxed,
-        // which satisfies the skip on that path.
-        const acknowledged = input.weAcknowledged === true
-          || (initiator !== 'owner' && input.allowRelaxed === true);
-        if (!acknowledged) {
-          const ownerFirst = profile.user.name.split(' ')[0];
-          const loc = travel.location ? ` (${travel.location})` : '';
-          // The day where he physically is (decision #2) — from the away clock.
-          const whereDay = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone })
-            .setZone(travel.effectiveTz).toFormat('EEEE');
-          logger.info('planMeeting — working-elsewhere day, verify trip-time before book', {
-            slotDate, location: travel.location, effectiveTz: travel.effectiveTz, initiator,
-            relaxed: input.allowRelaxed === true,
-          });
-          if (initiator === 'owner') {
-            // THE canonical dual-clock the model must quote VERBATIM (ops.ts surfaces
-            // it as `_trip_time_display`) — built by the ONE renderer, pinned by
-            // meaning so a paraphrase can't invert it, lodging never named (it reads
-            // as a venue). The ask text carries NO clock.
-            return {
-              action: 'confirm_override',
-              violationLabel: `working elsewhere${loc}`,
-              suggestedAskText: `You're working elsewhere${loc} on ${whereDay} — confirm the shown trip-time is the slot you want; your usual rules are relaxed there. On your yes, retry the SAME tool with we_acknowledged=true.`,
-              tripTimeDisplay: renderWeDualClock(input.slotStartIso, travel, profile.user.timezone, { endIso: input.slotEndIso }),
-              category,
-            };
-          }
-          // Colleague escalate — same renderer, owner-named framing for the colleague.
-          const dual = renderWeDualClock(input.slotStartIso, travel, profile.user.timezone, { endIso: input.slotEndIso, ownerName: ownerFirst });
-          return {
-            action: 'escalate_approval',
-            violationLabel: 'owner_working_elsewhere',
-            suggestedAskText: `Heads up — ${ownerFirst} is working elsewhere${loc} on ${whereDay} (this slot is ${dual}), so I'd run it by him before booking. Want me to check with him?`,
-            category,
-          };
-        }
-      }
-    }
-
+    // v3.7.x (#143) — Working-Elsewhere is no longer a separate relax+confirm
+    // branch. An away day is a per-date override carrying a timezone: checkSlot
+    // validates the slot against the stated hours IN that zone (via effectiveDay)
+    // and it books DIRECTLY — there is no forced approval or trip-time confirm just
+    // because he's away (the stated hours removed the reason for it). weTimeResolver
+    // still renders the dual-clock on the booked confirmation.
     const ruleResult = checkSlot({
       profile,
       slotStartIso: input.slotStartIso,
@@ -449,9 +383,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       category,
       events,
       excludeEventIds: input.existingEventId ? [input.existingEventId] : [],
-      // #WE-spine — a travel day relaxes the owner's home rules (they don't apply
-      // in the trip place); the trip-time was already verified by the confirm above.
-      allowRelaxed: !!input.allowRelaxed || onWorkingElsewhereDay,
+      allowRelaxed: !!input.allowRelaxed,
       isFloatingBlock: !!input.isFloatingBlock,
     });
 

@@ -105,6 +105,24 @@ function initSchema(db: Database.Database): void {
       UNIQUE(user_id, key)               -- one value per key per user, updates replace
     );
 
+    -- Per-date work-schedule overrides (v3.7.x / #143) — chat-driven exceptions
+    -- to the yaml schedule for a specific date. YAML is the default; a row here
+    -- WINS for that date; no row = yaml (fail-safe). A non-null timezone column marks
+    -- an away day (work-hours evaluated in that zone; books directly). Any column
+    -- left null keeps the yaml base for that axis.
+    CREATE TABLE IF NOT EXISTS owner_schedule_overrides (
+      owner_slack_id TEXT NOT NULL,
+      date           TEXT NOT NULL,   -- yyyy-MM-dd in the owner's home tz
+      is_workday     INTEGER,         -- null=keep base · 0=force off · 1=force on
+      windows        TEXT,            -- JSON ["09:00-17:00", ...] · null=keep base
+      location       TEXT,            -- 'office' | 'home' · null=keep base
+      timezone       TEXT,            -- IANA (e.g. America/New_York) · presence ⇒ away day · null=home tz
+      source         TEXT NOT NULL DEFAULT 'chat',
+      note           TEXT,
+      created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (owner_slack_id, date)
+    );
+
     -- Event log — things that happened while the user was away
     CREATE TABLE IF NOT EXISTS events (
       id          TEXT PRIMARY KEY,

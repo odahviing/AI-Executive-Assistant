@@ -173,6 +173,25 @@ export async function closeMeetingArtifacts(params: {
       params.meetingId,
     );
 
+    // 4b. (v3.7.x #143 residual #3) On DELETE, retire the colleague_booking_record's
+    // requester→event link. That record is created 'resolved', so the open-state
+    // request cascade in step 5 never touches it — a direct cancel is needed so a
+    // deleted meeting stops surfacing as requester-actionable (a move attempt no
+    // longer pings the owner about a meeting that's gone). Delete only; a MOVED
+    // colleague-booked meeting stays live so the requester can still act on it.
+    if (params.reason === 'deleted') {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { cancelColleagueBookingRecordsForEvent } = require('../db/requests') as
+          typeof import('../db/requests');
+        cancelColleagueBookingRecordsForEvent(params.ownerUserId, params.meetingId);
+      } catch (err) {
+        logger.warn('closeMeetingArtifacts — colleague booking-record retire threw, non-fatal', {
+          err: String(err).slice(0, 160), meetingId: params.meetingId,
+        });
+      }
+    }
+
     // 5. (v2.7.0) Close matching requests on the spine. Two match paths:
     //    (a) outcome_external_event_id directly matches (coord that already
     //        booked, request preserved the Graph id).

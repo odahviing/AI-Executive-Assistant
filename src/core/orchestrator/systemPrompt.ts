@@ -179,12 +179,21 @@ Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EE
           const kindLabel = r.subkind ?? r.kind;
           // v2.7.2 — mark the approval bound to the CURRENT thread. When
           // ${firstName} replies in a thread, that thread's ts matches the
-          // original approval DM's ts (which is stored as terminal_dm_msg_ts
-          // on the request). The marker tells Sonnet "this is the approval
-          // he's replying to — use this approval_id unless he names a
-          // different one." Closes the misroute-amplification risk when
-          // multiple policy_exception approvals are open at once.
-          const threadBoundMarker = threadTs && r.terminal_dm_msg_ts === threadTs
+          // approval's own DM message (terminal_dm_msg_ts) OR — since the 3.4.6
+          // daily decision thread — the daily-thread root (owner_dm_thread_ts),
+          // which is what Slack actually sets threadTs to for a reply inside the
+          // daily thread (replies anchor to the thread ROOT, never the individual
+          // ask message). v3.7.2 — must check BOTH: keying only on
+          // terminal_dm_msg_ts meant the marker never fired for a normal
+          // daily-thread reply, so a bare "yes" in the decision thread rendered
+          // NO marker and Sonnet (per the binding rules below + the chokepoint
+          // gate) asked "which one?" for an approval he'd plainly just answered
+          // (Keren, 2026-07-14 — the double-approve). Same anchor definition as
+          // the resolve_approval gate in skill.ts. In the daily thread several
+          // approvals share the root, so 2+ can be marked at once → the binding
+          // rules treat multiple markers + a bare yes as ambiguous (ask which).
+          const threadBoundMarker = threadTs
+            && (r.terminal_dm_msg_ts === threadTs || r.owner_dm_thread_ts === threadTs)
             ? '  ← THIS THREAD'
             : '';
           // v3.0.5 — id rendered WITHOUT `#` prefix. Pre-fix Sonnet sometimes
@@ -201,7 +210,7 @@ ${lines.join('\n')}
 Binding rules (critical):
 - When ${firstName} replies in a way that looks like a decision (picks a time, says "yes"/"no"/"ok"/"לא"/"כן", proposes an alternative): call resolve_approval with the right approval_id from the list above.
 - A QUESTION is NOT a decision. If ${firstName} replies with a question — "am I free then?", "isn't that during my trip?", "what time is that for me?", "where am I that day?" — he's seeking info, not deciding: ANSWER it (check calendar / travel / time) and leave the approval OPEN. Only an explicit yes / no / book-it / drop-it resolves one. NEVER resolve_approval(reject) on a question — that cancels the request AND fires a "doesn't work" DM to the requester. (Read the intent in any language; don't pattern-match.)
-- THREAD-BOUND APPROVAL — if a line above is marked "← THIS THREAD", that's the approval whose original DM is the parent of this reply thread. Default to that approval_id unless ${firstName} explicitly named a different one ("no, I meant the Yael one"). When the marker is present and ${firstName} typed a vague "yes" / "ok" / "כן", use the marked approval — that's what he's responding to.
+- THREAD-BOUND APPROVAL — a line marked "← THIS THREAD" is an approval whose decision thread ${firstName} is replying in (its own DM thread, or his daily decision thread). If EXACTLY ONE line is marked and he typed a vague "yes" / "ok" / "כן" / "no", that's what he's responding to — use that approval_id (unless he explicitly named a different one, "no, I meant the Yael one"). If SEVERAL lines are marked (multiple approvals share his daily decision thread), a bare "yes" is ambiguous — name them by subject and ask which one; only bind when he names it or the reply clearly points to one.
 - No marker present + multiple pending — match on subject, timing, or thread context. If more than one plausibly fits, ask ${firstName} which one (name them by subject).
 - NEVER bind a bare "yes"/"ok"/"no" to an approval when ${firstName}'s reply is in a thread that is NOT the approval's own thread and NOT his daily decision thread (e.g. a "want me to bump X outside?" offer, or an unrelated topic) — even if only one approval is pending. That reply is about THAT thread, not the approval; treating it as an approval books the wrong thing. Ask which approval he means instead. (resolve_approval refuses an unanchored bare ack, so guessing just wastes the turn.)
 - Verdicts:

@@ -111,6 +111,45 @@ If the meeting is NOT yet booked and they need to find a time together, use find
         },
       },
       {
+        // v3.7.x (#143) — per-date work-schedule override (owner-only). Not in
+        // COLLEAGUE_ALLOWED_TOOLS + a senderRole gate in the handler.
+        name: 'set_work_schedule_override',
+        description: `Set a PER-DATE exception to ${profile.user.name.split(' ')[0]}'s standing work schedule — one date or a date range. Owner-only. Use when he says "I'm off next Wednesday", "working from the office Tuesday", "work 9-3 on Thursday", "I'll be in Boston Mon–Wed working 9-5 EST", or "scrap that override". This changes ONLY the named date(s); it does NOT touch his standing weekly schedule (that's yaml).
+
+WHAT EACH FIELD DOES (all optional except date_from; omit a field to KEEP that day's normal value):
+- off:true → that date is a NON-working day (day off / vacation / holiday): no meetings, no floating blocks.
+- hours → the work-hour windows for the date, e.g. ["09:00-15:00"], or a split shift ["09:00-12:00","14:00-18:00"]. Replaces the day's normal hours. Read in his HOME timezone UNLESS you also pass timezone.
+- location → "office" or "home" to override the day's normal type ("I'll come into the office this Friday").
+- timezone → an IANA zone (e.g. "America/New_York") ONLY when he'll work from a DIFFERENT timezone that day (a trip). This makes it an AWAY day: his hours are evaluated in THAT zone and Maelle books directly there. For "Boston 9-5 EST" pass BOTH hours (["09:00-17:00"]) AND timezone ("America/New_York"). If he names NO zone, DO NOT pass timezone — the day stays in his home zone.
+- note → optional short reason ("conference").
+- clear:true → REMOVE any override on the date(s), reverting to his normal weekly schedule. Ignores the other fields.
+
+DATES: pass date_from (and date_to for a range) as YYYY-MM-DD FROM THE DATE LOOKUP table — never calculate a date. A range writes the SAME override to every date in [date_from, date_to].`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            date_from: { type: 'string', description: 'First date YYYY-MM-DD (from the DATE LOOKUP table). For a single day pass only this.' },
+            date_to: { type: 'string', description: 'OPTIONAL. Last date YYYY-MM-DD of a range — the same override is written to every date from date_from through date_to inclusive. Omit for a single date.' },
+            off: { type: 'boolean', description: 'OPTIONAL. TRUE = the date is a day OFF (non-working). Set only when he says he is off / on vacation / not working that day.' },
+            hours: { type: 'array', items: { type: 'string' }, description: 'OPTIONAL. Work-hour windows "HH:MM-HH:MM" for the date (e.g. ["09:00-15:00"]). Multiple entries = split shift. Read in his home tz unless `timezone` is also set.' },
+            location: { type: 'string', enum: ['office', 'home'], description: 'OPTIONAL. Force the date to an office day or a home day.' },
+            timezone: { type: 'string', description: 'OPTIONAL. IANA zone (e.g. "America/New_York") — set ONLY for a day he works from a different timezone (a trip). Makes it an away day. Omit when he names no zone.' },
+            note: { type: 'string', description: 'OPTIONAL. Short reason for the override.' },
+            clear: { type: 'boolean', description: 'OPTIONAL. TRUE = delete the override(s) on the date(s) and revert to the normal weekly schedule. Ignores the other fields.' },
+          },
+          required: ['date_from'],
+        },
+      },
+      {
+        // v3.7.x (#143) — read-only view of upcoming overrides (owner-only).
+        name: 'get_work_schedule_overrides',
+        description: `List ${profile.user.name.split(' ')[0]}'s upcoming per-date schedule overrides (days off / custom hours / office-home flips / travel-timezone days), from today forward. Owner-only, read-only. Use when he asks "what overrides do I have?", "any exceptions to my schedule coming up?", "am I off any days soon?", "which days am I travelling?".`,
+        input_schema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+      {
         name: 'get_free_busy',
         description: `Check free/busy data for ${profile.user.name.split(' ')[0]}'s own calendar over a date range — e.g. "when is ${profile.user.name.split(' ')[0]} free this week?".
 
@@ -345,10 +384,6 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
               type: 'boolean',
               description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
             },
-            we_acknowledged: {
-              type: 'boolean',
-              description: 'OPTIONAL (default false). Set TRUE ONLY when retrying after Maelle surfaced a WORKING-ELSEWHERE trip-time confirm (e.g. "that\'s 12:15 Boston / 19:15 your time — book?") and the owner approved THAT time. It confirms the trip-timezone time on a travel day so the handler books instead of re-asking. NEVER set it proactively — it is NOT a general override (that\'s `relaxed`), and `relaxed` does NOT substitute for it on a travel day.',
-            },
             sensitivity: {
               type: 'string',
               enum: ['normal', 'personal', 'private', 'confidential'],
@@ -393,10 +428,6 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             relaxed: {
               type: 'boolean',
               description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
-            },
-            we_acknowledged: {
-              type: 'boolean',
-              description: 'OPTIONAL (default false). Set TRUE ONLY when retrying after Maelle surfaced a WORKING-ELSEWHERE trip-time confirm (e.g. "that\'s 12:15 Boston / 19:15 your time — move it?") and the owner approved THAT time. Confirms the trip-timezone time on a travel day so the handler moves instead of re-asking. NEVER set it proactively — NOT a general override (that\'s `relaxed`), and `relaxed` does NOT substitute for it on a travel day.',
             },
             category: {
               type: 'string',
@@ -789,6 +820,8 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
       case 'delete_meeting':
       case 'hold_slot':
       case 'revert_last_auto_move':
+      case 'set_work_schedule_override':
+      case 'get_work_schedule_overrides':
         return await this.ops.executeToolCall(toolName, args, context);
 
       default:
@@ -1183,7 +1216,7 @@ Don't pre-refuse a move / cancel / update based on what you think the organizer 
 - delete_meeting on an event ${firstName} didn't organize → tool runs decline_and_relay path: removes the event from ${firstName}'s side AND auto-DMs the organizer politely. No need to ask ${firstName} for permission first; that's the planMeeting verdict.
 - move_meeting on an event ${firstName} didn't organize → tool returns error: 'not_organizer'. Narrate honestly: "<organizer> set that one up — only they can shift the time. Want me to flag it so ${firstName} can ping them?" Don't DM the organizer automatically (per owner direction).
 - update_meeting on an event ${firstName} didn't organize → same as move_meeting (returns error: 'not_organizer').
-- create_meeting / move_meeting on events ${firstName} DOES organize: tool runs planMeeting → location/category/rules/attendee-freebusy all decided inside. If rules fail, the tool returns error: 'rule_violation' with a suggested_ask_text. Owner-path: surface for confirmation in-thread; if he says yes, RETRY THE SAME TOOL with relaxed=true. NEVER call create_approval for owner-path after he answered in-thread. Colleague-path: call create_approval(kind=policy_exception) with that text. EXCEPTION — a WORKING-ELSEWHERE trip-time confirm (the suggested_ask_text shows a dual clock like "12:15 Boston / 19:15 your time"): on his yes, retry with we_acknowledged=true — NOT relaxed — which confirms the trip-timezone time without re-asking. relaxed does NOT skip that trip-time confirm, so on a travel day always carry the trip-time forward with we_acknowledged.
+- create_meeting / move_meeting on events ${firstName} DOES organize: tool runs planMeeting → location/category/rules/attendee-freebusy all decided inside. If rules fail, the tool returns error: 'rule_violation' with a suggested_ask_text. Owner-path: surface for confirmation in-thread; if he says yes, RETRY THE SAME TOOL with relaxed=true. NEVER call create_approval for owner-path after he answered in-thread. Colleague-path: call create_approval(kind=policy_exception) with that text.
 TRUST THE TOOL'S DECISION. Don't second-guess the organizer or hallucinate a wall — call it and let the verdict speak.
 
 Subject: USE WHAT THE OWNER STATED. If his message names the meeting in any form — "Kickoff with Daniel", "review Q3 pricing with Anna", "1:1 with Ben", "sync about onboarding with Eli", "intro call with Sam", "demo for Acme", "interview with Sarah", "weekly with Lior" — that IS the subject. Pass it as-is to create_meeting. Don't second-guess and don't ask "what's the meeting about?" — the topic word is right there. A subject the user gave in ANY form — even a terse project, company, or one-word name ("Brainrocket", "Acme", "onboarding") — IS the subject: use it verbatim, never "upgrade" it and never ask for something more specific. (Re-asking a subject they already gave is the #1 cause of the "asked 5× what it's about" loop — don't.) ONLY ask when the message is purely transactional ("book 30 mins with Anna tomorrow") with no topic word anywhere in the thread and no recent context. Once you've asked the subject in a thread and got an answer, NEVER re-ask in the same thread — the answer is recorded; carry it forward. The specificity bar applies ONLY when YOU compose a subject they DIDN'T give: then name the person and/or topic ("Interview with Ohad", "Pricing sync with Anna") rather than defaulting to a bare category word ("Interview", "Meeting", "Sync") on its own. If a category shows a \`title:\` convention, treat it as the default for that composed case (e.g. interview discretion — first name only, role in the body).

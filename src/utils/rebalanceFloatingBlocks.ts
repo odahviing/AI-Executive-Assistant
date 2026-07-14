@@ -20,6 +20,7 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import * as fb from './floatingBlocks';
+import { getEffectiveWorkDay } from './workHours';
 import logger from './logger';
 
 // Process-lifetime dedup cache for "floating block overlap" shadows.
@@ -87,6 +88,13 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
     }
     const dateStr = slotDt.toFormat('yyyy-MM-dd');
     const dayName = slotDt.toFormat('EEEE');
+
+    // v3.7.x (#143) — no floating blocks on a per-date override day, so there's
+    // nothing to rebalance or reclaim there. Skip entirely.
+    if (getEffectiveWorkDay(dateStr, profile).hasOverride) {
+      logger.info('rebalanceFloatingBlocks: skipped — schedule-override day', { date: dateStr });
+      return result;
+    }
 
     const blocks = fb.getFloatingBlocks(profile);
     if (blocks.length === 0) {

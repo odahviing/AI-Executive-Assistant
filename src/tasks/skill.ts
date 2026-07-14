@@ -133,7 +133,7 @@ AUTHORITY MODEL:
 
 Kinds:
 - duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
-- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting, floating-block out-of-window move). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. Once payload is complete, the handler auto-stamps \`payload.deferred_action = { tool: 'create_meeting', args: <those fields> }\` (or \`book_floating_block\` / \`move_meeting\` for floating-block bumps) so the resolver executes the action deterministically on owner approve (no separate booking turn needed). If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE creating the approval.
+- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting, floating-block out-of-window move). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. Once payload is complete, the handler auto-stamps \`payload.deferred_action = { tool: 'create_meeting', args: <those fields> }\` (or \`book_floating_block\` / \`move_meeting\` for floating-block bumps) so the resolver executes the action deterministically on owner approve (no separate booking turn needed). If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE creating the approval. HONESTY: write ask_text plainly. If the booked time hits a meeting already on the owner's calendar, NAME it ("you already have 'X' at 13:00 — book over it?") — a hard double-book is his call, but state it AS one; NEVER dress it as a soft free-time / buffer / focus-time rule. (The handler re-derives the real reason from the live calendar and leads the DM with it, so don't guess the reason from aggregate rejection lists.)
 - unknown_person: book with someone we don't have full contact info for. Payload: { name, known_fields, missing_fields }.
 - freeform: a NON-booking yes/no/amend ask ONLY ("should I cancel X?", "OK to decline this?"). Payload: { question, context, subject }. NEVER use freeform to book / set up / schedule a meeting — INCLUDING one where the owner is just an attendee alongside others ("30 min with him and Lori"). A meeting booking goes through create_meeting (any attendee count); if it breaks a rule the colleague-path gate auto-raises policy_exception with a replayable deferred_action (subject + attendees + time preserved). freeform carries no attendees or time, so on approve there's nothing to replay and the booking drifts — regenerated subject, re-asked attendees, a search window instead of the booked slot.
 
@@ -413,6 +413,10 @@ Binding — how to pick the right approval_id:
         const subkind = args.kind as ApprovalSubkind;
         const payload = (args.payload as Record<string, unknown>) ?? {};
         const askText = args.ask_text as string;
+        // #142c — set to checkSlot's real label when the booked time fails on a
+        // HARD owner_busy_collision, so the owner DM below LEADS with the named
+        // double-book instead of a soft-sounding buffer framing.
+        let honestHardReason: string | undefined;
 
         // Boundary-validate requester_slack_id via resolveSlackId helper.
         {
@@ -544,6 +548,66 @@ Binding — how to pick the right approval_id:
             };
             logger.info('create_approval — auto-stamped deferred_action for policy_exception', {
               subject: payload.subject, start: payload.start,
+            });
+          }
+
+          // #142c (Keren, 2026-07-14) — HONESTY: re-derive the TRUE per-slot rule;
+          // do NOT trust the Sonnet-supplied `rule`. Sonnet picks the ask reason
+          // from find_available_slots' AGGREGATE top_reasons and can grab a SOFT
+          // label (e.g. focus_time_office) when the BOOKED time actually fails on
+          // a HARD one (owner_busy_collision) — the owner then approves what reads
+          // as an overridable buffer nudge and gets double-booked over a real
+          // meeting. checkSlot is the ONE validator (utils/scheduleRules.ts): run
+          // it on the EXACT booked time and store its real reason. A hard
+          // owner_busy_collision is surfaced verbatim to the owner (Rule 7 — the
+          // hard conflict is always NAMED, never hidden behind a soft label);
+          // genuine soft escalations (focus floor / work hours / category) keep
+          // their honest soft label AND their ask prose unchanged. Best-effort:
+          // any failure leaves Sonnet's reason as-is rather than blocking a real
+          // escalation (reads only — calendar + rules, no writes).
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { getCalendarEvents } = require('../connectors/graph/calendar') as typeof import('../connectors/graph/calendar');
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { checkSlot } = require('../utils/scheduleRules') as typeof import('../utils/scheduleRules');
+            const tz = profile.user.timezone;
+            const startDt = DateTime.fromISO(payload.start as string, { zone: tz, setZone: true }).setZone(tz);
+            const events = await getCalendarEvents(
+              profile.user.email,
+              startDt.startOf('week').toFormat("yyyy-MM-dd'T'00:00:00"),
+              startDt.endOf('week').toFormat("yyyy-MM-dd'T'23:59:59"),
+              tz,
+            );
+            const check = checkSlot({
+              profile,
+              slotStartIso: payload.start as string,
+              slotEndIso: payload.end as string,
+              category: typeof payload.category === 'string' ? payload.category : null,
+              events,
+            });
+            if (!check.passes && check.violation_label) {
+              const sonnetRule = typeof payload.rule === 'string' ? payload.rule : null;
+              payload.rule = check.violation_kind ?? payload.rule;
+              payload.rule_label = check.violation_label;
+              // Rule 7 — a HARD busy collision MUST be named to the owner. Flag it
+              // so the DM leads with the real reason (soft rules leave the ask as-is).
+              if (check.violation_kind === 'owner_busy_collision') {
+                honestHardReason = check.violation_label;
+              }
+              if (sonnetRule !== (check.violation_kind ?? null)) {
+                logger.info('create_approval — re-derived policy_exception reason differs from Sonnet-supplied', {
+                  subject: payload.subject, start: payload.start,
+                  sonnetRule, derivedRule: check.violation_kind,
+                });
+              }
+            } else if (check.passes) {
+              logger.info('create_approval — policy_exception booked time passes all rules (possible over-escalation)', {
+                subject: payload.subject, start: payload.start, sonnetRule: payload.rule,
+              });
+            }
+          } catch (err) {
+            logger.warn('create_approval — reason re-derivation threw; keeping Sonnet-supplied reason', {
+              err: String(err).slice(0, 200),
             });
           }
         }
@@ -774,7 +838,10 @@ Binding — how to pick the right approval_id:
         //
         // v2.9.1 — append "If yes → I'll X" consequence line when on_approve
         // is set, so the owner sees what saying yes actually does.
-        let dmText = askText;
+        // #142c — when the booked time is a HARD double-book, LEAD with the
+        // deterministic checkSlot label so the real conflict is the first thing
+        // the owner reads, above whatever soft framing the ask prose used.
+        let dmText = honestHardReason ? `${honestHardReason}\n\n${askText}` : askText;
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { extractCallbacks, buildConsequenceText, resolveConsequenceTravel } = require('../core/approvals/approvalCallbacks') as

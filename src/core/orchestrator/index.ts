@@ -1175,15 +1175,12 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const we = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const calMod = require('../../connectors/graph/calendar') as typeof import('../../connectors/graph/calendar');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { DateTime: LuxWe } = require('luxon') as typeof import('luxon');
       const homeTz = profile.user.timezone;
       const winFrom = LuxWe.now().setZone(homeTz).toFormat('yyyy-MM-dd');
       const winTo = LuxWe.now().setZone(homeTz).plus({ days: 14 }).toFormat('yyyy-MM-dd');
-      let winEvents: import('../../connectors/graph/calendar').CalendarEvent[] = [];
-      try { winEvents = await calMod.getCalendarEvents(profile.user.email, winFrom, winTo, homeTz); } catch { /* fail open → record-only / empty */ }
-      const awayDays = we.detectOwnerAwayDaysInWindow(winEvents, homeTz, profile.user.slack_user_id, winFrom, winTo);
+      // v3.7.x (#143) — away days come from the override table (no Graph fetch).
+      const awayDays = we.detectOwnerAwayDaysInWindow(profile, winFrom, winTo);
       if (awayDays.size > 0) {
         const ownerFirst = profile.user.name.split(' ')[0];
         const byLoc = new Map<string, string[]>();

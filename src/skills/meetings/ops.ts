@@ -70,17 +70,19 @@ function buildOutOfHoursBusy(
   const rangeStart = DateTime.fromISO(startDate, { zone: timezone });
   const rangeEnd = DateTime.fromISO(endDate, { zone: timezone });
   if (!rangeStart.isValid || !rangeEnd.isValid) return blocks;
-  const officeDays = profile.schedule.office_days.days;
-  const homeDays = profile.schedule.home_days.days;
-  const dayName = (dt: DateTime) => dt.toFormat('cccc');
+  // v3.7.x (#143) — per-date effective day: office/home identity + work-hour
+  // windows come from a chat override when one exists for that date, else the
+  // yaml base. So a day off / custom hours / office↔home override reshapes the
+  // OOF blocks a colleague sees, consistent with find_available_slots.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getEffectiveWorkDay } = require('../../utils/workHours') as
+    typeof import('../../utils/workHours');
   for (let d = rangeStart.startOf('day'); d <= rangeEnd; d = d.plus({ days: 1 })) {
-    const name = dayName(d);
-    const isOffice = officeDays.includes(name as typeof officeDays[number]);
-    const isHome = homeDays.includes(name as typeof homeDays[number]);
+    const eff = getEffectiveWorkDay(d.toFormat('yyyy-MM-dd'), profile);
     const dayStart = d.startOf('day');
     const dayEnd = d.endOf('day');
-    if (!isOffice && !isHome) {
-      // Non-work day — block the whole day.
+    if (!eff.isWorkday || eff.windows.length === 0) {
+      // Non-work day (or an override day off / no windows) — block the whole day.
       blocks.push({
         start: dayStart.toISO() ?? `${d.toISODate()}T00:00:00`,
         end: dayEnd.toISO() ?? `${d.toISODate()}T23:59:59`,
@@ -88,23 +90,11 @@ function buildOutOfHoursBusy(
       });
       continue;
     }
-    // v2.8.1 — read all work-hour windows for this day. Build OOF blocks
-    // for every gap: 00:00 → first window start, between windows, last
-    // window end → 23:59. Multi-window aware (Tuesday "09:00-15:30" +
-    // "21:30-23:59" leaves an OOF block 15:30-21:30 in the middle).
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getOwnerWorkHoursForDay } = require('../../utils/workHours') as
-      typeof import('../../utils/workHours');
-    const wins = getOwnerWorkHoursForDay(profile, name);
-    if (wins.length === 0) {
-      // No windows on this workday — treat the whole day as OOF.
-      blocks.push({
-        start: dayStart.toISO() ?? `${d.toISODate()}T00:00:00`,
-        end: dayEnd.toISO() ?? `${d.toISODate()}T23:59:59`,
-        status: 'oof',
-      });
-      continue;
-    }
+    // v2.8.1 — build OOF blocks for every gap around the day's work-hour
+    // windows: 00:00 → first window start, between windows, last window end →
+    // 23:59. Multi-window aware (Tuesday "09:00-15:30" + "21:30-23:59" leaves
+    // an OOF block 15:30-21:30 in the middle).
+    const wins = eff.windows;
     // Morning block: 00:00 → first window start.
     if (wins[0].startMin > 0) {
       const morningEnd = dayStart.plus({ minutes: wins[0].startMin });
@@ -165,7 +155,6 @@ import {
 } from '../../db';
 import { closeMeetingArtifacts } from '../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../utils/timezoneConvert';
-import { recordWeConfirmShown, consumeWeConfirmShown } from '../../utils/weConfirmStash';
 import { resolveStatedInstant, renderWeDualClock } from '../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../utils/weekdayGuard';
 
@@ -454,10 +443,12 @@ export function analyzeCalendar(
     const dayType: DayAnalysis['dayType'] = isOffice ? 'office' : allWorkDays.has(dayName) ? 'home' : 'day_off';
 
     // v2.8.1 — multi-window aware work hours for this day.
+    // v3.7.x (#143) — hours come from the date's effective work day, so a chat
+    // override (custom hours / day off) drives the analysis, not raw weekday yaml.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getOwnerWorkHoursForDay, totalWorkMinutes } = require('../../utils/workHours') as
+    const { getEffectiveWorkDay, totalWorkMinutes } = require('../../utils/workHours') as
       typeof import('../../utils/workHours');
-    const windows = getOwnerWorkHoursForDay(profile, dayName);
+    const windows = getEffectiveWorkDay(dateStr, profile).windows;
     const workStartMin = windows.length > 0 ? windows[0].startMin : 9 * 60;
     const workEndMin = windows.length > 0 ? windows[windows.length - 1].endMin : 19 * 60;
     const workTotalMin = totalWorkMinutes(windows) || (workEndMin - workStartMin);
@@ -909,7 +900,7 @@ export class SchedulingSkill {
         // the owner was in Boston). Null when no WE marker → nothing attached.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const weModGc = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
-        const weNoteGc = await weModGc.summarizeWorkingElsewhere(rawEvents, timezone, context.profile.user.slack_user_id, args.start_date as string, args.end_date as string);
+        const weNoteGc = weModGc.summarizeWorkingElsewhere(context.profile, args.start_date as string, args.end_date as string);
 
         // v2.8.6 (99C, Shape A) — when the query window comes back with no
         // events on an owner-DM turn, enrich the result with recent
@@ -1089,6 +1080,115 @@ export class SchedulingSkill {
           message: `Put "${revSubject}" back to ${restoredLocal}${reNotified ? ` and let ${reNotified} ${reNotified === 1 ? 'person' : 'people'} know` : ''}. I won't auto-move it again.`,
         };
       }
+      case 'set_work_schedule_override': {
+        // v3.7.x (#143) — owner-only per-date override WRITE. Dates are
+        // Sonnet-parsed from the DATE LOOKUP table (no NL parsing here). A range
+        // writes N single-date rows via the merge-upsert; clear:true removes them.
+        if (context.senderRole !== 'owner') {
+          return { success: false, error: 'owner_only', message: 'Only the owner can set schedule overrides.' };
+        }
+        const ownerSlackId = context.profile.user.slack_user_id;
+        const isDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+        const dateFrom = typeof args.date_from === 'string' ? args.date_from.trim() : '';
+        const dateTo = (typeof args.date_to === 'string' && args.date_to.trim()) ? args.date_to.trim() : dateFrom;
+        if (!isDate(dateFrom) || !isDate(dateTo)) {
+          return { success: false, error: 'bad_date', message: 'I need the date(s) as YYYY-MM-DD from the date table.' };
+        }
+        const start = DateTime.fromISO(dateFrom, { zone: timezone });
+        const end = DateTime.fromISO(dateTo, { zone: timezone });
+        if (!start.isValid || !end.isValid || end < start) {
+          return { success: false, error: 'bad_range', message: 'That range looks off — give me a start on or before the end.' };
+        }
+        const dates: string[] = [];
+        for (let cur = start, guard = 0; cur <= end && guard < 400; cur = cur.plus({ days: 1 }), guard++) {
+          dates.push(cur.toFormat('yyyy-MM-dd'));
+        }
+        const { upsertScheduleOverride, clearScheduleOverride } = await import('../../db/scheduleOverrides');
+
+        if (args.clear === true) {
+          for (const d of dates) clearScheduleOverride(ownerSlackId, d);
+          logger.info('set_work_schedule_override — cleared', { ownerSlackId, count: dates.length });
+          const dLabel = dates.length === 1 ? dates[0] : `${dates[0]} → ${dates[dates.length - 1]}`;
+          return {
+            success: true, cleared: dates.length, dates, _slot_results_now_stale: true,
+            message: `Cleared the override${dates.length > 1 ? 's' : ''} on ${dLabel} — back to your normal schedule.`,
+          };
+        }
+
+        const hours = Array.isArray(args.hours)
+          ? (args.hours as unknown[]).filter((h): h is string => typeof h === 'string' && /^\d{2}:\d{2}-\d{2}:\d{2}$/.test(h))
+          : null;
+        const off = args.off === true;
+        const location = (args.location === 'office' || args.location === 'home') ? args.location : null;
+        const timezoneArg = (typeof args.timezone === 'string' && args.timezone.trim()) ? args.timezone.trim() : null;
+        const note = (typeof args.note === 'string' && args.note.trim()) ? args.note.trim() : null;
+        // A working-shape signal (hours / location / trip tz) forces isWorkday=true
+        // so it also flips a previously-set "off" back on; off wins over all.
+        const isWorkday: boolean | null = off ? false
+          : ((hours && hours.length > 0) || !!location || !!timezoneArg ? true : null);
+
+        if (!off && (!hours || hours.length === 0) && !location && !timezoneArg && !note) {
+          return {
+            success: false, error: 'nothing_to_set',
+            message: 'Tell me what changes for that day — off, custom hours, office/home, or a travel timezone.',
+          };
+        }
+
+        for (const d of dates) {
+          upsertScheduleOverride(ownerSlackId, {
+            date: d,
+            isWorkday,
+            windows: off ? null : (hours && hours.length > 0 ? hours : null),
+            location,
+            timezone: timezoneArg,
+            source: 'chat',
+            note,
+          });
+        }
+        const summaryParts: string[] = [];
+        if (off) summaryParts.push('day off');
+        if (hours && hours.length > 0) summaryParts.push(`hours ${hours.join(', ')}`);
+        if (location) summaryParts.push(`${location} day`);
+        if (timezoneArg) summaryParts.push(`timezone ${timezoneArg}`);
+        const summary = summaryParts.join(', ') || 'updated';
+        const dateLabel = dates.length === 1 ? dates[0] : `${dates[0]} → ${dates[dates.length - 1]} (${dates.length} days)`;
+        logger.info('set_work_schedule_override — wrote', { ownerSlackId, count: dates.length, off, hours, location, timezone: timezoneArg });
+        return {
+          success: true, dates,
+          off: off || undefined,
+          hours: hours && hours.length > 0 ? hours : undefined,
+          location: location ?? undefined,
+          timezone: timezoneArg ?? undefined,
+          _slot_results_now_stale: true,
+          message: `Done — ${dateLabel}: ${summary}.`,
+        };
+      }
+      case 'get_work_schedule_overrides': {
+        // v3.7.x (#143) — owner-only read of upcoming overrides (today forward).
+        if (context.senderRole !== 'owner') {
+          return { success: false, error: 'owner_only', message: 'Only the owner can view schedule overrides.' };
+        }
+        const ownerSlackId = context.profile.user.slack_user_id;
+        const todayIso = DateTime.now().setZone(timezone).toFormat('yyyy-MM-dd');
+        const { listScheduleOverrides } = await import('../../db/scheduleOverrides');
+        const rows = listScheduleOverrides(ownerSlackId, todayIso);
+        const overrides = rows.map(r => ({
+          date: r.date,
+          off: r.isWorkday === false ? true : undefined,
+          hours: r.windows ?? undefined,
+          location: r.location ?? undefined,
+          timezone: r.timezone ?? undefined,
+          note: r.note ?? undefined,
+        }));
+        return {
+          success: true,
+          count: overrides.length,
+          overrides,
+          message: overrides.length === 0
+            ? 'No upcoming schedule overrides — your normal weekly schedule applies.'
+            : `You have ${overrides.length} upcoming override${overrides.length === 1 ? '' : 's'}.`,
+        };
+      }
       case 'analyze_calendar': {
         const rawEvents = await getCalendarEvents(
           userEmail,
@@ -1134,7 +1234,7 @@ export class SchedulingSkill {
         // WE days, so issue-narration is framed in the away timezone too.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const weModAc = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
-        const weNoteAc = await weModAc.summarizeWorkingElsewhere(rawEvents, timezone, context.profile.user.slack_user_id, args.start_date as string, args.end_date as string);
+        const weNoteAc = weModAc.summarizeWorkingElsewhere(context.profile, args.start_date as string, args.end_date as string);
         return weNoteAc ? { day_analysis: analysis, ...weNoteAc } : analysis;
       }
 
@@ -1175,7 +1275,7 @@ export class SchedulingSkill {
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const weModFb = require('../../utils/workingElsewhere') as typeof import('../../utils/workingElsewhere');
-            const weFb = await weModFb.summarizeWorkingElsewhere([], timezone, context.profile.user.slack_user_id, args.start_date as string, args.end_date as string);
+            const weFb = weModFb.summarizeWorkingElsewhere(context.profile, args.start_date as string, args.end_date as string);
             weFbNote = weFb?._working_elsewhere_note ?? null;
           } catch { /* fail open — no note */ }
           // Daniel-bug (offer-then-retract) — get_free_busy returns RAW per-person
@@ -1598,10 +1698,6 @@ export class SchedulingSkill {
               top_reasons: string[];
               blocked_by?: Array<{ email: string; slots_blocked: number }>;
             }>;
-            workingElsewhere?: {
-              resolved: Array<{ date: string; away_tz: string; location: string }>;
-              unresolved: Array<{ date: string; location: string }>;
-            };
             unresolvedAttendees?: string[];
           } = {};
 
@@ -1682,10 +1778,6 @@ export class SchedulingSkill {
             const results = await Promise.all(normalized.map(async (cand) => {
               const diag: {
                 rejectedCounts?: Record<string, number>;
-                workingElsewhere?: {
-                  resolved: Array<{ date: string; away_tz: string; location: string }>;
-                  unresolved: Array<{ date: string; location: string }>;
-                };
               } = {};
               try {
                 const slots = await findAvailableSlots({
@@ -1713,29 +1805,15 @@ export class SchedulingSkill {
                 });
                 const startMs = DateTime.fromISO(cand.start, { zone: timezone }).toMillis();
                 const matches = slots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
-                // v3.3 — Working Elsewhere reason. On a WE day the slot walk
-                // skips without recording a rejection (rejectedCounts is empty),
-                // so an unavailable candidate would have NO reason → Sonnet
-                // fabricates "conflict." Read diag.workingElsewhere and label it
-                // honestly: the candidate is outside his hours WHERE HE IS.
-                const candDate = DateTime.fromISO(cand.start, { zone: timezone }).toFormat('yyyy-MM-dd');
-                const weResolved = diag.workingElsewhere?.resolved.find(r => r.date === candDate);
-                const weUnresolved = diag.workingElsewhere?.unresolved.find(u => u.date === candDate);
-                let brokenRule = matches ? undefined : Object.keys(diag.rejectedCounts ?? {})[0];
-                let weLabel: string | undefined;
-                if (!matches && weResolved) {
-                  const awayClock = DateTime.fromISO(cand.start, { zone: timezone }).setZone(weResolved.away_tz).toFormat('HH:mm');
-                  brokenRule = 'owner_working_elsewhere';
-                  weLabel = `${ownerFirst} is working elsewhere${weResolved.location ? ` (${weResolved.location})` : ''} that day — this is ${awayClock} where he actually is, outside his working hours there. His real window that day is daytime in ${weResolved.location || 'his away location'}.`;
-                } else if (!matches && weUnresolved) {
-                  brokenRule = 'owner_working_elsewhere';
-                  weLabel = `${ownerFirst} is working elsewhere${weUnresolved.location ? ` (${weUnresolved.location})` : ''} that day and I don't have his timezone there — I'd need to confirm his local hours before booking.`;
-                }
+                // v3.7.x (#143) — an away day is now walked normally (its stated
+                // hours in its own tz), so an unavailable away candidate yields a
+                // real rejection reason in rejectedCounts — no WE special-casing.
+                const brokenRule = matches ? undefined : Object.keys(diag.rejectedCounts ?? {})[0];
                 return {
                   start: cand.start,
                   end: cand.end,
                   available: matches,
-                  ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: weLabel ?? labelFor(brokenRule) } : {}),
+                  ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: labelFor(brokenRule) } : {}),
                 };
               } catch (err) {
                 logger.warn('candidate-slot validation threw — marking unavailable', {
@@ -1961,18 +2039,6 @@ export class SchedulingSkill {
               }
             }
             if (rawSlots.length === 0 && !shouldRecover && colleagueOwnerOnlySlots.length === 0 && ownerAttendeeTaggedSlots.length === 0) {
-              // v3.3 — fail loud on an all-Working-Elsewhere window: surface the
-              // marker so Sonnet asks about timezone instead of saying "busy."
-              const weInfo = diagnosticsOut.workingElsewhere;
-              if (weInfo && (weInfo.resolved.length > 0 || weInfo.unresolved.length > 0)) {
-                return {
-                  slots: [],
-                  working_elsewhere: weInfo,
-                  _working_elsewhere_note: 'The window is entirely Working-Elsewhere day(s). For any day in `working_elsewhere.unresolved`, ASK the owner what timezone he is in that day — do NOT say he is unavailable. For `resolved` days with no slots, his day there is genuinely full. NEVER present his home-timezone availability for a working-elsewhere day.',
-                  ...(attendeeEmailWarning ?? {}),
-                  ...(colleagueSoftBlockHint ?? {}),
-                };
-              }
               if (attendeeEmailWarning || colleagueSoftBlockHint) {
                 return {
                   slots: rawSlots,
@@ -2039,7 +2105,10 @@ export class SchedulingSkill {
                 relaxedRecoverySlots = relaxedRecoverySlots.filter(s => {
                   const sd = DateTime.fromISO(s.start, { zone: timezone });
                   if (!sd.isValid) return true;
-                  const windows = wh.getOwnerWorkHoursForDay(context.profile, sd.weekdayLong ?? '');
+                  // v3.7.x (#143) — clip to the date's EFFECTIVE work-hour
+                  // windows so an override (custom hours / day off) governs the
+                  // recovery, not raw weekday yaml.
+                  const windows = wh.getEffectiveWorkDay(sd.toFormat('yyyy-MM-dd'), context.profile).windows;
                   if (windows.length === 0) return false; // day off → never offer
                   const startMin = sd.hour * 60 + sd.minute;
                   return wh.isSlotInWorkHours(windows, startMin, startMin + durMin);
@@ -2049,18 +2118,6 @@ export class SchedulingSkill {
                 });
               }
               if (relaxedRecoverySlots.length === 0) {
-                // v3.3 — fail loud on working-elsewhere days (see strict-pass return above).
-                const weInfo = diagnosticsOut.workingElsewhere;
-                if (weInfo && (weInfo.resolved.length > 0 || weInfo.unresolved.length > 0)) {
-                  return {
-                    slots: [],
-                    working_elsewhere: weInfo,
-                    _working_elsewhere_note: 'The window is entirely Working-Elsewhere day(s). For any day in `working_elsewhere.unresolved`, ASK the owner what timezone he is in that day — do NOT say he is unavailable. For `resolved` days with no slots, his day there is genuinely full. NEVER present his home-timezone availability for a working-elsewhere day.',
-                    ...(strictDaySummary && strictDaySummary.length > 0 ? { day_summary: strictDaySummary } : {}),
-                    ...(attendeeEmailWarning ?? {}),
-                    ...(colleagueSoftBlockHint ?? {}),
-                  };
-                }
                 // Recovery also empty — return original empty result with day_summary.
                 if ((strictDaySummary && strictDaySummary.length > 0) || attendeeEmailWarning || colleagueSoftBlockHint) {
                   return {
@@ -2347,19 +2404,6 @@ export class SchedulingSkill {
               });
             }
 
-            // WE spine — pre-render the owner's OWN clock in his trip (away)
-            // timezone, the same verbatim-quote treatment attendees +
-            // present_in_timezone already get. Without it the model had only the
-            // raw `away_tz` IANA string and computed his there-time itself — the
-            // wrong-offset narration (15:45 rendered "7:45" instead of 08:45
-            // Boston, and Craig inverted). renderClockInZone is the shared
-            // deterministic renderer (offset abbr + trip weekday, no raw IANA).
-            annotatedSlots = annotatedSlots.map((s: any) => {
-              if (!s.away_tz) return s;
-              const display = renderClockInZone(s.start, timezone, s.away_tz);
-              return display ? { ...s, away_local_display: display } : s;
-            });
-
             // Presentation timezone — the requester asked for options in a
             // specific zone (e.g. "in ET"), even when no attendee is stored
             // there (an organizer collecting options for US colleagues). Without
@@ -2449,13 +2493,6 @@ export class SchedulingSkill {
               ? strictDaySummary
               : diagnosticsOut.daySummary;
             const hasDaySummary = Array.isArray(daySummary) && daySummary.length > 0;
-            // v3.3 — Working Elsewhere surfacing. `resolved` days carry
-            // tentative slots (already tagged in annotatedSlots); `unresolved`
-            // days had a
-            // marker whose location couldn't be mapped to a timezone → Sonnet
-            // must ASK, never offer home-TZ times.
-            const weInfo = diagnosticsOut.workingElsewhere;
-            const hasWe = !!weInfo && (weInfo.resolved.length > 0 || weInfo.unresolved.length > 0);
             // Relaxed (owner-override) search keeps attendee-conflicted slots
             // instead of dropping them, tagged with `attendee_conflicts`. Tell
             // the owner WHO's busy / off-hours per slot (rules 6 + 7) — never
@@ -2468,7 +2505,7 @@ export class SchedulingSkill {
             // (the tier holds them back otherwise), so their appearance IS the
             // signal to narrate the trade-off.
             const hasOverOptional = annotatedSlots.some((s: any) => typeof s.over_optional === 'string' && s.over_optional.length > 0);
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || hasWe || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional) {
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               if (travelers.length > 0) result.travelers = travelers;
               if (hasDaySummary) result.day_summary = daySummary;
@@ -2498,11 +2535,6 @@ export class SchedulingSkill {
                 result._relaxed_recovery = true;
                 result._recovery_note =
                   'Strict pass returned 0 in the named window. These slots come from a relaxed retry that bypassed soft rules (free-time floor / lunch / work-hours). Read day_summary.top_reasons to see WHICH rule each slot is breaking, and present with that trade-off explicitly ("X fits but dips under the free-time floor — book anyway?"). Owner gets the final say.';
-              }
-              if (hasWe) {
-                result.working_elsewhere = weInfo;
-                result._working_elsewhere_note =
-                  'Some days in this window are marked Working Elsewhere — the owner is in a different place/timezone, so his normal scheduling rules are SUSPENDED. Slots tagged `tentative_working_elsewhere:true` are TENTATIVE openings in his trip timezone. Each slot carries `away_local_display` — his clock where he physically is, e.g. "Mon 29 Jun 14:30 EDT" — plus `away_location`; any attendee in another zone carries `per_attendee_local[].local_display`. QUOTE these strings VERBATIM, and group days by the weekday inside `away_local_display` — NEVER compute a timezone or a day yourself. Present dual-clock (his trip time from `away_local_display`, his home time read off the slot `start`), say they need his confirmation, and route any booking through approval — never present as locked. For any day in `working_elsewhere.unresolved` (a marker whose location I could not map to a timezone), DO NOT offer times — ASK the owner what timezone he is in that day. NEVER show his home-timezone clock as his there-time on a working-elsewhere day.';
               }
               if (usedColleagueOwnerOnly) {
                 result._attendee_unverified_note =
@@ -2576,7 +2608,7 @@ export class SchedulingSkill {
         if (typeof args.start === 'string') {
           try {
             const { getTravelContextForInstant } = await import('../../utils/workingElsewhere');
-            const travel = await getTravelContextForInstant(args.start, userEmail, context.profile.user.slack_user_id, timezone);
+            const travel = getTravelContextForInstant(args.start, context.profile);
             if (travel.isAway) tripDisplay = { tz: travel.effectiveTz, location: travel.location };
             const statedZone = (typeof args.stated_zone === 'string' && args.stated_zone.trim())
               ? args.stated_zone.trim()
@@ -2770,6 +2802,31 @@ export class SchedulingSkill {
           });
         }
 
+        // v3.7.2 (#137b) — email is required to SEND an invite, on EVERY path.
+        // This was colleague-path-only (old Guard A), so the owner-approved
+        // deferred replay — which runs as senderRole:'owner'
+        // (deferredActionReplay.ts) — booked "Meeting with Keren (Attorney)" with
+        // no email for Keren → a broken invite Outlook can't deliver (2026-07-14).
+        // Giving dates/times needs no email; SENDING the invite can never happen
+        // without one, for anyone, regardless of who triggered the booking. Runs
+        // after the auto-fill above, so only a genuinely unresolvable attendee is
+        // refused (a named internal was already filled from the directory).
+        {
+          const missingEmail = attendees.filter(a => !(a.email ?? '').trim());
+          if (missingEmail.length > 0) {
+            const ownerFirst = context.profile.user.name.split(' ')[0];
+            logger.info('create_meeting refused — attendee(s) missing email', {
+              senderRole: context.senderRole,
+              missing: missingEmail.map(a => a.name),
+            });
+            return {
+              success: false,
+              error: 'attendee_missing_email',
+              message: `I don't have an email for ${missingEmail.map(a => a.name).join(', ')}, so I can't send the calendar invite. Get it (find_slack_user for an internal teammate, or ask ${ownerFirst}/the requester for an external), then re-call — I won't book a meeting no one can be invited to.`,
+            };
+          }
+        }
+
         // v2.3.2 — colleague-path booking gate. When a colleague has confirmed
         // slot + duration + subject in this DM (1:1 or fast-path multi-internal
         // flow), Maelle calls create_meeting directly instead of falling back to
@@ -2926,36 +2983,8 @@ export class SchedulingSkill {
             }
           }
 
-          // Guard A — every attendee must have an email so the calendar
-          // invite can actually reach them. Internal attendees and the
-          // requester themselves pass trivially; externals are also allowed
-          // (they get the calendar invite via Outlook — same delivery path
-          // as the coord fast-path Case B already designs for). Only refuse
-          // when an attendee has no email — that's the unclassifiable case
-          // (could be an internal Maelle should DM, could be an external
-          // Sonnet hasn't fully resolved). The fast-path Case B note tells
-          // Sonnet "call create_meeting after the requester picks —
-          // externals get the invite via Outlook"; keeping this guard
-          // email-only avoids contradicting that contract.
-          try {
-            const unclassifiable = attendees.filter(a => !(a.email ?? '').trim());
-            if (unclassifiable.length > 0) {
-              const ownerFirst = context.profile.user.name.split(' ')[0];
-              logger.info('create_meeting colleague-path refused — attendees missing email', {
-                requester: context.userId,
-                unclassifiable: unclassifiable.map(a => a.name),
-              });
-              return {
-                success: false,
-                error: 'attendee_missing_email',
-                message: `I don't have an email for ${unclassifiable.map(a => a.name).join(', ')}. Without an email I can't add them to the calendar invite. Get their email (ask the owner or via find_slack_user), then re-call.`,
-              };
-            }
-          } catch (err) {
-            logger.warn('create_meeting colleague-path attendee guard threw — proceeding to rule check', {
-              err: String(err).slice(0, 200),
-            });
-          }
+          // (Email-required guard hoisted to run on EVERY path — see #137b above,
+          // right after the attendee email auto-fill. Was colleague-only here.)
 
           // Guard B — slot rule-compliance via findAvailableSlots narrow window.
           // v2.8.6 — skipped entirely when args.relaxed=true was set by the
@@ -3258,22 +3287,6 @@ export class SchedulingSkill {
         // gate, email auto-fill); the normalizer reads those mutated values and
         // produces the canonical shape. See bookingRequest.ts for the invariants
         // the normalizer enforces.
-        // v3.5.x (B) — deterministic WE-confirm carry. If we already showed the
-        // owner this slot's trip-time in this conversation and he's re-issuing the
-        // SAME booking, the trip-time gate is satisfied — don't loop the confirm
-        // again (the 2026-06-29 "11am ET" infinite re-confirm, where the model
-        // never set we_acknowledged on the yes-retry). Owner path only; the
-        // stash only holds instants we actually showed, so a non-WE slot is never
-        // auto-acknowledged. `we_acknowledged` skips ONLY the WE trip-time check.
-        if (context.senderRole === 'owner'
-            && args.we_acknowledged !== true
-            && typeof args.start === 'string'
-            && consumeWeConfirmShown(context.channelId, context.threadTs, args.start)) {
-          logger.info('create_meeting — WE trip-time already confirmed this conversation, auto-acknowledging', {
-            start: args.start, channelId: context.channelId,
-          });
-          args.we_acknowledged = true;
-        }
         // Bug 4 (2026-06-29) — a colleague who only RELAYED a meeting between OTHERS
         // ("tell Idan I want to meet Tal") is the REQUESTER, not an attendee, but the
         // model had added her to attendees → she was invited AND the booking was logged
@@ -3371,30 +3384,12 @@ export class SchedulingSkill {
         }
         // Early-return on non-book plans:
         if (plan.action === 'confirm_override' || plan.action === 'escalate_approval') {
-          // v3.5.x (WE confirm render) — on a travel day, hand the model the ONE
-          // finished dual-clock string so the confirm STATES the time instead of
-          // asking "5:45 or 12:45?". planMeeting builds it (the single source — it
-          // owns the WE detection + travel context) and pins each clock to its
-          // place; we just surface it VERBATIM. Owner confirm only — the colleague
-          // escalate path carries its own owner-framed dual-clock in
-          // suggested_ask_text, so attaching a "your home time" string there would
-          // mislabel it to the colleague.
-          const tripTimeDisplay = plan.action === 'confirm_override' ? plan.tripTimeDisplay : undefined;
-          // v3.5.x (B) — remember we showed THIS slot's trip-time, so the owner's
-          // re-issue of the same booking books instead of re-confirming forever.
-          if (tripTimeDisplay && context.senderRole === 'owner' && typeof args.start === 'string') {
-            recordWeConfirmShown(context.channelId, context.threadTs, args.start);
-          }
           return {
             success: false,
             error: 'rule_violation',
             violation_label: plan.violationLabel,
             suggested_ask_text: plan.suggestedAskText,
             category: plan.category,
-            ...(tripTimeDisplay ? {
-              _trip_time_display: tripTimeDisplay,
-              _trip_note: 'Travel day — state the time using `_trip_time_display` EXACTLY as written, with its labels intact. The first clock is where you physically are; the second is your home time — NEVER relabel one as the other (do not call the home time a place name like "Boston time"). Do not ask which timezone, and do not recompute it.',
-            } : {}),
             // v2.7.2 — deferred_action_hint: the original tool call, ready to be
             // stamped on a follow-up create_approval. Orchestrator auto-attaches
             // this to payload.deferred_action when Sonnet raises a
@@ -4169,7 +4164,7 @@ export class SchedulingSkill {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const { getTravelContextForInstant } = require('../../utils/workingElsewhere') as
                   typeof import('../../utils/workingElsewhere');
-                const tctx = await getTravelContextForInstant(existing.startIso, userEmail, context.profile.user.slack_user_id, timezone);
+                const tctx = getTravelContextForInstant(existing.startIso, context.profile);
                 if (tctx.isAway && tctx.location && isExternalNow === false) {
                   newLocationFromShape = tctx.location;
                   newIsOnlineFromShape = false;
@@ -4276,7 +4271,7 @@ export class SchedulingSkill {
         if (typeof args.new_start === 'string') {
           try {
             const { getTravelContextForInstant } = await import('../../utils/workingElsewhere');
-            const travel = await getTravelContextForInstant(args.new_start, userEmail, context.profile.user.slack_user_id, timezone);
+            const travel = getTravelContextForInstant(args.new_start, context.profile);
             if (travel.isAway) moveTripDisplay = { tz: travel.effectiveTz, location: travel.location };
             const statedZone = (typeof args.stated_zone === 'string' && args.stated_zone.trim())
               ? args.stated_zone.trim()
@@ -4890,7 +4885,6 @@ export class SchedulingSkill {
             locationHint: args.location as string | undefined,
             isOnlineHint: typeof args.is_online === 'boolean' ? args.is_online : undefined,
             allowRelaxed: args.relaxed === true,
-            weAcknowledged: args.we_acknowledged === true,
           });
           logger.info('move_meeting — planMeeting verdict', {
             action: movePlan.action, meetingId: args.meeting_id,

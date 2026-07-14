@@ -45,6 +45,7 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
+import { getEffectiveWorkDayForInstant } from './workHours';
 
 export interface ResolveLocationInput {
   profile: UserProfile;
@@ -112,11 +113,13 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   const { profile } = input;
   const tz = profile.user.timezone;
   const dt = DateTime.fromISO(input.startIso).setZone(tz);
-  const dayName = dt.toFormat('EEEE');
-  const officeDays = profile.schedule.office_days.days as string[];
-  const homeDays = profile.schedule.home_days.days as string[];
-  const isOfficeDay = officeDays.includes(dayName);
-  const isHomeDay = homeDays.includes(dayName);
+  // v3.7.x (#143) — day type from the effective work day (yaml base + per-date
+  // override), so an "office Tuesday" / "home Friday" override drives the location
+  // stamp. No override → identical to the office_days/home_days name check. An
+  // away day resolves as neither → falls through to the online default (5).
+  const effectiveDay = getEffectiveWorkDayForInstant(input.startIso, profile);
+  const isOfficeDay = effectiveDay.location === 'office';
+  const isHomeDay = effectiveDay.location === 'home';
 
   // ── (0) PRESERVE on move when day-type didn't flip and no owner hint ────
   const hasOwnerHint =
@@ -130,15 +133,15 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
     input.existingLocation !== undefined &&
     input.existingIsOnline !== undefined
   ) {
-    const priorDay = DateTime.fromISO(input.priorStartIso).setZone(tz).toFormat('EEEE');
-    const typeOf = (d: string): 'office' | 'home' | 'off' =>
-      officeDays.includes(d) ? 'office' : homeDays.includes(d) ? 'home' : 'off';
-    if (typeOf(priorDay) === typeOf(dayName)) {
+    // v3.7.x (#143) — compare EFFECTIVE day types (override-aware), so a move
+    // between two days whose override day-type matches still preserves.
+    const priorEff = getEffectiveWorkDayForInstant(input.priorStartIso, profile);
+    if (priorEff.location === effectiveDay.location) {
       return {
         kind: 'preserve_existing',
         isOnline: input.existingIsOnline,
         location: input.existingLocation,
-        reasoning: `move within same day-type (${typeOf(dayName)}) — preserving existing location`,
+        reasoning: `move within same day-type (${effectiveDay.location}) — preserving existing location`,
       };
     }
   }
