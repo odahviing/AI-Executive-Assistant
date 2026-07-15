@@ -22,7 +22,6 @@
  * what was actually asked).
  */
 
-import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
 import logger from '../utils/logger';
 

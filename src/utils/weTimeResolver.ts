@@ -11,7 +11,7 @@
  * function answers the time, and everything follows it.
  *
  * Two pure functions, both fed the SINGLE travel context
- * (`resolveOwnerTravelContextForDate`) — no detection or zone math anywhere else:
+ * (`getTravelContextForInstant`) — no detection or zone math anywhere else:
  *   - resolveStatedInstant: stated clock + which-zone-he-named → canonical instant
  *   - renderWeDualClock:     instant + travel context → the ONE display string
  *
@@ -37,7 +37,7 @@ export interface StatedTimeInput {
   startIso: string;            // stated start — bare ("…T11:00:00") or already offset-tagged
   endIso?: string;             // optional stated end, resolved the same way
   statedZone?: StatedZone;     // what the owner named (model-supplied)
-  travel: OwnerTravelContext;  // the ONE detection (resolveOwnerTravelContextForDate)
+  travel: OwnerTravelContext;  // the ONE detection (getTravelContextForInstant)
   homeTz: string;              // owner's home/config zone
 }
 

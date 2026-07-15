@@ -679,8 +679,9 @@ async function findUnansweredTopLevel(opts: CheckOpts): Promise<UnansweredCandid
 // `conversations.history` (top-level only) never returns them, so the DM scan
 // above is structurally blind to the surface the owner actually uses daily.
 // Here we pull the panel thread's replies directly and replay the latest
-// unanswered one. The (channel, thread_ts) coordinates come from the
-// DB-backed `assistant_threads` registry, which survives restarts.
+// unanswered one. The (channel, thread_ts) coordinates come from
+// discoverThreadParents (registry-free — it reads recent DM history for panel
+// parents), so this works without any persisted thread registry.
 // Returns a panel thread's latest unanswered user message as a candidate, or
 // null. (Was processAssistantThreadIfMissed, which replayed directly.)
 async function findUnansweredInThread(opts: CheckOpts, threadTs: string): Promise<UnansweredCandidate | null> {

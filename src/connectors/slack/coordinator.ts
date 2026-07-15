@@ -2,10 +2,9 @@
  * Slack outreach + utilities (v1.6.0).
  *
  * What lives here:
- *   - sendOutreachDM: primitive for posting an outreach DM
  *   - handleOutreachReply: triggered by app.ts when a colleague replies to an
  *     outreach — classifies (continue/done/schedule) and progresses the job
- *   - findSlackUser / findSlackChannel / postToChannel / openDM: Slack utilities
+ *   - findSlackUser / findSlackChannel / openDM: Slack utilities
  *
  * What used to live here but is gone in 1.6:
  *   - sendCoordinationDM / handleCoordinationReply / confirmAndBook / handleDecline:
@@ -33,33 +32,6 @@ import {
   type OutreachJob,
 } from '../../db';
 import logger from '../../utils/logger';
-
-// ── Outreach primitives ──────────────────────────────────────────────────────
-
-export async function sendOutreachDM(
-  app: App,
-  params: {
-    jobId: string;
-    colleague_slack_id: string;
-    colleague_name: string;
-    message: string;
-    await_reply: boolean;
-    bot_token: string;
-  }
-): Promise<void> {
-  const dmChannel = await openDM(app, params.bot_token, params.colleague_slack_id);
-  await app.client.chat.postMessage({
-    token: params.bot_token,
-    channel: dmChannel,
-    text: params.message,
-  });
-  logger.info('Outreach DM sent', {
-    jobId: params.jobId,
-    colleague: params.colleague_name,
-    await_reply: params.await_reply,
-    preview: params.message.slice(0, 80),
-  });
-}
 
 // ── Outreach reply classifier (Sonnet) ───────────────────────────────────────
 
@@ -479,64 +451,6 @@ export async function findSlackChannel(
   } catch (err) {
     logger.error('Failed to search Slack channels', { err, name });
     return [];
-  }
-}
-
-export async function postToChannel(
-  app: App,
-  params: {
-    bot_token: string;
-    channel_id: string;
-    colleague_slack_id: string;
-    message: string;
-  }
-): Promise<{ ok: true } | { ok: false; reason: 'not_in_channel_private' | 'error'; detail: string }> {
-  const text = `<@${params.colleague_slack_id}> ${params.message}`;
-
-  const tryPost = async () => {
-    await app.client.chat.postMessage({
-      token: params.bot_token,
-      channel: params.channel_id,
-      text,
-    });
-  };
-
-  try {
-    await tryPost();
-    logger.info('Channel post sent', { channel: params.channel_id, mention: params.colleague_slack_id });
-    return { ok: true };
-  } catch (err: any) {
-    const code: string = err?.data?.error ?? err?.message ?? '';
-
-    if (code === 'not_in_channel') {
-      try {
-        const info = await app.client.conversations.info({
-          token: params.bot_token,
-          channel: params.channel_id,
-        }) as any;
-
-        const isPrivate: boolean = info?.channel?.is_private ?? true;
-
-        if (!isPrivate) {
-          await app.client.conversations.join({
-            token: params.bot_token,
-            channel: params.channel_id,
-          });
-          await tryPost();
-          logger.info('Channel post sent after join', { channel: params.channel_id });
-          return { ok: true };
-        } else {
-          logger.warn('Cannot post to private channel — not a member', { channel: params.channel_id });
-          return { ok: false, reason: 'not_in_channel_private', detail: `I'm not a member of that private channel and can't join without an invite.` };
-        }
-      } catch (infoErr: any) {
-        logger.error('Failed to check channel info after not_in_channel', { infoErr });
-        return { ok: false, reason: 'error', detail: String(infoErr?.message ?? infoErr) };
-      }
-    }
-
-    logger.error('Failed to post to channel', { err: code, channel: params.channel_id });
-    return { ok: false, reason: 'error', detail: code };
   }
 }
 

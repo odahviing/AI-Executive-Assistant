@@ -27,17 +27,3 @@ export function isStrictIana(tz: string | undefined | null): tz is string {
   if (trimmed === 'UTC' || trimmed === 'GMT') return true;
   return trimmed.includes('/');
 }
-
-/**
- * Throws-style validator for callers that want an explicit error message.
- * Returns the trimmed valid TZ on success, throws on rejection.
- */
-export function assertStrictIana(tz: string, label = 'timezone'): string {
-  const trimmed = tz.trim();
-  if (!isStrictIana(trimmed)) {
-    throw new Error(
-      `'${tz}' is not a valid IANA ${label}. Use a Region/City form like 'Asia/Jerusalem', 'America/New_York', 'Europe/London' — never abbreviations like 'IST', 'PST', 'CST' (those are ambiguous).`,
-    );
-  }
-  return trimmed;
-}

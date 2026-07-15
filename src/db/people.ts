@@ -424,26 +424,6 @@ export function upsertPersonMemory(params: {
 }
 
 /**
- * Update gender from an automatic detector (pronouns, image, name-LLM).
- * Silently no-ops if gender_confirmed = 1 — auto-detection never overrides
- * a human confirmation.
- */
-export function updatePersonGender(slackId: string, gender: PersonGender): void {
-  const pid = personIdForSlackId(slackId);
-  if (pid) updatePersonGenderById(pid, gender);
-}
-
-/** v3.2.0 — person_id-keyed worker. */
-export function updatePersonGenderById(personId: string, gender: PersonGender): void {
-  const db = getDb();
-  db.prepare(`
-    UPDATE people_memory
-       SET gender = ?, updated_at = datetime('now')
-     WHERE person_id = ? AND gender_confirmed = 0
-  `).run(gender, personId);
-}
-
-/**
  * Human-confirmed gender write. Sets gender_confirmed = 1 so that no
  * downstream auto-detector can overwrite it. Call this when the person
  * themselves states their gender (e.g. "אני את - נקבה", "I'm a guy"),

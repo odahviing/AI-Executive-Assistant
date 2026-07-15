@@ -11,14 +11,14 @@
  *        responds when the colleague reaches out first.
  *
  * Rank moves deterministically via `adjustEngagementRank` — signal-driven,
- * not LLM-judgment. The usual deltas:
+ * not LLM-judgment. The live deltas (v2.2; trimmed as the ping system retired):
  *
- *   colleague initiates social                          → +1
- *   Maelle ping got engaged reply (>30 chars in <24h)  → +1
- *   Maelle ping got brief reply (<=30 chars)           →  0
- *   Maelle ping got NO reply in 48h                    → -1
- *   colleague explicit deflection                      → -2
- *   owner directive                                    → setEngagementRank
+ *   any live social reply within 24h                    → +1  (reply_engaged)
+ *   revival after a quiet stretch                        → +1  (reviveStaleRankZero)
+ *   owner directive                                      → setEngagementRank
+ *
+ * Down-rank is owner-directive or revival-aging only — never from a colleague's
+ * own words; ignoring a coda costs nothing (v3.5.x / v3.2.6).
  *
  * All changes audit-log to `engagement_rank_log` with a reason string so we
  * can answer "why is Ysrael at 0?" later.

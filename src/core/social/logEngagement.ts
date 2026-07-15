@@ -11,7 +11,7 @@
  *   - Assistant raised + person's NEXT message:
  *       · matches subject + non-negative sentiment → +1
  *       · matches subject + negative sentiment    → −1
- *       · doesn't match (any pivot, including task, bare ack, different subject) → −1
+ *       · doesn't match (pivot) → no signal (marker left alive; weekly decay ages it)
  *   - Floor 0 → status='dormant'. Cap 5.
  *
  * The signal applier reads `last_assistant_initiated_at` on the most-recently-

@@ -51,12 +51,3 @@ export function listConnections(profileId: string): ConnectionId[] {
   const profileMap = registry.get(profileId);
   return profileMap ? [...profileMap.keys()] : [];
 }
-
-/**
- * Remove a Connection (testing / reconfiguration). Rarely called in production.
- */
-export function unregisterConnection(profileId: string, connectionId: ConnectionId): boolean {
-  const removed = registry.get(profileId)?.delete(connectionId) ?? false;
-  if (removed) logger.info('Connection unregistered', { profileId, connectionId });
-  return removed;
-}

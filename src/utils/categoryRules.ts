@@ -9,8 +9,6 @@
  *   - default_location / default_is_online / requires_travel_buffer
  *
  * Three exports:
- *   resolveCategoryByPriority — pick the FIRST matching category from a
- *     candidate list (yaml ORDER is priority)
  *   checkCategorySlot         — is this slot allowed for this category?
  *     fired at booking time by find_available_slots, create_meeting,
  *     move_meeting
@@ -44,29 +42,6 @@ export interface CategoryCheckResult {
 }
 
 type ProfileCategory = NonNullable<UserProfile['categories']>[number];
-
-/**
- * Walk the profile's categories list (in yaml ORDER) and return the
- * resolved category for an event with a given set of candidate names.
- * Earlier in the array = higher priority.
- *
- * @param candidateNames Categories the event matches (Graph categories
- *                       array, or Sonnet's classification candidates).
- * @returns The first matching profile category, or undefined when none
- *          of the candidates appear in the profile.
- */
-export function resolveCategoryByPriority(
-  profile: UserProfile,
-  candidateNames: string[],
-): ProfileCategory | undefined {
-  const cats = profile.categories ?? [];
-  if (cats.length === 0 || candidateNames.length === 0) return undefined;
-  const candidateSet = new Set(candidateNames.map(n => n.toLowerCase()));
-  for (const cat of cats) {
-    if (candidateSet.has(cat.name.toLowerCase())) return cat;
-  }
-  return undefined;
-}
 
 /**
  * Look up a profile category by exact name (case-insensitive).

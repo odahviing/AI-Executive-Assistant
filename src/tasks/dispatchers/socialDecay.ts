@@ -1,9 +1,9 @@
 /**
  * Social weekly decay dispatcher.
  *
- * Runs once per week per owner. Walks every active topic for that owner and
- * subtracts 1 from topics whose `last_touched_at` is more than 7 days old.
- * Topics hitting score 0 flip status to 'dormant' — Maelle stops raising
+ * Runs once per week per owner. Walks every active subject for that owner and
+ * subtracts 1 from subjects whose `last_touched_at` is more than 7 days old.
+ * Subjects hitting score 0 flip status to 'dormant' — Maelle stops raising
  * them, but the row stays (owner can still revive by re-mentioning, and
  * category-level memory retains "yes, we've talked about X before").
  *

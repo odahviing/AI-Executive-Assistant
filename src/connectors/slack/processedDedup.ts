@@ -38,14 +38,6 @@ export function markProcessed(ts: string): boolean {
   return true;
 }
 
-export function hasProcessed(ts: string): boolean {
-  return processedTs.has(ts);
-}
-
-export function unmarkProcessed(ts: string): void {
-  processedTs.delete(ts);
-}
-
 // v2.8.7 — content-based dedup for the "same message, different ts" case.
 // Slack's AI assistant panel can mirror an MPIM message into the panel
 // thread, producing a SECOND event with a DIFFERENT ts than the main

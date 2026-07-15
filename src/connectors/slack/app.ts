@@ -47,9 +47,8 @@ import logger from '../../utils/logger';
  *   1:1 DM      (D...)              → responds to every message from authorised user
  *   Group DM / MPIM (G...)          → responds when @mentioned, when she was the
  *                                     most-recent active speaker, OR when the
- *                                     addressee-gate / relevance-classifier votes
- *                                     RESPOND. MPIM @Maelle skips the relevance LLM
- *                                     (fast-path, v3.2.5)
+ *                                     addressee-gate votes RESPOND (v3.3.0 — the
+ *                                     separate relevance classifier was removed)
  *   Channel — top-of-thread @mention → owner-presence gate applies (CH-2 caveat
  *                                     known); when owner participates, runs the
  *                                     thread-action engine (book / follow_up / other)
@@ -153,7 +152,7 @@ export function createSlackAppForProfile(profile: UserProfile): App {
   // and catch-up can race with live delivery of the same event after restart.
   // v1.8.14: shared process-global Set (processedDedup.ts) so catchUpMissedMessages
   // can mark messages it replied to — preventing live handler from replying again.
-  const { markProcessed, hasProcessed, markContentProcessed } = require('./processedDedup') as typeof import('./processedDedup');
+  const { markProcessed, markContentProcessed } = require('./processedDedup') as typeof import('./processedDedup');
 
   // Bot user ID — fetched once at startup, used to detect self-mentions
   let botUserId: string | null = null;
@@ -1497,29 +1496,6 @@ export function createSlackAppForProfile(profile: UserProfile): App {
         isMpim: false,
       }).catch(err => logger.error('processMessage error', { err }));
     });
-  });
-
-  // ── Handler 1c: Assistant thread opened (v2.7.3) ──────────────────────────
-  // Slack's assistant panel (separate UI surface from regular DM) fires this
-  // event when a user opens Maelle in it. We register the thread so subsequent
-  // setStatus("Working…") calls during tool iterations actually surface in the
-  // panel. No greeting message is sent — assistant panels show the suggested-
-  // prompts UI by default; we don't want to push past that.
-  app.event('assistant_thread_started' as any, async ({ event }: any) => {
-    try {
-      const assistantThread = event?.assistant_thread;
-      if (!assistantThread) return;
-      const channelId = assistantThread.channel_id ?? assistantThread.context?.channel_id;
-      const threadTs = assistantThread.thread_ts;
-      if (!channelId || !threadTs) {
-        logger.warn('assistant_thread_started — missing channel_id or thread_ts, skipping', { event: JSON.stringify(event).slice(0, 300) });
-        return;
-      }
-      const { registerAssistantThread } = await import('./assistantThreads');
-      registerAssistantThread({ channelId, threadTs });
-    } catch (err) {
-      logger.warn('assistant_thread_started handler threw', { err: String(err).slice(0, 200) });
-    }
   });
 
   // ── Handler 2: Group DMs / MPIM ───────────────────────────────────────────

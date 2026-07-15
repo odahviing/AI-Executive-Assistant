@@ -91,7 +91,7 @@ async function detectGenderFromImage(
  * Detect and persist gender for a workspace contact.
  *
  * Priority (each tier is a tentative auto-detection — NEVER overrides a
- * gender_confirmed=1 row, enforced in updatePersonGender):
+ * gender_confirmed=1 row, enforced in people.ts):
  *   1. Slack pronouns field  → self-declaration → recorded as 'person' (steers)
  *   2. Profile photo vision  → a weak guess → recorded as 'auto' (does NOT steer
  *                              gendered forms until confirmed — see people.ts)

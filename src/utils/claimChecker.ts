@@ -409,28 +409,43 @@ export async function rewriteOwningTheMiss(opts: {
   actionType?: ClaimActionType;
   targetName?: string | null;
   ownerFirstName: string;
+  // v3.7.x (#B2) — the tool activity this turn. Without it the rewriter's
+  // "the action DID happen → keep" veto was BLIND: it re-judged the draft's
+  // SHAPE only and could not confirm a completed-action claim was backed by a
+  // tool, so it inverted a TRUE "added meeting@reflectiz.com" into "not done,
+  // confirm the address". Hand it the same ground truth the first checker reads.
+  toolSummaries?: string[];
 }): Promise<string | null> {
   const what = opts.actionSummary
     || (opts.actionType === 'message'
       ? `sending a message${opts.targetName ? ` to ${opts.targetName}` : ''}`
       : 'that action');
 
-  const prompt = `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify, not assume. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+  const toolBlock = (opts.toolSummaries && opts.toolSummaries.length)
+    ? opts.toolSummaries.map(s => `  - ${s}`).join('\n')
+    : '  (no tools ran this turn)';
 
-STEP 1 — Decide what the draft actually does. If the draft only:
-- PROPOSES or OFFERS an action ("Want me to move Michal to Wed?", "I can book that", "Should I reach out to her?"), OR
-- ASKS PERMISSION before acting, OR
-- COMMITS to a FUTURE action conditional on ${opts.ownerFirstName}'s answer ("once you pick, I'll move it"), OR
-- states an action that the tools genuinely DID perform, OR
-- simply does NOT state that something is already done / sent / booked / moved / flagged
-then it is NOT a false claim — the checker misfired. Call verdict with verdict="keep" (leave message empty). Do not turn a proposal into an apology.
+  const prompt = `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify AGAINST THE TOOL ACTIVITY below, not assume. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
-STEP 2 — ONLY if the draft genuinely STATES a completed action ("Done — booked Wed 12:15", "I've sent it to Yael", "Moved your 17:00 over") that no tool performed: call verdict with verdict="rewrite" and put the corrected reply in \`message\`. The rewrite must:
+TOOL ACTIVITY THIS TURN (the ground truth — a mutation summary carries its outcome: \`[update_meeting OK — …]\` succeeded, \`[… FAILED: …]\` did not):
+${toolBlock}
+
+STEP 1 — Call verdict="keep" (leave message empty) if ANY of these hold:
+- The draft only PROPOSES / OFFERS an action ("Want me to move Michal to Wed?", "I can book that", "Should I reach out to her?"), OR
+- it ASKS PERMISSION before acting, OR
+- it COMMITS to a FUTURE action conditional on ${opts.ownerFirstName}'s answer ("once you pick, I'll move it"), OR
+- the stated action IS backed by the TOOL ACTIVITY above — a matching tool ran with an OK outcome. Judge by MEANING, across forms: an attendee named by EMAIL in the draft ("added meeting@reflectiz.com") and by DISPLAY NAME in the summary ("added Meeting Room") are the SAME add; a room / resource mailbox counts as an added attendee. OR
+- the draft simply does NOT state that something is already done / sent / booked / moved / added / flagged.
+Do not turn a proposal into an apology, and do not "own a miss" that isn't one.
+
+STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely STATES a completed action ("Done — booked Wed 12:15", "added X", "I've sent it to Yael") AND the TOOL ACTIVITY shows NO matching successful tool (the tool is absent, or its summary says FAILED). Put the corrected reply in \`message\`. The rewrite must:
 - Make it UNMISTAKABLE the thing has NOT gone through yet, so ${opts.ownerFirstName} knows it still needs to happen. (e.g. "Actually — hold on, that didn't go out yet, let me sort it.")
 - NOT claim it's done/sent/booked/flagged/handled, and NOT smooth it into "I'll take care of it" (reads as resolved).
 - Keep every other fact intact: names, times, dates, numbers, the rest of the message.
 - Sound like a real person owning a small slip — never a system/error message, no talk of tools or mechanism.
 - Match the language of the draft (Hebrew/English/etc).
+
+SAFE-MISS — the hard rule. If you CANNOT tell from the tool activity whether the specific action happened (a related mutation ran but you are not sure it covers this exact claim), do NOT assert the opposite. NEVER invert a stated completed action into a confident "that didn't go through" / "I haven't done it yet", and NEVER manufacture a re-ask ("can you confirm the address?") for something that may already be done — inverting a TRUE statement is far worse than leaving a mild overclaim. When you are not sure the claim is false: verdict="keep". Only rewrite when the tool activity makes the false claim clear.
 
 Draft:
 ${opts.draft}`;

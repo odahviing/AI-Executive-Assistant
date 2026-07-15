@@ -1676,6 +1676,38 @@ export class SchedulingSkill {
             ? undefined
             : loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail);
 
+          // v3.7.x (Bug 1.5) — conversational per-attendee hours override. When the
+          // owner states an attendee's REAL hours ("Lori starts 7am ET"), thread it
+          // INTO the entry the walker already clips against (calendar.ts per-attendee
+          // work-window clip) — NO parallel hours route, so the clip can't drift (the
+          // annotation path tags busy/free only, never hours). Partial: only the
+          // bound(s) given override; tz (when given) makes the clip use it (home tz +
+          // clear any stale travel window). Without this the stored default
+          // (getEffectiveWorkingHours) kept rejecting 07:00 ET as
+          // outside_attendee_work_hours even after the owner said 7am works (2026-07-15).
+          const attendeeHoursOverride = Array.isArray(args.attendee_hours)
+            ? (args.attendee_hours as Array<{ email?: string; start?: string; end?: string; tz?: string }>)
+            : [];
+          if (attendeeAvailability && attendeeHoursOverride.length > 0) {
+            const hhmm = /^\d{1,2}:\d{2}$/;
+            for (const ov of attendeeHoursOverride) {
+              const ovEmail = (ov?.email ?? '').toLowerCase().trim();
+              if (!ovEmail) continue;
+              const entry = attendeeAvailability.find(a => a.email.toLowerCase() === ovEmail);
+              if (!entry) continue;
+              if (typeof ov.start === 'string' && hhmm.test(ov.start.trim())) entry.hoursStart = ov.start.trim();
+              if (typeof ov.end === 'string' && hhmm.test(ov.end.trim())) entry.hoursEnd = ov.end.trim();
+              if (typeof ov.tz === 'string' && ov.tz.trim()) {
+                entry.timezone = ov.tz.trim();
+                entry.homeTimezone = ov.tz.trim();
+                entry.travelWindow = undefined;
+              }
+              logger.info('find_available_slots — attendee hours override applied', {
+                email: entry.email, hoursStart: entry.hoursStart, hoursEnd: entry.hoursEnd, tz: entry.timezone,
+              });
+            }
+          }
+
           // #77 — owner-initiated path with attendees: auto-pass
           // attendeeBusyEmails so Graph free/busy filters the candidate pool,
           // not just work-hour clipping. Prior fixes (v2.2.3 #43, v2.3.6 #71)
@@ -3991,12 +4023,22 @@ export class SchedulingSkill {
         const rawAdd = (args.add_attendees as Array<{ name?: string; email?: string; optional?: boolean }> | undefined) ?? [];
         const rawRemove = (args.remove_attendees as string[] | undefined) ?? [];
         const hasAttendeeChange = rawAdd.length > 0 || rawRemove.length > 0;
+        // v3.7.x (#A) — the owner is changing the venue/online-ness ("make it the
+        // meeting room", "in person") WITHOUT naming an explicit venue string. We
+        // recompute the venue via resolveLocation (the SAME source create uses) and
+        // trust its full verdict — instead of the old apply that left the location
+        // untouched (2026-07-15 "changed to meeting room but the location didn't
+        // change") and stripped the Teams link. An explicit `location` string still
+        // wins (venueChangeRequested is false when one is given).
+        const venueChangeRequested =
+          typeof args.is_online === 'boolean'
+          && !(typeof args.location === 'string' && (args.location as string).trim());
         let mergedAttendees: Array<{ name?: string; email: string; optional?: boolean }> | undefined;
         let newCategoryFromShape: string | undefined;
         let newLocationFromShape: string | undefined;
         let newIsOnlineFromShape: boolean | undefined;
 
-        if (hasAttendeeChange) {
+        if (hasAttendeeChange || venueChangeRequested) {
           const ownerFirst = context.profile.user.name.split(' ')[0];
           // v3.1.4 (Y2) — resolve name-only adds to emails from the directory
           // BEFORE the missing-email filter, via the shared resolver every
@@ -4056,7 +4098,27 @@ export class SchedulingSkill {
               return {
                 error: 'colleague_not_requester',
                 meeting_subject: args.meeting_subject,
-                message: `Only ${ownerFirst} (or whoever requested this meeting) can change who's on "${args.meeting_subject}". Raise it with ${ownerFirst} via create_approval(kind=meeting_change) so he can decide.`,
+                // (1) v3.7.x #2.1b — framing seed. NOT "only <owner> can change" (which
+                // reads as "he must do it himself"): this change needs his sign-off, so
+                // it's being SENT to him to approve. Requester-facing wording is #2.1a
+                // (prompt chat); this is just the tool text that seeds it.
+                message: `Changing who's on "${args.meeting_subject}" needs ${ownerFirst}'s sign-off, so I'll send it to him to approve. Call create_approval(kind=policy_exception) with a short ask_text (who wants to add/remove whom), and I'll apply the change the moment he approves.`,
+                // (2) v3.7.x #2.1b — replay path. Stamp the update_meeting deferred_action
+                // (mirrors the create_meeting rule-violation branches) so owner-approve
+                // REPLAYS the exact attendee edit instead of resolving with nothing to
+                // apply. The orchestrator auto-attaches this onto the policy_exception
+                // payload; the resolver replays update_meeting (owner-path → the
+                // requester gate is skipped → the add/remove lands). update_meeting is
+                // already in RESOLVER_REPLAY_TOOLS.
+                _deferred_action_hint: {
+                  tool: 'update_meeting',
+                  args: {
+                    meeting_id: args.meeting_id,
+                    meeting_subject: args.meeting_subject,
+                    ...(addList.length > 0 ? { add_attendees: addList.map(a => ({ email: a.email, ...(a.name ? { name: a.name } : {}) })) } : {}),
+                    ...(removeList.length > 0 ? { remove_attendees: removeList } : {}),
+                  },
+                },
               };
             }
           }
@@ -4109,7 +4171,7 @@ export class SchedulingSkill {
             || (oldCount >= 5 && newCount <= 4);
           const shapeChanged = (wasExternal !== isExternalNow) || crossedThreshold;
 
-          if (shapeChanged && existing.startIso) {
+          if ((shapeChanged || venueChangeRequested) && existing.startIso) {
             logger.info('update_meeting — attendee shape changed, re-evaluating category + location', {
               meetingId: args.meeting_id,
               wasExternal, isExternalNow,
@@ -4151,8 +4213,25 @@ export class SchedulingSkill {
                 existingIsOnline: existing.isOnline,
               });
               if (loc.kind === 'resolved') {
-                if (loc.location !== existing.location) newLocationFromShape = loc.location;
-                if (loc.isOnline !== existing.isOnline) newIsOnlineFromShape = loc.isOnline;
+                if (venueChangeRequested) {
+                  // Venue change → apply the FULL verdict verbatim (trust
+                  // resolveLocation), NOT gated on "differs from existing": the
+                  // owner is explicitly re-placing the meeting. isOnline follows the
+                  // verdict (a 4+ Meeting Room always keeps Teams), never the raw
+                  // is_online flag (which was the misread of "meeting room"). And the
+                  // room mailbox is auto-added (optional), like the create path — so
+                  // "change to meeting room" also lands meeting@… without a re-ask.
+                  newLocationFromShape = loc.location;
+                  newIsOnlineFromShape = loc.isOnline;
+                  const roomEmail = (context.profile.meetings.room_email ?? '').toLowerCase().trim();
+                  if (loc.addRoomEmail && roomEmail && mergedAttendees
+                      && !mergedAttendees.some(a => a.email.toLowerCase() === roomEmail)) {
+                    mergedAttendees.push({ email: roomEmail, optional: true });
+                  }
+                } else {
+                  if (loc.location !== existing.location) newLocationFromShape = loc.location;
+                  if (loc.isOnline !== existing.isOnline) newIsOnlineFromShape = loc.isOnline;
+                }
               }
               // v3.4.2 (travel context) — when the meeting's day is a trip day,
               // an onsite (internal, not remote-forced) meeting's location is the
@@ -4202,8 +4281,17 @@ export class SchedulingSkill {
             ? [args.category as string]
             : (newCategoryFromShape ? [newCategoryFromShape] : undefined),
           attendees: mergedAttendees,
-          location: explicitIsOnline === true ? '' : (explicitLocation ?? newLocationFromShape),
-          isOnline: explicitIsOnline ?? newIsOnlineFromShape,
+          // v3.7.x (#A) — on a venue change TRUST the derived verdict (location +
+          // online-ness from resolveLocation); the raw is_online flag no longer wins
+          // (it was the misread), and a physical venue coexists with the Teams link.
+          // Otherwise unchanged: an explicit `location` still wins, is_online=true
+          // with no venue is still Teams-as-location, and omitting both preserves.
+          location: venueChangeRequested
+            ? (newLocationFromShape ?? (explicitIsOnline === true ? '' : undefined))
+            : (explicitIsOnline === true ? '' : (explicitLocation ?? newLocationFromShape)),
+          isOnline: venueChangeRequested
+            ? (newIsOnlineFromShape ?? explicitIsOnline)
+            : (explicitIsOnline ?? newIsOnlineFromShape),
         });
         await closeMeetingArtifacts({
           ownerUserId: context.profile.user.slack_user_id,
@@ -4233,7 +4321,14 @@ export class SchedulingSkill {
         if (args.new_subject) updateChanges.push(`renamed to '${args.new_subject}'`);
         if (args.category) updateChanges.push(`category set to ${args.category}`);
         if (rawAdd.length > 0) {
-          const names = rawAdd.map(a => a.name || a.email).filter(Boolean) as string[];
+          // v3.7.2 (#B1) — carry the EMAIL, not just a display name. A room mailbox's
+          // name ("Meeting Room") reads as a VENUE, so the old summary "added Meeting
+          // Room" was indistinguishable from a location change — the claim-checker
+          // couldn't match it to a draft's "added meeting@…" and inverted a TRUE add
+          // into "not added yet, confirm the address" (2026-07-15 Offensive Hub).
+          const names = rawAdd
+            .map(a => (a.email && a.name ? `${a.name} (${a.email})` : (a.email || a.name)))
+            .filter(Boolean) as string[];
           updateChanges.push(`added ${names.join(', ')}`);
         }
         if (rawRemove.length > 0) {
@@ -4247,8 +4342,13 @@ export class SchedulingSkill {
         // wins over shape (matches the apply at updateMeeting above).
         if (explicitLocation) updateChanges.push(`location set to "${explicitLocation}"`);
         else if (newLocationFromShape !== undefined) updateChanges.push(`location updated to "${newLocationFromShape}"`);
-        if (explicitIsOnline === true) updateChanges.push('switched to online');
-        else if (explicitIsOnline === false) updateChanges.push('switched to in-person');
+        // v3.7.x (#A) — narrate the APPLIED online-ness, not the raw flag. On a venue
+        // change the derived verdict wins (a Meeting Room keeps Teams → isOnline=true),
+        // so a raw is_online=false must NOT read as "switched to in-person" — it's
+        // hybrid (room + Teams), and the location line already states the venue.
+        const summaryIsOnline = venueChangeRequested ? (newIsOnlineFromShape ?? explicitIsOnline) : explicitIsOnline;
+        if (summaryIsOnline === false) updateChanges.push('switched to in-person');
+        else if (explicitIsOnline === true) updateChanges.push('switched to online');
         return {
           success: true,
           updated: args.meeting_subject,
@@ -5155,6 +5255,17 @@ export class SchedulingSkill {
         // rebalance so it can gate reclaim detection to the slot this move
         // actually freed.
         const vacated = computeVacatedSlot(preMoveStartIso, args.new_start as string, args.new_end as string, timezone);
+        // 1.4 (diagnostic) — the freed-slot narration once said 11:00 when the moved
+        // occurrence was at 14:00. Log the pre-move start (from getEventType) and the
+        // computed vacated so a recurrence shows whether getEventType returned the
+        // series base time vs the occurrence's real start (i.e. is the bug here or
+        // in the narration). Remove once diagnosed.
+        logger.info('move_meeting — vacated slot computed', {
+          meetingId: args.meeting_id,
+          preMoveStartIso,
+          newStart: args.new_start,
+          vacated,
+        });
 
         // v3.2.x (Tier 1) — capture the rebalance return so a displaced
         // floating block whose window this move just freed can be OFFERED back

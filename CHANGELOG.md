@@ -2,6 +2,35 @@
 
 ---
 
+## 3.7.4 — real-day scheduling + approval bug wave, plus a dead-code hygiene sweep
+
+Fixes a wave of real-day bugs from a single scheduling conversation: attendees shown as "free" when they were actually out-of-office or off-hours, a colleague's attendee-change escalation that was silently swallowed (owner never notified, colleague told it was "flagged"), and a social coda that fired mid-scheduling and leaked an unrelated topic into a booking ask. It also lands an owner-approved dead-code hygiene pass (−1,118 LOC: five whole-file deletes, ~20 unused exports, contradicts-code comments, three dead DB tables dropped). Restart required; the dead-table drops are idempotent on boot.
+
+### Fixed — attendee availability honesty (the "no clean slot" fallback)
+- When no slot is clean for everyone, the fallback that surfaces the owner's open times tagged with "who can't make each" now records EVERY conflicting attendee per slot, not just the first. Pre-fix a single busy/off-hours attendee consumed the slot's one tag, so a second unavailable attendee (e.g. an out-of-office teammate whose all-day block sat behind someone else's meeting) was silently omitted and read as "free" — and the same person flipped between "free" and "blocked" across two searches of the same week. Owner-drop path is unchanged (still short-circuits on the first blocker). ([calendar.ts](src/connectors/graph/calendar.ts))
+
+### Fixed — colleague attendee-change escalation (was silently dropped)
+- A colleague asking to add/remove someone on the owner's meeting is now (a) told the change is being SENT to the owner to approve — not that "the owner has to make the change himself as organizer" — and (b) it actually lands: the escalation stamps an `update_meeting` replay so the owner's approval applies the exact edit instead of resolving with nothing to do. ([ops.ts](src/skills/meetings/ops.ts), [index.ts](src/core/orchestrator/index.ts))
+- `create_approval` no longer silently reuses a TERMINAL (resolved/cancelled/expired) approval that hashes to the same subject. A genuine re-escalation about a past topic now mints a fresh day-scoped key so it actually persists and DMs the owner. Before, a repeat ask about the same meeting (subject-hash collision with a week-old resolved approval) returned "reused" — no new request, no owner DM — while the colleague was told "I've flagged it for you." ([skill.ts](src/tasks/skill.ts))
+
+### Fixed — social coda fired mid-scheduling
+- The coda's work-pending guard now treats a slot-search result (`slots`) as an open decision, so the coda no longer rides on an active scheduling turn. This closes the "…and the correct spelling of Zoe's name?" non-sequitur, where a remembered social topic (a pet) fused into a booking confirmation. ([index.ts](src/core/orchestrator/index.ts))
+
+### Added — per-attendee hours override in the slot finder
+- `find_available_slots` accepts an `attendee_hours` override, so when the owner states an attendee's real availability ("Lori's in ET but starts at 7am"), the finder uses those hours instead of the stored default — the instruction now reaches the deterministic search instead of being silently ignored. Composes with the fallback-tagging fix above (both read the same per-attendee window). ([meetings.ts](src/skills/meetings.ts), [ops.ts](src/skills/meetings/ops.ts))
+
+### Removed — dead-code hygiene sweep (owner-approved, parallel chat)
+- Five zero-caller files deleted (`utils/attendeeMode.ts`, `connectors/slack/relevance.ts`, `core/taskContinuity.ts`, `db/cronSchedules.ts`, `connections/router.ts` + its `PersonRef`/`RoutingPolicy` types), ~20 unused exports removed across db/utils/connectors, and a batch of contradicts-code comments corrected (provenance kept). Full verified list in [CLEANUP_AUDIT_HANDOFF.md](.claude/CLEANUP_AUDIT_HANDOFF.md).
+- Three dead DB tables now `DROP`ped on boot (`approvals`, `cron_schedules`, `assistant_threads`) — their code was already gone. Also fixed a stale `WRITE_TOOLS` list so routine/preference writes get the 60s write-TTL instead of the 5s read-TTL. ([client.ts](src/db/client.ts), [toolCallCache.ts](src/utils/toolCallCache.ts))
+
+### Diagnostic (no behavior change)
+- Added a log of the `move_meeting` freed slot (`preMoveStartIso` + computed `vacated`) to pin whether a wrong "frees up 11:00" narration is a recurring-occurrence read from `getEventType` or a narration slip — awaiting the next reproduction before fixing. ([ops.ts](src/skills/meetings/ops.ts))
+
+### Migration
+- The three dead-table drops run idempotently on boot (`DROP TABLE IF EXISTS`); nothing reads or writes them. No other schema change. `connections:` yaml block (`default_routing` / `per_skill_routing`) is now unread scaffolding (its only consumer, `router.ts`, is gone) — left in place for config back-compat.
+
+---
+
 ## 3.7.3 — chat-driven work-time overrides replace the full-day Working-Elsewhere spine
 
 The owner can now tell Maelle his schedule for a specific date — "next week I'm in Boston, 9-5 EST", "working Monday night", "off Tuesday", "from the office Wednesday" — and every scheduling surface follows it. This replaces the old all-day Working-Elsewhere travel-marker spine (which relaxed the rules and forced a trip-time confirm) with ONE per-date override record: YAML is the default, a date's override wins, no override = YAML (fail-safe). An away override with a stated timezone is now a normal, fully-validated work day in that zone that books DIRECTLY (no forced approval), dual-clock preserved. Bundles two approval-honesty fixes from a parallel chat (the "Keren double-approve"). Restart required; the new table auto-creates on boot.

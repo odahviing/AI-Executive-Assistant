@@ -48,11 +48,9 @@ export function displaySubject(event: SubjectableEvent, profile: UserProfile): s
 }
 
 /**
- * Boolean predicate for "is this event private?". Exported separately so
- * call sites that need to branch (e.g., omit a field entirely vs mask)
- * can ask the question without forcing a string answer.
+ * Boolean predicate for "is this event private?". Internal to displaySubject.
  */
-export function isEventPrivate(event: SubjectableEvent, profile: UserProfile): boolean {
+function isEventPrivate(event: SubjectableEvent, profile: UserProfile): boolean {
   const sensitivity = event.sensitivity;
   if (sensitivity === 'private' || sensitivity === 'personal') return true;
   const cats = Array.isArray(event.categories) ? (event.categories as string[]) : [];

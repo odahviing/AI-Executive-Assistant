@@ -14,8 +14,9 @@
  * Layer discipline (per the spec):
  *   - CODE (here): goal assembly + cap, per-goal timeout, seen-log
  *     read/write/prune, fail-open. gatherNews NEVER throws. Code does NOT
- *     parse news.md for domain steer (removed v3.4.0 — the regex was an
- *     implicit format contract on owner free-text); Tavily runs unsteered.
+ *     regex-parse news.md for domain steer (removed v3.4.0 — that regex was an
+ *     implicit format contract on owner free-text); the LLM planner emits
+ *     preferred/avoid domains that code hands to Tavily (M-7).
  *   - PROMPT (getSystemPromptSection): what's worth surfacing, the
  *     "already covered?" call, tone, citation, and weighing any source
  *     preferences the owner wrote in news.md. No enforcement.

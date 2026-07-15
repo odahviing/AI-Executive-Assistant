@@ -44,11 +44,10 @@ const WRITE_TOOLS = new Set<string>([
   'resolve_approval',
   // Outbound messaging
   'message_colleague',
-  // Task / routine mutations
+  // Task / routine mutations (v2.9 — the routine tools merged into manage_routine)
   'create_task',
   'update_task',
-  'create_routine',
-  'update_routine',
+  'manage_routine',
   // Person + knowledge writes
   'update_person_profile',
   'update_person_memory',
@@ -56,7 +55,6 @@ const WRITE_TOOLS = new Set<string>([
   'note_about_self',
   'log_interaction',
   'confirm_gender',
-  'learn_preference',
   'manage_preference',
   'update_my_preferences',
   'manage_knowledge',

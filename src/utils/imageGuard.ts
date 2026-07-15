@@ -7,7 +7,7 @@
  * work), the policy here flips from "log and proceed" to "refuse and notify"
  * — single switch, no re-architecture.
  *
- * Sibling to coordGuard.ts. Same shape: narrow Sonnet classifier, strict JSON
+ * Same shape as the other Sonnet guards: narrow classifier, strict JSON
  * output, fails open on parse / API errors so an LLM hiccup doesn't drop a
  * legitimate owner image.
  */

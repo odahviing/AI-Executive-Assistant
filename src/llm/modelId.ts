@@ -5,8 +5,8 @@
  * Vertex requires versioned model IDs: `claude-sonnet-4-6@20251220`.
  *
  * This helper maps a logical name to whatever the active provider expects.
- * Call sites pass logical names (`claude-sonnet-4-6`, `claude-haiku-4-6`);
- * the helper rewrites if needed.
+ * Call sites pass logical names (`claude-sonnet-4-6`); the helper rewrites if
+ * needed.
  *
  * The Vertex versioning suffix is provider-specific and tied to Google's
  * deployment cadence — they pin Anthropic models to specific snapshot dates
@@ -20,7 +20,6 @@ import { config } from '../config';
 // later supports floating names).
 const VERTEX_MODEL_SUFFIX: Record<string, string> = {
   'claude-sonnet-4-6': '@20251220',
-  'claude-haiku-4-6':  '@20251220',
   // Add other models as needed.
 };
 

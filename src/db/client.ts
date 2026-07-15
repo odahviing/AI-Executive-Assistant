@@ -164,6 +164,12 @@ function initSchema(db: Database.Database): void {
   // direction: leave no dead storage.
   try { db.exec(`DROP TABLE IF EXISTS approvals`); } catch (_) {}
 
+  // v3.7.x cleanup — drop tables whose code was removed: cron_schedules (its
+  // CRUD module was never wired — routines remains the live path) and
+  // assistant_threads (its readers were dead; registration was write-only).
+  try { db.exec(`DROP TABLE IF EXISTS cron_schedules`); } catch (_) {}
+  try { db.exec(`DROP TABLE IF EXISTS assistant_threads`); } catch (_) {}
+
   const columnMigrations = [
     `ALTER TABLE outreach_jobs ADD COLUMN colleague_tz TEXT`,
     `ALTER TABLE outreach_jobs ADD COLUMN scheduled_at TEXT`,
@@ -617,45 +623,11 @@ function initSchema(db: Database.Database): void {
   // schema can't be accidentally written to. Idempotent (no-op if absent).
   try { db.exec(`DROP TABLE IF EXISTS calendar_dismissed_issues`); } catch (_) {}
 
-  // ── Approvals (v1.5) ────────────────────────────────────────────────────────
-  // First-class structured approvals. Every decision Maelle needs from the owner
-  // is a row here. Always attached to a parent task (task_id is required) so the
-  // task system remains the root coordinator. The LLM (Sonnet) reads pending
-  // approvals from the system prompt and calls resolve_approval when the owner
-  // decides — NO buttons, natural language is fine.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS approvals (
-      id               TEXT PRIMARY KEY,
-      created_at       TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
-      task_id          TEXT NOT NULL,                     -- REQUIRED. Every approval is under a task.
-      owner_user_id    TEXT NOT NULL,                     -- who must decide
-      kind             TEXT NOT NULL,                     -- slot_pick | duration_override | policy_exception | unknown_person | calendar_conflict | freeform
-      status           TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected | expired | superseded | cancelled
-      payload_json     TEXT NOT NULL DEFAULT '{}',        -- kind-specific input (e.g. slots list, override details)
-      decision_json    TEXT,                              -- kind-specific output (what was decided)
-      skill_ref        TEXT,                              -- optional link to a domain job (coord_job id, outreach id, ...)
-      slack_channel    TEXT,                              -- DM channel where owner was asked
-      slack_thread_ts  TEXT,                              -- thread the ask lives in (for continuity)
-      slack_msg_ts     TEXT,                              -- ts of the actual ask message (for update/edit)
-      expires_at       TEXT,                              -- ISO — after this the runner flips to expired
-      responded_at     TEXT,                              -- ISO — when the owner decided
-      superseded_by    TEXT,                              -- id of another approval that replaced this one
-      idempotency_key  TEXT UNIQUE,                       -- coord_job_id + kind + payload_hash — safe retry
-      notes            TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_approvals_owner_status ON approvals(owner_user_id, status);
-    CREATE INDEX IF NOT EXISTS idx_approvals_task ON approvals(task_id);
-    CREATE INDEX IF NOT EXISTS idx_approvals_expires ON approvals(status, expires_at);
-    CREATE INDEX IF NOT EXISTS idx_approvals_skill_ref ON approvals(skill_ref);
-  `);
-
-  // v2.7.1 — bridge column to requests spine. Every approval row should also
-  // exist as a request (kind='approval') so the brief reads from one source
-  // of truth. coord_jobs / outreach_jobs already have this column; approvals
-  // was missing it. Idempotent ALTER — safe to re-run.
-  try { db.exec(`ALTER TABLE approvals ADD COLUMN request_id TEXT`); } catch (_) {}
-  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_approvals_request_id ON approvals(request_id)`); } catch (_) {}
+  // ── Approvals — REMOVED (v3.4.6 spine collapse) ──────────────────────────────
+  // Approvals are requests now (core/requests/, db/requests.ts). The legacy
+  // `approvals` table has no reader or writer left; the DROP above (see the
+  // v3.4.6 note near the top of initSchema) cleans it off older DBs. Nothing
+  // recreates it — leave no dead storage.
 
   // ── v1.7.2 — Summary skill ────────────────────────────────────────────────
   // One row per per-thread summary session. `current_draft` holds the
@@ -687,7 +659,7 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_summary_sessions_owner ON summary_sessions(owner_user_id, stage);
   `);
 
-  // ── v2.7.0 — requests + cron_schedules (the spine) ────────────────────────
+  // ── v2.7.0 — requests (the spine) ─────────────────────────────────────────
   // Single source of truth for every user-facing work item: approvals,
   // outreach, reminders, coord, research. Replaces the tasks/approvals/
   // coord_jobs/outreach_jobs four-table mess. Lifecycle timers live on the
@@ -764,43 +736,6 @@ function initSchema(db: Database.Database): void {
       root_ts                TEXT NOT NULL,   -- the dated-header message ts (thread root)
       created_at             TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (owner_user_id, day_key)
-    );
-
-    -- Recurring schedules (replaces routines table + cron-typed rows from tasks)
-    CREATE TABLE IF NOT EXISTS cron_schedules (
-      id                     TEXT PRIMARY KEY,
-      created_at             TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at             TEXT NOT NULL DEFAULT (datetime('now')),
-
-      owner_user_id          TEXT,             -- NULL for global ticks
-      name                   TEXT NOT NULL,
-      handler                TEXT NOT NULL,    -- 'morning_brief' | 'social_outreach_tick' | 'social_decay' | 'user_routine' | ...
-
-      interval_seconds       INTEGER,          -- for fixed-interval
-      cron_expression        TEXT,             -- for cron-style schedules
-
-      routine_yaml           TEXT,             -- user-defined routine payload
-
-      enabled                INTEGER NOT NULL DEFAULT 1,
-      last_fired_at          TEXT,
-      last_request_id        TEXT,             -- last request the cron spawned (NULL if no-op)
-      next_fire_at           TEXT NOT NULL,
-
-      consecutive_failures   INTEGER NOT NULL DEFAULT 0,
-      last_error             TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_cron_next_fire ON cron_schedules(next_fire_at) WHERE enabled = 1;
-
-    -- Slack assistant-panel thread registry. Slack fires assistant_thread_started
-    -- only on first open of a panel thread; we persist so registrations survive
-    -- process restarts. Otherwise the in-memory Map drops and existing open
-    -- panel threads stop getting setStatus calls until the user closes/re-opens.
-    CREATE TABLE IF NOT EXISTS assistant_threads (
-      channel_id      TEXT NOT NULL,
-      thread_ts       TEXT NOT NULL,
-      registered_at   TEXT NOT NULL DEFAULT (datetime('now')),
-      PRIMARY KEY (channel_id, thread_ts)
     );
 
     -- v2.9 — venue skill: owner-curated catalog of external meeting venues

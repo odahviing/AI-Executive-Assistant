@@ -167,11 +167,19 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   // day-type tree (internal + same-TZ + office-day → office with a Teams backup
   // link, never Teams-as-location). A real remote signal still forces online
   // via anyParticipantRemote / the different-TZ branches.
-  if (input.ownerIsOnlineHint === true && input.initiatorRole !== 'colleague') {
+  // v3.7.x (#location) — ...AND only when there's an EXTERNAL attendee. A bare
+  // is_online=true on an INTERNAL-only meeting is almost always Sonnet defaulting
+  // the flag (the 2026-07-15 "5 internals booked online instead of the Meeting
+  // Room" break) — so internal-only falls through to the day-type tree, which
+  // gives the office/room venue WITH a Teams link kept (isOnline stays true there,
+  // so nobody loses the online join). is_online only means "Teams-as-location,
+  // no venue" when an external is on the invite (where physical-vs-online is a
+  // real call). A genuinely-remote internal still goes online via path (2).
+  if (input.ownerIsOnlineHint === true && input.initiatorRole !== 'colleague' && input.hasExternalAttendee) {
     return {
       kind: 'resolved',
       isOnline: true,
-      location: '',      reasoning: 'owner-explicit is_online=true → Teams URL as location',
+      location: '',      reasoning: 'owner-explicit is_online=true + external → Teams URL as location',
     };
   }
   // Owner explicit is_online=false with no location → physical, but we still
@@ -267,13 +275,17 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
     }
     // Internal-only on office day.
     if (input.participantCount >= 4) {
-      // (3c) Big internal → Meeting Room + room_email + Teams in body.
+      // (3c) Big internal → Meeting Room + room_email + Teams in body. v3.7.x —
+      // isOnline is ALWAYS true here (owner: a 4+/Meeting-Room meeting always keeps
+      // the Teams link — people join online even for a physical one; the link lives
+      // in the body, the location field shows the room). A bare is_online=false
+      // ("make it the meeting room") no longer strips the join link.
       return {
         kind: 'resolved',
-        isOnline: !ownerForcedPhysical,
+        isOnline: true,
         location: meetingRoomLabel,
         addRoomEmail: true,
-        reasoning: `office day + internal ≥4 → ${meetingRoomLabel} (+ room email, Teams backup in body)`,
+        reasoning: `office day + internal ≥4 → ${meetingRoomLabel} (+ room email, Teams link in body — always kept)`,
       };
     }
     // (3d) Small internal → short_label + Teams in body.

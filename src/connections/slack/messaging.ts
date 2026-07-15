@@ -43,7 +43,6 @@ export interface SlackUserSearchResult {
   real_name: string;
   email?: string;
   tz: string;
-  is_external_guest: boolean;   // workspace guest (not a full member)
 }
 
 export interface SlackChannelSearchResult {
@@ -293,9 +292,6 @@ export async function deleteMessage(
 
 /**
  * Find Slack workspace users by display/real name. Returns up to 200 matches.
- * The `is_external_guest` flag flips true for users marked is_restricted /
- * is_ultra_restricted by the workspace — useful for the "internals only" rule
- * the Summary skill applies.
  */
 export async function findUserByName(
   app: App,
@@ -323,7 +319,6 @@ export async function findUserByName(
         real_name: m.real_name ?? m.name,
         email: m.profile?.email ?? undefined,
         tz: m.tz ?? 'UTC',
-        is_external_guest: !!(m.is_restricted || m.is_ultra_restricted),
       }));
   } catch (err) {
     logger.error('findUserByName failed', { err: String(err), name });
@@ -370,9 +365,8 @@ export async function findChannelByName(
  *
  * Requires `assistant:write` scope. Only works in threads that opened via
  * the assistant panel — for regular DM messages the API returns
- * `channel_not_found` or `not_in_assistant_thread`. Callers should consult
- * `isAssistantThread()` from connectors/slack/assistantThreads before calling
- * to avoid noisy failures.
+ * `channel_not_found` or `not_in_assistant_thread`. Errors are swallowed at
+ * debug, so a call on a non-panel thread is a harmless no-op.
  *
  * Pass empty status to clear (Slack also clears on next chat.postMessage).
  * Fire-and-forget; never blocks tool execution. Errors are logged at debug

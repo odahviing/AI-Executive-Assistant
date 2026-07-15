@@ -196,7 +196,7 @@ EXPLAINING WHY A DAY ISN'T OFFERED. The tool returns a \`day_summary\` array wit
   • \`accepted: 0, top_reasons: ['wrong_day_type']\` → "Monday is a home day, in-person needs an office day."
   • \`accepted: 0, top_reasons: ['category_per_day']\` → "Already at the daily cap for that category."
   • \`attendee_busy_collision\` (also in \`blocked_by\`) → the attendee's OWN calendar is genuinely busy during your shared hours — real evidence. Scope it ("X is booked during your shared hours Thursday"), don't inflate to "unavailable all day."
-  • \`outside_attendee_work_hours\` → the only openings fall outside the attendee's ASSUMED hours (a timezone-derived default, usually NOT their real schedule). Do NOT say "X isn't available" — say it no-overlap and hedge: "your free time Thursday is outside X's likely working hours."
+  • \`outside_attendee_work_hours\` → the only openings fall outside the attendee's ASSUMED hours (a timezone-derived default, usually NOT their real schedule). Do NOT say "X isn't available" — say it no-overlap and hedge: "your free time Thursday is outside X's likely working hours." If ${profile.user.name.split(' ')[0]} then states the attendee's REAL hours ("Lori starts 7am ET, so 7am works"), pass \`attendee_hours\` (below) to OVERRIDE the assumed default for that one search — don't keep clipping to the wrong hours.
   • \`accepted: >0\` → the day HAS options; if Sonnet's spread picker didn't surface one, say "there are slots that day, want me to pull them?"
   • Date not in \`day_summary\` at all → "I didn't search that day — it's outside the window I checked."
 
@@ -230,6 +230,20 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
               };
             })(),
             attendee_emails: { type: 'array', items: { type: 'string' }, description: 'Emails of attendees whose calendars should constrain the search (intersected with the owner\'s). Known internal colleagues named in the request are resolved from the directory and added for you automatically — you do NOT need to resolve names or call find_slack_user first. Pass any emails you already have. You do NOT need an EXTERNAL attendee\'s email to search (candidate / other company / personal domain): their calendar isn\'t visible, so the tool searches the owner\'s side and you collect their email only at BOOKING. Never demand an email — or withhold times — just to run the search.' },
+            attendee_hours: {
+              type: 'array',
+              description: `OVERRIDE an attendee's working hours for THIS search when ${profile.user.name.split(' ')[0]} states their REAL hours — the finder otherwise clips to a timezone-derived DEFAULT that is usually wrong (see the outside_attendee_work_hours note above). E.g. "Lori starts 7am ET, so 7am works" → attendee_hours:[{ email:"<lori's email>", start:"07:00", tz:"America/New_York" }]. Give ONLY the bound(s) he stated (start and/or end); the other keeps its stored value. tz = the IANA zone the hours are in (default: the attendee's own zone). Targeted per-attendee — everyone else keeps their own hours. Prefer this over ignore_attendee_availability, which drops EVERYONE's hours.`,
+              items: {
+                type: 'object',
+                properties: {
+                  email: { type: 'string', description: 'The attendee whose hours to override (matches an attendee_emails entry).' },
+                  start: { type: 'string', description: 'OPTIONAL. Work-day start "HH:MM".' },
+                  end: { type: 'string', description: 'OPTIONAL. Work-day end "HH:MM".' },
+                  tz: { type: 'string', description: 'OPTIONAL. IANA zone the hours are stated in. Default: the attendee\'s stored zone.' },
+                },
+                required: ['email'],
+              },
+            },
             search_from: { type: 'string', description: 'Start of search window. ISO 8601, date-only ("2026-05-25") or with time ("2026-05-25T07:00:00"). NOTE: the time-of-day is only honored as a hard limit when time_window_is_hard=true (see below) — otherwise the tool searches the full work day. Auto-expanded up to 21 days if fewer than 3 slots found.' },
             search_to: { type: 'string', description: 'End of search window. ISO 8601, date-only or with time. NOTE: the time-of-day is only honored as a hard limit when time_window_is_hard=true.' },
             time_window_is_hard: { type: 'boolean', description: 'Set TRUE only when the owner/attendee gave a REAL time constraint ("must end by noon", "only after 3pm", "available 7–12"). Then the search_from/search_to times are honored as a hard clip. When false/omitted (DEFAULT), those times are treated as SOFT — the tool searches the OWNER\'S FULL WORK DAY (including night-shift hours) and lets the work-hours + attendee-timezone filters surface the real overlap. This prevents accidentally clipping off valid late/night-shift slots that overlap a far-timezone colleague\'s working hours.' },

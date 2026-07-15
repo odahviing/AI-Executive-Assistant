@@ -489,16 +489,10 @@ const UserProfileSchema = z.object({
     }).optional(),
   }).default({ slack: { enabled: true } }),
 
-  // v1.9.0 — outbound routing policy. Governs which Connection the router
-  // picks when Maelle sends a message. Orthogonal to `channels` above
-  // (which toggles inbound listeners).
-  //
-  // Three layers of resolution (src/connections/router.ts):
-  //   1. SkillContext.inboundConnectionId — replies follow inbound transport
-  //   2. PersonRef.preferred_external — per-recipient override on people_memory
-  //   3. per_skill_routing[skill] — skill-specific override here
-  //   4. default_routing — profile-wide default
-  //   5. Hardcoded fallback: internal=slack, external=email
+  // v1.9.0 — outbound routing-policy scaffolding for future multi-transport
+  // (issue #1). Orthogonal to `channels` above (which toggles inbound
+  // listeners). Currently UNREAD — the router that consumed it was removed in
+  // the v3.7.x cleanup; kept as the config shape for when multi-transport lands.
   connections: z.object({
     default_routing: z.object({
       internal: z.string().default('slack'),

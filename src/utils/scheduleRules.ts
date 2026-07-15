@@ -11,6 +11,7 @@
  * Now they all call `checkSlot(...)` and get one consistent verdict + label.
  *
  * Rules checked, in order. First violation wins (caller gets ONE label):
+ *   0. in_the_past                — the slot start is already in the past
  *   1. vacation_or_off_day        — Friday/Saturday for Idan's profile
  *   2. category_day_type          — category requires office_days but slot is home day
  *   3. category_per_day           — at-limit for this category on this day
@@ -24,6 +25,9 @@
  *   8. owner_busy_collision       — owner has a hard conflict (delegated to caller's getCalendarEvents)
  *                                   (bypassed when allow_relaxed = true OR isFloatingBlock = true —
  *                                    owner can override his own time; signals coexist with meetings)
+ *   9. focus_time_floor           — booking would drop the day below the configured
+ *                                   length-based free-time floor (bypassed when
+ *                                   allow_relaxed = true OR isFloatingBlock = true)
  *
  * NOTE on between-meeting buffer (v2.7.1) — the 5-min buffer is NOT enforced
  * as a collision rule. The allowed durations (10/25/40/55) and aligned starts
@@ -61,8 +65,9 @@ export type RuleViolationKind =
 // not focus time, and doesn't count. This same math powers two surfaces:
 //
 //   - find_available_slots — per-slot loop rejects slots that would drop the
-//     day under the configured floor (2h office / 1h home). v2.7.0 lived
-//     inline in calendar.ts; now both callers consume this export.
+//     day under the configured length-based free-time floor
+//     (requiredFreeMinutesForWorkDay). v3.1.2 (C) — the search path consumes
+//     this floor only transitively, by routing through checkSlot rule (9).
 //   - checkSlot rule (9) — write-path validation. Pre-fix the floor was
 //     enforced ONLY at search time, so a named-time create_meeting /
 //     move_meeting / coord pick could book on a packed day that
@@ -463,7 +468,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // 17:00 directly after a meeting ending 17:00.
 
   // ── (9) daily focus-time floor (v3.1.2 C) ────────────────────────────────
-  // The 2h-office / 1h-home daily-free-time requirement used to live ONLY in
+  // The length-based daily-free-time floor (requiredFreeMinutesForWorkDay) used to live ONLY in
   // find_available_slots — so a named-time create_meeting / move_meeting /
   // coord pick would book on a packed day that the search path would have
   // refused. Now enforced here too via the shared computeDayQualityFreeMinutes

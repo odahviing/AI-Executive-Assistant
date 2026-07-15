@@ -1322,15 +1322,29 @@ export async function findAvailableSlots(params: {
       const attendeeConflicts: Array<{ email: string; reason: 'busy' | 'off_hours' }> = [];
       {
         // v2.7.6 — attendee busy (free/busy pool), attributed by email.
-        const overlapsAttendee = allBusy.find(busy =>
-          busy.email !== ownerEmailLower &&
-          cursor.getTime() < busy.end.getTime() &&
-          slotEnd.getTime() > busy.start.getTime()
-        );
-        if (overlapsAttendee) {
-          if (keepAttendeeConflicts) {
-            attendeeConflicts.push({ email: overlapsAttendee.email, reason: 'busy' });
-          } else {
+        // v3.7.x (1.1/1.2) — TAG mode records EVERY conflicting attendee, not just
+        // the first. `allBusy.find` stopped at one hit, so a second blocked
+        // attendee on the same slot (e.g. an OOO teammate behind someone else's
+        // meeting) went untagged → the owner-backstop narrated them "free" (the
+        // Dan-OOO-shows-free bug) and a masked attendee flipped free↔blocked
+        // between searches (the Lori/Monday contradiction). DROP mode still stops
+        // at the first — one reason is enough to reject the slot.
+        if (keepAttendeeConflicts) {
+          const seenBusy = new Set<string>();
+          for (const busy of allBusy) {
+            if (busy.email === ownerEmailLower || seenBusy.has(busy.email)) continue;
+            if (cursor.getTime() < busy.end.getTime() && slotEnd.getTime() > busy.start.getTime()) {
+              seenBusy.add(busy.email);
+              attendeeConflicts.push({ email: busy.email, reason: 'busy' });
+            }
+          }
+        } else {
+          const overlapsAttendee = allBusy.find(busy =>
+            busy.email !== ownerEmailLower &&
+            cursor.getTime() < busy.end.getTime() &&
+            slotEnd.getTime() > busy.start.getTime()
+          );
+          if (overlapsAttendee) {
             trackReject(`attendee_busy_collision:${overlapsAttendee.email}`, cursorDt.toISO()!);
             cursor = new Date(cursor.getTime() + step);
             continue;
@@ -1350,10 +1364,10 @@ export async function findAvailableSlots(params: {
           }
         }
         // #43 / #124 / Daniel — per-attendee work-window clip, own TZ with
-        // per-day travel-window resolution. First blocking attendee wins.
+        // per-day travel-window resolution.
         if (params.attendeeAvailability && params.attendeeAvailability.length > 0) {
           const candidateDayIso = cursorDt.toFormat('yyyy-MM-dd');
-          const blockingAttendee = params.attendeeAvailability.find(att => {
+          const attendeeOutsideHours = (att: NonNullable<typeof params.attendeeAvailability>[number]): boolean => {
             try {
               const tw = att.travelWindow;
               const effTz = (tw && candidateDayIso >= tw.from && candidateDayIso <= tw.until)
@@ -1375,11 +1389,18 @@ export async function findAvailableSlots(params: {
             } catch {
               return false;
             }
-          });
-          if (blockingAttendee) {
-            if (keepAttendeeConflicts) {
-              attendeeConflicts.push({ email: blockingAttendee.email, reason: 'off_hours' });
-            } else {
+          };
+          // v3.7.x (1.1/1.2) — TAG mode collects ALL off-hours attendees so a
+          // second one isn't masked by the first; DROP mode stops at the first.
+          if (keepAttendeeConflicts) {
+            for (const att of params.attendeeAvailability) {
+              if (!attendeeOutsideHours(att)) continue;
+              if (attendeeConflicts.some(c => c.email === att.email)) continue;
+              attendeeConflicts.push({ email: att.email, reason: 'off_hours' });
+            }
+          } else {
+            const blockingAttendee = params.attendeeAvailability.find(attendeeOutsideHours);
+            if (blockingAttendee) {
               trackReject(`outside_attendee_work_hours:${blockingAttendee.email}`, cursorDt.toISO()!);
               cursor = new Date(cursor.getTime() + step);
               continue;

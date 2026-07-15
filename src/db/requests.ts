@@ -427,21 +427,6 @@ export function getOpenScannerItems(ownerUserId: string): RequestRow[] {
   `).all(ownerUserId) as RequestRow[];
 }
 
-/** For outreach reply matching — open outreach for this colleague awaiting reply. */
-export function getOpenOutreachForColleague(
-  ownerUserId: string,
-  colleagueSlackId: string,
-): RequestRow[] {
-  return getDb().prepare(`
-    SELECT * FROM requests
-    WHERE owner_user_id = ?
-      AND kind IN ('outreach','social_outreach')
-      AND target_slack_id = ?
-      AND state = 'awaiting_colleague'
-    ORDER BY created_at DESC
-  `).all(ownerUserId, colleagueSlackId) as RequestRow[];
-}
-
 /** Set the kind-namespaced activity phase, validating the namespace matches kind. */
 export function setPhase(id: string, phase: RequestPhase): void {
   const row = getRequest(id);
@@ -540,23 +525,6 @@ export function markRequestSurfaced(ids: string[]): void {
   `);
   const tx = db.transaction((ids: string[]) => { for (const id of ids) stmt.run(id); });
   tx(ids);
-}
-
-/**
- * Merge fields into an existing details_json blob. Used for outreach
- * conversation appends, coord participant status updates, etc.
- */
-export function mergeRequestDetails(id: string, patch: Record<string, unknown>): void {
-  const row = getRequest(id);
-  if (!row) return;
-  let current: Record<string, unknown> = {};
-  if (row.details_json) {
-    try { current = JSON.parse(row.details_json) as Record<string, unknown>; } catch { /* keep empty */ }
-  }
-  const merged = { ...current, ...patch };
-  getDb().prepare(
-    `UPDATE requests SET details_json = ?, updated_at = datetime('now') WHERE id = ?`
-  ).run(JSON.stringify(merged), id);
 }
 
 // ── timing helpers ──────────────────────────────────────────────────────────

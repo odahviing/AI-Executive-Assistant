@@ -149,11 +149,6 @@ export function createSlotHold(params: {
   return db.prepare(`SELECT * FROM slot_holds WHERE id = ?`).get(id) as SlotHold;
 }
 
-export function getSlotHoldById(id: string): SlotHold | null {
-  const db = getDb();
-  return (db.prepare(`SELECT * FROM slot_holds WHERE id = ?`).get(id) as SlotHold | null) ?? null;
-}
-
 /** Terminal release. `expired=true` stamps status='expired' (sweep path),
  *  otherwise 'released' (confirm/book/owner-override/explicit cancel). */
 export function releaseSlotHold(id: string, closureReason: string, expired = false): boolean {

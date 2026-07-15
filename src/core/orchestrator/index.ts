@@ -175,9 +175,20 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
           const changes = typeof (result as { action_summary?: unknown }).action_summary === 'string'
             ? (result as { action_summary: string }).action_summary.replace(/\s+/g, ' ').trim().slice(0, 140)
             : '';
+          // v3.7.x (#B2) — surface the structured added-attendee EMAILS beside the
+          // prose. action_summary renders an added attendee by DISPLAY NAME ("added
+          // Meeting Room"); a draft that names the EMAIL ("added meeting@…") then
+          // can't be matched against the summary and the checker inverted a TRUE
+          // add. The email is already in the tool result (added_attendees) — carry
+          // it into the log the checker reads so a claim in EITHER form matches
+          // (R4: carry the truth, don't make the checker guess a name↔email bridge).
+          const addedEmails = Array.isArray((result as { added_attendees?: unknown }).added_attendees)
+            ? ((result as { added_attendees: unknown[] }).added_attendees.filter(e => typeof e === 'string') as string[])
+            : [];
+          const addedPart = addedEmails.length ? ` [added: ${addedEmails.join(', ')}]` : '';
           return changes
-            ? `[update_meeting OK — ${changes}${idPart}]`
-            : `[update_meeting OK ${String((input as any).new_subject ?? (input as any).meeting_subject ?? '').slice(0, 40)}${idPart}]`;
+            ? `[update_meeting OK — ${changes}${addedPart}${idPart}]`
+            : `[update_meeting OK ${String((input as any).new_subject ?? (input as any).meeting_subject ?? '').slice(0, 40)}${addedPart}${idPart}]`;
         }
 
         // v3.4.2 (NEW-1) — NEVER fall back to meeting_id here. It was rendered
@@ -457,15 +468,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // information…" / "Reviewing findings…") during the ~10s pre-first-tool
   // reasoning gap (classifyTurn pre-pass + initial Sonnet pass). Per-tool
   // status text from the pre-tool hook below overwrites this as tools fire.
-  // v2.8.5 — `isAssistantThread` gate removed. The registry was added in
-  // v2.7.3 as an optimization to avoid noisy failures on non-panel threads,
-  // but `assistant_thread_started` only fires on FIRST panel open — if the
-  // socket was disconnected at that moment, or the panel pre-existed before
-  // the handler was installed, the thread is permanently missing from the
-  // registry and status indicators silently never show. We now always try
-  // setStatus when we have channel+thread context; Slack rejects non-panel
-  // calls with channel_not_found / not_in_assistant_thread, which the
-  // catch in setAssistantStatus already swallows at debug level.
+  // v2.8.5 — no assistant-thread gating: always try setStatus when we have
+  // channel+thread context. Slack rejects non-panel calls with
+  // channel_not_found / not_in_assistant_thread, which the catch in
+  // setAssistantStatus already swallows at debug level. (The old v2.7.3 panel
+  // registry this used to consult was removed in the v3.7.x cleanup.)
   if (input.app && input.channelId && input.threadTs) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1753,10 +1760,10 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
       // with per-tool human-EA-voiced text (see utils/toolStatusText). Tools
       // without a mapping get '' which actively clears Slack's auto-default
       // ("Gathering information…") — observation / memory tools stay silent.
-      // v2.8.5 — `isAssistantThread` gate removed (see turn-start hook above
-      // for the rationale). Slack rejects non-panel calls with
-      // channel_not_found / not_in_assistant_thread; the catch in
-      // setAssistantStatus swallows that at debug level.
+      // v2.8.5 — no assistant-thread gating (see turn-start hook above for the
+      // rationale). Slack rejects non-panel calls with channel_not_found /
+      // not_in_assistant_thread; the catch in setAssistantStatus swallows that
+      // at debug level.
       if (input.app && input.channelId && input.threadTs) {
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -2071,7 +2078,13 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
           || r.rule_violation != null
           || r.not_organizer === true
           || Array.isArray(r.options)
-          || Array.isArray(r.slot_options);
+          || Array.isArray(r.slot_options)
+          // v3.7.x (1.6) — find_available_slots returns its options under `slots`;
+          // the guard only knew `options`/`slot_options`, so a slot-search turn
+          // (which hands the owner a pick to make) slipped past and the social
+          // coda rode on it — the "spelling of Zoe's name" mid-scheduling
+          // non-sequitur. A pending slate of slots IS an open decision.
+          || Array.isArray(r.slots);
         // A mutating meeting op that didn't close, or any tool that errored.
         const mutators = new Set(['create_meeting', 'move_meeting', 'delete_meeting', 'book_floating_block', 'book_lunch']);
         const failedMutation = mutators.has(toolUse.name)

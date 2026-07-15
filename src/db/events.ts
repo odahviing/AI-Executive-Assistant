@@ -66,8 +66,3 @@ export function getEventsByActor(ownerUserId: string, actorName: string): Maelle
     LIMIT 10
   `).all(ownerUserId, query) as MaelleEvent[];
 }
-
-export function markEventActioned(id: string): void {
-  const db = getDb();
-  db.prepare(`UPDATE events SET actioned = 1 WHERE id = ?`).run(id);
-}

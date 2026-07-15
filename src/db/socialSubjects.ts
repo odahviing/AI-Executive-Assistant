@@ -24,12 +24,12 @@
  * couldn't merge same-subject sub-beats. New schema: subjects merge cleanly via
  * the LLM classifier; beats persist under them as labels.
  *
- * Engagement signal rules (applied by the orchestrator post-classifier):
+ * Engagement signal rules (applied end-of-chat by capturePass.runSubjectReconciliation):
  *   - person spontaneously matches existing subject (no recent assistant raise) → +1
  *   - assistant raised a subject + person's NEXT message:
  *       · matches subject + non-negative sentiment → +1
  *       · matches subject + negative sentiment    → −1
- *       · doesn't match (any pivot, including task or bare ack) → −1
+ *       · doesn't match (pivot) → no signal (marker left alive; weekly decay ages it)
  *   - weekly decay: −1 to active subjects untouched 7+ days; floor 0 → dormant.
  *
  * Caps:
@@ -149,26 +149,11 @@ export function ensureCategoriesSeeded(_ownerUserId?: string): void {
 
 // ── Category helpers ─────────────────────────────────────────────────────────
 
-export function getAllCategories(): SocialCategory[] {
-  const db = getDb();
-  return db
-    .prepare(`SELECT * FROM social_categories WHERE owner_user_id = ? ORDER BY label ASC`)
-    .all(GLOBAL_OWNER) as SocialCategory[];
-}
-
 export function getCategoryByLabel(label: string): SocialCategory | null {
   const db = getDb();
   const row = db
     .prepare(`SELECT * FROM social_categories WHERE owner_user_id = ? AND label = ?`)
     .get(GLOBAL_OWNER, label.toLowerCase()) as SocialCategory | undefined;
-  return row ?? null;
-}
-
-export function getCategoryById(categoryId: string): SocialCategory | null {
-  const db = getDb();
-  const row = db
-    .prepare(`SELECT * FROM social_categories WHERE id = ?`)
-    .get(categoryId) as SocialCategory | undefined;
   return row ?? null;
 }
 
@@ -280,15 +265,6 @@ export function getActiveSubjectsForPerson(personSlackId: string): SocialSubject
   `).all(personSlackId) as SocialSubject[];
 }
 
-export function getDormantSubjectsForPerson(personSlackId: string): SocialSubject[] {
-  const db = getDb();
-  return db.prepare(`
-    SELECT * FROM social_subjects
-    WHERE person_slack_id = ? AND status = 'dormant'
-    ORDER BY last_touched_at DESC
-  `).all(personSlackId) as SocialSubject[];
-}
-
 /**
  * Subject most recently raised by the assistant (for the negative-feedback signal).
  * Used by the orchestrator on the NEXT inbound from this person to judge whether
@@ -333,24 +309,6 @@ export function applyScoreDelta(subjectId: string, delta: number, touchedBy: Sub
       subjectId, label: current.label, from: current.status, to: nextStatus, score: nextScore,
     });
   }
-  return getSubjectById(subjectId);
-}
-
-export function reviveSubject(subjectId: string): SocialSubject | null {
-  const db = getDb();
-  const current = getSubjectById(subjectId);
-  if (!current) return null;
-  if (current.status === 'active') return current;
-  // Revive at SCORE_ON_CREATE_PERSON (mid). Only the person can revive — caller enforces.
-  db.prepare(`
-    UPDATE social_subjects
-    SET engagement_score = ?,
-        status = 'active',
-        last_touched_at = datetime('now'),
-        updated_at = datetime('now')
-    WHERE id = ?
-  `).run(SCORE_ON_CREATE_PERSON, subjectId);
-  logger.info('Social subject revived', { subjectId, label: current.label });
   return getSubjectById(subjectId);
 }
 
@@ -592,25 +550,4 @@ export function runWeeklyDecay(ownerUserId: string): { decayed: number; dormantF
     logger.info('Social weekly decay pass', { ownerUserId, decayed, dormantFlipped });
   }
   return { decayed, dormantFlipped };
-}
-
-/**
- * Most-recent topic touch for a person — used by the proactive tick eligibility
- * gate (preserved from prior behavior). Returns 0 when no subject exists.
- */
-export function lastTopicTouchMs(personSlackId: string, ownerUserId: string): number {
-  try {
-    const db = getDb();
-    const row = db.prepare(`
-      SELECT MAX(last_touched_at) AS most_recent
-      FROM social_subjects
-      WHERE owner_user_id = ?
-        AND person_slack_id = ?
-    `).get(ownerUserId, personSlackId) as { most_recent: string | null } | undefined;
-    if (!row?.most_recent) return 0;
-    const t = new Date(row.most_recent).getTime();
-    return Number.isFinite(t) ? t : 0;
-  } catch {
-    return 0;
-  }
 }

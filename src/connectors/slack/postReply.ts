@@ -615,6 +615,9 @@ async function runClaimCheckAndMaybeRewrite(ctx: ClaimCheckContext): Promise<str
         actionType: verdict.action_type,
         targetName: verdict.target_name,
         ownerFirstName: profile.user.name.split(' ')[0],
+        // v3.7.x (#B2) — the rewriter must verify against the same tool activity
+        // the checker read, so it can't invert a true completed action it can't see.
+        toolSummaries: result.toolSummaries ?? [],
       });
       if (rewritten && rewritten.trim().length > 0) {
         cleanReply = formatForSlack(rewritten);

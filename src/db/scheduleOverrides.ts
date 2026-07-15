@@ -107,13 +107,3 @@ export function clearScheduleOverride(ownerSlackId: string, dateIso: string): vo
     `DELETE FROM owner_schedule_overrides WHERE owner_slack_id = ? AND date = ?`,
   ).run(ownerSlackId, dateIso);
 }
-
-/** Housekeeping — drop rows for dates already in the past (caller passes today
- *  in the owner's home tz). Overrides never apply to the past, so this only keeps
- *  the table small; correctness never depends on it. */
-export function pruneScheduleOverridesBefore(ownerSlackId: string, todayIso: string): void {
-  if (!ownerSlackId || !todayIso) return;
-  getDb().prepare(
-    `DELETE FROM owner_schedule_overrides WHERE owner_slack_id = ? AND date < ?`,
-  ).run(ownerSlackId, todayIso);
-}

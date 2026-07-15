@@ -10,7 +10,7 @@
  *
  * This module is the replay engine. It re-creates the SkillContext that the
  * original tool handler expects, then calls executeToolCall on the registered
- * MeetingsSkill (the home for create_meeting / move_meeting) or
+ * SchedulingSkill (the direct-ops home for create_meeting / move_meeting) or
  * CalendarHealthSkill (book_floating_block).
  *
  * Errors PROPAGATE — they don't silently log+swallow. The resolver wraps each

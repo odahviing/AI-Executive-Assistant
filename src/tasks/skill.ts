@@ -130,6 +130,7 @@ ALSO CHECK ROUTINES when the owner asks about recurring activities ("did you do 
 AUTHORITY MODEL:
 - If the owner tells Maelle directly to do something (even when it breaks a rule), that IS the approval — just do it, no approval needed.
 - If a colleague asks for something that breaks a rule or needs an owner-only judgment, create_approval — the owner must decide.
+- RELAY IT AS AN APPROVAL IN FLIGHT, NOT A DEAD END. When you raise this for a colleague, tell the requester you've SENT it to the owner (by name) to decide. If the change is theirs to make pending sign-off — e.g. the person who requested the meeting is adding attendees — say so ("you can add them — I've sent it to the owner to approve"). NEVER frame it as "the owner must make the change themselves" or "you can't change this."
 
 Kinds:
 - duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
@@ -497,6 +498,16 @@ Binding — how to pick the right approval_id:
         // schema-level `required:` (which today is the canonical enforcement
         // point for booking input shape).
         if (subkind === 'policy_exception') {
+          // #2.1b (attendee-edit approval) — an attendee EDIT escalation carries an
+          // update_meeting deferred_action, attached by the orchestrator from
+          // update_meeting's `_deferred_action_hint` (index.ts, policy_exception-gated).
+          // It has NO booking shape (no start/end/attendees) and needs no
+          // create_meeting auto-stamp or slot re-derivation — those are CREATE-only.
+          // The resolver replays update_meeting on approve (owner-path → the
+          // update_meeting requester gate is skipped → the add/remove lands). So the
+          // booking-field check and the #142c re-derivation below both skip for edits.
+          const isEdit = (payload.deferred_action as { tool?: string } | undefined)?.tool === 'update_meeting';
+
           const hasSubject = typeof payload.subject === 'string' && payload.subject.trim().length > 0;
           const hasStart = typeof payload.start === 'string' && payload.start.trim().length > 0;
           const hasEnd = typeof payload.end === 'string' && payload.end.trim().length > 0;
@@ -509,7 +520,7 @@ Binding — how to pick the right approval_id:
           if (!hasEnd) missing.push('end');
           if (!hasAttendees) missing.push('attendees');
 
-          if (missing.length > 0) {
+          if (!isEdit && missing.length > 0) {
             logger.info('create_approval — booking-kind payload missing required fields', {
               kind: subkind, missing,
             });
@@ -564,8 +575,9 @@ Binding — how to pick the right approval_id:
           // genuine soft escalations (focus floor / work hours / category) keep
           // their honest soft label AND their ask prose unchanged. Best-effort:
           // any failure leaves Sonnet's reason as-is rather than blocking a real
-          // escalation (reads only — calendar + rules, no writes).
-          try {
+          // escalation (reads only — calendar + rules, no writes). Skipped for an
+          // attendee edit (isEdit) — no slot to re-derive.
+          if (!isEdit) try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { getCalendarEvents } = require('../connectors/graph/calendar') as typeof import('../connectors/graph/calendar');
             // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -708,7 +720,7 @@ Binding — how to pick the right approval_id:
         }
 
         // Idempotency key as deterministic fallback (unique constraint at insert).
-        const idempotencyKey = buildIdempotencyKey({
+        let idempotencyKey = buildIdempotencyKey({
           ownerUserId,
           requesterSlackId: requesterSlackId ?? null,
           kind: 'approval',
@@ -716,15 +728,45 @@ Binding — how to pick the right approval_id:
         });
         const idempotent = getRequestByIdempotencyKey(idempotencyKey);
         if (idempotent) {
-          await maybeRevive(idempotent);
-          return {
-            ok: true,
-            approval_id: idempotent.id,
-            created: false,
-            expires_at: idempotent.expires_at,
-            kind: subkind,
-            reused_existing: true,
-          };
+          const priorTerminal = idempotent.state === 'resolved'
+            || idempotent.state === 'cancelled'
+            || idempotent.state === 'expired';
+          if (!priorTerminal) {
+            // Live duplicate of the SAME still-open ask — reuse it (re-surface if stale).
+            logger.info('create_approval — reusing OPEN idempotency match', {
+              existingId: idempotent.id, state: idempotent.state, subject, requesterSlackId,
+            });
+            await maybeRevive(idempotent);
+            return {
+              ok: true,
+              approval_id: idempotent.id,
+              created: false,
+              expires_at: idempotent.expires_at,
+              kind: subkind,
+              reused_existing: true,
+            };
+          }
+          // Bug 2.2 (Maayan "Offensive GTM Q&A", 2026-07-15) — the match is
+          // TERMINAL (resolved/cancelled/expired): a decided ask from a PAST turn,
+          // not a live duplicate. Silently reusing it here swallowed a real
+          // re-escalation (no new request, no owner DM) and left Sonnet claiming
+          // "I've flagged it" — false. The LLM dedup above deliberately ignores
+          // closed rows for exactly this reason; the deterministic key fallback
+          // must too. Mint a FRESH key (base + the owner-local re-ask DAY) so the
+          // fresh approval actually inserts and reaches the owner. The day suffix
+          // keeps dedup honest at both ends: a same-turn / same-day retry re-derives
+          // the SAME key → collides at insert → the catch below reuses the now-open
+          // row instead of double-DMing; a genuine re-ask on a LATER day gets a
+          // fresh key → a fresh approval (not a stale tombstone). (This path also
+          // fires for a genuine attendee-change escalation whose subject matches an
+          // earlier booking approval — same subject hashes to the same base key; the
+          // fresh key lets it through. Bug 2.1's escalate wording + the invalid
+          // `meeting_change` subkind live in ops.ts — routed to the meeting chat.)
+          const reAskDay = DateTime.now().setZone(profile.user.timezone).toFormat('yyyy-MM-dd');
+          logger.info('create_approval — prior idempotency match is TERMINAL; raising a fresh approval', {
+            priorId: idempotent.id, priorState: idempotent.state, reAskDay, subject, requesterSlackId,
+          });
+          idempotencyKey = `${idempotencyKey}:re:${reAskDay}`;
         }
 
         // Midpoint reminder + expiry — one schedule on the request row.

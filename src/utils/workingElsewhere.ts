@@ -7,8 +7,8 @@
  * functions are thin ADAPTERS over that one accessor, kept so the display +
  * prompt consumers (weTimeResolver dual-clock, the OWNER LOCATION block, the
  * calendar-read away-note) don't have to change shape:
- *   - resolveOwnerTravelContextForDate / getTravelContextForInstant → the ONE
- *     "where is the owner, in what tz, on date D?" for the display path (SYNC).
+ *   - getTravelContextForInstant → the ONE "where is the owner, in what tz, on
+ *     the day of instant T?" for the display path (SYNC).
  *   - detectOwnerAwayDaysInWindow → the away-day SET over a window (override rows
  *     with a non-home timezone).
  *   - summarizeWorkingElsewhere → the calendar-read away-note.
@@ -24,7 +24,7 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
-import { getEffectiveWorkDay, getEffectiveWorkDayForInstant } from './workHours';
+import { getEffectiveWorkDayForInstant } from './workHours';
 import { listScheduleOverrides } from '../db/scheduleOverrides';
 import logger from './logger';
 
@@ -63,13 +63,11 @@ export function detectOwnerAwayDaysInWindow(
 }
 
 /**
- * v3.7.x (#143) — THE single "where is the owner, in what timezone, on date D?"
- * for the DISPLAY path (booked dual-clock, approval preview, stated-time
- * resolution). SYNC — a per-date override read via getEffectiveWorkDay. `isAway`
- * is true only when the date has an override with an explicit `timezone` ≠ home;
- * then `effectiveTz` is that IANA. No override (or a home-tz-only one) →
- * isAway=false, effectiveTz=home → every display consumer is a no-op
- * (byte-identical to a normal day).
+ * v3.7.x (#143) — the resolved owner-location context for the DISPLAY path
+ * (booked dual-clock, approval preview, stated-time resolution), produced by
+ * getTravelContextForInstant. `isAway` is true only when the day has an override
+ * with an explicit `timezone` ≠ home; then `effectiveTz` is that IANA, else the
+ * owner home TZ → every display consumer is a no-op.
  *
  * `location` is deliberately '' — the override stores no city, and the dual-clock
  * names the tz abbreviation, not a place (naming the lodging read as a venue).
@@ -78,20 +76,6 @@ export interface OwnerTravelContext {
   isAway: boolean;
   effectiveTz: string;   // away IANA when away, else the owner home TZ
   location: string;      // always '' post-#143 (kept for the display type's shape)
-}
-
-export function resolveOwnerTravelContextForDate(
-  dayIso: string,                  // yyyy-MM-dd in the owner's home TZ
-  profile: UserProfile,
-): OwnerTravelContext {
-  const homeTz = profile.user.timezone;
-  try {
-    const eff = getEffectiveWorkDay(dayIso, profile);
-    if (eff.isAway) return { isAway: true, effectiveTz: eff.timezone, location: '' };
-  } catch (err) {
-    logger.warn('resolveOwnerTravelContextForDate — override resolve threw', { err: String(err).slice(0, 160) });
-  }
-  return { isAway: false, effectiveTz: homeTz, location: '' };
 }
 
 /**

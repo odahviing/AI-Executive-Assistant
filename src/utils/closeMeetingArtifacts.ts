@@ -56,12 +56,8 @@ export async function closeMeetingArtifacts(params: {
   meetingId: string;
   reason: MeetingArtifactReason;
   /**
-   * v2.9.2 — meeting subject. Used by the in_flight_action fallback cascade:
-   * when an in_flight follow_up row was opened mid-turn (e.g. create_meeting
-   * spilled) without a meeting_id in details, the meeting_id-based match
-   * misses it. The subject-based fallback catches those. Optional — when
-   * absent, the in_flight_action subject fallback is skipped (callers that
-   * have subject in scope should pass it).
+   * v2.9.2 — meeting subject, used only to compose the close-loop DM to the
+   * requester (falls back to the request's own subject). Optional.
    */
   subject?: string;
   /**
@@ -216,18 +212,12 @@ export async function closeMeetingArtifacts(params: {
         });
       }
 
-      // Fallback — sweep open top-level requests whose details_json references
-      // this meetingId (catches coords still in-flight whose outcome was never
-      // stamped). Bounded to open state so closed rows aren't disturbed.
-      //
-      // v2.9.2 — also include a SUBJECT-based fallback for in_flight_action
-      // rows. Those get created mid-turn by maybeOpenInFlightMeetingRequest
-      // when create_meeting spills; the row stores subject in details but the
-      // meeting_id is undefined (the new event id isn't known yet). When the
-      // create eventually succeeds, the meeting_id-based match never finds
-      // these rows. Subject-match catches them. Scoped to subkind=
-      // 'in_flight_action' to avoid false-positive matches with other request
-      // kinds that happen to share a subject string.
+      // Fallback — sweep open top-level requests: match by meeting_id in
+      // details_json (catches coords still in-flight whose outcome was never
+      // stamped), or by origin_thread_ts thread-match (below). Bounded to open
+      // state so closed rows aren't disturbed. (v2.9.2 + v3.4.6 — the old exact-
+      // subject / subkind='in_flight_action' fallback tier was deleted in v3.4.6;
+      // the thread-match below replaced it. See the tier note in the loop.)
       const open = getOpenRequestsForOwner(params.ownerUserId);
 
       // Thread-match the booking to its originating colleague request. A

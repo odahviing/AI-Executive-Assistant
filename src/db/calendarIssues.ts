@@ -578,15 +578,3 @@ export function attachRequestToIssue(issueId: string, requestId: string): boolea
   `).run(requestId, issueId);
   return result.changes > 0;
 }
-
-// ── Cleanup (background sweep) ───────────────────────────────────────────────
-
-/** Drop terminal rows older than 30 days. Called from the brief routine. */
-export function cleanOldResolvedIssues(): void {
-  const db = getDb();
-  db.prepare(`
-    DELETE FROM calendar_issues
-    WHERE status IN ('approved','dismissed','resolved')
-      AND updated_at < datetime('now', '-30 days')
-  `).run();
-}
