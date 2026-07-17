@@ -29,6 +29,7 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
   find_available_slots: 'Finding a time',
   check_join_availability: 'Checking who can make it',
   check_calendar_health: 'Reviewing the calendar',
+  get_work_schedule_overrides: 'Checking your schedule',
 
   // Calendar — writing
   create_meeting: 'Setting up the meeting',
@@ -37,6 +38,9 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
   delete_meeting: 'Cancelling the meeting',
   book_floating_block: 'Blocking the time',
   set_event_category: 'Sorting the meeting',
+  hold_slot: 'Holding the time',
+  set_work_schedule_override: 'Updating your schedule',
+  revert_last_auto_move: 'Putting it back',
 
   // Messaging / lookups
   message_colleague: 'Sending the message',
@@ -65,6 +69,7 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
   web_search: 'Searching the web',
   web_extract: 'Reading the page',
   web_research: 'Looking online',              // v3.1.8 grounded research loop
+  news: 'Catching up on the news',             // grounded news skill (owner-facing)
 
   // People / memory (v3.1.8 — were unmapped → showed the 'Working' placeholder)
   get_person_memory: 'Remembering',
@@ -78,6 +83,7 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
   // Meeting summary
   share_summary: 'Sending the recap',
   update_summary_draft: 'Editing the recap',
+  learn_summary_style: 'Learning your style',
 
   // Preferences (v2.9 — merged)
   manage_preference: 'Saving the preference',

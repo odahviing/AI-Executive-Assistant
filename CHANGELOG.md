@@ -2,6 +2,31 @@
 
 ---
 
+## 3.7.5 — efficient-calendar packing (#133) + an auto-move safety wave
+
+Adds the "efficient calendar" preference (owner rule 13): on a dense profile Maelle packs meetings back-to-back, kills the 6–29 min "dead" gaps that are too short to focus, and prefers earlier/tighter times — across three surfaces (slot ranking, a direct-time counter-offer, and an autonomous calendar-health defrag). Shipping with it: a wave of fixes to the active-mode auto-move, surfaced by running the defrag against the real calendar, that were relocating meetings to the wrong day and onto already-busy or off-grid slots. All gated on a new `meetings.packing_preference` (default `spread` → every other tenant is byte-identical). Restart required; no schema change.
+
+### Added — efficient-calendar packing (#133, dense profile only)
+- New `meetings.packing_preference: 'dense' | 'spread'` (default `spread`). On `dense`: the slot finder ranks candidates by how tightly they sit against existing meetings (back-to-back or a real ≥30-min break = good; a 6–29 min island = bad) and offers the efficient options first, earliest-first; `create_meeting` returns an `efficiency_counter` with an earlier back-to-back time when a named time would open a dead gap (`keep_requested_time: true` books as-requested); and calendar-health detects `inefficient_gap`s and autonomously defrags them. Thresholds REUSE `buffer_minutes` (5) + `thinking_time_min_chunk_minutes` (30) — no new numbers. New pure primitive `utils/calendarDensity.ts` is the single source of truth for all three surfaces. ([calendarDensity.ts](src/utils/calendarDensity.ts), [calendar.ts](src/connectors/graph/calendar.ts), [ops.ts](src/skills/meetings/ops.ts), [calendarHealth.ts](src/skills/calendarHealth.ts))
+- `analyze_calendar`'s free-time count now uses `thinking_time_min_chunk_minutes` (was a hardcoded 15), so it agrees with the slot-path focus floor on what counts as a real break.
+
+### Changed — one shared auto-move path
+- Extracted `executeInternalAutoMove` (calendarHealth.ts): the double_booking clash-clearer AND the new defrag now run ONE move path — requests-spine record (the `revert` handle) → `updateMeeting` → floating-block rebalance → notify the attendee → shadow-notify the owner.
+
+### Fixed — active-mode auto-move safety wave (found running the defrag live)
+- Never crosses the day/week by accident: the defrag stays same-day (`autoExpand: false` + a same-day guard); double_booking's search no longer auto-widens past its week-clamp into the next week (a last-work-day clash with no in-week slot now surfaces to the owner instead of jumping forward).
+- Never lands on a busy slot: the finder fetched the owner's events for the ORIGINAL window only, so an auto-expanded search validated later-day slots against stale events and accepted owner-busy times — now it fetches the widened window (fixes EVERY slot search, not just the auto-move). Auto-moves also now filter on the attendee's free/busy AND work-hours + timezone, so a move never lands where the colleague can't attend (notably cross-TZ — an early Israel slot that's before a US attendee's hours).
+- Never moves a solo event: a placeholder with no non-owner attendees is left for the owner (chokepoint guard) — the "Tax placeholder moved for no reason" case.
+- Never off-grid: the finder can align its start to the quarter grid (`gridAlignStart`, opt-in), so a back-to-back-with-the-prior-meeting start lands on :00/:15/:30/:45 (13:40 → 13:45).
+
+### Added — Slack status text
+- Filled the "what is Maelle doing" phrases that were falling back to a placeholder: `set_work_schedule_override`, `get_work_schedule_overrides`, `revert_last_auto_move`, `hold_slot`, `news`, `learn_summary_style`.
+
+### Migration
+- None. `packing_preference` defaults to `spread` (de-tenant neutral); no schema or data change.
+
+---
+
 ## 3.7.4 — real-day scheduling + approval bug wave, plus a dead-code hygiene sweep
 
 Fixes a wave of real-day bugs from a single scheduling conversation: attendees shown as "free" when they were actually out-of-office or off-hours, a colleague's attendee-change escalation that was silently swallowed (owner never notified, colleague told it was "flagged"), and a social coda that fired mid-scheduling and leaked an unrelated topic into a booking ask. It also lands an owner-approved dead-code hygiene pass (−1,118 LOC: five whole-file deletes, ~20 unused exports, contradicts-code comments, three dead DB tables dropped). Restart required; the dead-table drops are idempotent on boot.

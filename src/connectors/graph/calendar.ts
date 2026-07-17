@@ -7,6 +7,7 @@ import logger from '../../utils/logger';
 import { auditLog } from '../../db';
 import type { UserProfile } from '../../config/userProfile';
 import { slotDayMinutes } from '../../utils/workHours';
+import { scoreSlotDensity, densityConfigFromProfile, prefersDensePacking } from '../../utils/calendarDensity';
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -642,6 +643,13 @@ export async function findAvailableSlots(params: {
   // v1.6.4 — auto-expand search until we have ≥3 slots or hit maxSearchDays
   autoExpand?: boolean;            // default true
   maxSearchDays?: number;          // default 21
+  // v3.7.x (#133 fix) — align the walk's FIRST cursor UP to the :00/:15/:30/:45
+  // grid. OPT-IN (default off): the shared walker is ALSO a single-slot VALIDATOR
+  // (create/move colleague Guard B, candidate_slots, counter auto-accept) that must
+  // test the EXACT — possibly off-grid — named start; aligning there made the walk
+  // return 0 → false "unavailable" / false escalation. Only the defrag (off-grid
+  // keptEnd, wants the aligned back-to-back start) passes true.
+  gridAlignStart?: boolean;
   // v2.2.3 (#43) — opt-in deeper search. By default we only filter slots
   // against the OWNER's busy time + each attendee's working window (cheap, no
   // assumptions about which of the attendee's meetings are movable). When the
@@ -918,11 +926,20 @@ export async function findAvailableSlots(params: {
         // see 0 events and pass through any limit. Widen the fetch range
         // to cover at least the ISO week containing searchFrom..searchTo.
         // No-op when category is unset — preserves the cheap narrow fetch.
+        // v3.7.x — cover the CURRENT (possibly autoExpand-widened) window via
+        // currentTo, NOT the original params.searchTo. Pre-fix, when autoExpand
+        // widened the search to later days, checkSlot's owner-busy / focus-floor /
+        // floating-block rules still validated those expanded-day slots against
+        // owner events that only covered the ORIGINAL window — so an autoExpanded
+        // search silently ACCEPTED owner-busy slots on the later days (the auto-move
+        // "landed on an already-busy slot" bug). No expansion → currentTo ===
+        // params.searchTo → byte-identical fetch.
+        const effTo = currentTo.toISO()!;
         let fetchFrom = params.searchFrom;
-        let fetchTo = params.searchTo;
+        let fetchTo = effTo;
         if (params.category) {
           const sfDt = DateTime.fromISO(params.searchFrom, { zone: params.timezone });
-          const stDt = DateTime.fromISO(params.searchTo, { zone: params.timezone });
+          const stDt = DateTime.fromISO(effTo, { zone: params.timezone });
           if (sfDt.isValid && stDt.isValid) {
             fetchFrom = sfDt.startOf('week').toISO()!;
             fetchTo = stDt.endOf('week').toISO()!;
@@ -1167,7 +1184,23 @@ export async function findAvailableSlots(params: {
     // 10:30, 10:45").
     const MAX_PER_DAY = 4;
     const PREFERRED_GAP_MS = 30 * 60 * 1000;
-    const dayBuckets: Map<string, Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }>> = new Map();
+    // #133 — efficient-calendar ranking. When the owner prefers dense packing,
+    // each candidate is scored by how it sits among the owner's EXISTING
+    // commitments (back-to-back / real break = good; a 6–29 min dead gap = bad).
+    // The per-day pick below then keeps the most efficient slots (earliest-first
+    // tiebreak), so pickSpreadSlots offers efficient options first. ownerBusyMs =
+    // the owner's fixed commitments (floating blocks are already elastic-
+    // subtracted from allBusy above, so we never pack against a lunch that slides).
+    const packingDense = profile ? prefersDensePacking(profile.meetings) : false;
+    const densityCfg = profile
+      ? densityConfigFromProfile(profile.meetings)
+      : { bufferMinutes: 5, minBreakMinutes: 30 };
+    const ownerBusyMs: Array<{ start: number; end: number }> = packingDense
+      ? allBusy
+          .filter(b => b.email === ownerEmailLower)
+          .map(b => ({ start: b.start.getTime(), end: b.end.getTime() }))
+      : [];
+    const dayBuckets: Map<string, Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }>; density?: number }>> = new Map();
 
     // v2.3.6 (#71a) — diagnostic rejection counters. Helps debug "why was 17:45
     // rejected?" by showing the per-rule breakdown at the end of the search.
@@ -1246,7 +1279,21 @@ export async function findAvailableSlots(params: {
       }
     }
 
-    let cursor = DateTime.fromISO(params.searchFrom, { zone: params.timezone }).toJSDate();
+    // v3.7.x (#133) — OPT-IN grid-align of the walk's FIRST cursor. When
+    // gridAlignStart is set (the defrag), an OFF-GRID searchFrom (its back-to-back
+    // keptEnd, e.g. 13:40 — a normal off-grid meeting END, since durations bake a
+    // 5-min trailing buffer) is ceiled to the next quarter (13:45…) so candidates
+    // are aligned, never 13:40. Default OFF because the same walker VALIDATES exact
+    // single-slot windows (Guard B / candidate_slots / counter-accept), where
+    // ceiling a narrow off-grid window past searchEnd returned 0 → false
+    // "unavailable" / false escalation. Off = cursor starts EXACTLY at searchFrom
+    // (aligned callers unaffected; validators test the exact start).
+    let cursorDt0 = DateTime.fromISO(params.searchFrom, { zone: params.timezone });
+    if (params.gridAlignStart) {
+      const flooredQuarter = cursorDt0.startOf('hour').plus({ minutes: Math.floor(cursorDt0.minute / 15) * 15 });
+      cursorDt0 = flooredQuarter < cursorDt0 ? flooredQuarter.plus({ minutes: 15 }) : flooredQuarter;
+    }
+    let cursor = cursorDt0.toJSDate();
     while (cursor.getTime() + durationMs <= searchEnd.getTime()) {
       const cursorDt = DateTime.fromJSDate(cursor).setZone(params.timezone);
       const dayName = cursorDt.toFormat('EEEE');
@@ -1504,6 +1551,7 @@ export async function findAvailableSlots(params: {
         disturbs_floating_block: disturbsBlock,
         ...(softHit ? { over_optional: softHit.subject } : {}),
         ...(attendeeConflicts.length ? { attendee_conflicts: attendeeConflicts } : {}),
+        ...(packingDense ? { density: scoreSlotDensity(slotStartMs, slotEndMs, ownerBusyMs, densityCfg).score } : {}),
       });
       cursor = new Date(cursor.getTime() + step);
     }
@@ -1514,6 +1562,24 @@ export async function findAvailableSlots(params: {
     // Owner preference: "10, 10:30, 11:30, 14:00" > "10, 10:15, 10:30, 10:45".
     for (const [, daySlots] of dayBuckets) {
       if (daySlots.length === 0) continue;
+      // #133 — dense packing: keep the MOST EFFICIENT slots for the day (highest
+      // density score), earliest-first as the tiebreak — instead of the variety-
+      // spread pick. Clean slots still rank above WE-soft. pickSpreadSlots then
+      // spreads the final offered set across days, so the owner sees efficient
+      // options first (and, for cross-TZ, the earliest slot inside the overlap).
+      if (packingDense) {
+        const ranked = [...daySlots].sort((a, b) => {
+          const soft = (a.over_optional ? 1 : 0) - (b.over_optional ? 1 : 0);
+          if (soft !== 0) return soft;
+          const d = (b.density ?? 0) - (a.density ?? 0);
+          if (d !== 0) return d;
+          return a.start.localeCompare(b.start);   // earlier better
+        });
+        const picked = ranked.slice(0, MAX_PER_DAY);
+        picked.sort((a, b) => a.start.localeCompare(b.start));
+        candidates.push(...picked);
+        continue;
+      }
       // v3.6.4 — sink WE-soft (optional-join) slots so the per-day cap keeps
       // CLEAN slots first and a clean slot is never dropped in favour of a soft
       // one. Stable sort → chronological order preserved within each tier.

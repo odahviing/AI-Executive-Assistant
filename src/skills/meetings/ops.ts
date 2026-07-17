@@ -582,8 +582,12 @@ export function analyzeCalendar(
     // ── Free time (bug 1.13) ───────────────────────────────────────────────
     // Sum free gaps INSIDE each work window only — the off-period between a
     // morning and a night shift is never counted (it isn't work time). No buffer
-    // shave; any single gap under 15 min is dropped entirely, not trimmed.
-    // required = 1h free per 4h worked, rounded UP to the next 15 min, off the
+    // shave; a single gap under the min chunk is dropped entirely, not trimmed.
+    // #133 — the min chunk is thinking_time_min_chunk_minutes (the SAME block the
+    // slot-path focus floor counts via computeDayQualityFreeMinutes); a sub-chunk
+    // gap is a dead sliver, not free time. Was hardcoded 15; now aligned so
+    // analyze_calendar and the booking floor agree on what a "real break" is.
+    // required = 1h free per N hours worked, rounded UP to 15 min, off the
     // summed work-window length (workTotalMin).
     const freeWindows = windows.length > 0 ? windows : [{ startMin: workStartMin, endMin: workEndMin }];
     const meetingIntervals = timedMeetings.map(ev => {
@@ -591,6 +595,7 @@ export function analyzeCalendar(
       const [eh, em] = ev._localEndTime.split(':').map(Number);
       return { start: sh * 60 + sm, end: eh * 60 + em };
     });
+    const minChunk = profile.meetings.thinking_time_min_chunk_minutes ?? 30;
     let freeMin = 0;
     for (const w of freeWindows) {
       // Clamp meetings to this window, drop empties, sort, merge overlaps.
@@ -607,11 +612,11 @@ export function analyzeCalendar(
       let cursor = w.startMin;
       for (const b of merged) {
         const gap = b.start - cursor;
-        if (gap >= 15) freeMin += gap;   // full gap; sub-15 fragments don't count
+        if (gap >= minChunk) freeMin += gap;   // full gap; sub-chunk slivers don't count
         cursor = Math.max(cursor, b.end);
       }
       const trailing = w.endMin - cursor;
-      if (trailing >= 15) freeMin += trailing;
+      if (trailing >= minChunk) freeMin += trailing;
     }
 
     const requiredFreeMin = requiredFreeMinutesForWorkDay(workTotalMin, profile.meetings.work_hours_per_free_hour);
@@ -619,7 +624,7 @@ export function analyzeCalendar(
       issues.push({
         type: 'no_buffer',
         severity: 'high',
-        detail: `Only ${freeMin} min free inside your ${workTotalMin}-min work day; you want at least ${requiredFreeMin} min (1h free per 4h worked; gaps under 15 min don't count).`,
+        detail: `Only ${freeMin} min free inside your ${workTotalMin}-min work day; you want at least ${requiredFreeMin} min (1h free per 4h worked; gaps under ${minChunk} min don't count).`,
         suggestedFix: 'Consider moving or shortening some meetings.',
       });
     }
@@ -3476,6 +3481,114 @@ export class SchedulingSkill {
             error: 'unexpected_plan_action',
             message: `planMeeting returned unexpected action "${plan.action}" for create_meeting — this is a bug.`,
           };
+        }
+
+        // #133 — efficient-calendar counter-offer (dense packing only). If the
+        // requested time leaves a short dead gap (6–29 min) after the prior
+        // meeting and an EARLIER back-to-back start is free + rule-valid, offer
+        // that instead of booking as-is — owner direction "earlier is always
+        // better". The caller insists by re-calling with keep_requested_time.
+        // Gated on packing_preference==='dense' → byte-identical for other
+        // tenants; fail-open (any throw books as requested). Skipped under
+        // relaxed=true — an owner override / approved policy_exception replay
+        // already decided the exact time; never counter-offer over it.
+        if (args.keep_requested_time !== true && args.relaxed !== true) {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const density = require('../../utils/calendarDensity') as typeof import('../../utils/calendarDensity');
+            if (density.prefersDensePacking(context.profile.meetings)) {
+              const tzc = context.profile.user.timezone;
+              const reqStartIso = bookingRequest.slotStartIso;
+              const reqEndIso = bookingRequest.slotEndIso;
+              const rs = reqStartIso ? DateTime.fromISO(reqStartIso, { zone: tzc, setZone: true }).setZone(tzc) : DateTime.invalid('no start');
+              const re = reqEndIso ? DateTime.fromISO(reqEndIso, { zone: tzc, setZone: true }).setZone(tzc) : DateTime.invalid('no end');
+              if (rs.isValid && re.isValid) {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { getCalendarEvents } = require('../../connectors/graph/calendar') as typeof import('../../connectors/graph/calendar');
+                const dayEvents = await getCalendarEvents(
+                  context.profile.user.email,
+                  rs.startOf('day').toFormat("yyyy-MM-dd'T'00:00:00"),
+                  rs.endOf('day').toFormat("yyyy-MM-dd'T'23:59:59"),
+                  tzc,
+                );
+                const ownerBusy = dayEvents
+                  .filter(e => !e.isCancelled && !e.isAllDay && (e as { showAs?: string }).showAs !== 'free' && (e as { showAs?: string }).showAs !== 'workingElsewhere')
+                  .map(e => ({
+                    start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? tzc }).toMillis(),
+                    end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? tzc }).toMillis(),
+                  }));
+                const cfg = density.densityConfigFromProfile(context.profile.meetings);
+                const cand = density.earlierConnectiveStart(rs.toMillis(), re.toMillis(), ownerBusy, cfg);
+                if (cand !== null) {
+                  const durMs = re.toMillis() - rs.toMillis();
+                  const candStartIso = DateTime.fromMillis(cand, { zone: tzc }).toISO()!;
+                  const candEndIso = DateTime.fromMillis(cand + durMs, { zone: tzc }).toISO()!;
+                  // eslint-disable-next-line @typescript-eslint/no-require-imports
+                  const { checkSlot } = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
+                  const verdict = checkSlot({
+                    profile: context.profile,
+                    slotStartIso: candStartIso,
+                    slotEndIso: candEndIso,
+                    category: (args.category as string) ?? null,
+                    events: dayEvents,
+                  });
+                  // Attendee-aware: the earlier slot must ALSO be free for any
+                  // attendees. Critical cross-TZ — an earlier IL time can fall
+                  // BEFORE a US attendee's hours (14:45 IL = 07:45 ET). checkSlot
+                  // above only covers OWNER rules; reuse the finder (attendee tz +
+                  // busy) for the candidate window and only counter if it comes back.
+                  let attendeeClean = true;
+                  const attEmails = Array.isArray(args.attendees)
+                    ? (args.attendees as Array<{ email?: string }>).map(a => a?.email).filter((e): e is string => !!e)
+                    : [];
+                  if (verdict.passes && attEmails.length > 0) {
+                    // eslint-disable-next-line @typescript-eslint/no-require-imports
+                    const { findAvailableSlots } = require('../../connectors/graph/calendar') as typeof import('../../connectors/graph/calendar');
+                    // #133 fix — the finder clips to an attendee's hours/tz ONLY when
+                    // attendeeAvailability is passed, and subtracts their busy ONLY via
+                    // attendeeBusyEmails; passing attendeeEmails alone is a no-op, so this
+                    // re-check was owner-only and the cross-TZ guard (an earlier IL time
+                    // BEFORE a US attendee's hours) never fired. Build + pass both, exactly
+                    // like the main search path.
+                    // eslint-disable-next-line @typescript-eslint/no-require-imports
+                    const { loadAttendeeAvailabilityForEmails } = require('../../utils/attendeeAvailability') as typeof import('../../utils/attendeeAvailability');
+                    const attAvail = loadAttendeeAvailabilityForEmails(attEmails, context.profile.user.email);
+                    const attSlots = await findAvailableSlots({
+                      userEmail: context.profile.user.email,
+                      timezone: tzc,
+                      durationMinutes: Math.round(durMs / 60000),
+                      attendeeEmails: [context.profile.user.email, ...attEmails],
+                      attendeeBusyEmails: attEmails,
+                      ...(attAvail ? { attendeeAvailability: attAvail } : {}),
+                      searchFrom: candStartIso,
+                      searchTo: candEndIso,
+                      minBufferHours: 0,
+                      profile: context.profile,
+                    });
+                    attendeeClean = attSlots.some(s => DateTime.fromISO(s.start).toMillis() === cand);
+                  }
+                  if (verdict.passes && attendeeClean) {
+                    logger.info('create_meeting — efficiency counter-offer', {
+                      requested: rs.toISO(), suggested: candStartIso, subject: args.subject,
+                    });
+                    return {
+                      success: false,
+                      error: 'efficiency_counter',
+                      counter_offer: {
+                        requested_start: rs.toFormat("yyyy-MM-dd'T'HH:mm"),
+                        suggested_start: DateTime.fromMillis(cand, { zone: tzc }).toFormat("yyyy-MM-dd'T'HH:mm"),
+                        reason: 'The requested time leaves a short, unfocusable gap after the prior meeting; the earlier start packs it back-to-back and keeps your free time in one block.',
+                      },
+                      _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
+                      _note: 'Dense-calendar preference. Offer suggested_start as the tighter option ("X works — but Y puts it right after your last meeting instead of a dead gap. Y?"). If they keep the original time, re-call create_meeting with keep_requested_time:true to book as requested.',
+                    };
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            logger.warn('create_meeting — efficiency counter-offer threw, booking as requested', { err: String(err).slice(0, 160) });
+          }
         }
         const effectiveIsOnline: boolean = plan.isOnline;
         const planLocation: string = plan.location;

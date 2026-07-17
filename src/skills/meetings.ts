@@ -363,6 +363,10 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
               description: 'OPTIONAL (default false). If the owner is RESCHEDULING an existing meeting (e.g. "move my Simon 1:1 to Monday"), do NOT create — use move_meeting on the existing event. The handler will detect a same-subject + same-person event already in the calendar and hand you its id to move instead. Set force_new=true ONLY when the owner genuinely wants a SEPARATE, ADDITIONAL meeting with the same people (not a reschedule) and has confirmed it after that heads-up.',
             },
             body: { type: 'string', description: 'Optional meeting body — ENGLISH ONLY. FOLLOW-THROUGH: if you told the owner or requester that specific text they gave you (a summary / agenda / notes / "the X text") would be in the invite, you MUST pass that exact text here, on the booking call itself — promising it and leaving body unset ships an empty invite (and an approval replay only carries the body you set).' },
+            keep_requested_time: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). On a dense-calendar profile, create_meeting may return error="efficiency_counter" with a suggested earlier back-to-back time instead of booking a time that leaves a short dead gap. Present the suggestion; if the person prefers their ORIGINAL time, re-call create_meeting with the same args PLUS keep_requested_time=true to book it as requested (skips the counter). Do NOT set this preemptively.',
+            },
             is_online: {
               type: 'boolean',
               description: 'OPTIONAL. Pass ONLY when conversation explicitly said online (Zoom/Teams/video/call) or in-person (at office/come over/meet). When no explicit signal, OMIT — the handler picks per day-type + party shape (internal+home=Huddle, internal+office=Office, external=Teams). Defaulting to true silently corrupts the location decision.',

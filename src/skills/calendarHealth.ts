@@ -17,6 +17,7 @@ import { displaySubject } from '../utils/displaySubject';
 import { formatSkillPreferencesBlock } from '../utils/skillPreferences';
 import type { PreferPosition, AnchorEvent } from '../utils/floatingBlocks';
 import { getEffectiveWorkDay } from '../utils/workHours';
+import { classifyGap, densityConfigFromProfile, prefersDensePacking, scoreSlotDensity } from '../utils/calendarDensity';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -165,7 +166,8 @@ interface HealthIssue {
     | 'oof_conflict'
     | 'missing_category'
     | 'category_limit_exceeded'  // v2.6 — per_day or per_week limit on a category violated
-    | 'busy_day';                 // v2.1.1 — day exceeds busy thresholds (free-time / count / longest-free-block)
+    | 'busy_day'                  // v2.1.1 — day exceeds busy thresholds (free-time / count / longest-free-block)
+    | 'inefficient_gap';          // #133 — dead gap (6–29 min) between two meetings on a dense-packing day; movable_event_id = the later internal meeting to pull back-to-back
   date: string;
   description: string;
   eventIds?: string[];
@@ -192,6 +194,163 @@ interface HealthIssue {
   fix_detail?: string;            // human-readable one-liner describing the fix applied
   fix_failed?: boolean;           // set when active-mode tried to fix and an error was thrown
   fix_error?: string;
+}
+
+// #133 — shared autonomous internal-meeting move. Extracted from the
+// double_booking auto-fix so EVERY active-mode auto-move (clash-clearing AND
+// efficient-calendar defrag) runs ONE path: record on the requests-spine (the
+// revert handle) → updateMeeting → rebalance floating blocks → notify the
+// internal attendee(s) with a pushback escape → resolve the spine record →
+// shadow-notify the owner. Caller supplies the already-chosen, free + rule-valid
+// target (newStartIso) and the human phrasing; helper sets issue.fixed on success.
+async function executeInternalAutoMove(params: {
+  movable: CalendarEvent;
+  origStart: DateTime;
+  origEnd: DateTime;
+  durationMin: number;
+  newStartIso: string;
+  participantsRaw: NonNullable<CalendarEvent['attendees']>;
+  conflictReason: string;
+  moveVerb: string;               // "to clear the clash" / "to pack it back-to-back after your prior meeting"
+  keptEventId?: string;
+  issue: HealthIssue;
+  userEmail: string;
+  ownerUserId: string;
+  timezone: string;
+  profile: UserProfile;
+  context: { channelId: string; threadTs?: string };
+  internalActions: Array<{ tool: string; detail: string }>;
+}): Promise<void> {
+  const { movable, origStart: mStart, origEnd: mEnd, durationMin, participantsRaw,
+    conflictReason, moveVerb, keptEventId, issue, userEmail, ownerUserId, timezone,
+    profile, context, internalActions } = params;
+  const subj = displaySubject(movable, profile) || 'Meeting';
+  const newStartIso = params.newStartIso;
+  const newEndIso = DateTime.fromISO(newStartIso).plus({ minutes: durationMin }).toUTC().toISO()!;
+
+  // Owner rule — NEVER auto-move a SOLO event (no non-owner attendee). A
+  // placeholder / personal block with nobody else on it is the owner's own time:
+  // there's no one to coordinate with, and relocating it is exactly the "Tax
+  // placeholder moved for no reason" mistake. This is the chokepoint for EVERY
+  // auto-move (double_booking, defrag, and anything future) — surface it, don't
+  // move it. Floating blocks (lunch/gym) never reach here (they slide via
+  // rebalanceFloatingBlocks, not this path), so this only stops real solo events.
+  {
+    const ownerEmailLc = profile.user.email.toLowerCase();
+    const roomEmailLc = (profile.meetings.room_email ?? '').toLowerCase();
+    const hasRealAttendee = participantsRaw.some(a => {
+      const e = (a.emailAddress?.address ?? '').toLowerCase();
+      return !!e && e !== ownerEmailLc && e !== roomEmailLc;
+    });
+    if (!hasRealAttendee) {
+      logger.info('auto-move skipped — solo event (no non-owner attendees); left for the owner', {
+        subject: subj, eventId: movable.id, issueType: issue.type,
+      });
+      issue.fix_failed = true;
+      issue.fix_error = `"${subj}" has no other attendees — it's your own block, so I left it for you to move.`;
+      return;
+    }
+  }
+
+  // Record BEFORE executing so "revert" has a deterministic handle (event id +
+  // original/new times). state in_flight → resolved once the move + notify land.
+  // Best-effort: a record hiccup must NEVER block the move. TTL via `expiry`.
+  let autoMoveReq: { id: string } | null = null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { createRequest } = require('../db/requests') as typeof import('../db/requests');
+    autoMoveReq = createRequest({
+      ownerUserId, initiatedBy: ownerUserId, initiatedByRole: 'system',
+      kind: 'follow_up', subkind: 'auto_move',
+      subject: `Auto-moved "${subj}" ${moveVerb}`,
+      description: issue.description, state: 'in_flight',
+      ownerDmChannel: context.channelId,
+      outcomeExternalEventId: movable.id,
+      outcomeJson: {
+        original_start: mStart.toISO(), original_end: mEnd.toISO(),
+        new_start: newStartIso, new_end: newEndIso, subject: subj, kept_event_id: keptEventId,
+      },
+      idempotencyKey: `auto_move:${movable.id}:${Date.now()}`,
+      nextCheckAt: DateTime.now().plus({ hours: 12 }).toUTC().toISO()!,
+      nextCheckHandler: 'expiry',
+    });
+  } catch (reqErr) {
+    logger.warn('auto-move request-record create failed — proceeding with the move', { err: String(reqErr).slice(0, 160) });
+  }
+
+  await updateMeeting({ userEmail, timezone, meetingId: movable.id, start: newStartIso, end: newEndIso });
+  try {
+    const { rebalanceFloatingBlocksAfterMutation } = await import('../utils/rebalanceFloatingBlocks');
+    await rebalanceFloatingBlocksAfterMutation({ profile, affectedSlotIso: newStartIso, ownerSlackId: ownerUserId });
+  } catch (rebErr) {
+    logger.warn('rebalance after auto-move threw — continuing', { err: String(rebErr).slice(0, 160) });
+  }
+
+  // Notify each non-owner internal attendee (resolve slack_id from email). The
+  // notice is a meeting_reschedule(already_moved) so a "doesn't work" reply
+  // routes back to the owner with a revert option.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { notifyColleagueOfMove } = require('./meetingReschedule') as typeof import('./meetingReschedule');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getPersonByEmail } = require('../db') as typeof import('../db');
+  const notified: string[] = [];
+  const notifiedSlackIds: string[] = [];
+  for (const a of participantsRaw) {
+    const email = a.emailAddress.address;
+    if (!email || email.toLowerCase() === profile.user.email.toLowerCase()) continue;
+    const row = getPersonByEmail(email.trim().toLowerCase());
+    if (!row?.slack_id) continue;
+    await notifyColleagueOfMove({
+      profile, ownerChannel: context.channelId, ownerThreadTs: context.threadTs,
+      colleagueSlackId: row.slack_id,
+      colleagueName: a.emailAddress.name || row.name || email,
+      colleagueTz: row.timezone, meetingId: movable.id, meetingSubject: subj,
+      originalStartIso: mStart.toISO()!, originalEndIso: mEnd.toISO()!,
+      newStartIso, newEndIso, conflictReason,
+    });
+    notified.push((a.emailAddress.name || row.name || email).split(' ')[0]);
+    if (row.slack_id) notifiedSlackIds.push(row.slack_id);
+  }
+
+  const newLocal = DateTime.fromISO(newStartIso, { zone: timezone }).toFormat('EEE d MMM HH:mm');
+  issue.fixed = true;
+  issue.fix_detail = notified.length > 0
+    ? `Moved "${subj}" (was ${mStart.toFormat('HH:mm')}–${mEnd.toFormat('HH:mm')}) to ${newLocal} ${moveVerb}, and let ${notified.join(' and ')} know — I'll loop you in if they push back.`
+    : `Moved "${subj}" to ${newLocal} ${moveVerb}.`;
+  internalActions.push({
+    tool: 'move_meeting',
+    detail: `Auto-moved "${subj}" to ${newLocal} (${issue.type})${notified.length ? ` — notified ${notified.join(', ')}` : ''}`,
+  });
+
+  if (autoMoveReq) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { closeRequest } = require('../core/requests/closeRequest') as typeof import('../core/requests/closeRequest');
+      closeRequest({
+        id: autoMoveReq.id, state: 'resolved', closureReason: 'auto_move_executed', closedBy: 'system',
+        outcomeExternalEventId: movable.id,
+        outcomeJson: {
+          original_start: mStart.toISO(), original_end: mEnd.toISO(),
+          new_start: newStartIso, new_end: newEndIso, subject: subj,
+          notified_slack_ids: notifiedSlackIds, kept_event_id: keptEventId,
+        },
+      });
+    } catch (reqErr) {
+      logger.warn('auto-move request-record resolve failed — move already done', { err: String(reqErr).slice(0, 160) });
+    }
+  }
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { shadowNotify } = require('../utils/shadowNotify') as typeof import('../utils/shadowNotify');
+    await shadowNotify(profile, {
+      channel: context.channelId,
+      action: `Active-mode autofix — ${issue.type}`,
+      detail: `${issue.description}. I moved "${subj}" to ${newLocal} (free for everyone)${notified.length ? ` and let ${notified.join(', ')} know` : ''}. Say "revert" if you'd rather I hadn't.`,
+    });
+  } catch (err) {
+    logger.warn('shadowNotify on active-mode move threw — continuing', { err: String(err).slice(0, 200) });
+  }
 }
 
 export class CalendarHealthSkill implements Skill {
@@ -734,6 +893,44 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
             }
           }
 
+          // ── #133 — efficient-calendar dead gaps (dense packing only) ────────
+          // A gap between two consecutive meetings too long to be back-to-back
+          // but too short to be a real break (6–29 min) is dead time. Flag it
+          // with the LATER meeting as the movable side IF it's internal +
+          // unprotected + not already settled — the active-fix loop pulls it
+          // back-to-back with the earlier meeting (earlier is always better).
+          // Non-dense tenants: skipped entirely.
+          if (prefersDensePacking(profile.meetings)) {
+            const densCfg = densityConfigFromProfile(profile.meetings);
+            const sortedDay = [...nonAllDay].sort((x, y) =>
+              parseGraphDt(x.start.dateTime, x.start.timeZone, timezone).toMillis()
+              - parseGraphDt(y.start.dateTime, y.start.timeZone, timezone).toMillis());
+            for (let i = 0; i < sortedDay.length - 1; i++) {
+              const a = sortedDay[i];
+              const b = sortedDay[i + 1];
+              const aEnd = parseGraphDt(a.end.dateTime, a.end.timeZone, timezone);
+              const bStart = parseGraphDt(b.start.dateTime, b.start.timeZone, timezone);
+              const gapMin = (bStart.toMillis() - aEnd.toMillis()) / 60000;
+              if (gapMin <= 0) continue;                       // overlap → double_booking owns it
+              if (classifyGap(gapMin, densCfg) !== 'dead') continue;
+              if (dismissedEventIds.has(b.id) || recentlyAutoMovedIds.has(b.id)) continue;
+              const bProt = protection.isProtected(b, profile);
+              if (bProt.protected || bProt.reasons.includes('has external attendee')) continue;
+              const aDisp = displaySubject(a, profile);
+              const bDisp = displaySubject(b, profile);
+              issues.push({
+                type: 'inefficient_gap',
+                date: dayStr,
+                description: `${Math.round(gapMin)}-min dead gap between "${aDisp}" (ends ${aEnd.toFormat('HH:mm')}) and "${bDisp}" (starts ${bStart.toFormat('HH:mm')})`,
+                eventIds: [a.id, b.id],
+                suggestion: `Pull "${bDisp}" back-to-back after "${aDisp}" — internal, so its attendees just need to be free earlier.`,
+                internal_only: true,
+                movable_event_id: b.id,
+                kept_event_id: a.id,
+              });
+            }
+          }
+
           // ── OOF conflicts ──────────────────────────────────────────────────
           // v2.3.1 (B16) — trust showAs only. Owner pushed back on keyword
           // matching: if an event is marked SHOW AS FREE in Outlook, it's
@@ -1228,13 +1425,29 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                     const weekEndIso = conflictDt.minus({ days: conflictDt.weekday % 7 }).plus({ days: 6 }).endOf('day').toUTC().toISO()!;
                     if (weekEndIso < searchTo) searchTo = weekEndIso;
 
+                    // #133 fix — clip to the attendee's WORK HOURS + tz too, not just
+                    // busy. attendeeBusyEmails covers busy; attendeeAvailability is the
+                    // ONLY thing that stops a move to a free-but-outside-their-hours slot
+                    // (cross-TZ) — the same omission the defrag had.
+                    // eslint-disable-next-line @typescript-eslint/no-require-imports
+                    const { loadAttendeeAvailabilityForEmails } = require('../utils/attendeeAvailability') as typeof import('../utils/attendeeAvailability');
+                    const dbAttAvail = loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail);
                     const slots = await findAvailableSlots({
                       userEmail,
                       timezone,
                       durationMinutes: durationMin,
                       attendeeEmails: [userEmail, ...attendeeEmails],
+                      // Actually FILTER on the attendee's free/busy (attendeeEmails
+                      // alone doesn't — the busy pool reads attendeeBusyEmails), so the
+                      // move never lands where the colleague is busy.
+                      attendeeBusyEmails: attendeeEmails,
+                      ...(dbAttAvail ? { attendeeAvailability: dbAttAvail } : {}),  // #133 fix — clip to attendee hours/tz
                       searchFrom,
                       searchTo,
+                      // Don't auto-widen past the intended 2-day / week-clamped window
+                      // (autoExpand's +7-day widening defeated the week-clamp and pushed
+                      // clash-fixes into the NEXT week). Nothing free in-window → surface.
+                      autoExpand: false,
                       profile,
                     });
                     // v3.2.6 (RC1) — prefer a slot that leaves floating blocks
@@ -1256,140 +1469,19 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                       // MOVE IT DIRECTLY (owner authority, active mode), then notify
                       // the attendee(s) with a pushback escape hatch. No coord, no
                       // waiting, no orphan.
-                      const subj = displaySubject(movable, profile) || 'Meeting';
-                      const newStartIso = top.start;
-                      const newEndIso = DateTime.fromISO(newStartIso).plus({ minutes: durationMin }).toUTC().toISO()!;
+                      // v3.7.x (#133) — the move + record + notify + shadow now lives
+                      // in the shared executeInternalAutoMove (defrag reuses the SAME
+                      // path). double_booking supplies its clash reason + verb + the
+                      // target slot it found above.
                       const conflictReason = protection.sanitizeConflictReason(kept, profile.user.name.split(' ')[0], profile);
-
-                      // v3.7.x — record this autonomous auto-move on the requests-spine
-                      // as the "initial idea", BEFORE executing, so "revert" has a
-                      // deterministic handle (event id + original/new times) instead of
-                      // reconstructing from chat. kind='follow_up'/subkind='auto_move',
-                      // state in_flight → resolved once the move + notify succeed below.
-                      // Best-effort: a record hiccup must NEVER block the actual move.
-                      // Not awaiting_owner (stays out of the resolver / approvals block /
-                      // brief auto-park); TTL via `expiry` cleans an orphan if the move
-                      // throws before we resolve.
-                      let autoMoveReq: { id: string } | null = null;
-                      try {
-                        // eslint-disable-next-line @typescript-eslint/no-require-imports
-                        const { createRequest } = require('../db/requests') as typeof import('../db/requests');
-                        autoMoveReq = createRequest({
-                          ownerUserId,
-                          initiatedBy: ownerUserId,
-                          initiatedByRole: 'system',
-                          kind: 'follow_up',
-                          subkind: 'auto_move',
-                          subject: `Auto-moved "${subj}" to clear a clash`,
-                          description: issue.description,
-                          state: 'in_flight',
-                          ownerDmChannel: context.channelId,
-                          outcomeExternalEventId: movable.id,
-                          outcomeJson: {
-                            original_start: mStart.toISO(), original_end: mEnd.toISO(),
-                            new_start: newStartIso, new_end: newEndIso, subject: subj,
-                            kept_event_id: issue.kept_event_id,
-                          },
-                          idempotencyKey: `auto_move:${movable.id}:${Date.now()}`,
-                          nextCheckAt: DateTime.now().plus({ hours: 12 }).toUTC().toISO()!,
-                          nextCheckHandler: 'expiry',
-                        });
-                      } catch (reqErr) {
-                        logger.warn('auto-move request-record create failed — proceeding with the move', { err: String(reqErr).slice(0, 160) });
-                      }
-
-                      await updateMeeting({ userEmail, timezone, meetingId: movable.id, start: newStartIso, end: newEndIso });
-                      // Headless move — slide any floating block it landed on, in code.
-                      try {
-                        const { rebalanceFloatingBlocksAfterMutation } = await import('../utils/rebalanceFloatingBlocks');
-                        await rebalanceFloatingBlocksAfterMutation({ profile, affectedSlotIso: newStartIso, ownerSlackId: ownerUserId });
-                      } catch (rebErr) {
-                        logger.warn('rebalance after overlap auto-move threw — continuing', { err: String(rebErr).slice(0, 160) });
-                      }
-
-                      // Notify each non-owner attendee. Calendar attendees carry
-                      // email only → resolve slack_id (getPersonByEmail). The notice
-                      // is a meeting_reschedule(already_moved) so a "doesn't work"
-                      // reply routes back to the owner with a revert option.
-                      // eslint-disable-next-line @typescript-eslint/no-require-imports
-                      const { notifyColleagueOfMove } = require('./meetingReschedule') as typeof import('./meetingReschedule');
-                      // eslint-disable-next-line @typescript-eslint/no-require-imports
-                      const { getPersonByEmail } = require('../db') as typeof import('../db');
-                      const notified: string[] = [];
-                      const notifiedSlackIds: string[] = [];  // v3.7.x — captured for the revert record
-                      for (const a of participantsRaw) {
-                        const email = a.emailAddress.address;
-                        if (!email || email.toLowerCase() === profile.user.email.toLowerCase()) continue;
-                        const row = getPersonByEmail(email.trim().toLowerCase());
-                        if (!row?.slack_id) continue; // can't DM → skip (meeting still moved; owner shadowed below)
-                        await notifyColleagueOfMove({
-                          profile,
-                          ownerChannel: context.channelId,
-                          ownerThreadTs: context.threadTs,
-                          colleagueSlackId: row.slack_id,
-                          colleagueName: a.emailAddress.name || row.name || email,
-                          colleagueTz: row.timezone,
-                          meetingId: movable.id,
-                          meetingSubject: subj,
-                          originalStartIso: mStart.toISO()!,
-                          originalEndIso: mEnd.toISO()!,
-                          newStartIso,
-                          newEndIso,
-                          conflictReason,
-                        });
-                        notified.push((a.emailAddress.name || row.name || email).split(' ')[0]);
-                        if (row.slack_id) notifiedSlackIds.push(row.slack_id);
-                      }
-
-                      const newLocal = DateTime.fromISO(newStartIso, { zone: timezone }).toFormat('EEE d MMM HH:mm');
-                      issue.fixed = true;
-                      issue.fix_detail = notified.length > 0
-                        ? `Moved "${subj}" (was ${mStart.toFormat('HH:mm')}–${mEnd.toFormat('HH:mm')}) to ${newLocal} to clear the clash, and let ${notified.join(' and ')} know — I'll loop you in if they push back.`
-                        : `Moved "${subj}" to ${newLocal} to clear the clash.`;
-                      fixesApplied += 1;
-                      internalActions.push({
-                        tool: 'move_meeting',
-                        detail: `Auto-moved "${subj}" to ${newLocal} (overlap autofix)${notified.length ? ` — notified ${notified.join(', ')}` : ''}`,
+                      await executeInternalAutoMove({
+                        movable, origStart: mStart, origEnd: mEnd, durationMin,
+                        newStartIso: top.start, participantsRaw, conflictReason,
+                        moveVerb: 'to clear the clash',
+                        keptEventId: issue.kept_event_id,
+                        issue, userEmail, ownerUserId, timezone, profile, context, internalActions,
                       });
-                      // Move + notify done → resolve the spine record, now carrying who
-                      // was notified so a later "revert" can re-notify them. Best-effort.
-                      if (autoMoveReq) {
-                        try {
-                          // eslint-disable-next-line @typescript-eslint/no-require-imports
-                          const { closeRequest } = require('../core/requests/closeRequest') as typeof import('../core/requests/closeRequest');
-                          closeRequest({
-                            id: autoMoveReq.id,
-                            state: 'resolved',
-                            closureReason: 'auto_move_executed',
-                            closedBy: 'system',
-                            outcomeExternalEventId: movable.id,
-                            outcomeJson: {
-                              original_start: mStart.toISO(), original_end: mEnd.toISO(),
-                              new_start: newStartIso, new_end: newEndIso, subject: subj,
-                              notified_slack_ids: notifiedSlackIds,
-                              kept_event_id: issue.kept_event_id,
-                            },
-                          });
-                        } catch (reqErr) {
-                          logger.warn('auto-move request-record resolve failed — move already done', { err: String(reqErr).slice(0, 160) });
-                        }
-                      }
-                      // Shadow-notify owner in real time — keeps autonomy, gives him
-                      // a chance to "revert" before the colleague even replies.
-                      try {
-                        // eslint-disable-next-line @typescript-eslint/no-require-imports
-                        const { shadowNotify } = require('../utils/shadowNotify') as
-                          typeof import('../utils/shadowNotify');
-                        await shadowNotify(profile, {
-                          channel: context.channelId,
-                          action: `Active-mode autofix — ${issue.type}`,
-                          detail: `${issue.description}. I moved "${subj}" to ${newLocal} (free for everyone, same week)${notified.length ? ` and let ${notified.join(', ')} know` : ''}. Say "revert" if you'd rather I hadn't.`,
-                        });
-                      } catch (err) {
-                        logger.warn('shadowNotify on active-mode move threw — continuing', {
-                          err: String(err).slice(0, 200),
-                        });
-                      }
+                      if (issue.fixed) fixesApplied += 1;
                     }
                   }
                 } catch (err) {
@@ -1398,6 +1490,96 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                   logger.warn('Move-coord for internal overlap failed', {
                     issueDate: issue.date, err: String(err).slice(0, 300),
                   });
+                }
+              }
+              else if (
+                issue.type === 'inefficient_gap'
+                && issue.movable_event_id && issue.kept_event_id
+              ) {
+                // #133 — defrag: pull the movable (later, internal) meeting
+                // back-to-back with the earlier one. Reuses the SAME free/busy +
+                // move path as double_booking, just with a NARROW search window
+                // (earlier meeting's end → the movable meeting's current slot) so
+                // the dense-ranked finder returns the back-to-back slot. Moves only
+                // if a slot free for the movable's attendees exists there AND it
+                // doesn't just shift the dead gap onto the next meeting.
+                try {
+                  const movable = events.find(e => e.id === issue.movable_event_id);
+                  const kept = events.find(e => e.id === issue.kept_event_id);
+                  if (movable && kept) {
+                    const mvProt = protection.isProtected(movable, profile);
+                    if (mvProt.protected || mvProt.reasons.includes('has external attendee')) {
+                      // Not ours to move — leave it surfaced for the owner.
+                    } else {
+                      const mStart = parseGraphDt(movable.start.dateTime, movable.start.timeZone, timezone);
+                      const mEnd = parseGraphDt(movable.end.dateTime, movable.end.timeZone, timezone);
+                      const durationMin = Math.round(mEnd.diff(mStart, 'minutes').minutes);
+                      const keptEnd = parseGraphDt(kept.end.dateTime, kept.end.timeZone, timezone);
+                      const participantsRaw = (movable.attendees ?? []).filter(a => a.status?.response !== 'declined');
+                      const attendeeEmails = participantsRaw.map(a => a.emailAddress.address).filter(Boolean);
+                      // #133 fix — clip the earlier target to the attendee's WORK HOURS +
+                      // tz, not just their busy. Without attendeeAvailability the finder
+                      // never clips hours, so a same-day pull-earlier could land before a
+                      // cross-TZ colleague's day (keptEnd 14:00 IL = 07:00 ET) — the same
+                      // outside-hours class the busy filter alone can't catch.
+                      // eslint-disable-next-line @typescript-eslint/no-require-imports
+                      const { loadAttendeeAvailabilityForEmails } = require('../utils/attendeeAvailability') as typeof import('../utils/attendeeAvailability');
+                      const defragAttAvail = loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail);
+                      const slots = await findAvailableSlots({
+                        userEmail, timezone, durationMinutes: durationMin,
+                        attendeeEmails: [userEmail, ...attendeeEmails],
+                        attendeeBusyEmails: attendeeEmails,  // FILTER on the attendee's free/busy — only pull it
+                                                             // to where they're actually free (the whole point of
+                                                             // "the other person can move it")
+                        ...(defragAttAvail ? { attendeeAvailability: defragAttAvail } : {}),  // #133 fix — clip to attendee hours/tz
+                        searchFrom: keptEnd.toUTC().toISO()!,
+                        searchTo: mEnd.toUTC().toISO()!,
+                        minBufferHours: 0,              // owner-authority active move; no colleague lead-time
+                        excludeEventIds: [movable.id],  // its own current slot isn't a conflict
+                        autoExpand: false,              // CRITICAL: defrag stays in the SAME-DAY gap — never widen
+                        gridAlignStart: true,           // #133 fix — off-grid keptEnd → aligned back-to-back start
+                        profile,                        // across days (the 07-23→07-26 "day forward" bug)
+                      });
+                      const top = slots.find(s => !s.disturbs_floating_block) ?? slots[0];
+                      // Net-improvement guard: the chosen slot must NOT itself open a
+                      // dead gap — never just shove the sliver onto the next meeting.
+                      let cleanTarget = false;
+                      if (top) {
+                        const densCfg = densityConfigFromProfile(profile.meetings);
+                        const dayBusy = events
+                          .filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free' && e.showAs !== 'workingElsewhere' && e.id !== movable.id)
+                          .map(e => ({
+                            start: parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis(),
+                            end: parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(),
+                          }));
+                        const tStartDt = DateTime.fromISO(top.start).setZone(timezone);
+                        // Belt-and-suspenders on top of autoExpand:false — the target
+                        // MUST be the same calendar day as the original (a defrag packs
+                        // back-to-back same day; it never relocates to another day).
+                        const sameDay = tStartDt.hasSame(mStart, 'day');
+                        const tScore = scoreSlotDensity(tStartDt.toMillis(), tStartDt.toMillis() + durationMin * 60000, dayBusy, densCfg);
+                        cleanTarget = sameDay && !tScore.createsDeadGap;
+                      }
+                      if (!top || !cleanTarget) {
+                        issue.fix_failed = true;
+                        issue.fix_error = 'No back-to-back slot that cleanly closes the gap (attendee busy, or it would just shift the gap) — left for you.';
+                      } else {
+                        await executeInternalAutoMove({
+                          movable, origStart: mStart, origEnd: mEnd, durationMin,
+                          newStartIso: top.start, participantsRaw,
+                          conflictReason: 'packing the day tighter',
+                          moveVerb: 'to pack it back-to-back after your prior meeting',
+                          keptEventId: issue.kept_event_id,
+                          issue, userEmail, ownerUserId, timezone, profile, context, internalActions,
+                        });
+                        if (issue.fixed) fixesApplied += 1;
+                      }
+                    }
+                  }
+                } catch (err) {
+                  issue.fix_failed = true;
+                  issue.fix_error = `Defrag move failed: ${String(err).slice(0, 200)}`;
+                  logger.warn('inefficient_gap auto-fix failed', { issueDate: issue.date, err: String(err).slice(0, 300) });
                 }
               }
               // Other overlap cases (both protected, external, unclear
