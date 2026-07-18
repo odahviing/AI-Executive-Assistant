@@ -353,6 +353,80 @@ async function executeInternalAutoMove(params: {
   }
 }
 
+// #133c — shared "pull an internal meeting back to abut an anchor" primitive.
+// The anchor is the END of the earlier commitment the meeting should sit right
+// after — a MEETING (the meeting-to-meeting defrag) or a FLOATING BLOCK (lunch,
+// the #133c fallback). Validates the target the SAME way for both: a same-day,
+// grid-aligned, attendee-free slot that doesn't itself open a new dead gap; then
+// routes through executeInternalAutoMove (the one move+notify path). Sets
+// issue.fix_failed with a reason when there's no clean slot. The CALLER owns the
+// protection / external / recently-moved gates before calling.
+async function pullInternalMeetingToAbut(params: {
+  movable: CalendarEvent;
+  keptEndDt: DateTime;                 // abut target — the anchor's end (grid-aligned by the finder)
+  keptEventId: string;
+  moveVerb: string;
+  conflictReason: string;
+  dayEventsForBusy: CalendarEvent[];   // the day's events, for the net-improvement density check
+  issue: HealthIssue;                  // real (defrag) or synthetic (fallback); receives fixed / fix_failed
+  userEmail: string;
+  ownerUserId: string;
+  timezone: string;
+  profile: UserProfile;
+  context: { channelId: string; threadTs?: string };
+  internalActions: Array<{ tool: string; detail: string }>;
+}): Promise<void> {
+  const { movable, keptEndDt, keptEventId, moveVerb, conflictReason,
+    dayEventsForBusy, issue, userEmail, ownerUserId, timezone, profile, context, internalActions } = params;
+  const mStart = parseGraphDt(movable.start.dateTime, movable.start.timeZone, timezone);
+  const mEnd = parseGraphDt(movable.end.dateTime, movable.end.timeZone, timezone);
+  const durationMin = Math.round(mEnd.diff(mStart, 'minutes').minutes);
+  const participantsRaw = (movable.attendees ?? []).filter(a => a.status?.response !== 'declined');
+  const attendeeEmails = participantsRaw.map(a => a.emailAddress.address).filter(Boolean);
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { attendeeCheckParams } = require('../utils/attendeeAvailability') as typeof import('../utils/attendeeAvailability');
+  const slots = await findAvailableSlots({
+    userEmail, timezone, durationMinutes: durationMin,
+    // Only pull the meeting to where the attendees are actually free AND inside
+    // their (cross-TZ) work hours — never before their day starts.
+    ...attendeeCheckParams(attendeeEmails, userEmail),
+    searchFrom: keptEndDt.toUTC().toISO()!,
+    searchTo: mEnd.toUTC().toISO()!,
+    minBufferHours: 0,              // owner-authority active move; no colleague lead-time
+    excludeEventIds: [movable.id],  // its own current slot isn't a conflict
+    autoExpand: false,              // stays in the SAME-DAY gap — never widen across days
+    gridAlignStart: true,           // off-grid anchor end → aligned back-to-back start
+    profile,
+  });
+  const top = slots.find(s => !s.disturbs_floating_block) ?? slots[0];
+  // Net-improvement guard: the chosen slot must NOT itself open a dead gap —
+  // never just shove the sliver onto the next meeting.
+  let cleanTarget = false;
+  if (top) {
+    const densCfg = densityConfigFromProfile(profile.meetings);
+    const dayBusy = dayEventsForBusy
+      .filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free' && e.showAs !== 'workingElsewhere' && e.id !== movable.id)
+      .map(e => ({
+        start: parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis(),
+        end: parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(),
+      }));
+    const tStartDt = DateTime.fromISO(top.start).setZone(timezone);
+    const sameDay = tStartDt.hasSame(mStart, 'day');
+    const tScore = scoreSlotDensity(tStartDt.toMillis(), tStartDt.toMillis() + durationMin * 60000, dayBusy, densCfg);
+    cleanTarget = sameDay && !tScore.createsDeadGap;
+  }
+  if (!top || !cleanTarget) {
+    issue.fix_failed = true;
+    issue.fix_error = 'No back-to-back slot that cleanly closes the gap (attendee busy, or it would just shift the gap) — left for you.';
+    return;
+  }
+  await executeInternalAutoMove({
+    movable, origStart: mStart, origEnd: mEnd, durationMin,
+    newStartIso: top.start, participantsRaw, conflictReason, moveVerb,
+    keptEventId, issue, userEmail, ownerUserId, timezone, profile, context, internalActions,
+  });
+}
+
 export class CalendarHealthSkill implements Skill {
   id = 'calendar' as const;
   readonly skillId = 'calendar';
@@ -629,8 +703,13 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { computeHealthCheckWindow } = require('../utils/workHours') as typeof import('../utils/workHours');
         const defaultWindow = computeHealthCheckWindow(profile);
-        const startDate = (args.start_date as string) ?? defaultWindow.startDate;
-        const endDate = (args.end_date as string) ?? defaultWindow.endDate;
+        // #143b — a deterministic per-firing window from the calendar-health
+        // routine (morning → today; 1PM → today + 4 weeks) OVERRIDES both Sonnet's
+        // args and the default, so the autonomous sweep's scope can't drift.
+        // Owner-asked / chat calls carry no override → behaviour unchanged.
+        const forced = context.healthWindowOverride;
+        const startDate = forced?.startDate ?? (args.start_date as string) ?? defaultWindow.startDate;
+        const endDate = forced?.endDate ?? (args.end_date as string) ?? defaultWindow.endDate;
         // v2.1.1 — mode resolution. Explicit arg wins; else profile default.
         const mode: 'passive' | 'active' =
           (args.mode === 'active' || args.mode === 'passive')
@@ -1425,23 +1504,15 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                     const weekEndIso = conflictDt.minus({ days: conflictDt.weekday % 7 }).plus({ days: 6 }).endOf('day').toUTC().toISO()!;
                     if (weekEndIso < searchTo) searchTo = weekEndIso;
 
-                    // #133 fix — clip to the attendee's WORK HOURS + tz too, not just
-                    // busy. attendeeBusyEmails covers busy; attendeeAvailability is the
-                    // ONLY thing that stops a move to a free-but-outside-their-hours slot
-                    // (cross-TZ) — the same omission the defrag had.
                     // eslint-disable-next-line @typescript-eslint/no-require-imports
-                    const { loadAttendeeAvailabilityForEmails } = require('../utils/attendeeAvailability') as typeof import('../utils/attendeeAvailability');
-                    const dbAttAvail = loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail);
+                    const { attendeeCheckParams } = require('../utils/attendeeAvailability') as typeof import('../utils/attendeeAvailability');
                     const slots = await findAvailableSlots({
                       userEmail,
                       timezone,
                       durationMinutes: durationMin,
-                      attendeeEmails: [userEmail, ...attendeeEmails],
-                      // Actually FILTER on the attendee's free/busy (attendeeEmails
-                      // alone doesn't — the busy pool reads attendeeBusyEmails), so the
-                      // move never lands where the colleague is busy.
-                      attendeeBusyEmails: attendeeEmails,
-                      ...(dbAttAvail ? { attendeeAvailability: dbAttAvail } : {}),  // #133 fix — clip to attendee hours/tz
+                      // Check the attendees fully — never move the clash onto a time they're
+                      // busy OR outside their (cross-TZ) work hours.
+                      ...attendeeCheckParams(attendeeEmails, userEmail),
                       searchFrom,
                       searchTo,
                       // Don't auto-widen past the intended 2-day / week-clamped window
@@ -1497,12 +1568,11 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                 && issue.movable_event_id && issue.kept_event_id
               ) {
                 // #133 — defrag: pull the movable (later, internal) meeting
-                // back-to-back with the earlier one. Reuses the SAME free/busy +
-                // move path as double_booking, just with a NARROW search window
-                // (earlier meeting's end → the movable meeting's current slot) so
-                // the dense-ranked finder returns the back-to-back slot. Moves only
-                // if a slot free for the movable's attendees exists there AND it
-                // doesn't just shift the dead gap onto the next meeting.
+                // back-to-back with the earlier one, via the shared abut helper
+                // (also used by the #133c lunch-anchored fallback). Anchor = the
+                // earlier MEETING's end. Moves only if a slot free for the
+                // movable's attendees exists there AND it doesn't just shift the
+                // dead gap onto the next meeting.
                 try {
                   const movable = events.find(e => e.id === issue.movable_event_id);
                   const kept = events.find(e => e.id === issue.kept_event_id);
@@ -1511,69 +1581,15 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
                     if (mvProt.protected || mvProt.reasons.includes('has external attendee')) {
                       // Not ours to move — leave it surfaced for the owner.
                     } else {
-                      const mStart = parseGraphDt(movable.start.dateTime, movable.start.timeZone, timezone);
-                      const mEnd = parseGraphDt(movable.end.dateTime, movable.end.timeZone, timezone);
-                      const durationMin = Math.round(mEnd.diff(mStart, 'minutes').minutes);
                       const keptEnd = parseGraphDt(kept.end.dateTime, kept.end.timeZone, timezone);
-                      const participantsRaw = (movable.attendees ?? []).filter(a => a.status?.response !== 'declined');
-                      const attendeeEmails = participantsRaw.map(a => a.emailAddress.address).filter(Boolean);
-                      // #133 fix — clip the earlier target to the attendee's WORK HOURS +
-                      // tz, not just their busy. Without attendeeAvailability the finder
-                      // never clips hours, so a same-day pull-earlier could land before a
-                      // cross-TZ colleague's day (keptEnd 14:00 IL = 07:00 ET) — the same
-                      // outside-hours class the busy filter alone can't catch.
-                      // eslint-disable-next-line @typescript-eslint/no-require-imports
-                      const { loadAttendeeAvailabilityForEmails } = require('../utils/attendeeAvailability') as typeof import('../utils/attendeeAvailability');
-                      const defragAttAvail = loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail);
-                      const slots = await findAvailableSlots({
-                        userEmail, timezone, durationMinutes: durationMin,
-                        attendeeEmails: [userEmail, ...attendeeEmails],
-                        attendeeBusyEmails: attendeeEmails,  // FILTER on the attendee's free/busy — only pull it
-                                                             // to where they're actually free (the whole point of
-                                                             // "the other person can move it")
-                        ...(defragAttAvail ? { attendeeAvailability: defragAttAvail } : {}),  // #133 fix — clip to attendee hours/tz
-                        searchFrom: keptEnd.toUTC().toISO()!,
-                        searchTo: mEnd.toUTC().toISO()!,
-                        minBufferHours: 0,              // owner-authority active move; no colleague lead-time
-                        excludeEventIds: [movable.id],  // its own current slot isn't a conflict
-                        autoExpand: false,              // CRITICAL: defrag stays in the SAME-DAY gap — never widen
-                        gridAlignStart: true,           // #133 fix — off-grid keptEnd → aligned back-to-back start
-                        profile,                        // across days (the 07-23→07-26 "day forward" bug)
+                      await pullInternalMeetingToAbut({
+                        movable, keptEndDt: keptEnd, keptEventId: issue.kept_event_id,
+                        moveVerb: 'to pack it back-to-back after your prior meeting',
+                        conflictReason: 'packing the day tighter',
+                        dayEventsForBusy: events, issue,
+                        userEmail, ownerUserId, timezone, profile, context, internalActions,
                       });
-                      const top = slots.find(s => !s.disturbs_floating_block) ?? slots[0];
-                      // Net-improvement guard: the chosen slot must NOT itself open a
-                      // dead gap — never just shove the sliver onto the next meeting.
-                      let cleanTarget = false;
-                      if (top) {
-                        const densCfg = densityConfigFromProfile(profile.meetings);
-                        const dayBusy = events
-                          .filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free' && e.showAs !== 'workingElsewhere' && e.id !== movable.id)
-                          .map(e => ({
-                            start: parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis(),
-                            end: parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(),
-                          }));
-                        const tStartDt = DateTime.fromISO(top.start).setZone(timezone);
-                        // Belt-and-suspenders on top of autoExpand:false — the target
-                        // MUST be the same calendar day as the original (a defrag packs
-                        // back-to-back same day; it never relocates to another day).
-                        const sameDay = tStartDt.hasSame(mStart, 'day');
-                        const tScore = scoreSlotDensity(tStartDt.toMillis(), tStartDt.toMillis() + durationMin * 60000, dayBusy, densCfg);
-                        cleanTarget = sameDay && !tScore.createsDeadGap;
-                      }
-                      if (!top || !cleanTarget) {
-                        issue.fix_failed = true;
-                        issue.fix_error = 'No back-to-back slot that cleanly closes the gap (attendee busy, or it would just shift the gap) — left for you.';
-                      } else {
-                        await executeInternalAutoMove({
-                          movable, origStart: mStart, origEnd: mEnd, durationMin,
-                          newStartIso: top.start, participantsRaw,
-                          conflictReason: 'packing the day tighter',
-                          moveVerb: 'to pack it back-to-back after your prior meeting',
-                          keptEventId: issue.kept_event_id,
-                          issue, userEmail, ownerUserId, timezone, profile, context, internalActions,
-                        });
-                        if (issue.fixed) fixesApplied += 1;
-                      }
+                      if (issue.fixed) fixesApplied += 1;
                     }
                   }
                 } catch (err) {
@@ -1612,20 +1628,52 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
           // date. Replaces the dead Path (a) inside the double_booking
           // branch — the detector excludes floating blocks from its
           // pair-overlap scan (line 463-470), so Path (a) could never fire.
+          // #133c — blocks the sweep relocated this run; the lunch-anchored
+          // fallback below skips them (Graph re-fetch may still show the old
+          // position — defer to the next sweep on settled data).
+          const consolidatedBlockIds = new Set<string>();
           try {
             const { rebalanceFloatingBlocksAfterMutation } = await import('../utils/rebalanceFloatingBlocks');
             const sweepStart = DateTime.fromISO(startDate, { zone: timezone });
             const sweepEnd = DateTime.fromISO(endDate, { zone: timezone });
             const dayCount = Math.max(1, Math.floor(sweepEnd.diff(sweepStart, 'days').days) + 1);
+            // #143c — ONE range fetch for the whole sweep, then hand each day its
+            // slice via preloadedDayEvents — a 28-day sweep makes 1 Graph read, not
+            // 28. Fail-safe: if the range fetch throws, dayEvents stays undefined
+            // and the helper fetches that day itself (the original per-day path).
+            let sweepEvents: CalendarEvent[] = [];
+            try {
+              sweepEvents = await getCalendarEvents(userEmail, startDate, endDate, timezone);
+            } catch (fetchErr) {
+              logger.warn('Sweep range fetch failed — helper will per-day fetch', { err: String(fetchErr).slice(0, 160) });
+            }
             for (let d = 0; d < dayCount; d++) {
               const dt = sweepStart.plus({ days: d }).set({ hour: 12, minute: 0, second: 0, millisecond: 0 });
               const affectedIso = dt.toUTC().toISO();
               if (!affectedIso) continue;
+              let dayEvents: CalendarEvent[] | undefined;
+              if (sweepEvents.length > 0) {
+                const dayStartMs = dt.startOf('day').toMillis();
+                const dayEndMs = dt.endOf('day').toMillis();
+                dayEvents = sweepEvents.filter(e => {
+                  if (e.isCancelled) return false;
+                  const s = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis();
+                  const en = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis();
+                  return s < dayEndMs && en > dayStartMs;   // events intersecting this day
+                });
+              }
               const result = await rebalanceFloatingBlocksAfterMutation({
                 profile,
                 affectedSlotIso: affectedIso,
                 ownerSlackId: profile.user.slack_user_id,
+                // #133b — sweep-only: on a dense calendar also SLIDE a block
+                // sitting in a dead sliver (6–29 min) to abut a neighbour, so
+                // free time coalesces into one real break. Booking-path callers
+                // omit this → their behaviour is unchanged.
+                consolidateDense: true,
+                preloadedDayEvents: dayEvents,   // #143c — batched read
               });
+              for (const id of result.movedBlockEventIds) consolidatedBlockIds.add(id);
               if (result.moved > 0) {
                 internalActions.push({
                   tool: 'rebalance_floating_blocks',
@@ -1638,6 +1686,84 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
             logger.warn('Periodic rebalance sweep threw — continuing', {
               err: String(err).slice(0, 200),
             });
+          }
+
+          // ── #133c — lunch-anchored defrag FALLBACK (dense only) ────────────
+          // Runs AFTER consolidation (the cheap move — sliding lunch — is always
+          // tried first) on FRESH data. For the SANDWICHED case (a meeting, then
+          // lunch, then a 6–29 min sliver, then an internal meeting) sliding lunch
+          // only relocates the sliver, so consolidation correctly declined — here
+          // we pull the later MEETING earlier to abut lunch's end. Internal only:
+          // an external / 4+-person / protected meeting is NEVER moved (it stays,
+          // sliver and all). Same validated move path as the meeting-to-meeting
+          // defrag, via pullInternalMeetingToAbut.
+          if (prefersDensePacking(profile.meetings)) {
+            try {
+              const densCfgFb = densityConfigFromProfile(profile.meetings);
+              const freshEvents = await getCalendarEvents(userEmail, startDate, endDate, timezone);
+              const nowMsFb = DateTime.now().setZone(timezone).toMillis();
+              const exclSubjectsFb = (profile.meetings.issue_exclusions?.subjects ?? [])
+                .map(s => s.toLowerCase()).filter(s => s.length > 0);
+              const noTrackCatsFb = new Set(
+                (profile.categories ?? []).filter(c => c.no_issue_tracking === true).map(c => c.name),
+              );
+              const isRealMeetingFb = (e: CalendarEvent): boolean => {
+                if (e.isCancelled || e.isAllDay) return false;
+                if (e.showAs === 'free' || e.showAs === 'workingElsewhere') return false;
+                const subj = (e.subject ?? '').toLowerCase();
+                if (exclSubjectsFb.some(s => subj.includes(s))) return false;
+                if (floatingBlocks.some(b => fb.isFloatingBlockEvent({ subject: e.subject, categories: e.categories }, b))) return false;
+                if ((e.categories ?? []).some(c => noTrackCatsFb.has(c))) return false;
+                return true;
+              };
+              let cursorFb = DateTime.fromISO(startDate, { zone: timezone });
+              const endFb = DateTime.fromISO(endDate, { zone: timezone });
+              while (cursorFb <= endFb) {
+                const dStr = cursorFb.toFormat('yyyy-MM-dd');
+                const dName = cursorFb.toFormat('EEEE');
+                if (!allWorkDays.includes(dName) || getEffectiveWorkDay(dStr, profile).hasOverride) {
+                  cursorFb = cursorFb.plus({ days: 1 });
+                  continue;
+                }
+                const dayEvts = freshEvents.filter(e => !e.isCancelled
+                  && parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toFormat('yyyy-MM-dd') === dStr);
+                const meetingsSorted = dayEvts.filter(isRealMeetingFb)
+                  .map(e => ({ e, start: parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis() }))
+                  .sort((a, b) => a.start - b.start);
+                for (const block of floatingBlocks) {
+                  if (!fb.blockAppliesOnDay(block, dName, profile)) continue;
+                  const blockEvent = dayEvts.find(e => !e.isAllDay
+                    && fb.isFloatingBlockEvent({ subject: e.subject, categories: e.categories }, block));
+                  if (!blockEvent) continue;
+                  if (consolidatedBlockIds.has(blockEvent.id)) continue;      // moved this sweep → stale re-fetch risk; next sweep handles it
+                  const blockEnd = parseGraphDt(blockEvent.end.dateTime, blockEvent.end.timeZone, timezone);
+                  if (blockEnd.toMillis() <= nowMsFb) continue;               // block already passed today
+                  const nextM = meetingsSorted.find(m => m.start >= blockEnd.toMillis());
+                  if (!nextM) continue;                                        // nothing after lunch
+                  const gapMin = (nextM.start - blockEnd.toMillis()) / 60000;
+                  if (classifyGap(gapMin, densCfgFb) !== 'dead') continue;     // only 6–29 min slivers
+                  const M = nextM.e;
+                  const prot = protection.isProtected(M, profile);
+                  if (prot.protected || prot.reasons.includes('has external attendee')) continue;  // NEVER external / protected
+                  if (recentlyAutoMovedIds.has(M.id) || dismissedEventIds.has(M.id)) continue;
+                  const synthIssue: HealthIssue = {
+                    type: 'inefficient_gap', date: dStr,
+                    description: `${Math.round(gapMin)}-min gap between your ${block.name.replace(/_/g, ' ')} and "${displaySubject(M, profile)}"`,
+                  };
+                  await pullInternalMeetingToAbut({
+                    movable: M, keptEndDt: blockEnd, keptEventId: blockEvent.id,
+                    moveVerb: `to close the ${Math.round(gapMin)}-min gap after your ${block.name.replace(/_/g, ' ')}`,
+                    conflictReason: 'packing the day tighter',
+                    dayEventsForBusy: dayEvts, issue: synthIssue,
+                    userEmail, ownerUserId, timezone, profile, context, internalActions,
+                  });
+                  if (synthIssue.fixed) fixesApplied += 1;
+                }
+                cursorFb = cursorFb.plus({ days: 1 });
+              }
+            } catch (err) {
+              logger.warn('Lunch-anchored defrag fallback threw — continuing', { err: String(err).slice(0, 200) });
+            }
           }
 
           logger.info('Calendar health: active mode complete', {
@@ -1780,6 +1906,13 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
 
         const summaryLines: string[] = [];
         for (const i of issues) {
+          // #133/#143 — a dense inefficient_gap is an AUTONOMOUS preference, not
+          // an owner-actionable conflict. A SUCCESSFUL defrag already shadow-
+          // notifies; a FAILED one must stay SILENT. Surfacing "couldn't close
+          // the 20-min gap" led Sonnet to offer to OVERRIDE an attendee's work
+          // hours for a packing tweak (the Lori 5-Aug 13:45 offer). Leave it,
+          // exactly like consolidation's "no strict improvement → no move".
+          if (i.type === 'inefficient_gap' && i.fix_failed) continue;
           if (i.fixed && i.fix_detail) {
             // Successful fix — narrate the action.
             summaryLines.push(`✓ ${i.fix_detail}`);

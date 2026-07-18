@@ -423,13 +423,10 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         const reqDay = DateTime.fromISO(input.slotStartIso, { zone: tzAlt });
         const durMin = input.durationMin
           ?? Math.max(15, Math.round(DateTime.fromISO(input.slotEndIso).diff(DateTime.fromISO(input.slotStartIso), 'minutes').minutes));
-        const attendeeEmails = nonOwnerParticipants
-          .map(p => (p.email ?? '').trim())
-          .filter((e): e is string => e.length > 0);
         const dayIso = reqDay.toFormat('yyyy-MM-dd');
         const after1 = reqDay.plus({ days: 1 }).toFormat('yyyy-MM-dd');
         const after2 = reqDay.plus({ days: 2 }).toFormat('yyyy-MM-dd');
-        const base = { userEmail: profile.user.email, timezone: tzAlt, durationMinutes: durMin, attendeeEmails, profile };
+        const base = { userEmail: profile.user.email, timezone: tzAlt, durationMinutes: durMin, profile };
         const sameDay = await findAvailableSlots({ ...base, searchFrom: dayIso, searchTo: dayIso });
         const later = await findAvailableSlots({ ...base, searchFrom: after1, searchTo: after2 });
         const picks = [...sameDay.slice(0, 2), ...later.slice(0, 1)];

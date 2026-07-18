@@ -489,23 +489,6 @@ const UserProfileSchema = z.object({
       enabled: z.boolean(),
     }).optional(),
   }).default({ slack: { enabled: true } }),
-
-  // v1.9.0 — outbound routing-policy scaffolding for future multi-transport
-  // (issue #1). Orthogonal to `channels` above (which toggles inbound
-  // listeners). Currently UNREAD — the router that consumed it was removed in
-  // the v3.7.x cleanup; kept as the config shape for when multi-transport lands.
-  connections: z.object({
-    default_routing: z.object({
-      internal: z.string().default('slack'),
-      external: z.string().default('email'),
-    }).default({ internal: 'slack', external: 'email' }),
-    per_skill_routing: z.record(z.object({
-      internal: z.string().optional(),
-      external: z.string().optional(),
-    })).optional(),
-  }).default({
-    default_routing: { internal: 'slack', external: 'email' },
-  }),
 });
 
 // Canonical UserProfile — after the loader normalizes legacy fields.

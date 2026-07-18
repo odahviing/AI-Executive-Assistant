@@ -23,6 +23,7 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import logger from './logger';
+import { findDeadGaps, type DensityConfig } from './calendarDensity';
 
 export type WeekDay =
   | 'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday'
@@ -343,6 +344,76 @@ export function findLatestAlignedSlotForBlock(
     if (!isLeadingGap) next = merged[i - 1].start;
   }
   return null;
+}
+
+/**
+ * #133b — dense-mode consolidation target for an existing floating block.
+ *
+ * A floating block (lunch) placed so it leaves a DEAD sliver (buffer < gap <
+ * minBreak — 6–29 min for Idan) on a side fragments the owner's free time into
+ * unfocusable minutes instead of one real break. Because the block is elastic
+ * within its window, the cheap fix is to SLIDE THE BLOCK (no attendees, no
+ * cross-TZ) to abut a neighbour so the leftover coalesces into a single
+ * ≥ minBreak break — or to drop the block into a gap it fits exactly.
+ *
+ * Returns the aligned start (ms) the block should move to, or null when moving
+ * it wouldn't STRICTLY reduce the day's dead-gap minutes (already optimal, or
+ * the gap simply can't be made clean). PURE — candidates come from the existing
+ * window-aware finders, so they're already aligned, in-window, and
+ * non-overlapping; the caller validates nothing further.
+ *
+ * `commitments` = the day's real meetings + any OTHER floating block (ms), NOT
+ * this block. Only the two window extremes (earliest / latest aligned fit) are
+ * scored: for a single gap the dead-minimising placement always abuts a
+ * neighbour, so an extreme dominates any middle placement. `prefer_position`
+ * breaks a tie (default earliest). The guard is one-directional — a missed
+ * clever move just means "no move"; it can never make the day worse.
+ */
+export function findConsolidatingSlotForBlock(
+  block: FloatingBlock,
+  dayDate: string,
+  timezone: string,
+  commitments: Array<{ start: number; end: number }>,
+  cfg: DensityConfig,
+  currentBlockStartMs: number,
+): number | null {
+  const windowStart = windowMsForDay(dayDate, block.preferred_start, timezone);
+  const windowEnd = windowMsForDay(dayDate, block.preferred_end, timezone);
+  if (!Number.isFinite(windowStart) || !Number.isFinite(windowEnd)) return null;
+  const durationMs = block.duration_minutes * 60 * 1000;
+
+  const busyInWindow = commitments
+    .map(m => ({ start: Math.max(m.start, windowStart), end: Math.min(m.end, windowEnd) }))
+    .filter(m => m.end > m.start);
+
+  const earliest = findAlignedSlotForBlock(block, dayDate, timezone, busyInWindow);
+  const latest = findLatestAlignedSlotForBlock(block, dayDate, timezone, busyInWindow);
+
+  // Total dead-gap minutes on the day with the block placed at `startMs`. The
+  // meeting-to-meeting dead gaps are constant across placements, so comparing
+  // this figure isolates the block-adjacent change.
+  const deadMinutesFor = (startMs: number): number =>
+    findDeadGaps([...commitments, { start: startMs, end: startMs + durationMs }], cfg)
+      .reduce((sum, g) => sum + g.gapMinutes, 0);
+
+  const currentDead = deadMinutesFor(currentBlockStartMs);
+
+  // Honour prefer_position on a tie by trying the preferred extreme first.
+  const order = block.prefer_position === 'latest_in_window'
+    ? [latest, earliest]
+    : [earliest, latest];
+  let best: number | null = null;
+  let bestDead = Infinity;
+  for (const cand of order) {
+    if (cand === null) continue;
+    const d = deadMinutesFor(cand);
+    if (d < bestDead) { bestDead = d; best = cand; }
+  }
+
+  if (best === null) return null;
+  if (bestDead >= currentDead) return null;                          // no strict improvement — leave it
+  if (Math.abs(best - currentBlockStartMs) < 60 * 1000) return null; // effectively the same slot
+  return best;
 }
 
 /**

@@ -627,7 +627,6 @@ export async function findAvailableSlots(params: {
   userEmail: string;
   timezone: string;
   durationMinutes: number;
-  attendeeEmails: string[];
   searchFrom: string;
   searchTo: string;
   preferMorning?: boolean;

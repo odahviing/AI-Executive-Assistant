@@ -2,6 +2,36 @@
 
 ---
 
+## 3.8.0 — efficient-calendar round 2 (lunch-aware packing) + grounded availability timezones
+
+Extends dense packing into floating blocks and cross-timezone attendees, and closes a class of timezone-drift bugs on availability checks. On a dense profile, Maelle now slides lunch itself to consolidate scattered dead minutes into one real break, and — when lunch can't — pulls an INTERNAL meeting to abut it (never an external/protected one). Separately, `find_available_slots` now hands back the timezone conversion for Sonnet to QUOTE (killing the "8am ET = 22:00 / = 15:00" thrash within one conversation), the autonomous health sweep splits into a light morning pass (today) and a deep midday pass (4 weeks), and the whole sweep now costs one calendar read instead of one per day. All dense behavior stays gated on `meetings.packing_preference` (default `spread` → other tenants byte-identical). Restart required; no schema change.
+
+### Added — efficient-calendar round 2 (dense profile only)
+- Lunch consolidation: the floating-block mover (`rebalanceFloatingBlocksAfterMutation`) can now SLIDE a block within its window to swallow a 6–29 min dead sliver into one real ≥30-min break — only when it strictly reduces the day's dead-gap minutes. New pure primitive `findConsolidatingSlotForBlock` folded into the ONE mover (overlap-fix and consolidate are mutually-exclusive branches), sweep-only via a `consolidateDense` flag so the booking path is unchanged. ([floatingBlocks.ts](src/utils/floatingBlocks.ts), [rebalanceFloatingBlocks.ts](src/utils/rebalanceFloatingBlocks.ts))
+- Lunch-anchored defrag fallback: when sliding lunch can't close a sliver (the "sandwiched" case — lunch between two meetings), Maelle pulls the later INTERNAL meeting to abut lunch instead — via a new shared `pullInternalMeetingToAbut` also used by the meeting-to-meeting defrag. External / 4+-person / protected meetings are NEVER auto-moved. ([calendarHealth.ts](src/skills/calendarHealth.ts))
+
+### Added — deterministic calendar-health window (the twice-daily routine)
+- The health-check routine's two firings now scope in CODE, not by model choice: the morning pass checks TODAY only, the midday pass the next 4 weeks — forced through `SkillContext.healthWindowOverride` so the window can't drift. Owner-asked checks in chat are unchanged (single-slot routines keep their existing window — no coverage regression). ([dispatchers/routine.ts](src/tasks/dispatchers/routine.ts), [calendarHealth.ts](src/skills/calendarHealth.ts))
+
+### Changed — grounded availability timezones (#148)
+- `find_available_slots` now returns the conversion as a quotable string instead of leaving Sonnet to compute it: `_requested_time_local` ("08:00 EDT = 15:00 his time") for a stated foreign time, `presentation_local` per candidate, and a `_timezone_hint` when a zone is tagged without a time-of-day. This closes the availability-query timezone drift (the same "8am ET" flip-flopping 22:00 ↔ 15:00 in one conversation). ([ops.ts](src/skills/meetings/ops.ts), [meetings.ts](src/skills/meetings.ts))
+- New `attendeeCheckParams` helper bundles `attendeeBusyEmails` + `attendeeAvailability` in one call, so a caller can't pass one without the other — the silent desync that let an attendee-aware search fall back to owner-only (the cross-TZ hole where an early Israel slot BEFORE a US attendee's hours slipped through). Call sites across `ops.ts` / `planMeeting.ts` / `meetingReschedule.ts` now use it. ([attendeeAvailability.ts](src/utils/attendeeAvailability.ts))
+
+### Fixed
+- The autonomous health sweep made one Graph read PER DAY (14–28 round-trips per run); it now fetches the window once and slices per day — one read. ([calendarHealth.ts](src/skills/calendarHealth.ts), [rebalanceFloatingBlocks.ts](src/utils/rebalanceFloatingBlocks.ts))
+- A failed dense-gap defrag no longer surfaces to the owner as an "override" offer: a 20-min gap the fixer couldn't close (a 40-min meeting can't fit it, or the only slot is outside an attendee's hours) is now left silently instead of asking "want me to move X and override their hold?" — dense packing is a preference, not a conflict.
+- Graph-lag safety on the sweep: the lunch-anchored fallback skips a block the same sweep just moved (a fresh re-fetch can still show its old position), deferring to the next run on settled data.
+- Removed the no-op `attendeeEmails` param from `find_available_slots` — passing it alone never checked anyone; every call site cleaned up.
+
+### Removed — dead-code hygiene
+- Dropped the unused `connections` outbound-routing scaffold from the profile schema (its consumer was removed in the v3.7.x cleanup). ([userProfile.ts](src/config/userProfile.ts))
+- Deleted 33 one-off `scripts/*` (old migrations, cleanups, stress tests, investigations) that had served their purpose.
+
+### Migration
+- None. Dense behavior stays gated on `packing_preference` (default `spread`); no schema or data change.
+
+---
+
 ## 3.7.5 — efficient-calendar packing (#133) + an auto-move safety wave
 
 Adds the "efficient calendar" preference (owner rule 13): on a dense profile Maelle packs meetings back-to-back, kills the 6–29 min "dead" gaps that are too short to focus, and prefers earlier/tighter times — across three surfaces (slot ranking, a direct-time counter-offer, and an autonomous calendar-health defrag). Shipping with it: a wave of fixes to the active-mode auto-move, surfaced by running the defrag against the real calendar, that were relocating meetings to the wrong day and onto already-busy or off-grid slots. All gated on a new `meetings.packing_preference` (default `spread` → every other tenant is byte-identical). Restart required; no schema change.

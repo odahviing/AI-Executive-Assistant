@@ -179,3 +179,25 @@ export function loadAttendeeAvailabilityForEmails(
     return undefined;
   }
 }
+
+/**
+ * The full attendee-check param bundle for `findAvailableSlots`, in ONE call.
+ *
+ * The finder only checks attendees when BOTH `attendeeBusyEmails` (busy
+ * subtraction) AND `attendeeAvailability` (work-hours/tz clip) are passed —
+ * `attendeeEmails` alone is a no-op. Callers that wanted real attendee-aware
+ * scheduling used to hand-build both at the call site; forget the availability
+ * half and you silently get an owner-only check (the #133 auto-move bug class).
+ * Bundling them means callers pass the attendee list ONCE and can't desync.
+ *
+ * `emails` is the attendee-only list — the owner is filtered out of the
+ * availability lookup internally and never belongs in the busy pool. Spread the
+ * result into the `findAvailableSlots` params: `{ ...base, ...attendeeCheckParams(emails, owner) }`.
+ */
+export function attendeeCheckParams(
+  emails: string[],
+  ownerEmail: string,
+): { attendeeBusyEmails: string[]; attendeeAvailability?: AttendeeAvailabilityEntry[] } {
+  const availability = loadAttendeeAvailabilityForEmails(emails, ownerEmail);
+  return { attendeeBusyEmails: emails, ...(availability ? { attendeeAvailability: availability } : {}) };
+}

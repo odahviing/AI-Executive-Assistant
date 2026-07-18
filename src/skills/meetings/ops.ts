@@ -1386,15 +1386,42 @@ export class SchedulingSkill {
           const searchWindowTz = typeof args.search_window_timezone === 'string'
             ? args.search_window_timezone.trim()
             : '';
+          // #148 — grounded strings the tool hands back so Sonnet QUOTES the conversion
+          // instead of doing it in her head (the recurring "8am ET = 22:00 / = 15:00" thrash).
+          let requestedTimeLocal = '';   // (A) e.g. "Mon 21 Jul 08:00 EDT = 15:00 Idan's time"
+          let timezoneHint = '';         // (B) set when a zone is tagged but no time-of-day was given
           if (searchWindowTz) {
-            // v3.4.2 (A2) — shared helper, identical to create/move's conversion.
-            const fromRequested = effectiveSearchFrom;
-            effectiveSearchFrom = reinterpretClockInZone(effectiveSearchFrom, searchWindowTz, timezone);
-            effectiveSearchTo = reinterpretClockInZone(effectiveSearchTo, searchWindowTz, timezone);
-            logger.info('find_available_slots — converted search window from requested TZ to owner TZ', {
-              searchWindowTz, from_requested: fromRequested, from_owner: effectiveSearchFrom,
-            });
+            const searchFromHasTime = typeof args.search_from === 'string' && (args.search_from as string).includes('T');
+            if (!searchFromHasTime) {
+              // (B) — a zone was tagged but search_from has no clock time. Converting a
+              // bare date's midnight is meaningless AND shifts the day boundary by the
+              // offset, so SKIP it and tell Sonnet to re-call with the exact stated time.
+              timezoneHint = `search_window_timezone=${searchWindowTz} was set but search_from has no time-of-day — nothing to convert. Re-call with the exact stated clock time (e.g. search_from="${args.search_from}T09:00:00"); do NOT convert it yourself.`;
+              logger.info('find_available_slots — zone tagged without a time-of-day; conversion skipped', {
+                searchWindowTz, search_from: args.search_from,
+              });
+            } else {
+              // v3.4.2 (A2) — shared helper, identical to create/move's conversion.
+              const fromRequested = effectiveSearchFrom;
+              effectiveSearchFrom = reinterpretClockInZone(effectiveSearchFrom, searchWindowTz, timezone);
+              effectiveSearchTo = reinterpretClockInZone(effectiveSearchTo, searchWindowTz, timezone);
+              // (A) — hand back the grounded owner-local value of the STATED foreign time,
+              // the mirror of present_in_timezone's presentation_local for the owner side.
+              const foreignDisp = renderClockInZone(effectiveSearchFrom, timezone, searchWindowTz);
+              const ownerClock = DateTime.fromISO(effectiveSearchFrom, { zone: timezone });
+              if (foreignDisp && ownerClock.isValid) {
+                requestedTimeLocal = `${foreignDisp} = ${ownerClock.toFormat('HH:mm')} ${context.profile.user.name.split(' ')[0]}'s time`;
+              }
+              logger.info('find_available_slots — converted search window from requested TZ to owner TZ', {
+                searchWindowTz, from_requested: fromRequested, from_owner: effectiveSearchFrom, requestedTimeLocal,
+              });
+            }
           }
+          // #148 — grounded fields spread into EVERY search-path return (main + the
+          // 0-slots/attendee-warning early exit) so Sonnet always has the string to quote.
+          const tzGroundingFields: Record<string, string> = {};
+          if (requestedTimeLocal) tzGroundingFields._requested_time_local = `The stated foreign time converts to: ${requestedTimeLocal}. Quote THIS ${context.profile.user.name.split(' ')[0]}-zone value; do NOT recompute the cross-timezone conversion yourself.`;
+          if (timezoneHint) tzGroundingFields._timezone_hint = timezoneHint;
           const mustBeAfterId = args.must_be_after_event_id as string | undefined;
           if (mustBeAfterId) {
             try {
@@ -1812,6 +1839,9 @@ export class SchedulingSkill {
               }
             };
 
+            // #148 — the zone the candidate times were STATED in (searchWindowTz), or an
+            // explicit present_in_timezone, used to echo each result back in that zone.
+            const groundTz = searchWindowTz || (typeof args.present_in_timezone === 'string' ? args.present_in_timezone.trim() : '');
             const results = await Promise.all(normalized.map(async (cand) => {
               const diag: {
                 rejectedCounts?: Record<string, number>;
@@ -1821,7 +1851,6 @@ export class SchedulingSkill {
                   userEmail,
                   timezone,
                   durationMinutes: durationMin,
-                  attendeeEmails,
                   attendeeBusyEmails,
                   attendeeAvailability,
                   searchFrom: cand.start,
@@ -1846,10 +1875,16 @@ export class SchedulingSkill {
                 // hours in its own tz), so an unavailable away candidate yields a
                 // real rejection reason in rejectedCounts — no WE special-casing.
                 const brokenRule = matches ? undefined : Object.keys(diag.rejectedCounts ?? {})[0];
+                // #148 — render the (already owner-local) slot back in the zone the
+                // candidate was STATED in, so Sonnet quotes "08:00 ET (15:00 his time)"
+                // instead of head-converting the owner-local time back to the foreign zone.
+                // Guard the empty-string parse-fail exactly like the present_in_timezone path.
+                const presentLocal = groundTz ? renderClockInZone(cand.start, timezone, groundTz) : '';
                 return {
                   start: cand.start,
                   end: cand.end,
                   available: matches,
+                  ...(presentLocal ? { presentation_local: presentLocal } : {}),
                   ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: labelFor(brokenRule) } : {}),
                 };
               } catch (err) {
@@ -1874,6 +1909,7 @@ export class SchedulingSkill {
               duration_minutes: durationMin,
               candidates_checked: normalized.length,
               results,
+              ...(groundTz ? { _requested_time_local: `Each result carries presentation_local — the slot in ${groundTz}, the zone the times were given in. Quote that alongside the owner-local time ("08:00 ET = 15:00 his time"); NEVER recompute the cross-timezone conversion yourself.` } : {}),
             };
           }
 
@@ -1882,7 +1918,6 @@ export class SchedulingSkill {
               userEmail,
               timezone,
               durationMinutes: args.duration_minutes as number,
-              attendeeEmails,
               attendeeBusyEmails,
               searchFrom: effectiveSearchFrom,
               searchTo: effectiveSearchTo,
@@ -2020,7 +2055,6 @@ export class SchedulingSkill {
                 userEmail,
                 timezone,
                 durationMinutes: args.duration_minutes as number,
-                attendeeEmails: ownerAudience ? attendeeEmails : [],   // colleague: owner-only, attendees become a caveat
                 attendeeBusyEmails: ownerAudience ? attendeeEmails : undefined,
                 attendeeAvailability: ownerAudience ? attendeeAvailability : undefined,
                 tagAttendeeConflicts: ownerAudience,   // owner: keep his day strict, TAG attendee busy (never drop)
@@ -2083,6 +2117,7 @@ export class SchedulingSkill {
                     ? { day_summary: diagnosticsOut.daySummary } : {}),
                   ...(attendeeEmailWarning ?? {}),
                   ...(colleagueSoftBlockHint ?? {}),
+                  ...tzGroundingFields,
                 };
               }
               return rawSlots;
@@ -2098,7 +2133,6 @@ export class SchedulingSkill {
                   userEmail,
                   timezone,
                   durationMinutes: args.duration_minutes as number,
-                  attendeeEmails,
                   attendeeBusyEmails,
                   searchFrom: effectiveSearchFrom,
                   searchTo: effectiveSearchTo,
@@ -2542,8 +2576,10 @@ export class SchedulingSkill {
             // (the tier holds them back otherwise), so their appearance IS the
             // signal to narrate the trade-off.
             const hasOverOptional = annotatedSlots.some((s: any) => typeof s.over_optional === 'string' && s.over_optional.length > 0);
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional) {
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
+              // #148 — grounded timezone strings so Sonnet quotes the conversion, never recomputes it.
+              Object.assign(result, tzGroundingFields);
               if (travelers.length > 0) result.travelers = travelers;
               if (hasDaySummary) result.day_summary = daySummary;
               if (attendeeEmailWarning) Object.assign(result, attendeeEmailWarning);
@@ -3061,7 +3097,6 @@ export class SchedulingSkill {
                   userEmail,
                   timezone,
                   durationMinutes: durationMin,
-                  attendeeEmails: [userEmail],
                   searchFrom: fromIso,
                   searchTo: toIso,
                   profile: context.profile,
@@ -3544,22 +3579,16 @@ export class SchedulingSkill {
                   if (verdict.passes && attEmails.length > 0) {
                     // eslint-disable-next-line @typescript-eslint/no-require-imports
                     const { findAvailableSlots } = require('../../connectors/graph/calendar') as typeof import('../../connectors/graph/calendar');
-                    // #133 fix — the finder clips to an attendee's hours/tz ONLY when
-                    // attendeeAvailability is passed, and subtracts their busy ONLY via
-                    // attendeeBusyEmails; passing attendeeEmails alone is a no-op, so this
-                    // re-check was owner-only and the cross-TZ guard (an earlier IL time
-                    // BEFORE a US attendee's hours) never fired. Build + pass both, exactly
-                    // like the main search path.
                     // eslint-disable-next-line @typescript-eslint/no-require-imports
-                    const { loadAttendeeAvailabilityForEmails } = require('../../utils/attendeeAvailability') as typeof import('../../utils/attendeeAvailability');
-                    const attAvail = loadAttendeeAvailabilityForEmails(attEmails, context.profile.user.email);
+                    const { attendeeCheckParams } = require('../../utils/attendeeAvailability') as typeof import('../../utils/attendeeAvailability');
+                    // Re-check the earlier candidate against the ATTENDEES too, not just the
+                    // owner — attendeeCheckParams carries busy + hours/tz clip, so the cross-TZ
+                    // guard (an earlier IL time BEFORE a US attendee's hours) actually fires.
                     const attSlots = await findAvailableSlots({
                       userEmail: context.profile.user.email,
                       timezone: tzc,
                       durationMinutes: Math.round(durMs / 60000),
-                      attendeeEmails: [context.profile.user.email, ...attEmails],
-                      attendeeBusyEmails: attEmails,
-                      ...(attAvail ? { attendeeAvailability: attAvail } : {}),
+                      ...attendeeCheckParams(attEmails, context.profile.user.email),
                       searchFrom: candStartIso,
                       searchTo: candEndIso,
                       minBufferHours: 0,
@@ -4683,19 +4712,23 @@ export class SchedulingSkill {
                 const toIso = endDt.toUTC().toISO();
                 let validSlots: Array<{ start: string }> = [];
                 const diagnostics: { rejectedCounts?: Record<string, number>; rejectedExamples?: Record<string, string[]> } = {};
-                // v3.5.x (step 2) — check the OTHER required attendees too: owner
-                // + every required attendee EXCEPT the asker (the asker's own busy
-                // doesn't block their own request). findAvailableSlots' diagnostics
-                // then tell us WHO is busy so the escalation names them.
-                const colleagueMoveCheckEmails = [userEmail, ...requiredAttendees
+                // v3.5.x (step 2) — check the OTHER required attendees too: everyone
+                // required EXCEPT the owner (checked via userEmail) and the asker (whose
+                // own busy doesn't block their own request). attendeeCheckParams passes
+                // their busy + work-hours/tz, so findAvailableSlots' diagnostics can name
+                // WHO is unavailable in the escalation below (attendee_busy_collision /
+                // outside_attendee_work_hours → nameForEmail).
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { attendeeCheckParams } = require('../../utils/attendeeAvailability') as typeof import('../../utils/attendeeAvailability');
+                const moveCheckAttendees = requiredAttendees
                   .map(a => a.email)
-                  .filter(e => e !== ownerEmailLc && e !== askerEmail)];
+                  .filter(e => e !== ownerEmailLc && e !== askerEmail);
                 if (fromIso && toIso) {
                   validSlots = await findAvailableSlots({
                     userEmail,
                     timezone,
                     durationMinutes: durationMin,
-                    attendeeEmails: colleagueMoveCheckEmails,
+                    ...attendeeCheckParams(moveCheckAttendees, userEmail),
                     searchFrom: fromIso,
                     searchTo: toIso,
                     profile: context.profile,

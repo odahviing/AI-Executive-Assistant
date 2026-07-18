@@ -370,7 +370,6 @@ export async function precheckAvailability(params: {
             userEmail: params.profile.user.email,
             timezone: tz,
             durationMinutes: d,
-            attendeeEmails: [],
             searchFrom: startDt.toISO()!,
             searchTo: startDt.toISO()!,   // zero-width → engine checks a d-min meeting AT this start
             autoExpand: false,

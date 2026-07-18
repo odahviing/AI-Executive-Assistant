@@ -385,7 +385,6 @@ export async function handleRescheduleReply(
                   userEmail: profile.user.email,
                   timezone,
                   durationMinutes: durationMin,
-                  attendeeEmails: [profile.user.email],
                   searchFrom: fromIso,
                   searchTo: toIso,
                   profile,

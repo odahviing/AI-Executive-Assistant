@@ -21,6 +21,8 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import * as fb from './floatingBlocks';
 import { getEffectiveWorkDay } from './workHours';
+import { prefersDensePacking, densityConfigFromProfile } from './calendarDensity';
+import type { CalendarEvent } from '../connectors/graph/calendar';
 import logger from './logger';
 
 // Process-lifetime dedup cache for "floating block overlap" shadows.
@@ -74,9 +76,33 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
    * Omit to fall back to permissive detection (any open window).
    */
   freedRangeIso?: { start: string; end: string };
-}): Promise<{ moved: number; overlapping: number; reclaimable: ReclaimableBlock[] }> {
-  const result: { moved: number; overlapping: number; reclaimable: ReclaimableBlock[] } =
-    { moved: 0, overlapping: 0, reclaimable: [] };
+  /**
+   * #133b — DENSE consolidation opt-in. When true AND the tenant is on dense
+   * packing, a block that sits in a DEAD sliver (6–29 min) but overlaps nothing
+   * is slid within its window to abut a neighbour (free time → one real break).
+   * Only the calendar-health sweep passes it; booking-path callers omit it, so
+   * their behaviour is unchanged. This is the SINGLE place that auto-moves a
+   * floating block — overlap-fix and dense-consolidate share the move+notify.
+   */
+  consolidateDense?: boolean;
+  /**
+   * #143c — the affected day's events, pre-fetched by the caller. When provided,
+   * the helper SKIPS its own single-day Graph read and works from these. The
+   * calendar-health sweep passes it so a whole-window sweep makes ONE range fetch
+   * instead of one Graph round-trip per day. Mutation-path callers omit it → the
+   * helper fetches the one affected day itself (unchanged).
+   */
+  preloadedDayEvents?: CalendarEvent[];
+}): Promise<{ moved: number; overlapping: number; reclaimable: ReclaimableBlock[]; movedBlockEventIds: string[] }> {
+  // movedBlockEventIds — every block event this call actually relocated (overlap-
+  // fix OR dense consolidation). The calendar-health sweep collects these so the
+  // #133c lunch-anchored fallback can SKIP a block moved this sweep: Graph
+  // calendarView lags a few seconds after a write, so a fresh re-fetch may still
+  // show the block's OLD position — acting on it would move a meeting to close a
+  // sliver consolidation already closed. Deferring to the next sweep (settled
+  // data) is correct and churn-free.
+  const result: { moved: number; overlapping: number; reclaimable: ReclaimableBlock[]; movedBlockEventIds: string[] } =
+    { moved: 0, overlapping: 0, reclaimable: [], movedBlockEventIds: [] };
   const { profile, affectedSlotIso } = params;
 
   try {
@@ -120,7 +146,9 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
     const endIso = slotDt.endOf('day').toUTC().toISO();
     if (!startIso || !endIso) return result;
 
-    const events = await getCalendarEvents(profile.user.email, startIso, endIso, tz);
+    // #143c — use the caller's pre-fetched day events when provided (the sweep's
+    // batched path); otherwise fetch just this one day (the per-mutation path).
+    const events = params.preloadedDayEvents ?? await getCalendarEvents(profile.user.email, startIso, endIso, tz);
     const realEvents = events.filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free');
 
     // Freed-range gate (optional): when the caller tells us the slot this
@@ -295,6 +323,52 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         return eStart < blockEndMs && eEnd > blockStartMs;
       });
       if (!overlapping) {
+        // #133b — DENSE consolidation. No meeting overlaps the block, but on a
+        // dense calendar it may still leave a DEAD sliver (6–29 min) beside it.
+        // Slide it within its window to abut a neighbour so the free time
+        // coalesces into one real break — using the SAME move+notify this
+        // function already runs for overlaps (ONE mover, two reasons).
+        // findConsolidatingSlotForBlock returns null unless the slide STRICTLY
+        // reduces the day's dead minutes (already-optimal / unfixable → no move
+        // → idempotent across sweeps). Gated: opt-in flag + dense tenant only.
+        if (params.consolidateDense && prefersDensePacking(profile.meetings)) {
+          const commitments = realEvents
+            .filter(e => e.id !== blockEvent.id)   // meetings + any OTHER floating block, never this one
+            .map(e => ({
+              start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' }).setZone(tz).toMillis(),
+              end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'utc' }).setZone(tz).toMillis(),
+            }));
+          const target = fb.findConsolidatingSlotForBlock(
+            block, dateStr, tz, commitments, densityConfigFromProfile(profile.meetings), blockStartMs,
+          );
+          if (target !== null) {
+            const newStart = DateTime.fromMillis(target, { zone: tz });
+            const newEnd = newStart.plus({ minutes: block.duration_minutes });
+            try {
+              await updateMeeting({
+                userEmail: profile.user.email, timezone: tz,
+                meetingId: blockEvent.id, start: newStart.toISO()!, end: newEnd.toISO()!,
+              });
+              result.moved++;
+              result.movedBlockEventIds.push(blockEvent.id);
+              await shadowNotify(profile, {
+                channel: '',
+                action: 'Dense calendar — floating block consolidated',
+                detail: `Slid your ${block.name.replace(/_/g, ' ')} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} on ${slotDt.toFormat('EEE d MMM')} so the free time around it lands as one clean break instead of split minutes. Tell me if you'd rather it stayed at ${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}.`,
+              });
+              logger.info('rebalanceFloatingBlocks: consolidated block (dense)', {
+                block: block.name, date: dateStr,
+                from: DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm'),
+                to: newStart.toFormat('HH:mm'),
+              });
+            } catch (err) {
+              logger.warn('rebalanceFloatingBlocks: dense consolidation updateMeeting failed', {
+                blockId: blockEvent.id, err: String(err).slice(0, 200),
+              });
+            }
+            continue;
+          }
+        }
         logger.info('rebalanceFloatingBlocks: block skipped — no overlap, current placement still fine', {
           block: block.name, date: dateStr,
           currentPlacement: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm')}`,
@@ -346,6 +420,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
             end: newEnd.toISO()!,
           });
           result.moved++;
+          result.movedBlockEventIds.push(blockEvent.id);
           await shadowNotify(profile, {
             channel: '',  // sendDirect path; cache handles the channel
             action: 'Floating block rebalanced',
