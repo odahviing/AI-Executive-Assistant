@@ -1,0 +1,22 @@
+# Keep the build context small and secret-free.
+node_modules
+dist
+.git
+.github
+
+# Live data + secrets — never in the image (mounted from the PVC / Secret at runtime).
+data/
+logs/
+config/users/
+.env
+*.pem
+*.key
+*.p12
+
+# Local tooling / editor / agent noise
+.claude
+.vscode
+.idea
+*.swp
+**/*.bak-*
+*.log

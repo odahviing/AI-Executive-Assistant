@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maelle
+  labels:
+    app: maelle
+spec:
+  replicas: 1                       # NEVER >1. See strategy note below.
+  selector:
+    matchLabels:
+      app: maelle
+  strategy:
+    # ── THE most important line in this file ──────────────────────────────────
+    # Recreate, NOT RollingUpdate. Maelle holds exactly ONE Slack socket-mode
+    # WebSocket. Two live pods = two sockets → Slack replies `too_many_connections`
+    # and the two processes fight (a known, observed failure). Recreate tears the
+    # old pod fully down BEFORE starting the new one, so there is never a moment
+    # with two Maelle processes. Combined with replicas:1 and the ReadWriteOnce
+    # PVC, the single-writer / single-socket invariant holds by construction.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: maelle
+    spec:
+      # Workload Identity → this KSA is bound to a GCP service account that has
+      # roles/aiplatform.user (Vertex AI). Gives the pod keyless ADC — no Anthropic
+      # key, no GOOGLE_APPLICATION_CREDENTIALS file. See serviceaccount.yaml.
+      serviceAccountName: maelle
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000             # the image's `node` user
+        fsGroup: 1000               # make the mounted PVC group-writable by node
+      containers:
+        - name: maelle
+          image: maelle             # kustomize/CI pins the real registry path + tag
+          env:
+            - { name: NODE_ENV,          value: "production" }
+            # App is timezone-safe (every zone is passed explicitly); UTC only
+            # affects how log-line timestamps render. Set to Asia/Jerusalem if you
+            # prefer owner-local log timestamps — zero behavioral effect.
+            - { name: TZ,                value: "UTC" }
+            # ── LLM: Google Vertex AI (auth via Workload Identity, no key) ──────
+            - { name: LLM_PROVIDER,      value: "vertex" }
+            - { name: VERTEX_PROJECT_ID, value: "TODO-vertex-project-id" }   # TODO
+            - { name: VERTEX_REGION,     value: "us-east5" }                 # a region that serves Claude (or "global")
+            # ── Storage: both land on the mounted PVC (see volumeMounts) ───────
+            - { name: DB_PATH,           value: "/app/data/maelle.db" }
+            - { name: LOG_PATH,          value: "/app/logs" }
+          envFrom:
+            # Infra creds (Azure Graph + optional OpenAI/Tavily/Brave). Create this
+            # Secret out-of-band from GCP Secret Manager — see secret.example.yaml.
+            - secretRef:
+                name: maelle-env
+          volumeMounts:
+            # ONE PVC, mounted at the two cwd-relative paths the app reads/writes.
+            # config/users/ is resolved from cwd (userProfile.ts) and holds BOTH
+            # idan.yaml (Slack tokens) AND runtime-written state (idan_people/,
+            # _prefs/, _kb/, news_seen) — so it must be on a writable volume, not
+            # a read-only ConfigMap. Seeded at cutover by scripts/migrate-data.sh.
+            - { name: state, mountPath: /app/data,          subPath: data }
+            - { name: state, mountPath: /app/config/users,  subPath: config-users }
+            # Winston also writes rotating files; keep them off the state PVC.
+            # The real log store is stdout → Cloud Logging (logger has a Console
+            # transport), so these files are disposable scratch.
+            - { name: logs,  mountPath: /app/logs }
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+          # No HTTP surface, so no readiness/HTTP-liveness probe. Recovery is
+          # already handled: the app's socket watchdog (src/index.ts) exits the
+          # process on a persistently dead socket, and restartPolicy: Always (the
+          # default) brings it back. If you want an active liveness probe, gate it
+          # on data/socket-watermark.json freshness — but confirm the stamp cadence
+          # first so a slow refresh can't crash-loop the pod. Left off deliberately.
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: maelle-state
+        - name: logs
+          emptyDir: {}

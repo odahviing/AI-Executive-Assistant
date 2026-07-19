@@ -235,6 +235,7 @@ export async function executeInternalAutoMove(params: {
     const { shadowNotify } = require('../../utils/shadowNotify') as typeof import('../../utils/shadowNotify');
     await shadowNotify(profile, {
       channel: context.channelId,
+      icon: '🔧',
       action: `Active-mode autofix — ${issue.type}`,
       detail: `${issue.description}. I moved "${subj}" to ${newLocal} (free for everyone)${notified.length ? ` and let ${notified.join(', ')} know` : ''}. Say "revert" if you'd rather I hadn't.`,
     });

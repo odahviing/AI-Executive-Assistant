@@ -353,6 +353,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
               result.movedBlockEventIds.push(blockEvent.id);
               await shadowNotify(profile, {
                 channel: '',
+                icon: '🔧',
                 action: 'Dense calendar — floating block consolidated',
                 detail: `Slid your ${block.name.replace(/_/g, ' ')} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} on ${slotDt.toFormat('EEE d MMM')} so the free time around it lands as one clean break instead of split minutes. Tell me if you'd rather it stayed at ${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}.`,
               });
@@ -423,6 +424,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           result.movedBlockEventIds.push(blockEvent.id);
           await shadowNotify(profile, {
             channel: '',  // sendDirect path; cache handles the channel
+            icon: '🔧',
             action: 'Floating block rebalanced',
             detail: `Moved ${block.name} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} on ${slotDt.toFormat('EEE d MMM')}.`,
           });
@@ -444,6 +446,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           try {
             await shadowNotify(profile, {
               channel: '',
+              icon: '🔧',
               action: 'Floating block overlap',
               // v3.7.x (#140c) — name the block, the conflicting event, and the
               // window so the owner knows WHAT is moving and WHY (his #140

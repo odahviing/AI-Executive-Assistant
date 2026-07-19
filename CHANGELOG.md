@@ -2,6 +2,24 @@
 
 ---
 
+## 3.8.3 — shadow/scope polish, approval + honesty fixes, orchestrator split, GCP deploy scaffolding
+
+A cleanup-and-fixes patch bundling several chats, plus the first commit of the GCP deploy scaffolding (owner direction — normally kept out of the tree). Fixes: calendar-repair shadows now read distinct from conversation receipts; four unmapped scheduling tools stop shipping on every turn; a colleague's reply to an owner outreach lands back in the owner's original thread; and the claim-checker catches a false "here's the image" with no file sent. Also an internal orchestrator split and the (not-yet-provisioned) GKE deploy files. No schema change; restart to load.
+
+### Fixed
+- Calendar-repair shadows use a wrench 🔧 (auto-move, floating-block consolidate / rebalance / overlap) instead of the 🔍 conversation-receipt icon, so a fix reads distinct from a relay. `shadowNotify` gained an `icon` param (default 🔍). ([shadowNotify.ts](src/utils/shadowNotify.ts), [autoMove.ts](src/skills/calendarHealth/autoMove.ts), [rebalanceFloatingBlocks.ts](src/utils/rebalanceFloatingBlocks.ts))
+- Module G tool-scoping: four tools (`set_work_schedule_override`, `get_work_schedule_overrides`, `hold_slot`, `revert_last_auto_move`) were never mapped to a scope, so they shipped on every owner turn and logged "tool not mapped" on each restart. Mapped to the meetings scope. ([registry.ts](src/skills/registry.ts))
+- Approval routing: a colleague's reply to an owner outreach now posts into the owner's ORIGINAL thread, not the shared daily approval thread — a returned LinkedIn draft (Oran) was landing detached from the conversation. ([skill.ts](src/tasks/skill.ts))
+- Honesty: the claim-checker flags a file/image-delivery claim ("here's the image", "see attached", "with the image attached") when no file/image-send tool ran this turn (new `deliver_file` action type); it does NOT flag describing a third party's attachment or offering to forward. (The actual owner-ward image forward is tracked as a separate GitHub issue.) ([claimChecker.ts](src/utils/claimChecker.ts))
+
+### Changed — internal refactor (no behavior change)
+- `orchestrator/index.ts` extracted its turn-context builder — system-prompt parts + social directive + scope-filtered tools + trimmed history — into `orchestrator/buildTurnContext.ts` (−988 lines from index.ts, following the 3.8.2 `turnHelpers.ts` split). ([buildTurnContext.ts](src/core/orchestrator/buildTurnContext.ts))
+
+### Added — GCP deploy scaffolding (not yet provisioned)
+- First commit of the GKE deploy setup: `Dockerfile` + `.dockerignore` (container build), `.github/workflows/deploy-gke.yml` (Workload Identity Federation — no service-account key in Git), `k8s/` manifests (Deployment / PVC / kustomization / serviceaccount + `secret.example.yaml`, a `REPLACE_ME` template only), `scripts/migrate-data.sh`, and a container build-stamp in `src/index.ts`. Nothing is provisioned yet; secrets never flow through Git — the real `maelle-env` Secret is created out-of-band (GCP Secret Manager) and Slack tokens stay in the git-ignored `config/users/idan.yaml`.
+
+---
+
 ## 3.8.2 — real-day scheduling + approval bug wave (5 chats), dense meeting↔lunch fix, cron icons
 
 A full real-day wave off Idan's live calendar: the general chat traced each finding, split it to the chat that owns it (meeting / approval / guard / prompt), and this bundles everyone's fixes into one version. The through-line on the approval side — colleague calendar CHANGES (move / add-attendees) must ride the meeting tool + a `policy_exception` deferred_action that REPLAYS on approve; freeform approvals applied nothing and produced false "done" confirmations. Plus the dense sweep now closes a meeting↔lunch sliver it was missing, and every automatic thread gets a leading icon. Restart required; no schema change; dense stays gated on `meetings.packing_preference`.

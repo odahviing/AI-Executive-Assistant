@@ -22,17 +22,27 @@ import { execSync } from 'node:child_process';
  * live. Fail-safe: any read error degrades to 'unknown', never blocks startup.
  * __dirname resolves to repo/dist (PM2) or repo/src (ts-node-dev) — `..` is
  * the repo root in both.
+ *
+ * Container path: an image has no `.git`, so `git rev-parse` would always fail
+ * and log gitSha='unknown' — losing the deploy-verification signal. The image
+ * build injects APP_VERSION + GIT_SHA as envs (see Dockerfile); read those
+ * first. Local/PM2 runs leave them unset and fall back to reading package.json +
+ * git directly (byte-identical to before).
  */
 function getBuildStamp(): { version: string; gitSha: string } {
   const repoRoot = join(__dirname, '..');
-  let version = 'unknown';
-  let gitSha = 'unknown';
-  try {
-    version = (JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version as string) ?? 'unknown';
-  } catch { /* keep 'unknown' */ }
-  try {
-    gitSha = execSync('git rev-parse --short HEAD', { cwd: repoRoot, encoding: 'utf8' }).trim();
-  } catch { /* keep 'unknown' — e.g. running outside a git checkout */ }
+  let version = process.env.APP_VERSION || 'unknown';
+  let gitSha = process.env.GIT_SHA || 'unknown';
+  if (!process.env.APP_VERSION) {
+    try {
+      version = (JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version as string) ?? 'unknown';
+    } catch { /* keep 'unknown' */ }
+  }
+  if (!process.env.GIT_SHA) {
+    try {
+      gitSha = execSync('git rev-parse --short HEAD', { cwd: repoRoot, encoding: 'utf8' }).trim();
+    } catch { /* keep 'unknown' — e.g. running outside a git checkout */ }
+  }
   return { version, gitSha };
 }
 

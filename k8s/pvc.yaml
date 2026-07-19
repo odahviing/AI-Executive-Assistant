@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maelle-state
+spec:
+  # ReadWriteOnce — mounted by exactly one node/pod at a time. Matches SQLite's
+  # single-writer model and reinforces the single-pod invariant (a second pod
+  # cannot attach the same disk on another node).
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # DB is ~8 MB today and grows slowly; 10 Gi is generous headroom for the DB
+      # + the config/users/ tree. Bump if audit_log growth ever warrants it.
+      storage: 10Gi
+  # storageClassName: standard-rwo   # TODO: your cluster's RWO class.
+  #   On GKE, `standard-rwo` = balanced PD (good default). Omit to use the
+  #   cluster default StorageClass. Pick a class that supports VolumeSnapshots
+  #   so the nightly DB backup can snapshot the disk.

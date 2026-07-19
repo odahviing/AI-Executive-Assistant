@@ -168,6 +168,11 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
     'manage_calendar_issue',
     // v3.3 — owner marks travel / working-elsewhere days (Working Elsewhere mode).
     'manage_working_elsewhere',
+    // v3.8.x — these were added after the scope map and never mapped, so Module G
+    // shipped them on EVERY owner turn + logged "tool not mapped" each restart:
+    // per-date schedule overrides (#143, replaced the WE spine), slot holds (#30),
+    // and the calendar-health auto-move revert (v3.7.2). All meeting/schedule turns.
+    'set_work_schedule_override', 'get_work_schedule_overrides', 'hold_slot', 'revert_last_auto_move',
     // v2.9 — find_venue is reachable from a meetings-flavored turn
     // ("book coffee with Yael"); also lives in the 'venue' scope.
     'find_venue',

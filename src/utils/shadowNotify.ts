@@ -61,6 +61,12 @@ export async function shadowNotify(
      * subsequent shadows in the same thread.
      */
     conversationHeader?: string;
+    /**
+     * Leading glyph. Defaults to 🔍 (the shadow/receipt icon). Autonomous
+     * calendar-REPAIR shadows (auto-move, floating-block consolidate / rebalance /
+     * overlap) pass a wrench 🔧 so a fix reads distinct from a conversation receipt.
+     */
+    icon?: string;
   }
 ): Promise<void> {
   if (!profile.behavior.v1_shadow_mode) return;
@@ -73,7 +79,8 @@ export async function shadowNotify(
   }
 
   try {
-    const text = `🔍 _*${params.action}:* ${params.detail}_`;
+    const icon = params.icon ?? '🔍';
+    const text = `${icon} _*${params.action}:* ${params.detail}_`;
 
     // v2.3.2 — conversation-key threading takes priority. If the caller
     // tagged this shadow with a conversationKey, use the cached anchor (or
@@ -99,7 +106,7 @@ export async function shadowNotify(
       // top-level header + this shadow's body, then cache the resulting ts
       // as the anchor for subsequent shadows on the same key.
       const headerLine = params.conversationHeader
-        ? `🔍 *${params.conversationHeader}*\n${text}`
+        ? `${icon} *${params.conversationHeader}*\n${text}`
         : text;
       const res = await conn.sendDirect(ownerId, headerLine);
       if (!res.ok) {

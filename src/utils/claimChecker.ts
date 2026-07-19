@@ -60,7 +60,7 @@ export interface ClaimCheckInput {
   };
 }
 
-export type ClaimActionType = 'message' | 'book' | 'task' | 'other' | 'invented_fact' | 'gossipy' | null;
+export type ClaimActionType = 'message' | 'book' | 'task' | 'deliver_file' | 'other' | 'invented_fact' | 'gossipy' | null;
 
 export interface ClaimCheckResult {
   claimed_action: boolean;
@@ -216,6 +216,10 @@ The action-based mutation tools and their mutating actions:
 
 So if the draft says "Done. Calendar health now runs at 7:00, briefing at 7:30" and TOOL ACTIVITY shows \`[manage_routine: action=update]\` twice, the claim is HONEST — don't flag. Same for "noted that" + \`[update_person_memory: ...]\`, "saved the preference" + \`[manage_preference: action=set]\`, "marked the lunch gap as fine" + \`[manage_calendar_issue: action=approve]\`, etc. Only flag if the matching action-tool didn't run, or ran with \`FAILED\` outcome.
 
+CRITICAL — file / image delivery:
+A draft can claim it just DELIVERED a file or image TO THE READER in this very message — "here's the image", "here it is, attached", "with the image attached", "see attached", "sharing the file", "attached is the deck". ${input.ownerFirstName}'s assistant replies in plain text: a reply carries an attachment ONLY when a file/image-send tool actually ran this turn (an upload / send-file / attach tool with an OK outcome in TOOL ACTIVITY). So a "delivered it here" claim is HONEST only when such a send appears in the activity; with NO file/image send in the activity the attachment does NOT exist — flag claimed_action=true (action_type "deliver_file"). Judge by whether an upload HAPPENED, not by the wording — this holds in any language.
+NOT a delivery claim (do NOT flag): describing that a THIRD PARTY attached or sent a file ("Oran attached an image to his note", "the deck he sent over"), OFFERING to send one ("want me to forward the image?"), or pointing to a link / where to find it. Only a claim that the file is attached HERE, now, for the reader — with no matching send this turn — is false.
+
 CRITICAL — specifics mismatch vs occurrence mismatch (v2.6.1, refined v2.6.5):
 Calendar mutation tools each cover DIFFERENT fields:
 - \`create_meeting\` — creates a new event with subject / time / duration / attendees.
@@ -234,6 +238,7 @@ NOT a false claim:
 - Proposing / offering / recommending a future action — EVEN when it names a specific meeting, time, or person. "Best fit: Wednesday 13:00 — want me to move the interview there?", "I can book that", "Want me to reach out?", "Shall I move it?" are PROPOSALS awaiting the owner's yes, NOT completed actions. A draft that recommends or asks-before-acting is claimed_action=false no matter how specific it is. Only flag when the draft states the action ALREADY happened ("moved", "booked", "done", "sent", "scheduled it"). When the turn was a reply to an attachment/screenshot, the draft is analysis + a proposal off that image — don't treat its specifics as a phantom action.
 - Referencing what the assistant did in PRIOR turns (history, not this turn).
 - Saying "on it" / "I'll handle that" — these are in-progress commitments, not completed claims.
+- Describing that a THIRD PARTY attached/sent a file, or OFFERING to send/forward one — that is not a claim the assistant delivered it here (see "file / image delivery" above).
 
 IS a false claim:
 - "I've sent a message to X" when NO message_colleague targeting X is in TOOL ACTIVITY THIS TURN.
@@ -241,6 +246,7 @@ IS a false claim:
 - "I've flagged this with him" when no create_approval / create_task is in TOOL ACTIVITY THIS TURN.
 - The reply contains a \`<@USERID>\` Slack ping intended to notify someone OUTSIDE the current room, but no message_colleague targeting them is in TOOL ACTIVITY THIS TURN. (For people NOT in the room, inline pings are not how to message them — message_colleague is.)
 - IMPORTANT MPIM EXCEPTION: if MPIM CONTEXT is present above and the \`<@USERID>\` mention is for a PARTICIPANT in the listed group thread, that's LEGITIMATE in-room addressing — NOT a phantom send. Do not flag it. Only flag pings to people NOT in the participant list.
+- A claim that a file/image is attached HERE / delivered to the reader in THIS message ("here's the image", "see attached", "with the image attached") when NO file/image-send tool ran this turn — the text reply carries no attachment unless a send tool fired (see "file / image delivery" above).
 
 ═════════════════════════════════════════════════════════════════════════════
 OUTPUT SCHEMA
@@ -248,7 +254,7 @@ OUTPUT SCHEMA
 
 {
   "claimed_action": boolean,
-  "action_type": "message" | "book" | "task" | "other" | null,
+  "action_type": "message" | "book" | "task" | "deliver_file" | "other" | null,
   "claim_specifics_mismatch": boolean,
   "target_name": string | null,
   "action_summary": string | null

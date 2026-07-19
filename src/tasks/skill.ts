@@ -914,25 +914,39 @@ Binding — how to pick the right approval_id:
           const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
           const conn = getConnection(ownerUserId, 'slack');
           if (conn) {
-            // v3.4.6 (spine collapse) — post the ask into the owner's ONE daily
-            // decision thread (lazily created on the first approval of the day;
-            // day-key honors day_boundary_hour so a 1am ask lands on the prior
-            // workday's thread). terminal_dm_msg_ts = THIS message's ts so ✅
-            // resolves THIS approval regardless of how many share the thread;
-            // owner_dm_thread_ts = the daily root so typed replies route to
-            // content attribution. Supersedes the v3.1.7 outreach-relay
-            // threading (all approvals consolidate into the daily thread now).
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { getOrCreateOwnerDailyThread } = require('../utils/ownerDailyThread') as
-              typeof import('../utils/ownerDailyThread');
-            const daily = await getOrCreateOwnerDailyThread({ profile, conn });
-            const res = daily
-              ? await conn.postToChannel(daily.channel, dmText, { threadTs: daily.rootTs })
+            // Where the owner sees this ask:
+            //   • Outreach continuation (Finding A, 2026-07-19) — a colleague's reply
+            //     to a recent owner outreach → post into the owner's ORIGINAL thread
+            //     (relayOwner, from the outreach's recorded owner_dm_thread_ts) so the
+            //     reply stays in THAT conversation. Pre-fix relayOwner was computed +
+            //     stamped on the row, then the daily-thread post below OVERWROTE it —
+            //     Oran's LinkedIn reply detached onto the daily approval thread.
+            //   • Otherwise — the owner's ONE daily decision thread (v3.4.6 spine
+            //     collapse; lazily created, day-key honors day_boundary_hour so a 1am
+            //     ask lands on the prior workday's thread).
+            // Either way: terminal_dm_msg_ts = THIS message's ts (✅ resolves per
+            // message); owner_dm_thread_ts = the thread we posted into (typed replies
+            // route via content attribution + the bare-ack anchor gate).
+            let postChannel: string | undefined;
+            let postThreadTs: string | undefined;
+            if (relayOwner?.owner_dm_channel && relayOwner.owner_dm_thread_ts) {
+              postChannel = relayOwner.owner_dm_channel;
+              postThreadTs = relayOwner.owner_dm_thread_ts;
+            } else {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { getOrCreateOwnerDailyThread } = require('../utils/ownerDailyThread') as
+                typeof import('../utils/ownerDailyThread');
+              const daily = await getOrCreateOwnerDailyThread({ profile, conn });
+              postChannel = daily?.channel;
+              postThreadTs = daily?.rootTs;
+            }
+            const res = (postChannel && postThreadTs)
+              ? await conn.postToChannel(postChannel, dmText, { threadTs: postThreadTs })
               : await conn.sendDirect(ownerUserId, dmText);  // fallback: plain DM
             if (res.ok) {
               updateRequest(row.id, {
-                ownerDmChannel: daily?.channel ?? res.ref ?? undefined,
-                ownerDmThreadTs: daily?.rootTs ?? undefined,
+                ownerDmChannel: postChannel ?? res.ref ?? undefined,
+                ownerDmThreadTs: postThreadTs ?? undefined,
                 terminalDmMsgTs: res.ts ?? undefined,
               });
             } else {
