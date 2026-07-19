@@ -389,6 +389,22 @@ export function findConsolidatingSlotForBlock(
   const earliest = findAlignedSlotForBlock(block, dayDate, timezone, busyInWindow);
   const latest = findLatestAlignedSlotForBlock(block, dayDate, timezone, busyInWindow);
 
+  // #133d — ABUTTING candidates. earliest/latest only find the window extremes;
+  // the position that actually collapses a dead sliver is the one that KISSES a
+  // neighbour. For each commitment, add the aligned slot right AFTER it
+  // (start = alignUp(end)) and right BEFORE it (start = alignDown(start −
+  // duration)). Filtered to in-window + non-colliding; the strict-improvement
+  // guard below still decides whether any of them is actually used, so a useless
+  // candidate is simply never picked (stays idempotent across sweeps).
+  const abutting: number[] = [];
+  for (const c of commitments) {
+    for (const cand of [alignUpQuarter(c.end, timezone), alignDownQuarter(c.start - durationMs, timezone)]) {
+      if (cand < windowStart || cand + durationMs > windowEnd) continue;
+      if (commitments.some(m => cand < m.end && cand + durationMs > m.start)) continue;
+      abutting.push(cand);
+    }
+  }
+
   // Total dead-gap minutes on the day with the block placed at `startMs`. The
   // meeting-to-meeting dead gaps are constant across placements, so comparing
   // this figure isolates the block-adjacent change.
@@ -400,8 +416,8 @@ export function findConsolidatingSlotForBlock(
 
   // Honour prefer_position on a tie by trying the preferred extreme first.
   const order = block.prefer_position === 'latest_in_window'
-    ? [latest, earliest]
-    : [earliest, latest];
+    ? [latest, earliest, ...abutting]
+    : [earliest, latest, ...abutting];
   let best: number | null = null;
   let bestDead = Infinity;
   for (const cand of order) {

@@ -773,6 +773,11 @@ export async function sendMorningBriefing(
     logger.warn('briefs — humanGate threw, sending raw', { err: String(err).slice(0, 200) });
   }
 
+  // ☀️ briefing glyph so the daily thread reads distinct in the sidebar (the
+  // owner's OWN threads never get an icon). Added AFTER humanGate so the gate
+  // never sees/rewrites the emoji.
+  textToSend = `☀️ ${textToSend}`;
+
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
   const conn = getConnection(ownerUserId, 'slack');

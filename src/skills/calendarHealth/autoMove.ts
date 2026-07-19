@@ -17,6 +17,7 @@ import logger from '../../utils/logger';
 import { displaySubject } from '../../utils/displaySubject';
 import type { UserProfile } from '../../config/userProfile';
 import { densityConfigFromProfile, scoreSlotDensity } from '../../utils/calendarDensity';
+import { alignDownQuarter } from '../../utils/floatingBlocks';
 import { parseGraphDt } from './classify';
 import type { HealthIssue } from './types';
 
@@ -313,5 +314,102 @@ export async function pullInternalMeetingToAbut(params: {
     movable, origStart: mStart, origEnd: mEnd, durationMin,
     newStartIso: top.start, participantsRaw, conflictReason, moveVerb,
     keptEventId, issue, userEmail, ownerUserId, timezone, profile, context, internalActions,
+  });
+}
+
+// #133d — mirror of pullInternalMeetingToAbut for the BEFORE-block case. A
+// meeting that ENDS in a dead sliver just before a floating block (the "push
+// Michal" case: meeting ends 11:15, lunch pinned at its 11:30 window floor, a
+// 15-min dead gap between them that lunch CAN'T slide down to swallow) is pushed
+// LATER so it ends exactly at the block's start. Target start is grid-aligned
+// DOWN (any residual ≤ a quarter is connective, never dead). Same guards as the
+// pull: same-day, attendee-free, and it must NOT open a new dead gap on the
+// meeting's LEFT (scoreSlotDensity checks both neighbours). Caller owns the
+// protection / external / recently-moved gates. Routes through the ONE move path.
+export async function pushInternalMeetingToAbutBefore(params: {
+  movable: CalendarEvent;
+  blockStartDt: DateTime;              // the floating block's START — abut target
+  blockEventId: string;               // recorded as kept_event_id (revert handle)
+  moveVerb: string;
+  conflictReason: string;
+  dayEventsForBusy: CalendarEvent[];
+  issue: HealthIssue;
+  userEmail: string;
+  ownerUserId: string;
+  timezone: string;
+  profile: UserProfile;
+  context: { channelId: string; threadTs?: string };
+  internalActions: Array<{ tool: string; detail: string }>;
+}): Promise<void> {
+  const { movable, blockStartDt, blockEventId, moveVerb, conflictReason,
+    dayEventsForBusy, issue, userEmail, ownerUserId, timezone, profile, context, internalActions } = params;
+  const mStart = parseGraphDt(movable.start.dateTime, movable.start.timeZone, timezone);
+  const mEnd = parseGraphDt(movable.end.dateTime, movable.end.timeZone, timezone);
+  const durationMin = Math.round(mEnd.diff(mStart, 'minutes').minutes);
+  const durationMs = durationMin * 60000;
+  const participantsRaw = (movable.attendees ?? []).filter(a => a.status?.response !== 'declined');
+  const attendeeEmails = participantsRaw.map(a => a.emailAddress.address).filter(Boolean);
+
+  // Target: the meeting ENDS at the block's start. Prefer an on-grid start
+  // (align DOWN); but if that leaves a DEAD residual gap to the block (durations
+  // ≡ 5 mod 15 — 20/50 min — where no quarter start abuts a quarter block), fall
+  // back to the EXACT abut (off-grid start, 0-gap). A clean kiss beats an on-grid
+  // start with a fresh sliver. The walker tests the exact off-grid start as-is
+  // when gridAlignStart is off (findAvailableSlots: cursor starts at searchFrom).
+  const densCfg = densityConfigFromProfile(profile.meetings);
+  let targetStartMs = alignDownQuarter(blockStartDt.toMillis() - durationMs, timezone);
+  let gridAligned = true;
+  if ((blockStartDt.toMillis() - (targetStartMs + durationMs)) / 60000 > densCfg.bufferMinutes) {
+    targetStartMs = blockStartDt.toMillis() - durationMs;   // exact abut, off-grid
+    gridAligned = false;
+  }
+  const targetStartDt = DateTime.fromMillis(targetStartMs, { zone: timezone });
+  const targetEndMs = targetStartMs + durationMs;
+
+  // Must push LATER (never earlier), stay same-day, and not overlap the block.
+  if (targetStartMs <= mStart.toMillis()
+      || !targetStartDt.hasSame(mStart, 'day')
+      || targetEndMs > blockStartDt.toMillis()) {
+    issue.fix_failed = true;
+    issue.fix_error = 'No clean slot that abuts the block — left for you.';
+    return;
+  }
+
+  // Attendee-free at the target (owner + required attendees, cross-TZ hours).
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { attendeeCheckParams } = require('../../utils/attendeeAvailability') as typeof import('../../utils/attendeeAvailability');
+  const slots = await findAvailableSlots({
+    userEmail, timezone, durationMinutes: durationMin,
+    ...attendeeCheckParams(attendeeEmails, userEmail),
+    searchFrom: targetStartDt.toUTC().toISO()!,
+    searchTo: blockStartDt.toUTC().toISO()!,
+    minBufferHours: 0,
+    excludeEventIds: [movable.id],   // its own current slot isn't a conflict
+    autoExpand: false,               // stay in the SAME-DAY gap — never widen
+    gridAlignStart: gridAligned,     // aligned target → align; exact off-grid abut → test as-is
+    profile,
+  });
+  const free = slots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - targetStartMs) <= 60000);
+
+  // Net-improvement guard: the pushed slot must NOT open a new dead gap on the
+  // LEFT (the meeting before it) — never just shove the sliver onto the neighbour.
+  const dayBusy = dayEventsForBusy
+    .filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free' && e.showAs !== 'workingElsewhere' && e.id !== movable.id)
+    .map(e => ({
+      start: parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis(),
+      end: parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(),
+    }));
+  const tScore = scoreSlotDensity(targetStartMs, targetEndMs, dayBusy, densCfg);
+
+  if (!free || tScore.createsDeadGap) {
+    issue.fix_failed = true;
+    issue.fix_error = 'No back-to-back slot that cleanly closes the gap (attendee busy, or it would just shift the gap) — left for you.';
+    return;
+  }
+
+  await executeInternalAutoMove({
+    movable, origStart: mStart, origEnd: mEnd, durationMin,
+    newStartIso: targetStartDt.toUTC().toISO()!, participantsRaw, conflictReason, moveVerb,
+    keptEventId: blockEventId, issue, userEmail, ownerUserId, timezone, profile, context, internalActions,
   });
 }

@@ -508,9 +508,10 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // DM asks Maelle to move an existing meeting, she can do it autonomously
         // IF the new slot fits the owner's rules (work hours, work days, buffers,
         // floating blocks, no conflicts). If the new slot breaks a rule, the tool
-        // refuses and signals needs_owner_approval — Sonnet then falls back to
-        // create_approval(kind=meeting_reschedule). Owner-path callers skip this
-        // check (owner override IS the approval).
+        // refuses and signals needs_owner_approval WITH a _deferred_action_hint —
+        // Sonnet raises create_approval(kind=policy_exception), the orchestrator
+        // stamps the deferred move, and owner-approve replays it. Owner-path callers
+        // skip this check (owner override IS the approval).
         if (context.senderRole === 'colleague') {
           // v3.5.x — colleague-requested move gate (replaces the v3.1.4
           // requester-controls gate). Maelle organizes every meeting, so the old
@@ -562,7 +563,10 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               meeting_subject: args.meeting_subject,
               requested_start: args.new_start,
               requested_end: args.new_end,
-              message: `I couldn't read who's on "${args.meeting_subject}" to check whether ${askerFirst} can move it. Raise create_approval(kind=meeting_reschedule) so ${ownerFirst} decides.`,
+              message: `I couldn't read who's on "${args.meeting_subject}" to check whether ${askerFirst} can move it. Raise create_approval(kind=policy_exception) so ${ownerFirst} decides.`,
+              // #2.1b / Approval-A — stamp the deferred move so owner-approve REPLAYS it
+              // (policy_exception-gated auto-attach). Without this the approval applied nothing.
+              _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
             };
           }
 
@@ -607,7 +611,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               meeting_subject: args.meeting_subject,
               requested_start: args.new_start,
               requested_end: args.new_end,
-              message: `${askerName ?? 'They'} asked to move "${args.meeting_subject}", which they set up with ${ownerFirst}. Raise create_approval(kind=meeting_reschedule) so ${ownerFirst} confirms the new time.`,
+              message: `${askerName ?? 'They'} asked to move "${args.meeting_subject}", which they set up with ${ownerFirst}. Raise create_approval(kind=policy_exception) so ${ownerFirst} confirms the new time.`,
+              _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
             };
           }
           // Step 1.5 — every OTHER required attendee must be INTERNAL so we can
@@ -633,7 +638,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               meeting_subject: args.meeting_subject,
               requested_start: args.new_start,
               requested_end: args.new_end,
-              message: `${askerName ?? 'They'} asked to move "${args.meeting_subject}", but it has external attendee(s) whose availability I can't check (${names}) — moving a meeting with outside people needs ${ownerFirst}. Raise create_approval(kind=meeting_reschedule) and note the external attendee(s).`,
+              message: `${askerName ?? 'They'} asked to move "${args.meeting_subject}", but it has external attendee(s) whose availability I can't check (${names}) — moving a meeting with outside people needs ${ownerFirst}. Raise create_approval(kind=policy_exception) and note the external attendee(s).`,
+              _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
             };
           }
 
@@ -744,8 +750,9 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                     requested_start: newStart,
                     requested_end: newEnd,
                     message: humanReason === 'unknown'
-                      ? `${askerName ?? 'They'} asked to move "${args.meeting_subject}" to that time, but it doesn't pass ${ownerFirst}'s scheduling rules and I can't tell which one. Call create_approval(kind=meeting_reschedule) and let him decide.`
-                      : `${askerName ?? 'They'} asked to move "${args.meeting_subject}" to that time, but ${humanReason}. I can't do it on my own — call create_approval(kind=meeting_reschedule) and pass "${humanReason}" in ask_text so ${ownerFirst} knows what he's deciding.`,
+                      ? `${askerName ?? 'They'} asked to move "${args.meeting_subject}" to that time, but it doesn't pass ${ownerFirst}'s scheduling rules and I can't tell which one. Call create_approval(kind=policy_exception) and let him decide.`
+                      : `${askerName ?? 'They'} asked to move "${args.meeting_subject}" to that time, but ${humanReason}. I can't do it on my own — call create_approval(kind=policy_exception) and pass "${humanReason}" in ask_text so ${ownerFirst} knows what he's deciding.`,
+                    _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
                   };
                 }
               }
@@ -757,7 +764,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 meeting_subject: args.meeting_subject,
                 requested_start: newStart,
                 requested_end: newEnd,
-                message: `I couldn't verify whether that slot fits ${context.profile.user.name.split(' ')[0]}'s rules right now. Raise create_approval(kind=meeting_reschedule) so he can decide.`,
+                message: `I couldn't verify whether that slot fits ${context.profile.user.name.split(' ')[0]}'s rules right now. Raise create_approval(kind=policy_exception) so he can decide.`,
+                _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
               };
             }
           }
@@ -1030,26 +1038,26 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         let movePlanIsOnline: boolean | undefined;
         let movePlanCategories: string[] | undefined;
         let movePlanPreserveExisting = false;
+        let movePlanOverrideNotice: string | undefined;   // #A — attendee-busy heads-up, surfaced on the move result
         try {
           const { planMeeting: planMove } = await import('../../planMeeting');
-          // Pull existing event metadata (categories, current location) for
-          // the priorSlotStartIso + existingEventCategories inputs.
-          const existing = await getCalendarEvents(
-            userEmail,
-            DateTime.fromISO(effectiveStart, { zone: timezone }).minus({ days: 1 }).toFormat('yyyy-MM-dd'),
-            DateTime.fromISO(effectiveStart, { zone: timezone }).plus({ days: 1 }).toFormat('yyyy-MM-dd'),
-            timezone,
-          );
-          const movingEvent = existing.find(e => e.id === args.meeting_id);
-          const priorStartIso = movingEvent?.start?.dateTime;
-          // v2.8.5 — also extract prior END so planMeeting's freebusy overlap
-          // check can exclude the source event when an attendee's calendar still
-          // shows it. Otherwise a move like 13:00→13:15 trips confirm_override
-          // because the attendee looks busy at 13:15 (with the very meeting being moved).
-          const priorEndIso = movingEvent?.end?.dateTime;
-          const existingCats = ((movingEvent as any)?.categories as string[] | undefined) ?? [];
-          const existingLocation = (movingEvent as any)?.location?.displayName as string | undefined;
-          const existingIsOnline = (movingEvent as any)?.isOnlineMeeting as boolean | undefined;
+          // #B (2026-07-19) — fetch the moving event BY ID, not via a ±1-day window
+          // around the DESTINATION. A >1-day move never found the source event in that
+          // window → movingEvent=undefined → empty participants + no priorStart →
+          // planMeeting re-detected the category from the owner alone (Meeting →
+          // Logistic) and cleared the location ("Intro with Maya", Mon→Thu). The by-id
+          // fetch returns the exact shape at any distance (and gives fix A its attendees).
+          const { getEventForAttendeeUpdate } = await import('../../../../connectors/graph/calendar');
+          const movingEvent = await getEventForAttendeeUpdate(userEmail, args.meeting_id as string);
+          const priorStartIso = movingEvent?.startIso;
+          // v2.8.5 — prior END lets planMeeting's freebusy overlap exclude the source
+          // event when an attendee's calendar still shows it (a 13:00→13:15 nudge
+          // otherwise trips confirm_override on the very meeting being moved).
+          const priorEndIso = movingEvent?.endIso;
+          const existingCats = movingEvent?.categories ?? [];
+          const existingLocation = movingEvent?.location;
+          const existingIsOnline = movingEvent?.isOnline;
+          const moveAttendees = movingEvent?.attendees ?? [];
           const movePlan = await planMove({
             profile: context.profile,
             intent: 'move',
@@ -1057,10 +1065,10 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             initiatorSlackId: context.userId,
             slotStartIso: effectiveStart,
             slotEndIso: effectiveEnd,
-            subject: (movingEvent?.subject ?? args.meeting_subject) as string | undefined,
-            participants: ((movingEvent?.attendees ?? []) as any[]).map(a => ({
-              email: a?.emailAddress?.address,
-              name: a?.emailAddress?.name,
+            subject: args.meeting_subject as string | undefined,
+            participants: moveAttendees.map(a => ({
+              email: a.email,
+              name: a.name,
             })),
             existingEventId: args.meeting_id as string,
             existingEventCategories: existingCats,
@@ -1147,6 +1155,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           }
           if (movePlan.action === 'book') {
             movePlanPreserveExisting = movePlan.preserveExisting === true;
+            movePlanOverrideNotice = movePlan.overrideNotice;   // #A — "who's busy" heads-up, surfaced on the result below
             // (v2.8.2) preserveExisting: leave location/isOnline undefined so the
             // Graph PATCH doesn't touch them. Re-stamping the BiWeekly's "Huddle"
             // with the office address on every move is exactly what we're killing.
@@ -1392,6 +1401,11 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // PROPOSE-ONLY: surface it; the reply offers ("…frees 12:30 — want
           // lunch back there?"). Not auto-moved (may be owner-pinned).
           ...(reclaimable.length ? { reclaimable_block: reclaimable[0] } : {}),
+          // #A (2026-07-19) — non-blocking attendee-busy heads-up. The move already went
+          // through (owner override is total), but a colleague-requested move can re-land
+          // on a time that attendee is busy — surface it so Maelle flags it, never re-asks.
+          // This notice was computed by planMeeting but DROPPED here before the fix.
+          ...(movePlanOverrideNotice ? { _attendee_busy_note: `Heads up — ${movePlanOverrideNotice}. Moved anyway (your call is total); say plainly who's busy at the new time and offer to check with them or pick another slot — don't re-ask permission.` } : {}),
           // v1.8.3 — past-tense summary the reply quotes verbatim. Issue #26 bug 1:
           // without this, Sonnet could re-read the calendar post-move and narrate
           // the new time as a fresh discovery ("already at 12:30, nothing to change")

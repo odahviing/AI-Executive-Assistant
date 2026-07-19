@@ -2,6 +2,35 @@
 
 ---
 
+## 3.8.2 — real-day scheduling + approval bug wave (5 chats), dense meeting↔lunch fix, cron icons
+
+A full real-day wave off Idan's live calendar: the general chat traced each finding, split it to the chat that owns it (meeting / approval / guard / prompt), and this bundles everyone's fixes into one version. The through-line on the approval side — colleague calendar CHANGES (move / add-attendees) must ride the meeting tool + a `policy_exception` deferred_action that REPLAYS on approve; freeform approvals applied nothing and produced false "done" confirmations. Plus the dense sweep now closes a meeting↔lunch sliver it was missing, and every automatic thread gets a leading icon. Restart required; no schema change; dense stays gated on `meetings.packing_preference`.
+
+### Fixed — scheduling (meeting chat)
+- Category flip on a >1-day move: `move_meeting` fetched the moving event via a ±1-day window around the DESTINATION, so a move spanning more than a day couldn't find it → empty attendees → category re-detected from the owner alone (Meeting → Logistic) and location cleared ("Intro with Maya" Mon→Thu; the Michal Tue→Sun repeat). Now fetched BY ID at any distance. ([moveMeeting.ts](src/skills/meetings/ops/handlers/moveMeeting.ts))
+- Owner move didn't flag an attendee conflict: a colleague-requested move that re-lands on a time the OTHER attendee is busy now surfaces a non-blocking heads-up (override is total, but named — "book me 5 double meetings, but FLAG it") — the notice planMeeting computed was being dropped. ([planMeeting.ts](src/skills/meetings/planMeeting.ts))
+- Vague colleague reschedule → offer, don't escalate: when a colleague on the meeting asks to move it without naming a time, Maelle offers rule-compliant slots and books the pick instead of jumping to an approval. ([meetings.ts](src/skills/meetings.ts))
+- Placeholder subject sent to externals: with an external on the invite, Maelle secures a real subject BEFORE booking (batched with the day) instead of booking "Meeting with X and Y" and renaming — which hit the external as a second notification. ([meetings.ts](src/skills/meetings.ts))
+
+### Fixed — approvals + honesty (approval + guard chats)
+- Freeform approvals for calendar changes applied nothing: a move / add-attendees escalated as `create_approval(kind=freeform)` had no deferred_action, so approving it replayed nothing and the requester was notified early/empty — yet Maelle reported "done" (Maya move; Maayan "added Isaac & Chris" who were never added). Calendar changes now go through the meeting tool FIRST; escalations carry a `policy_exception` deferred_action that REPLAYS move/update/delete on approve, and the handler skips the create-only booking-field checks for existing-event changes. ([skill.ts](src/tasks/skill.ts), moveMeeting.ts)
+- Claim-checker let a false "done" through: `resolve_approval` was treated as backing ANY completed-action claim; now it's honest only when its summary shows a mutation actually replayed — "decision recorded, NO calendar change" makes a "done / added / moved" claim a flagged phantom. ([claimChecker.ts](src/utils/claimChecker.ts))
+- Approval needed two grants: the ack-after-completed-action guard counted a prior-turn `create_approval` as work-already-done and stripped `resolve_approval`, so a bare "ok" couldn't resolve a pending approval. Both are now excluded from that guard. ([orchestrator/index.ts](src/core/orchestrator/index.ts))
+
+### Fixed — dense calendar (#133d, general chat)
+- Meeting↔lunch dead sliver: a 6–29 min gap between a meeting and lunch fell through when the meeting sat BEFORE lunch and lunch was pinned at its window floor. `findConsolidatingSlotForBlock` now evaluates ABUTTING positions (slide lunch to kiss a neighbour, not just window extremes), and new `pushInternalMeetingToAbutBefore` pushes an internal meeting to end at lunch's start when lunch can't slide ("push Michal"). Full guard set (internal/unprotected, attendee-free, same-day, no new gap) + 15-scenario paper trace. ([floatingBlocks.ts](src/utils/floatingBlocks.ts), [autoMove.ts](src/skills/calendarHealth/autoMove.ts), [checkHealth.ts](src/skills/calendarHealth/handlers/checkHealth.ts))
+
+### Added — icons on automatic threads
+- Every scheduled post leads with an icon so it reads distinct from the owner's own DMs: briefing ☀️, calendar-health 🩺, every other cron 🔁 (via `routineIcon` at the one `dispatchRoutine` delivery point + `sendMorningBriefing`). The owner's own threads never route through these paths. ([routine.ts](src/tasks/dispatchers/routine.ts), [briefs.ts](src/tasks/briefs.ts))
+
+### Changed — internal refactor (no behavior change)
+- `orchestrator/index.ts` extracted its turn-loop helpers (`callClaude`, `trimHistory`, mutation-outcome + action-tape summarizers) into `orchestrator/turnHelpers.ts`. ([turnHelpers.ts](src/core/orchestrator/turnHelpers.ts))
+
+### Not changed (deferred)
+- Cross-TZ bare-time anchoring (owner names a time in an attendee's zone; it's read as owner-local) — owner deferred this pass.
+
+---
+
 ## 3.8.1 — split the four oversized files into focused modules (internal refactor, no behavior change)
 
 The four largest source files were each broken into a thin shell/barrel plus focused sibling modules — ~13,300 lines of monolith became directories you can navigate. Purely mechanical and behavior-preserving: every moved body was extracted byte-for-byte (re-sliced from a pristine copy and diff-verified), only import paths and explicit context-threading changed, `tsc --noEmit` stayed EXIT=0 throughout, and the running bot booted clean on the result. No logic, guard, or public export changed.

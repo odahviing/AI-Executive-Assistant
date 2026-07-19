@@ -27,7 +27,7 @@ import { displaySubject } from '../../../utils/displaySubject';
 import { getEffectiveWorkDay } from '../../../utils/workHours';
 import { classifyGap, densityConfigFromProfile, prefersDensePacking } from '../../../utils/calendarDensity';
 import { parseGraphDt, classifyEventCategory } from '../classify';
-import { revalidateActiveOverlapIssues, executeInternalAutoMove, pullInternalMeetingToAbut } from '../autoMove';
+import { revalidateActiveOverlapIssues, executeInternalAutoMove, pullInternalMeetingToAbut, pushInternalMeetingToAbutBefore } from '../autoMove';
 import type { HealthIssue } from '../types';
 import type { OpCtx } from './context';
 
@@ -1069,6 +1069,43 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                   if (consolidatedBlockIds.has(blockEvent.id)) continue;      // moved this sweep → stale re-fetch risk; next sweep handles it
                   const blockEnd = parseGraphDt(blockEvent.end.dateTime, blockEvent.end.timeZone, timezone);
                   if (blockEnd.toMillis() <= nowMsFb) continue;               // block already passed today
+
+                  // #133d — BEFORE-block mirror ("push the meeting to kiss lunch").
+                  // A meeting ENDING in a dead sliver just before the block, where
+                  // the block can't slide down to swallow it (pinned at its window
+                  // floor), is pushed LATER to abut the block's start. Opposite
+                  // side of the block from the after-lunch pull below, so the two
+                  // never fight. Same guards: internal, unprotected, not already
+                  // settled; the helper checks attendee-free + no-new-gap-on-left.
+                  const blockStart = parseGraphDt(blockEvent.start.dateTime, blockEvent.start.timeZone, timezone);
+                  if (blockStart.toMillis() > nowMsFb) {
+                    const prevBefore = meetingsSorted.filter(m =>
+                      parseGraphDt(m.e.end.dateTime, m.e.end.timeZone, timezone).toMillis() <= blockStart.toMillis());
+                    const prevM = prevBefore.length ? prevBefore[prevBefore.length - 1] : null;
+                    if (prevM) {
+                      const prevEndMs = parseGraphDt(prevM.e.end.dateTime, prevM.e.end.timeZone, timezone).toMillis();
+                      const gapMinB = (blockStart.toMillis() - prevEndMs) / 60000;
+                      const Mb = prevM.e;
+                      const protB = protection.isProtected(Mb, profile);
+                      if (classifyGap(gapMinB, densCfgFb) === 'dead'
+                          && !protB.protected && !protB.reasons.includes('has external attendee')
+                          && !recentlyAutoMovedIds.has(Mb.id) && !dismissedEventIds.has(Mb.id)) {
+                        const synthIssueB: HealthIssue = {
+                          type: 'inefficient_gap', date: dStr,
+                          description: `${Math.round(gapMinB)}-min gap between "${displaySubject(Mb, profile)}" and your ${block.name.replace(/_/g, ' ')}`,
+                        };
+                        await pushInternalMeetingToAbutBefore({
+                          movable: Mb, blockStartDt: blockStart, blockEventId: blockEvent.id,
+                          moveVerb: `to close the ${Math.round(gapMinB)}-min gap before your ${block.name.replace(/_/g, ' ')}`,
+                          conflictReason: 'packing the day tighter',
+                          dayEventsForBusy: dayEvts, issue: synthIssueB,
+                          userEmail, ownerUserId, timezone, profile, context, internalActions,
+                        });
+                        if (synthIssueB.fixed) fixesApplied += 1;
+                      }
+                    }
+                  }
+
                   const nextM = meetingsSorted.find(m => m.start >= blockEnd.toMillis());
                   if (!nextM) continue;                                        // nothing after lunch
                   const gapMin = (nextM.start - blockEnd.toMillis()) / 60000;

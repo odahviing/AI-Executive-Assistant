@@ -136,7 +136,7 @@ Kinds:
 - duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
 - policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting, floating-block out-of-window move). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. Once payload is complete, the handler auto-stamps \`payload.deferred_action = { tool: 'create_meeting', args: <those fields> }\` (or \`book_floating_block\` / \`move_meeting\` for floating-block bumps) so the resolver executes the action deterministically on owner approve (no separate booking turn needed). If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE creating the approval. HONESTY: write ask_text plainly. If the booked time hits a meeting already on the owner's calendar, NAME it ("you already have 'X' at 13:00 — book over it?") — a hard double-book is his call, but state it AS one; NEVER dress it as a soft free-time / buffer / focus-time rule. (The handler re-derives the real reason from the live calendar and leads the DM with it, so don't guess the reason from aggregate rejection lists.)
 - unknown_person: book with someone we don't have full contact info for. Payload: { name, known_fields, missing_fields }.
-- freeform: a NON-booking yes/no/amend ask ONLY ("should I cancel X?", "OK to decline this?"). Payload: { question, context, subject }. NEVER use freeform to book / set up / schedule a meeting — INCLUDING one where the owner is just an attendee alongside others ("30 min with him and Lori"). A meeting booking goes through create_meeting (any attendee count); if it breaks a rule the colleague-path gate auto-raises policy_exception with a replayable deferred_action (subject + attendees + time preserved). freeform carries no attendees or time, so on approve there's nothing to replay and the booking drifts — regenerated subject, re-asked attendees, a search window instead of the booked slot.
+- freeform: a NON-booking yes/no/amend ask ONLY ("should I cancel X?", "OK to decline this?"). Payload: { question, context, subject }. NEVER use freeform for a CALENDAR CHANGE — booking, MOVING/rescheduling, or adding/removing attendees on a meeting — INCLUDING one where the owner is just an attendee alongside others ("30 min with him and Lori"). Any calendar change goes through its own tool FIRST — create_meeting to book, move_meeting to reschedule, update_meeting to change attendees (any attendee count); if it breaks a rule or needs owner sign-off the colleague-path gate auto-raises a policy_exception with a replayable deferred_action (subject + attendees + time preserved). policy_exception is the ONLY kind whose deferred_action auto-attaches and replays — NEVER meeting_reschedule / meeting_change for a create_approval. freeform carries no attendees or time, so on approve there's nothing to replay and the booking drifts — regenerated subject, re-asked attendees, a search window instead of the booked slot.
 
 DEFERRED ACTION (auto-execute on approve) — v2.8.6:
 When the approval is asking permission for a SPECIFIC tool call (e.g. "should I cancel Dirk's meeting?", "OK to book this off-hours?"), include payload.deferred_action so the resolver fires the action when the owner approves — instead of you having to call the tool yourself in a follow-up turn. Without this, "approved but never executed" turns happen (root of the 2026-05-18 Dirk incident).
@@ -498,15 +498,22 @@ Binding — how to pick the right approval_id:
         // schema-level `required:` (which today is the canonical enforcement
         // point for booking input shape).
         if (subkind === 'policy_exception') {
-          // #2.1b (attendee-edit approval) — an attendee EDIT escalation carries an
-          // update_meeting deferred_action, attached by the orchestrator from
-          // update_meeting's `_deferred_action_hint` (index.ts, policy_exception-gated).
-          // It has NO booking shape (no start/end/attendees) and needs no
-          // create_meeting auto-stamp or slot re-derivation — those are CREATE-only.
-          // The resolver replays update_meeting on approve (owner-path → the
-          // update_meeting requester gate is skipped → the add/remove lands). So the
-          // booking-field check and the #142c re-derivation below both skip for edits.
-          const isEdit = (payload.deferred_action as { tool?: string } | undefined)?.tool === 'update_meeting';
+          // #2.1b + Finding A (2026-07-19) — an approval whose deferred_action targets
+          // an EXISTING event (edit attendees / reschedule / cancel), not a create,
+          // carries the tool's own args (meeting_id + the change), NOT the create_meeting
+          // booking shape. Attached by the orchestrator from the meeting tool's
+          // `_deferred_action_hint` (index.ts, policy_exception-gated). So the
+          // booking-field check and the #142c slot re-derivation below both skip for it
+          // — they're CREATE-only. The resolver replays the tool on approve (owner-path
+          // → the tool's requester gate is skipped → the change lands), and the
+          // requester relay reads new_start/meeting_subject from the deferred_action
+          // args → correct time, after the action. Pre-fix these rode create_approval
+          // (freeform) with NO deferred_action → the pure-approve path replayed nothing
+          // and notified early/empty (Maya move, Maayan add-attendees, 2026-07-19).
+          const deferredTool = (payload.deferred_action as { tool?: string } | undefined)?.tool;
+          const isExistingEventChange = deferredTool === 'update_meeting'
+            || deferredTool === 'move_meeting'
+            || deferredTool === 'delete_meeting';
 
           const hasSubject = typeof payload.subject === 'string' && payload.subject.trim().length > 0;
           const hasStart = typeof payload.start === 'string' && payload.start.trim().length > 0;
@@ -520,7 +527,7 @@ Binding — how to pick the right approval_id:
           if (!hasEnd) missing.push('end');
           if (!hasAttendees) missing.push('attendees');
 
-          if (!isEdit && missing.length > 0) {
+          if (!isExistingEventChange && missing.length > 0) {
             logger.info('create_approval — booking-kind payload missing required fields', {
               kind: subkind, missing,
             });
@@ -576,8 +583,8 @@ Binding — how to pick the right approval_id:
           // their honest soft label AND their ask prose unchanged. Best-effort:
           // any failure leaves Sonnet's reason as-is rather than blocking a real
           // escalation (reads only — calendar + rules, no writes). Skipped for an
-          // attendee edit (isEdit) — no slot to re-derive.
-          if (!isEdit) try {
+          // existing-event change (edit / reschedule / cancel) — no slot to re-derive.
+          if (!isExistingEventChange) try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { getCalendarEvents } = require('../connectors/graph/calendar') as typeof import('../connectors/graph/calendar');
             // eslint-disable-next-line @typescript-eslint/no-require-imports

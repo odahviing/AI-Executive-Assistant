@@ -11,6 +11,18 @@ import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
 
 /**
+ * Leading glyph for a routine's owner-facing post, so scheduled/automatic
+ * threads read as distinct from the owner's OWN conversations (which never
+ * route through here). The calendar-health system thread gets its own icon;
+ * every other cron shares the general automation glyph. The morning briefing
+ * is NOT here — it posts via sendMorningBriefing with its own icon.
+ */
+function routineIcon(routine: Routine): string {
+  if ((routine.prompt ?? '').includes('check_calendar_health')) return '🩺';
+  return '🔁';
+}
+
+/**
  * Materialized firing of a routine (v1.5.1).
  * The cadence-based lateness policy decides whether to run or skip. No more
  * "I was offline at X, run now or skip?" DMs.
@@ -214,12 +226,17 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     const messaging = require('../../connections/slack/messaging') as
       typeof import('../../connections/slack/messaging');
     if (!isSilent) {
+      // Icon on the automatic thread so it reads distinct from the owner's own
+      // DMs (which never route through dispatchRoutine). Health = its own glyph;
+      // every other cron shares the general one. The briefing isn't here — it
+      // posts via sendMorningBriefing with its own icon.
+      const decorated = `${routineIcon(routine)} ${cleaned}`;
       if (placeholderTs) {
         // Swap the placeholder for the final content. Same message id, no
         // new notification noise. Slack auto-clears the assistant-panel
         // status indicator on the update.
         const upd = await messaging.updateMessage(
-          app, botToken, routine.owner_channel, placeholderTs, cleaned,
+          app, botToken, routine.owner_channel, placeholderTs, decorated,
         );
         if (!upd.ok) {
           // Update failed — last-resort post a new top-level message so
@@ -227,14 +244,14 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
           logger.warn('dispatchRoutine — placeholder update failed, posting fresh message', {
             routineId: routine.id, detail: upd.detail,
           });
-          if (conn) await conn.postToChannel(routine.owner_channel, cleaned);
+          if (conn) await conn.postToChannel(routine.owner_channel, decorated);
         }
       } else if (conn) {
         // Placeholder path failed earlier — fall back to original behaviour.
         // v2.5.1 — no title prepend. The bot-style "*Routine title*\n..."
         // header read as machine framing. Routines that legitimately want
         // a header have Sonnet write one in the body. Most don't.
-        await conn.postToChannel(routine.owner_channel, cleaned);
+        await conn.postToChannel(routine.owner_channel, decorated);
       } else {
         logger.warn('dispatchRoutine — no Slack connection registered, routine output dropped', { routineId: routine.id });
       }

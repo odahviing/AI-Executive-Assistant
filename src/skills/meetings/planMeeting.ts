@@ -522,11 +522,16 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
             logger.info('planMeeting — attendee busy collision', {
               busyAttendees, slot: input.slotStartIso, overridden: input.allowRelaxed === true,
             });
-            if (input.allowRelaxed) {
-              // Owner override (or approved-replay): book anyway, but TELL him.
+            if (input.allowRelaxed || intent === 'move') {
+              // Owner override, approved-replay, OR any MOVE: book anyway and TELL him.
+              // #A (2026-07-19) — a MOVE never blocks on an attendee conflict (owner's
+              // rule: "book me 5 double meetings, but FLAG it"). A colleague-requested
+              // move can re-land on a time that attendee is busy ("Intro with Maya");
+              // surface it as a heads-up, don't cost a confirm. Fresh BOOKS still confirm
+              // once below.
               attendeeBusyNotice = label;
             } else {
-              // First pass — flag ONCE; owner's "book anyway" comes back relaxed.
+              // First-pass BOOK — flag ONCE; owner's "book anyway" comes back relaxed.
               const subj = input.subject ?? 'this meeting';
               const askText = `Heads up — ${who} ${names.length === 1 ? 'is' : 'are'} on another meeting at ${DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone, setZone: true }).setZone(profile.user.timezone).toFormat("EEEE 'at' HH:mm")}. Book "${subj}" anyway, or pick a different time?`;
               return { action: 'confirm_override', violationLabel: label, suggestedAskText: askText, category };
