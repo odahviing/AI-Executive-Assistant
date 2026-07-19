@@ -17,6 +17,9 @@ The four largest source files were each broken into a thin shell/barrel plus foc
 - Six files remain >1,000 LOC: each is a single tool-operation that can only shrink by decomposing its logic (a separate effort — plan in `.claude/FILE_SPLIT_PROPOSAL.md`).
 - `orchestrator/index.ts` and the tier-2 files (`summary`, `meetings`, `people`, `tasks/skill`, `assistant`) were left whole this pass.
 
+### Also reverted — the calendar-health window split (shipped 3.8.0, backed out)
+- Removed `healthWindowOverride` (the deterministic morning-today / 1PM-4-weeks routing) across `dispatchers/routine.ts`, `orchestrator/index.ts`, `skills/types.ts`, `calendarHealth/handlers/checkHealth.ts`, and the `parseScheduleTimes` export. It assumed the health routine fires twice daily (07:30 + 13:00), but the real setup is a today-scoped check inside the morning brief + a single 13:00 routine — so the override never fired. Out as dead code (no behavior change). The 13:00 routine's 4-week scope lives in its own prompt (data), not this code.
+
 ---
 
 ## 3.8.0 — efficient-calendar round 2 (lunch-aware packing) + grounded availability timezones

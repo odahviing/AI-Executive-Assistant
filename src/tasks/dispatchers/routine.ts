@@ -153,50 +153,6 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       `then the content. Don't bold it, don't use a header — just a natural opener.]\n\n` +
       routine.prompt;
 
-  // #143b — deterministic per-firing window for the calendar-health routine.
-  // It fires at two times (e.g. 07:30 + 13:00). The EARLIEST slot is the morning
-  // pass → scope check_calendar_health to TODAY only; any LATER slot is the daily
-  // deep clean → today + 4 weeks. Forced through SkillContext so the autonomous
-  // sweep's scope can't drift via the model. Non-health routines: no override.
-  let healthWindowOverride: { startDate: string; endDate: string } | undefined;
-  if (routine.title === 'Calendar health check') {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { parseScheduleTimes } = require('../crons') as typeof import('../crons');
-      const slots = parseScheduleTimes(routine.schedule_time);
-      const tz = profile.user.timezone;
-      const firedAt = DateTime.fromISO(scheduledAt).setZone(tz);
-      // Only split when there are 2+ firings (morning + deep). A single-slot
-      // routine keeps NO override → its existing default window, so this never
-      // shrinks coverage for a non-standard single-time config.
-      if (slots.length >= 2 && firedAt.isValid) {
-        const firedMin = firedAt.hour * 60 + firedAt.minute;
-        const sorted = [...slots].sort((a, b) => (a.h * 60 + a.m) - (b.h * 60 + b.m));
-        const earliestMin = sorted[0].h * 60 + sorted[0].m;
-        // Which slot did this firing correspond to? The nearest one.
-        let nearestMin = earliestMin;
-        let bestDelta = Infinity;
-        for (const s of sorted) {
-          const d = Math.abs((s.h * 60 + s.m) - firedMin);
-          if (d < bestDelta) { bestDelta = d; nearestMin = s.h * 60 + s.m; }
-        }
-        const isMorningPass = nearestMin === earliestMin;
-        const today = firedAt.toFormat('yyyy-MM-dd');
-        const endDate = isMorningPass ? today : firedAt.plus({ days: 28 }).toFormat('yyyy-MM-dd');
-        healthWindowOverride = { startDate: today, endDate };
-        logger.info('calendar-health routine — deterministic window', {
-          routineId: routine.id, firedLocal: firedAt.toFormat('HH:mm'),
-          pass: isMorningPass ? 'morning:today' : 'deep:4weeks', startDate: today, endDate,
-        });
-      }
-    } catch (err) {
-      // Fail-safe: no override → tool uses its normal default window.
-      logger.warn('calendar-health window override failed — using default window', {
-        routineId: routine.id, err: String(err).slice(0, 160),
-      });
-    }
-  }
-
   try {
     const result = await runOrchestrator({
       userMessage: wrappedPrompt,
@@ -207,7 +163,6 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       senderRole: 'owner',
       channel: 'slack',
       interactive: false,  // v3.2.6 (6.4) — scheduled report, not a conversation: no social coda
-      healthWindowOverride,  // #143b — undefined for every routine except calendar-health
       profile,
       app,
     });

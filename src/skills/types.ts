@@ -86,14 +86,6 @@ export interface SkillContext {
   senderRole: 'owner' | 'colleague';  // who is making this request
   channel: ChannelId;
   app?: import('@slack/bolt').App;  // available for skills that need to send Slack messages
-  /**
-   * #143b — a deterministic date window FORCED onto check_calendar_health for
-   * this run. Set only by the calendar-health routine dispatcher (morning firing
-   * → today only; the 1PM firing → today + 4 weeks) so the autonomous sweep's
-   * scope can't drift via the model. Absent on owner-asked / chat calls → the
-   * tool falls back to its normal default window.
-   */
-  healthWindowOverride?: { startDate: string; endDate: string };
   isMpim?: boolean;                   // true if this is a group DM (MPIM)
   isOwnerInGroup?: boolean;           // true when the owner sent this message in an MPIM
   mpimMemberIds?: string[];           // all non-bot member IDs when in MPIM

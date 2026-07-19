@@ -39,13 +39,8 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { computeHealthCheckWindow } = require('../../../utils/workHours') as typeof import('../../../utils/workHours');
         const defaultWindow = computeHealthCheckWindow(profile);
-        // #143b — a deterministic per-firing window from the calendar-health
-        // routine (morning → today; 1PM → today + 4 weeks) OVERRIDES both Sonnet's
-        // args and the default, so the autonomous sweep's scope can't drift.
-        // Owner-asked / chat calls carry no override → behaviour unchanged.
-        const forced = context.healthWindowOverride;
-        const startDate = forced?.startDate ?? (args.start_date as string) ?? defaultWindow.startDate;
-        const endDate = forced?.endDate ?? (args.end_date as string) ?? defaultWindow.endDate;
+        const startDate = (args.start_date as string) ?? defaultWindow.startDate;
+        const endDate = (args.end_date as string) ?? defaultWindow.endDate;
         // v2.1.1 — mode resolution. Explicit arg wins; else profile default.
         const mode: 'passive' | 'active' =
           (args.mode === 'active' || args.mode === 'passive')

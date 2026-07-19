@@ -288,10 +288,6 @@ export interface OrchestratorInput {
   // so a one-way report doesn't get "Do you have any pets?" tacked on.
   // Defaults to interactive (true) when omitted.
   interactive?: boolean;
-  // #143b — a deterministic date window the calendar-health routine forces onto
-  // check_calendar_health (morning firing → today; 1PM firing → today + 4 weeks).
-  // Threaded into SkillContext; absent on live/owner turns.
-  healthWindowOverride?: { startDate: string; endDate: string };
   isMpim?: boolean;                   // true if this is a group DM (MPIM)
   isChannel?: boolean;                // v2.6.6 — true if this is a public/private channel (vs DM/MPIM)
   isOwnerInGroup?: boolean;           // true when the owner sent this message in an MPIM
@@ -1575,7 +1571,6 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
       senderRole: input.senderRole,
       channel: input.channel,
       app: input.app,
-      healthWindowOverride: input.healthWindowOverride,  // #143b — forced health-check window (routine only)
       isMpim: input.isMpim,
       isOwnerInGroup: input.isOwnerInGroup,
       mpimMemberIds: input.mpimMemberIds,

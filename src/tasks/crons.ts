@@ -45,7 +45,7 @@ export interface Routine {
  * Invalid tokens are filtered out; the result is sorted ascending. Returns
  * an empty array only if the input has no valid times (caller falls back).
  */
-export function parseScheduleTimes(scheduleTime: string): Array<{ h: number; m: number }> {
+function parseScheduleTimes(scheduleTime: string): Array<{ h: number; m: number }> {
   const tokens = scheduleTime.split(',').map(t => t.trim()).filter(Boolean);
   const slots: Array<{ h: number; m: number }> = [];
   for (const tok of tokens) {
