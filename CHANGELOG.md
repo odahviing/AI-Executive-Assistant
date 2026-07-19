@@ -2,6 +2,23 @@
 
 ---
 
+## 3.8.1 — split the four oversized files into focused modules (internal refactor, no behavior change)
+
+The four largest source files were each broken into a thin shell/barrel plus focused sibling modules — ~13,300 lines of monolith became directories you can navigate. Purely mechanical and behavior-preserving: every moved body was extracted byte-for-byte (re-sliced from a pristine copy and diff-verified), only import paths and explicit context-threading changed, `tsc --noEmit` stayed EXIT=0 throughout, and the running bot booted clean on the result. No logic, guard, or public export changed.
+
+### Changed — file structure only (no logic touched)
+- `skills/meetings/ops.ts` **5,712 → 104 LOC**: calendar analysis + helpers extracted; each `executeToolCall` case moved to `ops/handlers/*` (findAvailableSlots / createMeeting / moveMeeting / calendarReads); the three copy-pasted violation-label switches collapsed to one `humanizeViolationLabel`.
+- `skills/calendarHealth.ts` **2,778 → 330 LOC**: auto-move engines → `calendarHealth/autoMove.ts`, classifiers → `classify.ts`, tool cases → `calendarHealth/handlers/*`.
+- `connectors/slack/app.ts` **2,458 → 266 LOC**: the shared message processor, file-ingestion, and the four Slack handlers → `connectors/slack/app/*`; Bolt handler registration order preserved exactly.
+- `connectors/graph/calendar.ts` **2,325 → a 4-line barrel** re-exporting `graph/{calendarTypes,graphClient,calendarReads,findAvailableSlots,calendarMutations}.ts`; the 26-symbol public surface is unchanged, so no importer moved.
+
+### Not changed
+- Zero behavior change — every public export still resolves from its original path; the running bot booted clean on the built result.
+- Six files remain >1,000 LOC: each is a single tool-operation that can only shrink by decomposing its logic (a separate effort — plan in `.claude/FILE_SPLIT_PROPOSAL.md`).
+- `orchestrator/index.ts` and the tier-2 files (`summary`, `meetings`, `people`, `tasks/skill`, `assistant`) were left whole this pass.
+
+---
+
 ## 3.8.0 — efficient-calendar round 2 (lunch-aware packing) + grounded availability timezones
 
 Extends dense packing into floating blocks and cross-timezone attendees, and closes a class of timezone-drift bugs on availability checks. On a dense profile, Maelle now slides lunch itself to consolidate scattered dead minutes into one real break, and — when lunch can't — pulls an INTERNAL meeting to abut it (never an external/protected one). Separately, `find_available_slots` now hands back the timezone conversion for Sonnet to QUOTE (killing the "8am ET = 22:00 / = 15:00" thrash within one conversation), the autonomous health sweep splits into a light morning pass (today) and a deep midday pass (4 weeks), and the whole sweep now costs one calendar read instead of one per day. All dense behavior stays gated on `meetings.packing_preference` (default `spread` → other tenants byte-identical). Restart required; no schema change.
