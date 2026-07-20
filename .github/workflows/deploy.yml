@@ -1,0 +1,60 @@
+name: Build and Deploy Maelle to GKE (EU)
+
+# Based on the platform team's template. Changes from that template:
+#   • trigger branch main → master (Maelle's default branch)
+#   • docker build passes GIT_SHA / APP_VERSION build-args so the boot stamp
+#     (version + gitSha) is correct in-container — the deploy-verification signal.
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: 'read'
+  id-token: 'write' # Required for Workload Identity Federation authentication
+
+jobs:
+  setup-build-publish-deploy:
+    name: Setup, Build, Publish, and Deploy
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    # 1. Authenticate with Google Cloud using Workload Identity Federation (Keyless)
+    - name: Authenticate to Google Cloud
+      id: auth
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: 'projects/1071058735660/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+        service_account: 'github-deployer@reflectiz-ai-backoffice.iam.gserviceaccount.com'
+
+    # 2. Configure Docker authentication to European Artifact Registry
+    - name: Set up Docker Auth
+      run: |
+        gcloud auth configure-docker europe-west4-docker.pkg.dev --quiet
+
+    # 3. Build the Docker image and push it to Artifact Registry
+    - name: Build and Push Docker Image
+      run: |
+        IMAGE_TAG="europe-west4-docker.pkg.dev/reflectiz-ai-backoffice/maelle-repo/maelle:${{ github.sha }}"
+        docker build \
+          --build-arg GIT_SHA=${{ github.sha }} \
+          --build-arg APP_VERSION="$(jq -r .version package.json)" \
+          -t $IMAGE_TAG .
+        docker push $IMAGE_TAG
+        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+    # 4. Get GKE Credentials for authentication (europe-west4)
+    - name: Get GKE Credentials
+      uses: google-github-actions/get-gke-credentials@v2
+      with:
+        cluster_name: 'maelle-cluster'
+        location: 'europe-west4'
+
+    # 5. Update image tag in deployment manifest and apply to GKE
+    - name: Deploy to GKE
+      run: |
+        sed -i "s|europe-west4-docker.pkg.dev/reflectiz-ai-backoffice/maelle-repo/maelle:latest|${{ env.IMAGE_TAG }}|g" k8s/deployment.yaml
+        kubectl apply -f k8s/deployment.yaml

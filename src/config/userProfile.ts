@@ -508,6 +508,27 @@ export type UserProfile = Omit<_RawUserProfile, 'schedule'> & {
 
 const profileCache = new Map<string, UserProfile>();
 
+// Cloud deploy: Slack credentials may be injected as env vars (from a k8s Secret)
+// instead of living in the yaml, so the profile file on the PVC can stay
+// secret-free. Env wins when set; otherwise the yaml value is used (local / PM2
+// unchanged). Applied to the RAW object pre-parse so an env-supplied token
+// satisfies the schema even when the yaml omits it. Single-tenant assumption:
+// env is process-global, so the same tokens apply to every profile loaded
+// (Maelle runs one owner today).
+function applySlackTokenEnvOverrides(raw: unknown): void {
+  const bot = process.env.SLACK_BOT_TOKEN;
+  const app = process.env.SLACK_APP_TOKEN;
+  const signing = process.env.SLACK_SIGNING_SECRET;
+  if (!bot && !app && !signing) return;
+  if (typeof raw !== 'object' || raw === null) return;
+  const r = raw as { assistant?: { slack?: Record<string, unknown> } };
+  if (!r.assistant) return;
+  r.assistant.slack = r.assistant.slack ?? {};
+  if (bot) r.assistant.slack.bot_token = bot;
+  if (app) r.assistant.slack.app_token = app;
+  if (signing) r.assistant.slack.signing_secret = signing;
+}
+
 export function loadUserProfile(profileName: string): UserProfile {
   if (profileCache.has(profileName)) {
     return profileCache.get(profileName)!;
@@ -523,6 +544,7 @@ export function loadUserProfile(profileName: string): UserProfile {
   }
 
   const raw = yaml.load(fs.readFileSync(filePath, 'utf-8'));
+  applySlackTokenEnvOverrides(raw);
   const parsed = UserProfileSchema.safeParse(raw);
 
   if (!parsed.success) {

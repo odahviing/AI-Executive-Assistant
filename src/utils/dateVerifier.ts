@@ -117,7 +117,12 @@ Output STRICT JSON only, no prose, no code fences:
 
   const resp = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 500,
+    // v3.8.x — 2000 not 500: on a date-heavy reply (a full-week rundown, many
+    // weekday↔date spans) the extractor JSON exceeded 500 and truncated mid-object
+    // → parse null → verification SKIPPED on exactly the busy replies where a wrong
+    // weekday is most likely (output_tokens hit the 500 cap, 2026-07-18/19). Only
+    // date-heavy turns emit that much, so the extra headroom is near-free.
+    max_tokens: 2000,
     messages: [{ role: 'user', content: prompt }],
   });
   logLlmUsage('date_verifier_extract', 'claude-haiku-4-5-20251001', resp);

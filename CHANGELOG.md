@@ -2,6 +2,26 @@
 
 ---
 
+## 3.8.4 — calendar-health leaves OOO days alone (#146), no freeform approval for calendar changes (#145), guard-honesty fixes, GKE deploy-doc merge
+
+Bundles several chats: #146 (calendar-health no longer auto-acts on vacation/OOF days, single or multi-day), #145 (a calendar change can never ride a freeform approval), a wave of claim-checker / dateVerifier honesty fixes, and the merge of the cloud team's real GKE deploy config. No schema change; restart to load.
+
+### Fixed — calendar health (#146)
+- Calendar-health now leaves a full-day OOO/vacation day ALONE — no lunch auto-book, no floating-block defrag, and it no longer flags the owner's own travel (a flight) as an "OOF conflict." SPAN-AWARE: a multi-day trip (e.g. Aug 13→18) is recognized on EVERY covered day, not just its start — the old check read only the OOF's start day, so mid-vacation days (Aug 17) still auto-booked lunch. New `dayIsFullDayOOO` (all-day oof/busy, start ≤ day < exclusive-end); the whole day's detection + the floating-block sweep + the defrag fallback all skip it. ([checkHealth.ts](src/skills/calendarHealth/handlers/checkHealth.ts))
+- A dense inefficient_gap the defrag couldn't close (e.g. an attendee's busy) now stays SILENT instead of re-surfacing every run — it was leaking into the narrated issues array despite the summary filter. ([checkHealth.ts](src/skills/calendarHealth/handlers/checkHealth.ts))
+
+### Fixed — approvals + honesty (#145 + guard)
+- A CALENDAR change (book / move / add-remove attendees / cancel) can no longer be raised as `create_approval(kind=freeform)` — a Haiku gate classifies the ask and refuses a calendar-shaped freeform, redirecting to the tool → `policy_exception` with a replayable deferred_action (so approve actually applies it). Fail-safe: a classifier error or ambiguous ask routes to "ask", never a silent allow. Code backstop to the tool-first prompt rule (the empty-shell freeform that dropped Maayan's "move GTM to Wed"). ([skill.ts](src/tasks/skill.ts))
+- Claim-checker: a reply that reports a completed action AND offers a follow-up in the same breath ("Moved it to 13:45 — Oran/Onn/Daniel are busy then, want me to let them know?") is no longer flagged as a phantom send; a trailing interrogative offer is a proposal. Only a declarative-past "I've let them know" with no send is false. ([claimChecker.ts](src/utils/claimChecker.ts))
+- dateVerifier: extractor max_tokens 500 → 2000 — on a date-heavy reply (full-week rundown) the JSON truncated → weekday verification silently skipped on exactly the replies most likely to carry a wrong weekday. ([dateVerifier.ts](src/utils/dateVerifier.ts))
+- postReply: the claim-checker "skipping rewrite" log now distinguishes a truthful prior-turn recap from a this-turn tool, so the reason no longer contradicts an empty tool tape. ([postReply.ts](src/connectors/slack/postReply.ts))
+- Group-chat private escalation splits by kind: a calendar change goes through the tool (→ policy_exception), a non-calendar yes/no through freeform. ([systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+
+### Changed — GKE deploy config (cloud-team merge, not yet provisioned)
+- Adopted the cloud team's deploy shape: a single `k8s/deployment.yaml` + `.github/workflows/deploy.yml` (real project / region / registry / cluster + Workload Identity), replacing the earlier kustomize / pvc / serviceaccount / `deploy-gke.yml` scaffolding. `config/userProfile.ts` now reads Slack tokens from env (SLACK_BOT_TOKEN / APP_TOKEN / SIGNING_SECRET, env-wins) so the profile on the PVC can be secret-free. Still nothing provisioned; secrets stay out-of-band. ([userProfile.ts](src/config/userProfile.ts), [k8s/](k8s/))
+
+---
+
 ## 3.8.3 — shadow/scope polish, approval + honesty fixes, orchestrator split, GCP deploy scaffolding
 
 A cleanup-and-fixes patch bundling several chats, plus the first commit of the GCP deploy scaffolding (owner direction — normally kept out of the tree). Fixes: calendar-repair shadows now read distinct from conversation receipts; four unmapped scheduling tools stop shipping on every turn; a colleague's reply to an owner outreach lands back in the owner's original thread; and the claim-checker catches a false "here's the image" with no file sent. Also an internal orchestrator split and the (not-yet-provisioned) GKE deploy files. No schema change; restart to load.

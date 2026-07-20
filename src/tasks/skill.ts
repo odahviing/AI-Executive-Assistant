@@ -24,6 +24,8 @@ import {
 import type { RequestKind, RequestRow } from '../core/requests/types';
 import { parseDetails } from '../core/requests/types';
 import logger from '../utils/logger';
+import { getAnthropicClient } from '../llm/client';
+import { logLlmUsage } from '../utils/usageLog';
 
 type CreateTaskType = 'reminder' | 'follow_up' | 'research';
 
@@ -34,6 +36,64 @@ const APPROVAL_SUBKINDS = [
   'freeform',
 ] as const;
 type ApprovalSubkind = (typeof APPROVAL_SUBKINDS)[number];
+
+const anthropic = getAnthropicClient();
+
+/**
+ * #145 (Maayan "move GTM to Wed", 2026-07-20) — calendar-freeform guard.
+ * `freeform` is for NON-CALENDAR owner decisions ONLY (out-of-scope flags,
+ * content review, private yes/no). A CALENDAR change — booking, moving/
+ * rescheduling, adding/removing attendees, or cancelling a meeting — must go
+ * through its tool → `policy_exception` carrying a replayable `deferred_action`.
+ * A freeform carries NO action, so on approve NOTHING happens and the change
+ * silently never lands (the empty-shell class: "Move to Wed?" approved → no
+ * move, no time, no context for follow-up turns). This Haiku gate runs ONLY on
+ * `freeform` and refuses a calendar-shaped one, redirecting to the structured
+ * path. Meaning-detection (not regex) because the ask is bare NL and Maelle is
+ * multilingual. THREE-WAY: 'calendar' → refuse + redirect; 'not_calendar' →
+ * allow; 'unsure' → don't create it, have Maelle ASK (the borderline case a
+ * binary would silently misjudge into an empty-shell). A classifier error routes
+ * to 'unsure' (ask), NOT a silent allow — so a Haiku hiccup can't let a calendar
+ * change slip through as freeform. The tool description is the primary guidance;
+ * this is the enforcement that can't be regressed away in the prompt.
+ */
+async function classifyFreeformCalendarChange(
+  question: string, context: string, subject: string,
+): Promise<'calendar' | 'not_calendar' | 'unsure'> {
+  const text = [subject, question, context].filter(s => s && s.trim()).join(' — ').slice(0, 600);
+  if (!text.trim()) return 'not_calendar';
+  try {
+    const resp = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 20,
+      system: `Classify an owner-approval request by whether it concerns a CALENDAR CHANGE to a meeting — booking a new meeting, moving/rescheduling an existing meeting, adding/removing attendees, or cancelling a meeting.
+- 'calendar' — it clearly IS one of those.
+- 'not_calendar' — it clearly is NOT (posting content, sharing info, flagging an out-of-scope request for the owner, a general non-scheduling yes/no).
+- 'unsure' — genuinely ambiguous, or not enough to tell.
+Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_calendar' on a maybe — an unsure verdict just asks; a wrong 'not_calendar' silently drops a real change. Answer via the classify tool only.`,
+      tools: [{
+        name: 'classify',
+        description: 'Classify whether the approval ask is a calendar/meeting change.',
+        input_schema: {
+          type: 'object' as const,
+          properties: { verdict: { type: 'string', enum: ['calendar', 'not_calendar', 'unsure'] } },
+          required: ['verdict'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'classify' },
+      messages: [{ role: 'user', content: text }],
+    });
+    logLlmUsage('freeform_calendar_guard', 'claude-haiku-4-5-20251001', resp);
+    const toolUse = resp.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
+    const v = (toolUse?.input as { verdict?: string } | undefined)?.verdict;
+    return (v === 'calendar' || v === 'not_calendar') ? v : 'unsure';
+  } catch (err) {
+    logger.warn('create_approval — freeform calendar guard threw; routing to UNSURE (ask, not a silent allow)', {
+      err: String(err).slice(0, 200),
+    });
+    return 'unsure';  // fail-to-ask: an error must never silently let a calendar change ride freeform
+  }
+}
 
 export class TasksSkill implements Skill {
   id = 'tasks' as const;
@@ -136,7 +196,7 @@ Kinds:
 - duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
 - policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting, floating-block out-of-window move). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. Once payload is complete, the handler auto-stamps \`payload.deferred_action = { tool: 'create_meeting', args: <those fields> }\` (or \`book_floating_block\` / \`move_meeting\` for floating-block bumps) so the resolver executes the action deterministically on owner approve (no separate booking turn needed). If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE creating the approval. HONESTY: write ask_text plainly. If the booked time hits a meeting already on the owner's calendar, NAME it ("you already have 'X' at 13:00 — book over it?") — a hard double-book is his call, but state it AS one; NEVER dress it as a soft free-time / buffer / focus-time rule. (The handler re-derives the real reason from the live calendar and leads the DM with it, so don't guess the reason from aggregate rejection lists.)
 - unknown_person: book with someone we don't have full contact info for. Payload: { name, known_fields, missing_fields }.
-- freeform: a NON-booking yes/no/amend ask ONLY ("should I cancel X?", "OK to decline this?"). Payload: { question, context, subject }. NEVER use freeform for a CALENDAR CHANGE — booking, MOVING/rescheduling, or adding/removing attendees on a meeting — INCLUDING one where the owner is just an attendee alongside others ("30 min with him and Lori"). Any calendar change goes through its own tool FIRST — create_meeting to book, move_meeting to reschedule, update_meeting to change attendees (any attendee count); if it breaks a rule or needs owner sign-off the colleague-path gate auto-raises a policy_exception with a replayable deferred_action (subject + attendees + time preserved). policy_exception is the ONLY kind whose deferred_action auto-attaches and replays — NEVER meeting_reschedule / meeting_change for a create_approval. freeform carries no attendees or time, so on approve there's nothing to replay and the booking drifts — regenerated subject, re-asked attendees, a search window instead of the booked slot.
+- freeform: a NON-CALENDAR yes/no/amend ask ONLY — flag an out-of-scope request for the owner, content review, a private judgment call ("OK to share my number with X?"). Payload: { question, context, subject }. NEVER for a CALENDAR CHANGE — booking, moving/rescheduling, adding/removing attendees, or CANCELLING a meeting (a cancel is a calendar change too). The handler REFUSES a calendar-shaped freeform (\`freeform_calendar_change\`): it carries no action, so on approve NOTHING would happen and the change silently dies. Any calendar change goes through its tool FIRST — create_meeting / move_meeting / update_meeting / delete_meeting (any attendee count); if it needs sign-off the colleague-path gate raises a policy_exception with a replayable deferred_action (subject + attendees + time preserved). policy_exception is the ONLY kind whose deferred_action auto-attaches and replays — NEVER meeting_reschedule / meeting_change for a create_approval.
 
 DEFERRED ACTION (auto-execute on approve) — v2.8.6:
 When the approval is asking permission for a SPECIFIC tool call (e.g. "should I cancel Dirk's meeting?", "OK to book this off-hours?"), include payload.deferred_action so the resolver fires the action when the owner approves — instead of you having to call the tool yourself in a follow-up turn. Without this, "approved but never executed" turns happen (root of the 2026-05-18 Dirk incident).
@@ -144,11 +204,11 @@ When the approval is asking permission for a SPECIFIC tool call (e.g. "should I 
 Shape: \`payload.deferred_action = { tool: "<tool-name>", args: <full-tool-args> }\`.
 Supported tools: \`create_meeting\`, \`move_meeting\`, \`update_meeting\`, \`book_floating_block\`, \`delete_meeting\`.
 
-Cancellations specifically: when you raise create_approval(kind=freeform) to ask "should I cancel X?", pass:
+Cancellations: a cancel is a CALENDAR change, so raise create_approval(kind=policy_exception) — NOT freeform — with an explicit:
   payload.deferred_action = { tool: "delete_meeting", args: { meeting_id, meeting_subject } }
-The resolver will call delete_meeting the instant the owner ✅'s the DM — no second turn needed.
+The handler skips the booking-field check for a delete deferred_action; the resolver calls delete_meeting the instant the owner ✅'s the DM — no second turn needed.
 
-For policy_exception approvals raised after a rule_violation on create_meeting / move_meeting / book_floating_block, the orchestrator auto-stamps deferred_action from the prior rule_violation's hint — you don't need to set it yourself. Only freeform cancellation asks (which don't go through rule_violation) need you to pass deferred_action explicitly.
+For policy_exception approvals raised after a rule_violation on create_meeting / move_meeting / book_floating_block, the orchestrator auto-stamps deferred_action from the prior rule_violation's hint — you don't need to set it yourself. Only a cancellation (policy_exception + a delete_meeting deferred_action, which doesn't go through rule_violation) needs you to pass deferred_action explicitly.
 
 Behavior:
 - DMs the owner immediately with ask_text. LLM-judged dedup against open requests for this (owner, requester) — if the same logical ask is already open, returns the existing one.
@@ -418,6 +478,38 @@ Binding — how to pick the right approval_id:
         // HARD owner_busy_collision, so the owner DM below LEADS with the named
         // double-book instead of a soft-sounding buffer framing.
         let honestHardReason: string | undefined;
+
+        // #145 — a CALENDAR change must never ride a freeform approval. Freeform
+        // carries no action, so approving "Move GTM to Wed?" changes nothing and
+        // the reschedule silently dies. Refuse it here and redirect to the tool →
+        // policy_exception path (which carries a replayable deferred_action).
+        // Freeform stays valid for NON-calendar asks (out-of-scope flags, content
+        // review, private questions). Owner direction 2026-07-20: calendar-only kill.
+        if (subkind === 'freeform') {
+          const q = typeof payload.question === 'string' ? payload.question : '';
+          const c = typeof payload.context === 'string' ? payload.context : '';
+          const s = typeof payload.subject === 'string' ? payload.subject : '';
+          const calVerdict = await classifyFreeformCalendarChange(q, c, s);
+          if (calVerdict === 'calendar') {
+            logger.info('create_approval — refused calendar-shaped freeform; redirecting to the structured path', {
+              preview: (s || q).slice(0, 80), requesterSlackId: payload.requester_slack_id,
+            });
+            return {
+              error: 'freeform_calendar_change',
+              reason: `That's a calendar change, not a plain yes/no — a freeform approval carries no action, so on approve NOTHING would actually happen (the meeting wouldn't move/book/change). Do it through the tool: create_meeting to book, move_meeting to reschedule, update_meeting to add/remove attendees, delete_meeting to cancel. If it needs the owner's sign-off it becomes a policy_exception carrying the concrete action (real time + attendees), which replays on approve. If it's a move/book to a DAY with no time yet, run find_available_slots first (pass moving_event_ids for a move) to find when the attendees are free, THEN move/create.`,
+            };
+          }
+          if (calVerdict === 'unsure') {
+            logger.info('create_approval — freeform calendar-change ambiguous; asking before routing (no approval created)', {
+              preview: (s || q).slice(0, 80), requesterSlackId: payload.requester_slack_id,
+            });
+            return {
+              error: 'freeform_needs_clarification',
+              reason: `I can't tell whether this is a calendar change or a genuine non-calendar decision, and it matters: a calendar change (book / move / reschedule / attendee edit / cancel) MUST go through the tool → policy_exception so it actually executes on approve; a real non-calendar yes/no is fine as freeform. Do NOT raise the approval yet. If the conversation makes it clear, route it now (tool → policy_exception if it touches a meeting; freeform if not). If it's genuinely unclear, ask the requester plainly — e.g. "just so I route this right, are you asking me to change something on your calendar, or is it something else?" — then act on the answer.`,
+            };
+          }
+          // 'not_calendar' → a genuine non-calendar ask → allow; fall through.
+        }
 
         // Boundary-validate requester_slack_id via resolveSlackId helper.
         {
@@ -1161,9 +1253,9 @@ Every decision the owner needs to make is a request of kind=approval. Do NOT fre
 
 WHEN TO CREATE AN APPROVAL:
 - Someone requested a non-standard meeting length → kind=duration_override
-- A scheduling rule would be violated → kind=policy_exception (covers floating-block out-of-window moves too; carry payload.deferred_action so the booking fires on approve)
+- A scheduling rule would be violated, OR a meeting needs to be moved / attendees changed / cancelled with owner sign-off → kind=policy_exception (carry payload.deferred_action — create_meeting / move_meeting / update_meeting / delete_meeting — so the change fires on approve)
 - Booking with a person you don't have full contact info for → kind=unknown_person
-- Any other yes/no/"how about X" question → kind=freeform
+- A NON-CALENDAR yes/no (out-of-scope flag, content review, private judgment) → kind=freeform. A CALENDAR change NEVER uses freeform — the handler refuses it; route it through the tool → policy_exception above.
 
 WHEN OWNER REPLIES:
 - Read the PENDING APPROVALS section in the system prompt — that's the truth about what's open.

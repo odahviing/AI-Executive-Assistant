@@ -571,12 +571,21 @@ async function runClaimCheckAndMaybeRewrite(ctx: ClaimCheckContext): Promise<str
     // mismatch, trust the verdict — let the retry fire. Retry already carries
     // this turn's tool summaries (v2.3.4) so no duplicate-mutation risk.
     if (matchingToolAlreadyRan && !verdict.claim_specifics_mismatch) {
-      logger.warn('Claim-checker flagged but matching tool already ran this turn — skipping rewrite (false positive)', {
+      // v3.8.x — accurate reason: matchingToolAlreadyRan scans THIS turn's
+      // summaries AND prior-turn markers (the #recap shield). When NO tool ran
+      // this turn, the match came from a prior turn — a truthful recap of an
+      // earlier action (e.g. an active-mode auto-fix), NOT something that "ran
+      // this turn". Say which, so the log doesn't contradict an empty tape.
+      const viaPriorRecap = (result.toolSummaries ?? []).length === 0;
+      logger.warn(viaPriorRecap
+        ? 'Claim-checker flagged but a matching tool ran in a PRIOR turn (truthful recap) — skipping rewrite (false positive)'
+        : 'Claim-checker flagged but matching tool already ran this turn — skipping rewrite (false positive)', {
         senderId: ctx.senderId,
         threadTs: ctx.threadTs,
         action_type: verdict.action_type,
         target_name: verdict.target_name,
         toolSummaries: result.toolSummaries,
+        viaPriorRecap,
       });
       return cleanReply;
     }

@@ -1,85 +1,135 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Maelle on GKE — merged from the platform team's template + Maelle's real needs.
+# Applied by .github/workflows/deploy.yml via `kubectl apply -f k8s/deployment.yaml`
+# (the workflow seds the :latest tag → the freshly built commit-SHA image).
+#
+# Platform-team notes are marked "PLATFORM:" — see k8s/README.md for the full
+# checklist of what must exist for Maelle to actually boot.
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: maelle
+  name: maelle-deployment
   labels:
     app: maelle
 spec:
-  replicas: 1                       # NEVER >1. See strategy note below.
+  replicas: 1
   selector:
     matchLabels:
       app: maelle
   strategy:
-    # ── THE most important line in this file ──────────────────────────────────
-    # Recreate, NOT RollingUpdate. Maelle holds exactly ONE Slack socket-mode
-    # WebSocket. Two live pods = two sockets → Slack replies `too_many_connections`
-    # and the two processes fight (a known, observed failure). Recreate tears the
-    # old pod fully down BEFORE starting the new one, so there is never a moment
-    # with two Maelle processes. Combined with replicas:1 and the ReadWriteOnce
-    # PVC, the single-writer / single-socket invariant holds by construction.
+    # ── CRITICAL (do not change to RollingUpdate) ─────────────────────────────
+    # Maelle holds exactly ONE Slack socket-mode WebSocket. The default
+    # RollingUpdate starts the new pod BEFORE terminating the old → two pods →
+    # two sockets → Slack `too_many_connections` and they fight (already observed).
+    # Recreate tears the old pod fully down first, so there is never overlap.
     type: Recreate
   template:
     metadata:
       labels:
         app: maelle
     spec:
-      # Workload Identity → this KSA is bound to a GCP service account that has
-      # roles/aiplatform.user (Vertex AI). Gives the pod keyless ADC — no Anthropic
-      # key, no GOOGLE_APPLICATION_CREDENTIALS file. See serviceaccount.yaml.
-      serviceAccountName: maelle
+      # PLATFORM Q1: for KEYLESS Vertex AI auth, this service account must have
+      # Workload Identity bound to a GCP SA that holds roles/aiplatform.user.
+      # If the `default` KSA isn't set up for WI, either configure it or point
+      # this at a dedicated SA that is. Without it, every Claude call fails.
+      serviceAccountName: default
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000             # the image's `node` user
-        fsGroup: 1000               # make the mounted PVC group-writable by node
+        runAsUser: 1000            # the image's built-in `node` user
+        fsGroup: 1000              # make the mounted PVC group-writable by node
       containers:
-        - name: maelle
-          image: maelle             # kustomize/CI pins the real registry path + tag
-          env:
-            - { name: NODE_ENV,          value: "production" }
-            # App is timezone-safe (every zone is passed explicitly); UTC only
-            # affects how log-line timestamps render. Set to Asia/Jerusalem if you
-            # prefer owner-local log timestamps — zero behavioral effect.
-            - { name: TZ,                value: "UTC" }
-            # ── LLM: Google Vertex AI (auth via Workload Identity, no key) ──────
-            - { name: LLM_PROVIDER,      value: "vertex" }
-            - { name: VERTEX_PROJECT_ID, value: "TODO-vertex-project-id" }   # TODO
-            - { name: VERTEX_REGION,     value: "us-east5" }                 # a region that serves Claude (or "global")
-            # ── Storage: both land on the mounted PVC (see volumeMounts) ───────
-            - { name: DB_PATH,           value: "/app/data/maelle.db" }
-            - { name: LOG_PATH,          value: "/app/logs" }
-          envFrom:
-            # Infra creds (Azure Graph + optional OpenAI/Tavily/Brave). Create this
-            # Secret out-of-band from GCP Secret Manager — see secret.example.yaml.
-            - secretRef:
-                name: maelle-env
-          volumeMounts:
-            # ONE PVC, mounted at the two cwd-relative paths the app reads/writes.
-            # config/users/ is resolved from cwd (userProfile.ts) and holds BOTH
-            # idan.yaml (Slack tokens) AND runtime-written state (idan_people/,
-            # _prefs/, _kb/, news_seen) — so it must be on a writable volume, not
-            # a read-only ConfigMap. Seeded at cutover by scripts/migrate-data.sh.
-            - { name: state, mountPath: /app/data,          subPath: data }
-            - { name: state, mountPath: /app/config/users,  subPath: config-users }
-            # Winston also writes rotating files; keep them off the state PVC.
-            # The real log store is stdout → Cloud Logging (logger has a Console
-            # transport), so these files are disposable scratch.
-            - { name: logs,  mountPath: /app/logs }
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "256Mi"
-            limits:
-              cpu: "500m"
-              memory: "1Gi"
-          # No HTTP surface, so no readiness/HTTP-liveness probe. Recovery is
-          # already handled: the app's socket watchdog (src/index.ts) exits the
-          # process on a persistently dead socket, and restartPolicy: Always (the
-          # default) brings it back. If you want an active liveness probe, gate it
-          # on data/socket-watermark.json freshness — but confirm the stamp cadence
-          # first so a slow refresh can't crash-loop the pod. Left off deliberately.
+      - name: maelle
+        image: europe-west4-docker.pkg.dev/reflectiz-ai-backoffice/maelle-repo/maelle:latest
+        # No containerPort: Maelle is Slack socket-mode (OUTBOUND WebSocket only).
+        # Nothing listens for inbound traffic — hence no Service / Ingress anywhere.
+        env:
+        # ── LLM: Google Vertex AI (keyless — auth via the SA above) ───────────
+        - name: LLM_PROVIDER
+          value: "vertex"
+        - name: VERTEX_PROJECT_ID
+          value: "reflectiz-ai-backoffice"
+        # PLATFORM Q6: confirm this region serves Claude. "global" is the safe
+        # default; europe-west1 / us-east5 are known Claude-on-Vertex regions.
+        - name: VERTEX_REGION
+          value: "global"
+        - name: GCP_PROJECT
+          value: "reflectiz-ai-backoffice"
+        # ── Storage — both paths land on the mounted PVC (see volumeMounts) ───
+        - name: DB_PATH
+          value: "/app/data/maelle.db"
+        - name: LOG_PATH
+          value: "/app/logs"
+        - name: TZ
+          value: "UTC"             # app is tz-safe; only affects log-line rendering
+        # ── Secrets (from the `maelle-secrets` Secret) ────────────────────────
+        # Slack tokens are consumed via these env vars by userProfile.ts (env
+        # overrides the yaml), so idan.yaml on the PVC can stay secret-free.
+        - name: SLACK_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: maelle-secrets
+              key: SLACK_BOT_TOKEN
+        - name: SLACK_APP_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: maelle-secrets
+              key: SLACK_APP_TOKEN
+        - name: SLACK_SIGNING_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: maelle-secrets
+              key: SLACK_SIGNING_SECRET
+        # PLATFORM Q2: Azure Graph creds are REQUIRED — Maelle exits at startup
+        # without them (calendar access). They must be in maelle-secrets too.
+        - name: AZURE_TENANT_ID
+          valueFrom:
+            secretKeyRef:
+              name: maelle-secrets
+              key: AZURE_TENANT_ID
+        - name: AZURE_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: maelle-secrets
+              key: AZURE_CLIENT_ID
+        - name: AZURE_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: maelle-secrets
+              key: AZURE_CLIENT_SECRET
+        # Optional keys (add to maelle-secrets only if used): OPENAI_API_KEY
+        # (voice), TAVILY_API_KEY / BRAVE_SEARCH_API_KEY (web search).
+        volumeMounts:
+        # ONE PVC, mounted at the two cwd-relative paths Maelle hard-codes:
+        - name: maelle-db-storage
+          mountPath: /app/data            # SQLite DB + socket watermark
+          subPath: data
+        # config/users/ holds idan.yaml AND runtime-written owner state
+        # (idan_people/, _prefs/, _kb/, news_seen). It is resolved from cwd and
+        # written at runtime → must be a writable volume, not a ConfigMap.
+        # PLATFORM Q5: empty until seeded by scripts/migrate-data.sh at cutover;
+        # the pod intentionally CrashLoops (no profile) until then.
+        - name: maelle-db-storage
+          mountPath: /app/config/users
+          subPath: config-users
+        - name: maelle-logs
+          mountPath: /app/logs            # disposable; real logs go to stdout → Cloud Logging
       volumes:
-        - name: state
-          persistentVolumeClaim:
-            claimName: maelle-state
-        - name: logs
-          emptyDir: {}
+      - name: maelle-db-storage
+        persistentVolumeClaim:
+          claimName: maelle-db-pvc
+      - name: maelle-logs
+        emptyDir: {}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maelle-db-pvc
+spec:
+  # ReadWriteOnce — one node/pod attaches at a time. Matches SQLite single-writer
+  # and reinforces the single-pod invariant.
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

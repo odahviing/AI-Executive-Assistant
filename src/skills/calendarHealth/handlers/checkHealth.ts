@@ -31,6 +31,24 @@ import { revalidateActiveOverlapIssues, executeInternalAutoMove, pullInternalMee
 import type { HealthIssue } from '../types';
 import type { OpCtx } from './context';
 
+/**
+ * #146 — is `dayStr` covered by a full-day OOF/busy (vacation) event? SPAN-aware:
+ * a multi-day all-day OOF (e.g. Aug 13→18) is true for EVERY covered day, not just
+ * its start — the old start-day-only check let mid-vacation days (Aug 17) auto-book
+ * lunch. All-day Graph events use an EXCLUSIVE end (midnight after the last day),
+ * so a day is covered when startDay ≤ dayStr < endExclusive (yyyy-MM-dd string
+ * compare, which orders correctly). Scans the whole range fetch, not one day's slice.
+ */
+function dayIsFullDayOOO(dayStr: string, events: CalendarEvent[], timezone: string): boolean {
+  return events.some(e => {
+    if (e.isCancelled || !e.isAllDay) return false;
+    if (e.showAs !== 'oof' && e.showAs !== 'busy') return false;
+    const startDay = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toFormat('yyyy-MM-dd');
+    const endExclusive = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toFormat('yyyy-MM-dd');
+    return startDay <= dayStr && dayStr < endExclusive;
+  });
+}
+
 export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, self, profile, userEmail, timezone } = ctx;
         // v2.1.4 — default window is owner-rule-driven (today → end of
@@ -115,19 +133,23 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             continue;
           }
 
+          // #146 — a full-day OOO/vacation day (single OR multi-day) is the owner's
+          // own time off: calendar-health does NOTHING on it — no lunch auto-book,
+          // no floating-block defrag, and it never flags his own travel (e.g. the
+          // Aug 13 flight) as an "OOF conflict". Skip the whole day's detection.
+          // (Supersedes the old fullDayBlocked, which only skipped lunch and only on
+          // the OOF's START day → a multi-day trip booked lunch on its middle days.)
+          if (dayIsFullDayOOO(dayStr, events, timezone)) {
+            cursor = cursor.plus({ days: 1 });
+            continue;
+          }
+
           // Get events for this day
           const dayEvents = events.filter(e => {
             if (e.isCancelled) return false;
             const eventStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
             return eventStart.toFormat('yyyy-MM-dd') === dayStr;
           });
-
-          // v3.2.6 (6.3) — a FULL-DAY busy or OOF event (vacation / all-day
-          // block) means the day is off or fully spoken for: don't flag a
-          // missing floating block on it. The owner blocks vacation days; no
-          // lunch is expected there.
-          const fullDayBlocked = dayEvents.some(e =>
-            e.isAllDay && !e.isCancelled && (e.showAs === 'oof' || e.showAs === 'busy'));
 
           // ── Missing floating blocks ──
           // Every block configured for the profile (lunch + any custom) is
@@ -144,7 +166,6 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
           // hasn't been placed surface for the active-mode auto-book on
           // the day of.
           for (const block of floatingBlocks) {
-            if (fullDayBlocked) break;  // v3.2.6 (6.3) — full-day busy/OOF: no lunch expected
             if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
             const hasBlock = dayEvents.some(e => {
               if (e.isAllDay) return false;
@@ -982,6 +1003,8 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
               const dt = sweepStart.plus({ days: d }).set({ hour: 12, minute: 0, second: 0, millisecond: 0 });
               const affectedIso = dt.toUTC().toISO();
               if (!affectedIso) continue;
+              // #146 — no floating-block sweep on a full-day OOO day (span-aware).
+              if (dayIsFullDayOOO(dt.toFormat('yyyy-MM-dd'), events, timezone)) continue;
               let dayEvents: CalendarEvent[] | undefined;
               if (sweepEvents.length > 0) {
                 const dayStartMs = dt.startOf('day').toMillis();
@@ -1052,7 +1075,8 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
               while (cursorFb <= endFb) {
                 const dStr = cursorFb.toFormat('yyyy-MM-dd');
                 const dName = cursorFb.toFormat('EEEE');
-                if (!allWorkDays.includes(dName) || getEffectiveWorkDay(dStr, profile).hasOverride) {
+                if (!allWorkDays.includes(dName) || getEffectiveWorkDay(dStr, profile).hasOverride
+                    || dayIsFullDayOOO(dStr, events, timezone)) {   // #146 — no defrag on a full-day OOO
                   cursorFb = cursorFb.plus({ days: 1 });
                   continue;
                 }
@@ -1320,7 +1344,15 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // Drop acknowledged/resolved-and-unfixed issues from what's RETURNED, so
         // the narrator can't surface them. Fixed/failed issues stay (Maelle still
         // reports the action she took). Mirrors the brief/analyze read-paths.
-        const visibleIssues = issues.filter(i => i.fixed || i.fix_failed || !isAckSuppressed(i));
+        // #146.3 — a FAILED dense inefficient_gap (defrag couldn't close it, e.g. the
+        // Aug 5 Simon↔Lori gap where Lori's busy) stays SILENT — dropped from what the
+        // narrator reads, mirroring the summary-text filter above. It's an efficiency
+        // nudge, not owner-actionable; surfacing it re-raised the same gap every run and
+        // tempted Sonnet to offer overriding Lori's hours. A SUCCESSFUL gap fix still
+        // shows (Maelle reports the move).
+        const visibleIssues = issues.filter(i =>
+          !(i.type === 'inefficient_gap' && i.fix_failed)
+          && (i.fixed || i.fix_failed || !isAckSuppressed(i)));
         return {
           issues: visibleIssues,
           count: visibleIssues.length,

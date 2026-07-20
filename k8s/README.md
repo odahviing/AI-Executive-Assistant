@@ -1,90 +1,78 @@
-# Maelle on GKE — deployment framework
+# Maelle on GKE — deployment
 
-Scaffolding to run Maelle as a single always-on pod on GKE, with Claude served by
-**Vertex AI**. This is the **framework only** — nothing here provisions cloud
-resources, and the data migration (`scripts/migrate-data.sh`) is an empty stub.
-Fill in every `TODO` before a real deploy.
+Runs Maelle as a single always-on pod on GKE, Claude served by **Vertex AI**.
+Merged from the platform team's deploy template + the fixes Maelle actually needs
+to boot. This is still **framework stage**: `scripts/migrate-data.sh` is an empty
+stub and nothing is provisioned yet.
 
-> Today's live deploy is still PM2 on the owner's laptop. This directory is the
-> target state, not yet cut over.
+**Environment (from the platform team):** project `reflectiz-ai-backoffice`,
+region `europe-west4`, Artifact Registry `maelle-repo`, cluster `maelle-cluster`,
+keyless CI via Workload Identity (`github-deployer` SA).
 
-## What runs, and the one rule that matters
-
-Maelle is **one stateful, always-on process**: it holds exactly **one** Slack
-socket-mode WebSocket, runs in-process timers (briefs, sweeps, catch-up), and
-owns a **single-writer SQLite** file. Therefore:
-
-- **Never two pods.** Two pods = two Slack sockets → Slack sends
-  `too_many_connections` and they fight. This is enforced three ways:
-  `replicas: 1`, `strategy: Recreate` (old pod dies before new starts — no
-  rolling overlap), and a `ReadWriteOnce` PVC (one node attaches the disk).
-- **No Service / Ingress / LoadBalancer.** Maelle is outbound-only (Slack wss,
-  MS Graph, Vertex AI). Nothing listens for inbound traffic, so there are no
-  Service or Ingress manifests here by design.
+## The one rule that matters
+Maelle holds **exactly one** Slack socket-mode WebSocket. Two pods = two sockets =
+Slack `too_many_connections` (a failure already seen). Enforced by
+`strategy: Recreate` + `replicas: 1` + a `ReadWriteOnce` PVC. **Never** switch to
+RollingUpdate. There is no Service/Ingress — Maelle is outbound-only.
 
 ## Files
-
 | File | Purpose |
 |------|---------|
-| `deployment.yaml` | The pod: `Recreate` strategy, Vertex env, PVC mounts, Workload-Identity SA. |
-| `pvc.yaml` | `ReadWriteOnce` persistent disk for the DB + `config/users/`. |
-| `serviceaccount.yaml` | KSA bound (Workload Identity) to a GCP SA with `roles/aiplatform.user`. |
-| `secret.example.yaml` | Template for the `maelle-env` Secret (Azure + optional keys). **No real values.** |
-| `kustomization.yaml` | Ties the resources together; CI pins the image tag here. |
-| `../Dockerfile` | Multi-stage build (compiles better-sqlite3, injects the boot stamp). |
-| `../.github/workflows/deploy-gke.yml` | Auto-build → Artifact Registry → GKE, keyless via WIF. |
+| `deployment.yaml` | Deployment (Recreate) + PVC. Real image/project values + the boot fixes. |
+| `secret.example.yaml` | Template for the `maelle-secrets` Secret. **No real values.** |
+| `../Dockerfile` | Multi-stage build (compiles better-sqlite3, injects boot stamp, adds Vertex SDK). |
+| `../.github/workflows/deploy.yml` | Auto-build → Artifact Registry → GKE, keyless WIF (branch `master`). |
 | `../scripts/migrate-data.sh` | **Empty stub** — the cutover data copy, built later. |
 
-## How the pieces fit
+---
 
-- **Image** — `Dockerfile` builds on `node:20-bookworm` (compiles the
-  `better-sqlite3` native addon), prunes dev deps, adds `@anthropic-ai/vertex-sdk`,
-  then copies `dist/` + prod `node_modules` into a slim runtime. The boot stamp
-  (`version` + `gitSha`) is injected as build args, since the image has no `.git`.
-- **LLM = Vertex, keyless** — `LLM_PROVIDER=vertex` + `VERTEX_PROJECT_ID` +
-  `VERTEX_REGION`. Auth comes from the pod's Workload Identity SA
-  (`roles/aiplatform.user`) via ADC — **no Anthropic key, no key file.**
-- **State** — one PVC (`maelle-state`) mounted at two cwd-relative paths the app
-  hard-codes: `/app/data` (SQLite) and `/app/config/users` (idan.yaml + owner
-  memory/prefs/kb, which the app writes at runtime). Logs go to an `emptyDir`
-  and to stdout → Cloud Logging.
-- **Secrets** — infra creds come from the `maelle-env` Secret (`envFrom`). Slack
-  tokens currently live in `idan.yaml` on the PVC (schema requires them inline).
-  No Anthropic key anywhere.
+## ⚠️ For the platform team — required to get Maelle running
 
-## One-time cluster setup (fill in TODOs first)
+Your template assumes a stateless, env-configured web app. Maelle is a **stateful
+daemon**: config lives in a YAML profile file, data in SQLite on disk, Claude via
+Vertex, and it opens no inbound port. The manifest was adapted accordingly. Please
+confirm / set up the following — **Maelle will not boot until these are true:**
 
-```sh
-# 1. Namespace
-kubectl create namespace maelle
+1. **Vertex auth (Q1).** The pod authenticates to Vertex AI with **no key**, via
+   Workload Identity. The `default` KSA in the target namespace must be bound to a
+   GCP service account holding **`roles/aiplatform.user`**. If it isn't, point
+   `serviceAccountName` at one that is. *(Your template used `serviceAccountName:
+   default` and predates the Vertex decision — this likely needs setting up.)*
 
-# 2. GCP service account for the pod (Vertex) — see serviceaccount.yaml header
-#    for the full gcloud block, then apply the KSA:
-kubectl apply -k k8s/            # after editing the TODO placeholders
+2. **Secret contents (Q2).** `maelle-secrets` must contain **more than the 3 Slack
+   keys** — Maelle exits at startup without the Azure Graph creds:
+   `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_SIGNING_SECRET`, **`AZURE_TENANT_ID`,
+   `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`** (+ optional `OPENAI_API_KEY`,
+   `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`). **No `ANTHROPIC_API_KEY`** — Vertex
+   handles the LLM. See `secret.example.yaml`.
 
-# 3. The maelle-env Secret (from Secret Manager, or manually — see secret.example.yaml)
-kubectl -n maelle create secret generic maelle-env --from-literal=AZURE_TENANT_ID=... ...
+3. **Pre-created resources (Q3).** Confirm these exist or tell us to create them:
+   Artifact Registry `maelle-repo`, cluster `maelle-cluster`, the `maelle-db-pvc`
+   PVC, and the `maelle-secrets` Secret. **Which namespace** should we deploy to?
 
-# 4. Workload Identity Federation for GitHub Actions (keyless CI). Create a WIF
-#    pool + provider for the repo and a `maelle-deployer` GCP SA with
-#    roles/artifactregistry.writer + roles/container.developer, then set the
-#    WIF_PROVIDER / DEPLOY_SA envs in deploy-gke.yml.
-```
+4. **Branch (Q4).** Your workflow triggered on `main`; Maelle's default branch is
+   **`master`** — the workflow now uses `master`. Confirm, and confirm the WIF pool
+   trusts repo `odahviing/AI-Executive-Assistant`, and that `github-deployer` has
+   Artifact Registry writer + GKE developer.
 
-## Placeholders to fill (every `TODO`)
+5. **Config on the PVC (Q5).** Maelle reads its full profile (schedule, categories,
+   meeting rules, timezone) from `config/users/idan.yaml`, and writes owner state
+   there at runtime — so `config/users/` is mounted from the PVC, **not** built from
+   env. Until `migrate-data.sh` seeds it at cutover, the pod **intentionally
+   CrashLoops** ("No user profiles found") — that's expected, not a bug.
 
-- `deployment.yaml`: `VERTEX_PROJECT_ID`.
-- `serviceaccount.yaml`: `iam.gke.io/gcp-service-account` (PROJECT_ID).
-- `kustomization.yaml`: image `newName` (Artifact Registry path).
-- `deploy-gke.yml`: `GCP_PROJECT_ID`, `GCP_REGION`, `AR_REPO`, `GKE_CLUSTER`,
-  `GKE_LOCATION`, `WIF_PROVIDER`, `DEPLOY_SA`.
-- `pvc.yaml`: `storageClassName` (optional; defaults to the cluster default).
+6. **Vertex region (Q6).** Set `VERTEX_REGION` to a Claude-serving Vertex location.
+   `global` is the safe default; `europe-west1` / `us-east5` are known. Confirm the
+   preference (data-residency, latency).
+
+Also note: `@anthropic-ai/vertex-sdk` is installed at image-build time pinned to
+`^0.4.0` — verify it's compatible with the app's `@anthropic-ai/sdk` before the
+first real build (see `../Dockerfile`).
 
 ## First deploy & cutover (later — not now)
-
-1. Fill TODOs; complete cluster setup above.
-2. Push to `master` → CI builds + deploys. The pod will start but **exit** until
-   the PVC has a profile (`config/users/idan.yaml`) — that's expected pre-cutover.
+1. Platform team confirms/sets up items 1–6 above.
+2. Push to `master` → CI builds + deploys. Pod CrashLoops until the PVC has a
+   profile (expected).
 3. Run `scripts/migrate-data.sh` (once built) to seed the PVC with the live DB +
    `config/users/`, verifying row counts against the baseline.
 4. Confirm the boot stamp in logs (`version` + `gitSha`), socket alive, a test DM
