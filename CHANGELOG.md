@@ -2,6 +2,36 @@
 
 ---
 
+## 4.0.0 — Sonnet 5, SDK 0.112, pre-release audit, cloud-VM prep
+
+First major since 2.0 (the Connection interface). Bundles every active chat: the Sonnet 4.6 → 5 model migration (with an explicit thinking-off policy), the Anthropic SDK jump 0.24 → 0.112 (+ vertex-sdk for the cloud path), a seven-subagent pre-release code audit (all HIGH findings fixed), the dense-calendar defrag finally executing, and the scaffolding to run 24/7 on a cloud VM. The model + SDK swap is behavior-neutral by design; the only intended behavior changes are the calendar-health fixes. No DB schema migration — restart to load.
+
+### Changed — model + SDK
+- Sonnet tier moved `claude-sonnet-4-6` → `claude-sonnet-5`, centralized in new `src/llm/models.ts` (old `src/llm/modelId.ts` deleted). The `SONNET` bundle pins `thinking: { type: 'disabled' }` at every Sonnet call site — load-bearing: Sonnet 5 defaults adaptive-thinking ON when `thinking` is omitted, which would silently change the turn shape (thinking blocks round-tripped through the tool loop) and cost. Haiku 4.5 centralized as the bare alias `claude-haiku-4-5` (Vertex-safe). ([models.ts](src/llm/models.ts))
+- `@anthropic-ai/sdk` ^0.24.0 → ^0.112.3; added `@anthropic-ai/vertex-sdk` ^0.19.0 for the Vertex/cloud path. ([package.json](package.json))
+
+### Added — cloud (VM) migration prep
+- Scaffolding to run Maelle 24/7 off the owner's local box: `scripts/vm-setup.sh`, `scripts/deploy-watcher.mjs`, an updated `ecosystem.config.js`, plus the retained `Dockerfile` / `k8s/` / `scripts/migrate-data.sh`. Plan pivoted from GKE toward a VM (`deploy-gke.yml` removed). Nothing provisioned; secrets stay out-of-band (`k8s/secret.example.yaml` is placeholders only; tokens read from env). ([scripts/vm-setup.sh](scripts/vm-setup.sh), [ecosystem.config.js](ecosystem.config.js))
+
+### Fixed — efficient-calendar defrag now actually executes
+- Dense-mode defrag could never close a real gap: packing a meeting back-to-back moves it by the gap size (6–29 min), less than the meeting's own duration, so the target always overlapped the meeting's current slot — which the finder's v2.4.1 "don't offer the moved meeting's time back" rule rejected. New opt-in `allowMovingEventOverlap` on `findAvailableSlots` (default off; every other caller unchanged) keeps the busy-carve but skips that forbidden-zone rejection for the two defrag helpers, so both the pull and the push land. Verified live (Michal midyear pulled to close a 20-min pre-lunch gap). ([findAvailableSlots.ts](src/connectors/graph/findAvailableSlots.ts), [autoMove.ts](src/skills/calendarHealth/autoMove.ts))
+- Meeting↔meeting defrag gained a push fallback: when the later meeting's attendee can't move back — busy, or outside their work hours (a cross-TZ attendee whose earlier slot falls before their workday, e.g. a New York teammate at an Israel-morning time) — push the earlier internal meeting forward to abut the later one instead. Gated on the earlier side's protection + the "if I said no, it's no" sets + the no-new-dead-gap check. ([checkHealth.ts](src/skills/calendarHealth/handlers/checkHealth.ts))
+- A health check no longer flags a meeting that already ended — the scan skips elapsed events (it had reported a 14:30 overlap at 23:48 on a "check the next 3 weeks"). ([checkHealth.ts](src/skills/calendarHealth/handlers/checkHealth.ts))
+- A stale OOF-conflict row on a full-day OOO day now self-resolves before surfacing (the "Israir flight, sitting since yesterday" re-flag) — each open OOF row is re-validated against its own day and resolved when that day is a full-day OOO, even when it's outside the scan window. ([checkHealth.ts](src/skills/calendarHealth/handlers/checkHealth.ts))
+
+### Fixed — pre-release audit, Wave 1 HIGH (see [.claude/V4_AUDIT_HANDOFF.md](.claude/V4_AUDIT_HANDOFF.md))
+- H1 reschedule counter auto-accept reported a FAILED Graph move as success. H2/H2b fire-and-forget outreach mis-tracked (numeric `await_reply` always-true) + a silent no-op close. H3 the 5-min background pipeline had no re-entrancy guard → slow handlers double-fired (real risk on 24/7). H4 calendar-health prompt told the model to call deleted tools. H5 a zoneless slot anchored in the server zone, not the owner's (bites once off the home box — the cloud target). H6 fresh installs booted missing 3 `people_memory` columns → first inbound threw. H7 media/file/huddle inbound bypassed both dedup guards → double-processing on socket reconnect.
+- Plus owner-selected mediums (day-classification via `getEffectiveWorkDay`, capturePass double-count + SELF-labeling, summary assignee exact-match, conversations `JSON.parse` guard, calendar-health prompt honesty) and a dead-code + stale-comment sweep.
+
+### Removed
+- The full-day Working-Elsewhere marker framework: the `manage_working_elsewhere` tool + all plumbing and the dead `working_elsewhere` yaml schema. Away days are declared via `set_work_schedule_override` (#143). KEPT: the #143 override adapters, `weTimeResolver` dual-clock, and the timed soft `workingElsewhere` event.
+- `src/llm/modelId.ts` (replaced by `models.ts`) + a batch of confirmed-dead functions/imports (audit Wave 3).
+
+### Deferred (tracked in V4_AUDIT_HANDOFF.md, none block V4)
+- Audit mediums M5/M8/M9/M10/M11 + the Wave-5 lows remain open; guard-class findings routed to the guard chat; a couple routed to the orchestrator chat.
+
+---
+
 ## 3.8.4 — calendar-health leaves OOO days alone (#146), no freeform approval for calendar changes (#145), guard-honesty fixes, GKE deploy-doc merge
 
 Bundles several chats: #146 (calendar-health no longer auto-acts on vacation/OOF days, single or multi-day), #145 (a calendar change can never ride a freeform approval), a wave of claim-checker / dateVerifier honesty fixes, and the merge of the cloud team's real GKE deploy config. No schema change; restart to load.

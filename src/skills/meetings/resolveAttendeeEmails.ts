@@ -73,11 +73,6 @@ export function resolveAttendeeEmail(input: AttendeeContactInput): ResolvedAtten
   };
 }
 
-/** Resolve a list; preserves order. */
-export function resolveAttendeeEmails(list: AttendeeContactInput[]): ResolvedAttendeeContact[] {
-  return list.map(resolveAttendeeEmail);
-}
-
 export interface ResolvedInternalAttendee {
   name: string;   // the people_memory name (canonical), for narration
   email: string;  // resolved, lowercased, internal (owner-domain)
@@ -93,7 +88,7 @@ export interface ResolvedInternalAttendee {
  * as a Hebrew token). A one-word query must equal a name token (first/last),
  * never a substring of one; a multi-word query must have all its tokens present.
  */
-function nameGenuinelyMatches(candidateName: string | undefined, candidateEmail: string | undefined, query: string): boolean {
+export function nameGenuinelyMatches(candidateName: string | undefined, candidateEmail: string | undefined, query: string): boolean {
   const q = query.toLowerCase().trim();
   if (!q) return false;
   const name = (candidateName ?? '').toLowerCase().trim();

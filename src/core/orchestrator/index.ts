@@ -280,6 +280,10 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     const response = await callClaude({
       model,
       max_tokens: maxTokens,
+      // Sonnet 5 runs adaptive thinking by default when `thinking` is omitted;
+      // disable it so the booking loop stays snappy and its turn shape (no
+      // thinking blocks round-tripped through the tool loop) matches Sonnet 4.6.
+      thinking: { type: 'disabled' },
       system: systemBlocks,
       tools: tools.length > 0 ? tools : undefined,
       tool_choice: toolChoice,

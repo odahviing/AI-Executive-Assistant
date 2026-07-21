@@ -42,6 +42,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { MODEL_HAIKU } from '../llm/models';
 import type { UserProfile } from '../config/userProfile';
 import logger from './logger';
 import { extractFirstJsonObject } from './extractJson';
@@ -417,7 +418,7 @@ export async function runHumanGate(
     // claim-checker which v3.0.6 moved to Haiku successfully. Flip from Sonnet
     // for ~3× cost cut + ~1s latency drop per call. Fires on every owner +
     // colleague reply + every brief, so the aggregate savings are meaningful.
-    const model = 'claude-haiku-4-5-20251001';
+    const model = MODEL_HAIKU;
     const resp = await anthropic.messages.create({
       model,
       max_tokens: 600,
@@ -533,6 +534,15 @@ export async function runHumanGate(
         rewritePreview: parsed.rewrite.slice(0, 120),
       });
       return { ok: false, rewrite: parsed.rewrite };
+    }
+
+    // v3.8.x — the gate flagged the draft leaky (ok:false) but returned no usable
+    // rewrite. Don't ship the flagged draft unchanged (fail-open-to-leak): route
+    // through safeFallback, which substitutes a safe line for a leaky-looking draft
+    // and passes a clean-looking one. (Owner-path harm is low — securityGate scrubs
+    // colleague-facing hard leaks upstream — but a gate-flagged draft shouldn't ship.)
+    if (parsed.ok === false) {
+      return safeFallback(draft, audience, 'gate returned ok:false with no usable rewrite');
     }
 
     return { ok: true, rewrite: null };

@@ -17,16 +17,6 @@ import { closeRequest } from '../core/requests/closeRequest';
 // ══════════════════════════════════════════════════════════════════════════
 
 // ── Bridge helpers (v2.7.0) ──────────────────────────────────────────────────
-// Link a legacy outreach_jobs row to its user-facing requests row. The legacy
-// table stays as the internal state machine; the request is what surfaces in
-// brief, system prompt, scanner. When the legacy row transitions to terminal
-// status, updateOutreachJob (below) reads the linked request_id and calls
-// closeRequest with the appropriate state.
-
-export function linkOutreachToRequest(outreachId: string, requestId: string): void {
-  getDb().prepare(`UPDATE outreach_jobs SET request_id = ?, updated_at = datetime('now') WHERE id = ?`).run(requestId, outreachId);
-}
-
 // v3.0.8 — exported for skills/outreach.ts thread-continuity hook. Lookup
 // the request_id linked to an outreach_jobs row when only jobId is in scope.
 export function getLinkedRequestIdForOutreach(outreachId: string): string | null {

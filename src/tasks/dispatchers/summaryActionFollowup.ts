@@ -19,6 +19,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
+import { SONNET } from '../../llm/models';
 import { config } from '../../config';
 import { completeTask, createTask, updateTask } from '../index';
 import {
@@ -76,7 +77,7 @@ Output ONLY the DM text — no quotes, no preamble, no explanation.`;
 
   try {
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 200,
       messages: [{ role: 'user', content: prompt }],
     });

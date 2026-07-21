@@ -16,6 +16,8 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { parseFirstJsonObject } from './extractJson';
+import { SONNET } from '../llm/models';
 import type { RequestRow } from '../core/requests/types';
 import logger from './logger';
 
@@ -79,7 +81,7 @@ export async function judgeRequestDedup(params: {
     ].filter(Boolean).join('\n');
 
     const resp = await client.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 250,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userPrompt }],
@@ -90,8 +92,15 @@ export async function judgeRequestDedup(params: {
       .map(b => (b as Anthropic.TextBlock).text)
       .join('')
       .trim();
-    const cleaned = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```\s*$/i, '');
-    const parsed = JSON.parse(cleaned) as { match?: string; existing_id?: string | null; reasoning?: string };
+    // v3.8.x — reuse the shared balanced-object extractor (utils/extractJson), as
+    // the gate stack does: strips fences AND tolerates trailing prose. A raw
+    // JSON.parse threw on trailing prose → fell to the catch → a real "existing"
+    // match was silently treated as NEW (a duplicate request). null → treat as new.
+    const parsed = parseFirstJsonObject<{ match?: string; existing_id?: string | null; reasoning?: string }>(text);
+    if (!parsed) {
+      logger.warn('requestDedup — no JSON object in extractor output, treating as new');
+      return fallback;
+    }
 
     if (parsed.match === 'existing' && typeof parsed.existing_id === 'string' && parsed.existing_id) {
       const verified = candidateRows.find(c => c.id === parsed.existing_id);

@@ -31,15 +31,10 @@ COPY src ./src
 RUN npm run build
 
 # Drop dev dependencies (typescript/eslint/…), keeping the compiled better-sqlite3
-# binary and the rest of the prod tree.
+# binary and the prod tree — including @anthropic-ai/vertex-sdk, which is now a
+# pinned production dependency in package.json (installed by `npm ci` above and
+# kept by this prune), so no separate install step is needed.
 RUN npm prune --omit=dev
-
-# Vertex SDK — required only for LLM_PROVIDER=vertex (llm/client.ts lazy-requires
-# it). Installed AFTER prune (so prune can't strip it) and --no-save so the repo's
-# package.json / lock stay untouched at this framework stage.
-# TODO(prod): promote @anthropic-ai/vertex-sdk into package.json "dependencies"
-# for a pinned, fully reproducible `npm ci` build.
-RUN npm install --no-save --omit=dev @anthropic-ai/vertex-sdk@^0.4.0
 
 # ---- runtime ────────────────────────────────────────────────────────────────
 FROM node:20-bookworm-slim AS runtime

@@ -1,5 +1,4 @@
 import { getDb } from '../db';
-import { DateTime } from 'luxon';
 import logger from '../utils/logger';
 import type { Task, TaskType, TaskStatus } from './types';
 
@@ -96,23 +95,6 @@ function fireCompletionReact(ownerUserId: string, ownerThreadTs: string, taskId:
   });
 }
 
-/**
- * v1.7.2 — "What's open with this person?" — every active 1:1 task whose
- * target_slack_id matches. Used by get_my_tasks(with_person=...) and by
- * weekly review flows. Coord tasks (multi-party) are excluded since
- * target_slack_id is single-valued.
- */
-export function getOpenTasksWithPerson(ownerUserId: string, targetSlackId: string): Task[] {
-  const db = getDb();
-  return db.prepare(`
-    SELECT * FROM tasks
-    WHERE owner_user_id = ?
-      AND target_slack_id = ?
-      AND status IN ('new', 'in_progress', 'pending_owner', 'pending_colleague', 'completed')
-    ORDER BY due_at ASC, created_at ASC
-  `).all(ownerUserId, targetSlackId) as Task[];
-}
-
 export function updateTask(id: string, updates: Partial<Omit<Task, 'id' | 'created_at'>>): void {
   const db = getDb();
   const fields = Object.keys(updates)
@@ -125,49 +107,6 @@ export function updateTask(id: string, updates: Partial<Omit<Task, 'id' | 'creat
     params[k] = k === 'context' && typeof v === 'object' ? JSON.stringify(v) : (v ?? null);
   }
   db.prepare(`UPDATE tasks SET ${fields}, updated_at = datetime('now') WHERE id = @id`).run(params);
-}
-
-export function getTask(id: string): Task | null {
-  const db = getDb();
-  return db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task | null;
-}
-
-export function getOpenTasksForOwner(ownerUserId: string): Task[] {
-  const db = getDb();
-  // v1.6.8 — include 'completed' so fire-and-forget tasks (e.g.
-  // message_colleague with await_reply=false) stay visible until the owner
-  // is actually informed about them. The completed → informed transition is
-  // the existing two-step: `completed` = action happened, `informed` = owner
-  // has seen it reported. A "what's on your plate" question counts as the
-  // moment of informing for briefings/catch-ups — once a task is surfaced,
-  // the runner or briefing flow flips it to 'informed' and it drops off.
-  return db.prepare(`
-    SELECT * FROM tasks
-    WHERE owner_user_id = ?
-    AND who_requested != 'system'
-    AND status IN ('new', 'in_progress', 'pending_owner', 'pending_colleague', 'completed')
-    ORDER BY due_at ASC, created_at ASC
-  `).all(ownerUserId) as Task[];
-}
-
-/**
- * Returns active tasks for a specific person (by who_requested).
- * Also includes completed/failed tasks from the last 24 hours.
- * Used to inject context when a colleague DMs Maelle.
- */
-export function getTasksForPerson(personSlackId: string): Task[] {
-  const db = getDb();
-  const oneDayAgo = DateTime.now().minus({ hours: 24 }).toUTC().toISO()!;
-  return db.prepare(`
-    SELECT * FROM tasks
-    WHERE who_requested = ?
-    AND (
-      status IN ('new', 'in_progress', 'pending_owner', 'pending_colleague')
-      OR (status IN ('completed', 'informed', 'failed') AND updated_at >= ?)
-    )
-    ORDER BY created_at DESC
-    LIMIT 20
-  `).all(personSlackId, oneDayAgo) as Task[];
 }
 
 /**
@@ -199,61 +138,6 @@ export function getActiveJobsForThread(ownerUserId: string, threadTs: string): {
   return { tasks, outreachJobs };
 }
 
-// Get tasks that completed but requester hasn't been notified yet
-export function getCompletedUninformedTasks(ownerUserId: string): Task[] {
-  const db = getDb();
-  return db.prepare(`
-    SELECT * FROM tasks
-    WHERE owner_user_id = ?
-    AND who_requested != 'system'
-    AND status = 'completed'
-    ORDER BY completed_at DESC
-  `).all(ownerUserId) as Task[];
-}
-
-/**
- * v2.2.4 — single source for the morning briefing.
- *
- * Tasks is the spine. Outreach + coord + reminder/follow_up/research surfaces
- * all hang off tasks via skill_ref. This query returns every user-facing task
- * the brief should consider; callers then hydrate outreach- and coord-backed
- * tasks with detail-row data for richer narration.
- *
- * Filters:
- *   - who_requested != 'system'  → drops every system-tick / *_send /
- *     *_expiry / *_decision / *_nudge / *_abandon / *_fix task
- *   - status NOT IN informed/cancelled/failed/stale  → terminal-noisy states
- *     drop off; `completed` stays in for one more brief, then flips to
- *     `informed` post-send
- *   - created_at >= since         → 7-day window matching the existing brief
- *   - completed tasks bounded by completed_at >= since so old completions
- *     don't reappear if their parent row stayed alive.
- */
-export function getBriefableTasks(ownerUserId: string, since: string): Task[] {
-  const db = getDb();
-  return db.prepare(`
-    SELECT * FROM tasks
-    WHERE owner_user_id = ?
-    AND who_requested != 'system'
-    AND status NOT IN ('informed', 'cancelled', 'failed', 'stale')
-    AND created_at >= ?
-    AND (
-      status != 'completed'
-      OR (completed_at IS NOT NULL AND completed_at >= ?)
-    )
-    ORDER BY
-      CASE status
-        WHEN 'pending_owner' THEN 0
-        WHEN 'pending_colleague' THEN 1
-        WHEN 'in_progress' THEN 2
-        WHEN 'new' THEN 3
-        WHEN 'completed' THEN 4
-        ELSE 5
-      END,
-      created_at DESC
-  `).all(ownerUserId, since, since) as Task[];
-}
-
 export function markTaskInformed(id: string): void {
   const db = getDb();
   db.prepare(`UPDATE tasks SET status = 'informed', updated_at = datetime('now') WHERE id = ?`).run(id);
@@ -267,10 +151,6 @@ export function getTasksDueNow(): Task[] {
     AND due_at IS NOT NULL
     AND datetime(due_at) <= datetime('now')
   `).all() as Task[];
-}
-
-export function cancelTask(id: string): void {
-  updateTask(id, { status: 'cancelled' });
 }
 
 export function completeTask(id: string): void {
@@ -288,29 +168,3 @@ export function completeTask(id: string): void {
   }
 }
 
-// ── Formatting for display ────────────────────────────────────────────────────
-
-export function formatTasksForUser(tasks: Task[]): string {
-  if (tasks.length === 0) return 'Nothing on my list right now.';
-
-  return tasks.map(t => {
-    let status: string;
-    switch (t.status) {
-      case 'pending_colleague': status = 'waiting for reply'; break;
-      case 'pending_owner':     status = 'needs your input'; break;
-      case 'in_progress':       status = 'in progress'; break;
-      case 'completed':         status = 'done'; break;
-      case 'new': {
-        if (t.due_at) {
-          const due = DateTime.fromISO(t.due_at);
-          status = `scheduled for ${due.toFormat('EEE d MMM HH:mm')}`;
-        } else {
-          status = 'new';
-        }
-        break;
-      }
-      default: status = t.status;
-    }
-    return `${t.title} — ${status}`;
-  }).join('\n');
-}

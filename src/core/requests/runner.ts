@@ -121,7 +121,6 @@ async function dispatchHandler(
       return runRescheduleReask(row, profile);
 
     case 'outreach_expiry':
-    case 'outreach_decision':
       return runOutreachExpiryOrDecision(row, profile);
 
     case 'send_scheduled_outreach':
@@ -459,9 +458,15 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     }
     const res = await conn.sendDirect(targetSlackId, message ?? '');
     const sentTs = res.ok ? (res.ts ?? null) : null;
-    const awaitReply = details.await_reply !== false;
+    // await_reply is stored NUMERIC (0/1) in details, so a bare `!== false` is
+    // always true (0 !== false). Treat 0 as fire-and-forget; keep "missing = await".
+    const awaitReply = details.await_reply !== false && details.await_reply !== 0;
     updateRequest(row.id, {
-      state: awaitReply ? 'awaiting_colleague' : 'resolved',
+      // Fire-and-forget: leave state alone here so closeRequest below owns the
+      // terminal 'resolved' write + audit_log row. Setting state:'resolved' here
+      // made closeRequest see an already-terminal row and no-op → closed_at/
+      // closed_by/closure_reason stayed NULL and no audit was written.
+      state: awaitReply ? 'awaiting_colleague' : undefined,
       details: { ...details, sent_at: DateTime.now().toISO(), dm_message_ts: sentTs },
       nextCheckAt: awaitReply
         ? DateTime.now().plus({ days: 5 }).toUTC().toISO()

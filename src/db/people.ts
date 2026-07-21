@@ -12,10 +12,6 @@ export interface PersonNote {
 
 export type PersonGender = 'male' | 'female' | 'unknown';
 
-export type PersonSocialTopicQuality = 'neutral' | 'engaged' | 'good';
-// Back-compat alias during v2.2 migration; prefer PersonSocialTopicQuality.
-export type SocialTopicQuality = PersonSocialTopicQuality;
-
 /**
  * Structured person profile — built up over time from observed behavior and
  * explicit interactions. Each dimension is independent and updateable.

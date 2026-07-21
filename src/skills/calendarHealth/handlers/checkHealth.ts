@@ -19,8 +19,10 @@ import {
   markStaleResolved,
   getSuppressedEventIds,
   dayLevelIssueSyntheticId,
+  updateCalendarIssueStatus,
   type DetectedIssue,
   type IssueClass,
+  type CalendarIssueRow,
 } from '../../../db';
 import logger from '../../../utils/logger';
 import { displaySubject } from '../../../utils/displaySubject';
@@ -47,6 +49,54 @@ function dayIsFullDayOOO(dayStr: string, events: CalendarEvent[], timezone: stri
     const endExclusive = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toFormat('yyyy-MM-dd');
     return startDay <= dayStr && dayStr < endExclusive;
   });
+}
+
+/**
+ * #146 follow-up — resolve stale OOF-conflict rows on full-day OOO days before
+ * surfacing. A meeting flagged `oof_with_meetings` BEFORE #146 shipped (or on a
+ * date the current run's window doesn't cover) lingers as an open row and
+ * re-surfaces on every check via getActiveCalendarIssues — the "Israir flight on
+ * Aug 13, sitting since yesterday" case. #146's policy: a full-day OOO day is the
+ * owner's own time off, nothing on it is a conflict. So re-validate each active
+ * oof_with_meetings row against its OWN day (fetched individually, like the
+ * overlap re-validation, so a date outside this run's window is still checked)
+ * and resolve it when the day is a full-day OOO. FAIL-SAFE: a fetch error keeps
+ * the row surfaced — never silently hide a real conflict.
+ */
+async function revalidateActiveOOOIssues(
+  issues: CalendarIssueRow[],
+  userEmail: string,
+  timezone: string,
+): Promise<CalendarIssueRow[]> {
+  const oofDates = new Set(
+    issues.filter(i => i.issue_class === 'oof_with_meetings').map(i => i.event_date),
+  );
+  if (oofDates.size === 0) return issues;
+
+  const fullDayOOO = new Map<string, boolean>();
+  for (const date of oofDates) {
+    try {
+      const dayEvents = await getCalendarEvents(userEmail, date, date, timezone);
+      fullDayOOO.set(date, dayIsFullDayOOO(date, dayEvents, timezone));
+    } catch (err) {
+      logger.warn('revalidateOOO — day fetch failed, keeping its issues surfaced', {
+        date, err: String(err).slice(0, 120),
+      });
+    }
+  }
+
+  const survivors: CalendarIssueRow[] = [];
+  for (const row of issues) {
+    if (row.issue_class !== 'oof_with_meetings' || fullDayOOO.get(row.event_date) !== true) {
+      survivors.push(row);
+      continue;
+    }
+    updateCalendarIssueStatus(row.id, 'resolved', '[re-validated: full-day OOO day — left alone per #146]');
+    logger.info('revalidateOOO — resolved stale OOF-on-OOO-day issue before surfacing', {
+      id: row.id, event_date: row.event_date,
+    });
+  }
+  return survivors;
 }
 
 export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -123,6 +173,13 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // Iterate through each day in range
         let cursor = DateTime.fromISO(startDate, { zone: timezone });
         const end = DateTime.fromISO(endDate, { zone: timezone });
+        // A health check is FORWARD-looking. When the range starts today, the
+        // already-elapsed part of today is not actionable — flagging a meeting
+        // that ended hours ago (the "14:30 overlap surfaced at 23:48" case) just
+        // reports the past. Anchor "now" once and drop any event that already
+        // ended from every detection pass below; future days are unaffected
+        // (nothing there has ended), and an in-progress event stays flagged.
+        const nowMs = DateTime.now().setZone(timezone).toMillis();
 
         while (cursor <= end) {
           const dayStr = cursor.toFormat('yyyy-MM-dd');
@@ -144,11 +201,15 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             continue;
           }
 
-          // Get events for this day
+          // Get events for this day (future-facing only — skip anything that
+          // already ended, so a health check never flags a past meeting).
           const dayEvents = events.filter(e => {
             if (e.isCancelled) return false;
             const eventStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
-            return eventStart.toFormat('yyyy-MM-dd') === dayStr;
+            if (eventStart.toFormat('yyyy-MM-dd') !== dayStr) return false;
+            const eventEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
+            if (eventEnd.toMillis() < nowMs) return false;   // already elapsed — not actionable
+            return true;
           });
 
           // ── Missing floating blocks ──
@@ -605,8 +666,11 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // re-validate overlap rows against the live calendar first, so a stale
         // one (owner moved the event in Outlook, date outside the health window)
         // is resolved instead of surfaced. Fail-safe: keeps the row on any error.
-        const activeIssues = await revalidateActiveOverlapIssues(
-          getActiveCalendarIssues(ownerUserId), profile.user.email, profile.user.timezone,
+        const activeIssues = await revalidateActiveOOOIssues(
+          await revalidateActiveOverlapIssues(
+            getActiveCalendarIssues(ownerUserId), profile.user.email, profile.user.timezone,
+          ),
+          profile.user.email, profile.user.timezone,
         );
 
         // Active-mode fix loop. Runs ONLY when mode='active'. Each fix is
@@ -941,6 +1005,35 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                         dayEventsForBusy: events, issue,
                         userEmail, ownerUserId, timezone, profile, context, internalActions,
                       });
+                      // #133e — pull is the preferred move (earlier is better), but it
+                      // genuinely fails when the LATER meeting's attendee can't come
+                      // back to the earlier slot: busy right before, or — the case the
+                      // Aug-5 Simon↔Lori run exposed — OUTSIDE their work hours (Lori's
+                      // in New York, so 13:40 Israel is 06:40 for her, before her day
+                      // starts). The mirror move closes the gap from the other side:
+                      // push the EARLIER meeting FORWARD to abut the later one's start.
+                      // Only when the earlier side is ours to move (detection gated only
+                      // the later side); the push helper's own net-improvement guard
+                      // still refuses to open a new dead gap on the left (so it correctly
+                      // declines when the earlier meeting sits right after lunch). Clear
+                      // the pull's failure stamp first so a successful push narrates as a
+                      // fix instead of being silently dropped.
+                      if (!issue.fixed) {
+                        const keptProt = protection.isProtected(kept, profile);
+                        if (!keptProt.protected && !keptProt.reasons.includes('has external attendee')
+                            && !dismissedEventIds.has(kept.id) && !recentlyAutoMovedIds.has(kept.id)) {
+                          issue.fix_failed = false;
+                          issue.fix_error = undefined;
+                          const laterStart = parseGraphDt(movable.start.dateTime, movable.start.timeZone, timezone);
+                          await pushInternalMeetingToAbutBefore({
+                            movable: kept, blockStartDt: laterStart, blockEventId: issue.movable_event_id,
+                            moveVerb: 'to pack it back-to-back before your next meeting',
+                            conflictReason: 'packing the day tighter',
+                            dayEventsForBusy: events, issue,
+                            userEmail, ownerUserId, timezone, profile, context, internalActions,
+                          });
+                        }
+                      }
                       if (issue.fixed) fixesApplied += 1;
                     }
                   }

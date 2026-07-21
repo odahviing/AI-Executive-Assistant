@@ -14,6 +14,7 @@
  */
 
 import { getAnthropicClient } from '../llm/client';
+import { SONNET } from '../llm/models';
 import { config } from '../config';
 import { tavilySearch } from '../skills/general';
 import logger from './logger';
@@ -102,7 +103,7 @@ Rules:
 - No quotation marks inside the values.`;
 
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 256,
       system: prompt,
       messages: [{ role: 'user', content: 'Extract.' }],

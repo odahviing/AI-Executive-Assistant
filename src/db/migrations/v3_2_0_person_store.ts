@@ -104,6 +104,7 @@ export function runPersonStoreMigration(db: Database.Database, dbPath: string): 
         source              TEXT,                                  -- slack | calendar | manual
         name                TEXT NOT NULL,
         name_he             TEXT,
+        name_he_set_by      TEXT,
         timezone            TEXT,
         gender              TEXT NOT NULL DEFAULT 'unknown',
         gender_confirmed    INTEGER NOT NULL DEFAULT 0,
@@ -121,26 +122,37 @@ export function runPersonStoreMigration(db: Database.Database, dbPath: string): 
         last_initiated_at   TEXT,
         proactive_pending   INTEGER NOT NULL DEFAULT 0,
         currently_traveling TEXT,
+        last_inbound_lang   TEXT,
+        last_inbound_lang_at TEXT,
         created_at          TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
       )
+      -- NOTE: these columns must include EVERY people_memory column that
+      -- initSchema adds via ALTER BEFORE this migration runs (name_he_set_by,
+      -- last_inbound_lang, last_inbound_lang_at). Otherwise a FRESH install —
+      -- where initSchema creates the old shape + ALTERs, then this rebuild fires —
+      -- drops them, and the first inbound write (stampInboundLang) throws until a
+      -- second boot re-ALTERs them. Columns ALTERed AFTER the migration (is_vip)
+      -- are safe and intentionally not listed here.
     `);
 
     const insert = db.prepare(`
       INSERT INTO people_memory_new (
         person_id, slack_id, email, kind, org, source,
-        name, name_he, timezone, gender, gender_confirmed,
+        name, name_he, name_he_set_by, timezone, gender, gender_confirmed,
         notes, interaction_log, profile_json,
         state, state_set_by, timezone_set_by, gender_set_by, working_hours_auto,
         engagement_rank, last_seen, last_social_at, last_initiated_at,
-        proactive_pending, currently_traveling, created_at, updated_at
+        proactive_pending, currently_traveling, last_inbound_lang, last_inbound_lang_at,
+        created_at, updated_at
       ) VALUES (
         @person_id, @slack_id, @email, @kind, @org, @source,
-        @name, @name_he, @timezone, @gender, @gender_confirmed,
+        @name, @name_he, @name_he_set_by, @timezone, @gender, @gender_confirmed,
         @notes, @interaction_log, @profile_json,
         @state, @state_set_by, @timezone_set_by, @gender_set_by, @working_hours_auto,
         @engagement_rank, @last_seen, @last_social_at, @last_initiated_at,
-        @proactive_pending, @currently_traveling, @created_at, @updated_at
+        @proactive_pending, @currently_traveling, @last_inbound_lang, @last_inbound_lang_at,
+        @created_at, @updated_at
       )
     `);
 
@@ -156,6 +168,7 @@ export function runPersonStoreMigration(db: Database.Database, dbPath: string): 
         source:              'slack',
         name:                r.name ?? '',
         name_he:             r.name_he ?? null,
+        name_he_set_by:      r.name_he_set_by ?? null,
         timezone:            r.timezone ?? null,
         gender:              r.gender ?? 'unknown',
         gender_confirmed:    r.gender_confirmed ?? 0,
@@ -173,6 +186,8 @@ export function runPersonStoreMigration(db: Database.Database, dbPath: string): 
         last_initiated_at:   r.last_initiated_at ?? null,
         proactive_pending:   r.proactive_pending ?? 0,
         currently_traveling: r.currently_traveling ?? null,
+        last_inbound_lang:   r.last_inbound_lang ?? null,
+        last_inbound_lang_at: r.last_inbound_lang_at ?? null,
         created_at:          r.created_at ?? null,
         updated_at:          r.updated_at ?? null,
       });

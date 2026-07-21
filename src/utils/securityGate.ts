@@ -14,6 +14,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { SONNET, MODEL_SONNET, MODEL_HAIKU } from '../llm/models';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
 import { extractFirstJsonObject } from './extractJson';
@@ -157,7 +158,7 @@ Output STRICT JSON only: {"verdict":"impersonation"|"benign"}`;
   try {
     const start = Date.now();
     const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: MODEL_HAIKU,
       max_tokens: 40,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -216,7 +217,7 @@ Output ONLY the reply text. No explanation, no quotes, no preamble.`;
     const start = Date.now();
     // Haiku — cheap, only runs on actual signal.
     const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: MODEL_HAIKU,
       max_tokens: 200,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -287,11 +288,11 @@ Output ONLY the rewritten reply (or UNFIXABLE). No explanation, no quotes, no pr
     // output. Only runs on trigger (regex pre-filter), so the cost footprint
     // is bounded.
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 400,
       messages: [{ role: 'user', content: prompt }],
     });
-    logLlmUsage('security_gate', 'claude-sonnet-4-6', response);
+    logLlmUsage('security_gate', MODEL_SONNET, response);
     const elapsedMs = Date.now() - start;
     const text = ((response.content[0] as Anthropic.TextBlock).text ?? '').trim();
     logger.info('Security rewriter ran', {

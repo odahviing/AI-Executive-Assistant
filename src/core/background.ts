@@ -143,13 +143,28 @@ export function startBackgroundTimer(
   // No new cron entity; the existing 5-min tick is the only scheduler. The
   // pass is bounded (≤20 ready threads/tick), fire-and-forget, and never
   // blocks the materializer/runner pipeline.
+  // v3.8.x — re-entrancy guard. setInterval does NOT await the async pipeline, so
+  // if one run exceeds the 5-min interval the next tick re-enters and
+  // sweepDueRequests re-selects the same still-open rows — request handlers
+  // (runResearchRun/runReminderFire) only clear next_check_at at the very end, so
+  // this double-fires a research/reminder run + double owner DMs + double LLM spend.
+  // Skip a tick while one is in flight (mirrors the 10-min catch-up's
+  // periodicInFlight). The prune + capture pass below still run every tick — they
+  // carry their own guards and are cheap.
+  let taskPipelineInFlight = false;
   setInterval(() => {
     const app = runningApps[0]?.app;
     if (!app) return;
-    materializeRoutineTasks(profiles)
-      .then(() => runDueTasks(app, profiles))
-      .then(() => processSlotHoldsIfDue(profiles))
-      .catch(err => logger.error('Routine→task pipeline error', { err: String(err) }));
+    if (taskPipelineInFlight) {
+      logger.warn('Routine→task pipeline still running from a prior tick — skipping this tick');
+    } else {
+      taskPipelineInFlight = true;
+      materializeRoutineTasks(profiles)
+        .then(() => runDueTasks(app, profiles))
+        .then(() => processSlotHoldsIfDue(profiles))
+        .catch(err => logger.error('Routine→task pipeline error', { err: String(err) }))
+        .finally(() => { taskPipelineInFlight = false; });
+    }
 
     // v3.1 (Path 2 Stage 8) — requests-spine retention. Prunes old terminal
     // rows so the spine stays lean. Fire-and-forget; never blocks the task

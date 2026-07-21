@@ -12,6 +12,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { SONNET } from '../llm/models';
 import { config } from '../config';
 import logger from './logger';
 
@@ -97,7 +98,7 @@ export async function inferTimezoneFromState(state: string): Promise<string | nu
   try {
     const anthropic = getAnthropicClient();
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 30,
       messages: [{
         role: 'user',

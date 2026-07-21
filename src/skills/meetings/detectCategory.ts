@@ -12,6 +12,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
+import { SONNET } from '../../llm/models';
 import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
 import logger from '../../utils/logger';
@@ -100,7 +101,7 @@ Example: Physical | External attendee from accept2.com coming for an in-person m
   try {
     const anthropic = getAnthropicClient();
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 120,
       messages: [{ role: 'user', content: prompt }],
     });

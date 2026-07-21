@@ -35,12 +35,13 @@ import { promises as fs, existsSync, mkdirSync, readFileSync } from 'fs';
 import path from 'path';
 import { DateTime } from 'luxon';
 import { getAnthropicClient } from '../llm/client';
+import { MODEL_HAIKU } from '../llm/models';
 import { tavilySearch, type DomainFilterOpts } from './general';
 import { readSkillPreferences, formatSkillPreferencesBlock } from '../utils/skillPreferences';
 import logger from '../utils/logger';
 import { extractFirstJsonObject } from '../utils/extractJson';
 
-const NEWS_MODEL = 'claude-haiku-4-5-20251001';
+const NEWS_MODEL = MODEL_HAIKU;
 
 // Cost controls (code constants — tune after measuring).
 const NEWS_GOAL_CAP = 4;               // max research goals per gather

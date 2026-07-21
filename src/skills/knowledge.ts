@@ -32,6 +32,7 @@
 
 import type Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { SONNET } from '../llm/models';
 import type { Skill, SkillContext } from './types';
 import type { UserProfile } from '../config/userProfile';
 import { promises as fs } from 'fs';
@@ -151,7 +152,7 @@ Output ONLY the JSON.`;
 
   try {
     const resp = await params.anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 100,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -303,7 +304,7 @@ TASK-INPUT VS KNOWLEDGE — read the OWNER SAID caption carefully:
   let verdict: any;
   try {
     const resp = await params.anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 1000,
       tools: [{
         name: 'classify_document',
@@ -386,7 +387,7 @@ No JSON. No code fences around the output. Just markdown.`;
   let condensed: string;
   try {
     const resp = await params.anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 8000,
       messages: [{ role: 'user', content: contentPrompt }],
     });

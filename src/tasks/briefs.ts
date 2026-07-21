@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { SONNET } from '../llm/models';
 import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
@@ -200,7 +201,7 @@ function buildOutreachItem(
     } catch (_) {}
   }
 
-  const awaitsReply = det.await_reply !== false && r.state === 'awaiting_colleague';
+  const awaitsReply = det.await_reply !== false && det.await_reply !== 0 && r.state === 'awaiting_colleague';
   const statusLabel = r.state === 'awaiting_colleague'
     ? (awaitsReply ? 'sent, awaiting reply' : "sent — they're handling it on their side")
     : r.state === 'in_flight'
@@ -586,7 +587,7 @@ ${Object.keys(peopleGender).length > 0
 
   try {
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: (hasNews || hasHealth || hasHolds) ? 1100 : 800,
       system: systemPrompt,
       messages: [{ role: 'user', content: userContent }],

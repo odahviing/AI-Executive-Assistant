@@ -22,11 +22,6 @@ export function is1on1DM(channelId: string): boolean {
     return channelId.startsWith('D');
   }
 
-  // In DMs (1:1 or group), say() must NOT receive thread_ts — Bolt rejects it
-export function isDirectContext(channelId: string, isMpim?: boolean): boolean {
-    return is1on1DM(channelId) || isMpim === true;
-  }
-
   // ── Mention resolver ─────────────────────────────────────────────────────
   // Replace <@USERID> with "Real Name (slack_id: USERID)" so Claude can use
   // the Slack ID directly without a separate find_slack_user call.
@@ -114,26 +109,3 @@ export function isOverloadError(err: unknown): boolean {
     return /overloaded|rate[_ ]?limit/i.test(msg);
   }
 
-  // Helper: narrate a KB ingest result to the owner in-thread.
-export async function postIngestResult(
-    result: Awaited<ReturnType<typeof import('../../../skills/knowledge').ingestKnowledgeDoc>>,
-    say: (text: string) => Promise<void>,
-  ): Promise<void> {
-    if (result.kind === 'created' && result.sectionId) {
-      await say(`Filed under \`${result.sectionId}.md\`, ${result.summary || result.title || 'saved'}. Want it renamed or moved? Just tell me.`);
-    } else if (result.kind === 'merged' && result.sectionId) {
-      await say(`Added to your existing \`${result.sectionId}.md\`, ${result.summary || 'merged under a new update section'}.`);
-    } else if (result.kind === 'sibling' && result.sectionId) {
-      await say(`Filed as \`${result.sectionId}.md\` (sibling of a related section), ${result.summary || result.title || 'saved'}.`);
-    } else if (result.kind === 'ambiguous') {
-      await say(result.question || `Not sure where to file this. Want to give me a hint?`);
-    } else if (result.kind === 'rejected') {
-      if (result.reason === 'too_short' || result.reason === 'empty_condensed') {
-        await say(`That file's too thin to keep as a standalone reference, was it clipped?`);
-      } else if (result.reason === 'classifier_error') {
-        await say(`I hit an issue classifying that, give me a moment and try again?`);
-      } else {
-        await say(`I don't think this is worth keeping in the knowledge base (${result.reason || 'not a clear knowledge doc'}). Let me know if I got that wrong.`);
-      }
-    }
-  }

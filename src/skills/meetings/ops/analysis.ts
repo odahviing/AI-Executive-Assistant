@@ -263,10 +263,6 @@ export function analyzeCalendar(
   // covers narration filtering.
   _legacy?: Set<string>,
 ): DayAnalysis[] {
-  const officeDays = new Set(profile.schedule.office_days.days as string[]);
-  const homeDays   = new Set(profile.schedule.home_days.days   as string[]);
-  const allWorkDays = new Set([...officeDays, ...homeDays]);
-
   // Floating blocks (lunch + any custom). Uses the same matcher every other
   // code path (slot search, book_floating_block, rebalance) uses.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -290,17 +286,19 @@ export function analyzeCalendar(
     const dateStr = cursor.toFormat('yyyy-MM-dd');
     const dayName = cursor.toFormat('EEEE'); // "Monday"
 
-    const isWorkDay  = allWorkDays.has(dayName);
-    const isOffice   = officeDays.has(dayName);
-    const dayType: DayAnalysis['dayType'] = isOffice ? 'office' : allWorkDays.has(dayName) ? 'home' : 'day_off';
-
-    // v2.8.1 — multi-window aware work hours for this day.
-    // v3.7.x (#143) — hours come from the date's effective work day, so a chat
-    // override (custom hours / day off) drives the analysis, not raw weekday yaml.
+    // v2.8.1 + v3.7.x (#143) — day CLASSIFICATION and hours both come from the
+    // date's EFFECTIVE work day (a per-date chat override wins over raw weekday
+    // yaml). Pre-fix isWorkDay/dayType read raw office_days/home_days, so an "off
+    // next Wed" override still analyzed Wed as a 9-19 workday (false no_buffer /
+    // missing-lunch) and a made-working off-day was mis-flagged work_on_day_off.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getEffectiveWorkDay, totalWorkMinutes } = require('../../../utils/workHours') as
       typeof import('../../../utils/workHours');
-    const windows = getEffectiveWorkDay(dateStr, profile).windows;
+    const effectiveDay = getEffectiveWorkDay(dateStr, profile);
+    const isWorkDay  = effectiveDay.isWorkday;
+    const isOffice   = effectiveDay.location === 'office';
+    const dayType: DayAnalysis['dayType'] = !isWorkDay ? 'day_off' : isOffice ? 'office' : 'home';
+    const windows = effectiveDay.windows;
     const workStartMin = windows.length > 0 ? windows[0].startMin : 9 * 60;
     const workEndMin = windows.length > 0 ? windows[windows.length - 1].endMin : 19 * 60;
     const workTotalMin = totalWorkMinutes(windows) || (workEndMin - workStartMin);

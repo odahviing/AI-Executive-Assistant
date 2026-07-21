@@ -1,4 +1,4 @@
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface CalendarEvent {
   id: string;
@@ -28,7 +28,7 @@ export interface CalendarEvent {
   // occurrence. 'singleInstance' = ordinary non-recurring event.
   type?: 'singleInstance' | 'occurrence' | 'exception' | 'seriesMaster';
   seriesMasterId?: string;
-}
+}
 
 export interface FreeBusySlot {
   start: string;
@@ -41,12 +41,12 @@ export interface FreeBusySlot {
   // attendee in another zone is read as if their busy block were in the
   // owner's zone.
   _timezone?: string;
-}
+}
 
 export interface CreatedMeeting {
   id: string;
   joinUrl?: string;            // Teams join URL when isOnline=true
-}
+}
 
 export interface CreateMeetingParams {
   subject: string;
@@ -65,9 +65,9 @@ export interface CreateMeetingParams {
   // and any "all day" attempt landed as a 0-min event at midnight. Default
   // false — only set true when owner explicitly asks for a full-day event.
   // showAs is intentionally not exposed for normal MEETINGS: every meeting
-  // Maelle books is busy by default (owner direction). v3.3 — it IS settable
-  // for personal status markers (e.g. an all-day Working Elsewhere day created
-  // via manage_working_elsewhere). Omit → Graph default (busy).
+  // Maelle books is busy by default (owner direction). It IS settable for the
+  // TIMED optional-join (soft) event that uses showAs='workingElsewhere'.
+  // Omit → Graph default (busy).
   showAs?: 'free' | 'busy' | 'tentative' | 'oof' | 'workingElsewhere';
   isAllDay?: boolean;
   userEmail: string;
@@ -78,7 +78,7 @@ export interface CreateMeetingParams {
   // from the call site where profile is in scope. When omitted, falls back to
   // the legacy generic line for back-compat.
   defaultBodyAuthor?: string;
-}
+}
 
 /**
  * Meeting mode (v1.6.4) — steers the slot search.
@@ -92,7 +92,7 @@ export interface CreateMeetingParams {
  *               day_type is returned but the caller usually asks the owner
  *               which day to pick since the venue drives it.
  */
-export type MeetingMode = 'in_person' | 'online' | 'either' | 'custom';
+export type MeetingMode = 'in_person' | 'online' | 'either' | 'custom';
 
 export interface UpdateMeetingParams {
   userEmail: string;
@@ -114,8 +114,8 @@ export interface UpdateMeetingParams {
   // FINAL list (existing - removed + added) before passing — Graph does not
   // diff. Omit entirely to leave attendees untouched.
   attendees?: Array<{ name?: string; email: string; optional?: boolean }>;
-}
+}
 
 export type VerifyResult =
   | { ok: true }
-  | { ok: false; reason: 'not_found' | 'start_drift'; got?: string; expected?: string };
+  | { ok: false; reason: 'not_found' | 'start_drift'; got?: string; expected?: string };

@@ -44,6 +44,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
+import { SONNET } from '../../llm/models';
 import { getDb } from '../../db/client';
 import logger from '../../utils/logger';
 import { config } from '../../config';
@@ -207,7 +208,7 @@ async function classifyResponseVsNewTopic(params: {
 }): Promise<boolean> {
   try {
     const result = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 12,
       system:
         `You decide whether a Slack DM from ${params.colleagueName} is a continuation of a prior message ${params.ownerFirstName}'s assistant sent them, or a fresh new topic. ` +

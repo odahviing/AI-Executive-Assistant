@@ -107,7 +107,7 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
           // meant a 14:00 override on a day that already had lunch booked
           // at 11:30 would CREATE A SECOND lunch. Owner sees two lunches
           // same day. Match the same shape the non-override branch uses
-          // at :1531 (any block event on the day → already_existed).
+          // (any block event on the day → already_existed).
           const existingNearby = events.find(e => {
             if (e.isAllDay || e.isCancelled || e.showAs === 'free') return false;
             if (!fb.isFloatingBlockEvent(

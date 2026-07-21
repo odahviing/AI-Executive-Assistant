@@ -34,6 +34,7 @@
 import { DateTime } from 'luxon';
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { MODEL_HAIKU } from '../llm/models';
 import logger from './logger';
 import type { UserProfile } from '../config/userProfile';
 import { getEffectiveToday } from './effectiveToday';
@@ -116,7 +117,7 @@ Output STRICT JSON only, no prose, no code fences:
 {"pairs":[{"span":"...","writtenWeekdayText":"...","writtenWeekdayNum":4,"isoDate":"2026-06-11"}],"weekdayNames":["...x7..."]}`;
 
   const resp = await anthropic.messages.create({
-    model: 'claude-haiku-4-5-20251001',
+    model: MODEL_HAIKU,
     // v3.8.x — 2000 not 500: on a date-heavy reply (a full-week rundown, many
     // weekday↔date spans) the extractor JSON exceeded 500 and truncated mid-object
     // → parse null → verification SKIPPED on exactly the busy replies where a wrong
@@ -125,7 +126,7 @@ Output STRICT JSON only, no prose, no code fences:
     max_tokens: 2000,
     messages: [{ role: 'user', content: prompt }],
   });
-  logLlmUsage('date_verifier_extract', 'claude-haiku-4-5-20251001', resp);
+  logLlmUsage('date_verifier_extract', MODEL_HAIKU, resp);
 
   const raw = ((resp.content[0] as Anthropic.TextBlock)?.text ?? '').trim();
   // Robust parse — NEVER JSON.parse the raw (fenced/malformed) text; null on

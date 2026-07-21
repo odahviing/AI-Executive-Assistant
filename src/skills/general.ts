@@ -3,10 +3,11 @@ import type { Skill, SkillContext } from './types';
 import type { UserProfile } from '../config/userProfile';
 import { config } from '../config';
 import { getAnthropicClient } from '../llm/client';
+import { MODEL_HAIKU } from '../llm/models';
 import logger from '../utils/logger';
 import { extractFirstJsonObject } from '../utils/extractJson';
 
-const RESEARCH_PLAN_MODEL = 'claude-haiku-4-5-20251001';
+const RESEARCH_PLAN_MODEL = MODEL_HAIKU;
 
 // ── External web-search response shapes ──────────────────────────────────────
 // Minimal-surface interfaces — only the fields we actually read. Provider

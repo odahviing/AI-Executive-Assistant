@@ -97,8 +97,22 @@ spec:
             secretKeyRef:
               name: maelle-secrets
               key: AZURE_CLIENT_SECRET
-        # Optional keys (add to maelle-secrets only if used): OPENAI_API_KEY
-        # (voice), TAVILY_API_KEY / BRAVE_SEARCH_API_KEY (web search).
+        # Optional feature keys — voice (OpenAI Whisper/TTS) + web search (Tavily).
+        # optional:true → a missing key leaves the env unset (the app fails open on
+        # both) instead of blocking pod start. Brave is unused (Tavily is the search
+        # backend); add it the same way only if adopted.
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: maelle-secrets
+              key: OPENAI_API_KEY
+              optional: true
+        - name: TAVILY_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: maelle-secrets
+              key: TAVILY_API_KEY
+              optional: true
         volumeMounts:
         # ONE PVC, mounted at the two cwd-relative paths Maelle hard-codes:
         - name: maelle-db-storage

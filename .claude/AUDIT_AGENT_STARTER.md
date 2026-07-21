@@ -3,107 +3,122 @@
 Paste-and-go seed for a fresh audit chat. Self-contained: assumes zero prior context.
 
 Project: **Maelle** — AI executive assistant, Node.js/TypeScript, monorepo at `E:\Code\Maelle`.
-Version: **check `package.json`** (it's the source of truth; was 3.4.x at last audit). Stable line.
+Version: **check `package.json`** (was **3.8.4** at last handoff; the number churns — see the multi-chat note). Stable line.
 
 ---
 
-## ▶ THIS RUN STARTS WITH CLEANING — not bugs
+## ▶ STEP 0 — RECONCILE GIT STATE FIRST (this repo has MULTIPLE chats writing to it)
 
-The owner's first ask this cycle is a **quick cleanup pass**, NOT a bug hunt:
+**More than one Claude chat operates on this repo at the same time.** Last cycle a GCP/Vertex-migration chat and an SDK-upgrade chat ran in parallel with the audit chat. Observed reality:
+- HEAD moved under the audit chat mid-session (6c5024f → cea5a71 → … → e80234e).
+- `package.json` version bumped 3.8.1 → 3.8.2 → 3.8.3 in minutes.
+- Another chat's `git add -A` **swept the audit chat's uncommitted work into ITS commits** (turnHelpers landed in 3.8.2, buildTurnContext in 3.8.3, both authored by the other chat).
 
-- **Dead code** — unused functions, unreferenced exports, retired-path imports, unreachable branches, orphaned files.
-- **Unused functions** — defined-but-never-called (verify with grep, not assumption).
-- **Duplicate / stacked comments** — the "3-4 comments piled on one code block" problem: collapse to ONE.
-- **Outdated comments** — comments that contradict the current code (these are mini-bugs — a reader believes them and ships the next bug), or reference deleted features / wrong version numbers.
-
-Goal: a leaner, more honest codebase. **Then the owner has further audit plans** (bug-focused waves, design review, etc.) — the full audit playbook below still governs those; this run just front-loads hygiene.
-
-Deliver cleanup as **propose-first batches** the owner approves, exactly like a bug audit — same discipline, different target.
+Before any audit / cleanup / wrap:
+1. `git -C E:/Code/Maelle status --short` + `git log --oneline -8` — know what's committed vs uncommitted and whose it is.
+2. **Files owned by OTHER chats right now — DO NOT touch, revert, or commit:**
+   - GCP/Docker/k8s: `Dockerfile`, `.dockerignore`, `k8s/`, `.github/workflows/deploy-gke.yml`, `scripts/migrate-data.sh`, `src/index.ts` (build-stamp), the `vertex` branch in `src/llm/client.ts`, the Vertex map in `src/llm/modelId.ts`.
+   - SDK upgrade + Sonnet 5 migration: **anything touching `@anthropic-ai/sdk`, the `claude-sonnet-*` model strings, or `thinking`/`effort` params.**
+3. **When you wrap, commit ONLY your own files** with explicit `git add <paths>` — **never `git add -A`** (it will sweep the other chats' in-flight work).
 
 ---
 
-## HARD RULES (these govern every audit run, cleanup included)
+## ▶ THIS RUN — the owner names the focus
+
+The last two cycles are DONE and shipped (see State Carried Forward): a **dead-code hygiene sweep** and a **big file-split refactor**. This run has **no forced agenda** — the owner will say what they want (a bug wave, a design review, a specific subsystem, the queued further-splits, the open follow-ons below). If it's not clear, ask. Deliver everything as **propose-first batches**, verify-before-flag, same discipline as always.
+
+---
+
+## HARD RULES (govern every audit run)
 
 ### Propose / build / commit
 1. **Propose-first. Build only on an explicit per-item "go"** ("fix it" / "do it" / "remove it" / "go"). Never bundle — approval on one item is NOT approval for its neighbors.
-2. **A question is not a build signal.** "how does it happen?" / "is it real?" / "recheck" / "why only M?" mean *explain more*, not *start editing*.
-3. **Never commit, version-bump, or write CHANGELOG without an explicit wrap word** ("wrap" / "ship" / "commit" / "cut a version"). The owner commits.
-4. **Typecheck after every change**: `npx tsc --noEmit -p E:/Code/Maelle/tsconfig.json` run from the repo root. NOT `npm run typecheck` from a `.claude/worktrees/` worktree — that checks stale source. EXIT=0 before moving on.
+2. **A question is not a build signal.** "how does it happen?" / "is it real?" / "why?" mean *explain more*, not *start editing*.
+3. **Never commit, version-bump, or write CHANGELOG without an explicit wrap word** ("wrap" / "ship" / "commit" / "cut a version"). Then commit ONLY your files (Step 0.3).
+4. **Typecheck after every change**: `npx tsc --noEmit -p tsconfig.json` from the repo root. EXIT=0 before moving on.
 
 ### Verify before you touch anything (the load-bearing rule)
-5. **VERIFY-BEFORE-FLAG.** Audit subagents have a real false-positive rate — every round last cycle produced non-bugs (a "dead" function that was live, a "contradiction" that was correct, a fix already shipped). **Re-read the cited code against the current tree before proposing or removing.** Never act on a subagent claim you haven't personally confirmed.
-6. **Don't manufacture edits.** If the target doesn't actually exist (e.g. "merge the stacks" but the file has no stacks), report "nothing to do." Do not churn good code to look productive.
+5. **VERIFY-BEFORE-FLAG.** Audit subagents have a real false-positive rate. Re-read the cited code against the current tree and `grep -rn` for callers before proposing or removing. Never act on a subagent claim you haven't personally confirmed. (Last cycle a deterministic import-graph scan caught two whole-file orphans the LLM subagents walked past — pair LLM subagents with mechanical grep checks.)
+6. **Don't manufacture edits.** If the target doesn't exist, report "nothing to do." Don't churn good code to look productive.
 
 ### Cleanup-specific
-7. **Dead code — verify ZERO callers before removing** (`grep -rn` the symbol across `src/`). A local `const`/function used only by a `void x;` line is dead. But **LEAVE the risky ones**: write-only DB columns, schema-column drops that need a table rebuild, defensive legacy `case` branches that protect old rows, owner-curated `scripts/`. When unsure, propose + explain, don't delete.
-8. **Comments — remove-bad + merge-stacks, but KEEP HISTORY.** Two operations only:
-   - Remove comments that **contradict the code** (stale model names, wrong TTLs, "falls back to 24h" when the code does otherwise, references to deleted functions) — highest value, they mislead.
-   - **Merge a 3-4-comment stack on one block into ONE line — but keep a compact combined version ref** (e.g. `// v2.7.1 + v2.9.5 — <merged why>`). **Do NOT strip all version/issue provenance** — the owner wants the history kept; `git blame` is not an acceptable substitute. (This was the one mistake last cycle: a subagent stripped every `// vX.Y` tag wholesale; the owner reverted it. Keep single-version WHY comments exactly as they are — only PILES get merged, and even then the refs survive.)
-   - Keep every genuine WHY / invariant / gotcha. The enemy is redundancy and contradiction, not provenance.
+7. **Dead code — verify ZERO callers before removing** (`grep -rn` the symbol across ALL of `src/`, plus `scripts/`). Watch for: barrel re-exports, dynamic `require()`, callers outside `src/`. LEAVE the risky ones: DB columns / table drops (a schema change), defensive legacy `case` branches, owner-curated config/back-compat, `(x:any)` shapes. When unsure, propose + explain, don't delete.
+8. **Comments — remove-contradicts-code + merge-stacks, KEEP PROVENANCE.** Fix comments that contradict the code (highest value — they mislead). When merging a 3-4 comment pile, keep a compact combined version/issue ref (`// v2.7.1 + v3.4.0 — <why>`). NEVER strip `// vX.Y` / `#NNN` tags wholesale (the owner reverted exactly that once). Single-version WHY comments stay untouched.
 
 ### Working style
-9. **Atomic findings.** Each = one fix shape, with a `file:line` citation. No "somewhere in X" hand-waves.
-10. **Route in-flight-feature bugs to the owning chat via a written prompt** — don't fix new code you don't own. (Last cycle: slot-holds → #30 chat; language → language chat.)
-11. **Subagent cost-awareness.** A blank-check full-file comment-sweep subagent cost ~2.5h / ~289k tokens last cycle. For bulk-but-mechanical work, prefer targeted inline edits or a *tightly-scoped* subagent mandate (comment-only + typecheck-0 gate + "restore-from-HEAD" reference). Don't hand a subagent an open-ended file rewrite.
-12. **When the owner disagrees with a finding, accept it and move on.** Several "bugs" are intentional design. Don't argue.
+9. **Atomic findings.** Each = one fix shape with a `file:line` citation.
+10. **Route in-flight-feature bugs to the owning chat** via a written prompt — don't fix code another chat owns (see Step 0.2).
+11. **Subagent cost-awareness.** For behavior-preserving MOVES, a byte-for-byte extraction verified by tsc + re-slice-from-HEAD is very reliable (last cycle split ~13k lines this way, zero regressions caught by tsc). For discovery, scope each subagent to a subsystem + cap output. Don't hand a subagent an open-ended file rewrite.
+12. **When the owner disagrees with a finding, accept it and move on.**
 
 ### Shell (from CLAUDE.md)
-- Never prepend `cd <path>` to a command (triggers a sandbox prompt). Use absolute paths / `git -C`.
+- Never prepend `cd <path>` to a command. Use absolute paths / `git -C`.
 - No compound `;` / `&&` / `||` chains — one logical command per Bash call; independent commands as parallel tool calls.
-- Never `node -e` / `node -p`. Use the Read tool for files, `scripts/db-query.cjs` for the DB.
+- Never `node -e` / `node -p`. Read tool for files, `scripts/db-query.cjs` for the DB, a written `.js` in the temp dir for one-off analysis (that's how orphan-detection was done last cycle).
 - Prefer Bash over PowerShell for portable commands.
 
 ---
 
-## HOW TO RUN AN AUDIT (the playbook — applies to cleanup AND the bug waves that follow)
+## HOW TO RUN AN AUDIT (the playbook)
 
-### 1. Orient
-- Read the top of `CHANGELOG.md` (recent versions) + `.claude/memory/project_overview.md` for current invariants. Without these, subagents flag already-fixed behavior as bugs.
-- Read the most recent `.claude/*_HANDOFF.md` (last cycle's was `V3_4_0_AUDIT_HANDOFF.md`) for the do-not-re-flag list and the left-on-purpose list (below).
-- `git status` — know what's uncommitted (there's usually in-flight feature work in the tree; don't attribute it or revert it).
+1. **Orient.** Read CHANGELOG.md top, `.claude/ARCHITECTURE_MAP.md`, this file's State section, and `git status`.
+2. **Dispatch parallel subagents** (one per subsystem cluster, single message, multiple Agent calls). Self-contained prompt each: scope + file list + KEY INVARIANTS + DO-NOT-RE-FLAG + goal (dead code / unused exports / contradicts-comments; or bug-trace) + "read files, grep callers, atomic findings w/ file:line, DO NOT edit, <1500 words."
+3. **Run the mechanical cross-cutting sweep yourself** (orphan files / dangling imports / unused exports) — a written import-graph script is more reliable than an LLM for exhaustive bookkeeping.
+4. **Synthesize:** dedupe, **verify each finding yourself** (Rule 5, drop false positives explicitly), number atomically, rank.
+5. **Save a self-contained handoff** at `.claude/<NAME>_HANDOFF.md`; append a "SESSION N — what got fixed" block as you build.
 
-### 2. Dispatch parallel subagents (one per subsystem, single message, multiple Agent calls)
-Each subagent gets a self-contained prompt:
-```
-Maelle — Node/TS AI exec assistant, vX.Y.Z, E:\Code\Maelle. You are a <subsystem> auditor. Propose-only.
-YOUR SCOPE: <subsystem>
-FILES: <list>
-KEY INVARIANTS (correct as of vX.Y — do NOT flag): <3-6 from CHANGELOG>
-DO-NOT-RE-FLAG (already decided): <list>
-GOALS: <for cleanup: dead code / unused fns / duplicate+outdated comments. for bugs: production / config leak / bad description / stale comment>
-REQUIRED: read files (grep large ones); for bugs, paper-trace 2-3 scenarios; atomic findings w/ file:line; DO NOT edit.
-OUTPUT (<2000 words): ### ID — Where / What / Bite / Fix. Group by category. If clean, say so.
-```
-**Cleanup framing**: tell each agent to hunt dead code + unused exports + comment debris in its files, and to grep for callers before calling anything "unused." A whole-tree cross-cutting agent always runs (`grep -rn` for orphans, contradicts-code comments, config leaks).
+---
 
-### 3. Synthesize
-- **Dedupe** (same finding from two agents → one).
-- **Verify each finding yourself** (Rule 5) — read the code. Drop the false positives explicitly.
-- **Number atomically**, stable, owner references by number.
-- **Rank**: for cleanup → dead-code (verified) / unused-functions / contradicts-code-comments (mini-bugs, do first) / comment-stack-merges / outdated-refs. For bugs → TOP (production teeth) / HIGH / MEDIUM.
-- **Save a self-contained handoff** at `.claude/<NAME>_HANDOFF.md` (mission + state + full list + wave order), and **append a "SESSION N — what got fixed" block** as you build, so the next chat knows true state.
+## SUBSYSTEM MAP (post-split — the monoliths are now directories)
 
-### 4. Subsystem map (fold in the newer files — the skill's map is slightly stale)
-Booking (`skills/meetings.ts`, `meetings/ops.ts`, `planMeeting.ts`, `bookingRequest.ts`, `coord/*`, `detectCategory.ts`, `connectors/graph/calendar.ts`, `utils/scheduleRules.ts`, `resolveLocation.ts`, `meetingProtection.ts`) · Requests-spine/approvals (`core/requests/*` incl. `resolver.ts`, `runner.ts`, `reconcile.ts`, `deferredActionReplay.ts`, `closeRequest.ts`; `tasks/skill.ts`; `db/requests.ts`, `db/approvals.ts`) · Social (`skills/social.ts`, `core/social/*`, `db/socialSubjects.ts` [NOT `socialTopics.ts` — deleted], `db/engagementRank.ts`) · Persona/memory (`core/assistant.ts`, `assistantSelf.ts`, `memory/peopleMemory.ts`, `capturePass.ts`, `db/people.ts`, `resolveSlackId.ts`) · Venue (`skills/venue.ts`, `utils/venueSearch.ts`, `db/venues.ts`) · Floating blocks (`utils/floatingBlocks.ts`, `rebalanceFloatingBlocks.ts`) · Work hours (`utils/workHours.ts`, `effectiveToday.ts`, `config/userProfile.ts`) · News (`skills/news.ts`) · Thread actions (`core/threadActions/*`) · Slot holds (`db/slotHolds.ts` — #30, may still be in-flight) · Recovery/transport (`core/background.ts`, `connectors/slack/app.ts`, `socketWatermark.ts`, `inboundReplayRegistry.ts`, `processedDedup.ts`, `connectors/whatsapp.ts` [INERT scaffolding]) · Guards (`utils/humanGate.ts`, `claimChecker.ts`, `dateVerifier.ts`, `securityGate.ts`, `coordGuard.ts`) · Cross-cutting (whole `src/` sweep).
+- **Booking** — `skills/meetings.ts` (tools + prompt shell) → `skills/meetings/ops.ts` (104-line dispatcher) → `ops/handlers/{findAvailableSlots,createMeeting,moveMeeting,calendarReads}.ts` + `ops/{analysis,helpers,violationLabels}.ts`; `meetings/{planMeeting,bookingRequest,detectCategory,findMeetingOwner,resolveAttendeeEmails}.ts`; `utils/scheduleRules.ts` (`checkSlot` = THE validator), `utils/workHours.ts` (`getEffectiveWorkDay*` = THE work-day resolver), `coord/*`, `meetingProtection`, `resolveLocation`, `weTimeResolver`.
+- **Calendar backend** — `connectors/graph/calendar.ts` is now a **4-line barrel** re-exporting `graph/{calendarTypes,graphClient,calendarReads,findAvailableSlots,calendarMutations}.ts`.
+- **Calendar health** — `skills/calendarHealth.ts` (330-line shell) → `calendarHealth/{autoMove,classify,types}.ts` + `calendarHealth/handlers/{checkHealth,floatingBlockOps,categoryOps}.ts`.
+- **Slack transport** — `connectors/slack/app.ts` (266-line factory shell) → `app/{processMessage,fileIngestion,handlers,helpers,context}.ts`; `postReply.ts`, `coordinator.ts`, `inboundQueue.ts`, `recentOutboundContext.ts`, `socketWatermark.ts`, `processedDedup.ts`. (`relevance.ts`, `assistantThreads.ts` were DELETED.)
+- **Orchestrator** — `core/orchestrator/index.ts` (~1,395 LOC — the turn loop, left whole on purpose) + `buildTurnContext.ts` (prompt/context assembly) + `turnHelpers.ts` (`callClaude`, `summarizeToolCall`, `mutationOutcome`, …) + `systemPrompt.ts`.
+- **Requests spine / approvals** — `core/requests/*` (`closeRequest` = only terminal path, `resolver`, `runner`=sweep, `reconcile`, `deferredActionReplay`, `types`); `tasks/skill.ts` (`create_approval`/`resolve_approval` → creates REQUESTS); `db/requests.ts`.
+- **Tasks system** — `tasks/runner.ts` (the tick's exec entry: runs `sweepDueRequests` + task dispatchers), `tasks/dispatchers/*`, `tasks/index.ts`, `routineMaterializer`. **Shrinking legacy** — see debt.
+- **Social** — `skills/social.ts` (thin shell) + `core/social/*` (classifyTurn, generateCoda, logEngagement, stateMachine) + `memory/capturePass` + `db/{socialSubjects,engagementRank}`.
+- **Person / memory** — `db/people.ts` (`resolvePerson` = identity chokepoint), `memory/peopleMemory.ts`, `core/assistant.ts`.
+- **Guards** — `utils/{claimChecker,dateVerifier,humanGate,securityGate,imageGuard,addresseeGate}.ts`. (There is NO `coordGuard.ts`.)
+- **Leaf skills** — `news`, `venue`, `knowledge`, `summary`, `general`(search).
+- **Cross-cutting** — whole-`src/` sweep (orphans, contradicts-code comments, config leaks).
+
+Full living map: **`.claude/ARCHITECTURE_MAP.md`**.
 
 ---
 
 ## STATE CARRIED FORWARD (do not re-do / re-flag)
 
-### Already removed last cycle (don't hunt for them)
-`getDueRequestsByHandler` (db/requests.ts), 5 unused `config` imports (claimChecker/humanGate/coordGuard/securityGate/briefIntent), `hhmmToMinutes` (ops.ts). `ops.ts` version-marker stacks already merged (refs kept).
+### Shipped this cycle (don't hunt for these; don't re-flag as bugs)
+- **Dead-code sweep** — deleted whole files: `attendeeMode`, `relevance`, `taskContinuity`, `cronSchedules`, `router` (+ `PersonRef`/`RoutingPolicy` types), `assistantThreads`. Removed dead functions across socialSubjects / people / requests / timezoneValidator / categoryRules / scheduleOverrides / calendarIssues / workingElsewhere / events / registry / processedDedup / coordinator / messaging / displaySubject / slotHolds / briefIntent. Fixed ~12 contradicts-code comments (provenance kept). Fixed `toolCallCache` WRITE_TOOLS names. **Dropped 3 dead tables** (`approvals`, `cron_schedules`, `assistant_threads`) via `DROP TABLE IF EXISTS` migrations in `client.ts`. Deleted **33 spent one-shot scripts** (kept `db-query.cjs`, `auto-build`/`auto-triage-bug`, `measure-prompt(s)`, `_dump-prompts`).
+- **File-split refactor** — the 4 monoliths (`ops.ts` 5,712→104, `calendarHealth.ts` 2,778→330, `app.ts` 2,458→266, `calendar.ts` 2,325→barrel) split behavior-preservingly (byte-for-byte, tsc-0), plus orchestrator `turnHelpers` + `buildTurnContext` extracted. **No file over ~1,500 LOC now.**
 
-### Dead code LEFT ON PURPOSE — do NOT propose removing again
-- `proactive_pending` column (db) — dropping = risky rebuild.
-- `last_participant_activity_at` on CoordJob — write-only, column-drop risky.
-- `outreach_decision` case in `runner.ts` dispatchHandler — defensive for legacy rows.
-- `scripts/deploy-watcher.mjs` — orphaned but owner-curated `scripts/`.
-- `coord_jobs.status` / `outreach_jobs.status` — vestigial-but-intentional (Path 2 keeps the columns, status lives on the request).
-- `(s: any)` annotation maps in `ops.ts` — pre-existing loose shape, not worth the churn.
-- `connectors/whatsapp.ts` branches — inert-until-configured, not dead.
+### Left on purpose (do NOT propose removing)
+- Vestigial-by-design status columns: `coord_jobs.status` / `outreach_jobs.status` / `approvals.status` (the requests-spine row owns lifecycle — intentionally unread).
+- `proactive_pending` column, `last_participant_activity_at` on CoordJob, `outreach_decision` case in `runner.ts`, `(x:any)` shape maps in the ops handlers, `connectors/whatsapp.ts` inert branches, the `working_elsewhere` yaml back-compat block in `userProfile.ts`.
+- **The single-operation handlers still >1,000 LOC** — `ops/handlers/createMeeting.ts` (1,496), `ops/handlers/moveMeeting.ts` (1,403), `ops/handlers/findAvailableSlots.ts` (1,345), `calendarHealth/handlers/checkHealth.ts` (1,313), `graph/findAvailableSlots.ts` (1,108). These are ONE tool operation each — they only shrink by decomposing their *logic*, which is a separate careful effort, NOT a move. Don't flag their size as a bug.
 
-### Bug findings already ruled out (don't re-raise as bugs when you get to bug waves)
-app_mention bot-author guard (owner: bots CAN call Maelle); multi-tenant panel scope R-1 (clone = new server); stranded-`in_progress`-task auto-reset (too risky); `isOutreachReplyByContext` fanout (won't happen); prefs `replace` data-loss; `move_meeting must_be_after_event_id` "overpromise" (false positive — it's not even on move_meeting); the `#80` `meetings.ts` `as any` cluster (deferred, don't sweep); Hebrew colleague-leak in securityGate (owned by the guards chat).
+### Open follow-ons DISCOVERED but not done (owner-decides — propose, don't auto-do)
+- **`userProfile.ts` `connections:` zod block is ORPHANED** — its only reader (`router.ts`) was deleted; it's dead multi-transport scaffolding, but it's owner-facing config / back-compat surface. Kill it, or keep for issue #1. (Comment already marks it "UNREAD".)
+- **Tasks table is a shrinking legacy.** The requests spine absorbed the timers; the tasks table is now the owner-facing brief/ledger substrate + 5 recurring chores. Micro-cleanup available (NOT a full-table deletion): 4 vestigial `TaskType` values `coordination`/`reminder`/`follow_up`/`research` (now request *kinds*, nothing creates task rows of them), the `social_ping_rank_check` no-op drain, and the stale `tasks/types.ts` header.
+- **Further splits queued** in `.claude/FILE_SPLIT_PROPOSAL.md`: `app/handlers.ts` (1,218 → dm/mpim/reactions/mention), `moveMeeting.ts` (→ move + update), the orchestrator core-loop decomposition (risky — logic refactor, not a move), and tier-2 files (`summary` 1,417, `meetings` 1,249, `people` 1,164, `tasks/skill` 1,157, `assistant` 1,115).
+
+### In-flight, OWNED BY OTHER CHATS — do NOT touch (route bugs to them)
+- **GCP/Vertex migration:** `Dockerfile`, `.dockerignore`, `k8s/`, `deploy-gke.yml`, `migrate-data.sh`, `src/index.ts` build-stamp, `llm/client.ts` vertex branch, `modelId.ts` vertex map.
+- **SDK upgrade + Sonnet 5 migration:** `@anthropic-ai/sdk` is pinned **0.24.3** (June 2024 — predates the `thinking` param; latest is 0.112.3). A separate chat is upgrading the SDK and migrating `claude-sonnet-4-6` → `claude-sonnet-5` (~40 call sites; the gotcha is Sonnet 5's adaptive-thinking-on-by-default, which the old SDK can't disable and whose thinking-block responses it can't safely round-trip — hence SDK upgrade FIRST). Guards/classifiers already run Haiku 4.5. **Do NOT touch model strings, the SDK, or thinking/effort params.**
+
+### Bug findings already ruled out (don't re-raise as bugs)
+app_mention bot-author guard (bots CAN call Maelle); multi-tenant panel scope (clone = new server); stranded-`in_progress` auto-reset (too risky); `isOutreachReplyByContext` fanout; prefs `replace` data-loss; `move_meeting must_be_after_event_id` overpromise (false positive); the `#80` `meetings.ts` `as any` cluster (deferred); Hebrew colleague-leak in `securityGate` (owned by the guards chat).
+
+---
+
+## Living reference docs (read for current truth)
+- **`.claude/ARCHITECTURE_MAP.md`** — the core spines + peripheral map + known architectural debt (current).
+- **`.claude/CLEANUP_AUDIT_HANDOFF.md`** — the dead-code cleanup session log.
+- **`.claude/FILE_SPLIT_PROPOSAL.md`** — the remaining-split plan.
+- **`CHANGELOG.md`** (top) — recent versions.
+- **`.claude/memory/project_architecture.md`** — deep architecture (requests spine, orchestrator loop, etc.).
 
 ---
 

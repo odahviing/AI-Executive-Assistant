@@ -118,9 +118,6 @@ export const SCORE_ON_CREATE_ASSISTANT = 2;
 export const MAX_ACTIVE_SUBJECTS_PER_CATEGORY = 5;
 export const MAX_TOPIC_BEATS_PER_SUBJECT = 10;
 
-// Soft target — picker behavior, not a hard cap.
-export const TARGET_ACTIVE_CATEGORIES = 3;
-
 const GLOBAL_OWNER = 'global';
 
 // ── Bootstrap: seed the 30 global categories (once) ──────────────────────────

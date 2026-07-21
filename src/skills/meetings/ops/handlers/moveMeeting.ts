@@ -10,7 +10,6 @@ import { DateTime } from 'luxon';
 import type { SkillContext } from '../../../types';
 
 import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy } from '../../ops/helpers';
-import { humanizeViolationLabel } from '../../ops/violationLabels';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getCalendarEvents,

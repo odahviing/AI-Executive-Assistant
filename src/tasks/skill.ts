@@ -25,6 +25,7 @@ import type { RequestKind, RequestRow } from '../core/requests/types';
 import { parseDetails } from '../core/requests/types';
 import logger from '../utils/logger';
 import { getAnthropicClient } from '../llm/client';
+import { MODEL_HAIKU } from '../llm/models';
 import { logLlmUsage } from '../utils/usageLog';
 
 type CreateTaskType = 'reminder' | 'follow_up' | 'research';
@@ -64,7 +65,7 @@ async function classifyFreeformCalendarChange(
   if (!text.trim()) return 'not_calendar';
   try {
     const resp = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: MODEL_HAIKU,
       max_tokens: 20,
       system: `Classify an owner-approval request by whether it concerns a CALENDAR CHANGE to a meeting — booking a new meeting, moving/rescheduling an existing meeting, adding/removing attendees, or cancelling a meeting.
 - 'calendar' — it clearly IS one of those.
@@ -83,7 +84,7 @@ Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_ca
       tool_choice: { type: 'tool', name: 'classify' },
       messages: [{ role: 'user', content: text }],
     });
-    logLlmUsage('freeform_calendar_guard', 'claude-haiku-4-5-20251001', resp);
+    logLlmUsage('freeform_calendar_guard', MODEL_HAIKU, resp);
     const toolUse = resp.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
     const v = (toolUse?.input as { verdict?: string } | undefined)?.verdict;
     return (v === 'calendar' || v === 'not_calendar') ? v : 'unsure';

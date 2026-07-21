@@ -22,7 +22,7 @@ export async function resolveMovingAnchorDay(
 ): Promise<string | undefined> {
   if (!eventIds || eventIds.length === 0) return undefined;
 
-  // ±60 days from now covers every realistic "move that meeting" ask.
+  // −7/+60 days from now covers every realistic "move that meeting" ask.
   const today = DateTime.now().setZone(timezone);
   const start = today.minus({ days: 7 }).toFormat("yyyy-MM-dd'T'00:00:00");
   const end = today.plus({ days: 60 }).toFormat("yyyy-MM-dd'T'23:59:59");

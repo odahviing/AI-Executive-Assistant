@@ -191,24 +191,6 @@ export function markSummaryShared(params: {
   });
 }
 
-/**
- * Cleanup hook: any session in 'iterating' state that hasn't moved in 7+ days
- * gets its draft nulled (still keeps the meta row for historical reference).
- * Call on startup; no need to schedule its own timer.
- */
-export function purgeIdleSummaryDrafts(): number {
-  const db = getDb();
-  const result = db.prepare(`
-    UPDATE summary_sessions
-    SET current_draft = NULL,
-        stage = CASE WHEN stage = 'iterating' THEN 'cancelled' ELSE stage END,
-        updated_at = datetime('now')
-    WHERE current_draft IS NOT NULL
-      AND updated_at <= datetime('now', '-7 days')
-  `).run();
-  return result.changes;
-}
-
 export function parseDraft(session: SummarySession): SummaryDraft | null {
   if (!session.current_draft) return null;
   try {

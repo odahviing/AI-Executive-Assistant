@@ -36,8 +36,9 @@ import type { UserProfile } from '../../config/userProfile';
 import logger from '../../utils/logger';
 import { logLlmUsage } from '../../utils/usageLog';
 import { FIXED_CATEGORIES } from '../../db/socialSubjects';
+import { MODEL_HAIKU } from '../../llm/models';
 
-const MODEL = 'claude-haiku-4-5-20251001';
+const MODEL = MODEL_HAIKU;
 
 // ── Intent types (formerly in classifyOwnerIntent.ts, removed in the v3.0.6
 //    merge — this module is now the sole owner of per-turn classification) ──

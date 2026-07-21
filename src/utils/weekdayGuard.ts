@@ -41,10 +41,16 @@ export function checkIntendedWeekday(
   const dt = DateTime.fromISO(startIso, { zone: timezone });
   if (!dt.isValid) return { ok: true };
   if (dt.weekday === intendedWeekday) return { ok: true };
-  // luxon `set({ weekday })` moves within the SAME ISO week (Mon–Sun), keeping
-  // the clock time — so a Friday that should have been "Thursday" corrects to
-  // the Thursday of that same week, which is almost always what was meant.
-  const corrected = dt.set({ weekday: intendedWeekday as 1 | 2 | 3 | 4 | 5 | 6 | 7 });
+  // Correct to the NEAREST date matching the intended weekday, keeping the clock
+  // time. luxon `set({ weekday })` moves within the ISO week (Mon=1…Sun=7), so
+  // Sunday (ISO 7, the LAST ISO day) always lands at the END of the ISO week —
+  // for a Sun-start owner (Idan, Sun–Thu) that overshoots ~5 days forward (next
+  // week) instead of the ~2 days back that was meant (#audit 2026-07-21). Nearest
+  // match is week-start-agnostic and matches ISO `set` for the common ±1 mis-resolve.
+  let delta = intendedWeekday - dt.weekday;   // -6..6
+  if (delta > 3) delta -= 7;                  // >3 forward → go back instead
+  if (delta < -3) delta += 7;                 // >3 back → go forward instead
+  const corrected = dt.plus({ days: delta });
   return {
     ok: false,
     namedWeekday: intendedWeekday,

@@ -13,7 +13,14 @@ export function getConversationHistory(threadTs: string): ConversationMessage[] 
   const db = getDb();
   const row = db.prepare('SELECT context FROM conversation_threads WHERE thread_ts = ?').get(threadTs) as any;
   if (!row) return [];
-  return JSON.parse(row.context);
+  // Defensive — a corrupt context blob must not wedge the thread. appendToConversation
+  // reads this first, so an unguarded throw here would block BOTH reads and writes
+  // for this thread on every turn thereafter.
+  try {
+    return JSON.parse(row.context) as ConversationMessage[];
+  } catch {
+    return [];
+  }
 }
 
 export function appendToConversation(

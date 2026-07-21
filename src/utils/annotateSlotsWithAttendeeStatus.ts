@@ -87,20 +87,3 @@ export async function annotateSlotsWithAttendeeStatus<S extends { start: string;
   });
 }
 
-/**
- * Render an attendee status as a short tag for coord DM display.
- *   free → "looks free"
- *   busy → "you look busy"
- *   tentative → "looks tentative"
- *   oof → "you're out of office"
- *   unknown → '' (no tag — degraded data)
- */
-export function statusTag(status: AttendeeSlotStatus): string {
-  switch (status) {
-    case 'free':      return 'looks free';
-    case 'busy':      return 'you look busy';
-    case 'tentative': return 'looks tentative';
-    case 'oof':       return 'you\'re out of office';
-    case 'unknown':   return '';
-  }
-}

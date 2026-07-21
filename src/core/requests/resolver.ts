@@ -25,6 +25,7 @@ import {
 } from '../approvals/approvalCallbacks';
 import { runDeferredAction } from './deferredActionReplay';
 import logger from '../../utils/logger';
+import { MODEL_HAIKU } from '../../llm/models';
 
 export type ResolveVerdict =
   | { verdict: 'approve'; data?: Record<string, unknown> }
@@ -822,7 +823,7 @@ RULES:
 - ONE sentence. A light "Hi ${requesterFirst ?? ''}" is fine; no sign-off.`;
       const usr = `Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''} Outcome: ${outcome}.${startFormatted ? ` Scheduled for ${startFormatted}.` : ''} Write the message.`;
       const resp = await anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',
+        model: MODEL_HAIKU,
         max_tokens: 200,
         system: sys,
         messages: [{ role: 'user', content: usr }],

@@ -159,7 +159,7 @@ One deployment can serve multiple executives. Each profile gets its own Slack ap
 | Component | Library |
 |---|---|
 | Language | TypeScript / Node.js 20+ |
-| LLM | Anthropic Claude Sonnet 4.6 (Haiku for sidecar classifiers). Vertex AI ready via `LLM_PROVIDER` env var (v2.8.1) |
+| LLM | Anthropic Claude Sonnet 5 (Haiku 4.5 for sidecar classifiers). Vertex AI ready via `LLM_PROVIDER` env var (v2.8.1); SDK `@anthropic-ai/sdk` 0.112 + `@anthropic-ai/vertex-sdk` |
 | Slack | `@slack/bolt` (Socket Mode) |
 | Microsoft Graph | `@microsoft/microsoft-graph-client` + `@azure/identity` |
 | Database | SQLite via `better-sqlite3` |

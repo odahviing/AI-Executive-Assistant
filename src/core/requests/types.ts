@@ -29,12 +29,6 @@ export type ApprovalSubkind =
   | 'unknown_person'
   | 'freeform';
 
-export type OutreachSubkind =
-  | 'general'
-  | 'meeting_reschedule'
-  | 'invite'
-  | 'note';
-
 export type RequestState =
   | 'awaiting_owner'      // owner action blocks progress (most approvals start here)
   | 'awaiting_colleague'  // colleague reply blocks progress (most outreach lives here)
@@ -71,8 +65,7 @@ export type RequestPhase = OutreachPhase;
 export type NextCheckHandler =
   | 'expiry'                 // generic expiry → close with state=expired
   | 'approval_reminder'      // midpoint nag DM, then re-arm for expiry
-  | 'outreach_expiry'        // outreach awaiting_colleague past window → flip to outreach_decision
-  | 'outreach_decision'      // 2 workdays after no-response → auto-close with "want me to try again?"
+  | 'outreach_expiry'        // outreach awaiting_colleague past window → close as expired
   | 'send_scheduled_outreach' // fire a future-dated outreach DM
   | 'reminder_fire'          // fire a reminder DM at due_at
   | 'research_run'           // run a research prompt through the agent loop, DM the result
@@ -214,8 +207,3 @@ export function parseDetails<T = Record<string, unknown>>(row: RequestRow): T | 
   try { return JSON.parse(row.details_json) as T; } catch { return null; }
 }
 
-/** Helper: outcome_json parse. */
-export function parseOutcome<T = Record<string, unknown>>(row: RequestRow): T | null {
-  if (!row.outcome_json) return null;
-  try { return JSON.parse(row.outcome_json) as T; } catch { return null; }
-}

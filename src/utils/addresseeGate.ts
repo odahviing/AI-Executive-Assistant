@@ -19,6 +19,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { MODEL_HAIKU } from '../llm/models';
 import logger from './logger';
 
 const anthropic = getAnthropicClient();
@@ -60,7 +61,7 @@ export async function classifyAddressee(params: {
       // Binary MAELLE/HUMAN/AMBIGUOUS classifier — Haiku-grade.
       // (The original Sonnet choice was a leftover; top-of-file comment
       // already documented the intent as "cheap Haiku call".)
-      model: 'claude-haiku-4-5-20251001',
+      model: MODEL_HAIKU,
       max_tokens: 12,
       system:
         `You watch a group chat where ${assistantName} is the executive assistant to ${ownerFirstName}. ` +
@@ -82,8 +83,12 @@ export async function classifyAddressee(params: {
     if (raw.startsWith('HUMAN')) return 'HUMAN';
     return 'AMBIGUOUS';
   } catch (err) {
-    logger.warn('Addressee classifier failed — defaulting to MAELLE', { err: String(err) });
-    // Fail-open to MAELLE so we don't silently drop messages during outages.
-    return 'MAELLE';
+    // Fail to AMBIGUOUS (silent), matching this gate's stated tradeoff (top of
+    // file): a group false-positive — chiming into human-to-human chatter — is
+    // worse than a false-negative. Anyone who actually wants Maelle can @mention
+    // her; the fast-path above short-circuits to MAELLE without the classifier.
+    // (Was fail-open-to-MAELLE, which made a Haiku outage answer human chatter.)
+    logger.warn('Addressee classifier failed — defaulting to AMBIGUOUS (silent)', { err: String(err) });
+    return 'AMBIGUOUS';
   }
 }

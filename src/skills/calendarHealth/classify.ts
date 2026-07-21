@@ -6,6 +6,7 @@
  */
 import { DateTime } from 'luxon';
 import { getAnthropicClient } from '../../llm/client';
+import { SONNET } from '../../llm/models';
 import type { CalendarEvent } from '../../connectors/graph/calendar';
 import type { UserProfile } from '../../config/userProfile';
 import logger from '../../utils/logger';
@@ -40,7 +41,7 @@ export async function classifyEventCategory(
     const Anthropic = (require('@anthropic-ai/sdk') as typeof import('@anthropic-ai/sdk')).default;
     const client = getAnthropicClient();
     const resp = await client.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 200,
       tools: [{
         name: 'pick_category',

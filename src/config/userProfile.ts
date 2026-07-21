@@ -260,23 +260,6 @@ const UserProfileSchema = z.object({
     issue_exclusions: z.object({
       subjects: z.array(z.string()).default([]),
     }).optional(),
-    // WORKING ELSEWHERE offer window — DEPRECATED / UNREAD as of v3.7.x (#143).
-    // The full-day WE travel spine was replaced by per-date schedule overrides
-    // (`owner_schedule_overrides`): an away day now carries its own explicit
-    // timezone + stated hours and is walked/booked like any normal day in that
-    // zone, so there is no separate WE offer band anymore. The schema is retained
-    // for config back-compat (a tenant yaml with this block still validates); it
-    // is simply no longer consumed. Safe to drop in a future breaking change.
-    working_elsewhere: z.object({
-      regular: z.object({
-        days: z.array(z.enum(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'])).default([]),
-        hours: z.string().regex(/^\d{2}:\d{2}-\d{2}:\d{2}$/),
-      }),
-      relaxed: z.object({
-        days: z.array(z.enum(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'])).default([]),
-        hours: z.string().regex(/^\d{2}:\d{2}-\d{2}:\d{2}$/),
-      }),
-    }).optional(),
   }).default({
     allowed_durations: [25, 50],
     buffer_minutes: 0,
@@ -669,15 +652,5 @@ export function loadAllProfiles(): Map<string, UserProfile> {
   }
 
   return profiles;
-}
-
-export function findProfileBySlackId(
-  slackUserId: string,
-  allProfiles: Map<string, UserProfile>
-): UserProfile | null {
-  for (const profile of allProfiles.values()) {
-    if (profile.user.slack_user_id === slackUserId) return profile;
-  }
-  return null;
 }
 

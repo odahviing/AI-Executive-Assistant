@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
+import { MODEL_SONNET } from '../../llm/models';
 import { buildSystemPromptParts } from './systemPrompt';
 import { classifyTurn, type OwnerIntentClassification } from '../social/classifyTurn';
 import { chooseSocialDirective, formatDirectiveForPromptBlock, type SocialDirective, noDirective } from '../social/stateMachine';
@@ -298,12 +299,16 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // modes — malformed coord args, missed RULE 3 triggers, over-sensitive to
   // conversational idioms. The stable-solution bias is "one strong model
   // everywhere" over "two models with a cost gap and a behavior gap".
-  const MODEL_OWNER     = 'claude-sonnet-4-6';
-  const MODEL_COLLEAGUE = 'claude-sonnet-4-6';
+  const MODEL_OWNER     = MODEL_SONNET;
+  const MODEL_COLLEAGUE = MODEL_SONNET;
   const model = input.senderRole === 'colleague' ? MODEL_COLLEAGUE : MODEL_OWNER;
 
-  // max_tokens — colleagues get shorter answers, owners get full budget
-  const maxTokens = input.senderRole === 'colleague' ? 1024 : 2048;
+  // max_tokens — colleagues get shorter answers, owners get full budget.
+  // v3.8.x — bumped from 1024/2048: Sonnet 5's tokenizer is ~30% denser than
+  // 4.6's, so the same reply text costs ~30% more output tokens. Thinking is
+  // disabled (see the callClaude site), so the whole budget is response text —
+  // the bump just keeps a reply that fit before from truncating now.
+  const maxTokens = input.senderRole === 'colleague' ? 1400 : 2700;
 
   // Build system prompt in two parts for prompt caching:
   //   static  → skills rules (large, profile-driven) — cached for 5 min

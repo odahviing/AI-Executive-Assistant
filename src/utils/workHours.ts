@@ -154,7 +154,12 @@ export function getEffectiveWorkDay(dateIso: string, profile: UserProfile): Effe
  */
 export function getEffectiveWorkDayForInstant(instantIso: string, profile: UserProfile): EffectiveWorkDay {
   const homeTz = profile.user.timezone;
-  const dt = DateTime.fromISO(instantIso, { setZone: true });
+  // Anchor a bare (zoneless) instant in the owner's HOME tz — NOT the process
+  // zone. `setZone:true` alone leaves a no-offset string in the server's local
+  // zone (UTC once off Idan's box), which would resolve a near-midnight slot to
+  // the wrong calendar date. checkSlot anchors the same string with { zone: tz }
+  // (scheduleRules.ts) — match it so the two never disagree on the day.
+  const dt = DateTime.fromISO(instantIso, { zone: homeTz, setZone: true });
   if (!dt.isValid) return getEffectiveWorkDay(instantIso, profile);  // defensive — let the date path handle a bad input
   const homeDate = dt.setZone(homeTz).toFormat('yyyy-MM-dd');
 
@@ -287,17 +292,14 @@ export function addWorkdays(fromIso: string, n: number, profile: UserProfile): s
 }
 
 /**
- * v2.1.4 — default date window for the daily calendar health check.
+ * v2.1.4 + v3.2.6 — default date window for the daily calendar health check.
  *
- * Rule (owner simplification):
- *   start = today (local date, start of day)
- *   end   = the owner's last workday of the current week, at end-of-hours
- *   if (end - start) <= 24 hours → extend end by 7 calendar days
- *
- * The <=24h branch catches "we're already on the last workday" — no point
- * checking only today; push the window into next week so there's actually
- * runway to coordinate moves with colleagues. Otherwise the window is
- * today through end of workweek (Sun-Thu for Idan's profile).
+ * Rule (v3.2.6, owner direction): start = today (local); end = the Saturday
+ * that ends NEXT week (Sun–Sat weeks). So on a Sunday it's a full 14 days
+ * (Sun → Sat-after); on a Thursday it's Thu → Sat-after. Bounded and short
+ * enough that the daily report stops re-narrating conflicts weeks out (the old
+ * v2.1.4 "last workday + <=24h → extend 7d" rule and the earlier 21-day sweep
+ * both over-surfaced).
  *
  * Returns YYYY-MM-DD strings so the health-check tool can plug them in
  * directly. Deterministic — Sonnet doesn't compute dates.

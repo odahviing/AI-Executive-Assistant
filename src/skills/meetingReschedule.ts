@@ -21,6 +21,7 @@
 import type { App } from '@slack/bolt';
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { SONNET } from '../llm/models';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import type { OutreachJob } from '../db/jobs';
@@ -98,7 +99,7 @@ Tie-break: a genuine NON-answer (they haven't decided, "I'll get back to you", t
 
   try {
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 200,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -404,6 +405,7 @@ export async function handleRescheduleReply(
               logger.info('Reschedule counter auto-accept (same week, rule-compliant) — moving', {
                 jobId: job.id, counter: decision.counter_start,
               });
+              let moveApplied = false;
               try {
                 await updateMeeting({
                   userEmail: profile.user.email,
@@ -424,45 +426,53 @@ export async function handleRescheduleReply(
                 } catch (rebErr) {
                   logger.warn('rebalance after counter auto-accept move threw — continuing', { err: String(rebErr).slice(0, 200), jobId: job.id });
                 }
+                moveApplied = true;
               } catch (err) {
-                logger.error('Reschedule counter auto-accept: updateMeeting failed, falling back to approval', {
+                // updateMeeting threw → the move did NOT land. Do NOT confirm it:
+                // this used to fall straight through and ship a phantom "moved to
+                // X" to the colleague + "so I moved it" to the owner + close the
+                // job, all on a failed PATCH. Leave moveApplied false and drop to
+                // the owner-ask fallback below — mirror the `approved` branch,
+                // which errors out on the same failure instead of lying.
+                logger.error('Reschedule counter auto-accept: updateMeeting failed — asking owner instead', {
                   err: String(err), jobId: job.id,
                 });
-                // fall through to approval path below
               }
 
-              // Confirm to colleague — thread into the original DM if we have it
-              const counterLocal = counterStartDt.toFormat('HH:mm');
-              const colleagueMsg = `Works — moved to ${counterLocal}. See you then.`;
-              try {
-                if (job.dm_channel_id) {
-                  await conn.postToChannel(job.dm_channel_id, colleagueMsg, { threadTs: job.dm_message_ts });
-                } else {
-                  await conn.sendDirect(job.colleague_slack_id, colleagueMsg);
+              if (moveApplied) {
+                // Confirm to colleague — thread into the original DM if we have it
+                const counterLocal = counterStartDt.toFormat('HH:mm');
+                const colleagueMsg = `Works — moved to ${counterLocal}. See you then.`;
+                try {
+                  if (job.dm_channel_id) {
+                    await conn.postToChannel(job.dm_channel_id, colleagueMsg, { threadTs: job.dm_message_ts });
+                  } else {
+                    await conn.sendDirect(job.colleague_slack_id, colleagueMsg);
+                  }
+                } catch (err) {
+                  logger.warn('Reschedule counter auto-accept: colleague DM failed', { err: String(err) });
                 }
-              } catch (err) {
-                logger.warn('Reschedule counter auto-accept: colleague DM failed', { err: String(err) });
+                conversation.push({ role: 'maelle', text: colleagueMsg });
+
+                // Shadow DM the owner
+                await shadowNotify(profile, {
+                  channel: job.owner_channel,
+                  threadTs: job.owner_thread_ts ?? undefined,
+                  action: 'Auto-accepted counter',
+                  detail: `${job.colleague_name} countered "${ctx.meeting_subject}" to ${counterStartDt.toFormat('EEEE d MMM HH:mm')} — same week, within your rules, so I moved it. Say the word if you'd rather I hadn't.`,
+                });
+
+                updateOutreachJob(job.id, {
+                  status: 'replied',
+                  reply_text: replyText,
+                  conversation_json: JSON.stringify(conversation),
+                });
+                getDb().prepare(
+                  `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
+                   WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague')`,
+                ).run(job.id);
+                return true;
               }
-              conversation.push({ role: 'maelle', text: colleagueMsg });
-
-              // Shadow DM the owner
-              await shadowNotify(profile, {
-                channel: job.owner_channel,
-                threadTs: job.owner_thread_ts ?? undefined,
-                action: 'Auto-accepted counter',
-                detail: `${job.colleague_name} countered "${ctx.meeting_subject}" to ${counterStartDt.toFormat('EEEE d MMM HH:mm')} — same week, within your rules, so I moved it. Say the word if you'd rather I hadn't.`,
-              });
-
-              updateOutreachJob(job.id, {
-                status: 'replied',
-                reply_text: replyText,
-                conversation_json: JSON.stringify(conversation),
-              });
-              getDb().prepare(
-                `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
-                 WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague')`,
-              ).run(job.id);
-              return true;
             }
           }
         }

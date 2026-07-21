@@ -51,6 +51,7 @@ import {
 import { readPersonMemory, writePersonSection, slugifyName } from './peopleMemory';
 import { selfSlackId } from '../core/assistantSelf';
 import { getAnthropicClient } from '../llm/client';
+import { MODEL_HAIKU } from '../llm/models';
 import { isStrictIana } from '../utils/timezoneValidator';
 import { config } from '../config';
 import logger from '../utils/logger';
@@ -66,7 +67,7 @@ import {
 
 const SILENCE_MINUTES = 30;
 const MAX_THREADS_PER_TICK = 20;
-const HAIKU_MODEL = 'claude-haiku-4-5-20251001';
+const HAIKU_MODEL = MODEL_HAIKU;
 
 /**
  * Haiku-extracted delta. Each field is optional — Haiku only emits keys
@@ -160,9 +161,9 @@ function buildUserMessage(
   ].join('\n');
 }
 
-function chatToTranscript(messages: Array<{ role: string; content: string }>, colleagueName: string, ownerName: string): string {
+function chatToTranscript(messages: Array<{ role: string; content: string }>, humanName: string): string {
   return messages.map(m => {
-    const speaker = m.role === 'assistant' ? `Maelle` : colleagueName || 'them';
+    const speaker = m.role === 'assistant' ? `Maelle` : humanName || 'them';
     return `${speaker}: ${m.content}`;
   }).join('\n');
 }
@@ -417,7 +418,7 @@ export async function runCapturePass(app: App, profile: UserProfile): Promise<vo
         markThreadCaptured(row.thread_ts);
         continue;
       }
-      const transcript = chatToTranscript(messages, personRow.name, ownerName);
+      const transcript = chatToTranscript(messages, personRow.name);
 
       // 4. Single Haiku call to extract deltas.
       const userMsg = buildUserMessage(personRow.name, currentProfile, currentMd, transcript);
@@ -577,7 +578,7 @@ async function runSelfCapture(
 
     const messages = getConversationHistory(threadTs);
     if (messages.length === 0) return;
-    const transcript = chatToTranscript(messages, profile.assistant.name, ownerName);
+    const transcript = chatToTranscript(messages, ownerName);
 
     const userMsg = [
       'EXISTING NOTES about Maelle (do NOT re-emit any of these — same fact = skip):',
@@ -811,7 +812,7 @@ async function runSubjectReconciliation(
     // 2. Chat transcript
     const messages = getConversationHistory(threadTs);
     if (messages.length === 0) return;
-    const transcript = chatToTranscript(messages, personName, ownerName);
+    const transcript = chatToTranscript(messages, personName);
 
     // 3. Build the active-subjects block with beats
     const activeSubjectsBlock = (() => {
@@ -962,6 +963,15 @@ async function runSubjectReconciliation(
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { applyRaiseFeedbackForMatches, applyOrganicMatchSignal } = require('../core/social/logEngagement') as
         typeof import('../core/social/logEngagement');
+      // Read the raised subject BEFORE raise-feedback runs: applyRaiseFeedbackForMatches
+      // clears the raise marker (last_assistant_initiated_at → NULL), after which
+      // getMostRecentRaisedSubject returns null and the organic loop below would fire
+      // a SECOND signal on the very subject raise-feedback just credited (±2 instead
+      // of ±1) — exactly the common "colleague replied to the coda" path.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getMostRecentRaisedSubject } = require('../db/socialSubjects') as
+        typeof import('../db/socialSubjects');
+      const raised = getMostRecentRaisedSubject(ownerUserId, personSlackId);
       applyRaiseFeedbackForMatches({
         ownerUserId,
         personSlackId,
@@ -969,10 +979,6 @@ async function runSubjectReconciliation(
       });
       // Organic match — fire per matched subject that ISN'T the raised one
       // (raise-feedback already handled the raised case above).
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getMostRecentRaisedSubject } = require('../db/socialSubjects') as
-        typeof import('../db/socialSubjects');
-      const raised = getMostRecentRaisedSubject(ownerUserId, personSlackId);
       for (const m of matchedSubjectIds) {
         if (raised && m.id === raised.id) continue;  // already covered by raise-feedback
         applyOrganicMatchSignal({

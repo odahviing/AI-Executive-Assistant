@@ -1,7 +1,6 @@
 import { App, LogLevel } from '@slack/bolt';
 import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
-import { auditLog } from '../../db';
 import logger from '../../utils/logger';
 import type { SenderRole, SlackAppContext } from './app/context';
 import { resolveSlackMentions } from './app/helpers';
@@ -236,31 +235,4 @@ export function startSocketWatchdog(app: App, profile: UserProfile, ownerChannel
       process.exit(1);
     })();
   }, WATCHDOG_POLL_MS).unref?.();
-}
-
-// ── Proactive messaging ───────────────────────────────────────────────────────
-// Phase 3 — push messages to user without them initiating
-
-export async function sendProactiveMessage(
-  app: App,
-  profile: UserProfile,
-  text: string,
-): Promise<void> {
-  try {
-    await app.client.chat.postMessage({
-      token: profile.assistant.slack.bot_token,
-      channel: profile.user.slack_user_id,
-      text,
-    });
-    auditLog({
-      action: 'proactive_message',
-      source: 'system',
-      actor: profile.assistant.name,
-      target: profile.user.slack_user_id,
-      details: { preview: text.slice(0, 100) },
-      outcome: 'success',
-    });
-  } catch (err) {
-    logger.error('Failed to send proactive message', { err, assistant: profile.assistant.name });
-  }
 }

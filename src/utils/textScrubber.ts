@@ -29,7 +29,6 @@ const TOOL_NAMES = [
   'create_meeting', 'delete_meeting', 'escalate_to_user',
   'find_available_slots', 'get_calendar', 'get_free_busy',
   'move_meeting', 'set_event_category', 'update_meeting', 'manage_calendar_issue',
-  'manage_working_elsewhere',
   // Slack lookups
   'find_slack_channel', 'find_slack_user',
   // Knowledge

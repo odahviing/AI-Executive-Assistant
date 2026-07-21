@@ -1,92 +1,14 @@
 /**
- * categoryOps — the `manage_working_elsewhere`, `set_event_category`, and
- * `manage_calendar_issue` case bodies, extracted VERBATIM from
+ * categoryOps — the `set_event_category` and `manage_calendar_issue` case
+ * bodies, extracted VERBATIM from
  * ../../calendarHealth.ts. No logic changes: relative import depth deepened two
  * levels; free vars threaded via OpCtx (each handler destructures only what its
  * body uses).
  */
-import { DateTime } from 'luxon';
-import {
-  getCalendarEvents,
-  createMeeting,
-  deleteMeeting,
-  updateMeeting,
-} from '../../../connectors/graph/calendar';
+import { updateMeeting } from '../../../connectors/graph/calendar';
 import { auditLog, getActiveCalendarIssues, updateCalendarIssueStatus, type IssueStatus } from '../../../db';
 import logger from '../../../utils/logger';
 import type { OpCtx } from './context';
-
-export async function handleManageWorkingElsewhere(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
-  const { context, userEmail, timezone } = ctx;
-        // v3.3 — owner-only personal status marker (Working Elsewhere). Creates
-        // / removes an all-day showAs=workingElsewhere event so WE-mode (slot
-        // finder + booking gate + active-mode skip) reads it. NOT a meeting.
-        if (context.senderRole !== 'owner') {
-          return { error: 'not_permitted', reason: 'Only the owner can set their working-elsewhere days.' };
-        }
-        const action = (args.action as string | undefined)?.trim();
-        const startDateArg = (args.start_date as string | undefined)?.trim();
-        const endDateArg = (args.end_date as string | undefined)?.trim() || startDateArg;
-        const location = (args.location as string | undefined)?.trim() ?? '';
-        if (!startDateArg) return { error: 'empty_start_date' };
-        const startDt = DateTime.fromISO(startDateArg, { zone: timezone });
-        const endDtInclusive = DateTime.fromISO(endDateArg!, { zone: timezone });
-        if (!startDt.isValid || !endDtInclusive.isValid) {
-          return { error: 'bad_date', message: 'start_date / end_date must be YYYY-MM-DD.' };
-        }
-
-        if (action === 'clear') {
-          try {
-            const events = await getCalendarEvents(userEmail, startDt.toFormat('yyyy-MM-dd'), endDtInclusive.toFormat('yyyy-MM-dd'), timezone);
-            const markers = events.filter(e => e.isAllDay && !e.isCancelled && e.showAs === 'workingElsewhere');
-            for (const m of markers) {
-              await deleteMeeting(userEmail, m.id);
-            }
-            logger.info('manage_working_elsewhere — cleared', { count: markers.length, from: startDateArg, to: endDateArg });
-            return { ok: true, action: 'clear', cleared: markers.length };
-          } catch (err) {
-            logger.warn('manage_working_elsewhere clear failed', { err: String(err).slice(0, 200) });
-            return { ok: false, error: 'clear_failed' };
-          }
-        }
-
-        if (action !== 'set') {
-          return { error: 'bad_action', message: "action must be 'set' or 'clear'." };
-        }
-        // All-day Graph event: start = midnight of first day, end = midnight of
-        // the day AFTER the last day (exclusive).
-        const allDayStart = startDt.startOf('day').toFormat("yyyy-MM-dd'T'00:00:00");
-        const allDayEnd = endDtInclusive.startOf('day').plus({ days: 1 }).toFormat("yyyy-MM-dd'T'00:00:00");
-        const subject = location ? `Working Elsewhere — ${location}` : 'Working Elsewhere';
-        try {
-          const created = await createMeeting({
-            subject,
-            start: allDayStart,
-            end: allDayEnd,
-            attendees: [],
-            isAllDay: true,
-            showAs: 'workingElsewhere',
-            ...(location ? { location } : {}),
-            userEmail,
-            timezone,
-          });
-          logger.info('manage_working_elsewhere — set', { id: created.id, from: startDateArg, to: endDateArg, location });
-          return {
-            ok: true,
-            action: 'set',
-            event_id: created.id,
-            from: startDt.toFormat('yyyy-MM-dd'),
-            to: endDtInclusive.toFormat('yyyy-MM-dd'),
-            location,
-            _note: location
-              ? `Marked Working Elsewhere (${location}) ${startDt.toFormat('EEE d MMM')}–${endDtInclusive.toFormat('EEE d MMM')}. Those days now use ${location} time for availability and route bookings to you.`
-              : `Marked Working Elsewhere ${startDt.toFormat('EEE d MMM')}–${endDtInclusive.toFormat('EEE d MMM')}. Tip: add a location next time so I can use the right timezone there.`,
-          };
-        } catch (err) {
-          logger.warn('manage_working_elsewhere set failed', { err: String(err).slice(0, 200) });
-          return { ok: false, error: 'set_failed' };
-        }
-}
 
 export async function handleSetEventCategory(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { userEmail, timezone } = ctx;

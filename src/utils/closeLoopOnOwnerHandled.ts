@@ -11,12 +11,14 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { SONNET, MODEL_SONNET } from '../llm/models';
 import type { UserProfile } from '../config/userProfile';
 import { getOpenScannerItems } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
 import { parseDetails, type RequestRow } from '../core/requests/types';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
+import { parseFirstJsonObject } from './extractJson';
 
 interface ScannerResult {
   scanned: boolean;
@@ -105,20 +107,22 @@ export async function closeLoopOnOwnerHandled(params: {
     ].join('\n');
 
     const resp = await client.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 400,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userPrompt }],
     });
-    logLlmUsage('close_loop', 'claude-sonnet-4-6', resp);
+    logLlmUsage('close_loop', MODEL_SONNET, resp);
     const text = resp.content
       .filter(b => b.type === 'text')
       .map(b => (b as Anthropic.TextBlock).text)
       .join('')
       .trim();
-    const cleaned = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```\s*$/i, '');
-    const parsed = JSON.parse(cleaned) as { closed_items?: Array<{ id?: string; reason?: string }> };
-    if (Array.isArray(parsed.closed_items)) {
+    // v3.8.x — shared balanced-object extractor (strips fences + tolerates trailing
+    // prose), same as the gate stack. Raw JSON.parse threw on trailing prose → the
+    // catch fired → no close (an owner-handled request lingered open). null → skip.
+    const parsed = parseFirstJsonObject<{ closed_items?: Array<{ id?: string; reason?: string }> }>(text);
+    if (parsed && Array.isArray(parsed.closed_items)) {
       closedIds = parsed.closed_items
         .filter(c => typeof c.id === 'string' && c.id.length > 0)
         .map(c => ({ id: c.id as string, reason: typeof c.reason === 'string' ? c.reason : '' }));

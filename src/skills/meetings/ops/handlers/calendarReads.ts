@@ -528,14 +528,6 @@ export async function handleGetFreeBusy(args: Record<string, unknown>, ctx: OpCt
             );
             raw[userEmail] = [...ownerBusy, ...synthetic];
           }
-          // Daniel-bug (offer-then-retract) — get_free_busy returns RAW per-person
-          // blocks, NOT a validated set of common bookable slots. When it's called
-          // with attendees, presenting its gaps as "both free / best bet" is
-          // owner-only eyeballing that contradicts the booking check (planMeeting
-          // DOES intersect attendees) → the 14:30 "both free" then "both busy"
-          // flip. Steer to find_available_slots, the one tool that intersects
-          // everyone's calendar + work hours. (Stronger than the static tool
-          // description, which Sonnet ignored — this rides the result it just read.)
           // #WE-spine — owner free/busy on a travel day: attach the away-tz note
           // so "am I free Wed 3pm?" on a Boston day isn't answered in a misleading
           // home clock. Record-based (summarizeWorkingElsewhere with no events →

@@ -1,4 +1,5 @@
 import { getAnthropicClient } from '../../llm/client';
+import { SONNET, MODEL_SONNET } from '../../llm/models';
 /**
  * Reply pipeline (v1.6.2 split from app.ts).
  *
@@ -153,8 +154,8 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // Step 2a (v3.0.2) — surface a status in the assistant panel while the
   // gate stack runs. Between "last tool returned" and "message lands" we
   // burn 4-8s on humanGate + claimChecker + dateVerifier + securityGate
-  // (each a Sonnet pass; some have a retry path that re-invokes the
-  // orchestrator). Pre-v3.0.2 the panel froze on the last tool's verb
+  // (Haiku passes now; the claim-checker's honesty rewrite is a tool-less pass,
+  // not an orchestrator re-invoke). Pre-v3.0.2 the panel froze on the last tool's verb
   // ("Checking the calendar"…) or went blank if no tool fired. Single
   // 'Finishing up' status covers the whole stack. Fire-and-forget, same
   // pattern as the orchestrator's pre-tool and turn-start status hooks.
@@ -233,7 +234,9 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // the reply acknowledges the action. Code-only check, no Sonnet call.
   // Addresses the Bug C pattern from issue #26 aftermath (owner saw audit
   // log "Meeting booked" while the colleague was told "flagged for Idan").
-  if (role === 'colleague' && !isOwnerInGroup) {
+  // v3.8.x — fail-closed on role: a non-owner (colleague / future 'unknown')
+  // gets the full colleague-strict treatment, not an ungated pass.
+  if (role !== 'owner' && !isOwnerInGroup) {
     const toolSummariesText = (result.toolSummaries ?? []).join(' ');
     // v3.7.x (#137b) — require the SUCCESS marker, not just the tool name. The
     // tool log renders `[<tool> OK …]` on success and `[<tool> FAILED: …]` on
@@ -296,7 +299,11 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   }
 
   // Step 4 — colleague-facing security gate (leak filter + identity-spoof).
-  if (role === 'colleague' && !isOwnerInGroup) {
+  // v3.8.x — fail-closed on role: any non-owner (colleague, or a future 'unknown'
+  // sender role) runs the strict leak gate. getSenderRole only returns owner|
+  // colleague today so this is zero behavior change now, but it stops a future
+  // 'unknown' path from shipping ungated (SenderRole allows 'unknown').
+  if (role !== 'owner' && !isOwnerInGroup) {
     // v3.0.5 — pull verified colleague email from people_memory (written at
     // message-arrival in app.ts via users.info → upsertPersonMemory). Extract
     // the last few user-role turns from history for the spoof scan. Both feed
@@ -877,7 +884,7 @@ async function runConcisionPassIfNeeded(rawReply: string, profile: UserProfile):
     const anthropic = getAnthropicClient();
     const ownerFirst = profile.user.name.split(' ')[0];
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 400,
       tools: [{
         name: 'rewrite',
@@ -908,7 +915,7 @@ Draft:
 ${trim}`,
       }],
     });
-    logLlmUsage('concision_pass', 'claude-sonnet-4-6', resp);
+    logLlmUsage('concision_pass', MODEL_SONNET, resp);
     const tool = resp.content.find((b: { type: string }) => b.type === 'tool_use') as { input?: { final?: string } } | undefined;
     const final = tool?.input?.final;
     if (!final || !final.trim()) return trim;

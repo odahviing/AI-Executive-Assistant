@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { SONNET } from '../llm/models';
 import { config } from '../config';
 import { getPersonMemory, setCoreFieldWithProvenance } from '../db';
 import type { PersonGender, CoreFieldSetBy } from '../db';
@@ -52,7 +53,7 @@ async function detectGenderFromImage(
   try {
     const anthropic = getAnthropicClient();
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 5,
       messages: [{
         role: 'user',

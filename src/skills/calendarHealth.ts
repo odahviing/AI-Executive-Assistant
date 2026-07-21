@@ -8,7 +8,6 @@ import { handleBookFloatingBlock } from './calendarHealth/handlers/floatingBlock
 import {
   handleSetEventCategory,
   handleManageCalendarIssue,
-  handleManageWorkingElsewhere,
 } from './calendarHealth/handlers/categoryOps';
 
 export class CalendarHealthSkill implements Skill {
@@ -176,27 +175,6 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
           required: ['action'],
         },
       },
-      {
-        name: 'manage_working_elsewhere',
-        description: `Mark (or clear) days the OWNER is working from a different location/timezone — travel days, working from another office, etc. Sets Outlook's "Working Elsewhere" status so Maelle knows his normal office/home/work-hours rules don't apply those days: availability becomes tentative in his AWAY timezone and bookings route to approval.
-
-Use when the owner says he'll be elsewhere: "next week I'm in France Monday and Tuesday", "I'm working from the NYC office Thu–Fri", "I'll be in London all next week".
-
-action='set' — create the all-day Working Elsewhere marker spanning the dates. Always include \`location\` (where he'll be) — it's what derives his timezone there.
-action='clear' — remove Working Elsewhere markers overlapping the date range (a trip got cancelled / changed).
-
-Owner-only. This is a personal status marker, NOT a meeting — no attendees, no booking rules. Resolve the dates from the owner's words using your date table.`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            action: { type: 'string', enum: ['set', 'clear'], description: 'set = create the marker; clear = remove markers in the range.' },
-            start_date: { type: 'string', description: 'First day, YYYY-MM-DD.' },
-            end_date: { type: 'string', description: 'Last day, YYYY-MM-DD (inclusive). Omit for a single day.' },
-            location: { type: 'string', description: 'Where he\'ll be — city or office ("France", "Boston Office", "London"). Drives the away-timezone; include whenever known (required for set).' },
-          },
-          required: ['action', 'start_date'],
-        },
-      },
     ];
   }
 
@@ -210,9 +188,6 @@ Owner-only. This is a personal status marker, NOT a meeting — no attendees, no
     const opCtx: OpCtx = { context, self: this, profile, userEmail, timezone };
 
     switch (toolName) {
-      case 'manage_working_elsewhere':
-        return handleManageWorkingElsewhere(args, opCtx);
-
       case 'check_calendar_health':
         return handleCheckHealth(args, opCtx);
 
@@ -259,16 +234,16 @@ Available tools:
 - book_floating_block: book a floating block in its preferred window. Pass \`block_name\` (one of: ${blocks.map(b => b.name).join(', ') || 'none configured'}). Configured blocks: ${blocksLine}. All floating blocks live under \`meetings.floating_blocks\`.
   POSITIONAL INTENT: when the owner says "before X" / "after X" for a floating block (X = a meeting on the same day), pass \`prefer_position: 'abut_before' | 'abut_after'\` + \`anchor_event_id\` (the event id from get_calendar). The handler computes \`anchor.start - buffer - duration\` (abut_before) or \`anchor.end + buffer\` (abut_after), snaps to a quarter-hour aligned slot, and verifies window + conflicts. Don't compute the time yourself and pass it through create_meeting — that bypasses the alignment + window-edge checks (the lunch window's preferred_end is exclusive, so e.g. starting AT 13:30 isn't a valid lunch slot). When the owner says "as late as possible" / "right before lunch ends", pass \`prefer_position: 'latest_in_window'\`.
 - set_event_category: add Outlook categories to events
-- get_calendar_issues: see all unresolved calendar issues (double bookings, OOF conflicts)
-- update_calendar_issue: change the status of a tracked issue
+- manage_calendar_issue: list active tracked issues, or transition one. action='list' (read active rows), 'approve' (owner waved it off / "leave it" — won't re-flag), 'start_resolve' (owner said "fix it" — opens a resolve; you then call move_meeting etc. and the row auto-resolves when the event changes), 'owner_will_resolve' (owner will handle it himself), 'owner_done' (owner says he fixed it). issue_id required except for 'list'.
 
 Calendar issue workflow:
 1. check_calendar_health detects issues; active mode auto-fixes the safe subset before returning
 2. For ANY remaining issues (overlaps, OOF conflicts, busy days that need owner input), report to the owner with the issue ID
 3. Owner responds:
-   - "it's fine" / "I know" → call update_calendar_issue with status "approved"
-   - "move X to Y" / "fix it" → call update_calendar_issue with "to_resolve" + their instructions, then use move_meeting to reschedule, then call update_calendar_issue with "resolved"
-   - "cancel X" → use delete_meeting, then call update_calendar_issue with "resolved"
+   - "it's fine" / "I know" → call manage_calendar_issue with action='approve' + the issue_id
+   - "move X to Y" / "fix it" → call manage_calendar_issue with action='start_resolve' + the issue_id, then use move_meeting to reschedule (the row auto-resolves when the event changes — no separate "resolved" call)
+   - "cancel X" → use delete_meeting (the row auto-resolves on the cascade)
+   - "I'll handle it myself" → call manage_calendar_issue with action='owner_will_resolve' + the issue_id (then action='owner_done' once he says he's done)
 4. Approved/resolved issues won't be flagged again
 
 NARRATING ACTIVE-MODE RESULTS — use \`summary_text\` verbatim (v2.7.4):
@@ -289,20 +264,20 @@ A meeting is PROTECTED from auto-reshuffle if ANY of:
   2. Has any external attendee (email domain ≠ owner's company)
   3. Subject matches an entry in \`meetings.protected[].name\`
   4. Any category matches an entry in \`meetings.protected[].category\`
-When the analyzer flags an overlap, it tells you which side is protected (\`kept_event_id\`) and which is movable (\`movable_event_id\`), plus \`protection_reasons\`. Use those fields when narrating. Active-mode DOES NOT auto-move overlaps in this release — that's v2.2 (needs the move-coord state machine). For now, report the overlap + the movable candidate + the protection reasons, and ask the owner to direct.
+When the analyzer flags an overlap, it tells you which side is protected (\`kept_event_id\`) and which is movable (\`movable_event_id\`), plus \`protection_reasons\`. Use those fields when narrating. In ACTIVE mode Maelle auto-moves an INTERNAL-only, unprotected overlap directly (owner authority) and reports it via summary_text; a PROTECTED overlap (external / 4+ attendees / protected subject or category) is NOT auto-moved — report the movable candidate + the protection reasons and ask the owner to direct.
 
 BUSY_DAY — narrate from the structured numbers, briefly:
 When the analyzer flags a \`busy_day\` issue, it carries \`free_minutes\` (total free during work hours), \`longest_gap_minutes\` (the longest single uninterrupted block), and \`threshold_minutes\` (the owner's target). Surface ONE short line per day in HUMAN time — never "80 min" / "110 min": "Wed 14 May runs tight — just under 1.5h free, under your 2h office-day target." Don't enumerate the meetings on that day — owner can ask for detail if he wants it. If multiple days flag, bundle: "Wed 14, Thu 7, and Wed 13 are all under your 2h office-day target." Offer to look at moveable items only when owner asks. Active mode does NOT auto-resolve these — picking what to move is judgment-heavy.
 
 CATEGORY_LIMIT_EXCEEDED — surface as informational, ask for direction:
-When the analyzer flags a \`category_limit_exceeded\` issue, narrate it briefly with the named category, the rule (per_day or per_week), the count vs limit, and the day/week label. Active mode does NOT auto-resolve these — picking which interview / outside-meeting to bump is judgment-heavy and only ${firstName} can decide. Frame as a question: "Tuesday has 3 interviews, your limit is 2 — want me to move one, or keep all 3?". Include the affected event subjects (look them up via \`get_calendar\` if not already in context) so ${firstName} can pick. On owner decline ("keep them all" / "leave it"), call \`update_calendar_issue\` with the issue_id and status='approved' so tomorrow's check doesn't re-surface the same row.
+When the analyzer flags a \`category_limit_exceeded\` issue, narrate it briefly with the named category, the rule (per_day or per_week), the count vs limit, and the day/week label. Active mode does NOT auto-resolve these — picking which interview / outside-meeting to bump is judgment-heavy and only ${firstName} can decide. Frame as a question: "Tuesday has 3 interviews, your limit is 2 — want me to move one, or keep all 3?". Include the affected event subjects (look them up via \`get_calendar\` if not already in context) so ${firstName} can pick. On owner decline ("keep them all" / "leave it"), call \`manage_calendar_issue\` with action='approve' + the issue_id so tomorrow's check doesn't re-surface the same row.
 
 OOF_CONFLICT WITH PROTECTION REASONS — frame as a question, not a status line.
-When an \`oof_conflict\` issue carries \`protection_reasons\` (the meeting can't be auto-moved because it has externals, ≥4 attendees, etc.), present it to the owner as a QUESTION: "External meeting on Thursday during your vacation — want me to handle, or you'll fix it yourself?". Include the meeting subject + date + the protection reasons in plain words, and the issue_id. If the owner says "I'll fix it" / "no, leave it" / "I'll handle", call \`update_calendar_issue\` with that issue_id and status='approved' so tomorrow's check doesn't re-surface the same row. Don't dismiss without explicit owner intent — only on a clear "I'll handle / leave it / no" reply.
+When an \`oof_conflict\` issue carries \`protection_reasons\` (the meeting can't be auto-moved because it has externals, ≥4 attendees, etc.), present it to the owner as a QUESTION: "External meeting on Thursday during your vacation — want me to handle, or you'll fix it yourself?". Include the meeting subject + date + the protection reasons in plain words, and the issue_id. If the owner says "no, leave it", call \`manage_calendar_issue\` with action='approve' + that issue_id; if he says "I'll fix it / I'll handle", call action='owner_will_resolve'. Either way tomorrow's check won't re-surface the row. Don't dismiss without explicit owner intent — only on a clear "I'll handle / leave it / no" reply.
 
 Rules:
 - In passive mode: only book floating blocks when explicitly asked or after check_calendar_health reveals a gap
-- In active mode: book / tag as described above. Never auto-resolve double bookings (even internal-only) in this release — that ships in v2.2.
+- In active mode: book / tag as described above, and auto-move an internal-only, unprotected double-booking directly (owner authority). A PROTECTED clash is reported for owner direction, never auto-moved.
 - Never auto-resolve OOF conflicts — always ask the owner first.
 - Categories are informational — suggest them but don't batch-apply without asking, UNLESS in active mode where the high-confidence classifier handles it.
 - When reporting issues, include the issue_id so the owner's response can be tracked.

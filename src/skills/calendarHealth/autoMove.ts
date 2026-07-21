@@ -285,6 +285,7 @@ export async function pullInternalMeetingToAbut(params: {
     searchTo: mEnd.toUTC().toISO()!,
     minBufferHours: 0,              // owner-authority active move; no colleague lead-time
     excludeEventIds: [movable.id],  // its own current slot isn't a conflict
+    allowMovingEventOverlap: true,  // a back-to-back pull overlaps the meeting's own slot — that's the point, not a forbidden "offer it back"
     autoExpand: false,              // stays in the SAME-DAY gap — never widen across days
     gridAlignStart: true,           // off-grid anchor end → aligned back-to-back start
     profile,
@@ -386,6 +387,7 @@ export async function pushInternalMeetingToAbutBefore(params: {
     searchTo: blockStartDt.toUTC().toISO()!,
     minBufferHours: 0,
     excludeEventIds: [movable.id],   // its own current slot isn't a conflict
+    allowMovingEventOverlap: true,   // a push forward overlaps the meeting's own slot — that's the point, not a forbidden "offer it back"
     autoExpand: false,               // stay in the SAME-DAY gap — never widen
     gridAlignStart: gridAligned,     // aligned target → align; exact off-grid abut → test as-is
     profile,

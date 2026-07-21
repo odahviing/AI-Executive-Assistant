@@ -91,7 +91,6 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
 
   // Calendar issues (v2.9 — merged)
   manage_calendar_issue: 'Sorting the calendar',
-  manage_working_elsewhere: 'Updating your travel days',
 
   // Venues (v2.9)
   find_venue: 'Finding a place',

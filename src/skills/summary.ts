@@ -27,11 +27,12 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { SONNET } from '../llm/models';
 import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
-import { config } from '../config';
 import type { Skill, SkillContext } from './types';
 import type { UserProfile } from '../config/userProfile';
+import { nameGenuinelyMatches } from './meetings/resolveAttendeeEmails';
 import {
   getSummarySessionByThread,
   createSummarySession,
@@ -152,8 +153,8 @@ ${sample}
 
   try {
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 50,
+      ...SONNET,
+      max_tokens: 80,
       messages: [{ role: 'user', content: prompt }],
     });
     const raw = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
@@ -253,8 +254,8 @@ ${params.transcript}
 """`;
 
   const resp = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4096,
+    ...SONNET,
+    max_tokens: 5500,
     messages: [{ role: 'user', content: prompt }],
   });
   const raw = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
@@ -313,8 +314,8 @@ ${params.summaryText}
 """`;
 
   const resp = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4096,
+    ...SONNET,
+    max_tokens: 5500,
     messages: [{ role: 'user', content: prompt }],
   });
   const raw = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
@@ -479,7 +480,7 @@ Output strict JSON only (no prose, no fences):
 
   try {
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 400,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -553,7 +554,6 @@ Output strict JSON only (no prose, no fences):
  */
 async function resolveActionItemAssignees(
   app: App | undefined,
-  botToken: string,
   draft: SummaryDraft,
   profile: UserProfile,
 ): Promise<SummaryDraft> {
@@ -570,10 +570,14 @@ async function resolveActionItemAssignees(
       continue;
     }
 
-    // 1) Try draft attendees first
-    const attendeeMatch = draft.attendees.find(a =>
-      a.internal && a.name.toLowerCase().includes(item.assignee_text.toLowerCase()),
-    );
+    // 1) Try draft attendees first — whole-token match, never a loose substring
+    // and never an empty assignee_text ("".includes → true would bind the FIRST
+    // internal attendee, DMing a colleague about a commitment they don't own).
+    // "Dan" must not silently bind "Daniel".
+    const assigneeText = (item.assignee_text ?? '').trim();
+    const attendeeMatch = assigneeText
+      ? draft.attendees.find(a => a.internal && nameGenuinelyMatches(a.name, undefined, assigneeText))
+      : undefined;
     if (attendeeMatch?.slackId) {
       updatedItems.push({
         ...item,
@@ -770,7 +774,7 @@ ${ownerMessage}
 
         try {
           const resp = await anthropic.messages.create({
-            model: 'claude-sonnet-4-6',
+            ...SONNET,
             max_tokens: 800,
             messages: [{ role: 'user', content: prompt }],
           });
@@ -897,8 +901,8 @@ Output the full updated draft JSON.`;
 
         try {
           const resp = await anthropic.messages.create({
-            model: 'claude-sonnet-4-6',
-            max_tokens: 4096,
+            ...SONNET,
+            max_tokens: 5500,
             messages: [{ role: 'user', content: prompt }],
           });
           const raw = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
@@ -964,10 +968,9 @@ Output the full updated draft JSON.`;
 
         const app = context.app;
         if (!app) return { ok: false, reason: 'no_slack_app' };
-        const botToken = profile.assistant.slack.bot_token;
 
         // Resolve action-item assignees BEFORE rendering for share so @mentions land
-        draft = await resolveActionItemAssignees(app, botToken, draft, profile);
+        draft = await resolveActionItemAssignees(app, draft, profile);
         replaceSummaryDraft(threadTs, draft);
 
         const rawRecipients = (args.recipients ?? []) as Array<{
@@ -1380,8 +1383,8 @@ async function tryCalendarMatch(
 
   try {
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 50,
+      ...SONNET,
+      max_tokens: 80,
       messages: [{ role: 'user', content: `OUTPUT FORMAT: a single line of JSON, nothing else. Do not explain. Do not add prose.
 {"index": <integer>}
 

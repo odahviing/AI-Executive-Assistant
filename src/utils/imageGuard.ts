@@ -14,6 +14,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { SONNET } from '../llm/models';
 import { config } from '../config';
 import logger from './logger';
 import type { DownloadedImage } from '../vision';
@@ -59,7 +60,7 @@ Output STRICT JSON only — no prose, no markdown, no code fences:
 
   try {
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 300,
       messages: [
         {

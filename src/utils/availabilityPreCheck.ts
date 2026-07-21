@@ -25,6 +25,7 @@ import type { UserProfile } from '../config/userProfile';
 import { getCalendarEvents, findAvailableSlots } from '../connectors/graph/calendar';
 import { checkSlot, type RuleViolationKind } from './scheduleRules';
 import { getAnthropicClient } from '../llm/client';
+import { MODEL_HAIKU } from '../llm/models';
 import { logLlmUsage } from './usageLog';
 import logger from './logger';
 
@@ -155,7 +156,7 @@ Output EXACTLY ONE call to normalize_instants.`;
 
   try {
     const resp = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: MODEL_HAIKU,
       max_tokens: 350,
       system: systemPrompt,
       tools: [{
@@ -184,7 +185,7 @@ Output EXACTLY ONE call to normalize_instants.`;
       tool_choice: { type: 'tool', name: 'normalize_instants' },
       messages: [{ role: 'user', content: message.slice(0, 4000) }],
     });
-    logLlmUsage('availability_tz_normalize', 'claude-haiku-4-5-20251001', resp);
+    logLlmUsage('availability_tz_normalize', MODEL_HAIKU, resp);
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
     const raw = toolUse?.input as { instants?: Array<{ instant_iso?: string; duration_minutes?: number; gap_query?: boolean }>; category?: string } | undefined;
     const out: NormalizedInstant[] = [];

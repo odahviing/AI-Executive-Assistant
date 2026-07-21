@@ -118,6 +118,13 @@ export function registerDmHandler(ctx: SlackAppContext): void {
         ? (message as any).thread_ts as string
         : ts;
 
+      // Dedup file/media shares too — Socket Mode is at-least-once and replays
+      // queued events on reconnect. Without this a re-delivered doc/image/audio
+      // is re-parsed + re-run through the orchestrator (duplicate reply/summary/
+      // side effects). The text path dedups below, but every file branch returns
+      // before reaching it.
+      if (!markProcessed(ts)) { logger.debug('DM file dedup — skipping retry', { ts }); return; }
+
       // Document branch — owner-only. Every .txt/.md/.pdf in the upload gets
       // downloaded + parsed sequentially, then routed through the orchestrator
       // as a normal turn with the file content embedded in the user message
@@ -297,6 +304,8 @@ export function registerDmHandler(ctx: SlackAppContext): void {
           const threadTs = ('thread_ts' in message && (message as any).thread_ts)
             ? (message as any).thread_ts as string
             : ts;
+          // Dedup — reconnect replays this share; ingesting twice = duplicate draft.
+          if (!markProcessed(ts)) { logger.debug('huddle recap dedup — skipping retry', { ts }); return; }
           logger.info('Forwarded huddle recap detected — ingesting', {
             channel: channelId,
             length: candidate.length,
@@ -432,6 +441,10 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
         const ts = event.ts;
         const threadTs = ('thread_ts' in event && event.thread_ts) ? event.thread_ts as string : ts;
 
+        // Dedup image shares — reconnect replays this event and the text dedup
+        // below is never reached (this branch returns).
+        if (!markProcessed(ts)) { logger.debug('MPIM image dedup — skipping retry', { ts }); return; }
+
         // Load mpimMemberIds so the orchestrator knows the group composition
         let mpimMemberIds: string[] | undefined;
         try {
@@ -550,7 +563,7 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
     // Dedup — same ts = Slack retry OR concurrent app_mention firing. First
     // call marks ts; any second handler (this one or app_mention) skips.
     if (!markProcessed(ts)) { logger.debug('MPIM dedup — skipping retry', { ts }); return; }
-    // v2.8.7 — content-based dedup. See app_mention handler above for the
+    // v2.8.7 — content-based dedup. See the app_mention handler for the
     // root cause (Slack assistant-panel mirror = same text, different ts).
     if (!markContentProcessed(event.channel as string, event.user as string, (event.text as string) ?? '')) {
       logger.info('MPIM dedup — same content recently processed, skipping', {
@@ -653,7 +666,7 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
       // bot directly, that's the most unambiguous "respond" signal there is —
       // skip the relevance LLM entirely. (mentionedIds + botUserId are already
       // computed above; we only reach here when mentions are absent OR the bot
-      // IS among them, since the other-people-only case returned at line ~1644.)
+      // IS among them, since the other-people-only case already returned earlier.)
       // Closes the ~2s wasted Sonnet relevance call on every @Maelle group
       // opener — the old fast-path in relevance.ts required ZERO @mentions, so
       // an explicit @Maelle disabled it and paid the full classification.
@@ -689,7 +702,7 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
         say,
         client,
         // v2.6.2 — real-channel thread continuation flips these. The
-        // addressee gate at processMessage:460 reads either flag (`isMpim ||
+        // addressee gate in processMessage reads either flag (`isMpim ||
         // isChannel`) to gate the relevance check, so behavior stays correct;
         // mpimMemberIds is intentionally undefined for channels (no DM-each-
         // member coord routing applies).

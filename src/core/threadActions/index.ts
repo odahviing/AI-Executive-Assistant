@@ -24,8 +24,9 @@ import type { UserProfile } from '../../config/userProfile';
 import { getPersonMemory } from '../../db';
 import logger from '../../utils/logger';
 import { logLlmUsage } from '../../utils/usageLog';
+import { MODEL_HAIKU } from '../../llm/models';
 
-const MODEL = 'claude-haiku-4-5-20251001';
+const MODEL = MODEL_HAIKU;
 
 export type ThreadActionKind = 'book' | 'follow_up' | 'other' | 'unclear';
 

@@ -69,8 +69,6 @@ export const WRITE_TOOLS = new Set([
   'manage_routine',
   // Calendar issues. v2.9 — merged into manage_calendar_issue (update action is the write).
   'manage_calendar_issue',
-  // v3.3 — working-elsewhere marker create/clear (calendar write).
-  'manage_working_elsewhere',
   // Knowledge / summary writes. v2.9 — ingest merged into manage_knowledge.
   'share_summary', 'manage_knowledge',
   'learn_summary_style', 'update_summary_draft',

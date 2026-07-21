@@ -17,9 +17,9 @@
  */
 
 import { getAnthropicClient } from '../llm/client';
+import { SONNET } from '../llm/models';
 import { tavilySearch } from '../skills/general';
 import { resolveVenueLocation } from './locationResolver';
-import { resolveModelId } from '../llm/modelId';
 import logger from './logger';
 
 export interface VenueCandidate {
@@ -229,7 +229,7 @@ ${searchResult.answer ? `Tavily summary: ${searchResult.answer}\n\n` : ''}Top re
 
   try {
     const response = await anthropic.messages.create({
-      model: resolveModelId('claude-sonnet-4-6'),
+      ...SONNET,
       max_tokens: 1500,
       system: sys,
       messages: [{ role: 'user', content: userMsg }],

@@ -407,7 +407,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
       const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
       if (evStart < afterWindowEnd && evEnd > beforeWindowStart) {
-        // Only collide if the touching event isn't ALSO at the same external venue.
+        // Any event overlapping the buffer window collides — no same-venue exemption.
         return {
           passes: false,
           violation_kind: 'travel_buffer_collision',

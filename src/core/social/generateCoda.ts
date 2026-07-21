@@ -17,11 +17,10 @@
  * task reply (not replacing it). Task content always comes first.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
+import { SONNET } from '../../llm/models';
 import type { UserProfile } from '../../config/userProfile';
 import type { LegacySocialDirectiveShape as SocialDirective } from './stateMachine';
-import { config } from '../../config';
 import logger from '../../utils/logger';
 import {
   getRecentTopicBeats,
@@ -125,7 +124,7 @@ Output the coda sentence only. No quotes, no label.`;
   try {
     const anthropic = getAnthropicClient();
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 100,
       tools: [{
         name: 'compose_coda',

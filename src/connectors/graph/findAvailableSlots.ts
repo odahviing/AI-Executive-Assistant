@@ -6,7 +6,7 @@ import { scoreSlotDensity, densityConfigFromProfile, prefersDensePacking } from 
 import type { MeetingMode, CalendarEvent } from './calendarTypes';
 import { getFreeBusy, getCalendarEvents } from './calendarReads';
 
-// ── Slot-rule helpers ────────────────────────────────────────────────────────
+// ── Slot-rule helpers ────────────────────────────────────────────────────────
 
 export async function findAvailableSlots(params: {
   userEmail: string;
@@ -98,6 +98,15 @@ export async function findAvailableSlots(params: {
   // Pass when validating ("can we move it to 10:30?") or discovering ("what
   // are options to move it?") a move. Omit for new bookings.
   excludeEventIds?: string[];
+  // v3.8.x — defrag exemption for behavior 2 above. When true, the moving
+  // event is still SUBTRACTED from busy (behavior 1) but its original slot is
+  // NOT added to the forbidden-zone list (behavior 2 is skipped). Calendar-
+  // health defrag needs this: a pull/push closes a 6–29 min dead gap by moving
+  // the meeting LESS than its own duration, so the back-to-back target always
+  // overlaps the meeting's current slot — and that target is a specific computed
+  // abut, not an offered alternative, so "don't offer the original back" must
+  // not reject it. Omit (default false) for user-facing move discovery.
+  allowMovingEventOverlap?: boolean;
   // v2.6 — category scheduling rules. When set, the slot loop applies the
   // category's rules (day_type, per_day, per_week limits) and filters out
   // slots that would violate them. When omitted, no category enforcement
@@ -346,8 +355,8 @@ export async function findAvailableSlots(params: {
 
     // v2.2.3 (scenario 9 row 7) — all-day busy events should block their
     // entire day. Owner direction:
-    //   isAllDay && showAs === 'free'  → ignore (already handled, getFreeBusy
-    //                                     filters status='free' at line 420)
+    //   isAllDay && showAs === 'free'  → ignore (free all-day isn't busy; it's
+    //                                     already filtered out earlier in this pass)
     //   isAllDay && showAs !== 'free'  → block the entire day
     // Graph getFreeBusy SHOULD return all-day busy as full-day busy intervals,
     // but this is the belt-and-suspenders pass — explicit + deterministic.
@@ -501,7 +510,12 @@ export async function findAvailableSlots(params: {
           .setZone(params.timezone).toMillis();
         const eEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
           .setZone(params.timezone).toMillis();
-        movingEventForbiddenZones.push({ start: eStart, end: eEnd });
+        // Behavior 2 (forbid the original slot as a target) — skipped for
+        // defrag moves, which deliberately abut a neighbour a few minutes off
+        // the current slot. Behavior 1 (the busy-carve below) always runs.
+        if (!params.allowMovingEventOverlap) {
+          movingEventForbiddenZones.push({ start: eStart, end: eEnd });
+        }
         // Carve from busy — shared helper, attendee intervals included (the
         // moving meeting exists in their calendars too).
         carveRangeFromBusy(eStart, eEnd, true);
@@ -1105,4 +1119,4 @@ export async function findAvailableSlots(params: {
   // cap is actively wrong. The pool is already bounded by the search window, and
   // only the spread picks reach the model.
   return candidates;
-}
+}

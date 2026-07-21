@@ -13,6 +13,7 @@
 
 import type Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { MODEL_HAIKU } from '../llm/models';
 import { logLlmUsage } from '../utils/usageLog';
 import logger from '../utils/logger';
 
@@ -132,7 +133,7 @@ export function buildImageBlock(image: DownloadedImage): AnthropicImageBlock {
 export async function describeImage(block: AnthropicImageBlock): Promise<string | null> {
   try {
     const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: MODEL_HAIKU,
       max_tokens: 220,
       messages: [{
         role: 'user',
@@ -146,7 +147,7 @@ export async function describeImage(block: AnthropicImageBlock): Promise<string 
         ],
       }],
     });
-    logLlmUsage('image_describe', 'claude-haiku-4-5-20251001', response);
+    logLlmUsage('image_describe', MODEL_HAIKU, response);
     const text = ((response.content[0] as Anthropic.TextBlock)?.text ?? '').trim().replace(/\s+/g, ' ');
     return text || null;
   } catch (err) {

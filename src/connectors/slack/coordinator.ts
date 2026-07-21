@@ -19,6 +19,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
+import { SONNET } from '../../llm/models';
 import { App } from '@slack/bolt';
 import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
@@ -63,7 +64,7 @@ async function isOutreachReplyByContext(params: {
       `Answer with ONLY "reply" or "new". A short acknowledgement, "yes/no/sounds good", a time preference, a follow-up question about the topic, or any feedback on what was asked → "reply". Anything that introduces a new subject, asks for something different, or reads as a fresh incoming request → "new".`;
 
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 10,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -128,7 +129,7 @@ Reply with ONLY "DONE: ...", "CONTINUE: ...", or "SCHEDULE: ..." — nothing els
 
   try {
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
     });

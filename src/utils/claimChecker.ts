@@ -25,6 +25,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
+import { SONNET, MODEL_SONNET, MODEL_HAIKU } from '../llm/models';
 import logger from './logger';
 import { extractFirstJsonObject } from './extractJson';
 import { logLlmUsage } from './usageLog';
@@ -89,7 +90,11 @@ function needsCheck(input: ClaimCheckInput): boolean {
   // v2.3.2 (2B) — coda mode always checks. Codas are SHORT by design but
   // every word matters; the "shares my name" hallucination was 9 words.
   if (input.mode === 'coda') return true;
-  if (input.bookingOccurred) return false;      // deterministic proof of the only booking claim type
+  // bookingOccurred is NOT a blanket skip (v3.8.x): a booking success proves only
+  // the BOOKING claim, but the same reply can ALSO carry a phantom send ("Booked
+  // Tue 2pm and pinged Yael" with only create_meeting) that must still be checked.
+  // The booking claim stays cheaply verified by the tape ([create_meeting OK] / a
+  // resolve-replay) + the booking hint in the prompt below — so we RUN, not skip.
   // A short reply still carries a phantom-send claim — "Sent it to Yael ✅"
   // (18 chars) / Hebrew "שלחתי ליעל" (~10). The 60-char floor predated the
   // cheap tool-less own-the-miss rewrite and skipped exactly the class the
@@ -108,6 +113,13 @@ export async function checkReplyClaims(input: ClaimCheckInput): Promise<ClaimChe
   const toolBlock = input.toolSummaries.length
     ? input.toolSummaries.map(s => `  - ${s}`).join('\n')
     : '  (no tools ran this turn)';
+
+  // v3.8.x — when a booking succeeded this turn its booking claim is already
+  // verified deterministically; tell the checker so it doesn't re-question the
+  // booking and instead scrutinizes any OTHER action claim in the same reply.
+  const bookingNote = input.bookingOccurred
+    ? '\nNOTE: a booking succeeded this turn — its booking/calendar claim is already verified; do NOT flag the booking itself. Scrutinize any OTHER action claim in the reply (a Slack send/ping, a file/image delivery) against TOOL ACTIVITY.'
+    : '';
 
   // v1.7.5 — MPIM context block. When the reply was drafted inside an MPIM
   // group chat, list the participants so the checker can recognize that
@@ -172,7 +184,7 @@ You audit draft replies from an executive assistant for honesty violations befor
 
 TOOL ACTIVITY THIS TURN:
 ${toolBlock}
-${mpimBlock}
+${mpimBlock}${bookingNote}
 DRAFT REPLY:
 """
 ${input.reply}
@@ -285,14 +297,14 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
       // false-positives from whichever model runs here, so the safety net
       // is unchanged. Coda mode also runs on Haiku — owner direction
       // 2026-05-26 "ship it and move all to haiku also the coda".
-      model: 'claude-haiku-4-5-20251001',
+      model: MODEL_HAIKU,
       // 5 fields in the schema; action_summary is the only long field (≤120 chars).
       // 300 tokens is comfortable headroom — used to be 800 to fit the v2.7.8
       // Module F + E extras that were removed in v3.0.6.
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
     });
-    logLlmUsage(input.mode === 'coda' ? 'claim_checker_coda' : 'claim_checker', 'claude-haiku-4-5-20251001', response);
+    logLlmUsage(input.mode === 'coda' ? 'claim_checker_coda' : 'claim_checker', MODEL_HAIKU, response);
     const raw = ((response.content[0] as Anthropic.TextBlock).text ?? '').trim();
     const elapsedMs = Date.now() - start;
 
@@ -464,7 +476,7 @@ ${opts.draft}`;
     const resp = await anthropic.messages.create({
       // Sonnet — the keep-vs-rewrite judgment is what Haiku misfires on; this
       // path runs only on flags (a few/day), so the stronger model is cheap here.
-      model: 'claude-sonnet-4-6',
+      ...SONNET,
       max_tokens: 600,
       tools: [{
         name: 'verdict',
@@ -488,7 +500,7 @@ ${opts.draft}`;
       tool_choice: { type: 'tool', name: 'verdict' },
       messages: [{ role: 'user', content: prompt }],
     });
-    logLlmUsage('claim_checker_rewrite', 'claude-sonnet-4-6', resp);
+    logLlmUsage('claim_checker_rewrite', MODEL_SONNET, resp);
 
     // Read ONLY the structured tool fields — never a text block. This is what
     // makes a reasoning leak impossible: the model's monologue, if any, lives in

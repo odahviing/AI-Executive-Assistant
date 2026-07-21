@@ -166,8 +166,6 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
     'check_calendar_health', 'book_floating_block', 'set_event_category',
     // v2.9 — get_calendar_issues + update_calendar_issue merged.
     'manage_calendar_issue',
-    // v3.3 — owner marks travel / working-elsewhere days (Working Elsewhere mode).
-    'manage_working_elsewhere',
     // v3.8.x — these were added after the scope map and never mapped, so Module G
     // shipped them on EVERY owner turn + logged "tool not mapped" each restart:
     // per-date schedule overrides (#143, replaced the WE spine), slot holds (#30),
