@@ -222,15 +222,17 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // I'll handle the others" scenarios.
           let attendeeEmails = (args.attendee_emails as string[]) ?? [];
 
-          // MOVE-PATH AUTHORITY (owner-path only): when moving_event_ids is set
-          // AND the owner is the initiator, the meeting's existing attendees
-          // ARE the attendees to check. Owner direction: "find_available_slots
-          // should just take the list of people to check if they're free or
-          // not" — tool reads them itself; Sonnet doesn't have to remember.
-          // Closes the painful Sales BiWeekly trace where Sonnet's later call
-          // dropped Isaac from attendee_emails and 17:00 was proposed without
-          // Isaac being verified. Colleague-path skips this — that flow uses
-          // per-attendee annotation (see v2.7.0 colleague-path block below).
+          // MOVE-PATH AUTO-FILL (owner-path only): when moving_event_ids is set AND
+          // the owner is the initiator, auto-read the moving event's roster so a later
+          // call that DROPPED an attendee still checks everyone. Owner direction:
+          // "find_available_slots should just take the list of people to check" — tool
+          // reads them itself; Sonnet doesn't have to remember. Closes the Sales
+          // BiWeekly trace where Sonnet dropped Isaac and 17:00 was proposed without
+          // him. GUARDED below (#145b): the event roster is folded in ONLY when it
+          // shares an attendee with the explicit set (same meeting) or the explicit set
+          // is empty; a moving_event_id that points at a DIFFERENT meeting is ignored,
+          // never ballooned in. Colleague-path skips this — that flow uses per-attendee
+          // annotation (see v2.7.0 colleague-path block below).
           const isOwnerInitiatedSearch =
             context.senderRole === 'owner' || context.isOwnerInGroup === true;
           const movingIdsForAttendees = (isOwnerInitiatedSearch && Array.isArray(args.moving_event_ids))
@@ -245,16 +247,37 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 timezone,
               );
               if (fromEvent.length > 0) {
-                // Union with any explicit args.attendee_emails (don't drop what
-                // Sonnet passed; just guarantee the event's attendees are in).
-                const merged = new Set<string>([...attendeeEmails.map(e => e.toLowerCase()), ...fromEvent.map(e => e.toLowerCase())]);
-                const before = attendeeEmails.length;
-                attendeeEmails = [...merged];
-                if (attendeeEmails.length > before) {
-                  logger.info('find_available_slots — auto-filled attendees from moving event', {
+                const explicitLc = attendeeEmails.map(e => e.toLowerCase());
+                const eventLc = fromEvent.map(e => e.toLowerCase());
+                // #145b (2026-07-21 "Automation" balloon) — only fold the moving event's
+                // roster into a NON-EMPTY explicit set when the two SHARE at least one
+                // attendee. Zero overlap means the moving_event_id points at a DIFFERENT
+                // meeting than the attendees describe: that day the model passed the real
+                // four {chris,isaac,onn,dina} but a wrong sibling id whose roster is
+                // {yael,elan,ysrael} — disjoint → 3 strangers unioned in → 7 people → 0
+                // slots on a day everyone was actually free. resolveMovingEventAttendees
+                // matches by EXACT id, so a wrong id returns a wrong-but-real roster; the
+                // overlap test is what catches it. An EMPTY explicit set → Sonnet dropped
+                // everyone → fill from the event (the Sales-BiWeekly case this was built for).
+                const shares = eventLc.some(e => explicitLc.includes(e));
+                if (explicitLc.length === 0 || shares) {
+                  const merged = new Set<string>([...explicitLc, ...eventLc]);
+                  const before = attendeeEmails.length;
+                  attendeeEmails = [...merged];
+                  if (attendeeEmails.length > before) {
+                    logger.info('find_available_slots — auto-filled attendees from moving event', {
+                      movingEventIds: movingIdsForAttendees,
+                      addedFromEvent: fromEvent,
+                      finalAttendees: attendeeEmails,
+                    });
+                  }
+                } else {
+                  // Disjoint roster → wrong / mismatched moving_event_id. Keep the explicit
+                  // set as-is; never balloon the search with a different meeting's people.
+                  logger.warn('find_available_slots — moving-event roster is DISJOINT from the explicit attendees; ignoring it (likely a wrong moving_event_id)', {
                     movingEventIds: movingIdsForAttendees,
-                    addedFromEvent: fromEvent,
-                    finalAttendees: attendeeEmails,
+                    eventRoster: fromEvent,
+                    explicitAttendees: attendeeEmails,
                   });
                 }
               }

@@ -303,12 +303,15 @@ export async function buildTurnContext(input: OrchestratorInput) {
   const MODEL_COLLEAGUE = MODEL_SONNET;
   const model = input.senderRole === 'colleague' ? MODEL_COLLEAGUE : MODEL_OWNER;
 
-  // max_tokens — colleagues get shorter answers, owners get full budget.
-  // v3.8.x — bumped from 1024/2048: Sonnet 5's tokenizer is ~30% denser than
-  // 4.6's, so the same reply text costs ~30% more output tokens. Thinking is
-  // disabled (see the callClaude site), so the whole budget is response text —
-  // the bump just keeps a reply that fit before from truncating now.
-  const maxTokens = input.senderRole === 'colleague' ? 1400 : 2700;
+  // max_tokens — now carries THINKING headroom. The orchestrator runs adaptive
+  // thinking at `high` (Sonnet-5 retry, see the callClaude site), and thinking
+  // shares the output budget with the reply + tool_use blocks. The old 1400/2700
+  // (sized for thinking-OFF, response-text-only) would truncate the moment the
+  // model reasons — the exact stop_reason:max_tokens failure the migration guide
+  // warns of, worsened by Sonnet 5's ~30%-denser tokenizer. These are a CEILING,
+  // not a target: adaptive throttles actual spend per turn, so easy turns stay
+  // cheap; reply brevity stays a PROMPT concern, not a max_tokens one.
+  const maxTokens = input.senderRole === 'colleague' ? 12000 : 16000;
 
   // Build system prompt in two parts for prompt caching:
   //   static  → skills rules (large, profile-driven) — cached for 5 min

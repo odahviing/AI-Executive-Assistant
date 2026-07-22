@@ -1389,15 +1389,23 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
           return false;
         };
 
+        // A FAILED autofix the owner can't act on stays SILENT — dropped from both the
+        // narration lines and the returned issues[]. Two kinds qualify:
+        //   • inefficient_gap — a dense-packing nudge; a failed defrag re-raised the same
+        //     gap every run and tempted Sonnet to offer overriding an attendee's hours (#146.3).
+        //   • missing_floating_block — a lunch/break that couldn't be booked because the day
+        //     is packed solid. "No lunch, no room, keep an eye on it" is a dead end: nothing
+        //     the owner or Maelle can do (bug 2). A BOOKABLE block still auto-books + reports;
+        //     only the can't-fit case goes quiet.
+        // A SUCCESSFUL fix of either type still surfaces (Maelle reports the action she took).
+        const isSilentFailedIssue = (i: HealthIssue): boolean =>
+          i.fix_failed === true &&
+          (i.type === 'inefficient_gap' || i.type === 'missing_floating_block');
+
         const summaryLines: string[] = [];
         for (const i of issues) {
-          // #133/#143 — a dense inefficient_gap is an AUTONOMOUS preference, not
-          // an owner-actionable conflict. A SUCCESSFUL defrag already shadow-
-          // notifies; a FAILED one must stay SILENT. Surfacing "couldn't close
-          // the 20-min gap" led Sonnet to offer to OVERRIDE an attendee's work
-          // hours for a packing tweak (the Lori 5-Aug 13:45 offer). Leave it,
-          // exactly like consolidation's "no strict improvement → no move".
-          if (i.type === 'inefficient_gap' && i.fix_failed) continue;
+          // A non-actionable failed autofix stays silent (see isSilentFailedIssue).
+          if (isSilentFailedIssue(i)) continue;
           if (i.fixed && i.fix_detail) {
             // Successful fix — narrate the action.
             summaryLines.push(`✓ ${i.fix_detail}`);
@@ -1436,15 +1444,11 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // the array the narrator reads → it re-flagged despite the approval.
         // Drop acknowledged/resolved-and-unfixed issues from what's RETURNED, so
         // the narrator can't surface them. Fixed/failed issues stay (Maelle still
-        // reports the action she took). Mirrors the brief/analyze read-paths.
-        // #146.3 — a FAILED dense inefficient_gap (defrag couldn't close it, e.g. the
-        // Aug 5 Simon↔Lori gap where Lori's busy) stays SILENT — dropped from what the
-        // narrator reads, mirroring the summary-text filter above. It's an efficiency
-        // nudge, not owner-actionable; surfacing it re-raised the same gap every run and
-        // tempted Sonnet to offer overriding Lori's hours. A SUCCESSFUL gap fix still
-        // shows (Maelle reports the move).
+        // reports the action she took), EXCEPT a non-actionable failed autofix,
+        // which stays silent here too (see isSilentFailedIssue). Mirrors the
+        // brief/analyze read-paths.
         const visibleIssues = issues.filter(i =>
-          !(i.type === 'inefficient_gap' && i.fix_failed)
+          !isSilentFailedIssue(i)
           && (i.fixed || i.fix_failed || !isAckSuppressed(i)));
         return {
           issues: visibleIssues,

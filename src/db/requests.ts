@@ -248,6 +248,27 @@ export function getOpenRequestsForThread(ownerUserId: string, threadTs: string):
   `).all(ownerUserId, threadTs) as RequestRow[];
 }
 
+/**
+ * #145-followup (Oran "still waiting" on a dead approval, 2026-07-22) — the LATEST
+ * request that originated in this thread, ANY state (including terminal). The
+ * colleague-path context only surfaces OPEN thread requests (getOpenRequestsForThread),
+ * so a colleague chasing a resolved/expired/cancelled approval got NO state signal and
+ * the model confabulated "still waiting on Idan." This returns the real row so the
+ * colleague-path can answer honestly (and, on a terminal row, offer to revive it).
+ * Thread-scoped for privacy — only the row from THIS conversation's thread. Returns
+ * null when the thread never carried a request.
+ */
+export function getLatestRequestForThread(ownerUserId: string, threadTs: string): RequestRow | null {
+  const row = getDb().prepare(`
+    SELECT * FROM requests
+    WHERE owner_user_id = ?
+      AND origin_thread_ts = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(ownerUserId, threadTs) as RequestRow | undefined;
+  return row ?? null;
+}
+
 export function getChildRequests(parentId: string): RequestRow[] {
   return getDb().prepare(
     `SELECT * FROM requests WHERE parent_request_id = ? ORDER BY created_at ASC`

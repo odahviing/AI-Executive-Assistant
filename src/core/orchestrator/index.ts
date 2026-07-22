@@ -280,10 +280,17 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     const response = await callClaude({
       model,
       max_tokens: maxTokens,
-      // Sonnet 5 runs adaptive thinking by default when `thinking` is omitted;
-      // disable it so the booking loop stays snappy and its turn shape (no
-      // thinking blocks round-tripped through the tool loop) matches Sonnet 4.6.
-      thinking: { type: 'disabled' },
+      // Sonnet-5 retry (staged): the orchestrator is a decision/tool-routing loop,
+      // and the thinking-OFF wave (fabricated "I checked", availability flips,
+      // under-escalation) traced to Sonnet 5 being less tool-eager + more literal
+      // with reasoning disabled. Adaptive thinking at `high` restores tool-reaching
+      // + self-verification on the exact layer that broke; `effort` is a ceiling and
+      // adaptive throttles within it, so easy turns stay cheap. The full
+      // response.content (incl. thinking blocks) is echoed back unchanged at the
+      // messages.push below — required on the same model. Guards/classifiers stay
+      // thinking-off (SONNET bundle). Revert = MODEL_SONNET → 4.6 (one line).
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
       system: systemBlocks,
       tools: tools.length > 0 ? tools : undefined,
       tool_choice: toolChoice,

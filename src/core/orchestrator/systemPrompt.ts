@@ -2,7 +2,7 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
 import { buildSkillsPromptSection, getActiveSkills } from '../../skills/registry';
 import { formatPreferencesCatalog, formatPeopleMemoryForPrompt, formatThreadPeopleBlock, getPersonMemory } from '../../db';
-import { getAwaitingOwnerRequests, getOpenRequestsForThread } from '../../db/requests';
+import { getAwaitingOwnerRequests, getOpenRequestsForThread, getLatestRequestForThread } from '../../db/requests';
 import { parseDetails } from '../requests/types';
 import { formatAssistantSelfForPrompt } from '../assistantSelf';
 import { formatPeopleCatalogSync, readPersonMemorySync, slugifyName } from '../../memory/peopleMemory';
@@ -267,6 +267,32 @@ The colleague's current reply is responding to ${firstName}'s counter offer. Pic
         return sections.length > 0 ? '\n' + sections.join('\n\n') : '';
       })()
     : '';
+
+  // #145-followup (Oran "still waiting" on a dead approval, 2026-07-22) — HONEST
+  // STATUS for a colleague chasing a DECIDED/DEAD approval. colleagueThreadApprovalsSection
+  // above lists only OPEN thread requests, so a colleague asking "any update?" on a
+  // resolved/expired/cancelled approval got NO state signal → the model confabulated
+  // "still waiting on ${firstName}" for a request that's actually closed. Surface the
+  // REAL terminal state (+ an honest revive offer) so she never fabricates a pending
+  // status, and can re-escalate on a yes (a fresh create_approval reaches ${firstName};
+  // the terminal-prior mints a fresh row, not a silent reuse).
+  const threadRequestStatusSection = (() => {
+    if (isOwner || !threadTs) return '';
+    const latest = getLatestRequestForThread(user.slack_user_id, threadTs);
+    // Open rows are already covered above; only speak up for a TERMINAL row.
+    if (!latest || latest.state === 'awaiting_owner' || latest.state === 'awaiting_colleague' || latest.state === 'in_flight') {
+      return '';
+    }
+    const subj = latest.subject ? `"${latest.subject}"` : 'the request in this thread';
+    if (latest.state === 'resolved') {
+      return `\nSTATUS OF THE REQUEST IN THIS THREAD — ${subj} was RESOLVED by ${firstName}. If the colleague asks "any update?" / "did we hear back?", give them the real outcome (${firstName} decided it) — do NOT say you're "still waiting on ${firstName}."`;
+    }
+    // expired / cancelled — the confabulation case
+    const why = latest.state === 'expired'
+      ? `it expired without a decision`
+      : `it was cancelled`;
+    return `\nSTATUS OF THE REQUEST IN THIS THREAD — ${subj} is CLOSED: ${why}. Nothing is pending with ${firstName} on it. If the colleague asks "any update?" / "did we hear back?", be HONEST — NEVER say "still waiting on ${firstName}" (it's dead; nothing is going to him). If they still want it, OFFER to take it back to ${firstName}, and if they say yes, raise it again with create_approval — a fresh ask reaches him.`;
+  })();
 
   const ownerContextSection = isOwner ? `
 WHAT YOU KNOW ABOUT ${user.name.toUpperCase()} (learned over time):
@@ -678,7 +704,7 @@ WEEK BOUNDARIES (critical — use these when interpreting "this week" / "next we
 ${weekBoundaries}
 "Next Sunday" = ${nextWeekStart.toFormat('EEE d MMM')} (${nextWeekStart.toFormat('yyyy-MM-dd')})
 When fetching "next week's calendar" use the date range listed above for Next week.
-${ownerContextSection}${colleagueThreadApprovalsSection}${threadPeopleSection}${speakerMemorySection}${verifiedSenderSection}`;
+${ownerContextSection}${colleagueThreadApprovalsSection}${threadRequestStatusSection}${threadPeopleSection}${speakerMemorySection}${verifiedSenderSection}`;
 
   return { static: staticContent, dynamic: dynamicContent };
 }

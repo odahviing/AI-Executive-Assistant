@@ -2,6 +2,24 @@
 
 ---
 
+## 4.0.1 — Sonnet 5 retry (adaptive thinking on the orchestrator) + the wave's root-cause fixes
+
+Second attempt at Sonnet 5, this time diagnosing WHY 4.0.0's blind flip regressed. Forensics on the live wave (2026-07-21 logs) traced it to Sonnet 5 being run thinking-DISABLED: with reasoning off it's markedly less tool-eager and more literal, so it answered from memory instead of calling the tool — that one policy choice, not the model itself, drove the fabrications, availability flips, and attendee drift. So the retry turns reasoning back ON for the agentic loop only: the orchestrator runs adaptive thinking at effort `high`; the ~30 guard/classifier passes stay thinking-off. Bundled with code fixes for the specific failures the wave exposed. Revert is still the one-line `MODEL_SONNET` flip. Restart to load.
+
+### Changed — model + reasoning
+- **Sonnet tier back to `claude-sonnet-5`.** The orchestrator agentic loop now runs `thinking: {type:'adaptive'}` with `output_config: {effort:'high'}` (was `thinking:{type:'disabled'}`) — restoring tool-reaching + self-verification on the exact decision layer that broke under the thinking-off flip. `maxTokens` bumped 1400/2700 → 12000/16000 (thinking shares the output budget; the old response-only sizing would truncate — worsened by Sonnet 5's ~30%-denser tokenizer). Guards/classifiers stay thinking-off via the `SONNET` bundle (`thinking:{disabled}`, valid on 5). No sampling params / `budget_tokens` anywhere, so no other migration breakage. Watch first live use: truncation (`stop_reason:max_tokens`), the one forced-tool-first-turn path, and whether it now calls the tool instead of fabricating. ([models.ts](src/llm/models.ts), [orchestrator/index.ts](src/core/orchestrator/index.ts), [buildTurnContext.ts](src/core/orchestrator/buildTurnContext.ts))
+
+### Fixed
+- **Move-path attendee balloon (4→7).** On an owner move, `find_available_slots` unioned the moving event's roster into the model's explicit attendee set — so a wrong `moving_event_id` (a sibling meeting with the same subject) folded 3 strangers in and the search returned 0 slots on a day everyone was actually free. Now guarded (#145b): the event roster is folded in only when it SHARES an attendee with the explicit set (same meeting) or the explicit set is empty (Sonnet dropped everyone); a disjoint roster is ignored, never ballooned. ([findAvailableSlots.ts](src/skills/meetings/ops/handlers/findAvailableSlots.ts))
+- **A colleague chasing a dead approval no longer hears "still waiting on Idan."** The colleague-path prompt surfaced only OPEN thread requests, so a follow-up on a resolved/expired/cancelled approval got no state signal and the model confabulated a pending status (the Oran LinkedIn-draft approval, expired, chased for 2 days). New `getLatestRequestForThread` (any state, thread-scoped) feeds a colleague-path status block: the real terminal outcome, never a fake "waiting," plus an honest offer to re-raise it via `create_approval` (a fresh ask actually reaches the owner). (#145-followup) ([requests.ts](src/db/requests.ts), [systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+- **Calendar-health stops nagging about a lunch it can't book.** A missing floating block whose auto-book failed (day packed, no slot) was surfaced as a dead-end "no room, keep an eye on it." It now stays silent — dropped from both the narration and the returned issues, mirroring the failed-dense-defrag rule — while a *bookable* block still auto-books and reports. ([checkHealth.ts](src/skills/calendarHealth/handlers/checkHealth.ts))
+
+### Changed — config + data (applied live to the DB, no deploy needed)
+- The 1pm calendar-health routine window is now **tomorrow → +13 days** (was today → +28d): the morning brief already covers today, so the midday scan looks ahead instead of re-reporting it. (routine prompt, `routines` table)
+- Removed a corrupt duplicate `people_memory` row named "Oran Frenkel" that carried the bot's OWN slack_id (`U0ARK5814PQ`) with misattributed content; the real Oran (`oran.f@reflectiz.com`) is untouched. (`people_memory` table)
+
+---
+
 ## 4.0.0 — SDK 0.112, pre-release audit, cloud-VM prep (Sonnet 5 attempted → reverted to 4.6 same-day)
 
 First major since 2.0 (the Connection interface). Bundles every active chat: the Anthropic SDK jump 0.24 → 0.112 (+ vertex-sdk for the cloud path), a seven-subagent pre-release code audit (all HIGH findings fixed), the dense-calendar defrag finally executing, and the scaffolding to run 24/7 on a cloud VM. The Sonnet 4.6 → 5 model swap that also shipped here was **reverted the same day** — see the model note below. No DB schema migration — restart to load.
