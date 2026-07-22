@@ -730,6 +730,32 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             }
           } catch { /* non-fatal */ }
         }
+        // v4.0.x — also ledger events the owner just LOOKED AT via get_calendar,
+        // so a follow-up "move it / who's on it / cancel it" resolves by id
+        // instead of the model re-searching — or, as Sonnet 5 did on the "Getting
+        // back the Automation" move, calling NO tool and fabricating "I can't find
+        // it" one turn after reading it. The read event's id gets trimmed from
+        // history within a couple turns; the (separate, capped) viewed-ledger keeps
+        // it referenceable. Non-fatal + shape-guarded so an unexpected result is a
+        // no-op, never a throw.
+        if (toolUse.name === 'get_calendar' && Array.isArray((r as any).events) && input.threadTs) {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { recordViewedThreadEvents } = require('../../utils/threadEventLedger') as
+              typeof import('../../utils/threadEventLedger');
+            const viewed = ((r as any).events as Array<Record<string, any>>)
+              .filter(e => typeof e?.id === 'string' && typeof e?.start?.dateTime === 'string')
+              .map(e => {
+                const d = DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? profile.user.timezone });
+                return {
+                  subject: typeof e.subject === 'string' ? e.subject : undefined,
+                  eventId: e.id as string,
+                  dateIso: d.isValid ? d.toFormat('yyyy-MM-dd') : '',
+                };
+              });
+            recordViewedThreadEvents(input.threadTs, viewed);
+          } catch { /* non-fatal */ }
+        }
         // v1.6.4 — remember deleted event ids so the same id can't be deleted
         // twice in one turn. See the short-circuit at the top of the loop.
         if (toolUse.name === 'delete_meeting') {

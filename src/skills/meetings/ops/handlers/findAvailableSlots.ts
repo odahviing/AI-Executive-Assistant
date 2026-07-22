@@ -799,14 +799,18 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 logger.warn('find_available_slots — colleague owner-only fallback threw, continuing', { err: String(err).slice(0, 150) });
               }
             }
-            // Owner path: strict-failed only on attendee busy → surface HIS
-            // genuinely open times with each attendee conflict tagged, instead of
-            // returning empty (which drove Sonnet to the blind ignore flag). Not
-            // run when the owner already opted into ignore_attendee_availability
-            // (attendees intentionally off) or already searched relaxed.
+            // Owner path — OR an insistent colleague (mustBe) — strict-failed only on
+            // attendee busy → surface the OWNER's genuinely open times with each attendee
+            // conflict tagged, instead of returning empty. For the owner: "here's who can't
+            // make it, your call." For the colleague (#145, 2026-07-21 owner direction):
+            // "the attendee's busy, but it's YOUR call — want it anyway?" and they can book
+            // over. Attendee availability is the REQUESTER's call, never the owner's; his own
+            // busy/rules never land in this set (those fail strict checkSlot → recovery=0 →
+            // the #128 soft-rule path handles them instead). Not run when the owner opted
+            // into ignore_attendee_availability or already searched relaxed.
             let ownerAttendeeTaggedSlots: typeof rawSlots = [];
             if (
-              rawSlots.length === 0 && isOwnerInitiatedSearch
+              rawSlots.length === 0 && (isOwnerInitiatedSearch || mustBe)
               && !ignoreAttendeeBusy && !isAlreadyRelaxed
               && attendeeEmails.length > 0
             ) {
@@ -1301,14 +1305,22 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   'You searched with override on, so these include slots where an attendee is busy or outside their working hours — each such slot has `attendee_conflicts: [{email, reason}]`. Present them, but say plainly who is busy / off-hours on those (e.g. "Tue 10:00 — Anna is busy then"). Never present a conflicted slot as clean. The owner can still book any of them.';
               }
               if (usedOwnerAttendeeTagged) {
-                // The owner-tagged backstop: no slot was clean for everyone, so
-                // these are his genuinely open times with each attendee conflict
-                // tagged. Distinct from the override note above (he did NOT search
-                // with override — the tool recovered these) so the framing is
-                // honest: "nothing works for all, here's who can't + widen?".
                 const ownerFirst = context.profile.user.name.split(' ')[0];
-                result._no_all_attendee_free_note =
-                  `No time in this window is free for EVERYONE, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee conflict tagged in \`attendee_conflicts: [{email, reason}]\`. Present them and say plainly, per slot, who can't make it (e.g. "Tue 16:15 — Maayan's busy then", "Tue 16:30 — both are busy"). NEVER present a conflicted slot as clean. ${ownerFirst} can book any of them — it's his call. ALSO offer to look at a different timeframe or widen the window, since nothing here works for all.`;
+                if (mustBe) {
+                  // #145 (2026-07-21 owner direction) — the requester is an INSISTENT
+                  // colleague and every open time has a required attendee busy. This is
+                  // the REQUESTER's call, NOT the owner's — Maelle serves the owner, not the
+                  // attendee. Name who's busy, and if they still want it, book it directly.
+                  // Never escalate to the owner: his own busy/rules never reach this set.
+                  result._attendee_busy_colleague_note =
+                    `No time here is free for everyone — every slot works for ${ownerFirst}, but a REQUIRED ATTENDEE is busy then (each slot's \`attendee_conflicts: [{email, reason}]\` names who; say ONLY that they're busy — you have no further detail, don't invent one). Tell the requester plainly ("${ownerFirst}'s free at 4pm, but <attendee>'s busy then"). This is THEIR call, not ${ownerFirst}'s — do NOT route it to him and do NOT say there's no time. If they still want it (they've usually synced with the attendee already, or they'll own the clash), BOOK IT directly with create_meeting at that slot — the attendee just gets the invite and can decline.`;
+                } else {
+                  // Owner-tagged backstop: no slot was clean for everyone, so these are his
+                  // genuinely open times with each attendee conflict tagged. Honest framing:
+                  // "nothing works for all, here's who can't + widen?".
+                  result._no_all_attendee_free_note =
+                    `No time in this window is free for EVERYONE, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee conflict tagged in \`attendee_conflicts: [{email, reason}]\`. Present them and say plainly, per slot, who can't make it (e.g. "Tue 16:15 — Maayan's busy then", "Tue 16:30 — both are busy"). NEVER present a conflicted slot as clean. ${ownerFirst} can book any of them — it's his call. ALSO offer to look at a different timeframe or widen the window, since nothing here works for all.`;
+                }
               }
               if (hasOverOptional) {
                 result._over_optional_note =

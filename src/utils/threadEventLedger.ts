@@ -60,6 +60,42 @@ export function getThreadEvents(threadTs: string): LedgerEntry[] {
   return ledger.get(threadTs) ?? [];
 }
 
+// v4.0.x — events the owner just LOOKED AT via get_calendar (not created/edited).
+// A read event's id is only in that turn's tool result, which gets trimmed out of
+// the model's history within a turn or two — so a follow-up "move it / who's on it
+// / cancel it" loses the id and the model re-searches, or (as Sonnet 5 did on the
+// "Getting back the Automation" move) fabricates "I can't find it" without even
+// looking. Persisting the read events keeps the id referenceable across trimming,
+// exactly like the created/edited ledger above. SEPARATE store + its own cap so a
+// broad "what's my week" read (dozens of events) can neither evict the deliberate
+// created/edited entries nor bloat the injected prompt block.
+const VIEWED_MAX_PER_THREAD = 20;
+const viewedLedger = new Map<string, LedgerEntry[]>();
+
+/** Record events surfaced by a get_calendar read in this thread. Dedup by id
+ *  (a later read refreshes subject/date); on overflow keep the SOONEST-dated —
+ *  the near-term meetings are the ones the owner acts on ("move tomorrow's"),
+ *  not one three weeks out. Undated entries sort last. */
+export function recordViewedThreadEvents(
+  threadTs: string,
+  events: Array<{ subject?: string; eventId: string; dateIso?: string }>,
+): void {
+  if (!threadTs || events.length === 0) return;
+  const byId = new Map((viewedLedger.get(threadTs) ?? []).map(e => [e.eventId, e]));
+  for (const ev of events) {
+    if (!ev.eventId) continue;
+    byId.set(ev.eventId, { subject: ev.subject || 'a meeting', eventId: ev.eventId, dateIso: ev.dateIso ?? '', at: Date.now() });
+  }
+  const sorted = [...byId.values()].sort((a, b) => (a.dateIso || '9999').localeCompare(b.dateIso || '9999'));
+  viewedLedger.set(threadTs, sorted.slice(0, VIEWED_MAX_PER_THREAD));
+}
+
+/** Events looked at (get_calendar) in this thread, soonest-dated first. */
+export function getViewedThreadEvents(threadTs: string): LedgerEntry[] {
+  if (!threadTs) return [];
+  return viewedLedger.get(threadTs) ?? [];
+}
+
 /**
  * v3.4.2 (F2) — the active planning window for this thread: the date span of
  * the events booked/edited this session. This is the TRAVEL-INDEPENDENT anchor

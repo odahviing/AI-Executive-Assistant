@@ -440,22 +440,37 @@ export async function buildTurnContext(input: OrchestratorInput) {
   if (isOwnerTurn && input.threadTs) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getThreadEvents, getActivePlanningWindow } = require('../../utils/threadEventLedger') as
+      const { getThreadEvents, getViewedThreadEvents, getActivePlanningWindow } = require('../../utils/threadEventLedger') as
         typeof import('../../utils/threadEventLedger');
       const evs = getThreadEvents(input.threadTs);
-      if (evs.length > 0) {
+      const createdIds = new Set(evs.map(e => e.eventId));
+      // v4.0.x — events pulled up via get_calendar this thread (minus ones already
+      // listed as created/edited), soonest-first, capped for the prompt. Lets a
+      // follow-up "move it / cancel it / who's on it" resolve by id instead of the
+      // model re-searching by name — or fabricating "I can't find it" (the "Getting
+      // back the Automation" move: read one turn, "not found" the next).
+      const viewed = getViewedThreadEvents(input.threadTs).filter(v => !createdIds.has(v.eventId)).slice(0, 10);
+      if (evs.length > 0 || viewed.length > 0) {
         const ownerFirst = profile.user.name.split(' ')[0];
-        const lines = evs.slice(-10).map(e => `  - "${e.subject}" — event_id=${e.eventId}`);
-        // v3.4.2 (F2) — active-window anchor for bare day references. Pure
-        // conversation signal (the dates booked this session) — NO travel/marker
-        // needed, so it works for a plain "plan my July" thread. Resolves the
-        // "Thursday → wrong calendar week" drift (booked Jul 2, then reverted to
-        // Jun 25).
-        const win = getActivePlanningWindow(input.threadTs);
-        const anchorLine = win
-          ? `This session you've been scheduling for **${win.from} to ${win.until}**. When ${ownerFirst} gives a bare day reference ("Thursday", "the 1st", "that week", "Monday morning") with no full date, resolve it WITHIN that window — NOT the nearest upcoming calendar day. If he clearly names a different week, follow that.\n\n`
-          : '';
-        ownerThreadEventsBlock = `## YOUR SESSION SO FAR (active planning week + event IDs)\n\n${anchorLine}When ${ownerFirst} asks to change one of the events below ("rename it", "add someone", "move it", "make it Weekly", "set its category"), call update_meeting / move_meeting / set_event_category with the matching event_id — do NOT get_calendar to re-find it by name (a just-written event lags a few seconds, and re-resolving by name can land the wrong week):\n\n${lines.join('\n')}`;
+        const parts: string[] = [];
+        if (evs.length > 0) {
+          const lines = evs.slice(-10).map(e => `  - "${e.subject}" — event_id=${e.eventId}`);
+          // v3.4.2 (F2) — active-window anchor for bare day references. Pure
+          // conversation signal (the dates booked this session) — NO travel/marker
+          // needed, so it works for a plain "plan my July" thread. Resolves the
+          // "Thursday → wrong calendar week" drift (booked Jul 2, then reverted to
+          // Jun 25).
+          const win = getActivePlanningWindow(input.threadTs);
+          const anchorLine = win
+            ? `This session you've been scheduling for **${win.from} to ${win.until}**. When ${ownerFirst} gives a bare day reference ("Thursday", "the 1st", "that week", "Monday morning") with no full date, resolve it WITHIN that window — NOT the nearest upcoming calendar day. If he clearly names a different week, follow that.\n\n`
+            : '';
+          parts.push(`## YOUR SESSION SO FAR (active planning week + event IDs)\n\n${anchorLine}When ${ownerFirst} asks to change one of the events below ("rename it", "add someone", "move it", "make it Weekly", "set its category"), call update_meeting / move_meeting / set_event_category with the matching event_id — do NOT get_calendar to re-find it by name (a just-written event lags a few seconds, and re-resolving by name can land the wrong week):\n\n${lines.join('\n')}`);
+        }
+        if (viewed.length > 0) {
+          const vlines = viewed.map(v => `  - "${v.subject}"${v.dateIso ? ` (${v.dateIso})` : ''} — event_id=${v.eventId}`);
+          parts.push(`## MEETINGS YOU'VE PULLED UP THIS THREAD (already on ${ownerFirst}'s calendar)\n\nWhen ${ownerFirst} asks to move / cancel / reschedule one of these, or who's on it, use the matching event_id directly (move_meeting / delete_meeting / update_meeting / get its attendees) — do NOT say you can't find it and do NOT re-search by name; you already have it:\n\n${vlines.join('\n')}`);
+        }
+        ownerThreadEventsBlock = parts.join('\n\n');
       }
     } catch (err) {
       logger.warn('ownerThreadEventsBlock builder threw — proceeding without it', {

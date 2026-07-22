@@ -69,6 +69,11 @@ export interface PlanMeetingInput {
   // Owner-explicit hints
   locationHint?: string;
   isOnlineHint?: boolean;
+  // v4.0.x — the caller's requested category (create_meeting's args.category).
+  // A HINT the classifier reconciles, NOT an override: detectCategory honors it
+  // when plausible and overrides it when it clearly doesn't fit (the Sonnet-5
+  // "Outside" on an online call). The reconciled verdict is what gets written.
+  categoryHint?: string | null;
 
   // Existing-event reference (move/cancel)
   existingEventId?: string;
@@ -128,6 +133,7 @@ export function planInputFromBookingRequest(
     })),
     locationHint: req.locationHint,
     isOnlineHint: req.isOnlineHint,
+    categoryHint: req.category ?? null,
     existingEventId: req.existingEventId,
     existingEventCategories: req.existingEventCategories,
     existingEventLocation: req.existingEventLocation,
@@ -258,6 +264,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         body: input.body,
         attendees: participants,
         isRecurring: input.isRecurring,
+        requestedCategory: input.categoryHint,
       });
       category = det.category;
       categoryReason = det.reason + ' (re-detected on move; day type changed)';
@@ -277,6 +284,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         body: input.body,
         attendees: participants,
         isRecurring: input.isRecurring,
+        requestedCategory: input.categoryHint,
       });
       category = det.category;
       categoryReason = det.reason;

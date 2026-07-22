@@ -23,6 +23,10 @@ export interface DetectCategoryInput {
   body?: string;
   attendees: Array<{ email?: string; name?: string }>;
   isRecurring?: boolean;
+  // v4.0.x — the category the caller (the model's create_meeting arg) suggested.
+  // A HINT to reconcile, not a command: honor it when it fits, override it when
+  // it clearly doesn't. This classifier's output is authoritative for the write.
+  requestedCategory?: string | null;
 }
 
 export interface DetectCategoryResult {
@@ -83,7 +87,8 @@ ${categoryBlock}
 
 RULES:
 - Walk top-down; first match wins.
-- If NOTHING fits clearly, output "UNMATCHED" (case-sensitive).
+- If NOTHING fits clearly, output "UNMATCHED" (case-sensitive).${input.requestedCategory ? `
+- The requester SUGGESTED "${input.requestedCategory}". Honor it ONLY if it genuinely fits this meeting's description above. If it clearly does not fit — e.g. a physical/in-person category for a meeting with no physical address, or a category whose description plainly describes a different situation — IGNORE the suggestion and classify by the descriptions. Your classification wins over the suggestion.` : ''}
 
 MEETING:
 Subject: ${input.subject.slice(0, 200)}

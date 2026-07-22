@@ -102,9 +102,21 @@ function humanizeIanaToken(match: string): string {
   return '';
 }
 
+// v4.0.x — bare / @-prefixed Slack user id leaked as literal text (NOT a rendered
+// <@…> mention): the group/DM context header feeds "Name (slack_id: U…)" and the
+// model sometimes echoes the id bare (Alex Wiggins → "@U09DGGSJJP9 …", 2026-07-21).
+// humanGate owns this semantically but is a probabilistic Haiku pass and missed it;
+// this deterministic scrub is the path-agnostic backstop (runs on every outbound via
+// formatForSlack). Wrap → <@id> so Slack renders the display name. Tuned to Slack's
+// id shape: uppercase-only + a REQUIRED digit (so all-caps words like "MEETING" /
+// "UPDATED" can't match); the two lookbehinds prevent double-wrapping an id already
+// inside a proper <@…>/<#…> mention. Structured token → the allowed kind of regex.
+const BARE_SLACK_ID_RE = /(?<!<@)(?<!<)@?\b([UW](?=[A-Z0-9]*\d)[A-Z0-9]{7,10})\b/g;
+
 export function scrubInternalLeakage(text: string): string {
   return text
     .replace(GRAPH_ID_RE, '')
+    .replace(BARE_SLACK_ID_RE, '<@$1>')
     .replace(IANA_TZ_RE, humanizeIanaToken)
     // v2.3.2 — sentence-separator dashes. Both forms ("foo - bar" and the
     // em-dash "foo — bar") are AI writing tells and the prompt rule alone

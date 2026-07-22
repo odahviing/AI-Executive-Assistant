@@ -1026,9 +1026,23 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // the create call sends an empty location, and for an online meeting Graph
         // fills it natively with "Microsoft Teams Meeting" (we never stamp a URL).
         const skipLocationField = planLocation.trim().length === 0;
-        if (planCategory && !args.category) {
+        // v4.0.x — planMeeting's classifier (which now reconciles the model's
+        // requested category as a hint) is AUTHORITATIVE for the WRITE. Previously
+        // args.category (the model's raw arg) won and plan.category was only a
+        // fallback + a log line — so Sonnet 5 hallucinating "Outside" on an online
+        // call silently overrode the classifier's correct "Meeting" (the B&H bug:
+        // verdict logged "Meeting", event written "Outside"). Now the reconciled
+        // verdict overwrites the arg; the arg survives only when the classifier
+        // found no clear match (planCategory null).
+        const modelRequestedCategory = typeof args.category === 'string' ? args.category : null;
+        if (planCategory) {
           args.category = planCategory;
         }
+        logger.info('create_meeting — category applied', {
+          applied: (args.category as string | undefined) ?? 'Meeting (default)',
+          classifierVerdict: planCategory,
+          modelRequested: modelRequestedCategory,
+        });
         // v2.8.2 — location stamping is a single string from resolveLocation.
         // For owner-explicit non-ASCII venues we resolve to English for the
         // calendar.
