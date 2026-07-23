@@ -16,6 +16,12 @@
  *      error codes. Same rule both audiences: refuse like a person, not
  *      like an error response.
  *
+ *   3. Image/doc-handling self-talk (v4.0.x / G2) — "I only have the gist",
+ *      "I don't have the actual image content", "just a description":
+ *      narrating her ingestion pipeline instead of simply asking the person
+ *      to clarify. Backstop to C1 (which re-attaches the image so there's
+ *      usually nothing to editorialize).
+ *
  * Sibling to securityGate.ts (still LLM-based but a different concern:
  * securityGate catches AI/bot/Claude tells leaking Maelle's true nature
  * to colleagues; this gate catches infrastructure / mechanism leaks
@@ -250,6 +256,12 @@ Same rule in Hebrew, French, etc. — never expose mechanism in any language.
 
 RAW IDENTIFIERS ARE MACHINE-VOICE — BUT A PROPER MENTION IS NOT. Slack renders "<@U…>" as a person's @name and "<#C…>" as a #channel: those are the CORRECT way to address someone or point at a channel. ALWAYS leave a "<@…>" or "<#…>" mention exactly as written — it is not a leak, and stripping it breaks the addressing (the reader stops getting tagged). What IS machine-voice is a RAW id shown as literal text: an unwrapped account id ("U0ARK5814PQ"), or an internal request/task id ("req_…", "task_…", "coord_…"). A human EA never reads a raw account or request id aloud — if ${assistantName} can't resolve who's meant she asks ("who should I loop in?"), she never reads out the id. Narrating a RAW id (NOT a rendered "<@…>"/"<#…>" mention) is ok=false.
 
+IMAGE / DOCUMENT HANDLING IS INTERNAL — never narrate its fidelity. ${assistantName} looked at whatever was shared; she does NOT tell the reader she "only has the gist", "doesn't have the actual image content", "just has a description", "can't see the image itself", or is "under a bit of doubt" about what reached her. That exposes her ingestion pipeline — a person who glanced at a screenshot doesn't say that. If the shared image/doc is genuinely unclear, she ASKS like a person; she never editorializes about the fidelity of what she received. This is ok=false (rewrite to a plain question).
+- ❌ "Under a bit of doubt here — I don't have the actual image content, just the gist"
+   ✅ "Want to be sure I've got this right — what's in the screenshot?"
+- ❌ "I only have a text description of the image, not the image itself"
+   ✅ "That didn't come through clearly on my end — mind summarizing what's in it?"
+
 Output strict JSON only, no prose, no markdown:
 { "ok": true | false, "rewrite": "<rewrite if ok=false>" | null }
 
@@ -365,6 +377,9 @@ function readVerdictTool(resp: Anthropic.Message): { ok: boolean; rewrite: strin
 function draftLooksLeaky(draft: string): boolean {
   return /\bmy\s+(?:system|routine|backend|tools?|prompts?|instructions|functions?|api)\b/i.test(draft)
     || /\b(?:access denied|not_permitted|permission denied|i don'?t have permission)\b/i.test(draft)
+    // Image-handling self-talk (G2) — Maelle narrating her ingestion pipeline
+    // ("just the gist", "the actual image content", "don't have the image").
+    || /\bactual image content\b|\b(?:just|only) the gist\b|\bdon'?t have the (?:actual )?image\b/i.test(draft)
     // Proper "<@U…>" / "<#C…>" mentions are NOT leaks — Slack renders them as a
     // name/channel and they must survive (rewriteDroppedAFact enforces it too).
     // Only a RAW unwrapped account id or a structured req_/task_/coord_ id is a

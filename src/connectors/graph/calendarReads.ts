@@ -22,7 +22,7 @@ export function parseGraphFreeBusySlot(item: any, requestedTz: string): FreeBusy
     status: item.status,
     _timezone: requestedTz,
   };
-}
+}
 
 // ── Calendar reads ────────────────────────────────────────────────────────────
 
@@ -60,7 +60,7 @@ function toEndOfDayLocal(dateStr: string | undefined | null, timezone: string): 
   return DateTime.fromISO(`${datePart(dateStr, timezone)}T23:59:59`, { zone: timezone })
     .toUTC()
     .toISO({ suppressMilliseconds: true })!;
-}
+}
 
 /**
  * Spread rules:
@@ -107,7 +107,7 @@ export function pickSpreadSlots(
   // ≥1h / duration gap against slots ALREADY chosen (by an earlier tier), so a
   // later tier never lands on top of an earlier-tier pick. This is the SINGLE
   // spreader for the regular, Working-Elsewhere-travel, and optional-join paths.
-  const fillFrom = (pool: typeof slots) => {
+  const fillFrom = (pool: typeof slots, relaxGap = false) => {
     if (chosen.length >= count || pool.length === 0) return;
     // Group candidates by their EFFECTIVE local day. WE-travel slot's day is its
     // TRIP-tz day (away_tz set); home slots group by `timezone` exactly as
@@ -142,7 +142,7 @@ export function pickSpreadSlots(
           // ≥1h from anything already chosen. Only same-day picks can ever be
           // <1h away (cross-day diffs are far larger), so scanning the whole set
           // is safe and cheap.
-          if (chosenDts.some(c => Math.abs(dt.diff(c, 'hours').hours) < MIN_GAP_HOURS)) continue;
+          if (!relaxGap && chosenDts.some(c => Math.abs(dt.diff(c, 'hours').hours) < MIN_GAP_HOURS)) continue;
           if (durationMinutes && durationMinutes > 0
             && chosenDts.some(c => Math.abs(dt.diff(c, 'minutes').minutes) < durationMinutes)) continue;
           chosen.push(start);
@@ -163,11 +163,19 @@ export function pickSpreadSlots(
   // recovery — break a real rule — is a separate, lower tier handled upstream.)
   fillFrom(slots.filter(s => !s.over_optional));
   fillFrom(slots.filter(s => !!s.over_optional));
+  // #Ayala (2026-07-23) — RELAXED FILL. The ≥1h spread gap is right for diverse
+  // options across a week, but when the only clean slots are clustered in one
+  // narrow band (e.g. the single ET-afternoon window overlapping the owner's day
+  // for two ET attendees), it strands real openings and returns just ONE. If the
+  // spread came up short, fill the rest from the same clean slots WITHOUT the 1h
+  // gap — the durationMinutes non-overlap guard still blocks overlapping starts,
+  // so these stay genuine, bookable options (21:15 + 21:45, not just 21:15).
+  if (chosen.length < count) fillFrom(slots.filter(s => !s.over_optional), true);
 
   // Output chronological regardless of round-robin order.
   chosen.sort((a, b) => DateTime.fromISO(a).toMillis() - DateTime.fromISO(b).toMillis());
   return chosen;
-}
+}
 
 export async function getCalendarEvents(
   userEmail: string,
@@ -203,7 +211,7 @@ export async function getCalendarEvents(
     cache.setCachedEvents(cacheKey, data);
     return data;
   });
-}
+}
 
 /**
  * findDuplicateEvent — the ONE idempotency primitive. Returns the owner's
@@ -235,7 +243,7 @@ export async function findDuplicateEvent(
     const evStartMs = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
     return Math.abs(evStartMs - startMs) <= toleranceMs;
   });
-}
+}
 
 /**
  * findReschedulableSibling (v3.6.x) — the create-vs-move slop guard's finder. A
@@ -290,7 +298,7 @@ export async function findReschedulableSibling(params: {
   if (matches.length === 0) return undefined;
   matches.sort((a, b) => Math.abs(evMsOf(a) - startMs) - Math.abs(evMsOf(b) - startMs));
   return matches[0];
-}
+}
 
 async function getCalendarEventsImpl(
   userEmail: string,
@@ -359,14 +367,14 @@ async function getCalendarEventsImpl(
     logger.error('Failed to fetch calendar events', { err, userEmail, startDate, endDate });
     throw err;
   }
-}
+}
 
 export class GraphPermissionError extends Error {
   constructor(public readonly operation: string, public readonly detail: string) {
     super(`Graph permission denied for "${operation}": ${detail}`);
     this.name = 'GraphPermissionError';
   }
-}
+}
 
 export async function getFreeBusy(
   callerEmail: string,
@@ -497,7 +505,7 @@ export async function getFreeBusy(
     }
     throw err;
   }
-}
+}
 
 /**
  * v1.8.8 — cheap probe to check whether an event is part of a recurring
@@ -560,7 +568,7 @@ export async function getNextSeriesOccurrenceAfter(
     });
     return null;
   }
-}
+}
 
 /**
  * v2.1.4 — who organized a calendar event? Used by update_meeting /
@@ -592,7 +600,7 @@ export async function getEventOrganizer(
     });
     return null;
   }
-}
+}
 
 /**
  * v3.5.x — single GET of one event's END instant (resolved to `timezone`) + its
@@ -626,7 +634,7 @@ export async function getEventEndInstant(
     });
     return null;
   }
-}
+}
 
 /**
  * v2.9.1 — load just enough event detail for an attendee-update flow:
@@ -678,7 +686,7 @@ export async function getEventForAttendeeUpdate(
     });
     return null;
   }
-}
+}
 
 export async function getEventType(userEmail: string, meetingId: string): Promise<{
   type?: 'singleInstance' | 'occurrence' | 'exception' | 'seriesMaster';
@@ -709,7 +717,7 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
     endDateTime: event?.end?.dateTime,
     endTimeZone: event?.end?.timeZone,
   };
-}
+}
 
 /**
  * v2.1.6 — post-delete verification. Returns true when Graph confirms the
@@ -737,7 +745,7 @@ export async function verifyEventDeleted(
     });
     return false;
   }
-}
+}
 
 // v2.2.5 (#54) — post-create / post-move verification. Mirrors the spirit of
 // verifyEventDeleted: re-read the event from Graph after a write to confirm it
@@ -752,7 +760,7 @@ export async function verifyEventDeleted(
 // occasional truncation of milliseconds; tighter than 60s produces false
 // drifts. Subject drift is intentionally NOT checked — Outlook normalizes
 // whitespace/emojis/quote styles, that's a separate problem class, not a
-// silent-write failure.
+// silent-write failure.
 
 const VERIFY_TOLERANCE_MS = 60_000;
 
@@ -799,7 +807,7 @@ async function verifyEventStartMatches(
     got: got.setZone(expectedTimezone).toFormat("EEE d MMM 'at' HH:mm"),
     expected: expected.toFormat("EEE d MMM 'at' HH:mm"),
   };
-}
+}
 
 export async function verifyEventCreated(
   userEmail: string,
@@ -808,7 +816,7 @@ export async function verifyEventCreated(
   expectedTimezone: string,
 ): Promise<VerifyResult> {
   return verifyEventStartMatches(userEmail, meetingId, expectedStartIso, expectedTimezone);
-}
+}
 
 export async function verifyEventMoved(
   userEmail: string,
@@ -817,4 +825,4 @@ export async function verifyEventMoved(
   expectedTimezone: string,
 ): Promise<VerifyResult> {
   return verifyEventStartMatches(userEmail, meetingId, expectedStartIso, expectedTimezone);
-}
+}

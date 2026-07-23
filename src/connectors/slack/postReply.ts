@@ -568,15 +568,22 @@ async function runClaimCheckAndMaybeRewrite(ctx: ClaimCheckContext): Promise<str
     const toolSummariesText = [(result.toolSummaries ?? []).join(' '), priorAssistantText].join(' ');
     const matchingToolAlreadyRan =
       verdict.action_type === 'message'
-        ? (/\[message_colleague/.test(toolSummariesText) &&
+        // v4.0.x (G1) — require the SUCCESS form `[message_colleague: <name>]`
+        // (the colon). A SKIPPED (`[message_colleague] <id> — … skipped`) or FAILED
+        // (`[message_colleague FAILED: …]`) summary is NOT a sent message and must
+        // not back a "flagged it to X" claim — that shipped a false "already flagged
+        // it to Simon" when the relay was dropped (2026-07-23). resolve_approval is
+        // also NO LONGER an unconditional backer here: it relays only the DECISION
+        // to the requester, not arbitrary content, so it wrongly backed a specific
+        // question ("whether it has to be him or Rita") that never went out. A
+        // genuine "I told the requester the decision" claim is handled by the
+        // claim-checker's own resolve_approval prompt rule (→ claimed_action=false),
+        // and if that still flags, rewriteOwningTheMiss's Sonnet veto keeps it — so
+        // dropping it here can't corrupt an honest relay. (The old double-DM concern
+        // is moot: the tool-firing retry that caused it is gone; the remedy is now a
+        // tool-less rewrite.)
+        ? (/\[message_colleague:/.test(toolSummariesText) &&
             (!verdict.target_name || toolSummariesText.toLowerCase().includes(verdict.target_name.toLowerCase())))
-          // v3.4.x — resolve_approval relays the owner's decision to the original
-          // requester ITSELF (internal DM via the resolver, not message_colleague).
-          // So it backs a "the requester will get it / I'll let them know / they
-          // can confirm" claim after an approval decision. Its summary carries no
-          // requester name, so no target match is possible or required (the
-          // double-DM the old message_colleague retry caused is exactly the harm).
-          || /\[resolve_approval/.test(toolSummariesText)
         : verdict.action_type === 'book'
           // v2.3.4 — `book` covers any calendar mutation, not just
           // create+finalize. The narrower regex let a move_meeting + correct

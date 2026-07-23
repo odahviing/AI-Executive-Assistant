@@ -93,6 +93,7 @@ export function attendeeTzForDay(
 export function loadAttendeeAvailabilityForEmails(
   emails: string[],
   ownerEmail: string,
+  fallbackTimezone?: string,   // #M3 — no-TZ attendee is assumed in this zone (owner/requester frame)
 ): AttendeeAvailabilityEntry[] | undefined {
   if (!emails || emails.length === 0) return undefined;
 
@@ -100,7 +101,7 @@ export function loadAttendeeAvailabilityForEmails(
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { searchPeopleMemory, getTravelRecord } = require('../db') as typeof import('../db');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getEffectiveWorkingHours } = require('./workingHoursDefault') as
+    const { getEffectiveWorkingHours, defaultWorkingHoursForTz } = require('./workingHoursDefault') as
       typeof import('./workingHoursDefault');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { inferTimezoneFromStateStatic } = require('./locationTz') as
@@ -113,41 +114,49 @@ export function loadAttendeeAvailabilityForEmails(
       if (lower === ownerLower) continue;
       const matches = searchPeopleMemory(email);
       const person = matches.find(m => (m.email ?? '').toLowerCase() === lower);
-      if (!person?.timezone) continue;
-      const wh = getEffectiveWorkingHours(person);
+      // #M3 (2026-07-23 owner direction) — an attendee with no stored timezone is
+      // ASSUMED to be in the requester's frame (fallbackTimezone = owner's TZ) with
+      // standard hours, instead of being SKIPPED (which left them unclipped so the
+      // search could offer owner-morning to a would-be-remote person). A human-stated
+      // TZ/time still overrides via search_window_timezone. When fallbackTimezone is
+      // omitted (other callers) → unchanged: skip the no-TZ attendee.
+      const resolvedTz = person?.timezone ?? fallbackTimezone;
+      if (!resolvedTz) continue;
+      const wh = person?.timezone ? getEffectiveWorkingHours(person) : defaultWorkingHoursForTz(resolvedTz);
       if (!wh) continue;
 
-      let timezone = person.timezone;
+      let timezone = resolvedTz;
       let travelMeta: AttendeeAvailabilityEntry['travel'];
       let travelWindow: AttendeeAvailabilityEntry['travelWindow'];
-      // v3.3.8 — raw record (includes FUTURE trips). The dated window goes on
-      // the entry for per-day resolution; the now-collapsed `timezone` field
-      // keeps its v2.5.2 semantics (travel TZ only while the trip is active
-      // TODAY) for the travelers/narration consumers.
-      const travel = person.slack_id ? getTravelRecord(person.slack_id) : null;
-      if (travel) {
-        const travelTz = inferTimezoneFromStateStatic(travel.location);
-        if (travelTz && travelTz !== person.timezone) {
-          travelWindow = {
-            from: travel.from,
-            until: travel.until,
-            timezone: travelTz,
-            location: travel.location,
-          };
-          const today = new Date().toISOString().slice(0, 10);
-          const activeToday = travel.from <= today;  // until >= today guaranteed by getTravelRecord
-          if (activeToday) {
-            travelMeta = {
-              location: travel.location,
-              homeTimezone: person.timezone,
+      // v3.3.8 — travel applies only to a KNOWN person with a stored TZ (an
+      // assumed-frame attendee has no travel record). Raw record includes FUTURE
+      // trips; the dated window drives per-day resolution.
+      if (person?.timezone) {
+        const travel = person.slack_id ? getTravelRecord(person.slack_id) : null;
+        if (travel) {
+          const travelTz = inferTimezoneFromStateStatic(travel.location);
+          if (travelTz && travelTz !== person.timezone) {
+            travelWindow = {
+              from: travel.from,
               until: travel.until,
+              timezone: travelTz,
+              location: travel.location,
             };
-            timezone = travelTz;
+            const today = new Date().toISOString().slice(0, 10);
+            const activeToday = travel.from <= today;  // until >= today guaranteed by getTravelRecord
+            if (activeToday) {
+              travelMeta = {
+                location: travel.location,
+                homeTimezone: person.timezone,
+                until: travel.until,
+              };
+              timezone = travelTz;
+            }
+          } else if (!travelTz) {
+            logger.info('attendeeAvailability — travel location not in static TZ map, using stored', {
+              email, location: travel.location,
+            });
           }
-        } else if (!travelTz) {
-          logger.info('attendeeAvailability — travel location not in static TZ map, using stored', {
-            email, location: travel.location,
-          });
         }
       }
 
@@ -157,7 +166,7 @@ export function loadAttendeeAvailabilityForEmails(
         workdays: wh.workdays,
         hoursStart: wh.hoursStart,
         hoursEnd: wh.hoursEnd,
-        homeTimezone: person.timezone,
+        homeTimezone: resolvedTz,
         ...(travelMeta ? { travel: travelMeta } : {}),
         ...(travelWindow ? { travelWindow } : {}),
       });
@@ -197,7 +206,8 @@ export function loadAttendeeAvailabilityForEmails(
 export function attendeeCheckParams(
   emails: string[],
   ownerEmail: string,
+  fallbackTimezone?: string,   // #M3 — no-TZ attendees assumed in this zone (owner frame)
 ): { attendeeBusyEmails: string[]; attendeeAvailability?: AttendeeAvailabilityEntry[] } {
-  const availability = loadAttendeeAvailabilityForEmails(emails, ownerEmail);
+  const availability = loadAttendeeAvailabilityForEmails(emails, ownerEmail, fallbackTimezone);
   return { attendeeBusyEmails: emails, ...(availability ? { attendeeAvailability: availability } : {}) };
 }

@@ -2,6 +2,38 @@
 
 ---
 
+## 4.0.3 — real-day bug wave: slot spread, approval verdicts, cross-TZ attendees, image carry-over, honesty guards
+
+A full day of live-use bugs, triaged and root-caused across every subsystem, then fixed. Prod ran 4.0.1 all day (4.0.2 was committed but not deployed), so none of these were 4.0.2 regressions. The wave clustered into four areas: meeting slot-finding (a cross-TZ request collapsing to a single option; a wrapping-band clamp; no-record attendee timezones; online-meeting location), approval verdict routing (`reject` vs `amend`), image loss across turns, and honesty guards. Restart to load.
+
+### Fixed — meeting slot-finding & cross-TZ
+- **Cross-TZ request collapsing to ONE option.** When the only clean slots sit in a single narrow window (the lone ET-afternoon band overlapping the owner's evening for two ET attendees), the spread picker's ≥1h same-day gap discarded every adjacent option and returned just one. A relaxed fill now tops up from the same clean slots without the 1h gap (the duration-overlap guard still keeps them non-overlapping and bookable), so the requester sees several in-window options, not "only one." ([calendarReads.ts](src/connectors/graph/calendarReads.ts))
+- **A wrapping per-day band silently disabled the clamp.** A foreign search-window timezone can shift a per-day availability band past midnight (16:00→01:00); the old `tm > fm` test dropped it, disabling the per-day clamp so interior days re-offered owner-hours (the Yael/Tyler re-offer). The band is now honored as a wrap — in-band = evening part `[from,24h)` ∪ early-morning part `[0,to]`. ([findAvailableSlots.ts](src/connectors/graph/findAvailableSlots.ts))
+- **No-record attendee timezone (M3).** An attendee with no stored timezone was skipped — left unclipped, so the search offered owner-morning to a would-be-remote person. They're now assumed in-frame (owner/requester zone) with standard hours; an explicit "3 EST" / "Boston time" overrides via `attendee_hours`. ([attendeeAvailability.ts](src/utils/attendeeAvailability.ts))
+- **Cross-TZ internal attendee → online, not "Idan Office" (M5).** An online cross-country intro was getting the office-day physical location; a known-different-timezone internal attendee now flags the meeting remote, mirroring the external-attendee path. ([planMeeting.ts](src/skills/meetings/planMeeting.ts))
+- **All-day-busy narration (M1).** When every slot on a day is attendee-blocked, say "X is busy all day <day>" instead of cherry-picking the one or two surfaced point-conflicts. ([findAvailableSlots handler](src/skills/meetings/ops/handlers/findAvailableSlots.ts))
+- **Untagged slot = verified free.** Never tell a requester an attendee "shows busy" at an untagged returned slot — that produced the self-contradictory "clean option for both, but Scott's busy then." No tag = clean for everyone passed. ([meetings.ts](src/skills/meetings.ts))
+- **Owner-path propose-times (P3).** When the owner asks a timing/availability question with no specific time ("when can I meet Gidon next week?"), propose his open slots instead of bouncing "what works for you?" back to him. ([systemPrompt.ts](src/core/orchestrator/systemPrompt.ts))
+
+### Fixed — approval verdict routing
+- **`reject` vs `amend` (the Simon miscommunication).** A "tell him X, ask if it must be him" instruction — a defer + relay-a-question — was being resolved as `reject`, which cancels the whole coordination AND auto-DMs the requester a decline. `reject` is now reserved for a genuine no; `amend` covers counter / defer / relay-a-question (flips to `awaiting_colleague`, DMs the question as "<owner> asked: …", keeps it open + tracked). ([systemPrompt.ts](src/core/orchestrator/systemPrompt.ts), [skill.ts](src/tasks/skill.ts))
+- **Double-notify guard no longer swallows a distinct message.** A `reject` relay no longer arms the double-notify guard, so a genuinely different follow-up `message_colleague` (the "can Rita cover?" question that reached Simon as nothing) still gets through; `approve`/`amend` stay armed against the real duplicate-DM. ([orchestrator/index.ts](src/core/orchestrator/index.ts))
+
+### Fixed — image carry-over & honesty guards
+- **Image re-attach across turns.** Image bytes were multimodal only on the arrival turn; every follow-up saw a lossy one-line gist, so Maelle kept saying "I don't have the actual image content." A follow-up owner turn with no fresh image now re-downloads the recent thread image (the persisted `url_private`) and re-attaches the real pixels — bounded to the last few entries, owner 1:1 only, fresh images win, fail-open. ([processMessage.ts](src/connectors/slack/app/processMessage.ts))
+- **Claim-shield outcome/content aware.** The claim-checker's false-positive shield backed a "message sent" claim by matching a tool NAME regardless of outcome — shipping a false "already flagged it to Simon" when the relay was skipped. It now requires the success form (`[message_colleague: <name>]`) and no longer lets `resolve_approval` unconditionally back a specific-content claim. ([postReply.ts](src/connectors/slack/postReply.ts))
+- **Image self-talk caught by humanGate.** "I only have the gist / don't have the actual image content / under a bit of doubt" is now rewritten to a plain question — a backstop to the re-attach above. ([humanGate.ts](src/utils/humanGate.ts))
+
+### Fixed — brief / news routing
+- **Brief-config misroute (was deferred in 4.0.2).** "For my morning brief, can we also include Reflectiz?" no longer trips `isBriefRequest` into regenerating a brief; the Haiku judge now treats "change what the brief covers" as a config change, so it reaches the orchestrator and `update_my_preferences` fires. ([briefIntent.ts](src/core/briefIntent.ts))
+- **News-config skill bucket.** A news-topic change phrased "in my brief" now routes to `skill='news'` (where topics live), not `skill='brief'`. ([assistant.ts](src/core/assistant.ts))
+
+### Known follow-ups (tracked, not in 4.0.3)
+- **Ayala slot count.** `MAX_PER_DAY = 4` caps the candidate pool BEFORE the spread picker, so a single wide cross-TZ window still surfaces ~2 spaced options rather than the fuller set (a 5th slot like the 3:15 case is culled pre-spread). The relaxed fill above fixed the ≥1h collapse; lifting or making the per-day cap window-aware is the remaining half.
+- **M3 fallback frame.** The no-timezone assumption uses the owner's zone; identical for owner-initiated searches, but a colleague in a different zone requesting for a no-record attendee would want the requester's zone.
+
+---
+
 ## 4.0.2 — thinking tuned per surface + the guard stack parallelized (speed/cost)
 
 Follow-up to the Sonnet-5 retry: thinking is now matched to the task at each SURFACE (not just the orchestrator), and the post-reply guard stack runs concurrently instead of serially. The morning brief had been composing on thinking-OFF Sonnet 5 and making poor surface-or-omit judgments (dropped a genuinely-new news section) and truncating a packed-day brief mid-news; both are addressed. On the efficiency side, the three owner-facing guards now run in one wall-clock instead of three, humanGate's verdict is forced structured output (killing a wasted reparse call), and close_loop moved off Sonnet to Haiku. Restart to load.

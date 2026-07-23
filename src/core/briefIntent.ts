@@ -47,7 +47,7 @@ export async function isBriefRequest(userMessage: string): Promise<boolean> {
           properties: {
             is_brief_request: {
               type: 'boolean',
-              description: 'True ONLY if the user is asking for THEIR morning briefing / daily summary / "what is on my plate today". False if they are asking to be briefed ON A SPECIFIC PERSON or TOPIC, or asking a different question that happens to contain the word "brief".',
+              description: 'True ONLY if the user is asking to RECEIVE their morning briefing NOW — the daily summary / "what is on my plate today". False if they are asking to be briefed ON A SPECIFIC PERSON or TOPIC, asking to CHANGE or CONFIGURE what the brief covers or when it runs (a settings change, handled by the normal assistant — NOT a brief send), or asking a different question that happens to contain the word "brief".',
             },
           },
           required: ['is_brief_request'],
@@ -75,6 +75,8 @@ NO examples (NOT a daily-brief request):
 - "what's on the cookie post"  (asking about a specific item)
 - "morning, did Yael respond?"
 - "what's the briefing time set to?"  (config question)
+- "for my morning brief, can we also include news on Reflectiz?"  (CONFIGURING what the brief covers — a settings change, not a send)
+- "add competitor updates to my brief" / "stop covering crypto in my brief"  (configuring content)
 - "schedule a meeting tomorrow"
 
 Output via the classify tool.`,

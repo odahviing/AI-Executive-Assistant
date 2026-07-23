@@ -20,10 +20,55 @@ import {
 } from '../../../db';
 import { detectAndSaveGender } from '../../../utils/genderDetect';
 import { handleOutreachReply, findSlackUser } from '../coordinator';
-import { describeImage } from '../../../vision';
+import { describeImage, downloadSlackImage, buildImageBlock, type AnthropicImageBlock } from '../../../vision';
 import logger from '../../../utils/logger';
 import type { SenderRole, SlackAppContext, ProcessMessageParams } from './context';
 import { isOverloadError } from './helpers';
+
+// C1 — re-attach a recent thread image on a follow-up owner turn. Image bytes
+// are multimodal ONLY on the turn they arrive; later turns saw just a lossy
+// one-line gist, so the owner kept hearing "I don't have the actual image
+// content" while still discussing a picture he'd just shared. When there's no
+// fresh image, scan the recent history for the most-recent persisted
+// `[Image … file_urls: URL]` and re-download it (the url_private stays valid via
+// the bot token) so Sonnet sees the real pixels again. Bounded to the
+// most-recent image within the last few entries (stops once it scrolls out of
+// near context), owner 1:1 only (owner images are trusted — ingestion already
+// lets them through), fail-open (any hiccup → no image = the prior behavior).
+const IMAGE_REATTACH_LOOKBACK = 6;
+function mimeFromImageUrl(url: string): string {
+  const u = url.toLowerCase();
+  if (u.includes('.jpeg') || u.includes('.jpg')) return 'image/jpeg';
+  if (u.includes('.gif')) return 'image/gif';
+  if (u.includes('.webp')) return 'image/webp';
+  return 'image/png';
+}
+async function reattachRecentThreadImage(
+  history: Array<{ role: string; content: string }>,
+  botToken: string,
+): Promise<AnthropicImageBlock[] | undefined> {
+  const recent = history.slice(-IMAGE_REATTACH_LOOKBACK);
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const m = recent[i];
+    if (m.role !== 'user') continue;
+    const match = /\[Image[^\]]*\bfile_urls:\s*(\S+)/i.exec(m.content);
+    if (!match) continue;
+    const url = match[1];
+    try {
+      const dl = await downloadSlackImage(url, botToken, mimeFromImageUrl(url));
+      if ('error' in dl) {
+        logger.warn('image re-attach — re-download failed, proceeding without', { error: dl.error });
+        return undefined;
+      }
+      logger.info('image re-attach — re-attached recent thread image for a follow-up turn', { urlPreview: url.slice(0, 80) });
+      return [buildImageBlock(dl)];
+    } catch (err) {
+      logger.warn('image re-attach threw — proceeding without', { err: String(err).slice(0, 160) });
+      return undefined;
+    }
+  }
+  return undefined;
+}
 
   // ── Shared message processor ──────────────────────────────────────────────
   // Single function handles all contexts — DM, group DM, channel mention
@@ -209,6 +254,12 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
 
 
     const dbHistory = getConversationHistory(threadTs);
+    // C1 — when the owner keeps discussing a picture from an earlier turn (no
+    // fresh image this turn), re-attach the recent thread image so Sonnet sees
+    // the real pixels, not the lossy gist. Owner 1:1 only; fresh images win.
+    const reattachedImages = (!images?.length && role === 'owner' && !isChannel && !isMpim)
+      ? await reattachRecentThreadImage(dbHistory, assistant.slack.bot_token)
+      : undefined;
     // v1.7.1 — when images are attached, prefix the persisted text with
     // "[Image]" so future turns know an image was shared in this turn (the
     // bytes themselves are never stored — see vision/index.ts).
@@ -594,7 +645,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
             isChannel,
             isOwnerInGroup,
             mpimMemberIds,
-            images,
+            images: images?.length ? images : reattachedImages,
             forceToolOnFirstTurn,
             signal,
             onWriteExecuted: () => markWrite(),

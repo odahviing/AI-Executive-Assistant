@@ -794,20 +794,29 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             }
           }
         }
-        // v3.4.7 — record requesters the resolver relayed an approval outcome to
-        // this turn, so a same-turn message_colleague to them is suppressed (the
-        // double-notify guard at the top of the loop; Ayala Geni 2026-06-22).
-        // Deterministic, no clock: requester_notified_at is stamped ONLY on a
-        // confirmed relay send, and state=awaiting_colleague means the amend
-        // counter was relayed — either way the requester already heard it. A
-        // failed/skipped relay leaves both unset, so message_colleague stays
-        // available as the fallback (never a silent drop).
+        // v3.4.7 — record requesters the resolver relayed a NON-reject approval
+        // outcome to this turn, so a same-turn message_colleague to them is
+        // suppressed (the double-notify guard at the top of the loop; Ayala Geni
+        // 2026-06-22). Deterministic, no clock: requester_notified_at is stamped
+        // ONLY on a confirmed relay send, and state=awaiting_colleague means the
+        // amend counter was relayed — either way the requester already heard the
+        // substantive content. A failed/skipped relay leaves both unset, so
+        // message_colleague stays available (never a silent drop).
+        // AP1 (2026-07-23) — a `reject` relay is EXCLUDED here: it's a terminal
+        // outcome notice, not content-bearing, so it must NOT arm the guard.
+        // Arming it silently swallowed a DISTINCT follow-up message_colleague —
+        // the "ask if Rita can cover?" question that reached Simon as nothing
+        // after a "can't make it" reject. Excluding reject leaves message_colleague
+        // free so a genuinely different message still gets through; approve/amend
+        // stay armed (their relay IS the substance, so a second DM there is the
+        // real duplicate this guard exists to stop).
         if (toolUse.name === 'resolve_approval' && input.senderRole === 'owner'
             && result && typeof result === 'object' && (result as { ok?: boolean }).ok === true) {
           try {
             const reqId = (result as { request_id?: string; approval_id?: string }).request_id
               ?? (result as { approval_id?: string }).approval_id;
-            if (typeof reqId === 'string') {
+            const verdict = (toolUse.input as { verdict?: string })?.verdict;
+            if (typeof reqId === 'string' && verdict !== 'reject') {
               // eslint-disable-next-line @typescript-eslint/no-require-imports
               const { getRequest } = require('../../db/requests') as typeof import('../../db/requests');
               const row = getRequest(reqId);

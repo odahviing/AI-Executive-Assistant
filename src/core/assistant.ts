@@ -347,7 +347,7 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
               // exactly what half-broke skill='news' (enum patched, but PREF_SKILLS
               // wasn't → fileForSkill returned null → saves failed at the allowlist).
               enum: [...PREF_SKILLS],
-              description: "Which area the preference governs. 'calendar' = calendar health / hygiene; 'meetings' = booking & scheduling style; 'brief' = the morning briefing (what to lead with, emphasize, skip, length); 'news' = the news skill's topics / source steer; 'general' = voice, how to address him, cross-cutting. Pick the area whose tools/behavior the preference changes.",
+              description: "Which area the preference governs. 'calendar' = calendar health / hygiene; 'meetings' = booking & scheduling style; 'brief' = the morning briefing's STYLE (what to lead with, emphasize, skip, length) — NOT its news content; 'news' = the news skill's TOPICS, companies to track, and source steer — use 'news' for \"cover X\" / \"include company Y\" / \"stop covering Z\" EVEN when the owner says \"in my morning brief\" (the brief's news section is driven by 'news', not 'brief'); 'general' = voice, how to address him, cross-cutting. Pick the area whose tools/behavior the preference changes.",
             },
             mode: {
               type: 'string',

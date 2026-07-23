@@ -1,6 +1,6 @@
 # Maelle session context
 
-Working on Maelle at `E:/Code/Maelle`. **Current version: v4.0.2** — `package.json` is the source of truth. **HEAD = the 4.0.2 wrap commit** (run `git log -1` for the SHA). The boot log stamps `version` + `gitSha` — confirm it matches HEAD after any restart. **Running model: `claude-sonnet-5`** — the Sonnet-5 retry is LIVE: the orchestrator runs adaptive thinking at `high`, and (4.0.2) COMPOSITION passes also think — brief `medium`, summary `medium`, knowledge `low`; the ~25 cheap classifier/guard passes stay thinking-off. 4.0.2 also parallelized the owner-facing guard stack (claim+humanGate+date, one wall-clock) + forced humanGate's verdict tool + moved close_loop to Haiku. Revert model = flip `MODEL_SONNET` back to `claude-sonnet-4-6` (one line). **Deferred:** the `isBriefRequest` brief-config misroute (see CHANGELOG 4.0.2).
+Working on Maelle at `E:/Code/Maelle`. **Current version: v4.0.3** — `package.json` is the source of truth. **HEAD = the 4.0.3 wrap commit** (run `git log -1` for the SHA). The boot log stamps `version` + `gitSha` — confirm it matches HEAD after any restart. **Running model: `claude-sonnet-5`** — the Sonnet-5 retry is LIVE: the orchestrator runs adaptive thinking at `high`, and (4.0.2) COMPOSITION passes also think — brief `medium`, summary `medium`, knowledge `low`; the ~25 cheap classifier/guard passes stay thinking-off. 4.0.2 also parallelized the owner-facing guard stack (claim+humanGate+date, one wall-clock) + forced humanGate's verdict tool + moved close_loop to Haiku. Revert model = flip `MODEL_SONNET` back to `claude-sonnet-4-6` (one line). **4.0.3** = a real-day bug wave across all subsystems (meeting slot spread + cross-TZ, approval `reject`-vs-`amend` verdicts, image re-attach across turns, honesty guards, brief/news routing — see CHANGELOG); the 4.0.2-deferred `isBriefRequest` misroute is now FIXED. **Known follow-ups:** Ayala `MAX_PER_DAY` pre-spread cap (a single wide cross-TZ window still surfaces ~2 options, not the fuller set); M3 no-TZ fallback uses the owner's zone, not the requester's.
 
 ## This chat = FEATURES **and** BUGS
 
@@ -51,6 +51,8 @@ Routing: honesty/leak → guard · narration/tone/tool-wording/yaml → prompt �
 - **2.1 — "Idan Cohen is typing" indicator.** Not code-diagnosable (bot identity correct `U0ARK5814PQ`, no socket conflict, setStatus uses bot token + 1:1-only). Owner said "no worry about it" — dropped pending a repro/screenshot.
 - **Remaining audit items** (`V4_AUDIT_HANDOFF.md`): mediums M5/M8/M9/M10/M11, Wave-5 lows, guard-class → guard chat. None block anything.
 - **#144** — forward a colleague's attached image to the owner: honesty fix shipped earlier, the actual owner-ward file-forward NOT built. Still open.
+- **4.0.3 follow-up — Ayala slot count (meeting chat).** `MAX_PER_DAY=4` (`connectors/graph/findAvailableSlots.ts:583`) caps the per-day candidate pool BEFORE the spread picker, so a single wide cross-TZ window surfaces ~2 spaced options, not the fuller set (a 5th slot like 3:15 is culled pre-spread). The 4.0.3 relaxed-fill fixed the ≥1h same-day collapse; lifting/window-aware'ing the per-day cap is the remaining half.
+- **4.0.3 follow-up — M3 fallback frame.** The no-TZ attendee assumption (`attendeeAvailability.ts`) uses the OWNER's zone; owner asked for the REQUESTER's zone (identical for owner-initiated, differs when a colleague in another zone requests).
 - **B&H "Outside" event** — the already-booked "B&H Photo Video" event still carries the "Outside" category in Outlook; the category-authority fix is forward-only (prevents new mis-tags, doesn't rewrite history). Recategorize manually or ask Maelle once deployed.
 
 ## Next up — many more real-day bugs + a proper Sonnet 5 retry
@@ -67,6 +69,7 @@ Owner's plan: keep resolving real-day bugs, AND retry Sonnet 5 — this time eva
 
 - **3.7.x–3.8.4** — real-day bug waves; efficient-calendar packing #133 (dense defrag) + round 2 (lunch consolidation, before/after-lunch push/pull); work-time overrides replace the full-day WE spine (#143); OOO-day calendar-health skip (#146); GKE deploy-doc merge. (Details in CHANGELOG / memory.)
 - **4.0.0** — SDK 0.112, V4 pre-release audit, cloud-VM prep, dense-defrag finally executing. **Sonnet 5 attempted → reverted to 4.6 same-day** (the CHANGELOG 4.0.0 entry was corrected to record the revert, not claim Sonnet 5). Version held at 4.0.0 across the same-day follow-up commit.
+- **4.0.1–4.0.3** — Sonnet 5 retry done RIGHT (adaptive thinking, orchestrator `high`; 4.0.1); thinking tuned per surface + guard stack parallelized (4.0.2); then a real-day bug wave (4.0.3) — meeting slot spread/cross-TZ, approval `reject`-vs-`amend`, image re-attach across turns, honesty guards, brief/news routing. (CHANGELOG canonical.)
 
 ## Watch live (first real use after redeploy)
 

@@ -660,6 +660,7 @@ export async function findAvailableSlots(params: {
     // wrongly drop them). Full-day / inverted bands are no-ops.
     let bandFromMin = -1;
     let bandToMin = -1;
+    let bandWraps = false;
     {
       const hasAttendeeClip = !!(params.attendeeAvailability && params.attendeeAvailability.length > 0);
       if (!hasAttendeeClip) {
@@ -668,10 +669,16 @@ export async function findAvailableSlots(params: {
         if (bf.isValid && bt.isValid) {
           const fm = bf.hour * 60 + bf.minute;
           const tm = bt.hour * 60 + bt.minute;
-          // Only a real sub-day band (not full-day 00:00..~23:59, not wrapping).
-          if (tm > fm && !(fm === 0 && tm >= 23 * 60 + 59)) {
+          // #C (2026-07-23) — a real sub-day band, INCLUDING one that wraps past
+          // midnight (e.g. 16:00→01:00, the endpoint-shift a foreign search-window
+          // TZ produces). Before, `tm > fm` dropped the wrapping case → the per-day
+          // clamp silently disabled → interior days re-offered owner-hours. Now keep
+          // it and flag the wrap; the check honors [fm,24h)∪[0,tm]. Skip only a
+          // genuine full-day band (00:00..~23:59).
+          if (fm !== tm && !(fm === 0 && tm >= 23 * 60 + 59)) {
             bandFromMin = fm;
             bandToMin = tm;
+            bandWraps = tm < fm;
           }
         }
       }
@@ -731,10 +738,18 @@ export async function findAvailableSlots(params: {
       // ── Search-only filters (not part of the owner-rule verdict) ──
       // Per-day requested-time clamp (organizer / no-attendee case) — honors the
       // requested window on EVERY day, not just the cursor's first.
-      if (bandFromMin >= 0 && (slotTotalMin < bandFromMin || slotEndMin > bandToMin)) {
-        trackReject('outside_requested_window', cursorDt.toISO()!);
-        cursor = new Date(cursor.getTime() + step);
-        continue;
+      if (bandFromMin >= 0) {
+        // #C — non-wrap: the slot must sit fully inside [from,to]. Wrap (from>to,
+        // crosses midnight): in-band if it's in the evening part (start ≥ from) OR
+        // the early-morning part (end ≤ to).
+        const outOfBand = bandWraps
+          ? (slotTotalMin < bandFromMin && slotEndMin > bandToMin)
+          : (slotTotalMin < bandFromMin || slotEndMin > bandToMin);
+        if (outOfBand) {
+          trackReject('outside_requested_window', cursorDt.toISO()!);
+          cursor = new Date(cursor.getTime() + step);
+          continue;
+        }
       }
       // #128 — booking lead time. Labeled (not a silent skip) so day_summary can
       // name "inside your booking lead time" instead of empty silence.

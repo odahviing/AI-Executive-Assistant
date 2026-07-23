@@ -243,7 +243,21 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     if (anyParticipantRemote) break;
     if (p.slack_id) {
       const travel = getCurrentTravel(p.slack_id);
-      if (travel) anyParticipantRemote = true;
+      if (travel) { anyParticipantRemote = true; break; }
+    }
+    // #M5 (2026-07-23) — a cross-TZ INTERNAL attendee (a colleague whose home zone
+    // differs from the owner's, not just travelers) makes this a de-facto remote
+    // meeting → online, not the office-day default. Mirrors the external-different-TZ
+    // path. Only fires on a KNOWN different TZ; a no-TZ attendee (assumed owner-frame
+    // per #M3) correctly stays local. Fail-open.
+    const pEmail = (p.email ?? '').trim().toLowerCase();
+    if (pEmail) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { searchPeopleMemory } = require('../../db/people') as typeof import('../../db/people');
+        const m = searchPeopleMemory(pEmail).find(x => (x.email ?? '').toLowerCase() === pEmail);
+        if (m?.timezone && m.timezone !== profile.user.timezone) anyParticipantRemote = true;
+      } catch { /* fail-open — no cross-TZ signal */ }
     }
   }
 

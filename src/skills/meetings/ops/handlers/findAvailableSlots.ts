@@ -456,7 +456,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // gets unfiltered slots.
           const attendeeAvailability = ignoreAttendeeBusy
             ? undefined
-            : loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail);
+            // #M3 — pass the owner's TZ as the fallback: an attendee with no stored
+            // timezone is assumed to be in the requester's frame (+ standard hours)
+            // rather than left unclipped. A human-stated TZ/time still overrides.
+            : loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail, timezone);
 
           // v3.7.x (Bug 1.5) — conversational per-attendee hours override. When the
           // owner states an attendee's REAL hours ("Lori starts 7am ET"), thread it
@@ -1342,7 +1345,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // genuinely open times with each attendee conflict tagged. Honest framing:
                   // "nothing works for all, here's who can't + widen?".
                   result._no_all_attendee_free_note =
-                    `No time in this window is free for EVERYONE, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee conflict tagged in \`attendee_conflicts: [{email, reason}]\`. Present them and say plainly, per slot, who can't make it (e.g. "Tue 16:15 — Maayan's busy then", "Tue 16:30 — both are busy"). NEVER present a conflicted slot as clean. ${ownerFirst} can book any of them — it's his call. ALSO offer to look at a different timeframe or widen the window, since nothing here works for all.`;
+                    `No time in this window is free for EVERYONE, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee conflict tagged in \`attendee_conflicts: [{email, reason}]\`. Present them and say plainly, per slot, who can't make it (e.g. "Tue 16:15 — Maayan's busy then", "Tue 16:30 — both are busy"). #M1 — BUT first read \`day_summary\`: for any day whose \`accepted:0\` with an attendee-busy reason (\`attendee_busy_collision\` / \`outside_attendee_work_hours\`), that attendee is unavailable the ENTIRE day — say "<attendee>'s busy all day <that day>", do NOT cherry-pick these 1-2 surfaced slots as if they were the only conflicts. NEVER present a conflicted slot as clean. ${ownerFirst} can book any of them — it's his call. ALSO offer to look at a different timeframe or widen the window, since nothing here works for all.`;
                 }
               }
               if (hasOverOptional) {

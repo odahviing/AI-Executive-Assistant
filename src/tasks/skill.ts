@@ -238,8 +238,8 @@ Owner short-acks ("yes", "go", "no", "kill it") in a thread bound to a pending a
 
 Verdicts:
 - approve: owner said yes. \`data\` is meaningful when a move/booking approval ALSO asked online-vs-in-person (external attendee, unknown timezone, office day) — pass the owner's answer as \`{ is_online: true }\` for online/Teams or \`{ is_online: false }\` for in-person, or \`{ location: "<place>" }\` for a named place. This is folded into the move/create the approval will replay, so it lands instead of re-asking. For every OTHER approval kind, \`data\` is dropped silently. If the owner wants to change the time/attendees at approve-time, use verdict='amend' with \`counter\` — never approve+data for those.
-- reject: owner said no. The linked work is cancelled.
-- amend: owner said "not as asked, but here's an alternative" (e.g. "no, but 13:30 would work"). Provide counter with the alternative.
+- reject: owner said a genuine NO / cancel it. This CANCELS the request AND auto-DMs the requester a decline ("<owner> can't make that work"). Use ONLY for a real no. NEVER use reject to relay a question, defer, or pass a message to the requester — reject sends them a decline and kills the whole coordination (incl. any pending booking). If the owner is still negotiating, or wants to ask the requester something, that's amend.
+- amend: owner is countering, deferring, or wants to RELAY A QUESTION / MESSAGE to the requester and keep the ask alive — "no, but 13:30 would work", "tell him I'm on vacation, ask if it has to be him or someone else can cover next week", "come back to me once you check with them". Put the alternative / question / message in \`counter\`. This flips the request to awaiting_colleague, DMs the requester the counter (a question renders as "<owner> asked: …"), and keeps it OPEN + tracked so their reply reconnects. Use amend WHENEVER the instruction is relay-a-question / ask-them / defer — NOT reject.
 
 Binding — how to pick the right approval_id:
 - Look for an explicit id token in the owner's reply first.
