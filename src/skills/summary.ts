@@ -157,7 +157,7 @@ ${sample}
       max_tokens: 80,
       messages: [{ role: 'user', content: prompt }],
     });
-    const raw = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
+    const raw = ((resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
     const parsed = JSON.parse(cleaned) as { kind?: string };
     return parsed.kind === 'summary' ? 'summary' : 'transcript';
@@ -255,10 +255,15 @@ ${params.transcript}
 
   const resp = await anthropic.messages.create({
     ...SONNET,
-    max_tokens: 5500,
+    // v4.0.x — summary composition on adaptive thinking (medium): produces/
+    // re-extracts the shareable summary, so a reasoning pass lifts the judgment.
+    // max_tokens bumped — thinking shares the output budget with a long-meeting JSON.
+    thinking: { type: 'adaptive' },
+    output_config: { effort: 'medium' },
+    max_tokens: 9000,
     messages: [{ role: 'user', content: prompt }],
   });
-  const raw = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
+  const raw = ((resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
   const parsed = JSON.parse(cleaned) as Partial<SummaryDraft>;
 
@@ -315,10 +320,15 @@ ${params.summaryText}
 
   const resp = await anthropic.messages.create({
     ...SONNET,
-    max_tokens: 5500,
+    // v4.0.x — summary composition on adaptive thinking (medium): produces/
+    // re-extracts the shareable summary, so a reasoning pass lifts the judgment.
+    // max_tokens bumped — thinking shares the output budget with a long-meeting JSON.
+    thinking: { type: 'adaptive' },
+    output_config: { effort: 'medium' },
+    max_tokens: 9000,
     messages: [{ role: 'user', content: prompt }],
   });
-  const raw = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
+  const raw = ((resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
   const parsed = JSON.parse(cleaned) as Partial<SummaryDraft>;
   return {
@@ -778,7 +788,7 @@ ${ownerMessage}
             max_tokens: 800,
             messages: [{ role: 'user', content: prompt }],
           });
-          const raw = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
+          const raw = ((resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
           const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
           const parsed = JSON.parse(cleaned) as { intents?: Array<Record<string, unknown>> };
           const intents = Array.isArray(parsed.intents) ? parsed.intents : [];
@@ -902,10 +912,13 @@ Output the full updated draft JSON.`;
         try {
           const resp = await anthropic.messages.create({
             ...SONNET,
-            max_tokens: 5500,
+            // v4.0.x — summary revision on adaptive thinking (medium); max_tokens bumped for thinking headroom.
+            thinking: { type: 'adaptive' },
+            output_config: { effort: 'medium' },
+            max_tokens: 9000,
             messages: [{ role: 'user', content: prompt }],
           });
-          const raw = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
+          const raw = ((resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
           const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
           const parsed = JSON.parse(cleaned) as Partial<SummaryDraft>;
           const updated: SummaryDraft = {
@@ -1397,7 +1410,7 @@ ${candidateBlock}
 
 Reply with ONLY {"index": N} — no other text.` }],
     });
-    const raw = ((resp.content[0] as Anthropic.TextBlock).text ?? '').trim();
+    const raw = ((resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
     // Tolerant parse: strip code fences, then if the response has prose,
     // pull the first {...} block out before parsing. Sonnet sometimes ignores
     // the strict-format instruction on this kind of selection prompt.

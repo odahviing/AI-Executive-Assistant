@@ -588,11 +588,20 @@ ${Object.keys(peopleGender).length > 0
   try {
     const response = await anthropic.messages.create({
       ...SONNET,
-      max_tokens: (hasNews || hasHealth || hasHolds) ? 1100 : 800,
+      // v4.0.x — the brief composes on adaptive thinking at `medium`. Thinking-off
+      // Sonnet 5 made a poor surface-or-omit judgment (dropped a genuinely-new news
+      // section); a light reasoning pass fixes the call. It's a 1x/day cron, so the
+      // cost is negligible. max_tokens bumped well above the old 800/1100 (which were
+      // sized for thinking-OFF, response-text-only) because thinking now shares the
+      // output budget — the old ceiling would truncate the moment it reasons.
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'medium' },
+      max_tokens: (hasNews || hasHealth || hasHolds) ? 6000 : 4000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userContent }],
     });
-    return ((response.content[0] as Anthropic.TextBlock).text ?? '').trim();
+    // find the TEXT block — with thinking on, content[0] is a thinking block.
+    return ((response.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
   } catch (err) {
     logger.error('Briefing AI generation failed — falling back to simple format', { err: String(err) });
     return buildFallbackBriefing(items, profile);

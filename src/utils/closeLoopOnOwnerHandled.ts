@@ -11,7 +11,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { SONNET, MODEL_SONNET } from '../llm/models';
+import { MODEL_HAIKU } from '../llm/models';
 import type { UserProfile } from '../config/userProfile';
 import { getOpenScannerItems } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
@@ -107,12 +107,16 @@ export async function closeLoopOnOwnerHandled(params: {
     ].join('\n');
 
     const resp = await client.messages.create({
-      ...SONNET,
+      // v4.0.x (PERF-3) — Haiku, not Sonnet: the last Sonnet straggler in the guard
+      // set. Safety is model-independent — the conservative SYSTEM_PROMPT + the
+      // deterministic messageReferencesRequest backstop (below) + fail-open all hold,
+      // and a missed close just resurfaces in tomorrow's brief (safe miss either way).
+      model: MODEL_HAIKU,
       max_tokens: 400,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userPrompt }],
     });
-    logLlmUsage('close_loop', MODEL_SONNET, resp);
+    logLlmUsage('close_loop', MODEL_HAIKU, resp);
     const text = resp.content
       .filter(b => b.type === 'text')
       .map(b => (b as Anthropic.TextBlock).text)

@@ -2,6 +2,26 @@
 
 ---
 
+## 4.0.2 — thinking tuned per surface + the guard stack parallelized (speed/cost)
+
+Follow-up to the Sonnet-5 retry: thinking is now matched to the task at each SURFACE (not just the orchestrator), and the post-reply guard stack runs concurrently instead of serially. The morning brief had been composing on thinking-OFF Sonnet 5 and making poor surface-or-omit judgments (dropped a genuinely-new news section) and truncating a packed-day brief mid-news; both are addressed. On the efficiency side, the three owner-facing guards now run in one wall-clock instead of three, humanGate's verdict is forced structured output (killing a wasted reparse call), and close_loop moved off Sonnet to Haiku. Restart to load.
+
+### Changed — thinking per surface (composition gets a reasoning pass)
+- Morning brief composes on adaptive thinking at `medium` (was thinking-off); max_tokens 800/1100 → 4000/6000 so thinking + the body fit. Fixes both the news-section omit and the mid-news truncation on a packed day. ([briefs.ts](src/tasks/briefs.ts))
+- Post-meeting summary composition — draft-from-transcript, parse-owner-edit, revise-draft — → adaptive `medium`, max_tokens 5500 → 9000. ([summary.ts](src/skills/summary.ts))
+- Knowledge-base entry composition → adaptive `low`. ([knowledge.ts](src/skills/knowledge.ts))
+- Every thinking-on site's text extraction switched from `content[0]` to find-the-text-block — with thinking on, `content[0]` is a thinking block, so the old read returned empty (would have shipped an empty brief). The ~25 cheap classifier/guard/extraction Sonnet passes stay thinking-off. ([briefs.ts](src/tasks/briefs.ts), [summary.ts](src/skills/summary.ts), [knowledge.ts](src/skills/knowledge.ts))
+
+### Changed — guard stack (speed/cost)
+- The three owner-facing guards (claim-check + humanGate + date-verify) now run CONCURRENTLY on the post-concision text with a probe → serial-fallback: if none wants a rewrite (>95% of turns) ship as-is (byte- and side-effect-identical to the old serial chain); if any flags, fall back to the exact serial chain. Collapses 3 serial round-trips to 1 wall-clock with ZERO coverage change; fail-open on a probe error. ([postReply.ts](src/connectors/slack/postReply.ts))
+- humanGate's verdict is now a forced `verdict` tool call (like concision / claim-rewrite) — parsing can't fail and the model's prose can't ship. Kills the old free-text + reparse path (Haiku mis-formatted the bare JSON ~half the time — a wasted second call per gate). Judgment unchanged (same system prompt). ([humanGate.ts](src/utils/humanGate.ts))
+- close_loop moved Sonnet → Haiku (the last Sonnet straggler in the guard set); safety is model-independent (conservative prompt + deterministic backstop + fail-open), and a missed close just resurfaces in tomorrow's brief. Also removes an unintended adaptive-thinking-on site (a Sonnet call that didn't carry the thinking-disabled bundle). ([closeLoopOnOwnerHandled.ts](src/utils/closeLoopOnOwnerHandled.ts))
+
+### Deferred (tracked, not in 4.0.2)
+- Brief-config misroute: a message CONFIGURING the brief's content ("for my brief, also include Reflectiz") trips `isBriefRequest` and regenerates a brief instead of saving the preference — the request never reaches the orchestrator, so `update_my_preferences` never fires. Fix = sharpen the Haiku judge to treat "change what the brief covers" as NOT a send-request. ([briefIntent.ts](src/core/briefIntent.ts))
+
+---
+
 ## 4.0.1 — Sonnet 5 retry (adaptive thinking on the orchestrator) + the wave's root-cause fixes
 
 Second attempt at Sonnet 5, this time diagnosing WHY 4.0.0's blind flip regressed. Forensics on the live wave (2026-07-21 logs) traced it to Sonnet 5 being run thinking-DISABLED: with reasoning off it's markedly less tool-eager and more literal, so it answered from memory instead of calling the tool — that one policy choice, not the model itself, drove the fabrications, availability flips, and attendee drift. So the retry turns reasoning back ON for the agentic loop only: the orchestrator runs adaptive thinking at effort `high`; the ~30 guard/classifier passes stay thinking-off. Bundled with code fixes for the specific failures the wave exposed. Revert is still the one-line `MODEL_SONNET` flip. Restart to load.

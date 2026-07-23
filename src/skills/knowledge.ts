@@ -388,10 +388,15 @@ No JSON. No code fences around the output. Just markdown.`;
   try {
     const resp = await params.anthropic.messages.create({
       ...SONNET,
+      // v4.0.x — KB-entry composition on adaptive thinking (low): a grounded markdown
+      // writeup; a light reasoning pass helps structure. max_tokens already generous.
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'low' },
       max_tokens: 8000,
       messages: [{ role: 'user', content: contentPrompt }],
     });
-    const firstBlock = resp.content[0];
+    // find the TEXT block — with thinking on, content[0] is a thinking block.
+    const firstBlock = resp.content.find(b => b.type === 'text');
     const raw = (firstBlock && firstBlock.type === 'text' ? firstBlock.text : '').trim();
     // Strip accidental ```markdown fences if Sonnet ignored the instruction
     condensed = raw.replace(/^```(?:markdown|md)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();

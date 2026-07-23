@@ -45,7 +45,6 @@ import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
 import type { UserProfile } from '../config/userProfile';
 import logger from './logger';
-import { extractFirstJsonObject } from './extractJson';
 import { logLlmUsage } from './usageLog';
 
 const anthropic = getAnthropicClient();
@@ -327,29 +326,32 @@ function missingFacts(original: string, rewrite: string): string[] {
 }
 
 /**
- * Parse a humanGate verdict from LLM output. Balanced-object extract (fences
- * stripped by extractFirstJsonObject) → JSON.parse; on failure, recover the
- * ok/rewrite fields by regex. Returns null ONLY when nothing is recoverable —
- * and CRUCIALLY never JSON.parses the raw fenced text (the fail-open where a
- * ```json-fenced reply threw "Unexpected token '`'" and the gate passed the
- * draft through unchecked).
+ * v4.0.x — forced structured-output verdict. The gate calls this `verdict` tool
+ * instead of emitting free-text JSON, so parsing CAN'T fail (kills the old
+ * reparse retry — Haiku mis-formatted the bare JSON ~half the time) and the
+ * model's prose can never ship as the reply (R6). Same {ok, rewrite} semantics
+ * the system prompt already describes — only the output transport is forced.
  */
-function parseGateVerdict(raw: string): { ok?: boolean; rewrite?: string | null } | null {
-  if (!raw || !raw.trim()) return null;
-  const obj = extractFirstJsonObject(raw);
-  if (obj) {
-    try { return JSON.parse(obj) as { ok?: boolean; rewrite?: string | null }; } catch { /* fall through to regex recovery */ }
-  }
-  // Field-level recovery — malformed JSON, stray fences, unescaped chars.
-  const okM = raw.match(/"ok"\s*:\s*(true|false)/i);
-  if (okM) {
-    const ok = okM[1].toLowerCase() === 'true';
-    let rewrite: string | null = null;
-    const rwM = raw.match(/"rewrite"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-    if (rwM) { try { rewrite = JSON.parse(`"${rwM[1]}"`) as string; } catch { rewrite = rwM[1]; } }
-    return { ok, rewrite };
-  }
-  return null;
+const HUMAN_GATE_VERDICT_TOOL = {
+  name: 'verdict',
+  description: 'Report whether the draft is fine as-is (ok=true) or violates a voice/leak rule and needs the rewrite (ok=false).',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      ok: { type: 'boolean', description: 'true = draft is fine as-is; false = it needs the rewrite.' },
+      rewrite: { type: 'string', description: 'When ok=false: the corrected draft, preserving every fact (dates, times, names, @mentions). Omit or leave empty when ok=true.' },
+    },
+    required: ['ok'],
+  },
+};
+
+/** Read the forced `verdict` tool result. Returns null when the tool block is
+ *  missing or `ok` isn't a boolean (rare) → caller routes to safeFallback. */
+function readVerdictTool(resp: Anthropic.Message): { ok: boolean; rewrite: string | null } | null {
+  const toolUse = resp.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
+  const input = (toolUse?.input ?? {}) as { ok?: unknown; rewrite?: unknown };
+  if (typeof input.ok !== 'boolean') return null;
+  return { ok: input.ok, rewrite: typeof input.rewrite === 'string' ? input.rewrite : null };
 }
 
 /**
@@ -419,43 +421,26 @@ export async function runHumanGate(
     // for ~3× cost cut + ~1s latency drop per call. Fires on every owner +
     // colleague reply + every brief, so the aggregate savings are meaningful.
     const model = MODEL_HAIKU;
+    // v4.0.x — forced structured output (like concision / rewriteOwningTheMiss):
+    // the verdict comes back as a `verdict` tool call, so parsing can't fail and
+    // the model's prose can never ship (R6). Kills the old free-text + reparse
+    // path (Haiku mis-formatted the bare JSON ~half the time). Judgment unchanged
+    // — the system prompt is the same; only the output transport is forced.
     const resp = await anthropic.messages.create({
       model,
       max_tokens: 600,
       system: systemPrompt,
+      tools: [HUMAN_GATE_VERDICT_TOOL],
+      tool_choice: { type: 'tool', name: 'verdict' },
       messages: [{ role: 'user', content: draft }],
     });
     logLlmUsage('human_gate', model, resp, { audience });
 
-    const text = resp.content
-      .filter(b => b.type === 'text')
-      .map(b => (b as Anthropic.TextBlock).text)
-      .join('')
-      .trim();
-
-    // Parse the verdict robustly (balanced-object extract → JSON → field-regex
-    // recovery). NEVER JSON.parse the raw fenced text — that's the fail-open we
-    // hit when a ```json reply broke extraction.
-    let parsed = parseGateVerdict(text);
-
-    // v3.6.x — an unparseable verdict must not fail OPEN. Retry the gate once
-    // (asking for bare JSON); if it's STILL unparseable, don't ship the
-    // un-vetted draft blind — safeFallback substitutes a safe line for a
-    // leaky-looking draft and passes a clean-looking one through.
+    const parsed = readVerdictTool(resp);
+    // Missing/malformed tool result (rare) → don't ship the un-vetted draft blind;
+    // safeFallback cans a leaky-looking draft, passes a clean-looking one.
     if (!parsed) {
-      logger.warn('humanGate — verdict unparseable, retrying once', { audience });
-      try {
-        const retryResp = await anthropic.messages.create({
-          model, max_tokens: 600, system: systemPrompt,
-          messages: [{ role: 'user', content: `${draft}\n\n[Reply with ONLY the JSON object {"ok":…,"rewrite":…}. No code fences, no prose.]` }],
-        });
-        logLlmUsage('human_gate_reparse', model, retryResp, { audience });
-        const rt = retryResp.content.filter(b => b.type === 'text').map(b => (b as Anthropic.TextBlock).text).join('').trim();
-        parsed = parseGateVerdict(rt);
-      } catch (_) { /* handled by the fallback below */ }
-    }
-    if (!parsed) {
-      return safeFallback(draft, audience, 'verdict unparseable after retry');
+      return safeFallback(draft, audience, 'verdict tool result missing');
     }
 
     if (parsed.ok === false && typeof parsed.rewrite === 'string' && parsed.rewrite.trim().length > 0) {
@@ -482,14 +467,15 @@ export async function runHumanGate(
             model,
             max_tokens: 600,
             system: systemPrompt,
+            tools: [HUMAN_GATE_VERDICT_TOOL],
+            tool_choice: { type: 'tool', name: 'verdict' },
             messages: [{
               role: 'user',
               content: `${draft}\n\n[CRITICAL: your previous rewrite dropped required content. Rewrite again with the SAME fix, but ${pin}.]`,
             }],
           });
           logLlmUsage('human_gate_retry', model, retryResp, { audience });
-          const rt = retryResp.content.filter(b => b.type === 'text').map(b => (b as Anthropic.TextBlock).text).join('').trim();
-          const p2 = parseGateVerdict(rt);
+          const p2 = readVerdictTool(retryResp);
           if (p2 && typeof p2.rewrite === 'string' && p2.rewrite.trim().length > 0) retry = p2.rewrite;
         } catch (_) { /* retry failed — handled below */ }
 

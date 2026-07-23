@@ -1,6 +1,6 @@
 # Maelle session context
 
-Working on Maelle at `E:/Code/Maelle`. **Current version: v4.0.1** — `package.json` is the source of truth. **HEAD = the 4.0.1 wrap commit** (run `git log -1` for the SHA). The boot log stamps `version` + `gitSha` — confirm it matches HEAD after any restart. **Running model: `claude-sonnet-5`** — the Sonnet-5 retry is LIVE as of 4.0.1: the orchestrator runs adaptive thinking at effort `high`; guards/classifiers stay thinking-off (see the ⚠️ block). Revert = flip `MODEL_SONNET` back to `claude-sonnet-4-6` (one line).
+Working on Maelle at `E:/Code/Maelle`. **Current version: v4.0.2** — `package.json` is the source of truth. **HEAD = the 4.0.2 wrap commit** (run `git log -1` for the SHA). The boot log stamps `version` + `gitSha` — confirm it matches HEAD after any restart. **Running model: `claude-sonnet-5`** — the Sonnet-5 retry is LIVE: the orchestrator runs adaptive thinking at `high`, and (4.0.2) COMPOSITION passes also think — brief `medium`, summary `medium`, knowledge `low`; the ~25 cheap classifier/guard passes stay thinking-off. 4.0.2 also parallelized the owner-facing guard stack (claim+humanGate+date, one wall-clock) + forced humanGate's verdict tool + moved close_loop to Haiku. Revert model = flip `MODEL_SONNET` back to `claude-sonnet-4-6` (one line). **Deferred:** the `isBriefRequest` brief-config misroute (see CHANGELOG 4.0.2).
 
 ## This chat = FEATURES **and** BUGS
 

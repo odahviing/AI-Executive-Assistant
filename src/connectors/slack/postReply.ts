@@ -171,52 +171,87 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     } catch (_) { /* helper failure is non-fatal */ }
   }
 
-  // Step 3 — owner-facing claim check (+ corrective retry).
+  // Steps 3 / 3a / 3b — owner-facing guard stack: claim-check + humanGate +
+  // date-verify. v4.0.x PROBE/parallelize: these three are side-effect-free cores
+  // (the rewrite + appendToConversation live in their postReply wrappers below,
+  // not the cores), and a rewrite is RARE. Run all three CONCURRENTLY on the
+  // post-concision text; if NONE wants a change (>95% of turns) ship as-is —
+  // byte- AND side-effect-identical to the serial chain, which on a clean turn
+  // also rewrites nothing and appends nothing. If ANY flags, fall back to the
+  // untouched serial chain → byte-identical to the pre-4.0 behavior (the probe's
+  // Haiku calls are wasted on that rare turn). Fail-safe: a probe error falls
+  // through to serial. Collapses 3 serial round-trips → 1 wall-clock on the
+  // common path. NO coverage change — every guard still runs.
   if (role === 'owner' || isOwnerInGroup) {
-    cleanReply = await runClaimCheckAndMaybeRewrite({
+    let ownerGuardsClean = false;
+    try {
+      const [{ checkReplyClaims }, { runHumanGate }, { verifyDates }] = await Promise.all([
+        import('../../utils/claimChecker'),
+        import('../../utils/humanGate'),
+        import('../../utils/dateVerifier'),
+      ]);
+      const [claimV, humanV, dateV] = await Promise.all([
+        checkReplyClaims({
+          reply: cleanReply,
+          toolSummaries: result.toolSummaries ?? [],
+          bookingOccurred: result.bookingOccurred ?? false,
+          ownerFirstName: profile.user.name.split(' ')[0],
+          mpimContext: isMpim ? { isMpim: true, participantSlackIds: mpimMemberIds ?? [] } : undefined,
+        }),
+        runHumanGate(cleanReply, profile, 'owner'),
+        verifyDates(cleanReply, profile, userMessage),
+      ]);
+      // Each flag mirrors EXACTLY its wrapper's "would this rewrite the text?"
+      // condition, so "none flags" ⇒ the serial chain would have rewritten nothing.
+      const claimFlags = claimV.claimed_action === true;
+      const humanFlags = !humanV.ok && !!humanV.rewrite && humanV.rewrite.trim().length > 0;
+      const dateFlags = !dateV.ok && dateV.mismatches.length > 0;
+      ownerGuardsClean = !claimFlags && !humanFlags && !dateFlags;
+    } catch (err) {
+      logger.warn('Owner-guard probe threw — falling back to the serial chain', { err: String(err).slice(0, 200) });
+    }
+
+    if (!ownerGuardsClean) {
+      // SERIAL FALLBACK — the exact pre-4.0 chain (claim → humanGate → date),
+      // byte-identical on a flag turn. The wrappers own the rewrite + history append.
+      cleanReply = await runClaimCheckAndMaybeRewrite({
+        app, profile,
+        initialReply: cleanReply,
+        result,
+        history, userMessage,
+        senderId, channelId, threadTs,
+        role, colleagueName, isMpim, isOwnerInGroup, mpimMemberIds,
+      });
+      try {
+        const { runHumanGate } = await import('../../utils/humanGate');
+        const verdict = await runHumanGate(cleanReply, profile, 'owner');
+        if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
+          cleanReply = formatForSlack(verdict.rewrite);
+        }
+      } catch (err) {
+        logger.warn('humanGate threw — leaving draft unchanged', { err: String(err).slice(0, 200) });
+      }
+      cleanReply = await runDateVerifierAndMaybeRetry({
+        app, profile,
+        initialReply: cleanReply,
+        history, userMessage,
+        senderId, channelId, threadTs,
+        role, colleagueName, isMpim, isOwnerInGroup, mpimMemberIds,
+      });
+    }
+  } else {
+    // Step 3b — date-verifier for the NON-owner path (the owner's date-verify is
+    // handled in the probe/serial above, so it runs exactly once either way).
+    // Catches "Thursday 11 June" when the 11th is a Wednesday, in any language —
+    // a wrong date to a colleague is just as bad.
+    cleanReply = await runDateVerifierAndMaybeRetry({
       app, profile,
       initialReply: cleanReply,
-      result,
       history, userMessage,
       senderId, channelId, threadTs,
       role, colleagueName, isMpim, isOwnerInGroup, mpimMemberIds,
     });
-
-    // Step 3a (v2.6.5) — owner-facing humanness gate. Catches Maelle framing
-    // herself as having technical infrastructure ("the routine fired but
-    // hit an error", "I'd flag it to whoever manages the backend"). Tech
-    // words about the world (backend interview, customer API, code review)
-    // are FINE — the gate only fires when she attributes infrastructure to
-    // HERSELF. Sibling to claimChecker but a different concern (voice, not
-    // false claims). Fails open — never blocks a draft.
-    //
-    // v2.9 — audience='owner': talking TO the owner directly. Exemplars use
-    // 1st/2nd person ("let me figure this out"); never third-person "Idan"
-    // references while addressing him.
-    try {
-      const { runHumanGate } = await import('../../utils/humanGate');
-      const verdict = await runHumanGate(cleanReply, profile, 'owner');
-      if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
-        cleanReply = formatForSlack(verdict.rewrite);
-      }
-    } catch (err) {
-      logger.warn('humanGate threw — leaving draft unchanged', { err: String(err).slice(0, 200) });
-    }
   }
-
-  // Step 3b — date-verifier (v3.4, Option C). Catches "Thursday 11 June" when
-  // the 11th is a Wednesday, in any language. A gated Haiku call EXTRACTS the
-  // weekday+date pairs; CODE judges them against the DATE LOOKUP and swaps the
-  // wrong weekday word inside the exact matched span (deterministic verdict +
-  // fix — the LLM only reads). Runs for both owner and colleague paths — a
-  // wrong date to a colleague is just as bad.
-  cleanReply = await runDateVerifierAndMaybeRetry({
-    app, profile,
-    initialReply: cleanReply,
-    history, userMessage,
-    senderId, channelId, threadTs,
-    role, colleagueName, isMpim, isOwnerInGroup, mpimMemberIds,
-  });
 
   // (v3.6.x — the "booked-date honesty" backstop that used to run here was
   // RETIRED. It was a 4th output-path LLM call on every booking reply, it
