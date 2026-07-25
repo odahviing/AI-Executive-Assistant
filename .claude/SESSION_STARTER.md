@@ -56,7 +56,7 @@ Every lane takes the product requirement into a different area. At a glance:
 - **slack vs everyone — the WhatsApp litmus:** *if Maelle switched to WhatsApp tomorrow, would this code change?* Yes → slack. No → the domain lane. (So: the `postReply` **pipeline** is slack, the **gates inside it** are guard; a ✅ reaction *arrives* via slack, what it *resolves* is requests.)
 - **`context` is a last-resort destination** — never route there merely because a symptom is visible in a reply.
 - **`other` only when no specialist owns it** — it is not a bin for the unclear; unclear = escalate to the owner.
-- **OPEN ownership question:** dense packing / calendar-health auto-move / floating-block defrag (`calendarHealth`, `rebalanceFloatingBlocks`, `calendarDensity`) historically sat outside the planner, but meeting's M7 (dense calendar, long breaks) already governs it — **owner to confirm** whether it belongs to `meeting` (recommended) or stays in `other`.
+- **calendar-health belongs to `meeting`** (settled): dense packing, auto-move/defrag and floating-block rebalance (`calendarHealth`, `rebalanceFloatingBlocks`, `calendarDensity`) are governed by M7 — there is no separate calendar lane. Meeting owns both halves: the commitment *and* the shape of the day.
 
 ## ⚠️ Sonnet 5 RETRY is LIVE as of 4.0.1 — orchestrator = adaptive thinking, effort `high`
 
