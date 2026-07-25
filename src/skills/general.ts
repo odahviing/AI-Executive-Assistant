@@ -211,14 +211,28 @@ For a quick one-off fact (weather, exchange rate, is today a holiday), use web_s
     }
   }
 
-  getSystemPromptSection(profile: UserProfile): string {
+  getSystemPromptSection(profile: UserProfile, scopes?: string[], isOwner?: boolean): string {
     const units = profile.user.units !== 'imperial'
       ? 'Always use metric units (°C, km, kg, etc.) — never Fahrenheit or imperial.'
       : 'Always use imperial units (°F, miles, lbs, etc.) — never Celsius or metric.';
+    // #20 class — never teach a tool this request doesn't ship. `web_research`
+    // is 'knowledge'-scope only (registry.ts:194) and is NOT colleague-allowed,
+    // so on a colleague turn (the dispatch chokepoint refuses it outright,
+    // registry.ts:565) and on any out-of-scope owner turn this paragraph was
+    // ~375 tokens teaching a capability the request omits. Derived from the
+    // tools actually shipped for this role + scope — same source of truth the
+    // chokepoint uses — so it can't drift when the scope map or the allowlist
+    // moves. `web_search` is ALWAYS_ON, so the section itself always stands.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getSkillTools } = require('./registry') as typeof import('./registry');
+    const shipsResearch = getSkillTools(profile, isOwner === false ? 'colleague' : 'owner', scopes)
+      .some(t => t.name === 'web_research');
+    const researchLine = shipsResearch
+      ? `\n- web_research(goal) — use this whenever you'll WRITE or PROPOSE from current events (a LinkedIn post, article, summary, suggestion, briefing) or the owner asks you to research / look into / explore a topic. It returns real SOURCES + their content. Write GROUNDED in what it returns and CITE the links in your output. NEVER state a current-events fact — a stat, "this week", a named incident/campaign — that isn't in the returned sources; if it finds nothing, say you couldn't find a source rather than writing from memory. When you PROPOSE angles / post ideas, each must be SELF-CONTAINED — the specific item, its concrete details (what it is, when, why it's relevant now), and the source link — so the owner can say "draft that" without asking "which one?". If you can't substantiate an angle (source blocked or empty, no real details), DROP it — never float a bare reference like "post about the webinar". One fewer idea beats one he can't act on. Combine with the knowledge base for our voice/positioning when drafting.`
+      : '';
     return `
 SEARCH & RESEARCH
-- web_search — a quick one-off fact (weather, exchange rate, is today a holiday, a single current detail). Answer stable knowledge (history, geography, concepts) directly, no search.
-- web_research(goal) — use this whenever you'll WRITE or PROPOSE from current events (a LinkedIn post, article, summary, suggestion, briefing) or the owner asks you to research / look into / explore a topic. It returns real SOURCES + their content. Write GROUNDED in what it returns and CITE the links in your output. NEVER state a current-events fact — a stat, "this week", a named incident/campaign — that isn't in the returned sources; if it finds nothing, say you couldn't find a source rather than writing from memory. When you PROPOSE angles / post ideas, each must be SELF-CONTAINED — the specific item, its concrete details (what it is, when, why it's relevant now), and the source link — so the owner can say "draft that" without asking "which one?". If you can't substantiate an angle (source blocked or empty, no real details), DROP it — never float a bare reference like "post about the webinar". One fewer idea beats one he can't act on. Combine with the knowledge base for our voice/positioning when drafting.
+- web_search — a quick one-off fact (weather, exchange rate, is today a holiday, a single current detail). Answer stable knowledge (history, geography, concepts) directly, no search.${researchLine}
 
 ${units}
 

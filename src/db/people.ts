@@ -131,6 +131,67 @@ export interface PersonMemory {
 
 const SET_BY_RANK: Record<CoreFieldSetBy, number> = { owner: 3, person: 2, auto: 1 };
 
+// ── Reading the interaction timeline ─────────────────────────────────────────
+//
+// Two kinds of entry live in one log and they need different treatment:
+//
+//   RELATIONAL (conversation / message_* / social_chat / other) — what was said.
+//   Always true after the fact; render freely.
+//
+//   BOOKING SNAPSHOTS (meeting_booked / coordination) — what the calendar looked
+//   like at write time. v2.3.4 stripped these from EVERY reader because a
+//   snapshot lies once the meeting moves or is cancelled, and Sonnet narrated
+//   stale ones as current fact.
+//
+// That blanket strip made the booking timeline write-only: recordBooking has
+// been appending entries no reader could ever surface, so "we booked yesterday"
+// — first-class work context under P6 — was unrecallable from the store. The
+// fix is a freshness rule instead of a blanket strip: a booking recorded in the
+// last BOOKING_RECALL_DAYS renders WITH an explicit as-booked frame that names
+// the calendar as authoritative; older ones stay out, because that is exactly
+// where a snapshot has had time to go stale.
+export const BOOKING_RECALL_DAYS = 14;
+
+/** Rendered above any booking-snapshot line so a moved meeting can't read as current. */
+export const BOOKING_SNAPSHOT_FRAME =
+  'recorded when booked — the calendar is authoritative if any of these moved since';
+
+function isBookingSnapshot(i: PersonInteraction): boolean {
+  return i.type === 'meeting_booked' || i.type === 'coordination';
+}
+
+/**
+ * Split a person's raw `interaction_log` JSON into the two lists every reader
+ * needs. ONE parse + ONE freshness rule, shared by the owner contact block, the
+ * colleague context block and get_person_memory, so the three can't drift.
+ * Corrupt JSON yields empty lists — never throws.
+ */
+export function readInteractionLog(
+  rawJson: string | null | undefined,
+  recentDays: number = BOOKING_RECALL_DAYS,
+): { relational: PersonInteraction[]; recentBookings: PersonInteraction[] } {
+  let log: PersonInteraction[];
+  try {
+    const parsed = JSON.parse(rawJson || '[]');
+    log = Array.isArray(parsed) ? parsed as PersonInteraction[] : [];
+  } catch {
+    return { relational: [], recentBookings: [] };
+  }
+  const cutoff = DateTime.now().minus({ days: recentDays });
+  const relational: PersonInteraction[] = [];
+  const recentBookings: PersonInteraction[] = [];
+  for (const i of log) {
+    // Every reader downstream does `i.date.split('T')[0]`; this is now the ONE
+    // place that parses the column, so a malformed entry is dropped here rather
+    // than throwing inside a prompt builder.
+    if (!i || typeof i.date !== 'string' || typeof i.summary !== 'string') continue;
+    if (!isBookingSnapshot(i)) { relational.push(i); continue; }
+    const at = DateTime.fromISO(i.date);
+    if (at.isValid && at >= cutoff) recentBookings.push(i);
+  }
+  return { relational, recentBookings };
+}
+
 // ── v2.2.4 — travel awareness ────────────────────────────────────────────────
 //
 // People travel. A Tel Aviv person works from Boston for a week, an NYC
@@ -650,18 +711,23 @@ export function appendPersonInteractionById(personId: string, interaction: Omit<
  *
  * @param slackId     - person's Slack ID
  * @param initiatedBy - 'maelle' | 'person' — only Maelle initiations consume the daily gate
+ * @returns true when the row was actually stamped; FALSE when this slack_id has
+ *          no people_memory row, in which case nothing was written. The return
+ *          exists because `last_initiated_at` is the once-per-day coda gate: a
+ *          silent no-op here leaves that gate open, and the caller that just
+ *          DELIVERED a coda (`recordCodaDelivered`) has to be able to say so.
  */
 export function recordSocialMoment(
   slackId: string,
   initiatedBy: 'maelle' | 'person' = 'maelle',
-): void {
+): boolean {
   // Updates last_social_at + last_initiated_at on the person row so the 24h
   // Maelle-initiation gate keeps working. Subject + topic-beat writes happen
   // ONLY at end-of-chat in `memory/capturePass.ts:runSubjectReconciliation`
   // (v3.0.1); this helper covers the people_memory row only.
   const db = getDb();
   const row = db.prepare('SELECT slack_id FROM people_memory WHERE slack_id = ?').get(slackId) as any;
-  if (!row) return;
+  if (!row) return false;
 
   const now = new Date().toISOString();
   const updates: Record<string, unknown> = { last_social_at: now };
@@ -671,6 +737,7 @@ export function recordSocialMoment(
   const setClause = Object.keys(updates).map(k => `${k} = @${k}`).join(', ');
   db.prepare(`UPDATE people_memory SET ${setClause}, updated_at = datetime('now') WHERE slack_id = @slack_id`)
     .run({ ...updates, slack_id: slackId });
+  return true;
 }
 
 export function getPersonMemory(slackId: string): PersonMemory | null {
@@ -1223,10 +1290,18 @@ export function formatPeopleMemoryForPrompt(
   const db = getDb();
   // Exclude the owner AND Maelle's own synthetic SELF:<owner> row (her row is
   // rendered separately as the ABOUT YOU block — see core/assistantSelf.ts).
+  //
+  // Exclusion is by `kind` / an explicit NULL-safe comparison, NEVER by a bare
+  // `slack_id != ?`: an external person's slack_id is NULL, and `NULL != 'U…'`
+  // evaluates to NULL (falsy) in SQL, so the old predicate silently dropped
+  // EVERY external from the owner's contact block — 19 people the owner had
+  // actually booked showed no email, no timezone, no "N notes on file", so
+  // Maelle re-asked for addresses she already stores. Same NULL trap
+  // searchPeopleMemory documents and guards 500 lines above.
   const people = db.prepare(`
     SELECT * FROM people_memory
-    WHERE slack_id != ?
-    AND slack_id NOT LIKE 'SELF:%'
+    WHERE kind != 'self'
+    AND (slack_id IS NULL OR slack_id != ?)
     AND last_seen >= datetime('now', '-90 days')
     ORDER BY last_seen DESC
     LIMIT 25
@@ -1295,25 +1370,25 @@ export function formatPeopleMemoryForPrompt(
     // v3.5.x — only a confirmed (person/owner) gender is authoritative; an `auto`
     // guess renders 'unknown' so it can't steer gendered Hebrew forms.
     const genderField = p.gender && p.gender !== 'unknown' && p.gender_set_by !== 'auto' ? p.gender : 'unknown';
+    // Externals have no Slack account, so there is no slack_id to hand back —
+    // rendering the column raw printed "slack_id: null" and invited the model to
+    // pass that string to a tool. Their handle is the email.
+    const handle = p.slack_id
+      ? `slack_id: ${p.slack_id}`
+      : 'external — no Slack account, reach them by email';
     const parts: string[] = [
-      `${p.name} (slack_id: ${p.slack_id}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${travelTag}${tzPart}${p.email ? `, email: ${p.email}` : ''}, gender: ${genderField}${langPart}${socialPart})`,
+      `${p.name} (${handle}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${travelTag}${tzPart}${p.email ? `, email: ${p.email}` : ''}, gender: ${genderField}${langPart}${socialPart})`,
     ];
 
     // Profile dimensions moved to per-person markdown files (v2.2.1). Fields
     // still persisted for code paths that read them deterministically.
     void profile;
 
-    // v2.3.4 — drop calendar-state snapshot entries (`meeting_booked`,
-    // `coordination`) from the prompt-rendered list. These were lying when
-    // the underlying meeting got moved or cancelled afterwards. The calendar
-    // is the source of truth for meetings; memory belongs to relational facts
-    // (conversations, messages, social pings), not stale booking snapshots.
-    const relationalLog: PersonInteraction[] = (() => {
-      try {
-        const log = JSON.parse(p.interaction_log || '[]') as PersonInteraction[];
-        return log.filter(i => i.type !== 'meeting_booked' && i.type !== 'coordination');
-      } catch { return []; }
-    })();
+    // v2.3.4 kept booking snapshots out because a moved meeting made them lie;
+    // readInteractionLog replaces that blanket strip with a freshness rule so
+    // "we booked yesterday" is recallable (P6) while stale snapshots still are
+    // not. See BOOKING_SNAPSHOT_FRAME.
+    const { relational: relationalLog, recentBookings } = readInteractionLog(p.interaction_log);
 
     const isFocus = p.slack_id ? (focusSlackIds?.has(p.slack_id) ?? false) : false;
     if (isFocus) {
@@ -1328,6 +1403,12 @@ export function formatPeopleMemoryForPrompt(
       for (const i of relationalLog.slice(-entryCap)) {
         parts.push(`  ↳ [${i.date.split('T')[0]}] ${i.type}: ${i.summary}`);
       }
+      if (recentBookings.length > 0) {
+        parts.push(`  recent bookings with them (${BOOKING_SNAPSHOT_FRAME}):`);
+        for (const i of recentBookings.slice(-5)) {
+          parts.push(`    📅 [${i.date.split('T')[0]}] ${i.summary}`);
+        }
+      }
     } else {
       // COMPACT roster line — v3.x (Block 1 prompt reduction). Was: every one
       // of the (up to 25) contacts dumped ALL ★ notes + a 10-entry ↳ tail,
@@ -1341,6 +1422,9 @@ export function formatPeopleMemoryForPrompt(
       const bits: string[] = [];
       if (noteCount > 0) bits.push(`${noteCount} note${noteCount === 1 ? '' : 's'}`);
       if (intCount > 0) bits.push(`${intCount} past exchange${intCount === 1 ? '' : 's'}`);
+      if (recentBookings.length > 0) {
+        bits.push(`${recentBookings.length} booking${recentBookings.length === 1 ? '' : 's'} in the last ${BOOKING_RECALL_DAYS} days`);
+      }
       if (bits.length > 0) {
         parts.push(`  (${bits.join(', ')} on file — get_person_memory("${p.name}") to load)`);
       }
@@ -1349,7 +1433,7 @@ export function formatPeopleMemoryForPrompt(
     return parts.join('\n');
   });
 
-  return `WORKSPACE CONTACTS (people you have interacted with — use slack_id directly, no need to call find_slack_user). Each line shows what you know at a glance; where a line ends with "N notes / past exchanges on file", that person's relationship history and conversation notes load on demand via get_person_memory — pull it when they're relevant to the turn:\n${lines.join('\n')}`;
+  return `WORKSPACE CONTACTS (people you have interacted with — colleagues carry a slack_id you can use directly, no need to call find_slack_user; externals carry an email instead and have no Slack account, so never call find_slack_user for them). Each line shows what you know at a glance; where a line ends with "N notes / past exchanges on file", that person's relationship history and conversation notes load on demand via get_person_memory — pull it when they're relevant to the turn:\n${lines.join('\n')}`;
 }
 
 // ── Social context block (per-sender) ────────────────────────────────────────
@@ -1363,13 +1447,87 @@ export function formatPeopleMemoryForPrompt(
 // block below surfaces profile + notes + interactions without any
 // stale/cooldown machinery.
 
+/** Timeline entries that belong to the SOCIAL layer, not the work layer. */
+const SOCIAL_INTERACTION_TYPES = new Set(['social_chat', 'social_ping']);
+
 /**
- * Builds a per-person social context block injected into the system prompt
- * for COLLEAGUE turns (owner turns use the new Social Engine directive
- * instead). Surfaces engagement level, profile, recent interactions, and
- * notes. Topic history (stale-count / cooldown / seed topics) was retired
- * in v2.2 — that machinery is owner-scoped now and lives in the Social
- * Engine. Returns '' for unknown people.
+ * WORK context about the colleague Maelle is talking to — who they are on the
+ * org chart, how they work, what she and they last did together.
+ *
+ * Split out of buildSocialContextBlock (which was gated entirely on the optional
+ * `skills.social` toggle) because none of this is social: role, reports_to,
+ * response speed, collaboration notes and the recent work exchanges are what
+ * make her COMPETENT with this person, and P6 forbids gating work-competence
+ * behind the social budget. A tenant that runs Maelle task-only used to lose all
+ * of it as collateral. This block is unconditional on a colleague turn; the
+ * social half below is what the toggle governs.
+ *
+ * Scope note (P9): this is built for the AUTHENTICATED speaker, about
+ * themselves — tier 2, they may read everything about themselves. It is never
+ * built for a third party. `sharedSurface` says the answer will be read by more
+ * than that one person (MPIM / channel), and the booking tail is withheld there:
+ * a meeting's subject, venue and time is the speaker's own business, and the
+ * others in the room may not be on it. Withholding is the default when a
+ * reader's entitlement is unclear.
+ *
+ * Returns '' for unknown people or when nothing is on file.
+ */
+export function buildPersonWorkContextBlock(
+  slackId: string,
+  opts?: { sharedSurface?: boolean },
+): string {
+  const person = getPersonMemory(slackId);
+  if (!person) return '';
+
+  const profile: PersonProfile = (() => {
+    try { return JSON.parse(person.profile_json || '{}'); } catch { return {}; }
+  })();
+
+  const lines: string[] = [];
+
+  const profileParts: string[] = [];
+  if (profile.communication_style)  profileParts.push(`style: ${profile.communication_style}`);
+  // v3.3.x — language_preference deliberately NOT rendered here. This is the
+  // COLLEAGUE-path (inbound) context: when the person writes to Maelle, the
+  // reply must mirror THEIR current message, never a stored pref (the Ayala
+  // "English in, Hebrew out" bug). The stored preference is for the OUTREACH
+  // path (when Maelle INITIATES) — surfaced on the owner-path contact line
+  // instead. Inbound language is governed by detectMessageLanguage's per-turn
+  // directive + the CURRENT-TURN-WINS rule.
+  // #135 — working_hours (free-text) deliberately NOT rendered here. It's a
+  // SCHEDULING fact, and the LLM was repeating it as authority (the Isaac "works
+  // Mon/Thu only" bug — the free-text contradicted his real free/busy + structured
+  // workdays). Availability is owned by find_available_slots / attendeeAvailability
+  // (structured workdays + Graph free/busy), never this relational blob — same
+  // reasoning as language_preference above.
+  if (profile.response_speed)       profileParts.push(`responds: ${profile.response_speed}`);
+  if (profile.role_summary)         profileParts.push(`role: ${profile.role_summary}`);
+  if (profile.reports_to)           profileParts.push(`reports to: ${profile.reports_to}`);
+  if (profile.collaboration_notes)  profileParts.push(`collab: ${profile.collaboration_notes}`);
+  if (profileParts.length > 0) lines.push(`Profile: ${profileParts.join(' | ')}`);
+
+  const { relational, recentBookings } = readInteractionLog(person.interaction_log);
+  const workExchanges = relational.filter(i => !SOCIAL_INTERACTION_TYPES.has(i.type)).slice(-10);
+  if (workExchanges.length > 0) {
+    lines.push(`Recent work exchanges:\n${workExchanges.map(i => `  [${i.date.split('T')[0]}] ${i.summary}`).join('\n')}`);
+  }
+  if (recentBookings.length > 0 && !opts?.sharedSurface) {
+    lines.push(`Recent bookings with them (${BOOKING_SNAPSHOT_FRAME}):\n${recentBookings.slice(-5).map(i => `  [${i.date.split('T')[0]}] ${i.summary}`).join('\n')}`);
+  }
+
+  if (lines.length === 0) return '';
+  return [`WHAT YOU KNOW ABOUT ${person.name} (work context)`, ...lines].join('\n');
+}
+
+/**
+ * The SOCIAL half of the per-person block, injected on COLLEAGUE turns only when
+ * `skills.social` is on (owner turns use the Social Engine directive instead).
+ * Engagement rank, the initiation cadence gate, and personal notes — the parts
+ * that genuinely belong to the optional friend-of-the-team layer.
+ *
+ * Work competence (role, reports_to, response speed, collaboration, recent work
+ * exchanges and bookings) is NOT here — see buildPersonWorkContextBlock, which
+ * runs whether or not social is on. Returns '' for unknown people.
  */
 export function buildSocialContextBlock(slackId: string, timezone: string, assistantName: string = 'Assistant'): string {
   const person = getPersonMemory(slackId);
@@ -1380,9 +1538,8 @@ export function buildSocialContextBlock(slackId: string, timezone: string, assis
   const hoursAgoInit     = lastInitiatedAt ? now.diff(lastInitiatedAt, 'hours').hours : Infinity;
   const canMaelleInitiate = hoursAgoInit >= 24;
 
-  const notes: PersonNote[]    = JSON.parse(person.notes || '[]');
-  const profile: PersonProfile = (() => {
-    try { return JSON.parse(person.profile_json || '{}'); } catch { return {}; }
+  const notes: PersonNote[] = (() => {
+    try { return JSON.parse(person.notes || '[]'); } catch { return []; }
   })();
 
   const lines: string[] = [`SOCIAL CONTEXT — ${person.name}`];
@@ -1403,30 +1560,6 @@ export function buildSocialContextBlock(slackId: string, timezone: string, assis
     lines.push(`Engagement rank: 3/3 — loves to chat. Be warm and reciprocate their energy; they'll carry the conversation.`);
   }
 
-  // Profile summary — show anything known
-  const profileParts: string[] = [];
-  if (profile.communication_style)  profileParts.push(`style: ${profile.communication_style}`);
-  // v3.3.x — language_preference deliberately NOT rendered here. This block is
-  // the COLLEAGUE-path (inbound) social context: when the person writes to
-  // Maelle, the reply must mirror THEIR current message, never a stored pref
-  // (the Ayala "English in, Hebrew out" bug). The stored preference is for the
-  // OUTREACH path (when Maelle INITIATES) — surfaced on the owner-path contact
-  // line instead. Inbound language is governed by detectMessageLanguage's
-  // per-turn directive + the CURRENT-TURN-WINS rule.
-  // #135 — working_hours (free-text) deliberately NOT rendered here. It's a
-  // SCHEDULING fact, and the LLM was repeating it as authority (the Isaac "works
-  // Mon/Thu only" bug — the free-text contradicted his real free/busy + structured
-  // workdays). Availability is owned by find_available_slots / attendeeAvailability
-  // (structured workdays + Graph free/busy), never this relational social blob —
-  // same reasoning as language_preference above.
-  if (profile.response_speed)       profileParts.push(`responds: ${profile.response_speed}`);
-  if (profile.role_summary)         profileParts.push(`role: ${profile.role_summary}`);
-  if (profile.reports_to)           profileParts.push(`reports to: ${profile.reports_to}`);
-  if (profile.collaboration_notes)  profileParts.push(`collab: ${profile.collaboration_notes}`);
-  if (profileParts.length > 0) {
-    lines.push(`Profile: ${profileParts.join(' | ')}`);
-  }
-
   if (canMaelleInitiate) {
     const ago = lastInitiatedAt
       ? (hoursAgoInit >= 48 ? `${Math.round(hoursAgoInit / 24)} days ago` : 'yesterday')
@@ -1437,19 +1570,10 @@ export function buildSocialContextBlock(slackId: string, timezone: string, assis
     lines.push(`${assistantName}-initiated check-in: NOT due — you already started one recently (${h}h until next). If THEY bring up personal topics, respond freely — just don't YOU start it.`);
   }
 
-  // Recent activity. v2.3.4 — drop calendar-state snapshot types
-  // (meeting_booked / coordination) — they go stale when meetings get moved
-  // or cancelled and Sonnet ends up narrating snapshots as if they were
-  // current facts. Relational entries only.
-  const interactionLog: PersonInteraction[] = (() => {
-    try { return JSON.parse(person.interaction_log || '[]'); } catch { return []; }
-  })();
-  const relationalInteractions = interactionLog.filter(
-    i => i.type !== 'meeting_booked' && i.type !== 'coordination',
-  );
-  const recentInteractions = relationalInteractions.slice(-10);
-  if (recentInteractions.length > 0) {
-    lines.push(`Recent activity:\n${recentInteractions.map(i => `  [${i.date.split('T')[0]}] ${i.summary}`).join('\n')}`);
+  const { relational } = readInteractionLog(person.interaction_log);
+  const socialMoments = relational.filter(i => SOCIAL_INTERACTION_TYPES.has(i.type)).slice(-10);
+  if (socialMoments.length > 0) {
+    lines.push(`Recent social moments:\n${socialMoments.map(i => `  [${i.date.split('T')[0]}] ${i.summary}`).join('\n')}`);
   }
 
   // Personal/relationship notes

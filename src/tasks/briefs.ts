@@ -456,13 +456,10 @@ async function generateBriefingText(
   // the brief is byte-identical to before this feature.
   const hasNews = !!(newsBundle && newsBundle.sources.length > 0);
   // v3.x — today's calendar-health summary folded into the brief (replaces the
-  // separate morning health routine). Additive like news: only included when
-  // there's something to flag (skip the "looks healthy" no-op text).
-  const hasHealth = !!(
-    healthSummary
-    && healthSummary.trim().length > 0
-    && !/no issues|looks healthy|looks good|calendar looks/i.test(healthSummary)
-  );
+  // separate morning health routine). Additive like news: the caller only
+  // passes a summary when the health pass had something to say (it drops the
+  // text on `vacuous` — see the gather site), so presence IS the signal.
+  const hasHealth = !!(healthSummary && healthSummary.trim().length > 0);
 
   if (items.length === 0 && !hasNews && !hasHealth) {
     // No time-of-day greeting on line 1 — the Slack app shows the first line
@@ -723,8 +720,20 @@ export async function sendMorningBriefing(
         executeSkillTool('check_calendar_health', { mode: 'active', start_date: today, end_date: today }, healthCtx),
         new Promise<undefined>(r => { const t = setTimeout(() => r(undefined), BRIEF_HEALTH_TIMEOUT_MS); if (typeof t.unref === 'function') t.unref(); }),
       ]);
-      const summary = (res && typeof res === 'object') ? (res as { summary_text?: unknown }).summary_text : undefined;
-      if (typeof summary === 'string' && summary.trim().length > 0) healthSummary = summary.trim();
+      // Read the tool's own `vacuous` flag ("nothing worth saying" —
+      // checkHealth.ts:1440), the same structured signal dispatchRoutine rides
+      // (routine.ts:197). Pre-fix the brief threw the flag away and re-derived
+      // it with an English regex over the composed prose, which broke the
+      // moment a template was reworded or an issue description happened to
+      // contain "looks good" — and the brief itself is composed in the owner's
+      // configured language, so prose-sniffing was never a safe signal.
+      const health = (res && typeof res === 'object') ? res as { summary_text?: unknown; vacuous?: unknown } : undefined;
+      const summary = health?.summary_text;
+      if (health?.vacuous === true) {
+        logger.info('briefs — calendar-health pass vacuous, omitting from brief');
+      } else if (typeof summary === 'string' && summary.trim().length > 0) {
+        healthSummary = summary.trim();
+      }
     } catch (err) {
       logger.warn('briefs — calendar-health gather threw, composing without it', { err: String(err).slice(0, 200) });
     }

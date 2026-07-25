@@ -113,6 +113,81 @@ export function applyOrganicMatchSignal(params: {
 }
 
 /**
+ * Stamp the social bookkeeping for a coda that has actually been DELIVERED.
+ *
+ * Called by the transport from its fire-and-forget timer once the post is
+ * confirmed; the ids come over on `OrchestratorOutput.socialCoda`.
+ *
+ * This used to run at GENERATION time in the orchestrator's coda block, which was
+ * exact while the coda was concatenated onto the reply — stamping meant sending.
+ * Once the coda became its own message posted a beat later, generation stopped
+ * implying delivery: the transport drops it on a leak hit, a prep throw, the
+ * person speaking again inside the beat, another turn answering first, or a failed
+ * post. Every drop still burned that person's one ping for the day AND parked the
+ * subject for 72h (the picker's re-raise defer, stateMachine.ts) for a line nobody
+ * ever saw. Delivery is the only event that should move either field.
+ *
+ * Two writes, guarded SEPARATELY and in this order on purpose:
+ *   1. `recordSocialMoment` → `people_memory.last_initiated_at`. This is the
+ *      once-per-day cadence gate AND the window anchor
+ *      `adjustRankFromColleagueResponse` (below) scores replies against. For a
+ *      `raise_new` coda it is the ONLY gate — there is no subject row yet — so it
+ *      goes first and a failure in the second write cannot cost us the gate.
+ *   2. `markSubjectRaised` → `social_subjects.last_assistant_initiated_at`, which
+ *      drives the 72h re-raise defer, the raise→ignored decay, and (for `continue`
+ *      codas) a second independent read of the daily gate. Absent on `raise_new`.
+ *
+ * NEVER throws. The caller is a `setTimeout` in the transport where an escaped
+ * rejection is an unhandled one, and a social aside is optional by definition —
+ * but the gate failing OPEN is the one outcome worth shouting about, because it is
+ * the only way the same person gets pinged twice in a day.
+ */
+export function recordCodaDelivered(params: {
+  personSlackId: string;
+  subjectId?: string;
+}): void {
+  const { personSlackId, subjectId } = params;
+
+  let gateStamped = false;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { recordSocialMoment } = require('../../db/people') as typeof import('../../db/people');
+    // Returns false when this slack_id has no people_memory row, in which case
+    // NOTHING was written — a silent no-op before the return value existed.
+    gateStamped = recordSocialMoment(personSlackId, 'maelle');
+  } catch (err) {
+    logger.error('Coda cadence gate write THREW after delivery', {
+      personSlackId, subjectId: subjectId ?? null, err: String(err).slice(0, 200),
+    });
+  }
+  if (!gateStamped) {
+    logger.error('Coda posted but the 24h gate did NOT close — this person can be pinged again today', {
+      personSlackId, subjectId: subjectId ?? null,
+      // `continue` codas are still gated by the raise marker below (the picker
+      // reads social_subjects too); a raise_new coda has nothing else holding it.
+      secondGate: subjectId ? 'raise_marker' : 'none',
+    });
+  }
+
+  if (subjectId) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { markSubjectRaised } = require('../../db/socialSubjects') as
+        typeof import('../../db/socialSubjects');
+      markSubjectRaised(subjectId);
+    } catch (err) {
+      logger.warn('Coda raise-marker write threw — engagement signal + 72h defer lost for this subject', {
+        personSlackId, subjectId, err: String(err).slice(0, 200),
+      });
+    }
+  }
+
+  logger.info('Social coda delivery recorded', {
+    personSlackId, subjectId: subjectId ?? null, gateStamped,
+  });
+}
+
+/**
  * In-conversation engagement_rank adjustment — the SOLE rank mover for
  * proactive social (v3.2.6).
  *
@@ -123,12 +198,15 @@ export function applyOrganicMatchSignal(params: {
  * A negative reply is NOT a brush-off — it's usually a grievance, which is
  * engagement; down-ranking is owner-directive / revival-aging only, never here.
  *
- * Window anchor is `people_memory.last_initiated_at` (set by recordSocialMoment
- * on EVERY coda — continue AND raise_new). The old anchor read the most-recent
- * RAISED SUBJECT, which is NULL for raise_new (discovery) codas — so a warm
- * reply to "any good music lately?" never scored. Anchoring on last_initiated_at
- * fixes that. There is no longer a 48h coda rank-check (ignoring is free, and
- * engagement is credited here, live, for both coda modes).
+ * Window anchor is `people_memory.last_initiated_at`, stamped by
+ * `recordCodaDelivered` above on every coda that was actually DELIVERED —
+ * continue AND raise_new. The old anchor read the most-recent RAISED SUBJECT,
+ * which is NULL for raise_new (discovery) codas — so a warm reply to "any good
+ * music lately?" never scored. Anchoring on last_initiated_at fixes that. Because
+ * the stamp now follows delivery rather than generation, a reply can no longer be
+ * credited as engagement with a coda the transport dropped and the person never
+ * saw. There is no longer a 48h coda rank-check (ignoring is free, and engagement
+ * is credited here, live, for both coda modes).
  */
 export function adjustRankFromColleagueResponse(params: {
   colleagueSlackId: string;

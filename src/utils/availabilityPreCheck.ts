@@ -23,7 +23,7 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import { getCalendarEvents, findAvailableSlots } from '../connectors/graph/calendar';
-import { checkSlot, type RuleViolationKind } from './scheduleRules';
+import { bookingLeadTimeHours, checkSlot, type RuleViolationKind } from './scheduleRules';
 import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
 import { logLlmUsage } from './usageLog';
@@ -415,6 +415,15 @@ export async function precheckAvailability(params: {
         slotEndIso: endDt.toISO()!,
         category: detectedCategory,   // enforce the SAME category cap the search does (was null → cap skipped)
         events,
+        // v4.1.x (M2) — this pre-check runs on the COLLEAGUE path, so it must
+        // hold the colleague booking lead time the search holds. Pre-fix it
+        // didn't: "is Idan free at 3pm?" asked at 2pm answered BOOKABLE, the
+        // colleague then booked it, and the 4-hour lead time was silently
+        // defeated on a slot find_available_slots had never offered.
+        leadTimeHours: bookingLeadTimeHours(params.profile, 'colleague'),
+        // Colleague surface — a private meeting's subject never reaches the
+        // verdict text (default masks; stated for the reader).
+        viewer: 'other',
       });
       if (check.passes) {
         verdicts.push({ date: pair.date, time: pair.time, bookable: true });
@@ -567,8 +576,14 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile): strin
     // US-evening or over-cap proposal got refused upfront and never reached the
     // owner's approval. Truly-hard states (owner genuinely busy, in the past)
     // still fall through to NOT BOOKABLE.
+    // v4.1.x (M2/M11) — `within_lead_time` and `travel_buffer_collision` join
+    // the set. Both are soft, owner-overridable protections that the SEARCH has
+    // always treated that way (SOFT_REJECT_PREFIXES) and that planMeeting
+    // escalates on the colleague path; without them here a "3pm today" ask at
+    // 2pm renders as a bare "NOT BOOKABLE" with no reason at all — a mechanical
+    // no, which is precisely what M11 forbids.
     const ESCALATABLE = new Set<string>([
-      'focus_time_floor', 'floating_block_overlap',
+      'focus_time_floor', 'floating_block_overlap', 'within_lead_time', 'travel_buffer_collision',
       'outside_working_hours', 'category_per_day', 'category_per_week', 'category_day_type',
     ]);
     if (v.rejection_reason && ESCALATABLE.has(v.rejection_reason)) {
@@ -576,6 +591,10 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile): strin
       // to a colleague (rule 7). All route to owner approval on insist.
       const why = v.rejection_reason === 'outside_working_hours'
         ? `that's outside ${ownerFirst}'s usual hours`
+        : v.rejection_reason === 'within_lead_time'
+          ? `that's sooner than ${ownerFirst} normally takes a new booking at`
+        : v.rejection_reason === 'travel_buffer_collision'
+          ? `there isn't enough room around it for ${ownerFirst} to get there and back`
         : v.rejection_reason.startsWith('category_')
           ? `${ownerFirst} is already at his limit for that kind of meeting that day`
           : `${ownerFirst}'s day is loaded around then`;

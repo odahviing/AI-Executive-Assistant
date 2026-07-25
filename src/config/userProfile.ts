@@ -181,7 +181,10 @@ const UserProfileSchema = z.object({
     work_hours_per_free_hour: z.number().min(0).optional(),                           // bug 1.13 — length-based free-time floor: 1 free hour per N hours worked (ceil to 15 min, off the day's TOTAL work-window minutes incl. split shifts). Unset / 0 = no floor imposed (de-tenant neutral; replaced the fixed free_time_per_office/home_day_hours). Read ONLY via requiredFreeMinutesForWorkDay (scheduleRules) — the single source of truth for analyze_calendar, checkSlot rule 9, and calendar-health.
     thinking_time_min_chunk_minutes: z.number().min(15).max(120).default(30),         // Smallest focus block worth counting — ALSO the minimum "real break" between meetings (#133)
     packing_preference: z.enum(['dense', 'spread']).default('spread'),                // #133 — 'dense': pack meetings back-to-back (≤buffer_minutes), kill 6–29min dead gaps, consolidate free time into ≥thinking_time_min_chunk breaks; prefer earlier. 'spread' (default): no density preference (de-tenant neutral).
-    min_slot_buffer_hours: z.number().min(0).max(12).default(4),                      // How far ahead colleagues can book (owner gets 1h)
+    min_slot_buffer_hours: z.number().min(0).max(12).default(4),                      // Booking LEAD TIME for a colleague-initiated slot. Read ONLY via bookingLeadTimeHours (scheduleRules) — the single source for search, checkSlot rule 1, and the colleague pre-check.
+    owner_min_slot_buffer_hours: z.number().min(0).max(12).default(1),                // Same lead time for the OWNER's own bookings. Was a literal `1` in four call sites; centralized so search and book can't drift.
+    travel_buffer_minutes: z.number().min(0).max(240).default(30),                    // Padding each side of a category flagged requires_travel_buffer. Was a literal 30 in scheduleRules AND in the slot walker (the schema comment already claimed this field existed).
+    offered_slot_count: z.number().int().min(1).max(20).default(8),                   // M6 — how many options a slot search offers, and the per-day candidate cap feeding the spreader. Was a literal 5 at each pickSpreadSlots call plus a hidden MAX_PER_DAY=4 that culled candidates BEFORE the spread.
     physical_meetings_require_office_day: z.boolean().default(false),                 // Force in-person meetings to office days only
     room_email: z.string().email().optional(),                                         // Meeting-room mailbox for room booking
     // v2.8.2 — three labels for the three output flavors of the location
@@ -334,7 +337,8 @@ const UserProfileSchema = z.object({
     // When true, create_meeting / find_available_slots auto-pad slots with
     // profile.meetings.travel_buffer_minutes on both sides. The flag is
     // about the meeting category ("this requires travel"), not the buffer
-    // length itself — that lives in profile.meetings.travel_buffer_minutes.
+    // length itself — that lives in profile.meetings.travel_buffer_minutes
+    // (default 30) and is read via travelBufferMinutesFor in scheduleRules.
     requires_travel_buffer: z.boolean().optional(),
     // v2.6.5 — when true, colleague-path create_meeting checks the owner's
     // calendar for an existing same-attendee occurrence in the same week

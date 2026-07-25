@@ -47,40 +47,6 @@ import logger from '../../utils/logger';
 /** Debounce window for typing-burst collapse. Milliseconds. */
 const DEBOUNCE_MS = 1500;
 
-/**
- * Tools whose execution makes the in-flight turn UN-abortable. Anything that
- * sends a message externally, creates/modifies a calendar event, raises an
- * approval, or makes an irreversible DB change. Read-only tools (get_calendar,
- * find_available_slots, find_slack_user, web_search, recall_*) stay abortable —
- * re-running them is free, the cached results from A3 even share work.
- */
-export const WRITE_TOOLS = new Set([
-  // Calendar mutations
-  'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
-  'book_floating_block', 'set_event_category',
-  // Outreach (sends DMs externally — irreversible)
-  'message_colleague',
-  // Approvals (DM owner)
-  'create_approval', 'resolve_approval',
-  // Tasks (visible state). v2.9 — edit/cancel merged into update_task.
-  'create_task', 'update_task',
-  // Routines. v2.9 — 4 tools merged into manage_routine; create/update/delete
-  // actions all flow through the same write tool.
-  'manage_routine',
-  // Calendar issues. v2.9 — merged into manage_calendar_issue (update action is the write).
-  'manage_calendar_issue',
-  // Knowledge / summary writes. v2.9 — ingest merged into manage_knowledge.
-  'share_summary', 'manage_knowledge',
-  'learn_summary_style', 'update_summary_draft',
-  // Memory writes. v2.9 — preferences merged into manage_preference (set/forget are writes).
-  'manage_preference', 'update_my_preferences',
-  'note_about_person', 'note_about_self',
-  'log_interaction', 'update_person_profile', 'update_person_memory',
-  'confirm_gender',
-  // Briefing
-  'send_briefing_now',
-]);
-
 // ── Per-thread state ─────────────────────────────────────────────────────────
 
 interface PendingMessage {
@@ -110,7 +76,12 @@ interface ThreadState {
   debounceTimer: NodeJS.Timeout | null;
   /** AbortController for the currently-running orchestrator turn; null when idle. */
   inFlight: AbortController | null;
-  /** True once a write tool has fired in the current turn — abort no longer safe. */
+  /**
+   * True once a write tool has fired in the current turn — abort no longer safe.
+   * Set by the runner's `markWrite` callback; WHICH tools count as writes is a
+   * transport-neutral question answered by WRITE_TOOLS in skills/registry.ts,
+   * which core consults before dispatch (orchestrator/index.ts).
+   */
   hasWriteFired: boolean;
 }
 
@@ -325,6 +296,32 @@ async function scheduleRun(key: string): Promise<void> {
       void scheduleRun(key);
     }, DEBOUNCE_MS);
   }
+}
+
+/**
+ * Is this thread mid-conversation RIGHT NOW? True when a turn is running for
+ * this queue key, a batch is buffered behind an un-abortable turn, or the
+ * debounce window is open.
+ *
+ * Read by the delivery pipeline before it posts a DELAYED follow-up (the social
+ * coda, postReply.ts). That message's whole premise is a lull — the work
+ * resolved or was handed off, so there is a beat of quiet in which a human
+ * thing is welcome. If the person has typed again inside that beat the lull is
+ * gone, and a social one-liner would land in the middle of the next exchange —
+ * exactly the non-sequitur the coda split exists to remove.
+ *
+ * A caller must NOT consult this from inside its own turn: the turn asking the
+ * question is itself the `inFlight` one. It is only meaningful from a timer
+ * that fires after the runner has returned.
+ */
+export function isThreadActive(
+  channelId: string,
+  threadTs: string | undefined,
+  isOneOnOneDm: boolean,
+): boolean {
+  const state = threadStates.get(keyFor(channelId, threadTs, isOneOnOneDm));
+  if (!state) return false;
+  return state.inFlight !== null || state.pending.length > 0 || state.debounceTimer !== null;
 }
 
 /**

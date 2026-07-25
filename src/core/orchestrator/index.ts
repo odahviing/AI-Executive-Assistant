@@ -1,13 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../../config';
-import { generateSocialCoda } from '../social/generateCoda';
-import { executeSkillTool } from '../../skills/registry';
+import type { PendingSocialCoda } from '../social/generateCoda';
+import { executeSkillTool, WRITE_TOOLS } from '../../skills/registry';
 import type { UserProfile } from '../../config/userProfile';
 import type { SkillContext, ChannelId } from '../../skills/types';
 import { auditLog } from '../../db';
 import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
-import { callClaude, mutationOutcome, summarizeToolCall } from './turnHelpers';
+import { callClaude, mutationOutcome, summarizeToolCall, summarizeInternalAction } from './turnHelpers';
 import { buildTurnContext } from './buildTurnContext';
 
 export interface OrchestratorInput {
@@ -147,6 +147,25 @@ export interface OrchestratorOutput {
    * this flag is informational for them (the reply ships normally).
    */
   healthCheckVacuous?: boolean;
+  /**
+   * A coda is DUE this turn — NOT appended to `reply`, and not yet written.
+   * It used to be glued on with "\n\n", so a scheduling answer ended on an
+   * unrelated social line and read as a non-sequitur. The transport delivers
+   * it as its own message in the same thread, a short beat later.
+   *
+   * This is a directive, not a sentence. Composing it here meant awaiting a
+   * Sonnet call plus a claim-check between "answer ready" and "answer posted" —
+   * two round-trips of latency on the WORK answer, for a line the transport
+   * then deliberately holds 10 seconds anyway (P10 — social never delays real
+   * work). The transport calls `composeSocialCoda` inside that beat instead.
+   *
+   * It carries its two ids because the social bookkeeping — the once-per-day
+   * cadence gate and the subject raise-marker — is stamped on DELIVERY, not on
+   * generation (`recordCodaDelivered`, core/social/logEngagement.ts). The
+   * transport is the only layer that knows whether the coda actually went out;
+   * it drops it on a leak hit, a lost lull, or a failed post.
+   */
+  socialCoda?: PendingSocialCoda;
 }
 
 /**
@@ -534,9 +553,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // abort, buffer for follow-up turn. Calling onWriteExecuted from
       // INSIDE executeSkillTool would race the queue's read; flagging here
       // (just before dispatch) is the safe ordering.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { WRITE_TOOLS } = require('../../connectors/slack/inboundQueue') as
-        typeof import('../../connectors/slack/inboundQueue');
       if (input.onWriteExecuted && WRITE_TOOLS.has(toolUse.name)) {
         try { input.onWriteExecuted(toolUse.name); } catch (_) { /* never fail the turn over the callback */ }
       }
@@ -899,11 +915,17 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // `check_calendar_health` was visible. Generic across tools — any
       // future skill that does internal mutations and emits the same shape
       // gets the same coverage.
+      // v4.1.x — rendered by summarizeInternalAction so these lines carry the same
+      // `mutated=<domain>` marker the top-level summaries do, which is what the
+      // claim-checker shield reads. This is the only OTHER writer to this tape that
+      // reports a COMPLETED mutation; the remaining direct pushes above (duplicate
+      // send / delete short-circuits, rate-limit deferral) all describe something
+      // that deliberately did NOT happen, so they correctly stay unmarked.
       if (result && typeof result === 'object' && Array.isArray((result as { internal_actions?: unknown }).internal_actions)) {
         const internalActions = (result as { internal_actions: Array<{ tool?: string; detail?: string }> }).internal_actions;
         for (const a of internalActions) {
           if (typeof a?.tool === 'string') {
-            toolCallSummaries.push(`[${a.tool} (via ${toolUse.name}): ${a.detail ?? ''}]`);
+            toolCallSummaries.push(summarizeInternalAction(a.tool, toolUse.name, a.detail));
           }
         }
       }
@@ -1251,13 +1273,19 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     }
   }
 
+  // The coda DUE this turn, handed to the transport to compose and post
+  // SEPARATELY (see OrchestratorOutput.socialCoda). Every gate below still runs
+  // here — eligibility is a property of the turn, and only the turn knows it —
+  // but nothing is awaited: the writing happens in the transport's 10s beat.
+  let socialCoda: PendingSocialCoda | null = null;
   // v2.2.1 Pattern 1 — slack-available task turns → social coda.
   // Task always wins, BUT if the task produced a "parking" tool call (coord
   // initiated, message_colleague await_reply, create_approval, outreach_send)
   // then Maelle has nothing else to do this moment — she's waiting on
   // someone. That's the right time to weave in social if the 24h cadence
-  // gate passes. One short additional sentence appended to the task reply.
-  // Never hijacks the task response; always starts with the task.
+  // gate passes. ONE short sentence, handed to the transport as its own
+  // message — never spliced onto the task reply, which read as a topic swerve
+  // in the reply's last line ("…17:30 Sydney. Any trips coming up?").
   // v2.2.3 (#3) — task-coda piggyback also gated on persona being active.
   // socialClassification will be null when persona is off, but belt-and-
   // suspenders the explicit check too.
@@ -1293,11 +1321,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // History: the original piggyback (v2.2.1) fired on parking turns but the
     // picker was context-blind → mid-booking non-sequitur ("btw that Samuel L.
     // Jackson movie...", 2026-05-11). It was hard-disabled. Two things changed
-    // since: (1) the claimChecker coda-validator below drops invented-fact /
-    // off-base codas, and (2) the `turnLeftWorkPending` guard keeps the coda
-    // off genuinely mid-process turns. The cold-open socialOutreachTick is
-    // gone (v3.2.5) — this in-conversation coda is now the ONLY proactive-
-    // social surface.
+    // since: (1) the claimChecker coda-validator (now inside composeSocialCoda)
+    // drops invented-fact / off-base codas, and (2) the `turnLeftWorkPending`
+    // guard keeps the coda off genuinely mid-process turns. The cold-open
+    // socialOutreachTick is gone (v3.2.5) — this in-conversation coda is now the
+    // ONLY proactive-social surface.
     const codaEligible = !turnLeftWorkPending;
     if (codaEligible) {
       try {
@@ -1313,116 +1341,35 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           // else 'en'. Cheap, deterministic; the coda generator falls back to
           // English when omitted, so failure mode is graceful.
           const codaLang: 'he' | 'en' = /[֐-׿]/.test(input.userMessage ?? '') ? 'he' : 'en';
-          const coda = await generateSocialCoda({
-            profile,
+          // Eligibility is settled HERE — it is a property of this turn and
+          // nothing downstream can re-derive it. The SENTENCE is not written
+          // here: `composeSocialCoda` runs in the transport's existing 10s beat,
+          // so the two LLM round-trips it costs land on dead time instead of
+          // between the work answer being ready and the person seeing it.
+          // Nothing is stamped either — the cadence gate
+          // (people_memory.last_initiated_at) and the subject raise-marker are
+          // written by `recordCodaDelivered` once the transport confirms the
+          // post, and now the topic-beat marker follows the same rule by virtue
+          // of living inside the composer.
+          socialCoda = {
             directive: codaDirective,
+            personSlackId: turnPersonSlackId,
+            subjectId: codaDirective.subjectId ?? undefined,
             senderRole: turnSenderRole,
             senderFirstName: turnSenderRole === 'owner'
               ? profile.user.name.split(' ')[0]
               : (input.senderName?.split(' ')[0] ?? 'there'),
             language: codaLang,
+          };
+          logger.info('Social coda DUE on a task turn — transport composes and posts it separately', {
+            personSlackId: turnPersonSlackId,
+            mode: codaDirective.mode,
+            topic: codaDirective.topicLabel,
+            subjectId: codaDirective.subjectId ?? null,
           });
-          // v2.3.2 (2B) — validate coda against people_memory before appending.
-          // Catches the "shares my name" / "marathon training" hallucinations
-          // (invented facts) and gossipy commentary about third parties.
-          // Reuses claimChecker with mode='coda' so the same JSON contract /
-          // fail-open semantics apply. Fails open: if the validator can't
-          // reach a verdict, the coda still ships (better one weird coda than
-          // dropping every coda when the API blips).
-          let codaPassed = true;
-          if (coda && coda.trim().length > 0) {
-            try {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { checkReplyClaims } = require('../../utils/claimChecker') as
-                typeof import('../../utils/claimChecker');
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { getPersonMemory } = require('../../db') as typeof import('../../db');
-              const personRow = getPersonMemory(turnPersonSlackId);
-              // Build a compact text snapshot of what we know about the
-              // recipient. Notes (free-text) + topics (categories/labels) +
-              // state/timezone are the inputs Sonnet should be riffing on.
-              const snapshot: string[] = [];
-              if (personRow) {
-                if (personRow.state) snapshot.push(`state: ${personRow.state}`);
-                if (personRow.timezone) snapshot.push(`timezone: ${personRow.timezone}`);
-                if (personRow.notes) {
-                  try {
-                    const notes = JSON.parse(personRow.notes) as Array<{ note?: string }>;
-                    for (const n of notes.slice(-10)) if (n.note) snapshot.push(`note: ${n.note}`);
-                  } catch { /* ignore */ }
-                }
-              }
-              const recipientName = input.senderName ?? personRow?.name ?? turnPersonSlackId;
-              const verdict = await checkReplyClaims({
-                reply: coda,
-                toolSummaries: [],
-                bookingOccurred: false,
-                ownerFirstName: profile.user.name.split(' ')[0],
-                mode: 'coda',
-                coda: {
-                  recipientName,
-                  recipientFactsSnapshot: snapshot.length > 0 ? snapshot.join('\n') : '(no notes / topics on record)',
-                },
-              });
-              if (verdict.claimed_action === true) {
-                codaPassed = false;
-                logger.info('Coda dropped by validator', {
-                  reason: verdict.action_type, summary: verdict.action_summary,
-                  codaPreview: coda.slice(0, 120),
-                });
-              }
-            } catch (err) {
-              logger.warn('Coda validator threw — letting coda through (fail-open)', {
-                err: String(err).slice(0, 200),
-              });
-            }
-          }
-
-          if (coda && coda.trim().length > 0 && codaPassed) {
-            finalReply = `${finalReply.trim()}\n\n${coda.trim()}`;
-            // v2.6.7 — mark the subject as raised so the next inbound from
-            // this person triggers the +1/−1 engagement signal. Subject id
-            // comes from codaDirective.subjectId (legacy alias topicId
-            // preserved on LegacySocialDirectiveShape). raise_new mode
-            // doesn't have a subject yet — the signal applies once the
-            // person responds and a subject gets created/matched.
-            if (codaDirective.subjectId) {
-              try {
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { markSubjectRaised } = require('../../db/socialSubjects') as
-                  typeof import('../../db/socialSubjects');
-                markSubjectRaised(codaDirective.subjectId);
-              } catch (err) {
-                logger.warn('markSubjectRaised threw — continuing', { err: String(err).slice(0, 200) });
-              }
-            }
-            // Record the coda as a Maelle-initiated social moment on the PERSON.
-            // Sets people_memory.last_initiated_at → opens the 24h window that
-            // `adjustRankFromColleagueResponse` keys on to score the colleague's
-            // reply (+1 engaged / −1 deflection / nothing if ignored). Fires for
-            // BOTH continue and raise_new codas, so discovery codas score too.
-            // v3.2.6 — the old 48h `social_ping_rank_check (coda)` task was
-            // REMOVED: it penalized −1 for an ignored tail-end coda, which the
-            // owner explicitly killed ("nothing to lose by ignoring"). Rank now
-            // moves ONLY on a real reply, live, via adjustRankFromColleagueResponse.
-            try {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { recordSocialMoment } = require('../../db') as typeof import('../../db');
-              recordSocialMoment(turnPersonSlackId, 'maelle');
-            } catch (err) {
-              logger.warn('coda recordSocialMoment threw — continuing', {
-                err: String(err).slice(0, 200),
-              });
-            }
-            logger.info('Social coda appended to task turn', {
-              personSlackId: turnPersonSlackId,
-              mode: codaDirective.mode,
-              topic: codaDirective.topicLabel,
-            });
-          }
         }
       } catch (err) {
-        logger.warn('Social coda generation threw — continuing without coda', { err: String(err).slice(0, 300) });
+        logger.warn('Social coda eligibility check threw — continuing without coda', { err: String(err).slice(0, 300) });
       }
     }
   }
@@ -1436,6 +1383,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     toolSummaries: toolCallSummaries.length > 0 ? toolCallSummaries : undefined,
     mutationActions: mutationActions.length > 0 ? mutationActions : undefined,
     healthCheckVacuous: healthCheckVacuous ? true : undefined,
+    socialCoda: socialCoda ?? undefined,
   };
 }
 

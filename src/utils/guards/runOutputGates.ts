@@ -9,21 +9,28 @@
  * (utils/claimChecker, utils/humanGate, utils/dateVerifier, utils/securityGate)
  * and are still dynamically imported — a clean reply never loads them twice.
  *
- * TWO entry points, because a pipeline step legitimately sits between them:
- *   1. runConcisionPassIfNeeded(draft, profile) — runs BEFORE postReply persists
+ * THREE entry points, because pipeline steps legitimately sit between them:
+ *   1. runDeliberationGuard(draft, profile) — runs BEFORE postReply persists
  *      the draft to conversation history, so history stores what the user will
- *      actually see (the clean answer, not the deliberation chain).
+ *      actually see (the answer, not the deliberation chain).
  *   2. runOutputGates(draft, ctx) — the whole gate stack, on the already
  *      normalized Slack-mrkdwn draft; returns the text to send.
+ *   3. runCodaGates(coda, ctx) — the SOCIAL CODA's own, much smaller gate. It is
+ *      a separate entry point rather than a mode of (2) because the coda is a
+ *      different kind of message (see its own doc comment): it answers nothing,
+ *      claims nothing, and its safe failure is SILENCE, not a rewrite. It
+ *      therefore returns a ship/drop verdict and cannot alter the text at all.
  *
- * Order inside runOutputGates (unchanged from the in-postReply version):
+ * Order inside runOutputGates:
  *   3/3a/3b  OWNER (or owner-in-group): claim-check + humanGate + date-verify,
  *            probed concurrently, exact serial chain on any flag.
  *   3b       NON-OWNER: date-verify.
- *   3c       NON-OWNER: mutation-contradiction retry.
  *   4/4a     NON-OWNER: security gate, then colleague humanGate.
  * Owner-only concerns (claim-checker) and colleague-only concerns (security
  * gate) are mutually exclusive by role, so there's no stage where both run.
+ *
+ * NOTHING here re-runs the orchestrator (G4). Every remedy is either a
+ * deterministic edit or a single tool-less rewrite pass.
  *
  * Every gate FAILS OPEN: a throw anywhere leaves the draft it was handed.
  */
@@ -31,12 +38,11 @@
 import { getAnthropicClient } from '../../llm/client';
 import { SONNET, MODEL_SONNET } from '../../llm/models';
 
-import type { App } from '@slack/bolt';
 import type { UserProfile } from '../../config/userProfile';
-import type { ChannelId } from '../../skills/types';
 import type { SenderRole } from '../../connectors/slack/postReply';
+import type { HumanGateAudience } from '../humanGate';
 import { appendToConversation } from '../../db';
-import { runOrchestrator, type OrchestratorOutput } from '../../core/orchestrator';
+import type { OrchestratorOutput } from '../../core/orchestrator';
 import { formatForSlack } from '../../connections/slack/formatting';
 import logger from '../logger';
 import { logLlmUsage } from '../usageLog';
@@ -47,7 +53,6 @@ import { logLlmUsage } from '../usageLog';
  * NOT here: a gate must never be able to send.
  */
 export interface OutputGateContext {
-  app: App;
   profile: UserProfile;
   result: OrchestratorOutput;
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -64,9 +69,9 @@ export interface OutputGateContext {
 
 export async function runOutputGates(draft: string, ctx: OutputGateContext): Promise<string> {
   const {
-    app, profile, result,
+    profile, result,
     role, colleagueName,
-    senderId, channelId, threadTs,
+    senderId, threadTs,
     history, userMessage, isMpim, isOwnerInGroup, mpimMemberIds,
   } = ctx;
   let cleanReply = draft;
@@ -142,77 +147,23 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // upstream by the meeting-core weekday guard. Backstop with a bad data source
   // + zero real catches + one false alarm = not worth the call. R1 / R9.)
 
-  // Step 3c (v1.8.4) — colleague-path mutation-contradiction check. When a
-  // calendar-mutating tool succeeded this turn AND the draft tells the
-  // colleague something like "I'll flag it for <owner>" or "he'll decide,"
-  // Maelle is contradicting her own action — she did mutate the calendar,
-  // she shouldn't defer it back to the owner. Retry once with a nudge so
-  // the reply acknowledges the action. Code-only check, no Sonnet call.
-  // Addresses the Bug C pattern from issue #26 aftermath (owner saw audit
-  // log "Meeting booked" while the colleague was told "flagged for Idan").
-  // v3.8.x — fail-closed on role: a non-owner (colleague / future 'unknown')
-  // gets the full colleague-strict treatment, not an ungated pass.
-  if (role !== 'owner' && !isOwnerInGroup) {
-    const toolSummariesText = (result.toolSummaries ?? []).join(' ');
-    // v3.7.x (#137b) — require the SUCCESS marker, not just the tool name. The
-    // tool log renders `[<tool> OK …]` on success and `[<tool> FAILED: …]` on
-    // failure (summarizeToolCall). Matching the bare name treated a FAILED
-    // booking as done: Oran's create_meeting FAILED (rule_check_failed) then
-    // escalated via create_approval, and the name-only regex fired the retry —
-    // inverting the CORRECT "flagged it for Idan" escalation into a false
-    // "booking it now". A failed mutation means she did NOT act, so deferring to
-    // the owner is honest and must not be rewritten. Same OK-only convention as
-    // MUTATION_OK_RE in the orchestrator.
-    const mutationSucceeded = /\[(?:move_meeting|create_meeting|update_meeting|delete_meeting) OK\b/i.test(toolSummariesText);
-    const ownerFirstName = profile.user.name.split(' ')[0];
-    const ownerFnRe = new RegExp(`\\b${ownerFirstName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\b`, 'i');
-    const draftDefersToOwner =
-      /\bflag(?:ged|ging)?\s+(?:it|this|that)?\s*for\b/i.test(cleanReply) ||
-      (/\blet\s+\S+\s+know\b/i.test(cleanReply) && ownerFnRe.test(cleanReply)) ||
-      (/\bcheck\s+with\s+\S+/i.test(cleanReply) && ownerFnRe.test(cleanReply)) ||
-      /\bhe'?ll\s+(?:likely|probably|need|decide|confirm|jump)/i.test(cleanReply);
-    if (mutationSucceeded && draftDefersToOwner) {
-      logger.warn('Colleague draft defers to owner after mutation succeeded — retrying', {
-        senderId, threadTs,
-        toolSummaries: result.toolSummaries,
-        draftPreview: cleanReply.slice(0, 160),
-      });
-      const nudge = `Your previous reply to this colleague said you'd flag / check with ${ownerFirstName}, but a calendar action (move / create / update / delete / book) already SUCCEEDED this turn. Do not defer to ${ownerFirstName} — acknowledge the action to the colleague directly. If the tool returned an action_summary, use it verbatim or paraphrase. Write one short honest sentence that matches what actually happened.`;
-      try {
-        const retry = await runOrchestrator({
-          userMessage,
-          conversationHistory: history,
-          threadTs,
-          channelId,
-          userId: senderId,
-          senderRole: role as 'owner' | 'colleague',
-          senderName: colleagueName,
-          channel: 'slack' as ChannelId,
-          app,
-          profile,
-          extraInstruction: nudge,
-          // v3.2.1 (#120 bug 1) — this retry exists ONLY to fix the DRAFT TEXT
-          // (the "I deferred but actually acted" contradiction). It must NOT
-          // re-execute tools: the original turn already ran create_approval /
-          // move_meeting, and a full re-run created a SECOND, differently-worded
-          // approval that slipped past the subject-string dedup (the Dina
-          // double-request). proseOnly strips every write tool (incl.
-          // create_approval) so the re-run can only re-narrate what already
-          // happened — reads stay available so it can ground the wording.
-          proseOnly: true,
-          isMpim,
-          isOwnerInGroup,
-          mpimMemberIds,
-        });
-        if (retry?.reply) {
-          cleanReply = formatForSlack(retry.reply);
-          logger.info('Colleague mutation-contradiction retry produced new draft', { previewAfter: cleanReply.slice(0, 160) });
-        }
-      } catch (err) {
-        logger.warn('Colleague mutation-contradiction retry failed — leaving original draft', { err: String(err) });
-      }
-    }
-  }
+  // (v4.1.x — the v1.8.4 colleague "mutation-contradiction" step that used to run
+  // here is RETIRED, and it is the clearest G4 violation the stack had: its remedy
+  // was `runOrchestrator(...)`, a SECOND full agentic turn on the reply path, to
+  // reword a draft. G4 names re-running the orchestrator as never allowed — an
+  // unbounded regeneration can differ from the vetted draft in any way, and it
+  // cost seconds of latency plus a whole turn's tokens on the colleague path.
+  // Its trigger was also English-only natural-language regex ("flagged it for",
+  // "he'll decide") — G7-banned, and useless in Hebrew or Russian. And it never
+  // caught anything: ZERO `Colleague draft defers to owner after mutation
+  // succeeded` warns across every log on disk.
+  //
+  // The job it was doing is owned UPSTREAM, where it belongs (G1/G3): the mutation
+  // tools return their own `action_summary` / `_must_reply_with` for the drafting
+  // turn to narrate (skills/outreach.ts:348, :496) and the pinned action tape
+  // replays confirmed mutations into the system prompt (turnHelpers.ts
+  // extractActionTape). A draft that contradicts a mutation is a DRAFTING bug, so
+  // it gets fixed where the draft is made, not policed afterwards.)
 
   // Step 4 — colleague-facing security gate (leak filter + identity-spoof).
   // v3.8.x — fail-closed on role: any non-owner (colleague, or a future 'unknown'
@@ -230,7 +181,16 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
       .filter(h => h.role === 'user')
       .slice(-5)
       .map(h => h.content);
-    cleanReply = await runSecurityGate({
+    // v4.1.x — normalize the gate's output like every OTHER rewrite path in this
+    // file does. This was the one rewrite that shipped raw: securityGate's Sonnet
+    // rewriter and its Haiku identity-refusal composer both emit free text, and it
+    // went straight to Slack without formatForSlack — so the scrubber never saw it.
+    // The em-dash AI-tell in the 2026-07-21 rewrite (log :838) is exactly that, and
+    // any raw id or tool name the rewriter emitted would have shipped unscrubbed
+    // too. Running it through formatForSlack also makes textScrubber the LAST word
+    // on the slack-id token on this path: whatever the rewriter did with an id, the
+    // scrubber re-wraps it into a rendered mention.
+    cleanReply = formatForSlack(await runSecurityGate({
       reply: cleanReply,
       colleagueName,
       senderId,
@@ -239,7 +199,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
       verifiedSenderEmail,
       ownerEmail: profile.user.email,
       recentUserMessages,
-    });
+    }));
 
     // Step 4a (v2.6.5) — colleague-facing humanness gate. Same Sonnet-pass
     // gate that runs on owner-path (Step 3a above), now also on colleague-
@@ -265,6 +225,98 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   }
 
   return cleanReply;
+}
+
+// ── Social-coda gate ────────────────────────────────────────────────────────
+
+export interface CodaGateVerdict {
+  /** True = post the coda EXACTLY as handed in. False = post nothing. */
+  ship: boolean;
+  /** Which check dropped it (for the caller's log). Null when ship=true. */
+  droppedBy: string | null;
+}
+
+/**
+ * The social coda's gate. Deliberately NOT `runOutputGates`.
+ *
+ * The coda is a one-line human aside Maelle posts on her OWN initiative, in its
+ * own message, a beat after the reply already landed (postReply's
+ * scheduleSocialCoda). It answers no question, states no date, claims no action
+ * and carries none of the turn's tool activity — so most of the reply stack has
+ * nothing to check, and several of its gates are actively HOSTILE to it:
+ *
+ *  - the claim-checker's remedy is rewriteOwningTheMiss, which on a false
+ *    positive turns a social question into an apology about work;
+ *  - securityGate's identity-spoof branch triggers off `recentUserMessages`, NOT
+ *    the draft, so it would hand the SAME refusal to the person twice;
+ *  - and the claim/date wrappers both appendToConversation, which would push a
+ *    second assistant row for a turn history already recorded.
+ *
+ * What DOES apply is the pair of checks that judge the text itself. Both run in
+ * DETECT-ONLY form: this function's return type carries no text, so it is
+ * structurally incapable of corrupting a correct coda (G6). The only action is
+ * DROP, and dropping a social aside costs nothing — that asymmetry is what makes
+ * an LLM verdict safe to act on here (G4: tool-less + miss-safe).
+ *
+ *  1. scanForLeaks — the HARD-IDENTIFIER half: raw Slack ids, req_/task_ ids,
+ *     provider tokens, JSON / tool-tag echoes. Those patterns are structured and
+ *     language-neutral (G7); the handful of English self-AI-claim patterns in the
+ *     same list are a bonus, not the coverage (a Hebrew "אני בוט" passes it — see
+ *     2). Free, so it runs first and a hit costs no LLM call. It is NOT redundant
+ *     with the coda's inputs being "just a topic label": those labels and topic
+ *     beats are free text Haiku derived from the DM transcript (social_subjects /
+ *     social_topics), and that transcript includes the PRE-gate draft plus the raw
+ *     `[tool …]` markers (postReply Step 1b) — so a structured internal id CAN
+ *     reach the generator's prompt, and this is the check that stops it leaving.
+ *  2. runHumanGate — the VOICE half, and the language-agnostic one, in the coda's
+ *     audience frame ('owner' vs 'internal'). Kept because the coda is the ONE
+ *     message Maelle sends unprompted, most often to a COLLEAGUE (5 of the 6
+ *     codas in the 2026-07-20..25 logs), and its generator's only defence against
+ *     a bot-tell or a third-person-owner slip is a line in its own prompt — which
+ *     is not enforcement. Its `rewrite` is read for nothing; ok=false means DROP.
+ *
+ * Fails CLOSED (drop) — the inverse of the reply gates' fail-open contract, and
+ * right for the same reason: a reply must always land, a social aside never has
+ * to. Nothing here can throw into the caller.
+ */
+export async function runCodaGates(
+  coda: string,
+  ctx: { profile: UserProfile; role: SenderRole },
+): Promise<CodaGateVerdict> {
+  const text = coda.trim();
+  if (text.length === 0) return { ship: false, droppedBy: 'empty' };
+
+  try {
+    const { scanForLeaks } = await import('../securityGate');
+    const leaks = scanForLeaks(text);
+    if (leaks.length > 0) return { ship: false, droppedBy: `leak:${leaks.join(',')}` };
+  } catch (err) {
+    logger.warn('Coda gate — leak scan unavailable; dropping the coda (fail closed)', {
+      err: String(err).slice(0, 200),
+    });
+    return { ship: false, droppedBy: 'leak_scan_threw' };
+  }
+
+  try {
+    const { runHumanGate } = await import('../humanGate');
+    // Fail-closed on role, same convention as the reply stack: anything that is
+    // not the authenticated owner gets the colleague-strict frame.
+    const audience: HumanGateAudience = ctx.role === 'owner' ? 'owner' : 'internal';
+    const verdict = await runHumanGate(text, ctx.profile, audience);
+    // verdict.rewrite is deliberately IGNORED. A fact-preserving rewrite is the
+    // right remedy for a reply that must land; for an optional social line the
+    // rewrite is pure downside — it can only produce a stranger second message
+    // (humanGate's own safeFallback would post "Let me look into this and come
+    // back to you" as a standalone aside, 10s after the work was already done).
+    if (!verdict.ok) return { ship: false, droppedBy: 'human_gate' };
+  } catch (err) {
+    logger.warn('Coda gate — voice check unavailable; dropping the coda (fail closed)', {
+      err: String(err).slice(0, 200),
+    });
+    return { ship: false, droppedBy: 'human_gate_threw' };
+  }
+
+  return { ship: true, droppedBy: null };
 }
 
 // ── Internal gates ──────────────────────────────────────────────────────────
@@ -332,49 +384,38 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
       .map(h => h.content)
       .join(' ');
     const toolSummariesText = [(result.toolSummaries ?? []).join(' '), priorAssistantText].join(' ');
-    const matchingToolAlreadyRan =
-      verdict.action_type === 'message'
-        // v4.0.x (G1) — require the SUCCESS form `[message_colleague: <name>]`
-        // (the colon). A SKIPPED (`[message_colleague] <id> — … skipped`) or FAILED
-        // (`[message_colleague FAILED: …]`) summary is NOT a sent message and must
-        // not back a "flagged it to X" claim — that shipped a false "already flagged
-        // it to Simon" when the relay was dropped (2026-07-23). resolve_approval is
-        // also NO LONGER an unconditional backer here: it relays only the DECISION
-        // to the requester, not arbitrary content, so it wrongly backed a specific
-        // question ("whether it has to be him or Rita") that never went out. A
-        // genuine "I told the requester the decision" claim is handled by the
-        // claim-checker's own resolve_approval prompt rule (→ claimed_action=false),
-        // and if that still flags, rewriteOwningTheMiss's Sonnet veto keeps it — so
-        // dropping it here can't corrupt an honest relay. (The old double-DM concern
-        // is moot: the tool-firing retry that caused it is gone; the remedy is now a
-        // tool-less rewrite.)
-        ? (/\[message_colleague:/.test(toolSummariesText) &&
-            (!verdict.target_name || toolSummariesText.toLowerCase().includes(verdict.target_name.toLowerCase())))
-        : verdict.action_type === 'book'
-          // v2.3.4 — `book` covers any calendar mutation, not just
-          // create+finalize. The narrower regex let a move_meeting + correct
-          // confirmation get retried after a false-positive verdict, and the
-          // retry — which doesn't see THIS turn's tool calls in
-          // conversationHistory — re-read the calendar and narrated her own
-          // move as someone else's ("looks like it was moved at some point
-          // during our conversation"). All five mutation tools should
-          // satisfy a book-type claim.
-          ? /\[(create_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block)/.test(toolSummariesText)
-          : verdict.action_type === 'task'
-            ? /\[(create_task|create_approval)/.test(toolSummariesText)
-            // Extend the false-positive shield to the memory/pref action-verb
-            // family. The claim-checker classifies "saved / noted / updated"
-            // claims as `other`, and these tools were never in the shield — so
-            // a legitimate update_my_preferences save that Sonnet narrated as
-            // "Saved" got flagged + retried (a wasted orchestrator turn; only
-            // the tool-call cache prevented a double-write). Same trust
-            // contract as book/task: the tool literally ran this turn ⇒ the
-            // claim is honest. The specifics-mismatch bypass below still fires
-            // for genuine over-claims, and an `other` claim with NONE of these
-            // tools present still retries (phantom-claim protection intact).
-            : verdict.action_type === 'other'
-            ? /\[(update_my_preferences|manage_preference|note_about_person|note_about_self|log_interaction|confirm_gender|update_person_profile|update_person_memory|manage_routine|manage_calendar_issue|update_task|update_summary_draft|manage_knowledge|resolve_approval)/.test(toolSummariesText)
-            : false;
+
+    // v4.1.x (G2/G3) — READ the carried marker; do not re-derive it.
+    //
+    // This used to be four action_type branches over a 5-tool, a 2-tool and a
+    // 14-tool name alternation, each one added after a distinct incident, and each
+    // new mutating tool anywhere in the codebase had to be remembered here or the
+    // guard would manufacture a false phantom-action flag. That is the exact
+    // maintenance shape G2 exists to prevent, and it was the guard GUESSING at a
+    // fact the tool layer already knew.
+    //
+    // summarizeToolCall now stamps `mutated=<domain>` on every call that actually
+    // changed state, using the claim-checker's own action_type vocabulary — so the
+    // shield is one field lookup and knows nothing about tool names. The marker is
+    // OK-only by construction, which also closes a hole the name-matching had: the
+    // old `book`/`task` alternations matched the tool-name PREFIX and so suppressed
+    // the honesty rewrite even on `[create_meeting FAILED: …]`. A failed mutation
+    // now correctly backs nothing (the same #137b convention the rest of the tool
+    // log already follows).
+    const mutationCarried = !!verdict.action_type
+      && toolSummariesText.includes(`mutated=${verdict.action_type}`);
+
+    // The one class where WHO matters: a DM sent to Yael does not make "already
+    // flagged it to Simon" honest. The recipient is already in the summary
+    // (`[message_colleague: <name>]`), so this reads existing data — it is not a
+    // second list. A SKIPPED relay (`[message_colleague] <id> — … skipped`, pushed
+    // straight to the tape by the orchestrator's idempotency guards) never carries
+    // the marker, so it can no longer back a "sent it" claim either.
+    const targetMatches = verdict.action_type !== 'message'
+      || !verdict.target_name
+      || toolSummariesText.toLowerCase().includes(verdict.target_name.toLowerCase());
+
+    const matchingToolAlreadyRan = mutationCarried && targetMatches;
 
     // v2.6.1 — when the claim-checker LLM has named a SPECIFIC change the
     // tool that ran doesn't cover (e.g. "updated to 25 min" claim while only
@@ -445,8 +486,11 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
       });
       if (rewritten && rewritten.trim().length > 0) {
         cleanReply = formatForSlack(rewritten);
-        // Overwrite the history entry with the honest version so the NEXT
-        // turn doesn't see the dishonest draft.
+        // Record the honest version so the NEXT turn doesn't act on the
+        // dishonest draft. Note this APPENDS (db/conversations.ts:26 pushes onto
+        // the context blob) — it does not replace Step 1b's entry, so the turn
+        // shows twice in history, with the honest line last. Acceptable on this
+        // rare path: last-write-wins is what the next turn reads.
         appendToConversation(ctx.threadTs, ctx.channelId, { role: 'assistant', content: cleanReply });
       }
     } catch (rwErr) {
@@ -561,60 +605,43 @@ async function runDateVerifierAndMaybeRetry(ctx: OutputGateContext, initialReply
   return cleanReply;
 }
 
-// ── v2.2.5 — Concision finalizer ─────────────────────────────────────────────
+// ── Deliberation guard (was the v2.2.5 "concision finalizer") ────────────────
 //
-// Sonnet sometimes emits a single text block with the entire derivation
-// embedded ("wait, that breaks the order", "let me find", "OK definitive clean
-// proposal"). The base-prompt anti-deliberation rule asks Sonnet to skip that;
-// when she ignores it, this pass catches it. Triggers on either deliberation
-// patterns OR length > 600 chars on a non-list reply. Asks Sonnet to rewrite
-// keeping only the final answer, capped tight. Falls back to the original on
-// any error — never blocks a reply.
+// v4.1.x (G1) — this pass was NOT a backstop, it was a routine second drafting
+// stage sitting on the critical path of every reply, and it was rewriting correct
+// answers into shorter ones. It fired on three shape heuristics — ≥2 question
+// marks, ≥2 English "if" branches, or >600 chars of non-list prose — sent the whole
+// reply to Sonnet with "stay under 4 short sentences", and had NO fact check at
+// all: the only safety net was "is the result shorter". Because it runs before
+// postReply persists history, the trimmed version was also what history kept, so
+// the fuller answer could not be recovered on the next turn. In the 07-19→07-23
+// logs it fired 14 times, and only 2 of those were the deliberation case; the rest
+// were length/shape — including a 193-char reply cut to 109 and a 983-char one cut
+// to 157. G1: reply length is DRAFTING behavior and belongs to whatever writes the
+// draft (prompt / orchestrator output policy), not to a guard.
+//
+// What survives is the one genuine output-time concern: Sonnet emitting her
+// derivation into the user-facing text ("wait, that breaks the order", "let me
+// find", "OK definitive clean proposal"). That is a REASONING LEAK — the same
+// family as G5 — and the reader should never see it. So:
+//   - the length and self-coherence triggers are GONE (with their helpers),
+//   - the prompt no longer asks for compression, only for the journey to be cut,
+//   - and a wrong fire is now a safe MISS: the rewrite must survive the same
+//     fact-preservation veto humanGate uses (rewriteDroppedAFact), so a dropped
+//     @mention / time / date / question throws the rewrite away and ships the
+//     original. Worst case the reader sees a bit of deliberation — never a
+//     deleted fact.
+//
+// Still fails open on any error, and still never blocks a reply.
 
 const DELIBERATION_RE = /\b(actually wait\b|on second thought\b|let me (?:think|find|check|give|ask|see|try)\b|wait,?\s+(?:that|the|i|let|professional|no)\b|on the other hand\b|on the one hand\b|definitive (?:clean )?proposal\b|hmm,?\s|so the full corrected\b|i need to (?:also )?(?:move|find|give|check)\b|let me give you the clean\b)/i;
 
-function looksLikeAList(text: string): boolean {
-  // List-style replies (numbered or bulleted) are legitimate even when long;
-  // don't trim them. Detect any of: "1." "2." line starts, several "-" line
-  // starts, or several lines starting with a digit.
-  const lines = text.split('\n');
-  const numberedLineCount = lines.filter(l => /^\s*\d+[.)]\s/.test(l)).length;
-  const bulletLineCount = lines.filter(l => /^\s*[-•]\s/.test(l)).length;
-  return numberedLineCount >= 2 || bulletLineCount >= 3;
-}
-
-// v2.3.1 (B20 + B21) — self-coherence trigger. Counts question marks and the
-// kind of "if-then" hedges that indicate Sonnet wrote a question AND answered
-// every possible variant. Both are signs of a reply that asks the same thing
-// twice or contradicts itself within one breath. Trigger is shape-based; the
-// rewrite Sonnet judges whether to actually fix.
-function looksSelfIncoherent(text: string): boolean {
-  // Two or more "?" (multiple questions in one message — usually duplicates
-  // or a question that gets re-asked at the end of the same reply).
-  const questionCount = (text.match(/\?/g) || []).length;
-  if (questionCount >= 2) return true;
-  // Hedge-then-answer pattern: "If X is Y... If X is Z..." in the same reply.
-  // Cheap shape detector — if the same topic appears with multiple "if"
-  // branches, the reply is fanning out instead of committing.
-  const ifBranches = (text.match(/\b[Ii]f\s+(it'?s|that's|the|this|you|today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)/g) || []).length;
-  if (ifBranches >= 2) return true;
-  return false;
-}
-
-export async function runConcisionPassIfNeeded(rawReply: string, profile: UserProfile): Promise<string> {
+export async function runDeliberationGuard(rawReply: string, profile: UserProfile): Promise<string> {
   const trim = rawReply.trim();
   if (!trim) return trim;
-
-  const tooLong = trim.length > 600 && !looksLikeAList(trim);
-  const hasDeliberation = DELIBERATION_RE.test(trim);
-  // v2.3.1 (B20 + B21) — broaden the concision pass to also catch
-  // self-contradiction (asks question + answers it in same reply) and
-  // duplicate questions. Shape-detected here; Sonnet decides what to do.
-  const isIncoherent = looksSelfIncoherent(trim);
-  if (!tooLong && !hasDeliberation && !isIncoherent) return trim;
+  if (!DELIBERATION_RE.test(trim)) return trim;
 
   try {
-    const Anthropic = (await import('@anthropic-ai/sdk')).default;
     const anthropic = getAnthropicClient();
     const ownerFirst = profile.user.name.split(' ')[0];
     const resp = await anthropic.messages.create({
@@ -632,40 +659,54 @@ export async function runConcisionPassIfNeeded(rawReply: string, profile: UserPr
       tool_choice: { type: 'tool', name: 'rewrite' },
       messages: [{
         role: 'user',
-        content: `You wrote this draft for ${ownerFirst}'s assistant. Rewrite it as ONLY the final user-facing answer. Strip:
-- self-correction ("wait,", "actually,", "on second thought", "let me", "OK definitive...")
+        content: `You wrote this draft for ${ownerFirst}'s assistant. It leaked your own thinking-out-loud into the text the reader will see. Output the SAME reply with only that narration removed. Strip:
+- self-correction ("wait,", "actually,", "on second thought", "OK definitive...")
 - planning narration ("I need to find", "let me check", "let me give you the clean")
-- intermediate proposals you rejected mid-thought
-- references to your reasoning process
+- references to your own reasoning process, and the order you worked things out in
 
-v2.3.1 ADDITIONS:
-- Self-contradiction: if the draft asks a question AND also answers it ("what date? — That's a Tuesday, so it fits..."), pick ONE. Either ask cleanly and stop, OR commit to the answer and skip the question. Never both.
-- Duplicate questions: if the same question is asked more than once in the draft (top + bottom, restated, etc.), keep one — the cleanest version, usually at the end.
-- Hedging branches: "If A then X. If B then Y. If C then Z." over the SAME unknown is fanning out instead of committing. Pick the most likely branch and act, OR ask which one and stop. Don't enumerate all of them.
+This is NOT an edit for brevity. Do not shorten, summarize, compress or tidy anything else. Every fact the draft states must still be there afterwards: every time, date, name, @mention, number and list item, and every question it asks. If the draft asks the reader something, your output asks the same thing.
 
-Keep the answer; drop the journey. Stay under 4 short sentences unless the draft is a numbered/bulleted list, in which case keep the list intact and trim only the prose around it. Match the language of the draft (Hebrew/English).
+That includes options you talked yourself out of mid-draft: keep the INFORMATION, drop the deliberation. "I could do 11:00 — wait, that clashes with the standup. 12:30 is clean." becomes "11:00 clashes with the standup, but 12:30 is clean." — not "12:30 is clean.". The reader still needs to know 11:00 was considered and why it's out.
+
+If removing the narration changes nothing, return the draft unchanged.
+
+Match the language of the draft.
 
 Draft:
 ${trim}`,
       }],
     });
-    logLlmUsage('concision_pass', MODEL_SONNET, resp);
+    logLlmUsage('deliberation_guard', MODEL_SONNET, resp);
     const tool = resp.content.find((b: { type: string }) => b.type === 'tool_use') as { input?: { final?: string } } | undefined;
     const final = tool?.input?.final;
     if (!final || !final.trim()) return trim;
     const cleaned = final.trim();
-    // Safety: if the rewrite is somehow LONGER than the original, the pass
-    // didn't help — return original. Same if rewrite is suspiciously short
-    // (< 10 chars) which probably means the model truncated.
+    // Removing narration can only make the text shorter; a longer or near-empty
+    // result means the model did something else. Keep the original.
     if (cleaned.length >= trim.length || cleaned.length < 10) return trim;
-    logger.info('Concision pass trimmed deliberation', {
+    // G6 — the veto that makes a wrong fire a safe MISS. Same deterministic,
+    // free, narrow check humanGate applies to ITS rewrites: an @mention, clock
+    // time, numeric date or question that the original carried and the rewrite
+    // does not means content was deleted, not narration. Ship the original.
+    // Imported lazily like every other guard primitive in this file — a clean
+    // reply never loads humanGate at all.
+    const { rewriteDroppedAFact } = await import('../humanGate');
+    if (rewriteDroppedAFact(trim, cleaned)) {
+      logger.warn('Deliberation guard — rewrite dropped a load-bearing fact; shipping the original draft', {
+        before: trim.length,
+        after: cleaned.length,
+        originalPreview: trim.slice(0, 160),
+        rewritePreview: cleaned.slice(0, 160),
+      });
+      return trim;
+    }
+    logger.info('Deliberation guard stripped reasoning narration', {
       before: trim.length,
       after: cleaned.length,
-      triggered: isIncoherent ? 'incoherent' : (hasDeliberation ? 'pattern' : 'length'),
     });
     return cleaned;
   } catch (err) {
-    logger.warn('Concision pass threw — sending original draft', { err: String(err).slice(0, 200) });
+    logger.warn('Deliberation guard threw — sending original draft', { err: String(err).slice(0, 200) });
     return trim;
   }
 }

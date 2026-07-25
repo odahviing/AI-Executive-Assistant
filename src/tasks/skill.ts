@@ -96,6 +96,111 @@ Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_ca
   }
 }
 
+/**
+ * The replayable action this approval is asking permission FOR, if it carries
+ * one. Same shape `extractCallbacks` reads back off the row, validated here so a
+ * malformed stamp can't pass as a real one.
+ */
+function approvalDeferredAction(
+  payload: Record<string, unknown>,
+): { tool: string; args: Record<string, unknown> } | null {
+  const da = payload.deferred_action as { tool?: unknown; args?: unknown } | undefined;
+  if (!da || typeof da.tool !== 'string' || !da.tool.trim()) return null;
+  if (!da.args || typeof da.args !== 'object' || Array.isArray(da.args)) return null;
+  return { tool: da.tool, args: da.args as Record<string, unknown> };
+}
+
+/**
+ * The reason THIS approval exists, read from the payload fields the tool
+ * description documents for its kind. Empty string = the ask states no reason.
+ */
+function statedApprovalReason(subkind: ApprovalSubkind, payload: Record<string, unknown>): string {
+  const s = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+  switch (subkind) {
+    case 'policy_exception':
+      return s(payload.rule) || s(payload.rule_label) || s(payload.context);
+    case 'duration_override':
+      return s(payload.reason) || s(payload.context);
+    case 'unknown_person': {
+      const missing = Array.isArray(payload.missing_fields)
+        ? (payload.missing_fields as unknown[]).map(s).filter(Boolean)
+        : [];
+      return missing.join(', ') || s(payload.reason) || s(payload.context);
+    }
+    case 'freeform':
+      return s(payload.question) || s(payload.context);
+  }
+}
+
+/** Which payload field(s) carry the reason for each kind — quoted back on refusal. */
+const REASON_FIELDS: Record<ApprovalSubkind, string> = {
+  policy_exception: 'payload.rule (the rule being overridden) and payload.context (why it matters)',
+  duration_override: 'payload.reason (why this length instead of a standard one)',
+  unknown_person: 'payload.missing_fields (what contact detail we do not have)',
+  freeform: 'payload.question (the decision) and payload.context (why it needs him)',
+};
+
+/**
+ * THE approval gate (R6 + R7) — the one place that decides whether an ask is
+ * allowed to reach the owner at all. Runs before dedup, before the row, before
+ * the DM. Returns null to let the ask through, or the refusal to hand back.
+ *
+ * R6 — an approval is a DEVIATION. A `policy_exception` overrides a specific
+ * calendar action, so it must CARRY that action (`payload.deferred_action`).
+ * That stamp is not decoration: the orchestrator copies it from the meeting
+ * tool's own `_deferred_action_hint`, which only exists because a tool actually
+ * refused this action this turn (index.ts:563-587). So its presence is the code's
+ * proof that something really blocked the work, and its absence proves nothing
+ * did — the model went straight to the owner without ever attempting the action.
+ * Pre-fix that case was not refused, it was PAPERED OVER: the handler fabricated
+ * a `deferred_action` from the payload (v2.9.4 auto-stamp) and DM'd the owner an
+ * override for work nothing had objected to. That auto-stamp is deleted with this
+ * gate — it existed only to serve the case the gate now refuses.
+ *
+ * Deliberately NOT keyed on re-running `checkSlot`: a clean slot does not mean
+ * permitted work. `location_mode_unspecified` (online vs in person),
+ * `meeting_room_unavailable_large_meeting`, a slot held for another colleague,
+ * and `rule_check_failed` are all legitimate policy_exceptions on a slot that
+ * breaks NO rule — refusing on "checkSlot passes" would kill every one of them.
+ * And the two call sites read different inputs, so they can disagree: on
+ * 2026-07-21 the write path refused B&H on travel_buffer_collision while this
+ * handler's own re-check called the same slot clean (log 19:14:58 vs 19:15:06).
+ * "Did a tool refuse this?" is the fact; "would checkSlot refuse it?" is a
+ * second opinion, and it belongs where it already is — labelling, not gating.
+ *
+ * R7 — no reason, no approval. Every kind must state WHY it reached him, in the
+ * field its own payload contract names, so he decides on data rather than gut.
+ * The two honest outcomes when there is none are exactly the two refusals below:
+ * the action was allowed (do it), or the reason isn't understood yet (find it).
+ */
+function gateApprovalAsk(
+  subkind: ApprovalSubkind,
+  payload: Record<string, unknown>,
+): { error: string; reason: string } | null {
+  // An off-menu kind has no payload contract, so neither of the checks below
+  // means anything for it — and it would otherwise mint a row with a garbage
+  // subkind that nothing downstream knows how to route.
+  if (!(APPROVAL_SUBKINDS as readonly string[]).includes(subkind)) {
+    return {
+      error: 'unknown_kind',
+      reason: `"${subkind}" is not an approval kind. Use one of: ${APPROVAL_SUBKINDS.join(' / ')}.`,
+    };
+  }
+  if (subkind === 'policy_exception' && !approvalDeferredAction(payload)) {
+    return {
+      error: 'no_verified_deviation',
+      reason: `Nothing refused this action, so there is nothing to override and nothing to replay if he says yes. A policy_exception is only real once a tool has actually blocked the work. Do the action instead: call create_meeting / move_meeting / update_meeting / delete_meeting with the exact time, subject and attendees. Either it is permitted and it just happens — which is the right outcome and does not cost him a decision — or the tool refuses and hands back the precise reason (broken_rule / violation_label / suggested_ask_text) plus the action itself, which rides onto your next create_approval automatically. Do not re-raise this approval before running that tool.`,
+    };
+  }
+  if (!statedApprovalReason(subkind, payload)) {
+    return {
+      error: 'missing_reason',
+      reason: `This ask states no reason, so it cannot reach him — he decides on data, not gut, and "${subkind}" reaching him without a why is just an interruption. Fill in ${REASON_FIELDS[subkind]} and retry. If you cannot say why this needs HIM specifically, then it does not: either the action is already allowed (do it), or you do not yet know what is blocking it (go find out first).`,
+    };
+  }
+  return null;
+}
+
 export class TasksSkill implements Skill {
   id = 'tasks' as const;
   name = 'Tasks';
@@ -195,7 +300,7 @@ AUTHORITY MODEL:
 
 Kinds:
 - duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
-- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting, floating-block out-of-window move). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. Once payload is complete, the handler auto-stamps \`payload.deferred_action = { tool: 'create_meeting', args: <those fields> }\` (or \`book_floating_block\` / \`move_meeting\` for floating-block bumps) so the resolver executes the action deterministically on owner approve (no separate booking turn needed). If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE creating the approval. HONESTY: write ask_text plainly. If the booked time hits a meeting already on the owner's calendar, NAME it ("you already have 'X' at 13:00 — book over it?") — a hard double-book is his call, but state it AS one; NEVER dress it as a soft free-time / buffer / focus-time rule. (The handler re-derives the real reason from the live calendar and leads the DM with it, so don't guess the reason from aggregate rejection lists.)
+- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting, floating-block out-of-window move). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. RUN THE ACTION'S TOOL FIRST: the handler refuses with \`no_verified_deviation\` unless the action rode in from a tool that actually blocked it, because with nothing blocked there is nothing to override and nothing to replay on approve. So call create_meeting / move_meeting / update_meeting / book_floating_block for the real time and attendees — it either just happens (allowed, and the owner is never interrupted) or it comes back refused WITH the exact reason and the action attached for this approval. If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE running anything. HONESTY: write ask_text plainly. If the booked time hits a meeting already on the owner's calendar, NAME it ("you already have 'X' at 13:00 — book over it?") — a hard double-book is his call, but state it AS one; NEVER dress it as a soft free-time / buffer / focus-time rule. (The handler re-derives the real reason from the live calendar and leads the DM with it, so don't guess the reason from aggregate rejection lists.)
 - unknown_person: book with someone we don't have full contact info for. Payload: { name, known_fields, missing_fields }.
 - freeform: a NON-CALENDAR yes/no/amend ask ONLY — flag an out-of-scope request for the owner, content review, a private judgment call ("OK to share my number with X?"). Payload: { question, context, subject }. NEVER for a CALENDAR CHANGE — booking, moving/rescheduling, adding/removing attendees, or CANCELLING a meeting (a cancel is a calendar change too). The handler REFUSES a calendar-shaped freeform (\`freeform_calendar_change\`): it carries no action, so on approve NOTHING would happen and the change silently dies. Any calendar change goes through its tool FIRST — create_meeting / move_meeting / update_meeting / delete_meeting (any attendee count); if it needs sign-off the colleague-path gate raises a policy_exception with a replayable deferred_action (subject + attendees + time preserved). policy_exception is the ONLY kind whose deferred_action auto-attaches and replays — NEVER meeting_reschedule / meeting_change for a create_approval.
 
@@ -210,6 +315,8 @@ Cancellations: a cancel is a CALENDAR change, so raise create_approval(kind=poli
 The handler skips the booking-field check for a delete deferred_action; the resolver calls delete_meeting the instant the owner ✅'s the DM — no second turn needed.
 
 For policy_exception approvals raised after a rule_violation on create_meeting / move_meeting / book_floating_block, the orchestrator auto-stamps deferred_action from the prior rule_violation's hint — you don't need to set it yourself. Only a cancellation (policy_exception + a delete_meeting deferred_action, which doesn't go through rule_violation) needs you to pass deferred_action explicitly.
+
+EVERY kind must say WHY it needs him, in its own payload field (policy_exception: rule + context · duration_override: reason · unknown_person: missing_fields · freeform: question + context). No reason → refused with \`missing_reason\`, and rightly: if you can't state why this needs HIM, either the action is already allowed (do it) or you don't yet know what's blocking it (find out first).
 
 Behavior:
 - DMs the owner immediately with ask_text. LLM-judged dedup against open requests for this (owner, requester) — if the same logical ask is already open, returns the existing one.
@@ -241,10 +348,7 @@ Verdicts:
 - reject: owner said a genuine NO / cancel it. This CANCELS the request AND auto-DMs the requester a decline ("<owner> can't make that work"). Use ONLY for a real no. NEVER use reject to relay a question, defer, or pass a message to the requester — reject sends them a decline and kills the whole coordination (incl. any pending booking). If the owner is still negotiating, or wants to ask the requester something, that's amend.
 - amend: owner is countering, deferring, or wants to RELAY A QUESTION / MESSAGE to the requester and keep the ask alive — "no, but 13:30 would work", "tell him I'm on vacation, ask if it has to be him or someone else can cover next week", "come back to me once you check with them". Put the alternative / question / message in \`counter\`. This flips the request to awaiting_colleague, DMs the requester the counter (a question renders as "<owner> asked: …"), and keeps it OPEN + tracked so their reply reconnects. Use amend WHENEVER the instruction is relay-a-question / ask-them / defer — NOT reject.
 
-Binding — how to pick the right approval_id:
-- Look for an explicit id token in the owner's reply first.
-- Otherwise bind ONLY the approval whose decision thread the owner is replying in (the one marked "← THIS THREAD" in PENDING APPROVALS). A bare "yes"/"no" resolves THAT one.
-- If the reply is NOT in an approval's thread, or names none while several are open, do NOT guess — call list_pending_approvals and ask which one (by subject). Never bind a bare ack to an approval from an unrelated thread; the tool refuses an unanchored bare ack.`,
+Binding — take the explicit id token from the owner's reply; otherwise the line marked "← THIS THREAD" in PENDING APPROVALS, which renders whenever anything is pending and carries the full disambiguation rules. No anchor and several open → call list_pending_approvals and ask which one by subject; the tool refuses an unanchored bare ack.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -535,6 +639,22 @@ Binding — how to pick the right approval_id:
         if (typeof payload.origin_thread_ts !== 'string' && threadTs) payload.origin_thread_ts = threadTs;
         if (payload.origin_is_mpim === undefined && context.isMpim !== undefined) payload.origin_is_mpim = context.isMpim;
 
+        // ── The gate (R6 + R7) ────────────────────────────────────────────────
+        // Nothing below this line runs for an ask that shouldn't reach him: no
+        // row, no dedup, no DM, no slot in his signature book. See gateApprovalAsk.
+        {
+          const refusal = gateApprovalAsk(subkind, payload);
+          if (refusal) {
+            logger.info('create_approval — refused at the gate', {
+              kind: subkind, error: refusal.error,
+              subject: typeof payload.subject === 'string' ? payload.subject : undefined,
+              start: typeof payload.start === 'string' ? payload.start : undefined,
+              requesterSlackId: payload.requester_slack_id,
+            });
+            return { error: refusal.error, reason: refusal.reason };
+          }
+        }
+
         // Expiry: owner-workdays default (2), with sub-workday escape hatch.
         let expiresAt: string;
         if (typeof args.expires_in_hours === 'number') {
@@ -631,36 +751,10 @@ Binding — how to pick the right approval_id:
             };
           }
 
-          // Auto-stamp on_approve. Pre-fix this required either Sonnet to set
-          // payload.deferred_action explicitly OR the orchestrator's
-          // _deferred_action_hint to capture from a rule_violation tool
-          // result earlier in the turn. When Sonnet went straight to
-          // create_approval without firing find_available_slots/create_meeting
-          // first (the Yael 13:01 case), no hint was captured → approval
-          // landed bare → resolver's on_approve was null → owner's "yes"
-          // resolved the request but didn't book → Sonnet had to book in a
-          // separate turn. Now we construct deferred_action directly from
-          // the payload Sonnet already provided. Skip when Sonnet (or the
-          // orchestrator hint pass) already set deferred_action.
-          if (!payload.deferred_action) {
-            payload.deferred_action = {
-              tool: 'create_meeting',
-              args: {
-                subject: payload.subject,
-                start: payload.start,
-                end: payload.end,
-                attendees: payload.attendees,
-                ...(payload.category ? { category: payload.category } : {}),
-                ...(payload.is_online !== undefined ? { is_online: payload.is_online } : {}),
-                ...(payload.location ? { location: payload.location } : {}),
-                ...(payload.body ? { body: payload.body } : {}),
-                relaxed: true,
-              },
-            };
-            logger.info('create_approval — auto-stamped deferred_action for policy_exception', {
-              subject: payload.subject, start: payload.start,
-            });
-          }
+          // (The v2.9.4 auto-stamp that fabricated a deferred_action from the
+          // payload when none was captured is DELETED — that is exactly the case
+          // gateApprovalAsk now refuses, so by here the action is always the one a
+          // meeting tool actually handed back.)
 
           // #142c (Keren, 2026-07-14) — HONESTY: re-derive the TRUE per-slot rule;
           // do NOT trust the Sonnet-supplied `rule`. Sonnet picks the ask reason
@@ -673,10 +767,18 @@ Binding — how to pick the right approval_id:
           // owner_busy_collision is surfaced verbatim to the owner (Rule 7 — the
           // hard conflict is always NAMED, never hidden behind a soft label);
           // genuine soft escalations (focus floor / work hours / category) keep
-          // their honest soft label AND their ask prose unchanged. Best-effort:
-          // any failure leaves Sonnet's reason as-is rather than blocking a real
-          // escalation (reads only — calendar + rules, no writes). Skipped for an
+          // their honest soft label AND their ask prose unchanged. Skipped for an
           // existing-event change (edit / reschedule / cancel) — no slot to re-derive.
+          //
+          // This is a LABEL pass, never a gate — the deviation was already proven
+          // upstream by the tool refusal gateApprovalAsk requires. That is why a
+          // throw here (Graph hiccup) deliberately keeps the tool-supplied reason
+          // and proceeds: blocking a proven escalation on a transient read would
+          // cost the requester their answer and buy no honesty. And a CLEAN verdict
+          // is not over-escalation either — the tool may well have refused for a
+          // reason checkSlot doesn't model (location mode, room, another
+          // colleague's hold, an unverifiable free/busy read), so we leave the
+          // tool's reason standing and log the divergence rather than override it.
           if (!isExistingEventChange) try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { getCalendarEvents } = require('../connectors/graph/calendar') as typeof import('../connectors/graph/calendar');
@@ -696,6 +798,15 @@ Binding — how to pick the right approval_id:
               slotEndIso: payload.end as string,
               category: typeof payload.category === 'string' ? payload.category : null,
               events,
+              // M12 — this label is OWNER-BOUND by construction: it lands on
+              // payload.rule_label and, for a hard collision, leads his approval
+              // DM. Nothing colleague-facing reads it (the colleague-path prompt
+              // block surfaces subject/slots only, and the requester relay reads
+              // details.subject/question). Without the explicit viewer it takes
+              // the safe default and masks the colliding meeting's subject —
+              // hiding his own calendar from him at the exact moment he's being
+              // asked to book over it.
+              viewer: 'owner',
             });
             if (!check.passes && check.violation_label) {
               const sonnetRule = typeof payload.rule === 'string' ? payload.rule : null;
@@ -713,12 +824,12 @@ Binding — how to pick the right approval_id:
                 });
               }
             } else if (check.passes) {
-              logger.info('create_approval — policy_exception booked time passes all rules (possible over-escalation)', {
-                subject: payload.subject, start: payload.start, sonnetRule: payload.rule,
+              logger.info('create_approval — slot breaks no scheduling rule; keeping the refusing tool\'s reason', {
+                subject: payload.subject, start: payload.start, toolRule: payload.rule,
               });
             }
           } catch (err) {
-            logger.warn('create_approval — reason re-derivation threw; keeping Sonnet-supplied reason', {
+            logger.warn('create_approval — reason re-derivation threw; keeping the refusing tool\'s reason', {
               err: String(err).slice(0, 200),
             });
           }
@@ -758,10 +869,15 @@ Binding — how to pick the right approval_id:
         // v2.9.2 — re-ask revival. When dedup matches an open approval AND
         // the requester is asking AGAIN, the request has been sitting cold:
         // ${owner} got the original DM hours ago, it's buried, no fresh
-        // signal nudges him. Re-surface by sending a fresh DM with the same
-        // ask_text + re-stamping terminal_dm_msg_ts so Module D and the
-        // approval-bound thread lock bind to the new DM. Threshold: 2 hours
-        // since last_surfaced_at (or created_at if never surfaced).
+        // signal nudges him. Re-surface it + re-stamp terminal_dm_msg_ts so
+        // Module D and the approval-bound thread lock bind to the new message.
+        // Threshold: 2 hours since last_surfaced_at (or created_at if never
+        // surfaced).
+        // #45 — the re-surface goes into TODAY's decision thread (postOwnerDecision),
+        // not a fresh top-level DM and not the day the ask was first raised: if it
+        // needs his signature today it belongs in today's book. The row's owner_dm_*
+        // pointers are re-stamped to wherever it just landed, so a typed reply there
+        // still binds (threadBoundApprovalAutoResolve matches on owner_dm_thread_ts).
         const REVIVAL_THRESHOLD_HOURS = 2;
         const maybeRevive = async (existing: RequestRow): Promise<void> => {
           // Only revive on awaiting_owner — awaiting_colleague is a pending
@@ -785,10 +901,17 @@ Binding — how to pick the right approval_id:
             }
             const requesterFirst = existing.requester_name?.split(' ')[0] ?? 'they';
             const reviveText = `${requesterFirst} just asked again about this — still need your call:\n\n${existing.description ?? existing.subject}`;
-            const res = await conn.sendDirect(ownerUserId, reviveText);
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { postOwnerDecision } = require('../utils/ownerDailyThread') as
+              typeof import('../utils/ownerDailyThread');
+            const res = await postOwnerDecision({
+              profile, conn, text: reviveText, label: 'approval re-ask revival',
+            });
             if (res.ok) {
               const nowIso = new Date().toISOString();
               updateRequest(existing.id, {
+                ownerDmChannel: res.channel ?? existing.owner_dm_channel ?? undefined,
+                ownerDmThreadTs: res.threadTs ?? existing.owner_dm_thread_ts ?? undefined,
                 terminalDmMsgTs: res.ts ?? existing.terminal_dm_msg_ts ?? undefined,
                 lastSurfacedAt: nowIso,
                 surfacedCount: (existing.surfaced_count ?? 0) + 1,
@@ -1020,31 +1143,27 @@ Binding — how to pick the right approval_id:
             // Either way: terminal_dm_msg_ts = THIS message's ts (✅ resolves per
             // message); owner_dm_thread_ts = the thread we posted into (typed replies
             // route via content attribution + the bare-ack anchor gate).
-            let postChannel: string | undefined;
-            let postThreadTs: string | undefined;
-            if (relayOwner?.owner_dm_channel && relayOwner.owner_dm_thread_ts) {
-              postChannel = relayOwner.owner_dm_channel;
-              postThreadTs = relayOwner.owner_dm_thread_ts;
-            } else {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { getOrCreateOwnerDailyThread } = require('../utils/ownerDailyThread') as
-                typeof import('../utils/ownerDailyThread');
-              const daily = await getOrCreateOwnerDailyThread({ profile, conn });
-              postChannel = daily?.channel;
-              postThreadTs = daily?.rootTs;
-            }
-            const res = (postChannel && postThreadTs)
-              ? await conn.postToChannel(postChannel, dmText, { threadTs: postThreadTs })
-              : await conn.sendDirect(ownerUserId, dmText);  // fallback: plain DM
+            // #45 — both branches now run through postOwnerDecision, the ONE
+            // owner-facing decision post path, so the daily thread stops being
+            // something each call site has to remember.
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { postOwnerDecision } = require('../utils/ownerDailyThread') as
+              typeof import('../utils/ownerDailyThread');
+            const res = await postOwnerDecision({
+              profile, conn, text: dmText, label: 'approval ask',
+              inThread: (relayOwner?.owner_dm_channel && relayOwner.owner_dm_thread_ts)
+                ? { channel: relayOwner.owner_dm_channel, threadTs: relayOwner.owner_dm_thread_ts }
+                : null,
+            });
             if (res.ok) {
               updateRequest(row.id, {
-                ownerDmChannel: postChannel ?? res.ref ?? undefined,
-                ownerDmThreadTs: postThreadTs ?? undefined,
+                ownerDmChannel: res.channel ?? undefined,
+                ownerDmThreadTs: res.threadTs ?? undefined,
                 terminalDmMsgTs: res.ts ?? undefined,
               });
             } else {
               logger.error('create_approval — owner ask post failed', {
-                requestId: row.id, reason: res.reason, detail: res.detail,
+                requestId: row.id, reason: res.reason,
               });
             }
           } else {

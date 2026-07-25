@@ -31,7 +31,10 @@ export interface ResolvedAttendeeContact {
 
 /**
  * Resolve a single attendee's email from people_memory when missing/malformed.
- * Chain: explicit valid email wins → slack_id lookup → fuzzy name lookup.
+ * Chain: explicit valid email wins → slack_id lookup → name lookup, and the name
+ * step is gated by `nameGenuinelyMatches` + a distinct-person check, exactly as
+ * `resolveNamedInternalAttendees` does. Ambiguous or substring-only → '' so the
+ * caller asks rather than binding the wrong human.
  */
 export function resolveAttendeeEmail(input: AttendeeContactInput): ResolvedAttendeeContact {
   let email = (input.email ?? '').trim().toLowerCase();
@@ -55,11 +58,28 @@ export function resolveAttendeeEmail(input: AttendeeContactInput): ResolvedAtten
       }
     }
     if ((!email || !email.includes('@')) && name) {
-      const matches = searchPeopleMemory(name);
-      const hit = matches.find(m => m.email && m.email.includes('@'));
-      if (hit) {
-        email = hit.email!.toLowerCase();
-        if (!name && hit.name) name = hit.name;
+      // The name branch resolves an IDENTITY, so it runs the SAME whole-name gate
+      // the sibling resolver below uses. searchPeopleMemory is SQL LIKE '%q%'
+      // ordered by last_seen, so "Lori" substring-matches Gloria and "Simon"
+      // matches Simone — and taking the first row that happens to carry an email
+      // put a real calendar invite in the wrong human's inbox, silently, with a
+      // plausible name in the narration. One matching rule for the whole file.
+      const query = name;   // const so the closure below narrows off `let name`
+      const genuine = searchPeopleMemory(query).filter(m =>
+        m.email && m.email.includes('@') && nameGenuinelyMatches(m.name, m.email, query),
+      );
+      // Collapse duplicate ROWS for one human (a calendar-sourced email-only row
+      // plus the later Slack row share an address) before the ambiguity test —
+      // counting raw rows is the defect that read Luke Joas as "ambiguous".
+      // >1 DISTINCT person = genuinely ambiguous → stay unresolved and let the
+      // caller ask, never guess which one.
+      const distinctEmails = new Set(genuine.map(m => m.email!.toLowerCase()));
+      if (distinctEmails.size === 1) {
+        email = [...distinctEmails][0];
+      } else if (distinctEmails.size > 1) {
+        logger.info('resolveAttendeeEmail — name matches more than one person, left unresolved', {
+          query: name, distinctPeople: distinctEmails.size,
+        });
       }
     }
   } catch (err) {

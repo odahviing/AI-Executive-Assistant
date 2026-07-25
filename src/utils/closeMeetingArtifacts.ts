@@ -98,7 +98,11 @@ export async function closeMeetingArtifacts(params: {
     // the requests spine), so the scan always matched zero rows. Pending
     // approvals are spine requests now, closed by the request cascade in step 5.
 
-    // 2. Outreach jobs with intent='meeting_reschedule' referencing this meeting
+    // 2. Outreach jobs with intent='meeting_reschedule' referencing this meeting.
+    // The status filter is the open/closed sentinel described in db/jobs.ts
+    // (top block): rows sit at the default 'sent' until closeRequest cascades
+    // them to 'cancelled'. This scan depends on that cascade — without it,
+    // already-closed outreach keeps matching here forever.
     const outreachRows = db.prepare(`
       SELECT id, context_json FROM outreach_jobs
       WHERE owner_user_id = ?
@@ -117,8 +121,10 @@ export async function closeMeetingArtifacts(params: {
       // v3.1.1 — close the linked REQUEST for each matching meeting_reschedule
       // outreach (the request owns lifecycle now), and drop the dead
       // outreach_expiry/outreach_decision TASK cancel (those task types no
-      // longer exist — outreach timing is on the spine). The vestigial
-      // outreach_jobs.status write is gone too.
+      // longer exist — outreach timing is on the spine). No direct
+      // outreach_jobs.status write here on purpose: closeRequest cascades the
+      // column to 'cancelled' (closeRequest.ts:99-113), which is what drops
+      // the row out of the SELECT above on the next pass.
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getLinkedRequestIdForOutreach } = require('../db/jobs') as typeof import('../db/jobs');
       // eslint-disable-next-line @typescript-eslint/no-require-imports

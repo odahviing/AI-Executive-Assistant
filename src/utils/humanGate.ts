@@ -52,6 +52,7 @@ import { MODEL_HAIKU } from '../llm/models';
 import type { UserProfile } from '../config/userProfile';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
+import { RAW_SLACK_ID_RE } from './textScrubber';
 
 const anthropic = getAnthropicClient();
 
@@ -296,8 +297,13 @@ Language-agnostic. Same standard in Hebrew, French, etc. — match the input lan
  * "What's your email?" → "I don't have an email — work with Idan directly", an
  * outright falsehood shipped to a colleague. humanGate changes VOICE, never
  * whether she's asking, so a vanished question is always a corrupted meaning.
+ *
+ * v4.1.x — EXPORTED. The same "an LLM rewrote the reply; did it silently delete
+ * something load-bearing?" question is asked by the deliberation guard
+ * (utils/guards/runOutputGates), which had no fact check at all — only "is the
+ * result shorter". One veto, reused, rather than a second near-copy (G2).
  */
-function rewriteDroppedAFact(original: string, rewrite: string): boolean {
+export function rewriteDroppedAFact(original: string, rewrite: string): boolean {
   const rwRaw = rewrite;
   const rwTight = rewrite.toLowerCase().replace(/\s+/g, '');
   // 1) Slack @mentions — every raw <@ID> must survive (else addressing breaks).
@@ -383,8 +389,12 @@ function draftLooksLeaky(draft: string): boolean {
     // Proper "<@U…>" / "<#C…>" mentions are NOT leaks — Slack renders them as a
     // name/channel and they must survive (rewriteDroppedAFact enforces it too).
     // Only a RAW unwrapped account id or a structured req_/task_/coord_ id is a
-    // tell. The (?<![@<]) skips an id sitting inside a proper "<@U…>" wrapper.
-    || /(?<![@<])\b[UW](?=[A-Z0-9]*\d)[A-Z0-9]{7,}\b|\b#?(?:req|task|coord|out|ci)_[a-z0-9_]+\b/i.test(draft);
+    // tell. v4.1.x (G2): the account-id half is textScrubber's RAW_SLACK_ID_RE —
+    // ONE definition of the token, imported, not re-typed here. Three components
+    // each keeping their own copy is what let securityGate start flagging the very
+    // mentions this gate protects (2026-07-21).
+    || RAW_SLACK_ID_RE.test(draft)
+    || /\b#?(?:req|task|coord|out|ci)_[a-z0-9_]+\b/i.test(draft);
 }
 
 function safeFallback(draft: string, audience: HumanGateAudience, reason: string): HumanGateResult {

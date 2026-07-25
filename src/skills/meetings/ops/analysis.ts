@@ -8,6 +8,7 @@ import logger from '../../../utils/logger';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../../config/userProfile';
 import type { CalendarEvent } from '../../../connectors/graph/calendar';
+import { displaySubject, type SubjectViewer } from '../../../utils/displaySubject';
 import { searchPeopleMemory } from '../../../db';
 
 // ── Calendar event processing ─────────────────────────────────────────────────
@@ -126,6 +127,16 @@ export function processCalendarEvents(
   ownerName: string,
   timezone: string,
   profile: UserProfile,
+  /**
+   * v4.1.x (M12, the "owner always sees everything" half) — WHO this list is
+   * being built for. Pre-fix the masking predicate took no caller, so the
+   * OWNER's own get_calendar in his own DM came back with his interviews and
+   * personal appointments titled "[Private]" — Maelle unable to name his own
+   * meetings back to him, and every follow-up reference-back ("move the
+   * interview") harder than it needed to be. Default stays 'other' (mask):
+   * unclear caller → return less.
+   */
+  viewer: SubjectViewer = 'other',
 ): ProcessedEvent[] {
   const result: ProcessedEvent[] = [];
 
@@ -159,23 +170,21 @@ export function processCalendarEvents(
       eventType = 'colleague_info';
     }
 
-    // Private/personal events: mask the subject. v2.9.4 (#107a) — checks BOTH
-    // paths via the central displaySubject helper:
+    // Private/personal events: mask the subject FOR A NON-OWNER VIEWER.
+    // v2.9.4 (#107a) — checks BOTH paths via the central displaySubject helper:
     //   (1) Outlook sensitivity is 'private' / 'personal'
     //   (2) any of the event's categories matches a yaml category with
     //       sets_sensitivity_private:true (e.g. the `Personal` category)
     // Both must be masked here, else Sonnet sees raw subjects for category-
-    // private events and could narrate them verbatim. The lower-level
-    // getCalendarEvents still returns raw subjects; the internal classifier
-    // flows (autoCategorize / detectCategory) read those directly and stay
-    // unaffected.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { displaySubject } = require('../../../utils/displaySubject') as
-      typeof import('../../../utils/displaySubject');
+    // private events and could narrate them verbatim to a colleague. The
+    // lower-level getCalendarEvents still returns raw subjects; the internal
+    // classifier flows (autoCategorize / detectCategory) read those directly
+    // and stay unaffected.
     const sensitivity = ev.sensitivity ?? 'normal';
     const subject = displaySubject(
       { subject: ev.subject, sensitivity, categories: ev.categories },
       profile,
+      viewer,
     );
 
     const attendeeNames = (ev.attendees ?? [])

@@ -675,6 +675,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
         history,
         userMessage,
         isMpim,
+        isChannel,
         isOwnerInGroup,
         mpimMemberIds,
         voiceInput,

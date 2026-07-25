@@ -68,7 +68,10 @@ function collectReferencedMeetingIds(ownerUserId: string): ArtifactRef[] {
     }
   }
 
-  // Reschedule outreach in-flight
+  // Reschedule outreach in-flight. The status filter is the open/closed
+  // sentinel described in db/jobs.ts (top block): rows sit at the default
+  // 'sent' until closeRequest cascades them to 'cancelled', so this scan
+  // depends on that cascade to stop following closed outreach.
   const outreachRows = db.prepare(`
     SELECT context_json FROM outreach_jobs
     WHERE owner_user_id = ?

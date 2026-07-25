@@ -9,7 +9,7 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 import type { SkillContext } from '../../../types';
 
-import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy } from '../../ops/helpers';
+import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, openQuestionsField } from '../../ops/helpers';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getCalendarEvents,
@@ -37,6 +37,7 @@ import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
+import { subjectViewerFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 
 export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -934,7 +935,19 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               // (rules 1, 6, 11) — moving his own lunch to 16:00 is his call, so
               // we move it and add a heads-up rather than bouncing for a
               // confirm_outside_window re-ask.
-              const isOwnerPath = context.senderRole === 'owner' || context.isOwnerInGroup === true;
+              // v4.1.x — STRICT (post-clamp) owner path. The name was already
+              // `isOwnerPath` but the definition was the loose one, which now
+              // collides head-on with the canonical split: `isOwnerPath` is
+              // `senderRole === 'owner'` (authority + data scope AFTER the MPIM
+              // clamp); identity-only attribution is `isOwnerTyping`. This branch
+              // grants the TOTAL one-step override — it honors the owner's target
+              // as-is and moves a floating block outside its window with no
+              // confirm — so it is authority, not identity, and the MPIM clamp
+              // exists precisely so owner-level authority is never exercised in a
+              // room colleagues share. Owner-in-MPIM now takes the colleague
+              // branch below (aligned placement inside the window), and his real
+              // override still reaches him through the approval flow.
+              const isOwnerPath = context.senderRole === 'owner';
               if (isOwnerPath) {
                 // v3.1.8 (D5) — snap the hint to the quarter grid. The general
                 // snap above is bypassed on the floating-block path because this
@@ -1081,6 +1094,9 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             locationHint: args.location as string | undefined,
             isOnlineHint: typeof args.is_online === 'boolean' ? args.is_online : undefined,
             allowRelaxed: args.relaxed === true,
+            // v4.1.x (M12) — the owner alone sees the real subject of whatever
+            // he'd be colliding with; a colleague-path move never does.
+            viewer: subjectViewerFor(context),
           });
           logger.info('move_meeting — planMeeting verdict', {
             action: movePlan.action, meetingId: args.meeting_id,
@@ -1097,6 +1113,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               violation_label: movePlan.violationLabel,
               alternatives: movePlan.alternatives,
               suggested_ask_text: movePlan.suggestedAskText,
+              ...openQuestionsField(movePlan.openQuestions),
               _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
               _note: 'The requested new time breaks one of the owner\'s soft rules. Do NOT escalate yet. Offer these nearby rule-compliant slots (2 on the requested day + 1 after) and ask if one works. If the colleague INSISTS on the original time, or none of these work, THEN call create_approval(kind=policy_exception) with suggested_ask_text so the owner decides.',
             };
@@ -1108,6 +1125,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               meeting_subject: args.meeting_subject,
               violation_label: movePlan.violationLabel,
               suggested_ask_text: movePlan.suggestedAskText,
+              ...openQuestionsField(movePlan.openQuestions),
               category: movePlan.category,
               // v2.7.2 — deferred_action_hint for resolver replay on approve.
               _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
@@ -1135,6 +1153,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               error: 'location_mode_unspecified',
               meeting_subject: args.meeting_subject,
               suggested_ask_text: movePlan.suggestedAskText,
+              ...openQuestionsField(movePlan.openQuestions),
               category: movePlan.category,
               _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
               _note: 'Move lands on an office day with external attendee in same/unknown timezone. Ask the owner online vs physical, then re-call move_meeting with either is_online=true or location=<full office address>.',
@@ -1147,6 +1166,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               error: 'meeting_room_unavailable_large_meeting',
               meeting_subject: args.meeting_subject,
               suggested_ask_text: movePlan.suggestedAskText,
+              ...openQuestionsField(movePlan.openQuestions),
               category: movePlan.category,
               _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
               _note: 'Move target time has the Meeting Room taken and the group is too large for the small-room fallback. Ask the owner whether to push the time, trim attendees, or pick another day.',
@@ -1404,7 +1424,10 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // through (owner override is total), but a colleague-requested move can re-land
           // on a time that attendee is busy — surface it so Maelle flags it, never re-asks.
           // This notice was computed by planMeeting but DROPPED here before the fix.
-          ...(movePlanOverrideNotice ? { _attendee_busy_note: `Heads up — ${movePlanOverrideNotice}. Moved anyway (your call is total); say plainly who's busy at the new time and offer to check with them or pick another slot — don't re-ask permission.` } : {}),
+          // v4.1.x (M3) — the same channel now also carries the booking LEVEL:
+          // "this books over your optional <X>" / "this double-books you over
+          // <Y> with 2 people on it". Same one-time flag, never a re-ask.
+          ...(movePlanOverrideNotice ? { _attendee_busy_note: `Heads up — ${movePlanOverrideNotice}. Moved anyway (your call is total); say plainly what the clash is at the new time and offer to check with them or pick another slot — don't re-ask permission.` } : {}),
           // v1.8.3 — past-tense summary the reply quotes verbatim. Issue #26 bug 1:
           // without this, Sonnet could re-read the calendar post-move and narrate
           // the new time as a fresh discovery ("already at 12:30, nothing to change")

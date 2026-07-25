@@ -64,9 +64,12 @@ function toEndOfDayLocal(dateStr: string | undefined | null, timezone: string): 
 
 /**
  * Spread rules:
- *   • Max 3 total
- *   • Max 2 per day (with ≥1h gap between same-day picks)
- *   • ≥2 unique days when returning 3 (no all-same-day)
+ *   • At most `count` total — the caller's offered-slot budget
+ *     (profile.meetings.offered_slot_count via offeredSlotCount). REQUIRED:
+ *     the old `count = 5` default was a second, silent bound competing with
+ *     the config (M6).
+ *   • ≥1h gap between same-day picks (relaxed on the final fill pass)
+ *   • Day-diversity first — one pick per day per round, then depth
  *
  * Day walk order:
  *   • If `anchorDay` (yyyy-MM-dd) is set and has candidates → walk that day
@@ -88,7 +91,7 @@ function toEndOfDayLocal(dateStr: string | undefined | null, timezone: string): 
 export function pickSpreadSlots(
   slots: Array<{ start: string; disturbs_floating_block?: boolean; away_tz?: string; over_optional?: string }>,
   timezone: string,
-  count = 5,
+  count: number,
   anchorDay?: string,
   // When set, no two returned slots start within `durationMinutes` of each
   // other (a later start landing inside an earlier slot is never a useful

@@ -57,6 +57,12 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     return;
   }
 
+  // O2 — ONE Connection for every outbound send in this dispatcher. A task
+  // dispatcher posts through the transport-neutral Connection interface, never
+  // a transport module directly; resolved once here so the skip notice, the
+  // progress placeholder and the final post cannot drift onto different paths.
+  const conn = getConnection(profile.user.slack_user_id, 'slack');
+
   const scheduledAt = (ctx.scheduled_at as string | undefined) || task.due_at || task.created_at;
   const verdict = assessLateness({ routine, scheduledAtIso: scheduledAt });
   if (!verdict.run) {
@@ -74,7 +80,6 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
 
     if (routine.notify_on_skip === 1) {
       try {
-        const conn = getConnection(profile.user.slack_user_id, 'slack');
         if (conn) {
           const nextTs = routine.next_run_at;
           const nextFormatted = nextTs
@@ -126,21 +131,26 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
   // the web" / "Reading the page" during routine tool runs. Now we post a
   // placeholder FIRST, capture its real ts, run the orchestrator threaded
   // under it (status indicator now fires on the real thread), then swap the
-  // placeholder for the final content via chat.update (or delete it on a
-  // silent return). Fallback to the old synthesized-ts path if the
-  // placeholder post itself fails — better degraded than blocked.
-  const botToken = profile.assistant.slack.bot_token;
+  // placeholder for the final content (or retract it on a silent return).
+  // Fallback to the old synthesized-ts path if the placeholder post itself
+  // fails — better degraded than blocked. All three steps — post, replace,
+  // retract — go through the Connection resolved above; this dispatcher holds
+  // no transport handle of its own.
   let placeholderTs: string | undefined;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { postToChannel } = require('../../connections/slack/messaging') as
-      typeof import('../../connections/slack/messaging');
-    const placeholder = await postToChannel(app, botToken, routine.owner_channel, 'Working…');
-    if (placeholder.ok && placeholder.ts) {
+    // O2 — the placeholder is an outbound SEND, so it goes through the
+    // Connection like every other send here. SendResult already carries the
+    // message ref (`ts`), which is all the threading below needs. No
+    // connection registered → no placeholder, and the synthetic-threadTs
+    // fallback right below carries the run (better than a "Working…" nobody
+    // can ever replace).
+    const placeholder = await conn?.postToChannel(routine.owner_channel, 'Working…');
+    if (placeholder?.ok && placeholder.ts) {
       placeholderTs = placeholder.ts;
     } else {
       logger.warn('dispatchRoutine — placeholder post failed, falling back to synthetic threadTs', {
-        routineId: routine.id, detail: placeholder.ok ? 'no_ts' : placeholder.reason,
+        routineId: routine.id,
+        detail: !placeholder ? 'no_connection' : placeholder.ok ? 'no_ts' : placeholder.reason,
       });
     }
   } catch (err) {
@@ -221,10 +231,6 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       cleanedLen: cleaned.trim().length,
     });
 
-    const conn = getConnection(profile.user.slack_user_id, 'slack');
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const messaging = require('../../connections/slack/messaging') as
-      typeof import('../../connections/slack/messaging');
     if (!isSilent) {
       // Icon on the automatic thread so it reads distinct from the owner's own
       // DMs (which never route through dispatchRoutine). Health = its own glyph;
@@ -232,17 +238,21 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       // posts via sendMorningBriefing with its own icon.
       const decorated = `${routineIcon(routine)} ${cleaned}`;
       if (placeholderTs) {
-        // Swap the placeholder for the final content. Same message id, no
-        // new notification noise. Slack auto-clears the assistant-panel
-        // status indicator on the update.
-        const upd = await messaging.updateMessage(
-          app, botToken, routine.owner_channel, placeholderTs, decorated,
-        );
-        if (!upd.ok) {
-          // Update failed — last-resort post a new top-level message so
-          // the result isn't lost.
+        // Swap the placeholder for the final content. Same message id, no new
+        // notification noise. Slack auto-clears the assistant-panel status
+        // indicator on the update. Going through the Connection is what applies
+        // the transport's outbound formatting to this text — the direct-module
+        // call it replaced skipped it, so routine output reached the owner as
+        // raw markdown on the path that almost always runs.
+        // `updateMessage` is optional on the interface: a transport without an
+        // edit primitive returns undefined here and degrades exactly like a
+        // failed edit — the fresh post below carries the result either way.
+        const upd = await conn?.updateMessage?.(routine.owner_channel, placeholderTs, decorated);
+        if (!upd || !upd.ok) {
+          // No edit verb, or the edit failed — last-resort post a new top-level
+          // message so the result isn't lost.
           logger.warn('dispatchRoutine — placeholder update failed, posting fresh message', {
-            routineId: routine.id, detail: upd.detail,
+            routineId: routine.id, detail: upd ? upd.detail : 'no_update_verb',
           });
           if (conn) await conn.postToChannel(routine.owner_channel, decorated);
         }
@@ -260,7 +270,9 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       // stale "Working…" hanging in their DM. Pre-placeholder we just
       // posted nothing; the new behaviour matches that effective state.
       if (placeholderTs) {
-        await messaging.deleteMessage(app, botToken, routine.owner_channel, placeholderTs);
+        // Best-effort retract, same as before: no branch on the outcome, and a
+        // transport without a delete primitive simply leaves it standing.
+        await conn?.deleteMessage?.(routine.owner_channel, placeholderTs);
       }
       logger.info('Routine completed silently (no message sent to owner)', {
         taskId: task.id,
@@ -285,10 +297,7 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     // "Working…" forever when the routine throws.
     if (placeholderTs) {
       try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { deleteMessage } = require('../../connections/slack/messaging') as
-          typeof import('../../connections/slack/messaging');
-        await deleteMessage(app, botToken, routine.owner_channel, placeholderTs);
+        await conn?.deleteMessage?.(routine.owner_channel, placeholderTs);
       } catch (_) { /* best effort */ }
     }
     // v2.6.5 — capture the actual error message in last_result instead of the

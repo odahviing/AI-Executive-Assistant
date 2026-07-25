@@ -21,6 +21,20 @@
  *   written after (keyed by person_id). Next time the owner books them, the
  *   history is already on file.
  *
+ * Who earns a row (P3 — ACTIVE engagement, not who asked):
+ *   Everyone on a meeting Maelle actually BOOKED. v3.1.7 gated new externals on
+ *   `ownerInitiated`, which is the wrong axis: a colleague booking the owner
+ *   with an external is still real, deliberate work with that external, and
+ *   dropping them meant the next encounter started from zero. The rule P3
+ *   actually protects is that PASSIVE observation must never mint people —
+ *   reading a calendar, scanning a day, passing over an attendee list. That is
+ *   enforced where it belongs: the v3.1.7 auto calendar-backfill sweep was
+ *   deleted (core/background.ts), calendar readers use getPersonByEmail
+ *   (read-only), and this function is only ever called from a completed
+ *   mutation. So there is no engagement test left to make here — reaching this
+ *   line IS the engagement. What remains is the not-a-person filter below
+ *   (recording bots, no-reply senders, room mailboxes).
+ *
  * Never throws. A failure here must never undo a successful booking.
  */
 import type { UserProfile } from '../config/userProfile';
@@ -41,16 +55,6 @@ export interface RecordBookingParams {
   attendees: Array<{ email: string; name?: string; slack_id?: string }>;
   /** Kind of mutation — drives the verb in the line. */
   mutation: 'booked' | 'moved' | 'updated';
-  /**
-   * v3.1.7 — did the OWNER initiate this booking (owner-path create_meeting, or
-   * an owner-initiated coordination)? When false (someone else booked a meeting
-   * *with* the owner), we DON'T create new EXTERNAL people — the owner doesn't
-   * want every external from a meeting he didn't ask for. Internal colleagues
-   * are still recorded either way ("we just book meetings with each other"), and
-   * an external already on file still gets the interaction logged. The owner can
-   * always explicitly remember an external via note_about_person / update_person_memory.
-   */
-  ownerInitiated: boolean;
 }
 
 const VERB_BY_MUTATION: Record<RecordBookingParams['mutation'], string> = {
@@ -84,7 +88,7 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
     // Lazy-load DB + memory writer to avoid circular-import risk from
     // skills/meetings/ops.ts → here → db → ... back into skills.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { resolvePerson, appendPersonInteractionById, getPersonByEmail } = require('../db') as typeof import('../db');
+    const { resolvePerson, appendPersonInteractionById } = require('../db') as typeof import('../db');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { writePersonSection, readPersonMemorySync } = require('./peopleMemory') as typeof import('./peopleMemory');
 
@@ -113,12 +117,6 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
       if (assistantEmail && email === assistantEmail) continue;
       if (roomEmail && email === roomEmail) continue;
       if (isNonHumanAttendee(email)) continue;  // recording bots / no-reply / resource mailboxes
-      // v3.1.7 — someone else booked a meeting WITH the owner: keep internal
-      // colleagues ("we just book meetings with each other"), but don't CREATE a
-      // new EXTERNAL person the owner didn't ask for. An external already on file
-      // still gets the interaction logged.
-      const isExternal = !att.slack_id && !(ownerDomain && email.endsWith('@' + ownerDomain));
-      if (!params.ownerInitiated && isExternal && !getPersonByEmail(email)) continue;
 
       // v3.2.0 — find-or-create the person (internal OR external). slack_id
       // (when known) is the strongest handle and dedups against an existing

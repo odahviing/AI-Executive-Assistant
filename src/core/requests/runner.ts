@@ -138,25 +138,42 @@ async function dispatchHandler(
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 /**
- * Generic expiry — close the request as expired + DM owner a tombstone.
+ * Generic expiry — close the request as expired + tell BOTH sides (R4).
  *
  * v2.9.1 — also notify the REQUESTER on approval-kind expiry (scenario A:
  * someone asks, owner never answers → without this the requester is left
  * hanging). Pre-fix the tombstone went only to the owner.
+ *
+ * #42 — the COPY is chosen from the row's STATE at fire time, not from `kind`
+ * alone. `kind==='approval'` says nothing about who went quiet: after an amend
+ * the owner has already decided and the request sits on the COLLEAGUE. Telling
+ * the owner "I never heard back from you" and the requester "I couldn't get a
+ * read from him" would then be a double lie about who ghosted whom — the exact
+ * wrong-outcome failure R4 names. One expiry path, two truthful stories.
  */
 async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed'> {
+  // Read the side BEFORE closing — closeRequest moves state to 'expired'.
+  const waitingOnColleague = row.state === 'awaiting_colleague';
+  const ownerFirst = profile.user.name.split(' ')[0];
+  const requesterFirst = row.requester_name?.split(' ')[0] ?? 'there';
+  const subject = row.subject && row.subject.toLowerCase().endsWith('needs your input')
+    ? 'that ask'
+    : (row.subject || 'that ask');
   closeRequest({
     id: row.id,
     state: 'expired',
-    closureReason: 'no_action_in_window',
+    closureReason: waitingOnColleague ? 'no_colleague_reply_in_window' : 'no_action_in_window',
     closedBy: 'expiry',
   });
-  // Tombstone DM to owner for approval decisions he never answered.
+  // Tombstone to the owner: what actually stalled, in his decision thread.
   if (row.kind === 'approval' && row.owner_dm_channel) {
     try {
       const conn = getConnection(profile.user.slack_user_id, 'slack');
       if (conn) {
-        const what = `I never heard back on the approval I asked about. I've closed it, let me know if you want to try again.`;
+        const who = row.requester_name?.split(' ')[0] ?? 'They';
+        const what = waitingOnColleague
+          ? `${who} never came back on what you suggested for "${subject}". I've closed it — say the word if you want me to chase it again.`
+          : `I never heard back on the approval I asked about. I've closed it, let me know if you want to try again.`;
         await sendTracked(
           conn,
           { channel: row.owner_dm_channel },
@@ -177,12 +194,12 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
     try {
       const conn = getConnection(profile.user.slack_user_id, 'slack');
       if (conn) {
-        const requesterFirst = row.requester_name?.split(' ')[0] ?? 'there';
-        const ownerFirst = profile.user.name.split(' ')[0];
-        const subject = row.subject && row.subject.toLowerCase().endsWith('needs your input')
-          ? 'that ask'
-          : (row.subject || 'that ask');
-        const body = `Hey ${requesterFirst} — I couldn't get a read from ${ownerFirst} on ${subject}. Closing this for now; ping me when you want to try again.`;
+        const body = waitingOnColleague
+          // The owner ANSWERED and we relayed his counter; it's their reply we
+          // never got. Saying "I couldn't get a read from him" here would blame
+          // him for their silence.
+          ? `Hey ${requesterFirst} — I never heard back on what ${ownerFirst} suggested for ${subject}, so I've closed this off for now. Ping me whenever you want to pick it up again.`
+          : `Hey ${requesterFirst} — I couldn't get a read from ${ownerFirst} on ${subject}. Closing this for now; ping me when you want to try again.`;
         // v3.4.6 — consistent requester threading: always thread into the
         // requester's origin thread (MPIM channel or 1:1 DM), matching
         // notifyRequesterOfDecision. Pre-fix the 1:1 path dropped the thread,
@@ -213,6 +230,21 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
  * Then re-arm next_check_at = expires_at, handler = 'expiry'.
  */
 async function runApprovalReminder(row: RequestRow, profile: UserProfile): Promise<'rearmed' | 'closed'> {
+  // #42 — never nag the owner about a call that isn't his to make. Every
+  // transition off awaiting_owner re-aims the clock (resolver timersForWaitingSide),
+  // so this is the precondition made explicit rather than assumed: reaching here
+  // in any other state means a re-aim was missed, and "Still waiting on your call
+  // here" would be a lie. Fall straight through to expiry instead of nagging.
+  if (row.state !== 'awaiting_owner') {
+    logger.info('runApprovalReminder — not awaiting the owner, skipping the nag and arming expiry', {
+      requestId: row.id, state: row.state,
+    });
+    updateRequest(row.id, {
+      nextCheckAt: row.expires_at ?? null,
+      nextCheckHandler: row.expires_at ? 'expiry' : null,
+    });
+    return 'rearmed';
+  }
   if (!row.expires_at) {
     // No expiry → just clear the timer (defensive — shouldn't happen since
     // approval_reminder is only set when expires_at exists).

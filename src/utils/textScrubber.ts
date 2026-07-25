@@ -105,13 +105,32 @@ function humanizeIanaToken(match: string): string {
 // v4.0.x — bare / @-prefixed Slack user id leaked as literal text (NOT a rendered
 // <@…> mention): the group/DM context header feeds "Name (slack_id: U…)" and the
 // model sometimes echoes the id bare (Alex Wiggins → "@U09DGGSJJP9 …", 2026-07-21).
-// humanGate owns this semantically but is a probabilistic Haiku pass and missed it;
-// this deterministic scrub is the path-agnostic backstop (runs on every outbound via
+// This deterministic scrub is the path-agnostic fix (runs on every outbound via
 // formatForSlack). Wrap → <@id> so Slack renders the display name. Tuned to Slack's
 // id shape: uppercase-only + a REQUIRED digit (so all-caps words like "MEETING" /
 // "UPDATED" can't match); the two lookbehinds prevent double-wrapping an id already
 // inside a proper <@…>/<#…> mention. Structured token → the allowed kind of regex.
 const BARE_SLACK_ID_RE = /(?<!<@)(?<!<)@?\b([UW](?=[A-Z0-9]*\d)[A-Z0-9]{7,10})\b/g;
+
+/**
+ * v4.1.x (G2) — THE single definition of "a raw Slack account id shown as literal
+ * text", i.e. an id this scrubber did NOT turn into a rendered `<@…>` mention.
+ *
+ * This module OWNS the slack-id token: it is the one component that acts on it
+ * deterministically, on every outbound, on every path (formatForSlack). The
+ * output-time gates are READERS — securityGate and humanGate import this pattern
+ * instead of each carrying their own. Three components keeping three regexes for
+ * one token is what shipped the 2026-07-21 bug: securityGate's `<@[UW]…>` trigger
+ * flagged the very mention THIS function manufactures, and the Sonnet rewriter
+ * stripped it out of two correct colleague replies (logs/maelle-2026-07-21.log:838,
+ * :908). A rendered mention is CORRECT output, never a leak.
+ *
+ * The `(?<![@<])` lookbehind is what encodes that: an id inside `<@…>`, or carrying
+ * an `@` prefix, is either already rendered or already handled above — only a truly
+ * naked id matches. No `/g` flag on purpose: callers use `.test()`, which is
+ * stateful (and therefore alternates true/false) on a global regex.
+ */
+export const RAW_SLACK_ID_RE = /(?<![@<])\b[UW](?=[A-Z0-9]*\d)[A-Z0-9]{7,}\b/;
 
 export function scrubInternalLeakage(text: string): string {
   return text

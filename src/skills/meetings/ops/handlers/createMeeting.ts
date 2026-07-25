@@ -9,7 +9,7 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 import type { SkillContext } from '../../../types';
 
-import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy } from '../../ops/helpers';
+import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, openQuestionsField } from '../../ops/helpers';
 import { humanizeViolationLabel } from '../../ops/violationLabels';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
@@ -845,6 +845,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             violation_label: plan.violationLabel,
             alternatives: plan.alternatives,
             suggested_ask_text: plan.suggestedAskText,
+            ...openQuestionsField(plan.openQuestions),
             _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
             _note: 'The proposed time breaks one of the owner\'s soft rules. Do NOT escalate yet. Offer these nearby rule-compliant slots (2 on the requested day + 1 after) and ask the colleague if one works. If they INSIST on the original time, or none of these work, THEN call create_approval(kind=policy_exception) with suggested_ask_text so the owner decides.',
           };
@@ -856,6 +857,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             error: 'rule_violation',
             violation_label: plan.violationLabel,
             suggested_ask_text: plan.suggestedAskText,
+            ...openQuestionsField(plan.openQuestions),
             category: plan.category,
             // v2.7.2 — deferred_action_hint: the original tool call, ready to be
             // stamped on a follow-up create_approval. Orchestrator auto-attaches
@@ -884,6 +886,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             success: false,
             error: 'location_mode_unspecified',
             suggested_ask_text: plan.suggestedAskText,
+            ...openQuestionsField(plan.openQuestions),
             category: plan.category,
             _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
             _note: 'Office day + external attendee in same/unknown timezone. Ask the owner online vs physical, then re-call create_meeting with either is_online=true or location=<full office address>.',
@@ -896,6 +899,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             success: false,
             error: 'meeting_room_unavailable_large_meeting',
             suggested_ask_text: plan.suggestedAskText,
+            ...openQuestionsField(plan.openQuestions),
             category: plan.category,
             _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
             _note: 'Meeting Room is taken at this time and the group is too large for the small-room fallback. Ask the owner whether to push the time, trim the attendee list, or pick a different day.',
@@ -1106,11 +1110,27 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               // owner + override_hold:true → fall through and book; release fires on success.
             } else {
               // Colleague booking over ANOTHER colleague's hold — never silently.
+              // v4.1.x — this branch tells the model to raise a policy_exception
+              // but shipped NO `_deferred_action_hint`, so the approval carried no
+              // action of its own. Two consequences, one of them live today:
+              //   • the orchestrator stamps `payload.deferred_action` ONLY from a
+              //     hint, so the approval had nothing to replay and its action was
+              //     fabricated downstream — on approve the replay re-entered this
+              //     very gate and died, leaving the request in `awaiting_owner`.
+              //     A colleague asked, the owner said yes, and nothing was booked.
+              //   • the requests lane's new create_approval gate refuses an
+              //     unstamped policy_exception outright, which would loop here.
+              // `override_hold: true` is REQUIRED, not decoration: the replay runs
+              // as the OWNER (deferredActionReplay.ts:74-83), so a bare `{...args}`
+              // lands on the owner confirm two lines up and returns success:false —
+              // the exact dead end above. The flag IS what the owner just approved:
+              // book it, release the hold, DM the holder (handled after the write).
               return {
                 success: false,
                 error: 'slot_held_needs_owner_approval',
                 hold_id: conflictHold.id,
                 message: `That time is tentatively held for someone else — don't book it, and don't reveal who holds it. Raise create_approval(kind=policy_exception) with this slot so ${context.profile.user.name.split(' ')[0]} decides; tell the colleague warmly you're checking on it.`,
+                _deferred_action_hint: { tool: 'create_meeting', args: { ...args, override_hold: true } },
               };
             }
           }
@@ -1407,8 +1427,9 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
 
           // v3.0.6 — write a "Booked X" line to each non-owner attendee's
           // person_memory md so future reads have the venue/subject/date.
-          // Fire-and-forget; never blocks the response. Externals without a
-          // people_memory row are silently skipped (see recordBooking.ts).
+          // Fire-and-forget; never blocks the response. Every human attendee is
+          // recorded regardless of who initiated (P3 — a booking IS active
+          // engagement); non-humans are filtered in recordBooking.ts.
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { recordBookingInPersonMemory } = require('../../../../memory/recordBooking') as
@@ -1422,8 +1443,6 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 .filter((a): a is typeof a & { email: string } => typeof a.email === 'string' && a.email.length > 0)
                 .map(a => ({ email: a.email, name: a.name, slack_id: a.slack_id })),
               mutation: 'booked',
-              // v3.1.7 — only the owner asking to book persists new externals.
-              ownerInitiated: context.senderRole === 'owner',
             });
           } catch (err) {
             logger.warn('recordBookingInPersonMemory invocation failed (colleague-path) — continuing', {

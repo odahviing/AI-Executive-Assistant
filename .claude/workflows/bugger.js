@@ -17,8 +17,8 @@ const SOURCES = A.sources || ['github', 'logs'] // the one 19:00 run does BOTH; 
 const SINCE = A.sinceIso || 'the last run' // watermark for the log review
 const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 25 // severity-first build cap per run
 const VERIFY = A.verify !== false // guard-verify each built fix unless explicitly off
-const CODE_LANES = ['meeting', 'requests', 'guard', 'people', 'slack', 'other'] // run in parallel; context runs LAST, separately
-const EFFORT = { meeting: 'xhigh', context: 'xhigh', slack: 'xhigh', requests: 'xhigh', other: 'high', people: 'high', guard: 'high' } // reasoning effort per lane (owner-set)
+const CODE_LANES = ['meeting', 'requests', 'guard', 'people', 'slack', 'outer'] // run in parallel; context runs LAST, separately
+const EFFORT = { meeting: 'xhigh', context: 'xhigh', slack: 'xhigh', requests: 'xhigh', outer: 'high', people: 'high', guard: 'high' } // reasoning effort per lane (owner-set)
 
 // ---- schemas (force structured returns) ----
 const FINDINGS = {
@@ -52,7 +52,7 @@ const ATOMIC = {
         properties: {
           id: { type: 'string' },
           symptom: { type: 'string' },
-          lane: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'other'] },
+          lane: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer'] },
           whyHypothesis: { type: 'string' },
           severity: { type: 'string', enum: ['high', 'medium', 'low'] },
           evidence: { type: 'string' },
@@ -80,7 +80,7 @@ const VERDICTS = {
           },
           rootCause: { type: 'string', description: 'file:line — proven, not guessed' },
           fix: { type: 'string', description: 'files touched, +/- lines, plain English' },
-          dependencyAgent: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'other', ''] },
+          dependencyAgent: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer', ''] },
           dependencyAsk: { type: 'string' },
           notes: { type: 'string' },
         },
@@ -125,7 +125,7 @@ log(`Intake: ${findings.length} raw findings from ${SOURCES.join(' + ')}`)
 // ---- 2. Triage: split into atomic issues + route (lightweight; the lane agent does the deep work) ----
 phase('Triage')
 const triaged = await agent(
-  `Split these findings into ATOMIC issues and route each to a lane (meeting / requests / guard / context / people / slack / other — \`context\` owns everything Maelle is TOLD (system prompt, tool descriptions, learned prefs) and runs LAST; \`requests\` owns the async work-item spine: approvals, outreach, reminders, follow-ups, timers/expiry and the requester close-loop; \`people\` owns identity, the person store, people memory and social; \`slack\` owns the transport — inbound routing, threading, DM/MPIM/channel behavior, authority-by-authenticated-sender, dedup/catch-up, the delivery pipeline; use \`other\` only for a subsystem NO lane owns: news, brief, routines, Graph plumbing, core orchestrator, DB, health, config, scripts). LIGHTWEIGHT only — id, symptom, lane, a why-hypothesis, severity, and carry clarity forward. Do NOT build the plan or prove the root cause; that is the lane agent's job.\nMERGE same-root issues: if two issues would be fixed by the SAME change / at the same place, emit ONE issue routed to the lane that owns the real fix. NEVER split a flow defect into "the bug" + "a missing backstop guard for it" — that is ONE bug; route it to the flow lane (meeting / requests / people / slack / context / other). Only raise a GUARD-lane issue when a guard itself misfires, leaks, or is wrong — never as a backstop for a flow defect (the flow fix IS the fix).\nFINDINGS:\n${JSON.stringify(findings, null, 2)}`,
+  `Split these findings into ATOMIC issues and route each to a lane (meeting / requests / guard / context / people / slack / outer — \`context\` owns everything Maelle is TOLD (system prompt, tool descriptions, learned prefs) and runs LAST; \`requests\` owns the async work-item spine: approvals, outreach, reminders, follow-ups, timers/expiry and the requester close-loop; \`people\` owns identity, the person store, people memory and social; \`slack\` owns the transport — inbound routing, threading, DM/MPIM/channel behavior, authority-by-authenticated-sender, dedup/catch-up, the delivery pipeline; use \`other\` only for a subsystem NO lane owns: news, brief, routines, Graph plumbing, core orchestrator, DB, health, config, scripts). LIGHTWEIGHT only — id, symptom, lane, a why-hypothesis, severity, and carry clarity forward. Do NOT build the plan or prove the root cause; that is the lane agent's job.\nMERGE same-root issues: if two issues would be fixed by the SAME change / at the same place, emit ONE issue routed to the lane that owns the real fix. NEVER split a flow defect into "the bug" + "a missing backstop guard for it" — that is ONE bug; route it to the flow lane (meeting / requests / people / slack / context / other). Only raise a GUARD-lane issue when a guard itself misfires, leaks, or is wrong — never as a backstop for a flow defect (the flow fix IS the fix).\nFINDINGS:\n${JSON.stringify(findings, null, 2)}`,
   { label: 'triage', phase: 'Triage', effort: 'low', model: 'sonnet', schema: ATOMIC },
 )
 const allIssues = (triaged && triaged.issues) || []

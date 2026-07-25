@@ -24,6 +24,24 @@
  * subject (autoCategorize's classifier prompt, detectCategory, etc.) read
  * event.subject directly with intent; they just must not pass that raw
  * subject downstream into Slack-bound data.
+ *
+ * ── WHO is looking (v4.1.x — M12, both halves) ───────────────────────────────
+ * Masking is an AUTHORIZATION decision, so it needs the authenticated caller,
+ * not just the event. Pre-fix the predicate took no viewer, which broke M12 in
+ * BOTH directions at once:
+ *   • the OWNER's own get_calendar came back with his interviews titled
+ *     "[Private]" (he must always see everything — he is the one who marked it);
+ *   • colleague-reachable payloads that never called this helper at all
+ *     (checkSlot's owner_busy label, check_join_availability, the search's
+ *     `over_optional` tag) shipped RAW subjects of the owner's private meetings
+ *     into a colleague turn's model context.
+ * The fix is one param, `viewer`, and a mask decision made where the payload is
+ * PRODUCED — never an output scrubber. Default is `'other'` (mask): when a
+ * caller's permission is unclear the safe answer is to return less.
+ *
+ * `'owner'` means the owner in a surface only he can read. Owner-in-MPIM is
+ * deliberately NOT owner here — colleagues read that transcript — which is the
+ * same posture as the `isOwnerDm` audit gate in the get_calendar handler.
  */
 
 import type { UserProfile } from '../config/userProfile';
@@ -34,16 +52,35 @@ interface SubjectableEvent {
   categories?: unknown;
 }
 
+/** Who the produced text is for. 'other' = anyone who is not the owner alone. */
+export type SubjectViewer = 'owner' | 'other';
+
 const PRIVATE_MASK = '[Private]';
 
 /**
- * Returns the privacy-aware subject for display in any user-visible text.
- * Pass the event AND the owner's profile (so the category-flag check can
- * consult the yaml). If the event qualifies as private, returns `[Private]`.
- * Otherwise returns the raw subject (or empty string if undefined).
+ * THE viewer predicate — derived from the AUTHENTICATED sender (Slack-verified
+ * `senderRole`), never from anything claimed in a message. Structural fields
+ * only so `utils` doesn't take a dependency on SkillContext.
  */
-export function displaySubject(event: SubjectableEvent, profile: UserProfile): string {
-  if (isEventPrivate(event, profile)) return PRIVATE_MASK;
+export function subjectViewerFor(
+  caller: { senderRole?: 'owner' | 'colleague'; isMpim?: boolean } | undefined,
+): SubjectViewer {
+  return caller?.senderRole === 'owner' && caller.isMpim !== true ? 'owner' : 'other';
+}
+
+/**
+ * Returns the privacy-aware subject for display in any user-visible text.
+ * Pass the event, the owner's profile (so the category-flag check can consult
+ * the yaml), and WHO is going to read it. Owner → always the raw subject.
+ * Anyone else → `[Private]` when the event qualifies, else the raw subject
+ * (M12: a colleague sees the subject by default; only a private one is hidden).
+ */
+export function displaySubject(
+  event: SubjectableEvent,
+  profile: UserProfile,
+  viewer: SubjectViewer = 'other',
+): string {
+  if (viewer !== 'owner' && isEventPrivate(event, profile)) return PRIVATE_MASK;
   return event.subject ?? '';
 }
 

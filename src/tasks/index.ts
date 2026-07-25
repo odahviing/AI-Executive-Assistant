@@ -127,6 +127,14 @@ export function getActiveJobsForThread(ownerUserId: string, threadTs: string): {
     AND status IN ('new', 'in_progress', 'pending_owner', 'pending_colleague')
   `).all(ownerUserId, threadTs) as Task[];
 
+  // The status filter is the open/closed sentinel described in db/jobs.ts (top
+  // block): a row sits at the SQL default 'sent' until closeRequest cascades it
+  // to 'cancelled'. This is the most consequential of that column's four
+  // readers — what survives here is injected into the system prompt as "ACTIVE
+  // IN THIS THREAD — you already committed to these" on every owner turn
+  // (core/orchestrator/buildTurnContext.ts:356), so if the cascade ever stops
+  // writing 'cancelled', closed outreach is presented to the model as live work
+  // forever ("still waiting on Idan" about a dead request).
   const outreachJobs = db.prepare(`
     SELECT * FROM outreach_jobs
     WHERE owner_user_id = ?

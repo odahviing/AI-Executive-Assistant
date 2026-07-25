@@ -183,10 +183,11 @@ export function directiveForProactiveSlot(params: {
   // Per-person gate. The two checks above read social_subjects, which a
   // `raise_new` coda never stamps (it has no subject row) — so a raise_new coda
   // left the daily gate un-armed and fired on EVERY turn (owner got 3 codas in
-  // 8 min, 2026-07-13). `recordSocialMoment(person, 'maelle')` writes
-  // people_memory.last_initiated_at on every appended coda (continue AND
-  // raise_new) — it is literally the per-person 24h gate field — so read it here
-  // to make once-per-day hold regardless of mode.
+  // 8 min, 2026-07-13). people_memory.last_initiated_at is stamped for BOTH modes
+  // — it is literally the per-person 24h gate field — so read it here to make
+  // once-per-day hold regardless of mode. Written by `recordCodaDelivered`
+  // (core/social/logEngagement.ts) when the transport confirms the coda actually
+  // posted, NOT when it was composed; for a raise_new coda it is the only gate.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getPersonMemory } = require('../../db') as typeof import('../../db');
   const personLastInit = getPersonMemory(personSlackId)?.last_initiated_at;

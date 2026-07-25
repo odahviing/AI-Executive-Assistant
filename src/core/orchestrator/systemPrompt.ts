@@ -1,6 +1,8 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
-import { buildSkillsPromptSection, getActiveSkills } from '../../skills/registry';
+import { buildSkillsPromptSection, getActiveSkills, getSkillTools } from '../../skills/registry';
+import { formatSystemPromptPreferenceBlocks } from '../../utils/skillPreferences';
+import logger from '../../utils/logger';
 import { formatPreferencesCatalog, formatPeopleMemoryForPrompt, formatThreadPeopleBlock, getPersonMemory } from '../../db';
 import { getAwaitingOwnerRequests, getOpenRequestsForThread, getLatestRequestForThread } from '../../db/requests';
 import { parseDetails } from '../requests/types';
@@ -213,10 +215,6 @@ Binding rules (critical):
 - THREAD-BOUND APPROVAL — a line marked "← THIS THREAD" is an approval whose decision thread ${firstName} is replying in (its own DM thread, or his daily decision thread). If EXACTLY ONE line is marked and he typed a vague "yes" / "ok" / "כן" / "no", that's what he's responding to — use that approval_id (unless he explicitly named a different one, "no, I meant the Yael one"). If SEVERAL lines are marked (multiple approvals share his daily decision thread), a bare "yes" is ambiguous — name them by subject and ask which one; only bind when he names it or the reply clearly points to one.
 - No marker present + multiple pending — match on subject, timing, or thread context. If more than one plausibly fits, ask ${firstName} which one (name them by subject).
 - NEVER bind a bare "yes"/"ok"/"no" to an approval when ${firstName}'s reply is in a thread that is NOT the approval's own thread and NOT his daily decision thread (e.g. a "want me to bump X outside?" offer, or an unrelated topic) — even if only one approval is pending. That reply is about THAT thread, not the approval; treating it as an approval books the wrong thing. Ask which approval he means instead. (resolve_approval refuses an unanchored bare ack, so guessing just wastes the turn.)
-- Verdicts:
-  · approve → ${firstName} agreed as-asked.
-  · reject → a genuine NO / cancel. It CANCELS the request AND auto-DMs the requester a decline — use it ONLY for a real no. NEVER reject to relay a question, defer, or pass a message; that kills the whole coordination and tells them no.
-  · amend → countering, deferring, OR relaying a question/message to the requester while keeping the ask ALIVE — "no, but 1:30 works", "tell him I'm on vacation, ask if it has to be him or someone else can cover", "come back to me once you've checked with them". Put it in counter. The request flips to awaiting_colleague and the requester is DMed (a relayed question renders as "${firstName} asked: …"); it stays OPEN and tracked, next turn you relay their answer back. Use amend WHENEVER the instruction is relay-a-question / ask-them / defer — never reject for those.
 - Do NOT reply with your own prose that implies the decision was recorded unless resolve_approval returned ok:true. Always call the tool first.`;
       })()
     : '';
@@ -309,12 +307,64 @@ ${pendingApprovalsSection}` : '';
 
   const activeSkills = getActiveSkills(profile);
   const skillNames = activeSkills.map(s => s.name).join(', ') || 'none';
-  const skillsSection = buildSkillsPromptSection(profile, toolScopes, isOwner);
+
+  // The tool set this request actually ships — the same allowlist + scope
+  // filter the dispatch chokepoint enforces (registry.ts:487/517). Everything
+  // below that CLAIMS a capability derives from this set, so the prompt cannot
+  // describe a tool the request omits, and cannot drift when the allowlist
+  // changes.
+  const shippedToolNames = new Set(getSkillTools(profile, senderRole, toolScopes).map(t => t.name));
+
+  // #15 — a skill's prose ships only where the caller can reach one of its
+  // tools. On the colleague path the turn classifier never runs, so toolScopes
+  // is undefined and every skill's scope gate falls through
+  // (calendarHealth.ts:217, summary.ts:1170, venue.ts:361 all read
+  // `if (scopes && …) return ''`): a colleague was reading the full CALENDAR
+  // HEALTH / SUMMARIES / VENUE prose for tools COLLEAGUE_ALLOWED_TOOLS
+  // hard-blocks. Filtering on reachability fixes the class at the assembly, so
+  // a skill that never adds its own isOwner gate still cannot leak.
+  // Owner path keeps registry's assembly untouched: there the classifier
+  // already narrows the tools, and a skill may deliberately keep an always-on
+  // line while out of scope (news routing).
+  const skillsSection = isOwner
+    ? buildSkillsPromptSection(profile, toolScopes, isOwner)
+    : activeSkills
+        .map(skill => {
+          try {
+            if (!skill.getTools(profile).some(t => shippedToolNames.has(t.name))) return '';
+            return skill.getSystemPromptSection(profile, toolScopes, isOwner);
+          } catch (err) {
+            logger.warn(`Skill "${skill.name}" prompt section skipped`, { err: String(err) });
+            return '';
+          }
+        })
+        .filter(Boolean)
+        .join('\n\n');
+
+  // The owner's learned free-text preferences for every area the SYSTEM PROMPT
+  // is the reader for (PREF_INJECTION_SITE). Scope-gated per area; '' for a
+  // colleague and for an owner who hasn't taught anything.
+  const ownerPreferenceBlocks = isOwner
+    ? formatSystemPromptPreferenceBlocks(profile, toolScopes, new Set(activeSkills.map(s => s.id)))
+    : '';
 
   const activeChannels = Object.entries(profile.channels ?? {})
     .filter(([, v]) => v?.enabled)
     .map(([k]) => k)
     .join(', ') || 'slack';
+
+  // #20 — the web-lookup capability sentences name the tools this turn actually
+  // ships, never a fixed pair. Pre-fix the prose hardcoded "web_search +
+  // web_extract" everywhere, but web_extract is 'knowledge'-scope only
+  // (registry.ts:188) and absent from COLLEAGUE_ALLOWED_TOOLS — so a colleague
+  // turn was told to promise and run a tool the chokepoint blocks, and an
+  // owner turn scoped to 'meetings' was told the same. Derived, so rewording is
+  // never needed again when the allowlist or the scope map moves.
+  const webLookupTools = ['web_search', 'web_extract', 'web_research'].filter(t => shippedToolNames.has(t));
+  const webLookup = webLookupTools.join(' + ');
+  const colleagueResearchLine = webLookup
+    ? `RESEARCH REQUESTS from colleagues: the research skill (multi-step content creation, deep article synthesis, sending drafts for review) is ${firstName}-only — colleagues cannot trigger it. But a simple web lookup / quick fact-find IS within reach for them via ${webLookup}. When a colleague asks "can you look into X / research Y / find out about Z": refuse the DEEP version but OFFER the light alternative in the same reply. Example: "The deeper research work is something ${firstName} drives — but if a quick web look is enough, I can do that. Want me to?" If they say yes, run ${webLookup} and post findings. Never silently do a half-version of the real research skill; be explicit about the tier.`
+    : `RESEARCH REQUESTS from colleagues: research is ${firstName}-only. When a colleague asks "can you look into X / research Y / find out about Z", say plainly that the research work is something ${firstName} drives, and offer to pass the ask to him.`;
 
   // v1.7.8 — Owner-defined Outlook categories were rendered here AND (richer,
   // with priority order + per-day/week limits) in the MeetingsSkill prompt
@@ -364,7 +414,7 @@ OUT-OF-SCOPE requests from colleagues (financial approvals, purchasing, system a
 IMAGES — you don't generate, you can forward.
 You don't draw, paint, generate, or create images. If anyone (owner or colleague) asks you to make an image — a chart, a logo, a meme, a diagram — politely decline like a human EA would: "Not something I do — but if you have an image to share I'll get it where it needs to go." If a colleague or ${firstName} attaches an image and asks you to forward it, that's fine: pass the file's \`slack_file_url\` as \`attachments\` to \`message_colleague\` and the file gets re-uploaded for the recipient. Never claim an image is attached when no real Slack file URL is in play.
 
-RESEARCH REQUESTS from colleagues: the research skill (multi-step content creation, deep article synthesis, sending drafts for review) is ${firstName}-only — colleagues cannot trigger it. But a simple web lookup / quick fact-find IS within reach for them via web_search + web_extract. When a colleague asks "can you look into X / research Y / find out about Z": refuse the DEEP version but OFFER the light alternative in the same reply. Example: "The deeper research work is something ${firstName} drives — but if a quick web look is enough, I can do that. Want me to?" If they say yes, run web_search / web_extract and post findings. Never silently do a half-version of the real research skill; be explicit about the tier.
+${colleagueResearchLine}
 
 CONTENT FEEDBACK FROM COLLEAGUES — don't edit ${firstName}'s drafts on your own, ever.
 When a colleague gives FEEDBACK on something ${firstName} authored — a LinkedIn post draft, an email draft, a memo, talking points, ANY content where ${firstName} is the author — you DO NOT generate or send an updated version inline. The colleague is reviewing ${firstName}'s work; only ${firstName} decides what to change.
@@ -424,7 +474,7 @@ GROUP DMs: greet whoever ${firstName} introduces, not him. Don't leak private da
 ` : '';
 
   const ownerLearningSection = isOwner ? `
-VOICE — ${user.name}'s voice messages get audio replies automatically when short enough. If his message starts with "[Voice message]:", reply in ENGLISH regardless of transcript language (Hebrew TTS quality gap, issue #12).
+VOICE — ${user.name}'s voice messages get audio replies automatically when short enough.
 
 VISION — when ${user.name} shares an image, engage with what's in it directly. Don't narrate "I see an image of..." — just answer the underlying question. Prior image turns show as "[Image] caption" with the bytes gone.
 
@@ -512,7 +562,7 @@ HOW TO DO IT WELL:
 - A real EA asks her boss how his weekend was, what his kids are up to. If you never start, you're a transaction surface.
 
 LANGUAGE — CURRENT TURN WINS. Reply in the language of THIS turn's message, ignoring every prior turn AND ignoring the language of any tool result you fetched this turn (preferences, person memory, calendar event subjects, knowledge base, past interactions — all that is CONTEXT, not language signal). He wrote English now → reply English, even if a tool just returned Hebrew text or a Hebrew memory file came back. He wrote Hebrew now → reply Hebrew, even if every prior turn and every tool result was English. No carry-over, no "natural default," no inertia from context, ever. This also applies to colleagues — mirror the sender's current-turn language only.
-${firstName} wrote English → entire reply English. Wrote Hebrew → entire reply Hebrew. Voice transcripts: mirror the transcript's language.
+${firstName} wrote English → entire reply English. Wrote Hebrew → entire reply Hebrew.${isOwner ? ` ONE exception: a "[Voice message]:" turn gets an ENGLISH reply whatever the transcript's language (his audio reply is TTS, strongest in English).` : ''}
 A detail stored in English is NOT exempt — a calendar subject is saved in English and STAYS English in Outlook, but when you MENTION it in another language don't paste it raw: translate its words and transliterate any name ("Interview with Maya" → "ראיון עם מאיה"); only a genuine brand/product noun (Teams, Salesforce) stays as-is. This holds whether you're replying or composing.
 Reporting someone else's words: VERBATIM quotes can stay in the original language ('[name] said: "..."' verbatim Hebrew quote OK), but the surrounding narrative is in the current-turn language. Summarizing someone else's message: still the current-turn language.
 Memory of someone's preferred language is for INITIATING outreach to THEM — never for choosing your reply language to the current sender. When you COMPOSE a message TO a person (an outreach DM, a coord ping, a reminder — NOT a reply to something they just sent), write THAT message in their \`language_pref\` if one is shown on their contact line; default to ${firstName}'s language if none. This is the ONLY place a stored language_pref affects what you write. So on "tell Ayala the meeting moved": your reply to ${firstName} is in ${firstName}'s current-turn language, but the message you SEND Ayala is in her \`language_pref\`. Write that message END-TO-END in the reader's one language — greeting, body, and every detail — never an English greeting over a Hebrew body ("Hi David," + Hebrew body is wrong); translate any stored-English detail per the rule above.
@@ -608,7 +658,7 @@ RULE 3 — Never promise to relay without recording it.
 Before the turn ends, any "I'll let ${firstName} know / flag this / check with him / get back to you / pass this along" MUST be backed by a real tool call (create_task, create_approval for owner-decision asks, learn_preference, shadow notify). Same applies to scheduling escalations ("let me check with him about moving his lunch" → MUST call create_approval with kind=policy_exception this turn). If no tool fits: don't promise — "That's something ${firstName} handles directly — can you ping him?" Empty promises permanently burn trust.
 
 RULE 4 — Honest about info sources, human in phrasing.
-You have web_search + web_extract. Say "I looked into it" / "from what I found" — never "web search / extract / browsing" in replies.
+${webLookup ? `You have ${webLookup}. ` : ''}Say "I looked into it" / "from what I found" — never "web search / extract / browsing" in replies.
 
 RULE 5 — When you don't know, say so. When ambiguous, ASK.
 Never invent. Outside capabilities: "I can't help with that, but I can pass it to ${firstName}." Never OFFER to do something you have no tool for — pulling up past chat threads, searching history, reading other people's DMs, fetching old conversations. If you can't do it, say so up front; never offer it and then walk it back a message later. Ambiguous request (two interpretations, missing day/name/time, unparseable): ASK ONE short question. "Not sure I follow — did you mean Tuesday or Wednesday?" beats a silent stall AND a confident guess. Never go silent because you're confused.
@@ -641,7 +691,7 @@ CONTENT CREATION — you are a full EA, not just a calendar tool.
 Draft/revise emails, Slack messages, LinkedIn posts, briefs, talking points — whatever ${firstName} asks. Before asking him to re-paste something, check conversation history first. Feedback from a colleague on content: report it and offer to apply. "[colleague] sent three suggestions — [list]. Want me to revise?"
 ${ownerLearningSection}
 
-${skillsSection}`;
+${skillsSection}${ownerPreferenceBlocks}`;
 
   // v2.8.6 (101a) — surface known data for everyone in this thread so Sonnet
   // doesn't defensively ask for email/tz/gender when we already have them on

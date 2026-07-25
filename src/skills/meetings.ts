@@ -9,6 +9,8 @@ import { SchedulingSkill as _LegacyOpsSkill } from './meetings/ops';
 import logger from '../utils/logger';
 import { DateTime } from 'luxon';
 import { calendarListingFormatRule } from '../utils/calendarListingFormat';
+import { checkSlot } from '../utils/scheduleRules';
+import { displaySubject, subjectViewerFor } from '../utils/displaySubject';
 
 /**
  * MeetingsSkill — the single skill responsible for everything about
@@ -266,7 +268,11 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
             },
             ignore_attendee_availability: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). By default on owner-initiated calls with attendees, the tool filters slots by both (a) each attendee\'s working hours / timezone (their day-window) and (b) their busy time from Graph free/busy. Set true to suppress the BUSY filter; the work-hours / timezone window is ALWAYS honored ("force them to move a meeting, not to wake up at 3 AM"). SET TRUE in TWO cases: (1) owner explicitly says "force them" / "ignore their calendar, I want this slot anyway"; (2) you are finding time for a meeting a COLLEAGUE REQUESTED — they asked for it (especially flagged urgent), so THEY are flexible and will move their own conflicts. ${profile.user.name.split(\' \')[0]} is the scarce resource: find when HE is free and let the requester accommodate. When true with attendees, the result TAGS each attendee\'s busy status on the owner-free slots (attendee_status), so you can say "12:30 works for him — you\'ve got something then, want me to ask them to move it?" — NEVER bounce "when are you free?" back to the requester who asked.',
+              // Backtick-delimited: this literal interpolates the owner's first
+              // name. As a single-quoted string the `${…}` shipped to the model
+              // as raw JavaScript source inside the schema. Matches the sibling
+              // `must_be` description below, which already interpolates.
+              description: `OPTIONAL (default false). By default on owner-initiated calls with attendees, the tool filters slots by both (a) each attendee's working hours / timezone (their day-window) and (b) their busy time from Graph free/busy. Set true to suppress the BUSY filter; the work-hours / timezone window is ALWAYS honored ("force them to move a meeting, not to wake up at 3 AM"). SET TRUE in TWO cases: (1) owner explicitly says "force them" / "ignore their calendar, I want this slot anyway"; (2) you are finding time for a meeting a COLLEAGUE REQUESTED — they asked for it (especially flagged urgent), so THEY are flexible and will move their own conflicts. ${profile.user.name.split(' ')[0]} is the scarce resource: find when HE is free and let the requester accommodate. When true with attendees, the result TAGS each attendee's busy status on the owner-free slots (attendee_status), so you can say "12:30 works for him — you've got something then, want me to ask them to move it?" — NEVER bounce "when are you free?" back to the requester who asked.`,
             },
             relaxed: {
               type: 'boolean',
@@ -573,10 +579,21 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         const dayStr = startDt.toFormat('yyyy-MM-dd');
         const timeStr = startDt.toFormat("EEEE, d MMMM 'at' HH:mm");
 
-        // Fetch owner's calendar
+        // v4.1.x (M12) — this tool exists for COLLEAGUE asks, so every subject it
+        // echoes back is masked unless the owner himself is asking in his own DM.
+        const joinViewer = subjectViewerFor(context);
+
+        // Fetch owner's calendar. Category rules count per-day AND per-ISO-week,
+        // and the focus-time floor is measured across the day, so the validator
+        // needs the whole WEEK — a single-day fetch made every weekly cap read 0.
         let events;
         try {
-          events = await getCalendarEvents(userEmail, dayStr, dayStr, timezone);
+          events = await getCalendarEvents(
+            userEmail,
+            startDt.startOf('week').toFormat('yyyy-MM-dd'),
+            startDt.endOf('week').toFormat('yyyy-MM-dd'),
+            timezone,
+          );
         } catch (err) {
           logger.error('check_join_availability: calendar fetch failed', { err });
           return { error: 'Could not check calendar.' };
@@ -584,42 +601,85 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
 
         const meetingStartMs = startDt.toMillis();
         const meetingEndMs = endDt.toMillis();
-        const bufferMs = (profile.meetings.buffer_minutes ?? 0) * 60 * 1000;
 
         // Parse event times helper
         const evTime = (dt: { dateTime: string; timeZone: string }) =>
           DateTime.fromISO(dt.dateTime.replace(/\.\d+$/, ''), { zone: dt.timeZone || timezone });
 
-        // Find blocking events (direct overlap or buffer-only)
-        const relevantEvents = events.filter(ev => {
-          if (ev.isCancelled || ev.isAllDay || ev.showAs === 'free') return false;
-          const s = evTime(ev.start).toMillis();
-          const e = evTime(ev.end).toMillis();
-          return s < meetingEndMs + bufferMs && e > meetingStartMs - bufferMs;
-        });
+        // Floating-block definitions. Hoisted above the occupancy scan below,
+        // which needs them to skip elastic blocks exactly as the validator does.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
+        const floatingBlocks = fb.getFloatingBlocks(profile);
 
-        const directConflicts = relevantEvents.filter(ev => {
+        // ── THE validator (M2) ────────────────────────────────────────────────
+        // v4.1.x — this handler used to be a complete SECOND rule engine: its own
+        // overlap math, its own buffer arithmetic (re-applying the between-meeting
+        // buffer as a widening conflict window — the exact `owner_buffer_collision`
+        // rule checkSlot deleted in v2.7.1), its own floating-block feasibility,
+        // and NO work-hours, NO category caps and NO focus-time floor at all. So a
+        // 21:00 ask answered "he's free at that time" on a slot both
+        // find_available_slots and create_meeting refuse, and a timed
+        // Working-Elsewhere optional-join counted as a hard conflict on a slot the
+        // search actively offers. Offer-then-retract, in both directions.
+        // Now the verdict comes from the ONE validator. What stays local is
+        // join-SPECIFIC presentation only: the partial-join window and the
+        // in-turn block move.
+        //
+        // NO `leadTimeHours` here, deliberately. The booking lead time is a
+        // WRITE-path rule — "how much notice before Maelle puts a NEW commitment
+        // on his calendar" — and this tool writes nothing (see the _note on every
+        // return: the colleague forwards their own invite). Passing it made every
+        // same-day "can Idan join our 3pm?" fail rule 0b on `within_lead_time`,
+        // i.e. a notice period applied to a presence question about a meeting
+        // that already exists. Worse, the refusal dead-ended: `needs_approval`
+        // steers the model to create_approval, which now requires a
+        // `_deferred_action_hint` this read-only tool has no business emitting,
+        // and whose refusal text points at create_meeting — a colleague-allowed
+        // tool that would have booked a DUPLICATE of the colleague's own meeting.
+        const joinCheck = checkSlot({
+          profile,
+          slotStartIso: startDt.toISO()!,
+          slotEndIso: endDt.toISO()!,
+          category: null,   // joining someone else's meeting — no category is being created
+          events,
+          viewer: joinViewer,
+        });
+        // OCCUPANCY — decided by the calendar, never by which rule tripped first.
+        // Same skips as the validator's own scan so the two cannot disagree:
+        // free-shows don't collide; a TIMED workingElsewhere event is an optional
+        // join, not a commitment; and a floating block is elastic (it slides, and
+        // `pendingBlockMoves` below is what slides it) — counting any of these as
+        // a conflict is what made this handler and the booking path give different
+        // answers for one slot.
+        const directConflicts = events.filter(ev => {
+          if (ev.isCancelled || ev.isAllDay || ev.showAs === 'free') return false;
+          if (ev.showAs === 'workingElsewhere') return false;
+          if (floatingBlocks.some(b => fb.isFloatingBlockEvent(
+            { subject: ev.subject, categories: ev.categories }, b,
+          ))) return false;
           const s = evTime(ev.start).toMillis();
           const e = evTime(ev.end).toMillis();
           return s < meetingEndMs && e > meetingStartMs;
         });
+        // Is he actually committed? `directConflicts` is the timed-overlap truth;
+        // checkSlot additionally catches commitments it can't see (an all-day busy
+        // / OOF block). Either one means "busy" — and that answer must NOT depend
+        // on rule ordering. checkSlot returns the FIRST violation and eight rules
+        // precede the busy check, so an off-hours ask over a real dinner used to
+        // fall through to the rule branch and tell the colleague "his calendar is
+        // clear at that time" while he had a hard commitment.
+        const ownerIsBusy = directConflicts.length > 0 || joinCheck.violation_kind === 'owner_busy_collision';
 
-        const bufferOnly = relevantEvents.filter(ev => !directConflicts.includes(ev));
-
-        // v2.1 — generalized floating-blocks violation check. Used to be
-        // lunch-only; now iterates every block that applies on this day
-        // (lunch + any custom block). A block is violated only when no
-        // aligned-and-buffered slot remains for it after adding the
-        // proposed meeting. Elastic detection: calendar events that
-        // already ARE this block are excluded from busy — they'll be
-        // moved, not blocked-against.
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
-        const floatingBlocks = fb.getFloatingBlocks(profile);
+        // v2.1 — floating blocks that apply on this day.
+        // v4.1.x (M2) — the FEASIBILITY VERDICT ("is there still room for lunch
+        // after this?") is no longer decided here: that is checkSlot rule 6, and
+        // this handler's private copy could disagree with it. What this pass now
+        // produces is join-SPECIFIC and exists nowhere else: WHICH block event
+        // has to physically shift, and to where, so active mode can move it in
+        // the same turn.
         const joinDayName = DateTime.fromISO(dayStr, { zone: timezone }).toFormat('EEEE');
         // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
-        let lunchViolation = false;
-        const violatedBlocks: string[] = [];
         // v2.1.1 — collect which floating-block EVENTS need to be moved in
         // the same turn if we return "yes free" in active mode. A block
         // event needs a move when (a) it exists on the calendar and
@@ -666,18 +726,20 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           const aligned = fb.findAlignedSlotForBlock(
             block, dayStr, timezone, busyInWindow,
           );
-          if (aligned === null && !block.can_skip) {
-            lunchViolation = true;
-            violatedBlocks.push(block.name);
-          } else if (aligned !== null) {
+          if (aligned !== null) {
             // Block fits — does its CURRENT event overlap the proposed
-            // meeting? If so, record a pending move.
+            // meeting? If so, record a pending move. Bound to THIS day's block
+            // window: `events` now spans the whole week (the validator needs it
+            // for per-week category caps + the day's focus floor), so an
+            // unbounded find would return another day's lunch and silently skip
+            // the real one.
             const existingBlockEvent = events.find(e => {
               if (e.isCancelled || e.isAllDay || e.showAs === 'free') return false;
-              return fb.isFloatingBlockEvent(
+              if (!fb.isFloatingBlockEvent(
                 { subject: e.subject, categories: e.categories },
                 block,
-              );
+              )) return false;
+              return evTime(e.start).toMillis() < wEnd && evTime(e.end).toMillis() > wStart;
             });
             if (existingBlockEvent) {
               const eStartMs = evTime(existingBlockEvent.start).toMillis();
@@ -702,18 +764,15 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           }
         }
 
-        // ── Fully free ──────────────────────────────────────────────────────────
-        // v3.3.7 (#124a) — buffer-only collisions FALL THROUGH to "free".
-        // The owner's 5-min buffer is carried by the meeting LENGTHS
-        // (allowed_durations 10/25/40/55 end short of the grid) — it is not
-        // a standalone rule, and it must never escalate on its own. This is
-        // the same v2.6.4 decision already applied to colleague-path
-        // create_meeting ("owner's 5-min buffer is a HELPER, not a hard
-        // rule" — calendar.ts buffer split); this tool was the one surface
-        // still escalating on it (the "Yael 11:00, OK to approve the tight
-        // buffer?" phantom ask). Genuine overlap + floating-block violations
-        // still escalate below.
-        if (directConflicts.length === 0 && !lunchViolation) {
+        // ── Free (per THE validator) ────────────────────────────────────────────
+        // v3.3.7 (#124a) — buffer-only collisions FALL THROUGH to "free". The
+        // owner's 5-min buffer is carried by the meeting LENGTHS
+        // (allowed_durations 10/25/40/55 end short of the grid) — it is not a
+        // standalone rule, and it must never escalate on its own. v4.1.x — that
+        // is now structural rather than a local carve-out: the widening buffer
+        // window this handler used to apply is simply gone, and the verdict is
+        // checkSlot's, which has no buffer-collision rule (deleted v2.7.1).
+        if (joinCheck.passes) {
           // v2.1.1 — active-mode in-turn block move. When
           // calendar_health_mode='active' AND a floating block event would
           // need to shift to accommodate this meeting, move it now via
@@ -747,8 +806,11 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           const movesLine = movesDone.length > 0
             ? ` I ${movesDone.join(' and ')} to make room.`
             : '';
-          const backToBackLine = bufferOnly.length > 0
-            ? ` (Back-to-back with "${bufferOnly.map(ev => ev.subject).join('", "')}" — that's fine, no approval needed.)`
+          // M3 — "free" can still mean "free over an optional-join event". Say so
+          // rather than presenting it as a clean slot; the validator already
+          // masked the subject for this caller.
+          const optionalLine = joinCheck.overOptional
+            ? ` (He has an optional "${joinCheck.overOptional}" then — he joins that only if free, so it's no obstacle.)`
             : '';
           return {
             can_join: true,
@@ -756,18 +818,26 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
             duration_min: durationMin,
             subject,
             blocks_moved: movesDone.length > 0 ? movesDone : undefined,
-            back_to_back_with: bufferOnly.length > 0 ? bufferOnly.map(ev => ev.subject) : undefined,
-            message: `${ownerFirst} is free at that time.${movesLine}${backToBackLine} Tell ${requesterName} to forward the calendar invite.`,
+            over_optional: joinCheck.overOptional,
+            message: `${ownerFirst} is free at that time.${movesLine}${optionalLine} Tell ${requesterName} to forward the calendar invite.`,
             _note: 'Do NOT book anything on the calendar. Just tell the colleague to forward the invite.',
           };
         }
 
-        // ── Partial availability ────────────────────────────────────────────────
-        if (directConflicts.length > 0) {
+        // ── He is committed ─────────────────────────────────────────────────────
+        // Occupancy is answered BEFORE the rule ladder, because "is he already on
+        // something?" is a fact about the calendar, not a consequence of which of
+        // nine rules happened to trip first. Gating this on
+        // `violation_kind === 'owner_busy_collision'` meant an ask at 21:00 over a
+        // real "Dinner with investors" tripped `outside_working_hours` (rule 5)
+        // first, skipped this branch, and told the colleague his calendar was
+        // clear. The old pre-rewrite code checked the overlap first; this restores
+        // that ordering with the validator's occupancy as a second source.
+        if (ownerIsBusy && directConflicts.length > 0) {
           const busyInMeeting = directConflicts.map(ev => ({
             start: Math.max(evTime(ev.start).toMillis(), meetingStartMs),
             end: Math.min(evTime(ev.end).toMillis(), meetingEndMs),
-            subject: ev.subject,
+            subject: displaySubject(ev, profile, joinViewer) || 'a meeting',
           })).sort((a, b) => a.start - b.start);
 
           const firstBusyStart = busyInMeeting[0].start;
@@ -797,25 +867,49 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
             };
           }
 
-          // Fully blocked by another meeting
+          // Fully blocked by another meeting. Subjects are viewer-scoped: a
+          // colleague hears the subject of a normal meeting and "[Private]" for
+          // one the owner marked private — never its real title (M12).
+          const conflictNames = directConflicts.map(ev => displaySubject(ev, profile, joinViewer) || 'a meeting');
           return {
             can_join: false,
             reason: 'busy',
             time: timeStr,
             subject,
-            conflict_with: directConflicts.map(ev =>
-              `"${ev.subject}" (${evTime(ev.start).toFormat('HH:mm')}–${evTime(ev.end).toFormat('HH:mm')})`
+            conflict_with: directConflicts.map((ev, i) =>
+              `"${conflictNames[i]}" (${evTime(ev.start).toFormat('HH:mm')}–${evTime(ev.end).toFormat('HH:mm')})`
             ).join(', '),
-            message: `${ownerFirst} has a conflict at that time: ${directConflicts.map(ev => ev.subject).join(', ')}.`,
+            message: `${ownerFirst} has a conflict at that time: ${conflictNames.join(', ')}.`,
+          };
+        }
+        if (ownerIsBusy) {
+          // The validator saw a commitment the timed-overlap scan cannot: an
+          // all-day busy / OOF block. No partial window to carve out of it —
+          // just the honest "he's committed", in the validator's own words.
+          return {
+            can_join: false,
+            reason: 'busy',
+            time: timeStr,
+            subject,
+            conflict_with: joinCheck.overCommitment?.subject,
+            message: joinCheck.violation_label
+              ?? `${ownerFirst} has something on his calendar at that time.`,
           };
         }
 
-        // ── Floating-block violation only → escalate to owner ───────────────────
-        // (v3.3.7 — buffer-only no longer reaches here; it falls through to
-        // "free" above. Only an unsatisfiable floating block escalates.)
-        const violations: string[] = [];
-        if (lunchViolation) violations.push(`floating-block protection (${violatedBlocks.join(', ')})`);
-
+        // ── Calendar clear, but a rule of his stands in the way ─────────────────
+        // Reached ONLY when nothing occupies the slot (both occupancy sources
+        // agree), so the "clear at that time" claim below is now true by
+        // construction. Pre-rewrite this branch was reachable only for an
+        // unsatisfiable floating block; it now covers every owner rule the
+        // booking path enforces — work hours, category caps, the free-time floor,
+        // travel buffer — so a 21:00 ask no longer answers "he's free at that
+        // time" and then fail at booking.
+        // Deliberately NOT the booking lead time: that is a write-path rule and
+        // this tool writes nothing (see the checkSlot call above).
+        // M11 — the reason travels in human terms (checkSlot's own label), so the
+        // colleague can understand it and, if it matters, trigger an approval.
+        const joinViolation = joinCheck.violation_label ?? 'one of his scheduling rules';
         return {
           can_join: 'needs_approval',
           time: timeStr,
@@ -823,9 +917,10 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           subject,
           reason,
           requester_name: requesterName,
-          violations,
-          message: `${ownerFirst} is technically free but joining would violate ${violations.join(' and ')}. Ask the owner — explain what "${subject}" is about${reason ? ` (${reason})` : ''} and which rule would be broken. If approved, tell ${requesterName} to forward the invite.`,
-          _note: 'Escalate to the owner in their DM thread. If they approve, tell the colleague to forward the invite. Do NOT book.',
+          violations: [joinViolation],
+          broken_rule: joinCheck.violation_kind,
+          message: `${ownerFirst}'s calendar is clear at that time, but joining would break one of his own rules: ${joinViolation}. Ask ${ownerFirst} — explain what "${subject}" is about${reason ? ` (${reason})` : ''} and what it would cost him. If approved, tell ${requesterName} to forward the invite.`,
+          _note: 'Escalate to the owner in their DM thread via create_approval(kind=policy_exception). To the colleague, give the reason in plain human terms — never the rule name. If the owner approves, tell the colleague to forward the invite. Do NOT book.',
         };
       }
 
@@ -971,15 +1066,15 @@ OWNER FREE, REQUESTER BUSY (colleague-requested meeting → \`attendee_status\` 
 A RETURNED SLOT WITH NO CONFLICT TAG IS VERIFIED FREE — for ${firstName} AND every attendee you passed. find_available_slots already ran everyone's availability + busy check; a slot comes back only if it's clean, OR carrying an explicit \`attendee_status\` conflict tag (the OWNER FREE, REQUESTER BUSY case just above). So NEVER tell the requester an attendee "shows busy" at an UNTAGGED returned slot — that contradicts the verification and yields the self-contradictory "clean for both, but X is busy." No tag = clean for everyone you passed; say so plainly.
 
 OWNER-PATH OVERRIDE — surface, ask in-thread, retry in-thread. NEVER a separate approval DM.
-When \${firstName} explicitly asks for something that would violate a soft rule (category limit, focus time, lunch window, day type, working hours, attendee busy), OFFER the override in the same reply alongside the alternatives. His "yes / book it / do it anyway" IS the approval — retry the same tool with \`relaxed: true\` (find_available_slots / create_meeting / move_meeting all accept it). DO NOT call \`create_approval\` on owner-path. The conversational ask in this thread already gave him the decision; routing it through a separate DM approval flow is redundant and stalls the action.
+When ${firstName} explicitly asks for something that would violate a soft rule (category limit, focus time, lunch window, day type, working hours, attendee busy), OFFER the override in the same reply alongside the alternatives. His "yes / book it / do it anyway" IS the approval — retry the same tool with \`relaxed: true\` (find_available_slots / create_meeting / move_meeting all accept it). DO NOT call \`create_approval\` on owner-path. The conversational ask in this thread already gave him the decision; routing it through a separate DM approval flow is redundant and stalls the action.
 ✅ "You're at 2 interviews tomorrow already, or shift to Thursday 10:30 — your call." → he says "do it" → call \`create_meeting(relaxed=true)\`.
 ✅ "Anna is on another call at 17:00 — book over, or pick a different time?" → he says "book over" → call \`move_meeting(relaxed=true)\`.
 ❌ He says "book it" → you call \`create_approval(kind=policy_exception)\` → owner gets a separate DM to approve his own ask he just confirmed in the thread.
 ❌ He says "do it" → you re-call without \`relaxed\`, hit the same rule, refuse again.
-\`create_approval(kind=policy_exception)\` is COLLEAGUE-PATH only — when a colleague is requesting something that needs \${firstName}'s sign-off in his own DM.
+\`create_approval(kind=policy_exception)\` is COLLEAGUE-PATH only — when a colleague is requesting something that needs ${firstName}'s sign-off in his own DM.
 
 NO WORKING-HOURS PREAMBLE when asking about time.
-When asking \${firstName} or a colleague "what time?" for a booking, JUST ASK. Don't preface with "(Office hours Wednesday are 10:30–19:00.)" or any equivalent recitation of his own hours back at him — he knows his schedule. Working-hours mentions belong in REJECTION explanations ("3:30 is past your hours, want 14:30 instead?"), not in clarifying questions before any slot has been searched.`;
+When asking ${firstName} or a colleague "what time?" for a booking, JUST ASK. Don't preface with "(Office hours Wednesday are 10:30–19:00.)" or any equivalent recitation of his own hours back at him — he knows his schedule. Working-hours mentions belong in REJECTION explanations ("3:30 is past your hours, want 14:30 instead?"), not in clarifying questions before any slot has been searched.`;
     })();
 
     return `

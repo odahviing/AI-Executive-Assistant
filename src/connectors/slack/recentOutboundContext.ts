@@ -82,11 +82,17 @@ export interface RecentOutboundContextResult {
 
 /**
  * Look up the most recent OPEN outreach_jobs row for this colleague within
- * the last 24h (regardless of status — `status` is task-lifecycle bookkeeping
- * status). v3.1 (Path 2): outreach_jobs.status is VESTIGIAL — lifecycle lives
- * on the linked request. We track conversational closure via `followup_closed_at`
- * (independent of the request's lifecycle), and on a real reply also close the
- * linked request (see closeFollowup below).
+ * the last 24h. "Open" here means CONVERSATIONALLY open — `followup_closed_at IS
+ * NULL` — which is this module's own signal, deliberately independent of both
+ * the request's lifecycle and `outreach_jobs.status`. That is why this query
+ * doesn't filter on status; it is not a claim that status means nothing.
+ *
+ * ⚠️ `outreach_jobs.status` is NOT vestigial (it was described that way here
+ * until 2026-07-26; that was false). It is the coarse open/closed sentinel that
+ * four live scans filter on, and closeFollowup below owns one of the only two
+ * writes that ever move it. Canonical invariant — both cascades, every reader,
+ * the failure mode: db/jobs.ts:4-50. Re-pointing those readers at the request is
+ * deferred under the owner's #41; until that lands nobody cleans this up.
  *
  * Returns the row, or null when nothing eligible exists.
  */
@@ -111,16 +117,53 @@ function findOpenOutboundForColleague(params: {
 
 /**
  * Mark an outreach_jobs row as having its conversational follow-up closed.
- * When `replyText` is provided, the inbound represents a real text reply —
- * also stamp status='replied' + reply_text so downstream readers (the
- * `activeSet` query in proactive picking, audit logs) see the engagement
- * signal. NOTE: the 48h `social_ping_rank_check` that originally consumed
- * this stamp was RETIRED in v3.2.6 — engagement_rank now moves only on
- * live reply via `adjustRankFromColleagueResponse`. The stamp is kept for
- * the remaining `activeSet`-style readers.
+ *
+ * ⚠️ LOAD-BEARING — do NOT delete the `status='replied'` write below. Together
+ * with closeRequest's `'cancelled'` flip (core/requests/closeRequest.ts:124-133)
+ * it is one of exactly TWO cascades that ever move `outreach_jobs.status`; rows
+ * are born at the SQL default 'sent' (db/client.ts:100) and nothing else ever
+ * changes them. Canonical invariant — every reader, every failure mode:
+ * db/jobs.ts:4-50. What matters at THIS write specifically:
+ *
+ *   • It is not one effect but FOUR, and they do not all point the same way.
+ *     Re-derived from the filters on disk 2026-07-26 — check them, don't trust a
+ *     summary of them (a wrong polarity relayed through four hand-offs is what
+ *     put "VESTIGIAL" here in the first place):
+ *       tasks/index.ts:130-136          NOT IN ('replied','cancelled','no_response')
+ *                                       → 'replied' REMOVES the row. This is the
+ *                                       user-visible one: getActiveJobsForThread
+ *                                       feeds the "ACTIVE IN THIS THREAD — you
+ *                                       already committed to these" block on every
+ *                                       owner turn (buildTurnContext.ts:356→:408).
+ *                                       Skip the write and a colleague who already
+ *                                       answered is fed to the model as still
+ *                                       pending — the "still waiting on Idan"
+ *                                       confabulation class.
+ *       checkHealth.ts:852-855          = 'sent'
+ *                                       → 'replied' REMOVES the row, which RE-ARMS
+ *                                       the overlap autofix. Opposite polarity to
+ *                                       the other three: here a row stuck at 'sent'
+ *                                       reads as "a ping is already out, stand
+ *                                       down", so it over-suppresses forever.
+ *       closeMeetingArtifacts.ts:106-110      IN ('sent','no_response','replied')
+ *       cleanupVanishedMeetingArtifacts.ts:75-80  same
+ *                                       → 'replied' KEEPS the row in both. These
+ *                                       two follow a replied-to outreach on
+ *                                       purpose; only closeRequest's 'cancelled'
+ *                                       takes a row out of them.
+ *   • The other cascade cannot cover for this one. closeRequest only fires when
+ *     the row HAS a linked request, and it skips rows already terminal
+ *     (closeRequest.ts:127) — so on a bridge-failure / legacy row with
+ *     request_id NULL (db/jobs.ts:213-221) this write is the ONLY closure.
+ *
+ * The same statement also persists `reply_text` — the only path that captures it
+ * for a plain conversational reply (the pipeline paths go through
+ * updateOutreachJob) — and buildTurnContext.ts:371-383 renders it into that same
+ * thread block. Restructuring is deferred under the owner's #41; leave it as is.
  *
  * Omit `replyText` for non-reply closures (emoji acks, auto-expire,
- * outbound-to-outbound matching) — those keep status untouched.
+ * outbound-to-outbound matching) — those close the conversation only and
+ * leave status to the request cascade.
  */
 function closeFollowup(
   jobId: string,
@@ -138,9 +181,10 @@ function closeFollowup(
           updated_at = datetime('now')
       WHERE id = ?
     `).run(reason, options.replyText, jobId);
-    // v3.1 (Path 2 fix) — CLOSE THE LINKED REQUEST. Post-migration the request
-    // is the source of truth; the raw status write above only touches the
-    // vestigial outreach_jobs.status. Without this, a reply matched via this
+    // v3.1 (Path 2 fix) — CLOSE THE LINKED REQUEST. The request owns the
+    // LIFECYCLE (state, phase, timers, what the brief reads); the status write
+    // above is the separate coarse open/closed sentinel, so it does not stand in
+    // for this call. Both are needed. Without this, a reply matched via this
     // fallback (when handleOutreachReply's LLM gate missed) left the request
     // stuck awaiting_colleague forever — the brief + rate-limiter kept treating
     // a replied-to outreach as still open (the orphan class this project kills).

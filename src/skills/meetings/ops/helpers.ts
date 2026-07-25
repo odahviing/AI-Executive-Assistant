@@ -10,6 +10,26 @@ import { DateTime } from 'luxon';
 // one imported below. Ts hoists type-only imports so this works.
 type UserProfileType = import('../../../config/userProfile').UserProfile;
 
+/**
+ * v4.1.x (M4) — the plan's complete set of open questions, shaped for a tool
+ * result. planMeeting now evaluates EVERY gate it can before returning, so a
+ * booking that needs both a location decision and an attendee-conflict
+ * acknowledgement carries both here instead of costing two round-trips. Emitted
+ * only when there is more than one — a single question is already fully carried
+ * by `suggested_ask_text`, and a one-element array would just be noise in the
+ * payload. ONE helper, called from every gate-bearing return in create/move, so
+ * the two handlers can't drift.
+ */
+export function openQuestionsField(
+  openQuestions: string[] | undefined,
+): { open_questions?: string[]; _ask_all_at_once?: string } {
+  if (!openQuestions || openQuestions.length < 2) return {};
+  return {
+    open_questions: openQuestions,
+    _ask_all_at_once: `This booking needs ${openQuestions.length} things answered. Ask them ALL in ONE message (open_questions lists them) and wait for one reply — do NOT ask them one at a time across separate turns. Once answered, re-call with every answer applied together.`,
+  };
+}
+
 // v1.8.3 — extract "HH:MM" from an ISO datetime string for action_summary
 // formatting. Falls back to the raw string if the shape is unexpected.
 export function formatIsoTime(iso: string): string {

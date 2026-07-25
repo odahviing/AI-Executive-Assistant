@@ -194,7 +194,7 @@ export function startBackgroundTimer(
       const { runCapturePass } = require('../memory/capturePass') as typeof import('../memory/capturePass');
       for (const profile of profiles.values()) {
         try {
-          await runCapturePass(app, profile);
+          await runCapturePass(profile);
         } catch (err) {
           logger.warn('runCapturePass threw — continuing', {
             ownerUserId: profile.user.slack_user_id,

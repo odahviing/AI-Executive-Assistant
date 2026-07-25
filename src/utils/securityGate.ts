@@ -18,22 +18,37 @@ import { SONNET, MODEL_SONNET, MODEL_HAIKU } from '../llm/models';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
 import { extractFirstJsonObject } from './extractJson';
+import { RAW_SLACK_ID_RE } from './textScrubber';
 
 const anthropic = getAnthropicClient();
 
 // ── Narrow regex triggers — each one is a specific leak pattern ─────────────
 // These are intentionally strict. "Call", "tool", "function" alone never match;
 // only specific self-referential phrases do.
-const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
+//
+// v4.1.x — every trigger also declares its CLASS, which decides what happens when
+// the rewriter can't salvage the draft (see filterColleagueReply's tail):
+//   'disclosure' — the draft itself reveals something a colleague must never see
+//                  (that she's AI, her internals, a model/provider, a payload echo,
+//                  an injection artifact). Shipping the original IS the leak, so an
+//                  unsalvageable draft is replaced by the safe canned line.
+//   'identifier' — the draft carries an opaque internal token (an unwrapped account
+//                  id, a channel ref, a req_/task_ id). Nothing about anyone is
+//                  disclosed; it is machine-voice at worst, and textScrubber already
+//                  owns the account-id half deterministically. Replacing a correct,
+//                  on-language reply with an English canned line here is CORRUPTION,
+//                  not a safe miss — so an unsalvageable draft ships as-is (G6).
+type TriggerClass = 'disclosure' | 'identifier';
+const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp; class: TriggerClass }> = [
   // Self-identity claims — "I'm an AI", "I am a bot", "as an assistant bot"
-  { name: 'self_ai_claim', pattern: /\bI(?:'|’)?m\s+(?:an?\s+)?(?:AI|bot|chatbot|assistant\s+bot|language\s+model|LLM|artificial\s+intelligence|machine|virtual\s+assistant)\b/i },
-  { name: 'self_ai_claim_2', pattern: /\bI\s+am\s+(?:an?\s+)?(?:AI|bot|chatbot|language\s+model|LLM|artificial\s+intelligence|machine)\b/i },
-  { name: 'self_ai_claim_3', pattern: /\bas\s+an?\s+(?:AI|bot|chatbot|language\s+model|LLM)\b/i },
+  { name: 'self_ai_claim', pattern: /\bI(?:'|’)?m\s+(?:an?\s+)?(?:AI|bot|chatbot|assistant\s+bot|language\s+model|LLM|artificial\s+intelligence|machine|virtual\s+assistant)\b/i, class: 'disclosure' },
+  { name: 'self_ai_claim_2', pattern: /\bI\s+am\s+(?:an?\s+)?(?:AI|bot|chatbot|language\s+model|LLM|artificial\s+intelligence|machine)\b/i, class: 'disclosure' },
+  { name: 'self_ai_claim_3', pattern: /\bas\s+an?\s+(?:AI|bot|chatbot|language\s+model|LLM)\b/i, class: 'disclosure' },
 
   // Self-referential internals — "my system prompt", "my tools", "my functions"
-  { name: 'self_internals', pattern: /\bmy\s+(?:system\s+)?(?:prompt|prompts|instructions|functions?|tools?|skills?|capabilities\s+list|api)\b/i },
-  { name: 'self_internals_2', pattern: /\b(?:the\s+)?(?:system\s+prompt|tool\s+call|function\s+call|tool\s+use)\b/i },
-  { name: 'self_internals_3', pattern: /\bI\s+(?:have\s+access\s+to|can\s+call|can\s+invoke|can\s+execute)\s+(?:the\s+)?(?:following\s+)?(?:tools?|functions?|skills?|apis?)\b/i },
+  { name: 'self_internals', pattern: /\bmy\s+(?:system\s+)?(?:prompt|prompts|instructions|functions?|tools?|skills?|capabilities\s+list|api)\b/i, class: 'disclosure' },
+  { name: 'self_internals_2', pattern: /\b(?:the\s+)?(?:system\s+prompt|tool\s+call|function\s+call|tool\s+use)\b/i, class: 'disclosure' },
+  { name: 'self_internals_3', pattern: /\bI\s+(?:have\s+access\s+to|can\s+call|can\s+invoke|can\s+execute)\s+(?:the\s+)?(?:following\s+)?(?:tools?|functions?|skills?|apis?)\b/i, class: 'disclosure' },
 
   // Model / provider leaks. Bare model NAMES (Claude / Haiku / Sonnet / Opus)
   // are NOT triggers on their own — "Claude" is a person's name, "haiku" a
@@ -41,30 +56,47 @@ const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
   // replies to the canned fallback. Keep the unambiguous provider tokens, and
   // catch model names only in a self-referential frame ("I'm Claude", "powered
   // by Sonnet", "running on GPT") — which is the actual leak this guards.
-  { name: 'model_leak', pattern: /\b(?:Anthropic|OpenAI|GPT-?\d|claude-[a-z0-9.-]+|large\s+language\s+model)\b/i },
-  { name: 'model_self_ref', pattern: /\b(?:I(?:'|’)?m|I\s+am|built\s+on|powered\s+by|running\s+on|based\s+on|(?:my\s+)?model\s+is)\s+(?:an?\s+|the\s+)?(?:Claude|GPT|Sonnet|Opus|Haiku|Gemini|Llama)\b/i },
+  { name: 'model_leak', pattern: /\b(?:Anthropic|OpenAI|GPT-?\d|claude-[a-z0-9.-]+|large\s+language\s+model)\b/i, class: 'disclosure' },
+  { name: 'model_self_ref', pattern: /\b(?:I(?:'|’)?m|I\s+am|built\s+on|powered\s+by|running\s+on|based\s+on|(?:my\s+)?model\s+is)\s+(?:an?\s+|the\s+)?(?:Claude|GPT|Sonnet|Opus|Haiku|Gemini|Llama)\b/i, class: 'disclosure' },
 
   // Structured payload echoes — JSON-looking self-describing blocks,
   // function_call syntax, tool_use tags
-  { name: 'json_echo', pattern: /\{\s*["']?(?:name|tool|function|action|type)["']?\s*:\s*["']/i },
-  { name: 'tool_tag_echo', pattern: /<(?:tool_use|function_call|tool_call)\b/i },
-  { name: 'function_call_text', pattern: /\bfunction_call\b|\btool_use\b/i },
+  { name: 'json_echo', pattern: /\{\s*["']?(?:name|tool|function|action|type)["']?\s*:\s*["']/i, class: 'disclosure' },
+  { name: 'tool_tag_echo', pattern: /<(?:tool_use|function_call|tool_call)\b/i, class: 'disclosure' },
+  { name: 'function_call_text', pattern: /\bfunction_call\b|\btool_use\b/i, class: 'disclosure' },
 
   // Structured INTERNAL IDENTIFIERS — raw Slack IDs and request/task IDs must
   // never cross to a colleague (2026-07-01 Oran leak: a failed find_slack_user
   // made the model narrate "U0ARK5814PQ… I have him as U0F28CK6H" straight to
-  // Oran). Regex on structured IDs is language-safe (R8). The bare-ID pattern
-  // REQUIRES a digit, so it can't fire on all-caps English words (UPGRADES,
-  // WORKFLOW, UNDERSTAND) — every Slack ID contains digits.
-  { name: 'slack_id_mention', pattern: /<@[UW][A-Z0-9]{6,}>/ },
-  { name: 'slack_channel_ref', pattern: /<#C[A-Z0-9]{6,}/ },
-  { name: 'slack_bare_id', pattern: /\b[UW](?=[A-Z0-9]*\d)[A-Z0-9]{7,}\b/ },
-  { name: 'internal_ref_id', pattern: /\b#?(?:req|task|coord|out|ci)_[a-z0-9_]+\b/i },
+  // Oran). Regex on structured IDs is language-safe (G7).
+  //
+  // v4.1.x (G2/G6) — the account-id trigger DEFERS to textScrubber, which owns
+  // this token (RAW_SLACK_ID_RE, the one definition). The old pair here fired on a
+  // PROPER `<@U…>` mention — the exact form the scrubber manufactures one step
+  // earlier in the same pipeline (formatForSlack → scrubInternalLeakage, run at
+  // postReply.ts:359 before any gate) and the form humanGate explicitly protects.
+  // So every colleague reply that @-mentioned anyone burned a Sonnet rewrite whose
+  // own instructions then STRIPPED the mention: two correct replies to Alex
+  // Wiggins shipped de-tagged on 2026-07-21 (log :838, :908). Dropped the
+  // `slack_id_mention` trigger outright (a rendered mention is correct output, not
+  // a leak) and narrowed the bare-id trigger to the scrubber's own residual form —
+  // so this can now only fire on an id the scrubber genuinely failed to wrap.
+  { name: 'slack_channel_ref', pattern: /<#C[A-Z0-9]{6,}/, class: 'identifier' },
+  { name: 'slack_bare_id', pattern: RAW_SLACK_ID_RE, class: 'identifier' },
+  { name: 'internal_ref_id', pattern: /\b#?(?:req|task|coord|out|ci)_[a-z0-9_]+\b/i, class: 'identifier' },
 
   // Role-header echoes from injection payloads
-  { name: 'role_header_echo', pattern: /\[(?:This\s+)?[Mm]essage\s+(?:is\s+)?from\b/ },
-  { name: 'inject_marker', pattern: /\[%00\]/ },
+  { name: 'role_header_echo', pattern: /\[(?:This\s+)?[Mm]essage\s+(?:is\s+)?from\b/, class: 'disclosure' },
+  { name: 'inject_marker', pattern: /\[%00\]/, class: 'disclosure' },
 ];
+
+/** True when EVERY trigger that fired is the opaque-identifier class — i.e. the
+ *  draft leaks no disclosure, only a token, so the original is safe to ship if the
+ *  rewriter can't produce something better. */
+function allTriggersAreIdentifiers(triggers: string[]): boolean {
+  return triggers.length > 0 && triggers.every(name =>
+    TRIGGER_PATTERNS.find(t => t.name === name)?.class === 'identifier');
+}
 
 /**
  * Scan a reply for leak patterns. Returns the list of trigger names that matched.
@@ -242,6 +274,11 @@ Output ONLY the reply text. No explanation, no quotes, no preamble.`;
 
 /**
  * Safe fallback for unrecoverable replies.
+ *
+ * Deliberately reserved for the 'disclosure' trigger class only. It is a fixed
+ * ENGLISH line and it destroys the whole answer, so using it on a reply whose only
+ * sin is an opaque identifier means a Hebrew/Russian/Spanish conversation gets an
+ * English non-answer in place of a correct one — corruption, not a safe miss.
  */
 const SAFE_FALLBACK = (ownerFirstName: string) =>
   `Let me check that with ${ownerFirstName} and come back to you.`;
@@ -422,6 +459,24 @@ export async function filterColleagueReply(opts: {
       colleagueSlackId: opts.colleagueSlackId,
     });
     return { reply: rewritten, filtered: true, triggers };
+  }
+
+  // v4.1.x (G6) — the rewriter failed. What ships now depends on the trigger CLASS,
+  // because the two answers have opposite failure modes:
+  //   identifier-only → ship the original. The reply is otherwise correct and in the
+  //     colleague's own language; the worst it carries is an opaque token, and the
+  //     account-id half is already deterministically wrapped by textScrubber (and
+  //     wrapped again on the way out — runOutputGates re-runs formatForSlack over
+  //     this result). Substituting an English canned line here would replace a good
+  //     answer with a non-answer, in the wrong language, to fix nothing.
+  //   any disclosure trigger → canned line, unchanged. There the original IS the
+  //     leak, so losing the answer is the correct price.
+  if (allTriggersAreIdentifiers(triggers)) {
+    logger.warn('Security rewriter unfixable on identifier-only triggers — shipping the original (textScrubber owns these tokens; a canned English line would be corruption)', {
+      triggers,
+      colleagueSlackId: opts.colleagueSlackId,
+    });
+    return { reply: opts.reply, filtered: false, triggers };
   }
 
   logger.warn('Security rewriter unfixable — using safe canned fallback', {

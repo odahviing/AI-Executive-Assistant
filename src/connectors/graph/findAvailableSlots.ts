@@ -85,6 +85,12 @@ export async function findAvailableSlots(params: {
   // Caller is expected to narrate to the owner that these slots break their
   // soft rules ("outside your focus protection / lunch window / normal hours").
   relaxed?: boolean;
+  // v4.1.x (M12) — WHO the returned annotations are for. The only annotation
+  // that carries free text is `over_optional` (the optional-join event's
+  // subject), and find_available_slots is colleague-allowed, so a private
+  // optional event would otherwise name itself to a colleague. Threaded into
+  // checkSlot, which does the masking at the producer. Default (omitted) masks.
+  viewer?: import('../../utils/displaySubject').SubjectViewer;
   // v2.4.1 — events to treat as "the meeting(s) being moved." Each id is
   // matched against the owner's calendar events for the search range and
   // produces TWO behaviors:
@@ -154,21 +160,17 @@ export async function findAvailableSlots(params: {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
   const maxSearchDays = params.maxSearchDays ?? 21;
-  // v2.5.4 — category-driven travel buffer. When the requested category has
-  // `requires_travel_buffer: true` (e.g. "Outside meeting") AND the caller
-  // didn't pass an explicit travel_buffer_minutes, default to 30 min on each
-  // side. Owner direction: the buffer fact belongs to the category ("if it's
-  // Outside, we need buffer"), the buffer LENGTH is independent of the
-  // category and stays fixed at a sensible default for now.
-  let effectiveTravelBufferMinutes = params.travelBufferMinutes ?? 0;
-  if (params.category && params.profile && effectiveTravelBufferMinutes === 0) {
-    const matchedCat = (params.profile.categories ?? []).find(
-      c => c.name.toLowerCase() === params.category!.toLowerCase(),
-    );
-    if (matchedCat?.requires_travel_buffer) {
-      effectiveTravelBufferMinutes = 30;
-    }
-  }
+  // v2.5.4 — category-driven travel buffer: the buffer FACT belongs to the
+  // category ("if it's Outside, we need buffer"), the LENGTH is config.
+  // v4.1.x (M2) — resolved by travelBufferMinutesFor, the SAME helper checkSlot
+  // uses, so search and book can never pad by different amounts (pre-fix the
+  // walker honored any caller value while checkSlot hardcoded 30).
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { travelBufferMinutesFor, offeredSlotCount: offeredCountFor, isWithinBookingLeadTime } =
+    require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
+  const effectiveTravelBufferMinutes = params.profile
+    ? travelBufferMinutesFor(params.profile, params.category ?? null, params.travelBufferMinutes)
+    : (params.travelBufferMinutes ?? 0);
   const travelBufferMs = effectiveTravelBufferMinutes * 60 * 1000;
   // v2.2.3 (#43) — owner-only by default for the busy filter. Don't assume
   // we can / should move attendee meetings. Their work-window clips below.
@@ -220,9 +222,9 @@ export async function findAvailableSlots(params: {
       const email = emailKey.toLowerCase();
       for (const slot of slots) {
         // 'workingElsewhere' is NOT a hard block. A timed WE event is a
-        // soft/optional-join event (v3.6.4) — collected into `softOccupied`
-        // below (with its subject) and avoided-if-possible, never hard-blocked.
-        // An all-day WE status simply isn't busy; the owner's own away days now
+        // soft/optional-join event (v3.6.4) — tiered by checkSlot as level
+        // 'optional' (subject on `overOptional`) and avoided-if-possible, never
+        // hard-blocked. An all-day WE status simply isn't busy; away days now
         // come from the per-date schedule override (#143) and are walked
         // normally with that day's effective windows + tz.
         if (slot.status !== 'free' && slot.status !== 'workingElsewhere') {
@@ -257,10 +259,6 @@ export async function findAvailableSlots(params: {
 
     const [defaultStartHour, defaultStartMin] = (params.workHoursStart ?? '09:00').split(':').map(Number);
     const [defaultEndHour, defaultEndMin] = (params.workHoursEnd ?? '18:00').split(':').map(Number);
-
-    // ── Buffer from now (hard constraint) ─────────────────────────────────
-    const minBufferMs = (params.minBufferHours ?? 0) * 60 * 60 * 1000;
-    const earliestAllowed = new Date(Date.now() + minBufferMs);
 
     // ── Profile-aware settings ────────────────────────────────────────────
     // v1.6.6 — no more "extra buffer around busy blocks" in the search.
@@ -387,19 +385,13 @@ export async function findAvailableSlots(params: {
     // v3.6.4 — SOFT / OPTIONAL tier. A TIMED workingElsewhere event (e.g. a
     // daily standup the owner joins only if free) is not a hard block: it's
     // avoided when clean slots exist, but bookable-over as a fallback, and it
-    // stays visible. Collect these ranges (with subject) from the owner's own
-    // events — getFreeBusy has no subject, and we already excluded them from
-    // allBusy above. All-day WE is the travel marker (handled separately); only
-    // TIMED WE is soft. Empty on the common no-such-event case → zero effect.
-    const softOccupied: Array<{ start: number; end: number; subject: string }> = [];
-    for (const evt of ownerEventsForFb) {
-      if (evt.isAllDay || evt.isCancelled) continue;
-      if (evt.showAs !== 'workingElsewhere') continue;
-      const s = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' });
-      const e = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' });
-      if (!s.isValid || !e.isValid) continue;
-      softOccupied.push({ start: s.toMillis(), end: e.toMillis(), subject: (evt.subject ?? '').trim() || 'an optional meeting' });
-    }
+    // stays visible.
+    // v4.1.x (M2/M3) — this walker used to re-derive that tier from a private
+    // `softOccupied` pass over the same events the validator reads, so the
+    // OPTIONAL level existed in search and nowhere else. It now comes back on
+    // the checkSlot verdict (`overOptional`, already privacy-masked for the
+    // caller), which is also what the write path annotates from. One derivation,
+    // two surfaces.
 
     // v3.7.x (#143) — no all-day WE detection in search. An away day is a
     // per-date override (explicit tz + stated hours) resolved per-day by
@@ -580,7 +572,16 @@ export async function findAvailableSlots(params: {
     // in 15-min increments. Two-stage approach gives both day-diversity AND
     // nice intra-day spacing ("10, 10:30, 11:30, 14:00" not "10, 10:15,
     // 10:30, 10:45").
-    const MAX_PER_DAY = 4;
+    // v4.1.x (M6) — the cap was a literal 4, applied BEFORE pickSpreadSlots
+    // ever saw the day, so a single wide window (a cross-TZ overlap band, or
+    // "anytime Tuesday") could only ever yield 4 candidates from that day —
+    // fewer than the 5 we then tried to offer, and a 5th viable slot was culled
+    // pre-spread (the Ayala case). It is now the offered-slot count itself: the
+    // most one day could ever legitimately contribute, so one viable day can
+    // fill the whole offer and nothing viable is discarded before the spreader.
+    // Keeping a cap (rather than dropping it) preserves the dense-packing
+    // branch below, where WHICH slots survive expresses the density ranking.
+    const MAX_PER_DAY = offeredCountFor(profile ?? undefined);
     const PREFERRED_GAP_MS = 30 * 60 * 1000;
     // #133 — efficient-calendar ranking. When the owner prefers dense packing,
     // each candidate is scored by how it sits among the owner's EXISTING
@@ -615,7 +616,9 @@ export async function findAvailableSlots(params: {
     // narration is unchanged after the validator unification.
     const mapVerdictToRejectLabel = (kind: string | undefined, dayType: 'office' | 'home' | 'other'): string => {
       switch (kind) {
+        // Both mean "too soon"; one label keeps day_summary narration stable.
         case 'in_the_past': return 'within_lead_time';
+        case 'within_lead_time': return 'within_lead_time';
         case 'outside_working_hours': return 'outside_owner_work_hours';
         case 'floating_block_overlap': return 'floating_block_no_room';
         case 'focus_time_floor': return dayType === 'home' ? 'focus_time_home' : 'focus_time_office';
@@ -753,7 +756,19 @@ export async function findAvailableSlots(params: {
       }
       // #128 — booking lead time. Labeled (not a silent skip) so day_summary can
       // name "inside your booking lead time" instead of empty silence.
-      if (cursor.getTime() < earliestAllowed.getTime()) {
+      // v4.1.x (M2) — the RULE now lives in checkSlot (rule 0b), which is what
+      // finally gave the write path the same floor. This stays as a cheap
+      // pre-filter calling the SAME predicate — one implementation, two call
+      // sites, no possible drift — kept at this position so the rejection is
+      // blamed on "too soon" and not on an attendee who happens to be busy in a
+      // window that was never bookable anyway.
+      // A RELAXED pass is a total owner override and bypasses the lead time
+      // exactly as checkSlot does — but an OFFER is not a booking: a time that
+      // has already gone is not an option to choose from, so it floors at "now".
+      const tooSoon = params.relaxed
+        ? cursor.getTime() < Date.now()
+        : isWithinBookingLeadTime(cursor.getTime(), params.minBufferHours);
+      if (tooSoon) {
         trackReject('within_lead_time', cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
         continue;
@@ -810,15 +825,20 @@ export async function findAvailableSlots(params: {
             continue;
           }
         }
-        // Travel buffer (custom mode / requires_travel_buffer) — an owner-side
-        // preference, enforced only when not overriding; nothing to annotate.
+        // Travel buffer, ATTENDEE side only. v4.1.x (M2) — the OWNER side of
+        // this padding is checkSlot rule 7 (fed the same effective minutes
+        // below), so it is no longer applied twice with two different lengths.
+        // What remains here is the half checkSlot cannot see: an ATTENDEE's
+        // busy block too close to the slot. Same canonical label so day_summary
+        // narration is unchanged.
         if (!params.relaxed) {
           const withinBuffer = bufferMs > 0 && allBusy.find(busy =>
+            busy.email !== ownerEmailLower &&
             cursor.getTime() < busy.end.getTime() + bufferMs &&
             slotEnd.getTime() > busy.start.getTime() - bufferMs
           );
           if (withinBuffer) {
-            trackReject('owner_buffer_collision', cursorDt.toISO()!);
+            trackReject('travel_buffer_collision', cursorDt.toISO()!);
             cursor = new Date(cursor.getTime() + step);
             continue;
           }
@@ -876,6 +896,7 @@ export async function findAvailableSlots(params: {
       // the book path uses — so search can never offer a slot the book path then
       // refuses (the Eli + Isaac search-vs-book root). allowRelaxed (owner
       // override) bypasses checkSlot's soft+hard owner rules (rule 11). ──
+      let verdictOverOptional: string | undefined;
       if (profile) {
         const verdict = checkSlot({
           profile,
@@ -885,10 +906,20 @@ export async function findAvailableSlots(params: {
           events: ownerEventsForFb,
           excludeEventIds: params.excludeEventIds,
           allowRelaxed: params.relaxed,
+          // v4.1.x (M2) — the booking lead time comes from the ONE validator now,
+          // fed the caller's role-resolved hours, instead of a walker-only gate
+          // the write path knew nothing about.
+          leadTimeHours: params.minBufferHours,
+          // v4.1.x (M2) — same padding the write path will apply, resolved once.
+          travelBufferMinutes: effectiveTravelBufferMinutes,
+          // v4.1.x (M12) — masks a private optional event's subject before it
+          // can reach a colleague-facing `over_optional` tag.
+          viewer: params.viewer,
           // v3.7.x (#143) — the SAME effective day the walker gated on, so search
           // and book evaluate work-hours / floor in the same windows + timezone.
           effectiveDay: effectiveDay ?? undefined,
         });
+        verdictOverOptional = verdict.overOptional;
         if (!verdict.passes) {
           trackReject(mapVerdictToRejectLabel(verdict.violation_kind, dayType), cursorDt.toISO()!);
           cursor = new Date(cursor.getTime() + step);
@@ -925,7 +956,8 @@ export async function findAvailableSlots(params: {
         }
       } else {
         // No-profile fallback (degenerate callers with no UserProfile): only
-        // work-hours window + owner busy can be evaluated.
+        // the work-hours window + owner busy can be evaluated. Lead time was
+        // already applied by the shared pre-filter above.
         const inAnyWindow = dayHours.some(w => slotTotalMin >= w.startMin && slotEndMin <= w.endMin);
         if (!inAnyWindow) {
           trackReject('outside_owner_work_hours', cursorDt.toISO()!);
@@ -955,14 +987,14 @@ export async function findAvailableSlots(params: {
       // the subject; pickSpreadSlots deprioritizes it below clean slots and only
       // surfaces it to fill the spread. A slot that ALSO breaks a real rule never
       // reaches here (dropped above) — real rule wins, so WE-soft is strictly
-      // above the relaxed tier and strictly below clean.
-      const softHit = softOccupied.find(r => slotStartMs < r.end && slotEndMs > r.start);
+      // above the relaxed tier and strictly below clean. The subject comes from
+      // the validator's M3 level (v4.1.x), already masked for this caller.
       dayBuckets.get(dayKey)!.push({
         start: cursorLocal.toISO()!,   // local-zoned ISO with explicit offset (v2.4.2)
         end: slotEndLocal.toISO()!,
         day_type: dayType,
         disturbs_floating_block: disturbsBlock,
-        ...(softHit ? { over_optional: softHit.subject } : {}),
+        ...(verdictOverOptional ? { over_optional: verdictOverOptional } : {}),
         ...(attendeeConflicts.length ? { attendee_conflicts: attendeeConflicts } : {}),
         ...(packingDense ? { density: scoreSlotDensity(slotStartMs, slotEndMs, ownerBusyMs, densityCfg).score } : {}),
       });
@@ -1126,12 +1158,11 @@ export async function findAvailableSlots(params: {
   }
 
   // pickSpreadSlots is the SINGLE spreader and bound — it round-robins by day
-  // and returns exactly `count`. Do NOT pre-truncate here: a CHRONOLOGICAL cap
+  // and returns at most `count`. Do NOT pre-truncate here: a CHRONOLOGICAL cap
   // (any size) lets one flooded early day dominate — a wide-open Sunday on a
   // trip week produced 41 Sunday candidates that filled the cap before Mon–Fri
-  // were ever seen ("5 Sunday options"). The earlier 30-cap only stayed hidden
-  // because per-day generation was capped at 4; with that gone, the chronological
-  // cap is actively wrong. The pool is already bounded by the search window, and
-  // only the spread picks reach the model.
+  // were ever seen ("5 Sunday options"). The pool is bounded per DAY (MAX_PER_DAY
+  // = the offered-slot count, so a day can fill the offer but not flood it) and
+  // by the search window; only the spread picks reach the model.
   return candidates;
 }

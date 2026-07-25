@@ -4,8 +4,8 @@ import { MODEL_SONNET } from '../../llm/models';
 import { buildSystemPromptParts } from './systemPrompt';
 import { classifyTurn, type OwnerIntentClassification } from '../social/classifyTurn';
 import { chooseSocialDirective, formatDirectiveForPromptBlock, type SocialDirective, noDirective } from '../social/stateMachine';
-import { getSkillTools } from '../../skills/registry';
-import { buildSocialContextBlock, getSummarySessionByThread, getOutreachLifecycle } from '../../db';
+import { getSkillTools, WRITE_TOOLS } from '../../skills/registry';
+import { buildSocialContextBlock, buildPersonWorkContextBlock, getSummarySessionByThread, getOutreachLifecycle } from '../../db';
 import { getActiveJobsForThread } from '../../tasks';
 import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
@@ -88,10 +88,33 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // edit takes effect on the next message (no caching).
   let socialDirective: SocialDirective = noDirective();
   let socialClassification: OwnerIntentClassification | null = null;
-  const isOwnerTurn = input.senderRole === 'owner' || input.isOwnerInGroup === true;
-  // person-of-the-turn: owner id on owner turns, colleague id on colleague turns
-  const turnPersonSlackId = isOwnerTurn ? profile.user.slack_user_id : input.userId;
-  const turnSenderRole: 'owner' | 'colleague' = isOwnerTurn ? 'owner' : 'colleague';
+  // ── TWO questions, two names — never one flag ────────────────────────────
+  // Pre-fix this file carried two competing definitions of "owner turn":
+  // `input.senderRole === 'owner'` (post-clamp) and a looser
+  // `senderRole === 'owner' || isOwnerInGroup === true`. Blocks picked one ad
+  // hoc, so in an MPIM the action tape (strict) was suppressed while the
+  // thread-event ledger 50 lines later (loose) was not — the owner's meeting
+  // subjects + event ids went into a colleague-readable thread's context, the
+  // exact leak the clamp above exists to prevent. One name per question now:
+  //
+  //   isOwnerPath   — is this the OWNER PATH? The effective authority + data
+  //                   scope AFTER the MPIM clamp above. Every owner-only
+  //                   payload (his calendar, his session ledger, his action
+  //                   tape, his open issues) and every owner-only tool gate
+  //                   rides THIS and nothing else. It is false in a clamped
+  //                   MPIM even though the owner is the one typing — that is
+  //                   the whole point of the clamp.
+  //   isOwnerTyping — WHO is the human on this turn? Identity only, for social
+  //                   classification + people-memory attribution
+  //                   (isOwnerInGroup deliberately survives the clamp — see
+  //                   the block at the top of this file). NEVER gate data or
+  //                   tools on it: attributing a turn to the owner is not the
+  //                   same as granting the owner's data scope.
+  const isOwnerPath = input.senderRole === 'owner';
+  const isOwnerTyping = isOwnerPath || input.isOwnerInGroup === true;
+  // person-of-the-turn: owner id when the owner is the typer, colleague id otherwise
+  const turnPersonSlackId = isOwnerTyping ? profile.user.slack_user_id : input.userId;
+  const turnSenderRole: 'owner' | 'colleague' = isOwnerTyping ? 'owner' : 'colleague';
   // v2.6.2 — renamed from socialActive. Master toggle for codas, engage,
   // proactive ticks, social topic logging, social context blocks.
   // Legacy `skills.persona` already auto-migrated to `skills.social` in
@@ -104,8 +127,10 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // classify the SAME message with the SAME recent-context, so they're now
   // one Haiku call (~1s) via classifyTurn. Each half is gated independently:
   //   - needIntent: social skill on + message has substance (owner OR colleague)
-  //   - needScopes: intent_aware_tools on + owner turn (colleagues get the
-  //                 static allowlist, so scopes are unused for them)
+  //   - needScopes: intent_aware_tools on + owner PATH (the colleague path
+  //                 discards scopes for tool selection — registry.ts:486 — and
+  //                 systemPrompt.ts:319 is built on toolScopes being undefined
+  //                 there, so computing them off-path only skews the prose)
   // Result.scope feeds getSkillTools below (toolScopes); result.intent drives
   // the social directive. Both fail open (intent→other, scopes→general).
   let toolScopes: string[] | undefined;
@@ -124,7 +149,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // (routine/system) turn; a scheduled report isn't a conversation.
   const needIntent = socialActive && input.interactive !== false && !!userMessage && userMessage.trim().length > 1;
   const needScopes = profile.behavior?.intent_aware_tools === true
-    && isOwnerTurn
+    && isOwnerPath
     && !!userMessage
     && userMessage.trim().length > 0;
   // v3.6.4 — extract meeting participants on any substantive INTERACTIVE turn
@@ -156,7 +181,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
       });
 
       if (needScopes) toolScopes = turnResult.scope.scopes;
-      if (isOwnerTurn) isFreeTimeInquiry = turnResult.freeTimeInquiry === true;
+      if (isOwnerPath) isFreeTimeInquiry = turnResult.freeTimeInquiry === true;
       if (needMeetingPeople) turnMeetingPeople = turnResult.meetingPeople ?? [];
       // v3.x (Block 3 — calendar prose lazy-load). A free-time / buffer / "how
       // packed" question needs the calendar-health guidance. Deterministically
@@ -327,7 +352,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // Inject active jobs for this thread so Maelle knows what she already committed to.
   // This prevents her from treating follow-up messages as new requests.
   let threadContextBlock = '';
-  if (input.senderRole === 'owner' && threadTs) {
+  if (isOwnerPath && threadTs) {
     const { tasks, outreachJobs } = getActiveJobsForThread(
       profile.user.slack_user_id,
       threadTs,
@@ -389,7 +414,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // later. Replaces the rotting RULE 2e prompt rule. Owner-only (colleagues
   // don't see Maelle's action history) and only when threadTs is present.
   let actionTapeBlock = '';
-  if (input.senderRole === 'owner' && threadTs) {
+  if (isOwnerPath && threadTs) {
     const tape = extractActionTape(input.conversationHistory);
     if (tape.length > 0) {
       actionTapeBlock = `\n\nACTIONS YOU TOOK IN THIS THREAD:\n${tape.map(t => `- ${t}`).join('\n')}\n\nWhen the owner asks about anything in this list, lead with what YOU did — not what the calendar currently shows. If he says it didn't happen or the calendar shows otherwise, do NOT insist on this list — re-check via get_calendar and reconcile honestly. The list is what the tool reported, not ground truth.`;
@@ -439,8 +464,14 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // by id instead of re-searching by name — which lagged after a write AND
   // re-resolved the date to the wrong week (the "Week Summary doesn't appear"
   // miss). Empty when nothing's been booked this thread → no block.
+  // OWNER PATH ONLY (isOwnerPath, not isOwnerTyping): this block names his
+  // meeting subjects and event ids. In a clamped MPIM it would put them in a
+  // colleague-readable thread's context — and point at move/cancel/update
+  // tools the colleague allow-list doesn't even ship. The colleague path has
+  // its own scoped equivalent above (colleagueBookingBlock: only what THEY
+  // requested).
   let ownerThreadEventsBlock = '';
-  if (isOwnerTurn && input.threadTs) {
+  if (isOwnerPath && input.threadTs) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getThreadEvents, getViewedThreadEvents, getActivePlanningWindow } = require('../../utils/threadEventLedger') as
@@ -482,12 +513,27 @@ export async function buildTurnContext(input: OrchestratorInput) {
     }
   }
 
-  // Social engagement context — colleague-rapport memory (people_memory-based).
-  // v2.2 — only injected on COLLEAGUE turns. Owner turns use the new Social
-  // Engine directive below instead.
-  // v2.2.3 (#3) — also gated on persona skill being on. With persona off,
-  // colleague turns get no social context block (Maelle stays task-only).
-  const socialBlock = (isOwnerTurn || !socialActive)
+  // Per-person context on COLLEAGUE turns (owner turns use the Social Engine
+  // directive below instead). TWO blocks, gated differently:
+  //   - WORK context (role, reports_to, response speed, collaboration, recent
+  //     work exchanges + bookings) — ALWAYS on. It is what makes Maelle
+  //     competent with this person; P6 forbids gating work-competence behind
+  //     the optional social skill, and pre-split `skills.social: false` cost a
+  //     tenant all of it as collateral.
+  //   - SOCIAL context (engagement rank, initiation cadence, personal notes) —
+  //     gated on the toggle (v2.2.3 #3), which is what the toggle is for.
+  // Both keyed on isOwnerTyping ON PURPOSE — that's the "who is the human"
+  // question, not a data gate. In a clamped MPIM input.userId is the OWNER's id,
+  // so falling to the colleague branch would build a per-person block out of the
+  // owner's own row and inject it into the group thread.
+  const personWorkBlock = isOwnerTyping
+    ? ''
+    : buildPersonWorkContextBlock(input.userId, {
+        // MPIM / channel: the answer is read by people other than the speaker,
+        // so the block drops the parts only the speaker is entitled to.
+        sharedSurface: input.isMpim === true || input.isChannel === true,
+      });
+  const socialBlock = (isOwnerTyping || !socialActive)
     ? ''
     : buildSocialContextBlock(input.userId, input.profile.user.timezone, input.profile.assistant.name);
 
@@ -599,7 +645,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
   // intent. Fails open: any error in analyze leaves the block empty and
   // the prompt rule + Sonnet's normal flow take over.
   let freeTimePrecheckBlock = '';
-  if (isFreeTimeInquiry && input.senderRole === 'owner') {
+  if (isFreeTimeInquiry && isOwnerPath) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const ops = require('../../skills/meetings/ops') as typeof import('../../skills/meetings/ops');
@@ -662,7 +708,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
   // IDs to call delete_meeting / manage_calendar_issue directly instead
   // of subject re-search.
   let recentCalendarIssuesBlock = '';
-  if (input.senderRole === 'owner') {
+  if (isOwnerPath) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getDb } = require('../../db') as typeof import('../../db');
@@ -827,6 +873,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
     actionTapeBlock,
     colleagueBookingBlock,
     ownerThreadEventsBlock,
+    personWorkBlock,
     socialBlock,
     socialDirectiveBlock,
   ].filter(Boolean).join('\n\n');
@@ -856,9 +903,6 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
   // get_my_tasks / recall_*) stay available so Sonnet can re-verify state
   // while she rewrites the wording.
   if (input.proseOnly === true) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { WRITE_TOOLS } = require('../../connectors/slack/inboundQueue') as
-      typeof import('../../connectors/slack/inboundQueue');
     const before = tools.length;
     tools = tools.filter(t => !WRITE_TOOLS.has(t.name));
     logger.info('Orchestrator — proseOnly mode: filtered out write tools', {
@@ -878,12 +922,9 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
   // The (b) condition is what preserves "Want me to change X?" → "yes, thanks":
   // that prior turn fired NO write (it only offered), so writes stay and the
   // approval executes. Acks only get blocked when the action was already done.
-  if (input.senderRole === 'owner' && socialClassification && socialClassification.kind !== 'task') {
+  if (isOwnerPath && socialClassification && socialClassification.kind !== 'task') {
     const lastAssistant = [...conversationHistory].reverse().find(m => m.role === 'assistant');
     if (lastAssistant) {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { WRITE_TOOLS } = require('../../connectors/slack/inboundQueue') as
-        typeof import('../../connectors/slack/inboundQueue');
       // An approval GRANT ("ok" to a pending approval) is NOT an ack of a
       // finished action — exclude create_approval + resolve_approval from BOTH
       // the marker detection and the strip. Otherwise a prior-turn `[create_approval OK`
@@ -915,7 +956,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
   // counter) can carry clarifying questions like "what time?" through
   // this constraint.
   if (
-    isOwnerTurn
+    isOwnerPath
     && input.threadTs
     && input.proseOnly !== true  // proseOnly already handled above
   ) {

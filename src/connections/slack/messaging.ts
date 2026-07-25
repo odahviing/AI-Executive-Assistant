@@ -76,6 +76,32 @@ export async function resolveDmChannelId(
   }
 }
 
+/**
+ * v4.1.x (#51) — the REVERSE of resolveDmChannelId: given a DM channel, who is
+ * the human on the other side? `conversations.info` returns `channel.user` for
+ * an `im`, which is the bot's counterpart in that conversation.
+ *
+ * Strictly 1:1 IM only. A group DM or channel resolves to null rather than to
+ * "some member", because a caller asking "whose DM is this" must never be
+ * handed an arbitrary participant of a shared space — and null is the answer
+ * that makes them skip rather than guess. Also null on any API failure.
+ */
+export async function resolveDmCounterpart(
+  app: App,
+  botToken: string,
+  channelId: string,
+): Promise<string | null> {
+  try {
+    const res = await app.client.conversations.info({ token: botToken, channel: channelId });
+    const ch = res.channel as { is_im?: boolean; user?: string } | undefined;
+    if (!res.ok || !ch) return null;
+    return ch.is_im && ch.user ? ch.user : null;
+  } catch (err) {
+    logger.warn('resolveDmCounterpart failed', { channelId, detail: String(err).slice(0, 200) });
+    return null;
+  }
+}
+
 /** Send a 1:1 DM to a Slack user. Opens the DM channel if needed. */
 export async function sendDM(
   app: App,

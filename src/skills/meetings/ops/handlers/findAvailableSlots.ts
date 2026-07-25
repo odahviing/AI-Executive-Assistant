@@ -38,10 +38,29 @@ import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
+import { bookingLeadTimeHours, offeredSlotCount } from '../../../../utils/scheduleRules';
+import { subjectViewerFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 
 export async function handleFindAvailableSlots(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
+  // v4.1.x — resolved ONCE per call from the authenticated sender.
+  //   leadHours: owner 1h vs colleague 4h, previously a literal at four sites
+  //     and enforced only inside the slot walker (M2).
+  //   viewer:    owner-DM-only sees a private optional event's real subject (M12).
+  //   offerCount: the M6 offered-slot budget, previously a literal 5.
+  //
+  // `isOwnerPath` is the STRICT, post-clamp definition (senderRole alone) — the
+  // effective authority + data scope. It is deliberately NOT
+  // `|| isOwnerInGroup`: the lead time decides how far the owner's own booking
+  // protection relaxes and therefore WHICH slots enter the payload, and the MPIM
+  // clamp exists so owner-level authority is never granted in a room colleagues
+  // share. His sub-lead-time booking in a group goes through the approval flow,
+  // not through re-granting authority in the group.
+  const isOwnerPath = context.senderRole === 'owner';
+  const leadHours = bookingLeadTimeHours(context.profile, isOwnerPath ? 'owner' : 'colleague');
+  const viewer = subjectViewerFor(context);
+  const offerCount = offeredSlotCount(context.profile);
         // v1.6.4 — meeting_mode is required from the LLM. Let findAvailableSlots
         // scope the workDays per mode (in_person → office only, else both). Do
         // NOT pre-pass workDays from here — the function's own mode-aware logic
@@ -233,8 +252,19 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // is empty; a moving_event_id that points at a DIFFERENT meeting is ignored,
           // never ballooned in. Colleague-path skips this — that flow uses per-attendee
           // annotation (see v2.7.0 colleague-path block below).
-          const isOwnerInitiatedSearch =
-            context.senderRole === 'owner' || context.isOwnerInGroup === true;
+          // v4.1.x — STRICT (post-clamp) owner path, same definition as
+          // `isOwnerPath` above. It used to be `|| isOwnerInGroup === true`, and
+          // this flag is not cosmetic: it decides what goes INTO the payload at
+          // several points downstream — whether a held slot comes back naming the
+          // colleague who holds it and why (the hold annotation below), whether
+          // the relaxed recovery surfaces times that break his focus / lunch /
+          // lead-time protections, and whether the "never reveal the mechanism"
+          // colleague hint is attached at all. Under the loose form, the owner's
+          // own turn in a group DM took the owner branch on every one of those —
+          // so another colleague's hold reason and his own day-load mechanics
+          // were emitted into a thread other people read. Same class as the
+          // get_calendar clamp; same ruling.
+          const isOwnerInitiatedSearch = isOwnerPath;
           const movingIdsForAttendees = (isOwnerInitiatedSearch && Array.isArray(args.moving_event_ids))
             ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
             : [];
@@ -602,9 +632,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                     ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
                     : undefined,
                   autoExpand: false,
-                  minBufferHours: (context.senderRole === 'owner' || context.isOwnerInGroup === true)
-                    ? 1
-                    : (context.profile.meetings.min_slot_buffer_hours ?? 4),
+                  minBufferHours: leadHours,
+                  viewer,
                   diagnosticsOut: diag,
                 });
                 const startMs = DateTime.fromISO(cand.start, { zone: timezone }).toMillis();
@@ -664,9 +693,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
               attendeeAvailability,
               autoExpand: !userNamedNarrowWindow,
-              minBufferHours: (context.senderRole === 'owner' || context.isOwnerInGroup === true)
-                ? 1
-                : (context.profile.meetings.min_slot_buffer_hours ?? 4),
+              minBufferHours: leadHours,
+              viewer,
               profile: context.profile,
               // v2.3.2 (2A) — relaxed mode opt-in (owner-only). Bypasses
               // focus / lunch / work-hours; keeps the 5-min between-meeting buffer.
@@ -732,7 +760,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // then" (true, mechanism-free) — and an insisted-on time goes to
             // the owner as an approval, never a flat refusal. Hard busy stays
             // "he's booked".
-            const SOFT_REJECT_PREFIXES = ['focus_time', 'owner_buffer_collision', 'floating_block_no_room', 'within_lead_time'];
+            // v4.1.x — `owner_buffer_collision` is no longer emitted anywhere
+            // (the owner side of travel padding moved into checkSlot, which
+            // labels it `travel_buffer_collision`); the attendee side keeps the
+            // canonical label too. Same set of soft, owner-relaxable protections.
+            const SOFT_REJECT_PREFIXES = ['focus_time', 'travel_buffer_collision', 'floating_block_no_room', 'within_lead_time'];
             const softRejectLabels = Object.keys(diagnosticsOut.rejectedCounts ?? {})
               .filter(l => SOFT_REJECT_PREFIXES.some(p => l.startsWith(p)));
             const colleagueSoftBlockHint = (!isOwnerInitiatedSearch && softRejectLabels.length > 0)
@@ -802,7 +834,12 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 meetingMode: mode as import('../../../../connectors/graph/calendar').MeetingMode,
                 travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
                 autoExpand: !userNamedNarrowWindow,
-                minBufferHours: ownerAudience ? 1 : (context.profile.meetings.min_slot_buffer_hours ?? 4),
+                // Owner-audience recovery reads his OWN lead time even on a
+                // colleague turn — the slots come back for HIM to choose from.
+                minBufferHours: ownerAudience
+                  ? bookingLeadTimeHours(context.profile, 'owner')
+                  : leadHours,
+                viewer,
                 profile: context.profile,
                 relaxed: false,
                 excludeEventIds: Array.isArray(args.moving_event_ids)
@@ -882,9 +919,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   meetingMode: mode as import('../../../../connectors/graph/calendar').MeetingMode,
                   travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
                   attendeeAvailability,
-                  minBufferHours: (context.senderRole === 'owner' || context.isOwnerInGroup === true || mustBe)
-                    ? 1   // #128 — must-be: the owner overrides his own colleague booking lead-time for an urgent ask
-                    : (context.profile.meetings.min_slot_buffer_hours ?? 4),
+                  // #128 — must-be: the owner overrides his own colleague booking
+                  // lead-time for an urgent ask, so the recovery searches at HIS lead.
+                  minBufferHours: mustBe ? bookingLeadTimeHours(context.profile, 'owner') : leadHours,
+                  viewer,
                   profile: context.profile,
                   relaxed: true,  // bypass focus/lunch/work-hours; attendee busy still enforced
                   excludeEventIds: Array.isArray(args.moving_event_ids)
@@ -954,7 +992,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const { pickSpreadSlots: pickSpreadMustBe } = require('../../../../connectors/graph/calendar') as
                   typeof import('../../../../connectors/graph/calendar');
-                const pickedMustBe = new Set(pickSpreadMustBe(relaxedRecoverySlots, timezone, 5, undefined, args.duration_minutes as number | undefined));
+                const pickedMustBe = new Set(pickSpreadMustBe(relaxedRecoverySlots, timezone, offerCount, undefined, args.duration_minutes as number | undefined));
                 const ownerFirst = context.profile.user.name.split(' ')[0];
                 const candidates = relaxedRecoverySlots
                   .filter(s => pickedMustBe.has(s.start))
@@ -1068,7 +1106,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             } catch (err) {
               logger.warn('find_available_slots — offered-slot exclusion threw, using full pool', { err: String(err).slice(0, 120) });
             }
-            const chosenStarts = new Set(pickSpreadSlots(pickPool, timezone, 5, anchorDay, args.duration_minutes as number | undefined));
+            const chosenStarts = new Set(pickSpreadSlots(pickPool, timezone, offerCount, anchorDay, args.duration_minutes as number | undefined));
 
             // v2.9.2 — preferred_slot guarantee. When the requester named a
             // specific time ("preferably 11:30"), pickSpreadSlots' MIN_GAP
@@ -1080,6 +1118,12 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             const preferredSlot = typeof args.preferred_slot === 'string' && args.preferred_slot.trim().length > 0
               ? args.preferred_slot.trim()
               : null;
+            // v4.1.x (M10/M11) — set when the named time is NOT offerable, so the
+            // result can say WHY instead of letting the model infer "unavailable"
+            // from absence. Never merged into `slots`: an excluded slot is still
+            // excluded (#142d — a slot the owner has an EXTERNAL commitment on is
+            // deliberately never PROPOSED). The bug was the silence, not the drop.
+            let preferredSlotStatus: Record<string, unknown> | undefined;
             if (preferredSlot) {
               const matchingCandidate = candidateSet.find(s => {
                 try {
@@ -1096,9 +1140,66 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   candidateStart: matchingCandidate.start,
                 });
               } else if (!matchingCandidate) {
-                logger.info('find_available_slots — preferred_slot not in candidate set (rule violation or outside window)', {
-                  preferredSlot,
-                });
+                // Pre-fix this branch logged and did NOTHING — the named time
+                // vanished from the payload and the model inferred it was
+                // "not available", so the owner could not override a block he
+                // was never told about (M10: the override must reach the SEARCH
+                // surface too). Re-check that ONE slot through the SAME engine
+                // the sibling candidate_slots branch uses and hand back its real
+                // reason. Convergence, not a second path.
+                try {
+                  const ownerFirstPref = context.profile.user.name.split(' ')[0];
+                  const durMinPref = args.duration_minutes as number;
+                  const prefStartDt = DateTime.fromISO(preferredSlot, { zone: timezone });
+                  const prefEndIso = prefStartDt.isValid
+                    ? (prefStartDt.plus({ minutes: durMinPref }).toISO() ?? preferredSlot)
+                    : preferredSlot;
+                  const prefDiag: { rejectedCounts?: Record<string, number> } = {};
+                  const prefSlots = await findAvailableSlots({
+                    userEmail,
+                    timezone,
+                    durationMinutes: durMinPref,
+                    attendeeBusyEmails,
+                    attendeeAvailability,
+                    searchFrom: preferredSlot,
+                    searchTo: prefEndIso,
+                    meetingMode: mode as import('../../../../connectors/graph/calendar').MeetingMode,
+                    travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
+                    profile: context.profile,
+                    category: args.category as string | undefined,
+                    relaxed: args.relaxed === true && context.senderRole === 'owner',
+                    excludeEventIds: Array.isArray(args.moving_event_ids)
+                      ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
+                      : undefined,
+                    autoExpand: false,
+                    minBufferHours: leadHours,
+                    viewer,
+                    diagnosticsOut: prefDiag,
+                  });
+                  const prefAvailable = prefSlots.length > 0;
+                  const brokenRule = prefAvailable ? undefined : Object.keys(prefDiag.rejectedCounts ?? {})[0];
+                  preferredSlotStatus = {
+                    start: preferredSlot,
+                    end: prefEndIso,
+                    available: prefAvailable,
+                    ...(brokenRule
+                      ? { broken_rule: brokenRule, broken_rule_label: humanizeViolationLabel(brokenRule, ownerFirstPref) }
+                      : {}),
+                    _note: prefAvailable
+                      // Passed the engine yet isn't in the offered set → it was
+                      // excluded by a PROPOSAL-only policy (#142d external
+                      // commitment) or fell outside the returned window. Say so.
+                      ? `The specific time asked for (${preferredSlot}) is not in the offered list even though it clears ${ownerFirstPref}'s rules — it sits on a commitment ${ownerFirstPref} has with someone outside the company, so it is never offered as an option. Say that plainly rather than implying the time is free or staying silent about it. ${ownerFirstPref} can still choose to book straight over it if he tells you to.`
+                      : `The specific time asked for (${preferredSlot}) is NOT bookable: ${humanizeViolationLabel(brokenRule, ownerFirstPref)}. Say this plainly and in human terms — never let it just be missing from the list. Then offer the alternatives in \`slots\`. If ${ownerFirstPref} says to do it anyway, that is his call: re-book with relaxed=true.`,
+                  };
+                  logger.info('find_available_slots — preferred_slot not offered, annotated with its real reason', {
+                    preferredSlot, available: prefAvailable, brokenRule,
+                  });
+                } catch (err) {
+                  logger.warn('find_available_slots — preferred_slot re-check threw; no annotation', {
+                    preferredSlot, err: String(err).slice(0, 160),
+                  });
+                }
               }
             }
 
@@ -1318,10 +1419,14 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // (the tier holds them back otherwise), so their appearance IS the
             // signal to narrate the trade-off.
             const hasOverOptional = annotatedSlots.some((s: any) => typeof s.over_optional === 'string' && s.over_optional.length > 0);
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint) {
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               // #148 — grounded timezone strings so Sonnet quotes the conversion, never recomputes it.
               Object.assign(result, tzGroundingFields);
+              // v4.1.x (M10/M11) — the named time that did NOT make the list, with
+              // its real reason. Present only when a preferred_slot was asked for
+              // and could not be offered.
+              if (preferredSlotStatus) result.preferred_slot_status = preferredSlotStatus;
               if (travelers.length > 0) result.travelers = travelers;
               if (hasDaySummary) result.day_summary = daySummary;
               if (attendeeEmailWarning) Object.assign(result, attendeeEmailWarning);

@@ -19,6 +19,9 @@ import {
   findUserByName as slackFindUserByName,
   findChannelByName as slackFindChannelByName,
   resolveDmChannelId,
+  resolveDmCounterpart,
+  updateMessage as slackUpdateMessage,
+  deleteMessage as slackDeleteMessage,
   type SendOutcome,
 } from './messaging';
 import { formatForSlack } from './formatting';
@@ -42,11 +45,15 @@ export function createSlackConnection(app: App, botToken: string, profile: UserP
   return {
     id: 'slack',
 
-    // v2.0.2 — all four outbound methods run text through formatForSlack
-    // before hitting the primitives. This scrubs internal leakage (sentinels,
-    // tool names) and applies Slack's markdown dialect. formatForSlack is
-    // idempotent, so callers that pre-format stay safe. Any remaining direct
+    // v2.0.2 — EVERY text-bearing method here runs its text through
+    // formatForSlack before hitting the primitives (the four send verbs below
+    // plus updateMessage). This scrubs internal leakage (sentinels, tool names)
+    // and applies Slack's markdown dialect. formatForSlack is idempotent, so
+    // callers that pre-format stay safe. Any remaining direct
     // `app.client.chat.postMessage` call sites will migrate through here.
+    // If you add a verb that carries text, it goes through formatForSlack too —
+    // that omission is exactly what made routine output render raw (see
+    // updateMessage below).
 
     async sendDirect(recipientRef, text, opts) {
       const outcome = await sendDM(app, botToken, recipientRef, formatForSlack(text), {
@@ -172,6 +179,12 @@ If you already have an email for the person, you don't need this tool to book a 
       return resolveDmChannelId(app, botToken, userRef);
     },
 
+    // v4.1.x (#51) — DM channel → person, the reverse direction. IM-only; the
+    // primitive returns null for anything multi-party.
+    async resolveChannelCounterpart(channelRef) {
+      return resolveDmCounterpart(app, botToken, channelRef);
+    },
+
     async reactToMessage(channelRef, messageTs, emojiName) {
       try {
         await app.client.reactions.add({
@@ -183,6 +196,27 @@ If you already have an email for the person, you don't need this tool to book a 
       } catch {
         // fire-and-forget; reactions failing is not a contract violation
       }
+    },
+
+    // v4.1.x (O2) — EDIT + RETRACT over chat.update / chat.delete, so the
+    // placeholder-then-update pattern stops reaching into the Slack module.
+    // formatForSlack on the update path is a BUG FIX, not symmetry: update is
+    // the NORMAL path for routine output (the placeholder almost always posts),
+    // so pre-fix the owner got raw `**bold**` / `## header` / `- ` markdown from
+    // every routine, while the rare fresh-post fallback rendered clean.
+    async updateMessage(channelRef, messageRef, text) {
+      const res = await slackUpdateMessage(app, botToken, channelRef, messageRef, formatForSlack(text));
+      return res.ok
+        ? { ok: true, ref: channelRef, ts: messageRef }
+        : { ok: false, reason: 'error', detail: res.detail };
+    },
+
+    async deleteMessage(channelRef, messageRef) {
+      const res = await slackDeleteMessage(app, botToken, channelRef, messageRef);
+      // No `ts` on success — the message it named is gone.
+      return res.ok
+        ? { ok: true, ref: channelRef }
+        : { ok: false, reason: 'error', detail: res.detail };
     },
 
     async executeToolCall(toolName, args) {

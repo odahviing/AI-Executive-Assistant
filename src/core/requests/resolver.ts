@@ -27,6 +27,73 @@ import { runDeferredAction } from './deferredActionReplay';
 import logger from '../../utils/logger';
 import { MODEL_HAIKU } from '../../llm/models';
 
+/**
+ * How many counter-offers a single request may carry before it is brought to a
+ * close — counted across BOTH directions (owner counters, colleague
+ * counter-counters), because the ping-pong is what's bounded, not either side's
+ * share of it. Round 1 and 2 relay; round 3 expires the request and both sides
+ * are told (R4). Owner ruling 2026-07-25: two. It lives here, once — the two
+ * copies of this cap (relay + bounce-back) had drifted to 3 apiece behind a
+ * stale dated comment, which is exactly how a rule ends up with two answers.
+ */
+const MAX_COUNTER_ROUNDS = 2;
+
+/**
+ * How long the COLLEAGUE gets to answer a counter relayed to them. Matches the
+ * colleague-side wait already used on this spine (runner.ts reschedule_reask →
+ * outreach_expiry at +48h) rather than inventing a second convention.
+ */
+const COLLEAGUE_COUNTER_WINDOW_HOURS = 48;
+
+/** Owner-side decision window, in owner workdays — same default create_approval raises with. */
+const OWNER_DECISION_WORKDAYS = 2;
+
+/**
+ * #42 — re-aim the request's clock at whichever side is now being waited on.
+ *
+ * The timers were a function of the RAISE, not of the STATE: a request raised
+ * awaiting_owner kept its owner-facing midpoint-nag + expiry schedule even after
+ * an amend handed the ball to the colleague. So the midpoint DM'd the owner
+ * "Still waiting on your call here" about a call he had already made, and expiry
+ * told BOTH parties he'd ghosted a decision the colleague was actually sitting
+ * on — the precise pair of wrong outcomes R4 exists to prevent. Every transition
+ * between the two waiting states now goes through here.
+ *
+ * Handler is always `expiry`: runExpiry reads the row's state at fire time and
+ * tells each side the true story, so one terminal path serves both directions.
+ * The midpoint nag is deliberately NOT re-armed on a transition — the message
+ * that caused the transition (the counter relay, the pushback DM) IS the nudge.
+ *
+ * The deadline never shortens a live one: whichever of the current `expires_at`
+ * and the fresh side-appropriate window is later wins, so someone handed the
+ * ball at the tail end of the window still gets a fair chance to answer.
+ * expires_at moves with next_check_at — one deadline, never two disagreeing.
+ */
+function timersForWaitingSide(
+  row: RequestRow,
+  side: 'owner' | 'colleague',
+  profile: UserProfile,
+): { expiresAt: string; nextCheckAt: string; nextCheckHandler: 'expiry' } {
+  let fresh: DateTime;
+  if (side === 'colleague') {
+    fresh = DateTime.now().plus({ hours: COLLEAGUE_COUNTER_WINDOW_HOURS }).toUTC();
+  } else {
+    // Owner-facing deadlines respect his work hours (R5) — same helper pair the
+    // raise-time expiry uses, so a counter bounced back at 22:00 doesn't burn
+    // the night.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { addWorkdays, workTimeBaseFromNow } = require('../../utils/workHours') as
+      typeof import('../../utils/workHours');
+    fresh = DateTime.fromISO(
+      addWorkdays(workTimeBaseFromNow(profile), OWNER_DECISION_WORKDAYS, profile),
+      { zone: 'utc' },
+    );
+  }
+  const existing = row.expires_at ? DateTime.fromISO(row.expires_at, { zone: 'utc' }) : null;
+  const at = ((existing?.isValid && existing > fresh) ? existing : fresh).toUTC().toISO()!;
+  return { expiresAt: at, nextCheckAt: at, nextCheckHandler: 'expiry' };
+}
+
 export type ResolveVerdict =
   | { verdict: 'approve'; data?: Record<string, unknown> }
   | { verdict: 'reject'; reason?: string }
@@ -161,6 +228,8 @@ export async function resolveRequest(
       const detailsAfter = parseDetails<Record<string, unknown>>(row) ?? {};
       updateRequest(requestId, {
         state: 'awaiting_owner',
+        // #42 — ball back with the owner, so the clock goes back to his window.
+        ...timersForWaitingSide(row, 'owner', ctx.profile),
         details: {
           ...detailsAfter,
           colleague_pushback: verdict.reason ?? 'said no to counter',
@@ -221,17 +290,16 @@ export async function resolveRequest(
 
     // v2.9.1 — colleague countering owner's counter (amending state). Bounce
     // back to awaiting_owner; owner sees "Yael said: not 14:00, how about
-    // 15:30?". Owner re-decides. Same round-cap protection.
-    const MAX_AMEND_ROUNDS_BOUNCE = 3;
+    // 15:30?". Owner re-decides. Same round cap — one constant, both directions.
     if (wasAwaitingColleague) {
-      if (amendRound > MAX_AMEND_ROUNDS_BOUNCE) {
+      if (amendRound > MAX_COUNTER_ROUNDS) {
         logger.warn('resolveRequest — colleague-counter amend round cap hit', {
-          id: requestId, round: amendRound,
+          id: requestId, round: amendRound, cap: MAX_COUNTER_ROUNDS,
         });
         closeRequest({
           id: requestId,
           state: 'expired',
-          closureReason: `amend ping-pong exceeded ${MAX_AMEND_ROUNDS_BOUNCE} rounds`,
+          closureReason: `amend ping-pong exceeded ${MAX_COUNTER_ROUNDS} rounds`,
           closedBy: 'expiry',
         });
         await notifyRequesterOfDecision(row, 'reject', null, 'too many rounds — closing', ctx);
@@ -246,6 +314,8 @@ export async function resolveRequest(
       counterHistory.push({ by: 'colleague', counter: verdict.counter, at: DateTime.now().toISO() });
       updateRequest(requestId, {
         state: 'awaiting_owner',
+        // #42 — ball back with the owner, so the clock goes back to his window.
+        ...timersForWaitingSide(row, 'owner', ctx.profile),
         details: {
           ...detailsAll,
           counter: verdict.counter,
@@ -282,17 +352,16 @@ export async function resolveRequest(
     // PENDING APPROVALS prompt block + Sonnet calls resolve_approval.
     //
     // Cap rounds to prevent infinite ping-pong (owner counters, requester
-    // counters, owner counters again, …). Default cap 3; after that the
-    // request expires (owner direction 2026-06-21 — "up to 3 rounds, no more").
-    const MAX_AMEND_ROUNDS = 3;
-    if (amendRound > MAX_AMEND_ROUNDS) {
+    // counters, owner counters again, …); past the cap it's just annoying, so
+    // bring it to a close — the request expires and both sides are told.
+    if (amendRound > MAX_COUNTER_ROUNDS) {
       logger.warn('resolveRequest — amend round cap hit, closing as expired', {
-        id: requestId, round: amendRound, cap: MAX_AMEND_ROUNDS,
+        id: requestId, round: amendRound, cap: MAX_COUNTER_ROUNDS,
       });
       closeRequest({
         id: requestId,
         state: 'expired',
-        closureReason: `amend ping-pong exceeded ${MAX_AMEND_ROUNDS} rounds`,
+        closureReason: `amend ping-pong exceeded ${MAX_COUNTER_ROUNDS} rounds`,
         closedBy: 'expiry',
       });
       await notifyRequesterOfDecision(row, 'reject', null, 'too many rounds — closing', ctx);
@@ -304,8 +373,11 @@ export async function resolveRequest(
       ? (detailsAll.counter_history as Array<Record<string, unknown>>)
       : [];
     counterHistoryOwnerSide.push({ by: 'owner', counter: verdict.counter, at: DateTime.now().toISO() });
+    // #42 — the ball just moved to the colleague; re-aim the clock at them.
+    const colleagueTimers = timersForWaitingSide(row, 'colleague', ctx.profile);
     updateRequest(requestId, {
       state: 'awaiting_colleague',
+      ...colleagueTimers,
       details: {
         ...detailsAll,
         counter: verdict.counter,
@@ -314,6 +386,9 @@ export async function resolveRequest(
         amended_at: DateTime.now().toISO(),
         amended_by: 'owner',
       },
+    });
+    logger.info('resolveRequest — amend relayed, timers re-aimed at the colleague', {
+      id: requestId, round: amendRound, expiresAt: colleagueTimers.expiresAt,
     });
     await notifyRequesterOfDecision(row, 'amend', verdict.counter, verdict.reason, ctx);
     return {
@@ -512,6 +587,27 @@ async function runApproveCallback(
     ? (replayResult.meetingId as string)
     : undefined;
 
+  // #11 — WHAT ACTUALLY HAPPENED, read off the executed action, not off the row.
+  // The stored `deferred_action` is the ORIGINAL ask; on an amended approval the
+  // executed args are `mergeAmendIntoApprove(on_approve, counter)`, built locally
+  // and never written back. So a counter of 13:00 → 15:30 booked 15:30 while
+  // anything reading the row still said 13:00 — and the requester relay read the
+  // row. Both the tool return and the relay are now fed from this one object:
+  // `booked_start` is the tool's own truth (it can snap/normalize the time),
+  // falling back to the args we actually replayed. Same for subject — a counter
+  // can rename the meeting too.
+  const executed = {
+    tool,
+    start: typeof replayResult?.booked_start === 'string'
+      ? (replayResult.booked_start as string)
+      : (typeof replayArgs.start === 'string'
+          ? (replayArgs.start as string)
+          : (typeof replayArgs.new_start === 'string' ? (replayArgs.new_start as string) : undefined)),
+    subject: typeof replayArgs.subject === 'string'
+      ? (replayArgs.subject as string)
+      : (typeof replayArgs.meeting_subject === 'string' ? (replayArgs.meeting_subject as string) : undefined),
+  };
+
   // Replay succeeded — close and relay.
   closeRequest({
     id: row.id,
@@ -526,10 +622,11 @@ async function runApproveCallback(
       replayed: tool,
       merged_from_amend: meta.mergedFromAmend,
       amend_round: meta.amendRound,
+      ...(executed.start ? { booked_start: executed.start } : {}),
     },
   });
 
-  await notifyRequesterOfDecision(row, 'approve', { replayed: tool }, undefined, ctx);
+  await notifyRequesterOfDecision(row, 'approve', { replayed: tool }, undefined, ctx, executed);
 
   // 138a + 138c (GH #140) — surface the CONCRETE outcome, not resolver jargon.
   // Pre-fix this returned `approved approval/policy_exception — replayed
@@ -540,12 +637,8 @@ async function runApproveCallback(
   // travel-aware line (same one the direct-book path gives her); `booked` marks
   // it a real booking. No kind/subkind string ever reaches the model.
   const isBookingTool = tool === 'create_meeting' || tool === 'book_floating_block';
-  const replayStart = typeof replayResult?.booked_start === 'string'
-    ? (replayResult.booked_start as string)
-    : (typeof replayArgs.start === 'string' ? (replayArgs.start as string) : undefined);
-  const replaySubject = typeof replayArgs.subject === 'string'
-    ? (replayArgs.subject as string)
-    : (row.subject ?? undefined);
+  const replayStart = executed.start;
+  const replaySubject = executed.subject ?? row.subject ?? undefined;
   const replaySummary = typeof replayResult?.action_summary === 'string'
     ? (replayResult.action_summary as string)
     : undefined;
@@ -599,12 +692,33 @@ function usableRelaySubject(candidate: unknown): string | undefined {
   return s;
 }
 
+/**
+ * What the resolver ACTUALLY executed for this request, handed in by the only
+ * caller that executed anything (runApproveCallback, post-replay).
+ *
+ * #11 — the relay is TOLD the outcome; it never reconstructs one. It used to
+ * read the time out of the row's stored `deferred_action`, which is the original
+ * ASK: after an amend the executed args are a locally-merged object that is
+ * never persisted, so the colleague was told "locked in for 13:00" while 15:30
+ * was on the calendar. Absent here (reject, amend relay, pure approve, an
+ * unreplayable on_approve) means nothing ran — and then the relay names no time
+ * at all, which is the honest thing to say about an action that hasn't happened.
+ */
+interface ExecutedOutcome {
+  tool: string;
+  /** ISO start the action actually landed on. */
+  start?: string;
+  /** Subject as executed — a counter can rename the meeting, not just move it. */
+  subject?: string;
+}
+
 async function notifyRequesterOfDecision(
   row: RequestRow,
   verdict: 'approve' | 'reject' | 'amend',
   data: Record<string, unknown> | null,
   reason: string | undefined,
   ctx: ResolveContext,
+  executed?: ExecutedOutcome,
 ): Promise<void> {
   // Definitive relay tracing (Yael/Eve drop, 2026-06-18). This path used to log
   // nothing on the common 1:1-DM success route, so a silent miss couldn't be
@@ -653,24 +767,21 @@ async function notifyRequesterOfDecision(
   //   (5) generic "that ask"
   // Pre-fix this fell straight to row.subject, leaking the auto-generated
   // "<subkind> needs your input" phrase into MPIM resolution messages.
+  // #11 — the EXECUTED subject leads. The stored deferred_action's subject is
+  // still a usable fallback for the paths where nothing ran (it's the ask's own
+  // wording), but it must never outrank what actually happened: a counter merges
+  // arbitrary keys into the replayed args, subject included.
   const deferred = details.deferred_action as { args?: Record<string, unknown> } | undefined;
-  // Pull subject + start time + location from the on_approve callback when
-  // present. v2.9.4 (#107d) — pre-fix the relay body said "I'll take it from
-  // here, will let you know once it's sorted" even though the booked time +
-  // subject were sitting in deferred.args. Now: when start is known, render
-  // the concrete time so the requester knows exactly what was booked.
   const deferredSubject = typeof deferred?.args?.subject === 'string'
     ? deferred.args.subject as string
     : (typeof deferred?.args?.meeting_subject === 'string' ? deferred.args.meeting_subject as string : undefined);
-  const deferredStart = typeof deferred?.args?.start === 'string'
-    ? deferred.args.start as string
-    : (typeof deferred?.args?.new_start === 'string' ? deferred.args.new_start as string : undefined);
   // v3.3.x — every candidate is filtered through usableRelaySubject, which
   // rejects approval-meta ("policy exception") AND question-form internal asks
   // ("Can Idan find 10 minutes…?") so neither leaks into the requester relay.
   // (Pre-fix only row.subject was filtered; details.question — the raw internal
   // question — fell straight through and leaked to Dina, 2026-06-14.)
   const subject =
+    usableRelaySubject(executed?.subject) ||
     usableRelaySubject(deferredSubject) ||
     usableRelaySubject(details.subject) ||
     usableRelaySubject(details.question) ||
@@ -712,7 +823,11 @@ async function notifyRequesterOfDecision(
         : dt.toFormat('cccc d MMM, HH:mm');
     } catch { return ''; }
   };
-  const startFormatted = deferredStart ? formatStart(deferredStart) : '';
+  // #11 — ONLY an executed action produces a time here. No executed action → no
+  // time in the relay, and the action-agnostic wording below carries it instead.
+  // (Pre-fix this read the stored ask's time, so an unreplayable on_approve also
+  // announced "Booking X for 14:00" for a booking that hadn't happened.)
+  const startFormatted = executed?.start ? formatStart(executed.start) : '';
 
   const { getConnection } = await import('../../connections/registry');
   const conn = getConnection(row.owner_user_id, 'slack');
@@ -802,7 +917,9 @@ async function notifyRequesterOfDecision(
         (typeof details.question === 'string' && details.question.trim() ? details.question.trim() : '') ||
         (typeof details.subject === 'string' && details.subject.trim() ? details.subject.trim() : '') ||
         row.subject || subject;
-      const deferredTool = (details.deferred_action as { tool?: string } | undefined)?.tool;
+      // The tool that RAN when one ran; else the one the ask was about.
+      const deferredTool = executed?.tool
+        ?? (details.deferred_action as { tool?: string } | undefined)?.tool;
       const actionHint =
         deferredTool === 'delete_meeting' ? 'a cancellation'
           : (deferredTool === 'move_meeting' || deferredTool === 'update_meeting') ? 'a change to an existing meeting'
@@ -977,11 +1094,27 @@ async function notifyOwnerOfColleaguePushback(
       logger.warn('notifyOwnerOfColleaguePushback — no Slack connection', { id: row.id });
       return;
     }
-    const res = await conn.sendDirect(row.owner_user_id, body);
-    if (res.ok && res.ts) {
-      // Update terminal_dm_msg_ts so Module D can auto-resolve the bounce
-      // reply on this fresh DM thread.
-      updateRequest(row.id, { terminalDmMsgTs: res.ts });
+    // #45 — a decision coming BACK to the owner is still a decision, so it goes
+    // in the signature book, not into a fresh top-level DM outside it. Today's
+    // book, resolved at post time: a counter that lands days after the original
+    // ask belongs in today's list of things needing his signature, not with the
+    // day he last touched it (owner ruling 2026-07-25 — "new day, new tasks").
+    // Re-stamp all three pointers so the row names where the ask now lives:
+    // terminal_dm_msg_ts keeps ✅ working on THIS message, and owner_dm_thread_ts
+    // is what threadBoundApprovalAutoResolve matches a typed reply against — the
+    // row is back in awaiting_owner by now, so it's a live candidate there.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { postOwnerDecision } = require('../../utils/ownerDailyThread') as
+      typeof import('../../utils/ownerDailyThread');
+    const res = await postOwnerDecision({
+      profile: ctx.profile, conn, text: body, label: `colleague ${verdict} bounce-back`,
+    });
+    if (res.ok) {
+      updateRequest(row.id, {
+        ownerDmChannel: res.channel ?? row.owner_dm_channel ?? undefined,
+        ownerDmThreadTs: res.threadTs ?? row.owner_dm_thread_ts ?? undefined,
+        terminalDmMsgTs: res.ts ?? row.terminal_dm_msg_ts ?? undefined,
+      });
     }
   } catch (err) {
     logger.warn('notifyOwnerOfColleaguePushback — threw, non-fatal', {

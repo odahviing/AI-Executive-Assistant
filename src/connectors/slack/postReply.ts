@@ -2,13 +2,13 @@
  * Reply pipeline (v1.6.2 split from app.ts).
  *
  * The stage between "runOrchestrator returned a draft" and "a message lands in
- * Slack". DELIVERY only — the output-time gate stack (concision, claim-checker,
- * humanGate, date verifier, security gate) lives in
+ * Slack". DELIVERY only — the output-time gate stack (deliberation guard,
+ * claim-checker, humanGate, date verifier, security gate) lives in
  * `utils/guards/runOutputGates` so transport and gate policy change
  * independently of each other.
  *
  * Steps, in order:
- *   1  Concision finalizer (guard module) on the raw draft.
+ *   1  Deliberation guard (guard module) on the raw draft.
  *   1b Save what the user will actually SEE to conversation history (so
  *      Claude's next turn sees what she did, not the deliberation chain).
  *   2  Normalize markdown artefacts (** → *, etc) for Slack rendering, and
@@ -18,6 +18,9 @@
  *   4  Ack-class emoji replacement, then the colleague shadow-notify.
  *   5  Audio vs text branch based on the input modality + TTS availability.
  *   6  Optional approval footer when the orchestrator flagged a pending ask.
+ *   7  Social coda, if the turn produced one — its OWN in-thread message a beat
+ *      after the reply lands, never a last line glued onto it. On a confirmed
+ *      post it closes the social cadence gate and mirrors to the owner's shadow.
  */
 
 import type { App } from '@slack/bolt';
@@ -28,7 +31,11 @@ import { formatForSlack } from '../../connections/slack/formatting';
 import { config } from '../../config';
 import { textToSpeech, sendAudioMessage, shouldRespondWithAudio } from '../../voice';
 import logger from '../../utils/logger';
-import { runConcisionPassIfNeeded, runOutputGates } from '../../utils/guards/runOutputGates';
+import { runDeliberationGuard, runOutputGates, runCodaGates } from '../../utils/guards/runOutputGates';
+import { isThreadActive } from './inboundQueue';
+import { getLastMaelleMessage } from '../../utils/threadActivity';
+import { recordCodaDelivered } from '../../core/social/logEngagement';
+import { composeSocialCoda } from '../../core/social/generateCoda';
 
 export type SenderRole = 'owner' | 'colleague' | 'unknown';
 
@@ -48,12 +55,17 @@ export interface PostReplyInput {
   // text and react 👍 on the user's message instead. Optional for back-compat;
   // when omitted, ack-replacement is skipped and the reply posts as text.
   userMessageTs?: string;
-  // Turn inputs the gate stack reads (prior-turn tool markers for the
-  // claim-checker shield, the spoof scan, the date verifier's anchor, and the
-  // colleague mutation-contradiction re-draft). Passed straight to runOutputGates.
+  // Turn inputs the gate stack reads (prior-turn mutation markers for the
+  // claim-checker shield, the spoof scan, the date verifier's anchor). Passed
+  // straight to runOutputGates.
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
   userMessage: string;
   isMpim?: boolean;
+  // True when this turn arrived in a real channel (not a DM, not an MPIM). The
+  // missing sibling of isMpim — the pipeline needs the full posture to decide
+  // what it may deliver on its own initiative (the social coda is 1:1-DM-only)
+  // and to address the inbound queue by the same key the inbound side used.
+  isChannel?: boolean;
   isOwnerInGroup?: boolean;
   mpimMemberIds?: string[];
   voiceInput?: boolean;
@@ -106,12 +118,249 @@ function isPureAckReply(reply: string): boolean {
   return ACK_PHRASES.has(normalized);
 }
 
+/**
+ * Shadow-mirror preview. Flattens to one line and caps with an ellipsis, so a
+ * real overflow reads as truncated rather than ended. Cap was raised from 200
+ * because it cut a normal slot proposal / colleague ask off mid-sentence.
+ * Shared by the conversation mirror (Step 4.6) and the coda mirror.
+ */
+const SHADOW_PREVIEW_MAX = 350;
+function shadowPreview(s: string | undefined): string {
+  const flat = (s ?? '').replace(/\s+/g, ' ').trim();
+  return flat.length > SHADOW_PREVIEW_MAX ? `${flat.slice(0, SHADOW_PREVIEW_MAX).trim()}…` : flat;
+}
+
+// ── Social coda — a separate message, not a last line ───────────────────────
+
+/**
+ * How long after the reply LANDS the coda follows. Owner's call: 10 seconds —
+ * long enough to read as a second thought rather than a swerve in the first
+ * one. Measured from delivery of the reply, not from the inbound message: a
+ * turn can take 30s, so anchoring on the inbound would collapse the beat to
+ * zero and reproduce the very run-on the split exists to fix.
+ */
+const CODA_DELAY_MS = 10_000;
+
+/**
+ * Deliver the social coda as its OWN in-thread message, a beat after the reply.
+ *
+ * It used to be concatenated (`reply + "\n\n" + coda`), so a Sydney slot
+ * proposal ended on an unrelated social line and read as a non-sequitur
+ * ("…17:30 Sydney. Any trips coming up?"). The orchestrator now settles only
+ * ELIGIBILITY during the turn and hands over a `PendingSocialCoda` — a directive,
+ * not a sentence. Composition and delivery both happen here, inside the beat.
+ *
+ * Contract:
+ * - SAME thread (S3), always — never a new top-level message. It is a follow-on
+ *   to the reply, not a new topic.
+ * - TEXT, never audio, even when the turn came in as a voice note. TTS exists so
+ *   an answer comes back in the modality it was asked in; the coda was not asked
+ *   for. A one-line social question you can read at a glance beats a second clip
+ *   the person has to play.
+ * - Scheduled only from a delivery-SUCCESS point, so a reply that failed to send
+ *   can never be followed by a cheerful aside about someone's weekend.
+ * - Dropped if the person has typed again by the time it fires — the coda's
+ *   premise is a lull, and a lull broken inside 10s wasn't one.
+ * - 1:1 DM only (S4/S6). The orchestrator already restricts it; asserted again
+ *   here so no future caller can put personal small-talk in a shared surface.
+ * - Fire-and-forget: it cannot delay, fail or crash the turn. Nothing on this
+ *   path is ever awaited by the person's reply — composition included, which is
+ *   the whole reason it moved in here.
+ * - A confirmed post is what closes the social gate (`recordCodaDelivered`) and
+ *   what the owner's shadow mirror reflects. Nothing is charged, and nothing is
+ *   reported to the owner, for a coda that never went out.
+ *
+ * Order inside the beat, and why it is that order: lull checks → compose →
+ * gate → post. Everything that can drop the coda for free runs before anything
+ * that costs a model call, so the common "they started typing again" case spends
+ * nothing. Composition is one call into the social lane (`composeSocialCoda`) —
+ * we ask for a sentence and get a sentence or null; the payload is theirs, the
+ * timing is ours.
+ *
+ * Gate coverage: the coda does NOT run the reply gate stack — it runs the
+ * guard-owned `runCodaGates` instead (utils/guards/runOutputGates), which owns
+ * the whole ship-or-drop decision and explains there why the reply stack's gates
+ * are wrong for this message. Together with the `claimChecker mode='coda'`
+ * validator inside `composeSocialCoda` and the cross-cutting
+ * `scrubInternalLeakage` inside formatForSlack, that is the coda's vetting.
+ */
+function scheduleSocialCoda(opts: {
+  coda: OrchestratorOutput['socialCoda'];
+  say: PostReplyInput['say'];
+  profile: UserProfile;
+  senderId: string;
+  colleagueName?: string;
+  channelId: string;
+  threadTs: string;
+  role: SenderRole;
+  isMpim: boolean;
+  isChannel: boolean;
+}): void {
+  const { coda, say, profile, senderId, colleagueName, channelId, threadTs, role, isMpim, isChannel } = opts;
+  if (!coda) return;
+
+  const isOneOnOneDm = !isMpim && !isChannel;
+  if (!isOneOnOneDm) {
+    logger.warn('Social coda suppressed — not a 1:1 DM', { threadTs, isMpim, isChannel });
+    return;
+  }
+
+  // The one thing still done before the timer, guarded, and every failure DROPS
+  // the coda. Fail-CLOSED here is the inverse of the reply gates' fail-open
+  // contract, and it is right precisely because nothing is lost by staying quiet
+  // — a social aside is optional by definition. The guard also makes "cannot
+  // fail the turn" literally true: this runs at two delivery-success points, one
+  // of them inside the ack branch's try, where a throw would fall through to the
+  // fallback text send and duplicate an already-acked reply. It has to stay out
+  // here: it is the BASELINE the fire-time check compares against, so reading it
+  // 10s later would compare the thread to itself and never detect a new turn.
+  let replyTsAtSchedule: string | null;
+  try {
+    // The reply we are trailing. Two cheap lookups at fire time decide whether
+    // the lull survived the 10s: the inbound queue answers "is a turn running or
+    // queued RIGHT NOW" (the person typed and we are already answering), and
+    // this snapshot answers "did a whole turn come and go" — a fast follow-up
+    // (the deterministic approval auto-resolve returns in ~300ms) can start and
+    // finish inside the window, leaving the queue idle again. Together they
+    // mean: nothing happened in this thread since the reply landed.
+    replyTsAtSchedule = getLastMaelleMessage(threadTs)?.messageTs ?? null;
+  } catch (err) {
+    logger.warn('Social coda prep threw — dropping the coda (fail closed)', {
+      threadTs, err: String(err).slice(0, 200),
+    });
+    return;
+  }
+
+  setTimeout(() => {
+    void (async () => {
+      try {
+        if (isThreadActive(channelId, threadTs, isOneOnOneDm)) {
+          logger.info('Social coda dropped — the person is talking again, the lull is gone', {
+            threadTs, personSlackId: coda.personSlackId,
+          });
+          return;
+        }
+        const replyTsNow = getLastMaelleMessage(threadTs)?.messageTs ?? null;
+        if (replyTsNow !== replyTsAtSchedule) {
+          logger.info('Social coda dropped — another turn already answered in this thread', {
+            threadTs, replyTsAtSchedule, replyTsNow,
+          });
+          return;
+        }
+        // WRITE the coda — here, and not a moment earlier. This is the first
+        // point at which the line is certainly going to be offered: both lull
+        // checks are behind us, so a coda the lull already killed now costs
+        // nothing at all — no Sonnet call, no claim-check, no burnt topic beat.
+        //
+        // It used to be composed during the turn, which put two round-trips
+        // between "answer ready" and "answer posted": the person waited on their
+        // WORK reply so that a social aside could be written — one the transport
+        // then deliberately sits on for 10 seconds. Social never delays real
+        // work. The 10s beat is dead time and is the right place to spend it.
+        //
+        // ONE call into the social lane, by design. Composing and vetting are its
+        // job, and the vet needs the person's notes; splitting the two would have
+        // meant assembling that snapshot out here, putting someone's private
+        // memory in the pipes for no reason the pipes have. Only the finished
+        // sentence crosses. Total by contract — null means "nothing to post".
+        const composed = await composeSocialCoda(coda, profile);
+        if (!composed) {
+          logger.info('Social coda not composed — nothing to post', {
+            threadTs, personSlackId: coda.personSlackId,
+          });
+          return;
+        }
+        const text = formatForSlack(composed.trim());
+        if (text.length === 0) return;
+
+        // Guard-owned ship/drop verdict, LAST so it is never spent on a coda the
+        // lull checks above already killed. Inside the timer on purpose: the 10s
+        // beat is dead time, so the check adds nothing to any user-visible path —
+        // not the reply (already delivered), not the turn (fire-and-forget).
+        const gate = await runCodaGates(text, { profile, role });
+        if (!gate.ship) {
+          logger.warn('Social coda dropped by the coda gate — never rewritten', {
+            threadTs, role, droppedBy: gate.droppedBy, codaPreview: text.slice(0, 80),
+          });
+          return;
+        }
+        // Social bookkeeping — the once-per-day cadence gate + the subject
+        // raise-marker — goes in on the line BEFORE the post, not after.
+        //
+        // A DB write either side of a network call leaves residue; the choice is
+        // which side carries it. AFTER: posted, gate still open → the same person
+        // can be pinged twice today (the 3-codas-in-8-minutes class the owner
+        // reported). BEFORE: gate burned, nothing posted → one silent skipped
+        // social day, self-healing in 24h. Cheap side wins — but the decisive
+        // reason is subtler: a `say` REJECTION does not prove the message didn't
+        // land (an accepted post whose response times out throws here), so
+        // stamping only on success would leave the gate open on a coda the person
+        // is looking at. Stamping first is correct, not merely cheaper. Every
+        // drop path — both lull checks, the prep guard, an empty compose,
+        // runCodaGates — already sits above this line, so the original bug
+        // (charging a ping for a coda nobody saw) stays fixed either way. Never
+        // throws by contract.
+        recordCodaDelivered({ personSlackId: coda.personSlackId, subjectId: coda.subjectId });
+        await say({ text, thread_ts: threadTs, unfurl_links: false, unfurl_media: false });
+        // History, so the NEXT turn knows she asked — otherwise she re-asks, or
+        // misreads the answer ("yeah, Berlin", with no memory of the question).
+        // Written only after a confirmed post, and only on the quiet-thread path,
+        // so history can never claim a coda the person never saw or interleave
+        // one behind a message that arrived first.
+        //
+        // Deliberately NOT recordMaelleMessage(): that names the message the
+        // completeTask hook reacts ✅ on, and the tick belongs on the task
+        // confirmation, not on a question about someone's weekend.
+        appendToConversation(threadTs, channelId, { role: 'assistant', content: text });
+        logger.info('Social coda posted as its own in-thread message', {
+          threadTs, role, delayMs: CODA_DELAY_MS, codaPreview: text.slice(0, 80),
+        });
+
+        // Owner receipt (owner's call: "I do want to see the coda in the shadow
+        // DM"). Fires only here — after a confirmed post — so a coda the gate
+        // dropped or the lull killed is never mirrored as if it had been sent,
+        // and it mirrors the exact post-gate string the person received (the same
+        // rationale as the v3.0.8 move that put the shadow after the gates).
+        //
+        // Its OWN shadowNotify call, but NOT a second "Conversation with X"
+        // header: the same conversationKey threads it under the anchor Step 4.6
+        // cached (shadowNotify.ts:95), so the owner sees one conversation with the
+        // coda as a labelled line inside it. Labelled 'Social coda' because
+        // telling it apart from the reply at a glance is the whole point of the
+        // request. Colleague-facing only — the owner doesn't need his own DM
+        // mirrored back, and the senderId check also excludes him in
+        // colleague-test mode. (No isOwnerInGroup check: the coda is 1:1-DM-only,
+        // asserted above, and that clamp only exists inside an MPIM.)
+        if (role === 'colleague' && senderId !== profile.user.slack_user_id) {
+          const who = colleagueName ?? senderId;
+          const { shadowNotify } = await import('../../utils/shadowNotify');
+          await shadowNotify(profile, {
+            channel: channelId,
+            threadTs,
+            action: 'Social coda',
+            detail: `I → ${who}: "${shadowPreview(text)}"`,
+            conversationKey: threadTs,
+            // Identical to Step 4.6's header so a re-anchor (approval turn, or a
+            // restart that lost the cache) can't label the same conversation two
+            // different ways.
+            conversationHeader: `Conversation with ${who}`,
+          });
+        }
+      } catch (err) {
+        logger.warn('Social coda post failed — dropped, turn unaffected', {
+          threadTs, err: String(err).slice(0, 200),
+        });
+      }
+    })();
+  }, CODA_DELAY_MS);
+}
+
 export async function postOrchestratorReply(input: PostReplyInput): Promise<void> {
   const {
     app, profile, result, say,
     role, colleagueName,
     senderId, channelId, threadTs,
-    history, userMessage, isMpim, isOwnerInGroup, mpimMemberIds, voiceInput,
+    history, userMessage, isMpim, isChannel, isOwnerInGroup, mpimMemberIds, voiceInput,
   } = input;
   const { assistant } = profile;
 
@@ -127,18 +376,16 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     return;
   }
 
-  // Step 1 (v2.2.5) — concision pass. When Sonnet emits a single text block
-  // with deliberation embedded ("wait,", "let me find", "OK definitive
-  // proposal", "actually,") or a wall of text > 600 chars on a non-list reply,
-  // run a quick rewrite that strips the journey and keeps only the final
-  // user-facing answer. Backstops the base-prompt anti-deliberation rule when
-  // Sonnet ignores it. Cheap (only fires when triggered, ~150 in / ~100 out).
+  // Step 1 — deliberation guard. When Sonnet emits a single text block with her
+  // derivation embedded ("wait,", "let me find", "OK definitive proposal"), strip
+  // that narration and keep the answer. Backstops the base-prompt anti-
+  // deliberation rule when Sonnet ignores it. Rare (a couple of fires a week) and
+  // it never shortens an answer — a rewrite that drops a fact is discarded.
   // Falls back to the original draft on any error.
-  const finalReply = await runConcisionPassIfNeeded(result.reply, profile);
+  const finalReply = await runDeliberationGuard(result.reply, profile);
 
-  // Step 1b — persist what the user will actually see (post-concision) to
-  // history. Future turns reading the conversation see the clean answer, not
-  // the raw deliberation chain.
+  // Step 1b — persist what the user will actually see to history. Future turns
+  // reading the conversation see the answer, not the raw deliberation chain.
   const savedContent = result.toolSummaries?.length
     ? `${result.toolSummaries.join(' ')}\n${finalReply}`
     : finalReply;
@@ -169,11 +416,11 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
 
   // Step 3 — the output-time GATE STACK (guard lane, utils/guards/runOutputGates).
   // Owner path: claim-check + humanGate + date-verify (probed concurrently,
-  // exact serial chain on any flag). Colleague path: date-verify →
-  // mutation-contradiction retry → security gate → humanGate. Every gate fails
-  // OPEN, so a throw in there returns the draft we handed it.
+  // exact serial chain on any flag). Colleague path: date-verify → security gate
+  // → humanGate. Every gate fails OPEN, so a throw in there returns the draft we
+  // handed it, and no gate can re-enter the orchestrator.
   cleanReply = await runOutputGates(cleanReply, {
-    app, profile, result,
+    profile, result,
     history, userMessage,
     senderId, channelId, threadTs,
     role, colleagueName, isMpim, isOwnerInGroup, mpimMemberIds,
@@ -198,6 +445,14 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       });
       logger.debug('Ack-class reply replaced with 👍 reaction', {
         senderId, threadTs, replyPreview: cleanReply.slice(0, 40),
+      });
+      // The reaction IS the reply and it landed, so the coda's beat starts here
+      // too. Without this the ack path — which returns before Step 5 — would
+      // silently swallow every coda that rode a one-word task confirmation.
+      scheduleSocialCoda({
+        coda: result.socialCoda, say, profile, senderId, colleagueName,
+        channelId, threadTs, role,
+        isMpim: isMpim === true, isChannel: isChannel === true,
       });
       return;  // No text post; the reaction IS the reply.
     } catch (err) {
@@ -232,16 +487,8 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     try {
       const { shadowNotify } = await import('../../utils/shadowNotify');
       const who = colleagueName ?? senderId;
-      // Shadow-mirror previews (owner-facing receipt). Cap raised from 200 — it was
-      // cutting a normal slot-proposal reply / colleague ask off mid-sentence, hard
-      // to read — with an ellipsis so a real overflow reads as truncated, not ended.
-      const SHADOW_PREVIEW_MAX = 350;
-      const previewLine = (s: string | undefined): string => {
-        const flat = (s ?? '').replace(/\s+/g, ' ').trim();
-        return flat.length > SHADOW_PREVIEW_MAX ? `${flat.slice(0, SHADOW_PREVIEW_MAX).trim()}…` : flat;
-      };
-      const replyPreview = previewLine(cleanReply);
-      const inboundPreview = previewLine(userMessage);
+      const replyPreview = shadowPreview(cleanReply);
+      const inboundPreview = shadowPreview(userMessage);
       const distinctTools = [...new Set(
         (result.toolSummaries ?? [])
           .map(s => s.match(/^\[([a-z0-9_]+)/)?.[1] ?? '')
@@ -286,6 +533,16 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       `To reject: \`reject ${result.approvalId}\``;
     await say({ text: approvalMsg, thread_ts: threadTs });
   }
+
+  // Step 7 — the social coda, as its own message. LAST on purpose: everything
+  // this turn owes the person is already in Slack, so the coda can only ever
+  // follow the answer, never precede or replace it. If Step 5 threw, we never
+  // get here — a failed reply is not followed by small talk.
+  scheduleSocialCoda({
+    coda: result.socialCoda, say, profile, senderId, colleagueName,
+    channelId, threadTs, role,
+    isMpim: isMpim === true, isChannel: isChannel === true,
+  });
 }
 
 // ── Delivery ───────────────────────────────────────────────────────────────

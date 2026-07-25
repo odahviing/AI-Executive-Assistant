@@ -2,6 +2,48 @@
 
 ---
 
+## 4.2.0 — the charter audit: 77 rules checked against the code, 40 fixes landed
+
+The framework shipped in 4.1.0 turned on itself. Every lane agent audited **its own area against its own charter** — the first time anyone asked whether Maelle's code actually does what her rules say. Of **77 rules, 22 were already obeyed and 60 were violated**; the owner reviewed all 68 findings individually, approved about half, and the seven lanes built them in parallel. A final adversarial pass over the combined diff caught two HIGH defects the individual lanes could not see, because each knew only its own wave. Result: **54 files, roughly +3,500 / −1,100.**
+
+Three findings came back **`charter-wrong`** — the code was right and the rule was not — including two guard rules that **contradicted each other**. Those became charter amendments rather than code changes; a defect hunt cannot produce that outcome, only an audit against a written standard can.
+
+### Fixed — privacy and disclosure
+- **The owner's full calendar could reach a colleague-readable thread.** In a group DM the MPIM clamp downgrades the owner to colleague, but `get_calendar` carried an `isOwnerInGroup` escape that skipped the clamp — every subject and attendee list entered the model's context in a room colleagues read. Dropping the escape was not sufficient: the scoped view filters to events the requester attends, and the owner's own `people_memory` row made that filter resolve to his whole calendar. Now gated on the authenticated identity and returning nothing before the calendar is even fetched, with an "ask me in DM" note. **The same loose test was found and closed in three further places** — the thread-event ledger, the slot finder (which was emitting another colleague's name and hold reason into a shared thread) and `move_meeting`.
+- **Private meeting subjects reached colleagues** through three payloads that never passed `displaySubject`. Subject masking is now **default-deny**, keyed on an explicit viewer threaded through every producer, so an un-threaded caller fails safe. The owner's own view was fixed in the same change — he no longer sees `[Private]` on his own calendar.
+- **`securityGate` was corrupting correct replies.** Its triggers fired on a properly-rendered `<@U…>` mention — the exact form `textScrubber` deliberately produces — so valid replies were de-tagged before sending. One owner for the token now, two readers. A side effect: every social coda that mentioned anyone was being silently dropped.
+
+### Fixed — wrong answers and wrong actions
+- **A meeting attendee could be silently replaced by the wrong person.** Name resolution fell back to a SQL `LIKE '%q%'` search and took the first row with an email, so "Lori" could bind Gloria's address and put a real invite in the wrong inbox. Now gated on a whole-name match plus a distinct-person check; ambiguity leaves the name unresolved so Maelle asks instead of guessing.
+- **Every external contact was invisible to the owner.** The contacts block filtered with `slack_id != ?`, and in SQL `NULL != 'U…'` is NULL — so all 19 externals were dropped from the roster silently.
+- **The requester was told the wrong meeting time.** The close-loop announced the time from the original request rather than what was actually booked, so an amended 13:00 → 15:30 booking was relayed as 13:00. It now carries the executed action's own truth.
+- **Approvals were raised for work that was already permitted**, and none required a reason. A `policy_exception` must now carry the action a tool actually refused — the code's proof that something was blocked — and every kind must state why. The old code that *fabricated* that proof is deleted.
+- **`check_join_availability` was a second, disagreeing validator.** It ran its own overlap and buffer maths with no work-hours, category or focus checks, so it could tell a colleague the owner was free at 21:00 on a slot booking would refuse. It now takes its verdict from `checkSlot`, and states occupancy independently of which rule tripped — it previously claimed "his calendar is clear" while he was in a dinner.
+- **An owner-named time could vanish from a search** with no annotation. It now returns with the real reason, while still never *proposing* a slot that collides with an external commitment.
+
+### Changed
+- Slot options raised from 5 to 8, both caps now config (`offered_slot_count`, `owner_min_slot_buffer_hours`, `travel_buffer_minutes`).
+- `planMeeting` collects every open gate and asks once, instead of returning on the first question.
+- Booking lead time and travel buffer moved into `checkSlot`, so search, candidate-check and booking can no longer disagree.
+- Owner decisions that resurface — a colleague's counter, a revived approval — now post into **today's** decision thread rather than as loose DMs. One path, resolved at post time.
+- Counter-offers cap at 2.
+- Colleague turns dropped **~4,000 tokens** of prompt: skill prose is now derived from the tools actually shipped for that caller, so a colleague no longer reads instructions for tools they are blocked from calling.
+- Learned preferences: seven of ten declared areas had no reader — writable and silently ignored. Adding an area without naming its reader is now a compile error.
+- The output gate stack lost its concision *drafting* pass (it rewrote for length with no fact check) and a colleague-path step that re-ran the orchestrator. The claim-checker shield reads a carried `mutated=` marker instead of matching tool names, so the guard now knows none.
+- Social codas are composed inside the delivery beat, not before the reply — the work answer no longer waits on two model calls for a line posted ten seconds later.
+- Routine output renders formatted; the update path never reached `formatForSlack`, so headers and bold shipped raw.
+- `Connection` gained `updateMessage`, `deleteMessage` and `resolveChannelCounterpart`; the tasks layer now holds no transport handle at all.
+
+### Migration
+- None new. `v4_0_4_dedupe_people_email` from 4.1.0 still runs on boot and self-terminates once clean.
+
+### Invariants preserved
+- Agents never commit, never bump a version, never wrap.
+- Security and privacy are enforced in code, never by prompt — every fix above masks or withholds at the payload, and no output scrubber was added.
+- A rule that turned out to be wrong was amended, not worked around.
+
+---
+
 ## 4.1.0 — the agent framework: Maelle is built by a squad of charter-bound agents
 
 Development moved from parallel human chats to a **seven-lane agent framework**. Each lane owns an area of the codebase and carries a charter — the owner's product rules as its system prompt — and a Manager orchestrates them: it pulls work (open GitHub `Bug` issues + a nightly 24h chat-quality log review), triages into atomic issues, dispatches the lanes in parallel with `context` last, chains cross-lane dependencies, guard-verifies each fix, and maintains a cumulative report. Agents build in the working tree and **never commit** — the owner alone wraps. The first real runs found and fixed a live bug (an attendee silently dropped from a multi-attendee search) and then its root cause in the person store.

@@ -38,6 +38,7 @@ import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
+import { subjectViewerFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 
 export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -146,6 +147,36 @@ export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx):
 
 export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
+        // ── Who may see how much (#8a) ────────────────────────────────────────
+        // A SHARED surface (group DM / channel) is never a private one. The
+        // transport clamps every sender there — the owner included — to
+        // senderRole 'colleague' (processMessage.ts:122), so that single field is
+        // the whole test. It used to be written
+        // `senderRole === 'colleague' && isOwnerInGroup !== true`, and that
+        // second clause was an escape hatch: in a group DM the owner's OWN turn
+        // skipped the clamp entirely and this handler returned his FULL calendar
+        // — every subject, every attendee list — into the context of a thread
+        // colleagues read. Nothing but the model's discretion stood between that
+        // payload and disclosure, which is the inversion shared rule 10 forbids.
+        const isSharedSurface = context.senderRole === 'colleague';
+        // The requester's AUTHENTICATED identity (Slack-verified sender vs the
+        // configured owner id) — never a claim made in a message. Needed because
+        // the scoped view below filters to "events this requester is on": when
+        // the requester IS the owner, that predicate matches his entire calendar,
+        // so dropping the escape hatch alone would have returned the same leak
+        // wearing a `_colleague_view: true` label. On a shared surface the owner
+        // gets NO calendar listing at all — he asks in his own DM.
+        const requesterIsOwner = context.userId === context.profile.user.slack_user_id;
+        if (isSharedSurface && requesterIsOwner) {
+          logger.info('get_calendar — owner asked on a shared surface; calendar listing withheld', {
+            channelId: context.channelId, isMpim: context.isMpim === true,
+          });
+          return {
+            events: [],
+            _owner_shared_surface: true,
+            _scope_note: `This is a group conversation, so ${context.profile.user.name.split(' ')[0]}'s calendar is not readable here — other people are in this thread. Do NOT list, summarise, count or hint at what is on his day, and do NOT try another tool to get around it. Tell him plainly you'll go through his day with him in your 1:1 DM. You CAN still work on a specific meeting he names here.`,
+          };
+        }
         const rawEvents = await getCalendarEvents(
           userEmail,
           args.start_date as string,
@@ -153,7 +184,13 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
           timezone,
           args.force_refresh === true,  // v3.2.x (#121) — user asked to LOOK now → fresh
         );
-        const processed = processCalendarEvents(rawEvents, userEmail, context.profile.user.name, timezone, context.profile);
+        // v4.1.x (M12) — the owner reading his OWN calendar in his own DM sees
+        // his real subjects; every other surface (colleague, or the owner in an
+        // MPIM where colleagues read along) keeps the [Private] mask.
+        const processed = processCalendarEvents(
+          rawEvents, userEmail, context.profile.user.name, timezone, context.profile,
+          subjectViewerFor(context),
+        );
 
         // v3.3 (fix #2) — Working Elsewhere enrichment. If the range covers
         // WE days, attach the away-TZ note so Sonnet does NOT eyeball home-TZ
@@ -221,8 +258,11 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
         // / check_join_availability — there is nothing else to reason from.
         // This also closes the enumeration-privacy hole in code rather than
         // asking Sonnet nicely.
-        const isColleaguePath = context.senderRole === 'colleague' && context.isOwnerInGroup !== true;
-        if (isColleaguePath) {
+        // Shared-surface requester who is NOT the owner: scope to the meetings
+        // they are actually on. (The owner-on-a-shared-surface case returned at
+        // the top of this handler — there is no scoped view that means anything
+        // for him, since every event is "his".)
+        if (isSharedSurface) {
           let colleagueEmailLower = '';
           try {
             colleagueEmailLower = (getPersonMemory(context.userId)?.email ?? '').toLowerCase();
@@ -235,6 +275,7 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
             const isOrganizer = ((ev.organizer?.emailAddress?.address ?? '').toLowerCase() === colleagueEmailLower);
             return onAttendees || isOrganizer;
           });
+          // Colleague view — masked by construction (no viewer arg = 'other').
           const sharedProcessed = processCalendarEvents(sharedRaw, userEmail, context.profile.user.name, timezone, context.profile);
           return {
             events: sharedProcessed,
@@ -464,7 +505,12 @@ export async function handleAnalyzeCalendar(args: Record<string, unknown>, ctx: 
           args.end_date as string,
           timezone,
         );
-        const processed = processCalendarEvents(rawEvents, userEmail, context.profile.user.name, timezone, context.profile);
+        // v4.1.x (M12) — owner-only tool, but still masked when he runs it in an
+        // MPIM (colleagues read that transcript).
+        const processed = processCalendarEvents(
+          rawEvents, userEmail, context.profile.user.name, timezone, context.profile,
+          subjectViewerFor(context),
+        );
         // v3.0.3 — analyzeCalendar is read-only. Suppression handled at
         // row-write time elsewhere.
         const _suppressed = getSuppressedEventIds(context.profile.user.slack_user_id);
@@ -517,8 +563,15 @@ export async function handleGetFreeBusy(args: Record<string, unknown>, ctx: OpCt
           // 10:30 — out-of-hours availability requires explicit owner override,
           // not a drive-by "check get_free_busy" bypass. Owner-path calls get
           // raw data (owner knows their own schedule and may want all gaps).
-          const isColleaguePath = context.senderRole === 'colleague' && context.isOwnerInGroup !== true;
-          if (isColleaguePath && Array.isArray(args.emails) && (args.emails as string[]).includes(userEmail)) {
+          // v4.1.x (#8a) — keyed on the effective senderRole ALONE, the same as
+          // get_calendar's clamp above. The old `&& isOwnerInGroup !== true`
+          // escape is gone: a shared surface is never a private one, whoever is
+          // typing. This particular branch is currently unreachable (get_free_busy
+          // is not colleague-allowed, so the registry chokepoint refuses it first)
+          // — but leaving a second copy of a pattern that was a real leak next
+          // door is how it comes back.
+          const isSharedSurface = context.senderRole === 'colleague';
+          if (isSharedSurface && Array.isArray(args.emails) && (args.emails as string[]).includes(userEmail)) {
             const ownerBusy = raw[userEmail] ?? [];
             const synthetic = buildOutOfHoursBusy(
               args.start_date as string,

@@ -1,6 +1,6 @@
 /**
- * Per-skill owner preferences — free-text markdown, injected at the bottom of
- * each skill's system-prompt section (v3.3 POC, calendar-health first).
+ * Per-skill owner preferences — free-text markdown, injected into the prompt
+ * surface that owns each area (see PREF_INJECTION_SITE below).
  *
  * This is the STYLE layer, the deliberate opposite of the process layer:
  *   - Process layer (yaml + code + base prompt): general good practice, shipped
@@ -12,9 +12,9 @@
  *     honors it; code does not parse it. A second owner's dir is empty and fills
  *     with THEIR style.
  *
- * Cost discipline: the block is appended to a skill's prompt section, which is
- * already scope-gated — so a skill's prefs ride along ONLY on turns where that
- * skill is already in the prompt. A fresh owner (no file) pays zero tokens.
+ * Cost discipline: a block rides along ONLY on turns where its area is already
+ * in play (the same scope predicate the skill's own prose uses). A fresh owner
+ * (no file) pays zero tokens.
  *
  * Mirrors the people-memory / KB md conventions (config/users/<owner>_*).
  */
@@ -66,6 +66,34 @@ export function isPrefSkill(s: string): s is PrefSkill {
   return (PREF_SKILLS as readonly string[]).includes(s);
 }
 
+/** Which prompt surface renders an area's file. Exactly one reader per area. */
+export type PrefInjectionSite =
+  | 'system-prompt'   // rendered by buildSystemPromptParts (owner path, scope-gated)
+  | 'skill-section'   // rendered inside that skill's own getSystemPromptSection
+  | 'brief-compose';  // rendered in the daily-brief compose pass, not the turn prompt
+
+/**
+ * The reader for every writable area.
+ *
+ * A writable area with NO reader silently discards what the owner taught while
+ * `update_my_preferences` still confirms it as saved — which is exactly what
+ * happened to seven of these ten (the owner re-taught his news topics after the
+ * first save landed in an unread `general.md`). `Record<PrefSkill, …>` makes the
+ * omission a COMPILE error: you cannot add an area without naming who reads it.
+ */
+export const PREF_INJECTION_SITE: Record<PrefSkill, PrefInjectionSite> = {
+  general:   'system-prompt',
+  calendar:  'skill-section',   // src/skills/calendarHealth.ts
+  meetings:  'system-prompt',
+  brief:     'brief-compose',   // src/tasks/briefs.ts
+  news:      'skill-section',   // src/skills/news.ts
+  summary:   'system-prompt',
+  social:    'system-prompt',
+  knowledge: 'system-prompt',
+  search:    'system-prompt',
+  venue:     'system-prompt',
+};
+
 function rootForProfile(profile: UserProfile): string {
   const firstName = profile.user.name.split(' ')[0].toLowerCase();
   return path.resolve(process.cwd(), 'config', 'users', `${firstName}_prefs`);
@@ -116,6 +144,35 @@ export function formatSkillPreferencesBlock(
     `Honor them over the defaults above when they conflict, UNLESS a hard rule or safety guard blocks it.`,
     body,
   ].join('\n');
+}
+
+/**
+ * Every preference block the SYSTEM PROMPT is the reader for, concatenated.
+ * Owner-path only — the caller gates on isOwner.
+ *
+ * Same cost discipline as a skill-section block: an area rides along only on a
+ * turn where that area is already in play, using the exact predicate every
+ * skill section uses for its own prose (`!scopes || 'general' || <area>`), and
+ * only while that skill is enabled in the profile. `general` is the
+ * cross-cutting voice/addressing file — no skill owns it, so it always renders.
+ * A fresh owner (no files) pays zero.
+ */
+export function formatSystemPromptPreferenceBlocks(
+  profile: UserProfile,
+  scopes: string[] | undefined,
+  activeSkillIds: ReadonlySet<string>,
+): string {
+  const blocks: string[] = [];
+  for (const area of PREF_SKILLS) {
+    if (PREF_INJECTION_SITE[area] !== 'system-prompt') continue;
+    if (area !== 'general') {
+      if (!activeSkillIds.has(area)) continue;
+      if (scopes && !scopes.includes('general') && !scopes.includes(area)) continue;
+    }
+    const block = formatSkillPreferencesBlock(profile, area);
+    if (block) blocks.push(block);
+  }
+  return blocks.join('\n');
 }
 
 /**

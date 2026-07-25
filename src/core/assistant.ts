@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
-import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, resolvePerson, getRecentChannelMessages, type PersonProfile, type PersonInteraction, type PersonNote } from '../db';
+import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, resolvePerson, getRecentChannelMessages, readInteractionLog, BOOKING_SNAPSHOT_FRAME, type PersonProfile, type PersonInteraction, type PersonNote } from '../db';
 import { getConnection } from '../connections/registry';
 import {
   readPersonMemory,
@@ -301,9 +301,11 @@ WHEN YOU PRESENT what you know (owner asks "what do you know about X" / "data on
       },
       {
         name: 'update_person_memory',
-        description: `Write a durable OPERATIONAL fact about a person into their markdown notes file — residence, workplace, working hours, communication style, how-to-address, preferred meeting mode, etc.
+        description: `Write a durable OPERATIONAL FACT about a person into their markdown notes file — residence, workplace, working hours, communication style, what tooling they use.
 
-Examples: "[Person] lives in [city]" · "Responds US Eastern mornings, offline after 5pm ET" · "Prefers brief replies, never greetings" · "Always does Teams, even for 1:1s".
+Examples: "[Person] lives in [city]" · "Responds US Eastern mornings, offline after 5pm ET" · "Writes in Hebrew, always" · "Always does Teams, even for 1:1s".
+
+The axis here is FACT vs INSTRUCTION, not "the owner vs a person". A fact is something true about them that you observed or were told. A STANDING INSTRUCTION from the owner about how to handle that person — "keep Dirk's meetings to 30 minutes", "always address Dr. Weiss as Dr. Weiss", "never book Yael before 10" — is the OWNER's preference, not their fact: it goes to update_my_preferences under the skill whose behavior it changes, with the person named in the line. Filed here it would only load if someone happened to call get_person_memory, so it would silently fail to steer the booking it was meant to steer.
 
 NOT for: social topics / hobbies / family stories (→ note_about_person / note_about_self) or ephemeral state like mood-today / running-late (→ log_interaction).
 
@@ -333,9 +335,11 @@ Section header behavior: existing section's body gets REPLACED; new header gets 
 
 Use ONLY after the owner confirms a STANDING preference (apply every time), e.g. "on Sundays don't add a missing lunch", "just delete duplicate recruiting-system invites", "call me Mr. Cohen when you confirm a booking". Offer to remember, then save on his yes.
 
+ABOUT A SPECIFIC PERSON — this is the right tool. A standing instruction from the owner concerning someone ("keep Dirk's meetings to 30 minutes", "always address Dr. Weiss as Dr. Weiss", "never book Yael before 10", "Rita gets a call, not a thread") is HIS preference, not a fact about them. Save it here, naming the person inside the line, under the skill whose behavior it changes — meetings for booking style, general for how to address someone. That is what makes it fire at the moment it matters. FACTS about that person (where they live, their hours, what they use) still go to update_person_profile / update_person_memory.
+
 SHAPE OF THE ASK: when he asks to change how you do something recurring, do NOT both pre-commit ("I'll do it next time") AND ask to make it standing — that's muddled (did it save, or are you waiting on him?). Acknowledge in one short line, then ask ONE clear question ("Want me to save that so every report comes this way?") and act only on his yes. Keep the ask uncrowded — don't re-list the whole structure inline, especially when the request was to reduce clutter.
 
-NOT for: one-off instructions for today, facts about other PEOPLE (→ update_person_memory / update_person_profile), or company knowledge (→ KB markdown).`,
+NOT for: one-off instructions for today, FACTS about other people (→ update_person_memory / update_person_profile — but his standing instruction ABOUT a person belongs here, see above), or company knowledge (→ KB markdown).`,
         input_schema: {
           type: 'object' as const,
           properties: {
@@ -748,15 +752,20 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
         const content = personId ? await readPersonMemory(context.profile, personId, row?.name ?? query) : null;
         let notes: PersonNote[] = [];
         let recentInteractions: Array<{ date: string; type: string; summary: string }> = [];
+        let recentBookings: Array<{ date: string; summary: string }> = [];
         if (row) {
           try { notes = JSON.parse(row.notes || '[]'); } catch { notes = []; }
-          try {
-            const log = JSON.parse(row.interaction_log || '[]') as PersonInteraction[];
-            recentInteractions = log
-              .filter(i => i.type !== 'meeting_booked' && i.type !== 'coordination')
-              .slice(-15)
-              .map(i => ({ date: i.date.split('T')[0], type: i.type, summary: i.summary }));
-          } catch { recentInteractions = []; }
+          // Booking snapshots used to be stripped here outright, which made
+          // "we booked yesterday" unrecallable from the store (P6). They come
+          // back with a freshness rule + an explicit as-booked frame instead —
+          // see readInteractionLog / BOOKING_SNAPSHOT_FRAME in db/people.ts.
+          const split = readInteractionLog(row.interaction_log);
+          recentInteractions = split.relational
+            .slice(-15)
+            .map(i => ({ date: i.date.split('T')[0], type: i.type, summary: i.summary }));
+          recentBookings = split.recentBookings
+            .slice(-8)
+            .map(i => ({ date: i.date.split('T')[0], summary: i.summary }));
         }
 
         // #132 — surface the stored identity (email / slack_id) so a person we've
@@ -766,7 +775,7 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
         // tool, so this never exposes a contact's email to a colleague.
         const email = row?.email ?? null;
         const slackId = row?.slack_id ?? null;
-        const hasMemory = content !== null || notes.length > 0 || recentInteractions.length > 0;
+        const hasMemory = content !== null || notes.length > 0 || recentInteractions.length > 0 || recentBookings.length > 0;
 
         if (!hasMemory && !email && !slackId) {
           return {
@@ -787,6 +796,12 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
           content: content ?? '',
           notes: notes.map(n => ({ date: n.date, note: n.note })),
           recent_interactions: recentInteractions,
+          ...(recentBookings.length > 0
+            ? {
+                recent_bookings: recentBookings,
+                recent_bookings_note: `These are ${BOOKING_SNAPSHOT_FRAME}. Safe to say "we booked X on <date>"; check the calendar before stating when it now sits.`,
+              }
+            : {}),
         };
       }
 
@@ -897,6 +912,14 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
         const timezone = args.timezone as string | undefined;
         const state   = args.state as string | undefined;
         const nameHe  = args.name_he as string | undefined;
+        // P4 — provenance is derived from the AUTHENTICATED sender, never
+        // assumed. The colleague branch above force-rewrites the target to the
+        // requester's own row, so a colleague reaching here is a person stating
+        // a fact about THEMSELVES ('person'), not the owner stating it. Writing
+        // 'owner' on every path recorded a false source in the very column P4's
+        // stated-beats-derived rule reads. Same one-expression shape as
+        // confirm_gender.
+        const setBy = isOwner ? 'owner' : 'person';
 
         // v3.0.2 — reject ambiguous TZ strings BEFORE writing. luxon resolves
         // "IST" to Asia/Kolkata (Indian Standard Time, +5:30) — silently wrong
@@ -925,9 +948,9 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
         if (!slackId) {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { setCoreFieldWithProvenanceById, setPersonNameHeById, updatePersonProfileById } = require('../db') as typeof import('../db');
-          if (timezone && timezone.trim()) setCoreFieldWithProvenanceById(target.personId, 'timezone', timezone.trim(), 'owner');
-          if (state && state.trim()) setCoreFieldWithProvenanceById(target.personId, 'state', state.trim(), 'owner');
-          if (nameHe && nameHe.trim()) setPersonNameHeById(target.personId, nameHe.trim(), 'owner');
+          if (timezone && timezone.trim()) setCoreFieldWithProvenanceById(target.personId, 'timezone', timezone.trim(), setBy);
+          if (state && state.trim()) setCoreFieldWithProvenanceById(target.personId, 'state', state.trim(), setBy);
+          if (nameHe && nameHe.trim()) setPersonNameHeById(target.personId, nameHe.trim(), setBy);
           updatePersonProfileById(target.personId, {
             communication_style: args.communication_style as string | undefined,
             language_preference: args.language_preference as string | undefined,
@@ -947,22 +970,22 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
           return { updated: true, name: target.name, external: true };
         }
 
-        // v2.2.2 (#46) — owner-path tool. Anything the owner sets here is
-        // owner-stated by definition; route through the provenance helper.
-        // Ensure the row exists first; upsertPersonMemory tracks tz_set_by='owner'
+        // v2.2.2 (#46) — route every core field through the provenance helper.
+        // Ensure the row exists first; upsertPersonMemory tracks tz_set_by
         // when we pass timezone alongside.
-        upsertPersonMemory({ slackId, name, timezone, timezoneSetBy: 'owner' });
+        upsertPersonMemory({ slackId, name, timezone, timezoneSetBy: setBy });
 
         if (nameHe && nameHe.trim()) {
-          setPersonNameHe(slackId, nameHe.trim(), 'owner');
+          setPersonNameHe(slackId, nameHe.trim(), setBy);
         }
 
-        // v2.2.2 (#46) — STATE: free-text location. Owner-stated → set_by='owner'.
+        // v2.2.2 (#46) — STATE: free-text location, stamped with who stated it.
         // When state lands and timezone wasn't also passed in this same call,
-        // try to derive timezone from the state and save with same provenance.
+        // try to derive timezone from the state and save with same provenance —
+        // a zone inferred from a stated city has that same statement as its source.
         if (state && state.trim()) {
           const { setCoreFieldWithProvenance } = require('../db') as typeof import('../db');
-          setCoreFieldWithProvenance(slackId, 'state', state.trim(), 'owner');
+          setCoreFieldWithProvenance(slackId, 'state', state.trim(), setBy);
           if (!timezone) {
             // Static-first lookup; Sonnet fallback if needed. Fire-and-forget.
             void (async () => {
@@ -979,7 +1002,7 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
                 const { isStrictIana } = require('../utils/timezoneValidator') as
                   typeof import('../utils/timezoneValidator');
                 if (tz && isStrictIana(tz)) {
-                  setCoreFieldWithProvenance(slackId, 'timezone', tz, 'owner');
+                  setCoreFieldWithProvenance(slackId, 'timezone', tz, setBy);
                   refreshAutoWorkingHours(slackId);
                 } else if (tz) {
                   logger.warn('state→tz derivation produced non-IANA value — discarded', {
@@ -993,14 +1016,15 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
           }
         }
 
-        // v2.2.2 (#46) — when owner passes timezone explicitly, lock it as owner-set.
-        // upsertPersonMemory only writes via COALESCE so an existing value isn't
-        // touched there. Use the provenance helper for an authoritative overwrite.
+        // v2.2.2 (#46) — an explicitly passed timezone is an authoritative
+        // statement by whoever sent the turn. upsertPersonMemory only writes via
+        // COALESCE so an existing value isn't touched there; the provenance
+        // helper does the overwrite AND records the source.
         if (timezone && timezone.trim()) {
           const { setCoreFieldWithProvenance } = require('../db') as typeof import('../db');
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { refreshAutoWorkingHours } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
-          setCoreFieldWithProvenance(slackId, 'timezone', timezone.trim(), 'owner');
+          setCoreFieldWithProvenance(slackId, 'timezone', timezone.trim(), setBy);
           refreshAutoWorkingHours(slackId);
         }
 
@@ -1095,10 +1119,38 @@ NOT for: one-off instructions for today, facts about other PEOPLE (→ update_pe
         const slotRelevant = fieldsWritten.some(f => SLOT_RELEVANT_FIELDS.has(f));
 
         const base = { updated: true, name } as Record<string, unknown>;
+        const notes: string[] = [];
+
         if (slotRelevant) {
           base._slot_results_now_stale = true;
-          base._note = `You updated slot-relevant fields for ${name}. Any prior find_available_slots results involving ${name} are now stale — the candidate set changes with the new constraint. Re-run find_available_slots before proposing options to the owner. Do not mentally filter old slot candidates; the tool's diagnostics (day_summary, attendee work-hours filter, etc.) need to re-evaluate.`;
+          notes.push(`You updated slot-relevant fields for ${name}. Any prior find_available_slots results involving ${name} are now stale — the candidate set changes with the new constraint. Re-run find_available_slots before proposing options to the owner. Do not mentally filter old slot candidates; the tool's diagnostics (day_summary, attendee work-hours filter, etc.) need to re-evaluate.`);
         }
+
+        // Colleague-self path: a core field the OWNER already set outranks a
+        // person's statement about themselves (SET_BY_RANK, db/people.ts), so
+        // that write silently no-ops. Say so, rather than let Maelle report a
+        // save that never landed — the same honesty confirm_gender owes via
+        // `higher_authority_already_set`. Compared against the STORED row, so a
+        // refusal is never confused with an idempotent no-op.
+        if (!isOwner) {
+          const after = getPersonMemoryRow(slackId);
+          const refused = ([
+            ['timezone', timezone?.trim(), after?.timezone],
+            ['state',    state?.trim(),    after?.state],
+            ['name_he',  nameHe?.trim(),   after?.name_he],
+          ] as Array<[string, string | undefined, string | undefined]>)
+            .filter(([, want, got]) => want && want !== got)
+            .map(([field]) => field);
+          if (refused.length > 0) {
+            base.not_saved = refused;
+            notes.push(`${refused.join(', ')} kept the value ${context.profile.user.name.split(' ')[0]} already set — his entry outranks a self-correction. Don't say it's saved; say you've noted it and will confirm with him.`);
+            logger.info('update_person_profile (colleague-self) — fields refused, owner value outranks', {
+              requesterId: context.userId, refused,
+            });
+          }
+        }
+
+        if (notes.length > 0) base._note = notes.join(' ');
         return base;
       }
 

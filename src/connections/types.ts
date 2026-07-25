@@ -192,6 +192,27 @@ export interface Connection {
   reactToMessage?(channelRef: string, messageTs: string, emojiName: string): Promise<void>;
 
   /**
+   * v4.1.x (O2) — EDIT and RETRACT a message this Connection already sent.
+   * Optional on the same terms as reactToMessage: a transport with no edit /
+   * delete primitive (email, SMS) simply doesn't implement, and callers check
+   * before invoking.
+   *
+   * Unlike reactToMessage these return a SendResult, because an edit IS a send
+   * — it puts new text in front of a person — and callers do branch on the
+   * outcome (the routine dispatcher posts a fresh message when its placeholder
+   * update fails). Implementers MUST run `text` through the same outbound
+   * formatter the send verbs use. That is a correctness requirement, not
+   * tidiness: an edit that skips it delivers raw markdown where the identical
+   * text sent through sendDirect / postToChannel would have rendered clean.
+   *
+   * `messageRef` is the transport-native message id (Slack: the message ts).
+   * updateMessage returns that ref back as `ts` — the message still exists at
+   * it. deleteMessage returns no `ts`, because it doesn't any more.
+   */
+  updateMessage?(channelRef: string, messageRef: string, text: string): Promise<SendResult>;
+  deleteMessage?(channelRef: string, messageRef: string): Promise<SendResult>;
+
+  /**
    * v3.3.7 (#125c) — resolve the 1:1 direct-message channel ref for a user on
    * this transport (Slack: conversations.open → D-channel id). Used by
    * recall_interactions to read the verbatim recent exchange with a person
@@ -200,6 +221,21 @@ export interface Connection {
    * Returns null when the user doesn't resolve.
    */
   resolveDirectChannelId?(userRef: string): Promise<string | null>;
+
+  /**
+   * v4.1.x (#51) — the REVERSE of resolveDirectChannelId: given a 1:1 direct
+   * channel ref, who is the person on the other side? Used by the memory
+   * capture pass, which walks stored DM threads by channel and needs the person
+   * each one belongs to. Optional; returns null when the ref doesn't resolve.
+   *
+   * Contract every transport must hold: 1:1 ONLY. A group or multi-party ref
+   * resolves to null, never to "one of the participants" — a caller asking
+   * "whose DM is this" cannot be handed an arbitrary member of a shared space,
+   * and null makes it skip instead of guess. Returns the bare person ref and
+   * nothing else; resolving a channel is not a licence to hand back what is in
+   * it.
+   */
+  resolveChannelCounterpart?(channelRef: string): Promise<string | null>;
 }
 
 /**

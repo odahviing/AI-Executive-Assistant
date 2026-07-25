@@ -62,10 +62,6 @@ function trimHistory(
   return [...kept, current];
 }
 
-/**
- * Build a compact one-line summary of a tool call for conversation history.
- * This lets Claude know what it did on previous turns without storing the full JSON.
- */
 // v2.2.5 — outcome-aware summary for mutation tools. The claim-checker reads
 // these summaries to decide if a reply's success language is honest. Without
 // outcome info, a failed move_meeting looked the same as a successful one and
@@ -88,7 +84,109 @@ function mutationOutcome(result: unknown): { ok: boolean; reason?: string; event
   return { ok: false, reason: 'unclear_result' };
 }
 
+/**
+ * v4.1.x (G3) — THE mutation marker. Which tools change state, and in which
+ * domain, is knowledge that belongs HERE: this is the one place that holds the
+ * tool name and its result at the same time, so it is the only place that can say
+ * "a real state change happened" instead of guessing it later from a string.
+ *
+ * Before this, the claim-checker's false-positive shield re-derived the same fact
+ * downstream by matching tool NAMES out of the rendered summary text — four
+ * action_type branches over a 5-tool, a 2-tool and a 14-tool alternation, each
+ * grown after a distinct incident, and every new mutating tool had to be
+ * remembered in it or it would produce a false phantom-action flag (G2). The
+ * shield now reads ONE field. Name-matching is gone from the guard entirely.
+ *
+ * The domain vocabulary is deliberately the claim-checker's own `action_type`
+ * enum, so the shield is a single `includes('mutated=' + action_type)`. Membership
+ * is exactly the set the old alternations covered — this change moves WHERE the
+ * list lives, it does not change WHICH tools count.
+ */
+type MutationDomain = 'book' | 'task' | 'message' | 'other';
+const MUTATION_DOMAIN: Record<string, MutationDomain> = {
+  // calendar mutations → the claim-checker's 'book' class
+  create_meeting: 'book', move_meeting: 'book', update_meeting: 'book',
+  delete_meeting: 'book', book_floating_block: 'book',
+  // work items raised for someone
+  create_task: 'task', create_approval: 'task',
+  // an outbound DM actually queued
+  message_colleague: 'message',
+  // the memory / preference / routine / knowledge write family
+  update_my_preferences: 'other', manage_preference: 'other',
+  note_about_person: 'other', note_about_self: 'other', log_interaction: 'other',
+  confirm_gender: 'other', update_person_profile: 'other', update_person_memory: 'other',
+  manage_routine: 'other', manage_calendar_issue: 'other', update_task: 'other',
+  update_summary_draft: 'other', manage_knowledge: 'other', resolve_approval: 'other',
+};
+
+/**
+ * The domain this call actually mutated, or null when nothing changed.
+ *
+ * Only an OK outcome earns a marker — the same convention the tool log already
+ * uses (`[<tool> OK …]` vs `[<tool> FAILED …]`, #137b). A failed mutation means she
+ * did NOT act, so it must not back a "done" claim: the old shield matched the tool
+ * NAME and so suppressed the honesty rewrite even on `[create_meeting FAILED: …]`.
+ */
+function mutationDomain(toolName: string, result: unknown): MutationDomain | null {
+  const domain = MUTATION_DOMAIN[toolName];
+  if (!domain) return null;
+  if (result == null || typeof result !== 'object') return null;
+  const r = result as Record<string, unknown>;
+  // Any explicit negative — a thrown/refused call, or a skill's own no-op verdict
+  // (resolve_approval's `{ok:false}`) — changed nothing.
+  if (typeof r.error === 'string') return null;
+  if (r.ok === false || r.success === false) return null;
+  // Calendar mutations carry a rich outcome (needs_confirmation / needs_owner_approval
+  // / unclear shapes are all NOT a completed write) — reuse the one reader for it.
+  if (domain === 'book' && !mutationOutcome(result).ok) return null;
+  return domain;
+}
+
 function summarizeToolCall(toolName: string, input: Record<string, unknown>, result: unknown): string {
+  const summary = renderToolSummary(toolName, input, result);
+  const domain = mutationDomain(toolName, result);
+  // Stamped OUTSIDE the tool's bracket on purpose: MUTATION_OK_RE below lifts the
+  // bracketed span verbatim into the pinned action tape, so keeping the marker out
+  // of it leaves that prompt block byte-identical to before. The marker still rides
+  // along everywhere it needs to — the summaries are persisted to conversation
+  // history joined verbatim (postReply Step 1b), which is exactly what the shield
+  // reads for both this turn and prior turns.
+  return domain ? `${summary} mutated=${domain}` : summary;
+}
+
+/**
+ * v4.1.x — the tool-log line for an INTERNAL action: a mutation a skill performed
+ * inside its own run (active-mode calendar health rebooking lunch, or auto-moving a
+ * meeting) rather than as its own top-level tool call. The orchestrator surfaces
+ * these onto the same tape so the claim-checker can see them.
+ *
+ * It lives HERE, beside summarizeToolCall, because it is the SAME surface and has to
+ * carry the same marker — and when it didn't, it broke exactly the reply it exists to
+ * protect. The retired name-matching alternation happened to match these lines on the
+ * tool name (`[book_floating_block (via …`, `[move_meeting (via …`), so moving the
+ * shield onto the carried marker silently dropped both paths: with
+ * calendar_health_mode "active" (config/users/idan.yaml:228), "how's my calendar
+ * today?" auto-rebooks lunch, and Maelle's TRUE "I put lunch back at 12:30" would be
+ * flagged as a phantom action and sent to rewriteOwningTheMiss.
+ *
+ * No outcome gate here, unlike a real tool call: an internal action is only ever
+ * emitted AFTER its mutation succeeded (checkHealth.ts:727 gates on `ok && created`;
+ * autoMove.ts:206 pushes once the move and its notifications have landed), so the
+ * entry's existence IS the confirmation. Reusing MUTATION_DOMAIN keeps coverage
+ * identical to the tool path — set_event_category and rebalance_floating_blocks are
+ * not in it, and were not in the old alternations either, so they stay unmarked.
+ */
+function summarizeInternalAction(tool: string, viaTool: string, detail?: string): string {
+  const line = `[${tool} (via ${viaTool}): ${detail ?? ''}]`;
+  const domain = MUTATION_DOMAIN[tool];
+  return domain ? `${line} mutated=${domain}` : line;
+}
+
+/**
+ * Build a compact one-line summary of a tool call for conversation history.
+ * This lets Claude know what it did on previous turns without storing the full JSON.
+ */
+function renderToolSummary(toolName: string, input: Record<string, unknown>, result: unknown): string {
   try {
     // v3.0.5 — generic FAILED detection. registry.ts wraps every thrown
     // tool call in `{ error: 'Tool "X" failed: <reason>' }`, and skills also
@@ -299,6 +397,7 @@ export {
   trimHistory,
   mutationOutcome,
   summarizeToolCall,
+  summarizeInternalAction,
   extractActionTape,
   stampHistoryTime,
 };

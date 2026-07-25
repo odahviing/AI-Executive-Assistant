@@ -7,12 +7,13 @@
  * landed and the next conversation started cold. This module fills that
  * gap with a deterministic, code-side capture mechanism:
  *
- *   1. The 5-min background loop calls `runCapturePass(app, profile)`.
+ *   1. The 5-min background loop calls `runCapturePass(profile)`.
  *   2. It queries `conversation_threads` for DMs that went quiet 30+ min
  *      ago AND have new activity since the last capture
  *      (`findThreadsReadyForCapture`).
- *   3. For each ready thread, it resolves the colleague via Slack
- *      `conversations.info` (DM channel.user) and skips owner DMs.
+ *   3. For each ready thread, it asks the Connection whose 1:1 DM that
+ *      channel is (`resolveChannelCounterpart`) and skips owner DMs. No
+ *      transport client is touched here — this module knows people, not pipes.
  *   4. It loads the colleague's current state (people_memory profile_json
  *      + .md file content + recent notes) and the just-completed chat.
  *   5. A single Haiku call extracts deltas — facts the chat revealed
@@ -33,9 +34,9 @@
  * stores 'user'/'assistant' roles without slack_id per message.
  */
 
-import type { App } from '@slack/bolt';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { UserProfile } from '../config/userProfile';
+import { getConnection } from '../connections/registry';
 import {
   findThreadsReadyForCapture,
   markThreadCaptured,
@@ -328,35 +329,32 @@ async function applyDelta(
 }
 
 /**
- * Resolve a DM channel's "other user" (the colleague). Returns null on
- * any failure — caller skips that thread for this tick.
- *
- * Uses `conversations.info`; for `im` channels Slack returns `channel.user`
- * directly as the human counterpart of the bot. Owner DMs return the
- * owner's slack_id; caller filters those.
- */
-async function resolveDmColleague(app: App, channelId: string): Promise<string | null> {
-  try {
-    const res = await app.client.conversations.info({ channel: channelId });
-    if (!res.ok || !res.channel) return null;
-    const ch = res.channel as { is_im?: boolean; user?: string };
-    if (ch.is_im && ch.user) return ch.user;
-    return null;
-  } catch (err) {
-    logger.warn('capturePass: conversations.info failed', {
-      channelId, err: String(err).slice(0, 200),
-    });
-    return null;
-  }
-}
-
-/**
  * Main entry. Called from the background loop every 5 min. Bounded by
  * MAX_THREADS_PER_TICK so a burst of ready threads can't blow the budget
  * on a single tick.
  */
-export async function runCapturePass(app: App, profile: UserProfile): Promise<void> {
+export async function runCapturePass(profile: UserProfile): Promise<void> {
   if (!config.ANTHROPIC_API_KEY) return;  // dev mode without API key — silently skip
+
+  // v4.1.x (#51) — "whose DM is this?" goes through the Connection, not through
+  // `app.client.conversations.info`. This module holds a person's memory; it has
+  // no business knowing which transport that person is on, and reaching into the
+  // Slack client was the one place it did.
+  //
+  // Resolved ONCE per tick: it is per-profile and constant for the run, and the
+  // absent case has to be handled before the loop, not inside it. A missing
+  // transport is NOT a per-thread failure — a per-thread failure marks the thread
+  // captured so it can't retry-storm, so treating "registry not ready" that way
+  // would silently burn every pending capture on one bad tick. Bail instead and
+  // pick them all up in five minutes.
+  const conn = getConnection(profile.user.slack_user_id, 'slack');
+  const resolveCounterpart = conn?.resolveChannelCounterpart?.bind(conn);
+  if (!resolveCounterpart) {
+    logger.warn('capturePass: no transport can resolve a DM counterpart — skipping this tick', {
+      ownerUserId: profile.user.slack_user_id,
+    });
+    return;
+  }
 
   const ready = findThreadsReadyForCapture(SILENCE_MINUTES, MAX_THREADS_PER_TICK);
   if (ready.length === 0) return;
@@ -369,9 +367,13 @@ export async function runCapturePass(app: App, profile: UserProfile): Promise<vo
 
   for (const row of ready) {
     try {
-      // 1. Resolve colleague. Skip owner DMs + non-DM rows that slipped
-      //    through the SQL filter (shouldn't happen but defensive).
-      const colleagueId = await resolveDmColleague(app, row.channel_id);
+      // 1. Whose DM is this? The Connection answers for 1:1 DMs ONLY and
+      //    returns null for anything multi-party — which is exactly the answer
+      //    this pass needs. A capture writes to ONE person's row, so being
+      //    handed "a member" of a group DM would file one person's conversation
+      //    onto another person's record. Null on failure too; either way we skip
+      //    the thread. (Owner DMs resolve to the owner's id — handled below.)
+      const colleagueId = await resolveCounterpart(row.channel_id);
       if (!colleagueId) {
         // Couldn't resolve — mark captured to avoid retrying every tick.
         markThreadCaptured(row.thread_ts);
@@ -479,41 +481,65 @@ export async function runCapturePass(app: App, profile: UserProfile): Promise<vo
 // ── SELF capture path (owner-DM threads) ────────────────────────────────────
 
 /**
- * Haiku prompt for SELF capture. Different from the colleague prompt:
- * we want EVERYTHING that defines who Maelle is (origin, personality,
- * preferences, identity, communication style) — generous capture — but
- * STRICTLY dedup against the existing notes. Same-fact-different-wording
- * = skip.
+ * Haiku prompt for SELF capture.
+ *
+ * This row is her IDENTITY, and it is the narrowest capture in the system —
+ * deliberately the opposite of the colleague pass. It was written "be generous"
+ * and that is exactly what broke it: the pass mistook every owner-DM turn for a
+ * lesson about her and wrote capability narration ("Maelle can perform a
+ * comprehensive calendar analysis across a multi-week range") and owner
+ * workflow preferences ("Owner prefers briefings with one event per line") onto
+ * the SELF row. 50 of those filled the note cap inside six days and pushed out
+ * every real identity fact — including the name-origin story this subsystem was
+ * built for (#105) — so the ABOUT YOU block injected on every owner AND
+ * colleague turn became a feature list, and asked about herself she had nothing
+ * to answer from.
+ *
+ * Two consequences encoded below:
+ *  - Only what the OWNER TAUGHT counts. Her own messages are narration, never a
+ *    source of facts about her.
+ *  - A capability is not an identity fact, and an owner workflow preference is
+ *    P7 content — it belongs in the per-skill learned MD via
+ *    update_my_preferences, never on this row.
  */
-const SELF_SYSTEM_PROMPT = `You are extracting facts about Maelle (an AI executive assistant) from her conversation with her owner.
+const selfSystemPrompt = (assistantName: string, ownerName: string) =>
+  `You are maintaining the IDENTITY record of ${assistantName}, ${ownerName}'s executive assistant, from a conversation between the two of them.
 
 You will be given:
-1. The notes Maelle already has saved about herself
-2. A conversation transcript between Maelle and her owner
+1. The notes already on file about who ${assistantName} is
+2. A conversation transcript (${assistantName} + ${ownerName})
 
-Your job: identify NEW facts about MAELLE that aren't already on file. Be generous in what counts as a Maelle-fact — capture anything that defines who she is or how she should behave:
+Your job: identify NEW things ${ownerName} TAUGHT ${assistantName} about herself. This is a very narrow bar. Almost every conversation teaches nothing — the normal, correct answer is an empty list.
+
+ONLY these count:
 - Origin / name meaning / where the name came from / why she exists
-- Identity (AI/human/bot, age, when she was built, who built her)
-- Personality traits the owner described or implied
-- Communication preferences ("be more X", "always Y when Z")
-- How she should handle specific situations
-- Background / lore the owner shared about why she works the way she does
-- Things the owner wants her to remember about her own role
+- Identity facts: whether she's AI or human, age, when she was built, who built her
+- Personality, character, or voice ${ownerName} described or corrected ("be warmer", "stop over-apologizing", "you're direct, not chatty")
+- Lore or background ${ownerName} shared about her and why she is the way she is
+- How she should refer to or describe HERSELF
 
-What's NOT a Maelle-fact (skip these — they belong elsewhere):
-- The owner's own life / work / meetings / calendar / hobbies
+TWO HARD EXCLUSIONS — these are the failure modes that wrecked this record:
+
+1. CAPABILITIES ARE NOT IDENTITY. Anything of the form "she can X", "she is able to Y", "when asked to Z she does W", "she searches / analyses / checks / presents / offers" is a description of what her tools do. It teaches her nothing about who she is, and she already knows it. Never emit it — no matter how the conversation phrased it.
+
+2. ${ownerName}'S PREFERENCES ARE NOT HER IDENTITY. "Owner prefers X formatted this way", "owner wants Y included", "owner asks for Z on Sundays" is a STANDING PREFERENCE of his. It has its own home (per-skill preference files) and does not belong on her record. The only preference-shaped thing that belongs here is one about her CHARACTER or VOICE — tone, warmth, directness, how she carries herself — never about the shape of an output, a workflow, a tool, or what to include in a report.
+
+Also skip, as before:
+- ${ownerName}'s own life / work / meetings / calendar / hobbies
 - Facts about colleagues mentioned in the conversation
-- Plot details of games / books / movies the owner discussed (those are facts about THAT WORK, not about Maelle — unless the owner explicitly tied it back to Maelle, like "you were named after a character")
-- Generic small-talk that didn't teach Maelle anything about herself
+- Plot details of games / books / movies discussed (facts about THAT WORK, not about her — unless he explicitly tied it back, like "you were named after a character")
+- Small talk that taught her nothing about herself
 
-DEDUP RULE — this is strict: compare against the existing notes. If the conversation re-confirms a fact already on file, even with new wording or additional context, output it ONLY IF the new context adds something substantive. Pure re-statements with no new info = skip. Same essential fact phrased differently = skip.
+WHO SAID IT MATTERS: only ${ownerName}'s words teach. ${assistantName}'s own messages in the transcript are her narrating her work — never treat them as a source of facts about her. If the only support for a candidate note is something SHE said, drop it.
+
+DEDUP RULE — strict: compare against the notes on file. A fact re-confirmed with new wording or extra colour = skip, unless the new context adds something genuinely substantive.
 
 Output strict JSON. No prose, no markdown fences:
 { "notes": ["fact 1", "fact 2", ...] }
 
-Each note: 1-2 sentences, written from a third-person stance describing Maelle ("Named after...", "Owner prefers her to...", "Built around..."). Be specific. Vague notes ("seems friendly") are useless later.
+Each note: 1-2 sentences, third-person about her ("Named after…", "Speaks plainly, never over-apologises…", "Built in…"). Be specific; vague notes ("seems friendly") are useless later.
 
-If nothing new was learned, output { "notes": [] }.`;
+If nothing new was taught — the usual case — output { "notes": [] }.`;
 
 interface SelfCaptureDelta {
   notes: string[];
@@ -536,12 +562,15 @@ function parseSelfDelta(raw: string): SelfCaptureDelta | null {
 /**
  * Process an owner-DM thread as a SELF capture turn.
  *
- * Loads Maelle's existing SELF row notes, runs Haiku with the conversation
- * + existing notes as context, applies new Maelle-facts via appendPersonNote
- * on the SELF: row. Idempotent across re-runs of the same chat: Haiku sees
- * existing notes and emits only deltas. Pure code-side capture — Sonnet's
- * in-turn note_about_self calls remain the primary path; this pass is a
- * safety net that catches facts Sonnet didn't save explicitly during chat.
+ * Loads her existing SELF row notes, runs Haiku with the conversation + those
+ * notes as context, and appends anything the OWNER TAUGHT her about herself via
+ * appendPersonNote on the SELF: row. Idempotent across re-runs of the same chat:
+ * Haiku sees existing notes and emits only deltas. Pure code-side capture —
+ * Sonnet's in-turn note_about_self calls remain the primary path; this pass is a
+ * safety net that catches identity facts Sonnet didn't save explicitly.
+ *
+ * The bar is narrow on purpose (see selfSystemPrompt): identity, lore and voice
+ * only. Emitting nothing is the expected outcome for almost every thread.
  *
  * Fire-and-forget contract: any error caught + logged, never propagates.
  */
@@ -580,26 +609,27 @@ async function runSelfCapture(
     if (messages.length === 0) return;
     const transcript = chatToTranscript(messages, ownerName);
 
+    const assistantName = profile.assistant.name;
     const userMsg = [
-      'EXISTING NOTES about Maelle (do NOT re-emit any of these — same fact = skip):',
+      `NOTES ALREADY ON FILE about ${assistantName} (do NOT re-emit any of these — same fact = skip):`,
       '```',
       existingNotes.length === 0
         ? '(none yet)'
         : existingNotes.map(n => `[${n.date}] ${n.note}`).join('\n'),
       '```',
       '',
-      'CONVERSATION TRANSCRIPT (Maelle + owner):',
+      `CONVERSATION TRANSCRIPT (${assistantName} + ${ownerName}):`,
       '```',
       transcript,
       '```',
       '',
-      'What new Maelle-facts (if any) does this conversation reveal? JSON only.',
+      `Did ${ownerName} teach ${assistantName} anything new about who she IS? Remember: capabilities and his workflow preferences do not count, and only his words teach. JSON only.`,
     ].join('\n');
 
     const resp = await anthropic.messages.create({
       model: HAIKU_MODEL,
       max_tokens: 1000,
-      system: SELF_SYSTEM_PROMPT,
+      system: selfSystemPrompt(assistantName, ownerName),
       messages: [{ role: 'user', content: userMsg }],
     });
     const text = resp.content
@@ -610,15 +640,17 @@ async function runSelfCapture(
     const delta = parseSelfDelta(text);
 
     if (!delta || delta.notes.length === 0) {
-      logger.info('runSelfCapture: no new Maelle-facts in this thread', { threadTs });
+      logger.info('runSelfCapture: nothing new taught about her in this thread', { threadTs });
       return;
     }
 
     for (const note of delta.notes) {
       appendPersonNote(selfId, note);
     }
-    logger.info('runSelfCapture: applied SELF notes', {
-      threadTs, count: delta.notes.length,
+    // Logged with the text: this row is small, durable and prompt-visible on
+    // every turn, so what lands on it is worth being able to audit from the log.
+    logger.info('runSelfCapture: applied SELF identity notes', {
+      threadTs, count: delta.notes.length, notes: delta.notes.map(n => n.slice(0, 120)),
     });
   } catch (err) {
     logger.warn('runSelfCapture: threw — non-fatal', {

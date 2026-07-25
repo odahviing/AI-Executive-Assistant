@@ -374,6 +374,54 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
 ]);
 
 /**
+ * The tools that MUTATE something outside this process — send a message,
+ * create/modify a calendar event, raise an approval, write durable state.
+ * Everything else (get_calendar, find_available_slots, find_slack_user,
+ * web_search, recall_*) is a repeatable read.
+ *
+ * "Is this tool a write?" is a property of the TOOL, not of any transport, so
+ * it belongs here with the rest of the tool-name classification
+ * (ALWAYS_ON_TOOLS / SCOPE_TO_TOOLS / COLLEAGUE_ALLOWED_TOOLS above). It used
+ * to be declared inside connectors/slack/inboundQueue.ts, which made core load
+ * the Slack transport just to ask that question — and left the set editable
+ * only from a Slack file even though not one entry is Slack-specific.
+ *
+ * Three consumers, all in core:
+ *   - abort-if-safe — an in-flight turn stops being abortable once one of these
+ *     fires (orchestrator/index.ts → onWriteExecuted → the inbound queue).
+ *   - proseOnly — the dateVerifier retry path strips every write so a reworded
+ *     reply can't fire a fresh mutation (buildTurnContext.ts).
+ *   - ack guard — "thanks" after a completed action can't re-mutate
+ *     (buildTurnContext.ts; it excludes the two approval tools).
+ */
+export const WRITE_TOOLS = new Set<string>([
+  // Calendar mutations
+  'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
+  'book_floating_block', 'set_event_category',
+  // Outreach (sends DMs externally — irreversible)
+  'message_colleague',
+  // Approvals (DM owner)
+  'create_approval', 'resolve_approval',
+  // Tasks (visible state). v2.9 — edit/cancel merged into update_task.
+  'create_task', 'update_task',
+  // Routines. v2.9 — 4 tools merged into manage_routine; create/update/delete
+  // actions all flow through the same write tool.
+  'manage_routine',
+  // Calendar issues. v2.9 — merged into manage_calendar_issue (update action is the write).
+  'manage_calendar_issue',
+  // Knowledge / summary writes. v2.9 — ingest merged into manage_knowledge.
+  'share_summary', 'manage_knowledge',
+  'learn_summary_style', 'update_summary_draft',
+  // Memory writes. v2.9 — preferences merged into manage_preference (set/forget are writes).
+  'manage_preference', 'update_my_preferences',
+  'note_about_person', 'note_about_self',
+  'log_interaction', 'update_person_profile', 'update_person_memory',
+  'confirm_gender',
+  // Briefing
+  'send_briefing_now',
+]);
+
+/**
  * Returns the list of skills that are:
  *   1. enabled in the user's YAML profile
  *   2. successfully loaded (not crashed on require)

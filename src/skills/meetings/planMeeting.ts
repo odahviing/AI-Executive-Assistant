@@ -19,13 +19,28 @@
  *   3. RESOLVE LOCATION    via utils/resolveLocation
  *   4. CHECK RULES         via utils/scheduleRules
  *   5. DECIDE ACTION       branches on initiator + ownership + rule result
+ *
+ * ── ONE ROUND, NOT FOUR (v4.1.x — M4) ───────────────────────────────────────
+ * Steps 3–5 used to `return` on the FIRST gate that needed input, which made
+ * the pipeline single-question-per-call by construction: the location question
+ * returned before the rule check had run, which returned before the
+ * attendee-busy check, which returned before the room check. The owner answered
+ * "online or physical?" and only THEN heard "Anna is busy then, book anyway?".
+ * Now every gate that CAN be evaluated is evaluated, the open questions are
+ * accumulated, and ONE action carries all of them (`openQuestions`, and the
+ * same text joined into `suggestedAskText`). Booking proceeds only when none is
+ * open. Gates that genuinely depend on an earlier answer (the meeting-room
+ * check needs a resolved location) are skipped, not guessed.
  */
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
 import { getCalendarEvents, getFreeBusy, findAvailableSlots, type CalendarEvent } from '../../connectors/graph/calendar';
 import { resolveLocation, type LocationVerdict } from '../../utils/resolveLocation';
-import { checkSlot, type RuleCheckResult } from '../../utils/scheduleRules';
+import { bookingLeadTimeHours, checkSlot, type RuleCheckResult } from '../../utils/scheduleRules';
+import type { SubjectViewer } from '../../utils/displaySubject';
+import { renderWeDualClock } from '../../utils/weTimeResolver';
+import { getTravelContextForInstant } from '../../utils/workingElsewhere';
 import { detectCategory } from './detectCategory';
 import { findMeetingOwner, type MeetingOwnerInfo } from './findMeetingOwner';
 import { getCurrentTravel, getPersonMemory, searchPeopleMemory } from '../../db/people';
@@ -100,6 +115,15 @@ export interface PlanMeetingInput {
 
   // Optional pre-fetched calendar (saves a Graph call when caller already has it)
   preloadedEvents?: CalendarEvent[];
+
+  /**
+   * v4.1.x (M12) — WHO will read the strings this plan produces. checkSlot's
+   * owner_busy label embeds the colliding meeting's subject, and on a
+   * COLLEAGUE-initiated create_meeting that label is handed back as
+   * `violation_label` + `suggested_ask_text` — straight into a colleague turn's
+   * model context. Scoped here, at the producer. Omitted → masked.
+   */
+  viewer?: SubjectViewer;
 }
 
 /**
@@ -143,10 +167,22 @@ export function planInputFromBookingRequest(
     allowRelaxed: req.relaxed,
     isFloatingBlock: req.isFloatingBlock,
     preloadedEvents: extra?.preloadedEvents,
+    // Owner alone → he sees everything (M12). Owner in an MPIM is NOT alone:
+    // colleagues read that transcript, so it masks like any colleague turn —
+    // the same posture as the isOwnerDm gate on get_calendar's audit context.
+    viewer: req.initiator === 'owner' && !req.context.isMpim ? 'owner' : 'other',
   };
 }
 
 // ── Plan output ─────────────────────────────────────────────────────────────
+
+/**
+ * M4 — every question this booking still needs answered, in one list. The
+ * action kind is the highest-precedence gate (so existing handler branches keep
+ * working); `openQuestions` is the complete set, and `suggestedAskText` is that
+ * same set joined for a single message. Length 1 is the common case.
+ */
+export type PlanOpenQuestions = string[];
 
 export type PlanAction =
   | {
@@ -158,15 +194,24 @@ export type PlanAction =
       category: string | null;
       reasoning: string;
       overrideNotice?: string;   // #127 — owner booked through a soft own-day rule; surface this heads-up, never re-ask
+      /**
+       * M3 — the booking LEVEL this write lands on. 'free' is the preferred
+       * place to book; 'optional' means it sits over a skippable
+       * Working-Elsewhere commitment; 'unfiltered' means it sits over a real
+       * commitment. Pre-fix the write path had no notion of the tier at all, so
+       * booking straight over the owner's optional standup was indistinguishable
+       * from booking a genuinely free slot in what Maelle said back.
+       */
+      level?: 'free' | 'optional' | 'unfiltered';
     }
   | { action: 'find_slots'; category: string | null; reasoning: string }
-  | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; category: string | null }
-  | { action: 'escalate_approval'; violationLabel: string; suggestedAskText: string; category: string | null }
-  | { action: 'propose_alternative'; violationLabel: string; suggestedAskText: string; alternatives: Array<{ start: string; end: string; label: string }>; category: string | null }
+  | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null }
+  | { action: 'escalate_approval'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null }
+  | { action: 'propose_alternative'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; alternatives: Array<{ start: string; end: string; label: string }>; category: string | null }
   | { action: 'decline_and_relay'; organizerName: string | null; organizerEmail: string | null; organizerSlackId: string | null; suggestedDmText: string }
   | { action: 'refuse_not_owners'; organizerName: string | null; organizerEmail: string | null }
-  | { action: 'ask_location_mode'; suggestedAskText: string; category: string | null; reasoning: string }
-  | { action: 'room_unavailable_large'; suggestedAskText: string; category: string | null; reasoning: string };
+  | { action: 'ask_location_mode'; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; reasoning: string }
+  | { action: 'room_unavailable_large'; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; reasoning: string };
 
 // ── Entry ───────────────────────────────────────────────────────────────────
 
@@ -314,6 +359,19 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     };
   }
 
+  // ── M4 gate accumulator ─────────────────────────────────────────────────
+  // Each gate is a question this booking still needs answered. They are
+  // COLLECTED, not returned one at a time (see the header note). `whenText` is
+  // the ONE clock renderer for every user-facing time string below — M14: the
+  // dual clock is quoted verbatim, never re-derived. Pre-fix these strings were
+  // formatted with a bare `.toFormat("EEEE 'at' HH:mm")` pinned to the owner's
+  // HOME zone, so on an away-override day the ask stated one hour while the
+  // violation_label travelling in the same payload (rendered by checkSlot in
+  // the day's EFFECTIVE zone, with a zone note) stated another.
+  const gates: Array<{ kind: 'location' | 'rule' | 'attendee_busy' | 'room'; ask: string }> = [];
+  const whenText = (startIso: string, endIso?: string): string =>
+    renderWeDualClock(startIso, getTravelContextForInstant(startIso, profile), profile.user.timezone, { endIso });
+
   // ── Resolve location ────────────────────────────────────────────────────
   let locationVerdict: LocationVerdict | null = null;
   // #127 — when the OWNER books through a soft own-day rule (focus floor, work
@@ -329,6 +387,23 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // and the group's too large for the small-room fallback — booked without the
   // room (not double-booked), with a heads-up so he grabs space himself.
   let roomBusyNotice: string | undefined;
+  // M3 — set when the write lands on a slot held by a skippable Working-Elsewhere
+  // commitment (level 'optional'): the owner must be told he's booking over it,
+  // not handed a confirmation that reads identical to a genuinely free slot.
+  let optionalLevelNotice: string | undefined;
+  // M3 — set when the write lands on a REAL commitment (level 'unfiltered') and
+  // proceeds anyway (owner override / approved replay). Distinct from a soft
+  // own-day rule: it names WHAT is being double-booked and whether other people
+  // are on it.
+  let unfilteredLevelNotice: string | undefined;
+  let bookingLevel: 'free' | 'optional' | 'unfiltered' | undefined;
+  let locationAskReasoning: string | undefined;
+  // Colleague-path rule break: the label, and the nearby rule-compliant options
+  // to offer before escalating (#8). Both feed the single combined return.
+  let ruleViolationLabel: string | undefined;
+  let attendeeBusyLabel: string | undefined;
+  let ruleAlternatives: Array<{ start: string; end: string; label: string }> = [];
+  let roomAskText: string | undefined;
   if (input.slotStartIso) {
     const ownerDomain = ownerEmail.split('@')[1].toLowerCase();
     const externalEmails: string[] = [];
@@ -378,13 +453,12 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     // (v2.8.2) ask_owner_online_or_physical: caller must ask, never auto-pick.
     // Owner-path AND colleague-path both surface the question; colleague-path
     // routes through create_approval so Sonnet doesn't try to resolve it locally.
+    // v4.1.x (M4) — recorded as a GATE and the pipeline keeps going, so the
+    // rule check and the attendee free/busy check run in the SAME call and
+    // their questions ride out with this one.
     if (locationVerdict.kind === 'ask_owner_online_or_physical') {
-      return {
-        action: 'ask_location_mode',
-        suggestedAskText: locationVerdict.suggestedAskText,
-        category,
-        reasoning: locationVerdict.reasoning,
-      };
+      gates.push({ kind: 'location', ask: locationVerdict.suggestedAskText });
+      locationAskReasoning = locationVerdict.reasoning;
     }
   }
 
@@ -407,7 +481,31 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       excludeEventIds: input.existingEventId ? [input.existingEventId] : [],
       allowRelaxed: !!input.allowRelaxed,
       isFloatingBlock: !!input.isFloatingBlock,
+      // v4.1.x (M2) — the booking lead time is now a real rule in THE validator,
+      // keyed on who is asking, so the write path enforces the same floor the
+      // search does. Pre-fix a colleague naming "3pm today" at 2pm was refused
+      // by find_available_slots and accepted by create_meeting.
+      leadTimeHours: bookingLeadTimeHours(profile, initiator),
+      // v4.1.x (M12) — the owner_busy label embeds the colliding subject.
+      viewer: input.viewer,
     });
+    // M3 — the tier this slot sits on, whatever the rule verdict was.
+    bookingLevel = ruleResult.level;
+    if (!input.isFloatingBlock && ruleResult.level === 'optional' && ruleResult.overOptional) {
+      // Bookable, no approval — but never silently. A floating block booking is
+      // exempt: blocks coexist with meetings by design.
+      optionalLevelNotice = `this books over your optional "${ruleResult.overOptional}" — you'd skip it; it stays on the calendar`;
+    }
+    if (!input.isFloatingBlock && ruleResult.level === 'unfiltered' && ruleResult.overCommitment && ruleResult.passes) {
+      // Only reachable when the owner-busy rule was BYPASSED (explicit override
+      // or approved replay). Booking over a real commitment is M3's Unfiltered
+      // tier — say what it is and who else is on it, not just "a rule".
+      const c = ruleResult.overCommitment;
+      const withWhom = c.attendeeCount > 0
+        ? ` with ${c.attendeeCount} other ${c.attendeeCount === 1 ? 'person' : 'people'} on it`
+        : '';
+      unfilteredLevelNotice = `this double-books you over "${c.subject}" (${c.window})${withWhom}`;
+    }
 
     if (!ruleResult.passes && ruleResult.violation_kind === 'in_the_past') {
       // A past / earlier-today time is almost always a typo, not an override —
@@ -417,7 +515,13 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       // owner's "yes / I meant it" retry comes back allowRelaxed, which checkSlot
       // then lets through (he can log a past meeting if he truly insists).
       const askText = `That time has already passed — did you mean later today, or a different day?`;
-      return { action: 'confirm_override', violationLabel: 'that time has already passed', suggestedAskText: askText, category };
+      return {
+        action: 'confirm_override',
+        violationLabel: 'that time has already passed',
+        suggestedAskText: askText,
+        openQuestions: [askText],
+        category,
+      };
     }
 
     if (!ruleResult.passes && initiator === 'owner') {
@@ -429,9 +533,15 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       // double-booking a COLLEAGUE imposes on someone else, not just his own day.
       ownerOverrideNotice = ruleResult.violation_label ?? 'a scheduling rule';
     } else if (!ruleResult.passes) {
-      const label = ruleResult.violation_label ?? 'rule violated';
+      ruleViolationLabel = ruleResult.violation_label ?? 'rule violated';
+      const label = ruleViolationLabel;
       const subj = input.subject ?? 'this meeting';
-      const askText = `Heads up — booking "${subj}" at ${DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone, setZone: true }).setZone(profile.user.timezone).toFormat("EEEE 'at' HH:mm")} would break a rule: ${label}. Want to override?`;
+      // M14 — the ONE dual-clock renderer. This string used to be formatted in
+      // the owner's HOME zone with no zone label, while the `label` beside it
+      // was rendered by checkSlot in the day's EFFECTIVE zone: on a trip day the
+      // same message carried two different clocks for one instant.
+      const askText = `Heads up — booking "${subj}" at ${whenText(input.slotStartIso, input.slotEndIso)} would break a rule: ${label}. Want to override?`;
+      gates.push({ kind: 'rule', ask: askText });
       // v3.2.x (#8) — colleague proposed a slot that breaks a rule. Instead of
       // jumping straight to owner approval (colleague waits), offer NEARBY
       // rule-compliant alternatives first — 2 on the requested day + 1 after —
@@ -440,7 +550,12 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       // AFTER, by the colleague's reply: if they insist (or none of these work),
       // Sonnet routes to create_approval. No regex, no extra planMeeting input.
       // Only when nothing nearby fits do we escalate straight away.
-      try {
+      // Skipped when the LOCATION question is also open: that gate takes
+      // precedence in the combined return (an approval replayed with an
+      // unresolved location just re-asks), so alternatives computed here would
+      // be discarded — two Graph round-trips for nothing. The combined ask still
+      // tells the colleague the rule is broken; the options come next round.
+      if (!gates.some(g => g.kind === 'location')) try {
         const tzAlt = profile.user.timezone;
         const reqDay = DateTime.fromISO(input.slotStartIso, { zone: tzAlt });
         const durMin = input.durationMin
@@ -453,22 +568,22 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         const later = await findAvailableSlots({ ...base, searchFrom: after1, searchTo: after2 });
         const picks = [...sameDay.slice(0, 2), ...later.slice(0, 1)];
         if (picks.length > 0) {
-          const alternatives = picks.map(s => {
-            const st = DateTime.fromISO(s.start).setZone(tzAlt);
-            const en = DateTime.fromISO(s.end).setZone(tzAlt);
-            return { start: s.start, end: s.end, label: `${st.toFormat('EEE d MMM HH:mm')}–${en.toFormat('HH:mm')}` };
-          });
+          ruleAlternatives = picks.map(s => ({
+            start: s.start,
+            end: s.end,
+            // M14 — alternative labels quote the same dual clock as everything
+            // else in this payload, so a trip-day option can't read home-only.
+            label: whenText(s.start, s.end),
+          }));
           logger.info('planMeeting — colleague soft-rule slot, offering nearby alternatives', {
-            label, count: alternatives.length, requested: input.slotStartIso,
+            label, count: ruleAlternatives.length, requested: input.slotStartIso,
           });
-          return { action: 'propose_alternative', violationLabel: label, suggestedAskText: askText, alternatives, category };
         }
       } catch (err) {
         logger.warn('planMeeting — alternative search threw, falling back to escalate_approval', {
           err: String(err).slice(0, 200),
         });
       }
-      return { action: 'escalate_approval', violationLabel: label, suggestedAskText: askText, category };
     }
 
     // ── Owner-initiated: check internal-attendee freebusy (v2.7.1) ─────────
@@ -554,9 +669,13 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
               attendeeBusyNotice = label;
             } else {
               // First-pass BOOK — flag ONCE; owner's "book anyway" comes back relaxed.
+              // M4 — recorded as a gate, so if the location question is also open
+              // it goes out in the SAME message instead of a second round.
+              // M14 — one dual clock, quoted, never re-derived per string.
               const subj = input.subject ?? 'this meeting';
-              const askText = `Heads up — ${who} ${names.length === 1 ? 'is' : 'are'} on another meeting at ${DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone, setZone: true }).setZone(profile.user.timezone).toFormat("EEEE 'at' HH:mm")}. Book "${subj}" anyway, or pick a different time?`;
-              return { action: 'confirm_override', violationLabel: label, suggestedAskText: askText, category };
+              const askText = `Heads up — ${who} ${names.length === 1 ? 'is' : 'are'} on another meeting at ${whenText(input.slotStartIso, input.slotEndIso)}. Book "${subj}" anyway, or pick a different time?`;
+              attendeeBusyLabel = label;
+              gates.push({ kind: 'attendee_busy', ask: askText });
             }
           }
         } catch (err) {
@@ -601,6 +720,9 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   //   - free: proceed as-is.
   //   - busy + ≤5 people: swap to small-room label, drop the room mailbox.
   //   - busy + ≥6 people: refuse, surface ask to owner.
+  // The ONE gate that genuinely depends on an earlier answer: it needs a
+  // resolved location (addRoomEmail comes from the location verdict), so when
+  // the location question is still open it is skipped rather than guessed.
   if (addRoomEmail && input.slotStartIso && input.slotEndIso) {
     try {
       const { checkMeetingRoomAvailability } = await import('../../utils/meetingRoomAvailability');
@@ -633,12 +755,8 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           logger.info('planMeeting — meeting room busy + group too large for fallback', {
             slot: input.slotStartIso, participantCount: participants.length,
           });
-          return {
-            action: 'room_unavailable_large',
-            suggestedAskText: verdict.suggestedAskText,
-            category,
-            reasoning: 'meeting room mailbox busy and ≥6 people — small fallback not viable',
-          };
+          roomAskText = verdict.suggestedAskText;
+          gates.push({ kind: 'room', ask: verdict.suggestedAskText });
         }
       }
     } catch (err) {
@@ -649,6 +767,68 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     }
   }
 
+  // ── ONE combined ask (M4) ───────────────────────────────────────────────
+  // Every gate that could be evaluated has been. If any is open, return a
+  // SINGLE action carrying ALL of the questions — the action KIND is the
+  // highest-precedence gate so existing handler branches are unchanged, and
+  // `openQuestions` is the complete set for the handler to relay in one message.
+  //
+  // Precedence — location first on purpose: it is a prerequisite for a
+  // well-formed booking (an approval replayed with an unresolved location just
+  // re-asks), so its handler note is the one that should drive the retry.
+  if (gates.length > 0) {
+    const openQuestions = gates.map(g => g.ask);
+    const suggestedAskText = openQuestions.join(' ');
+    logger.info('planMeeting — returning combined ask', {
+      gates: gates.map(g => g.kind), count: gates.length, intent, initiator,
+    });
+    if (gates.some(g => g.kind === 'location')) {
+      return {
+        action: 'ask_location_mode',
+        suggestedAskText,
+        openQuestions,
+        category,
+        reasoning: locationAskReasoning ?? 'location mode unresolved',
+      };
+    }
+    if (ruleViolationLabel) {
+      // Colleague-path rule break (the owner's is a one-step notice, never a
+      // gate). Nearby compliant options first; escalate only if none fit.
+      return ruleAlternatives.length > 0
+        ? {
+            action: 'propose_alternative',
+            violationLabel: ruleViolationLabel,
+            suggestedAskText,
+            openQuestions,
+            alternatives: ruleAlternatives,
+            category,
+          }
+        : {
+            action: 'escalate_approval',
+            violationLabel: ruleViolationLabel,
+            suggestedAskText,
+            openQuestions,
+            category,
+          };
+    }
+    if (roomAskText) {
+      return {
+        action: 'room_unavailable_large',
+        suggestedAskText,
+        openQuestions,
+        category,
+        reasoning: 'meeting room mailbox busy and ≥6 people — small fallback not viable',
+      };
+    }
+    return {
+      action: 'confirm_override',
+      violationLabel: attendeeBusyLabel ?? 'needs your confirmation',
+      suggestedAskText,
+      openQuestions,
+      category,
+    };
+  }
+
   return {
     action: 'book',
     isOnline,
@@ -656,8 +836,14 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     addRoomEmail,
     preserveExisting,
     category,
-    reasoning: `category=${category ?? 'none'} (${categoryReason}); location=${locationVerdict?.reasoning ?? 'n/a'}`,
-    overrideNotice: [ownerOverrideNotice, attendeeBusyNotice, roomBusyNotice].filter(Boolean).join('; ') || undefined,
+    level: bookingLevel,
+    reasoning: `category=${category ?? 'none'} (${categoryReason}); location=${locationVerdict?.reasoning ?? 'n/a'}; level=${bookingLevel ?? 'n/a'}`,
+    // M3 — the level notices ride the SAME heads-up channel as #127's rule
+    // notice, so "booked over your optional standup" and "this double-books you
+    // over X with 2 people on it" reach the owner instead of a confirmation
+    // that reads identical to booking a genuinely free slot.
+    overrideNotice: [ownerOverrideNotice, unfilteredLevelNotice, optionalLevelNotice, attendeeBusyNotice, roomBusyNotice]
+      .filter(Boolean).join('; ') || undefined,
   };
 }
 
