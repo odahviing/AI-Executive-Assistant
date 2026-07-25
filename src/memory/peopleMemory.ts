@@ -22,7 +22,7 @@
  */
 
 import type { UserProfile } from '../config/userProfile';
-import { promises as fs, existsSync, readdirSync, readFileSync, statSync } from 'fs';
+import { promises as fs, existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
 import logger from '../utils/logger';
 
@@ -97,22 +97,115 @@ function ensureDir(dir: string): Promise<void> {
   return fs.mkdir(dir, { recursive: true }).then(() => undefined);
 }
 
-/** Parse h2 headers that have non-empty content under them. */
-function extractNonEmptySections(md: string): string[] {
-  const lines = md.split(/\r?\n/);
-  const out: { header: string; hasContent: boolean }[] = [];
-  let current: { header: string; hasContent: boolean } | null = null;
-  for (const line of lines) {
+/** Split a person file into its h2 sections (header + raw body). */
+function parseSections(md: string): { header: string; body: string }[] {
+  const out: { header: string; body: string[] }[] = [];
+  let current: { header: string; body: string[] } | null = null;
+  for (const line of md.split(/\r?\n/)) {
     const h2 = /^##\s+(.+?)\s*$/.exec(line);
     if (h2) {
       if (current) out.push(current);
-      current = { header: h2[1], hasContent: false };
-    } else if (current && line.trim().length > 0) {
-      current.hasContent = true;
+      current = { header: h2[1], body: [] };
+    } else if (current) {
+      current.body.push(line);
     }
   }
   if (current) out.push(current);
-  return out.filter(s => s.hasContent).map(s => s.header);
+  return out.map(s => ({ header: s.header, body: s.body.join('\n').trim() }));
+}
+
+/** Parse h2 headers that have non-empty content under them. */
+function extractNonEmptySections(md: string): string[] {
+  return parseSections(md).filter(s => s.body.length > 0).map(s => s.header);
+}
+
+// A generated history bullet: "- [2026-06-16] Booked …". Structured, generated
+// by code (recordBooking / capturePass) — never natural language, so matching it
+// is language-independent.
+const DATED_BULLET = /^-\s*\[(\d{4}-\d{2}-\d{2})\]/;
+
+/** Union `incoming`'s sections into `base`, line-deduped. Sections made purely
+ *  of dated bullets are re-sorted by date so a merged history reads in order. */
+function mergeMarkdownSections(base: string, incoming: string): string {
+  let out = base;
+  for (const section of parseSections(incoming)) {
+    if (!section.body) continue;
+    const existing = parseSections(out).find(s => s.header.toLowerCase() === section.header.toLowerCase())?.body ?? '';
+    const kept = existing.split(/\r?\n/).map(l => l.trimEnd()).filter(l => l.trim().length > 0);
+    const have = new Set(kept.map(l => l.trim()));
+    const added = section.body.split(/\r?\n/).map(l => l.trimEnd())
+      .filter(l => l.trim().length > 0 && !have.has(l.trim()));
+    if (added.length === 0) continue;
+    let lines = [...kept, ...added];
+    if (lines.every(l => DATED_BULLET.test(l.trim()))) {
+      lines = lines.sort((a, b) => DATED_BULLET.exec(a.trim())![1].localeCompare(DATED_BULLET.exec(b.trim())![1]));
+    }
+    out = upsertSection(out, section.header, lines.join('\n'));
+  }
+  return out;
+}
+
+/**
+ * v4.0.4 — fold one person's md file into another's, called by
+ * `db/people.mergePersonRows` right after two rows for one human collapse.
+ *
+ * Without this the loser's `<person_id>.md` is ORPHANED: nothing in the DB
+ * points at it any more, but `formatPeopleCatalogSync` reads the DIRECTORY, so
+ * the file keeps rendering as a second "Luke Joas" in the prompt catalog — the
+ * duplicate we just removed, resurrected one layer up.
+ *
+ * Profile-independent on purpose (the db layer has no UserProfile): md files are
+ * keyed ONLY by person_id, so every `config/users/*_people` directory is swept —
+ * which is also what makes it correct multi-tenant.
+ *
+ * `survivorName` re-titles the file's `# <Display Name>` line ONLY when the file
+ * arrives by rename (its h1 is then the merged-away row's name, and the catalog
+ * renders h1, so it would show a name the DB no longer knows). A survivor file
+ * that already existed keeps its own h1 — that line is the documented
+ * owner-editable display override.
+ */
+export function mergePersonMdFiles(survivorId: string, loserId: string, survivorName?: string): void {
+  if (!survivorId || !loserId || survivorId === loserId) return;
+  // Both ids are internal surrogates, never user input — belt-and-braces anyway.
+  if (/[\\/\0]|\.\./.test(survivorId + loserId)) return;
+
+  const usersRoot = path.resolve(process.cwd(), 'config', 'users');
+  let entries: string[];
+  try { entries = readdirSync(usersRoot); } catch { return; }
+
+  for (const entry of entries) {
+    if (!entry.endsWith('_people')) continue;
+    const root = path.resolve(usersRoot, entry);
+    const loserPath = path.resolve(root, `${loserId}.md`);
+    const survivorPath = path.resolve(root, `${survivorId}.md`);
+    if (!loserPath.startsWith(root) || !survivorPath.startsWith(root)) continue;
+    if (!existsSync(loserPath)) continue;
+    try {
+      if (!existsSync(survivorPath)) {
+        renameSync(loserPath, survivorPath);
+        const name = (survivorName ?? '').trim();
+        if (name) {
+          const md = readFileSync(survivorPath, 'utf-8');
+          if (extractDisplayName(md) !== name) {
+            writeFileSync(survivorPath, md.replace(/^#\s+.*$/m, `# ${name}`), 'utf-8');
+          }
+        }
+        logger.info('person memory — md file re-keyed to the surviving person', {
+          dir: entry, from: `${loserId}.md`, to: `${survivorId}.md`,
+        });
+        continue;
+      }
+      const survivorMd = readFileSync(survivorPath, 'utf-8');
+      const mergedMd = mergeMarkdownSections(survivorMd, readFileSync(loserPath, 'utf-8'));
+      if (mergedMd !== survivorMd) writeFileSync(survivorPath, mergedMd, 'utf-8');
+      unlinkSync(loserPath);
+      logger.info('person memory — md files merged', { dir: entry, survivorId, loserId });
+    } catch (err) {
+      logger.warn('person memory — md merge failed, both files left in place', {
+        dir: entry, survivorId, loserId, err: String(err).slice(0, 200),
+      });
+    }
+  }
 }
 
 /** List every people-memory file the owner has, with a short "what's in it" hint. */

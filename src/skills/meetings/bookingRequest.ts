@@ -234,8 +234,8 @@ async function buildParticipants(
     // missing or malformed.
     if (!email || !email.includes('@')) {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { resolveAttendeeEmail } = require('./resolveAttendeeEmails') as
-        typeof import('./resolveAttendeeEmails');
+      const { resolveAttendeeEmail } = require('../../memory/resolveAttendeeEmails') as
+        typeof import('../../memory/resolveAttendeeEmails');
       const resolved = resolveAttendeeEmail({ name, email, slack_id: slackId });
       if (resolved.email) email = resolved.email;
       if (!name && resolved.name) name = resolved.name;

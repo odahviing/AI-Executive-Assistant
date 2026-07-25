@@ -1,5 +1,6 @@
 import { getDb } from './client';
 import { DateTime } from 'luxon';
+import logger from '../utils/logger';
 
 // ── People Memory ─────────────────────────────────────────────────────────────
 // Persistent contact directory — auto-populated when people are mentioned or
@@ -348,9 +349,25 @@ export function setPersonNameHeById(personId: string, nameHe: string, by: CoreFi
 }
 
 /**
- * Create or update a contact in people_memory.
+ * Create or update a contact in people_memory from a SLACK signal (users.info
+ * pull, @mention resolve, colleague message, self-seed).
  * Safe to call repeatedly — only overwrites non-null fields.
  * Gender is only updated when a real value (not 'unknown') is supplied.
+ *
+ * v4.0.4 — identity resolution goes through `resolvePerson`, THE chokepoint.
+ * Pre-fix this function ran its OWN `INSERT … ON CONFLICT(slack_id)`, which
+ * deduped on slack_id ONLY: a person already on file from the CALENDAR
+ * (slack_id NULL, email set) got a SECOND row the first time they appeared on
+ * Slack, because nothing checked whether another row already owned that email.
+ * That is exactly how Luke Joas ended up with two rows for one address
+ * (`p_mq97pufr_00pi9w`, source=calendar, 2026-06-11 → `p_U07QVKMCMP0`,
+ * source=slack, 2026-06-23), which then read as "ambiguous" downstream and
+ * dropped him from an availability search. resolvePerson's merge-by-attach
+ * hangs the new slack_id on the existing email-matched row instead.
+ *
+ * `name` is deliberately NOT passed to resolvePerson: its fuzzy-name step must
+ * never merge two DISTINCT Slack humans who happen to share a display name.
+ * The name is written below, where a definitive slack_id already pinned the row.
  */
 export function upsertPersonMemory(params: {
   slackId: string;
@@ -360,36 +377,33 @@ export function upsertPersonMemory(params: {
   gender?: PersonGender;
   /**
    * v2.2.2 (#46) — provenance for the timezone write. Defaults to 'auto'
-   * (Slack profile / users.info pulls). Owner-path callers should pass 'owner'
-   * so the value is locked against later auto-overwrite. The COALESCE pattern
-   * here means the timezone is only written when currently NULL; the explicit
-   * provenance helper `setCoreFieldWithProvenance` is the right path for
-   * AUTHORITATIVE overwrites of an existing value.
+   * (Slack profile / users.info pulls). Owner-path callers pass 'owner' so the
+   * value is locked against later auto-overwrite. The write itself rides
+   * `setCoreFieldWithProvenanceById` (below) — the authority chain is enforced
+   * there, in ONE place, not re-implemented in this statement.
    */
   timezoneSetBy?: CoreFieldSetBy;
 }): void {
+  if (!params.slackId) return;
   const db = getDb();
-  const tzSetBy: CoreFieldSetBy = params.timezoneSetBy ?? 'auto';
+
+  const resolved = resolvePerson({
+    slackId:  params.slackId,
+    email:    params.email,
+    // A `SELF:<owner>` row is the assistant's own row and must stay kind='self'
+    // — searchPeopleMemory excludes self by kind, which is what stops colleague
+    // gossip from landing on Maelle's row.
+    kindHint: params.slackId.startsWith('SELF:') ? 'self' : 'internal',
+  });
+  if (!resolved) return;
+  const personId = resolved.person_id;
+
   // NOTE: gender is only written when explicitly supplied AND not 'unknown'.
   // Respect gender_confirmed: never overwrite a confirmed gender here. A
   // confirmed update must go through confirmPersonGender().
-  // v3.2.0 — person_id is the PK now. For the internal upsert path the id is
-  // derived deterministically from slack_id (matches the migration's mapping),
-  // so a repeat upsert of the same colleague always lands on the same row.
-  const personId = `p_${params.slackId.replace(/[^A-Za-z0-9]/g, '_')}`;
-  const selfKind = params.slackId.startsWith('SELF:') ? 'self' : 'internal';
   db.prepare(`
-    INSERT INTO people_memory (person_id, slack_id, kind, source, name, email, timezone, timezone_set_by, gender, last_seen)
-    VALUES (@person_id, @slack_id, @kind, 'slack', @name, @email, @timezone, @tz_set_by, @gender, datetime('now'))
-    ON CONFLICT(slack_id) DO UPDATE SET
+    UPDATE people_memory SET
       name             = @name,
-      email            = COALESCE(@email, email),
-      timezone         = COALESCE(@timezone, timezone),
-      timezone_set_by  = CASE
-                           WHEN @timezone IS NOT NULL AND timezone IS NULL
-                             THEN @tz_set_by
-                           ELSE timezone_set_by
-                         END,
       gender           = CASE
                            WHEN gender_confirmed = 1 THEN gender
                            WHEN @gender != 'unknown' THEN @gender
@@ -397,26 +411,37 @@ export function upsertPersonMemory(params: {
                          END,
       last_seen        = datetime('now'),
       updated_at       = datetime('now')
+    WHERE person_id = @person_id
   `).run({
     person_id: personId,
-    slack_id:  params.slackId,
-    kind:      selfKind,
     name:      params.name,
-    email:     params.email    ?? null,
-    timezone:  params.timezone ?? null,
-    tz_set_by: params.timezone ? tzSetBy : null,
     gender:    params.gender   ?? 'unknown',
   });
 
-  // v2.2.2 (#46) — whenever timezone landed (new or existing), refresh the
-  // auto-derived working hours. Cheap; idempotent inside the helper.
+  // Timezone rides the provenance chokepoint (owner > person > auto). It used to
+  // be a `COALESCE(@timezone, timezone)` in the statement above, which OVERWROTE
+  // an owner-set zone with an auto Slack guess while leaving the old `_set_by`
+  // tag in place — the row then claimed 'owner' authority for an auto value.
+  // Harmless while owner-set zones only ever lived on calendar rows this function
+  // never touched; the moment a merge folds such a row onto a Slack row (which is
+  // now the point) it would silently clobber a taught timezone.
   if (params.timezone) {
+    setCoreFieldWithProvenanceById(personId, 'timezone', params.timezone, params.timezoneSetBy ?? 'auto');
+    // v2.2.2 (#46) — refresh the auto-derived working hours off whatever zone is
+    // now STORED (the write above may have been refused as lower-authority).
+    // Cheap; idempotent inside the helper.
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { refreshAutoWorkingHours } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
       refreshAutoWorkingHours(params.slackId);
     } catch { /* never block memory writes */ }
   }
+
+  // The Slack profile is authoritative for a Slack person's address, so an
+  // email CHANGE propagates here (resolvePerson's attach is fill-only). Routed
+  // through the single email writer so it can never mint / strand a second row
+  // for an address another person already owns.
+  if (params.email) setPersonEmail(personId, params.email, { overwrite: true });
 }
 
 /**
@@ -707,6 +732,284 @@ export function getPersonByEmail(email: string): PersonMemory | null {
   `).get(e) as PersonMemory | null) ?? null;
 }
 
+// ── v4.0.4 — one human, one row ──────────────────────────────────────────────
+//
+// `email` is the LOGICAL identity key of the person store, so writing one is an
+// identity operation, not a field update. Two rows sharing one address are one
+// human split in half, and every consumer that counts rows (attendee resolution,
+// the md catalog, name search) then reads the split as ambiguity. The three
+// helpers below are the whole enforcement: `setPersonEmail` is the only writer of
+// the column, `mergePersonRows` collapses a pair that already exists, and
+// `resolvePerson` calls both so no creation path can fork around them.
+
+/** SQLite `datetime('now')` writes "YYYY-MM-DD HH:MM:SS"; JS `toISOString()`
+ *  writes "…THH:MM:SS.sssZ". Both live in these columns, and a raw string
+ *  compare orders 'T' (0x54) after ' ' (0x20) — so normalize before comparing
+ *  or a same-day ISO value always looks newer than a SQLite one. */
+function tsKey(s?: string | null): string {
+  return (s ?? '').replace('T', ' ').replace('Z', '').trim();
+}
+function laterOf(a?: string | null, b?: string | null): string | null {
+  const ka = tsKey(a); const kb = tsKey(b);
+  if (!ka) return b ?? null;
+  if (!kb) return a ?? null;
+  return kb > ka ? (b ?? null) : (a ?? null);
+}
+function earlierOf(a?: string | null, b?: string | null): string | null {
+  const ka = tsKey(a); const kb = tsKey(b);
+  if (!ka) return b ?? null;
+  if (!kb) return a ?? null;
+  return kb < ka ? (b ?? null) : (a ?? null);
+}
+
+/** Provenance-aware field pick for a merge (owner > person > auto; ties → `a`). */
+function pickByProvenance(
+  a: { value?: string | null; setBy?: CoreFieldSetBy | null },
+  b: { value?: string | null; setBy?: CoreFieldSetBy | null },
+): { value: string | null; setBy: CoreFieldSetBy | null } {
+  const av = (a.value ?? '').trim();
+  const bv = (b.value ?? '').trim();
+  if (!av && !bv) return { value: null, setBy: null };
+  if (!av) return { value: bv, setBy: b.setBy ?? null };
+  if (!bv) return { value: av, setBy: a.setBy ?? null };
+  const ar = a.setBy ? SET_BY_RANK[a.setBy] : 0;
+  const br = b.setBy ? SET_BY_RANK[b.setBy] : 0;
+  return br > ar ? { value: bv, setBy: b.setBy ?? null } : { value: av, setBy: a.setBy ?? null };
+}
+
+/** Union two JSON arrays of dated records, dedup by `keyOf`, oldest→newest, capped. */
+function unionDated<T>(aJson: string, bJson: string, keyOf: (x: T) => string, dateOf: (x: T) => string, cap: number): string {
+  const parse = (s: string): T[] => {
+    try { const v = JSON.parse(s || '[]'); return Array.isArray(v) ? (v as T[]) : []; } catch { return []; }
+  };
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of [...parse(aJson), ...parse(bJson)]) {
+    if (!item || typeof item !== 'object') continue;
+    const k = keyOf(item);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(item);
+  }
+  out.sort((x, y) => tsKey(dateOf(x)).localeCompare(tsKey(dateOf(y))));
+  return JSON.stringify(out.slice(-cap));
+}
+
+/** Shallow-merge two PersonProfile blobs; non-empty keys from `a` win. */
+function mergeProfileJson(aJson: string, bJson: string): string {
+  const parse = (s: string): Record<string, unknown> => {
+    try { const v = JSON.parse(s || '{}'); return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}; }
+    catch { return {}; }
+  };
+  const merged = parse(bJson);
+  for (const [k, v] of Object.entries(parse(aJson))) {
+    if (v !== undefined && v !== null && v !== '') merged[k] = v;
+  }
+  return JSON.stringify(merged);
+}
+
+/** Columns not on the PersonMemory interface but present on the row. */
+type PersonRow = PersonMemory & { engagement_rank?: number; proactive_pending?: number };
+
+/**
+ * v4.0.4 — collapse TWO rows that are the SAME human into ONE, preserving the
+ * union of what each side knew. Returns true when the merge happened.
+ *
+ * Survivor choice is the CALLER's (the canonical rule is `getPersonByEmail`'s:
+ * a slack_id-bearing row wins, then most-recently-seen) — this function only
+ * guarantees nothing is lost: handles are COALESCEd, provenance-tagged fields
+ * keep the higher authority, notes / interaction_log are unioned + deduped,
+ * profile_json is shallow-merged, `created_at` keeps the EARLIER date (we've
+ * known the person since then), the recency stamps keep the LATER value, and
+ * the loser's per-person md file is folded into the survivor's so no file is
+ * orphaned (an orphan would surface as a phantom duplicate in the md catalog).
+ *
+ * Two refusals, both because merging would DESTROY identity rather than repair
+ * it: a kind='self' row (Maelle's own row — merging it is how colleague gossip
+ * would reach it), and two DIFFERENT slack_ids (two Slack accounts on one
+ * address are two people; keeping them apart is the conservative read).
+ */
+export function mergePersonRows(survivorId: string, loserId: string): boolean {
+  if (!survivorId || !loserId || survivorId === loserId) return false;
+  const db = getDb();
+  const survivor = getPersonById(survivorId) as PersonRow | null;
+  const loser = getPersonById(loserId) as PersonRow | null;
+  if (!survivor || !loser) return false;
+
+  if (survivor.kind === 'self' || loser.kind === 'self') {
+    logger.warn('person store — refusing to merge a SELF row', { survivorId, loserId });
+    return false;
+  }
+  if (survivor.slack_id && loser.slack_id && survivor.slack_id !== loser.slack_id) {
+    logger.warn('person store — refusing to merge two distinct slack identities', {
+      survivorId, loserId, survivorSlackId: survivor.slack_id, loserSlackId: loser.slack_id,
+    });
+    return false;
+  }
+
+  const slackIdMerged = survivor.slack_id ?? loser.slack_id ?? null;
+  const nameHe = pickByProvenance(
+    { value: survivor.name_he, setBy: survivor.name_he_set_by },
+    { value: loser.name_he, setBy: loser.name_he_set_by },
+  );
+  const timezone = pickByProvenance(
+    { value: survivor.timezone, setBy: survivor.timezone_set_by },
+    { value: loser.timezone, setBy: loser.timezone_set_by },
+  );
+  const state = pickByProvenance(
+    { value: survivor.state, setBy: survivor.state_set_by },
+    { value: loser.state, setBy: loser.state_set_by },
+  );
+  const gender = pickByProvenance(
+    { value: survivor.gender === 'unknown' ? null : survivor.gender, setBy: survivor.gender_set_by },
+    { value: loser.gender === 'unknown' ? null : loser.gender, setBy: loser.gender_set_by },
+  );
+
+  // engagement_rank: a non-default (≠2) value carries real signal; when both do
+  // and they disagree the LOWER wins — rank 0 is a "don't socialize with me"
+  // opt-out and a merge must never silently overturn it.
+  const rankS = typeof survivor.engagement_rank === 'number' ? survivor.engagement_rank : 2;
+  const rankL = typeof loser.engagement_rank === 'number' ? loser.engagement_rank : 2;
+  const engagementRank = rankS === rankL ? rankS
+    : rankS === 2 ? rankL
+    : rankL === 2 ? rankS
+    : Math.min(rankS, rankL);
+
+  // Outbound language follows the FRESHER inbound stamp, not the survivor.
+  const survivorLangFresher = tsKey(survivor.last_inbound_lang_at) >= tsKey(loser.last_inbound_lang_at);
+  const lastInboundLang = (survivor.last_inbound_lang && survivorLangFresher)
+    ? survivor.last_inbound_lang
+    : (loser.last_inbound_lang ?? survivor.last_inbound_lang ?? null);
+
+  const merged = {
+    person_id:            survivorId,
+    slack_id:             slackIdMerged,
+    email:                survivor.email ?? loser.email ?? null,
+    // A slack_id present ⇒ internal by construction; otherwise the stronger of
+    // the two claims wins ('internal' means company-domain / known colleague).
+    kind:                 slackIdMerged ? 'internal'
+                            : (survivor.kind === 'internal' || loser.kind === 'internal') ? 'internal' : 'external',
+    org:                  survivor.org ?? loser.org ?? null,
+    source:               slackIdMerged ? 'slack' : (survivor.source ?? loser.source ?? null),
+    name:                 (survivor.name ?? '').trim() || (loser.name ?? '').trim() || 'Unknown',
+    name_he:              nameHe.value,
+    name_he_set_by:       nameHe.setBy,
+    timezone:             timezone.value,
+    timezone_set_by:      timezone.setBy,
+    state:                state.value,
+    state_set_by:         state.setBy,
+    gender:               gender.value ?? 'unknown',
+    gender_set_by:        gender.setBy,
+    gender_confirmed:     Math.max(survivor.gender_confirmed ?? 0, loser.gender_confirmed ?? 0),
+    is_vip:               Math.max(survivor.is_vip ?? 0, loser.is_vip ?? 0),
+    engagement_rank:      engagementRank,
+    proactive_pending:    Math.max(survivor.proactive_pending ?? 0, loser.proactive_pending ?? 0),
+    working_hours_auto:   survivor.working_hours_auto ?? loser.working_hours_auto ?? null,
+    currently_traveling:  survivor.currently_traveling ?? loser.currently_traveling ?? null,
+    notes:                unionDated<PersonNote>(
+                            survivor.notes, loser.notes,
+                            n => `${n.date ?? ''}|${n.note ?? ''}`, n => n.date ?? '', 50),
+    interaction_log:      unionDated<PersonInteraction>(
+                            survivor.interaction_log, loser.interaction_log,
+                            i => `${i.date ?? ''}|${i.type ?? ''}|${i.summary ?? ''}`, i => i.date ?? '', 200),
+    profile_json:         mergeProfileJson(survivor.profile_json, loser.profile_json),
+    last_seen:            laterOf(survivor.last_seen, loser.last_seen),
+    last_social_at:       laterOf(survivor.last_social_at, loser.last_social_at),
+    last_initiated_at:    laterOf(survivor.last_initiated_at, loser.last_initiated_at),
+    last_inbound_lang:    lastInboundLang,
+    last_inbound_lang_at: laterOf(survivor.last_inbound_lang_at, loser.last_inbound_lang_at),
+    created_at:           earlierOf(survivor.created_at, loser.created_at),
+  };
+
+  const apply = db.transaction(() => {
+    // DELETE first: when the survivor is adopting the loser's slack_id, the
+    // UNIQUE index would still see it held by the loser row.
+    db.prepare(`DELETE FROM people_memory WHERE person_id = ?`).run(loserId);
+    db.prepare(`
+      UPDATE people_memory SET
+        slack_id = @slack_id, email = @email, kind = @kind, org = @org, source = @source,
+        name = @name, name_he = @name_he, name_he_set_by = @name_he_set_by,
+        timezone = @timezone, timezone_set_by = @timezone_set_by,
+        state = @state, state_set_by = @state_set_by,
+        gender = @gender, gender_set_by = @gender_set_by, gender_confirmed = @gender_confirmed,
+        is_vip = @is_vip, engagement_rank = @engagement_rank, proactive_pending = @proactive_pending,
+        working_hours_auto = @working_hours_auto, currently_traveling = @currently_traveling,
+        notes = @notes, interaction_log = @interaction_log, profile_json = @profile_json,
+        last_seen = @last_seen, last_social_at = @last_social_at, last_initiated_at = @last_initiated_at,
+        last_inbound_lang = @last_inbound_lang, last_inbound_lang_at = @last_inbound_lang_at,
+        created_at = @created_at, updated_at = datetime('now')
+      WHERE person_id = @person_id
+    `).run(merged);
+  });
+
+  try {
+    apply.immediate();
+  } catch (err) {
+    logger.error('person store — merge failed, both rows left intact', { survivorId, loserId, err: String(err).slice(0, 300) });
+    return false;
+  }
+
+  logger.warn('person store — merged two rows for one person', {
+    survivorId, loserId, email: merged.email, slackId: merged.slack_id, name: merged.name,
+  });
+
+  // Fold the loser's md file into the survivor's. Lazy require: the md layer
+  // owns the file layout and itself reads the DB, so the dependency is resolved
+  // at call time in both directions (same pattern as refreshAutoWorkingHours).
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { mergePersonMdFiles } = require('../memory/peopleMemory') as typeof import('../memory/peopleMemory');
+    mergePersonMdFiles(survivorId, loserId, merged.name);
+  } catch (err) {
+    logger.warn('person store — md-file merge failed after row merge', { survivorId, loserId, err: String(err).slice(0, 200) });
+  }
+
+  return true;
+}
+
+/**
+ * v4.0.4 — THE writer for `people_memory.email`. Never `UPDATE … SET email`
+ * anywhere else: the address is the logical identity key, so if ANOTHER row
+ * already holds it the two rows are the same human and must be MERGED, not left
+ * as a duplicate pair.
+ *
+ * Fill-only by default (an existing address stays). `overwrite: true` is for the
+ * Slack path, where users.info is authoritative and an address CHANGE should
+ * propagate.
+ *
+ * Returns the person_id that owns the address afterwards (may differ from the
+ * argument when a merge picked the other row as survivor), or null when the
+ * write was refused — two distinct Slack identities claiming one address, where
+ * the existing holder keeps it.
+ */
+export function setPersonEmail(personId: string, email: string, opts?: { overwrite?: boolean }): string | null {
+  const e = (email ?? '').trim().toLowerCase();
+  if (!personId || !e) return null;
+  const db = getDb();
+  const row = getPersonById(personId);
+  if (!row) return null;
+
+  const current = (row.email ?? '').trim().toLowerCase();
+  if (current === e) return personId;
+  if (current && !opts?.overwrite) return personId;
+
+  const holder = getPersonByEmail(e);
+  if (holder && holder.person_id !== personId) {
+    // Same address ⇒ same human. Collapse; the slack_id-bearing row survives
+    // (getPersonByEmail's canonical "Slack wins" order).
+    const survivorId = row.slack_id ? personId : (holder.slack_id ? holder.person_id : personId);
+    const loserId = survivorId === personId ? holder.person_id : personId;
+    if (mergePersonRows(survivorId, loserId)) return survivorId;
+    logger.warn('person store — email write refused, address held by another identity', {
+      email: e, personId, holder: holder.person_id,
+    });
+    return null;
+  }
+
+  db.prepare(`UPDATE people_memory SET email = ?, updated_at = datetime('now') WHERE person_id = ?`).run(e, personId);
+  return personId;
+}
+
 export interface ResolvePersonInput {
   slackId?: string | null;
   email?: string | null;
@@ -714,8 +1017,9 @@ export interface ResolvePersonInput {
   /** Owner's company domain (e.g. "reflectiz.com") — classifies a fresh
    *  email-only person as internal vs external. */
   ownerDomain?: string;
-  /** Force the kind on create (overrides domain inference). */
-  kindHint?: 'internal' | 'external';
+  /** Force the kind on create (overrides domain inference). `self` is the
+   *  assistant's own synthetic row — see upsertPersonMemory. */
+  kindHint?: 'internal' | 'external' | 'self';
 }
 
 export interface ResolvedPerson {
@@ -725,17 +1029,28 @@ export interface ResolvedPerson {
 }
 
 /**
- * v3.2.0 — THE person chokepoint. Find-or-create + light merge across
+ * v3.2.0 — THE person chokepoint. Find-or-create + merge across
  * {slack_id → email → fuzzy name}, returning a stable person_id. Every caller
  * that has a slack_id / email / name and needs "who is this person" routes
  * through here instead of a bare slack_id lookup — that's what lets a
  * pure-email external (booked once, no Slack) be recognized next time.
  *
- * Merge-by-attach (Slack wins, per owner Q5): if we match a person by email
- * and now also learn their slack_id, we attach the slack_id to that row and
- * promote it to internal. The rarer two-rows-one-human case (a separate row
- * already owns that slack_id) is left alone — realistically a company-domain
- * person always arrives via Slack first, so it almost never happens.
+ * v4.0.4 — the two handles are looked up UP FRONT instead of in a first-match-
+ * wins ladder, which is what makes "one human, two rows" impossible to leave
+ * behind:
+ *   - both handles match DIFFERENT rows → they are one human split in half
+ *     (a calendar-sourced row + a later Slack row); MERGE, Slack row survives.
+ *     The pre-4.0.4 ladder returned the slack row and left the pair standing,
+ *     documented as "almost never happens" — Luke Joas proved it does, and the
+ *     split then read as ambiguity in attendee resolution.
+ *   - only one matches → that's the person; the missing handle is attached
+ *     (merge-by-attach, Slack wins → promote to internal).
+ *   - the address is already held by a row with a DIFFERENT slack_id → two
+ *     Slack accounts, one address = two people. slack_id is the stronger
+ *     handle, so the holder keeps the address and this caller gets its own row.
+ *   - neither matches → unambiguous fuzzy name, else create.
+ * Because the slack_id lookup happens first, an attach can no longer collide
+ * with the UNIQUE index at all — the old silently-swallowed catch is gone.
  *
  * Returns null only when given no usable handle at all.
  */
@@ -744,77 +1059,72 @@ export function resolvePerson(input: ResolvePersonInput): ResolvedPerson | null 
   const slackId = (input.slackId ?? '').trim() || undefined;
   const email = (input.email ?? '').trim().toLowerCase() || undefined;
   const name = (input.name ?? '').trim() || undefined;
+  if (!slackId && !email && !name) return null;
 
-  // 1. slack_id — the strongest handle.
-  if (slackId) {
-    const row = getPersonMemory(slackId);
-    if (row) {
-      if (email && !row.email) {
-        db.prepare(`UPDATE people_memory SET email = ?, updated_at = datetime('now') WHERE person_id = ?`)
-          .run(email, row.person_id);
-        row.email = email;
-      }
-      return { person_id: row.person_id, created: false, row };
-    }
+  const bySlack = slackId ? getPersonMemory(slackId) : null;
+  const byEmail = email ? getPersonByEmail(email) : null;
+
+  const emailHeldByOther = !!(byEmail && slackId && byEmail.slack_id && byEmail.slack_id !== slackId);
+  if (emailHeldByOther) {
+    logger.warn('person store — address held by a different slack identity; keeping them separate', {
+      email, slackId, holder: byEmail!.person_id, holderSlackId: byEmail!.slack_id,
+    });
+  }
+  const usableEmail = emailHeldByOther ? undefined : email;
+  const emailRow = emailHeldByOther ? null : byEmail;
+
+  // 1. One human on two rows → collapse (Slack row survives).
+  if (bySlack && emailRow && bySlack.person_id !== emailRow.person_id) {
+    mergePersonRows(bySlack.person_id, emailRow.person_id);
   }
 
-  // 2. email — logical key.
-  if (email) {
-    const row = getPersonByEmail(email);
-    if (row) {
-      if (slackId && !row.slack_id) {
-        // Attach the newly-known slack_id; promote to internal (Slack wins).
-        try {
-          db.prepare(`UPDATE people_memory SET slack_id = ?, kind = 'internal', source = 'slack', updated_at = datetime('now') WHERE person_id = ?`)
-            .run(slackId, row.person_id);
-          row.slack_id = slackId;
-          row.kind = 'internal';
-        } catch { /* slackId already owned by another row — leave as-is */ }
-      }
-      return { person_id: row.person_id, created: false, row };
-    }
-  }
-
-  // 3. fuzzy name — only trust an unambiguous match.
-  if (name) {
+  // 2. Target = the strongest handle that matched, else an unambiguous name.
+  let targetId = bySlack?.person_id ?? emailRow?.person_id;
+  if (!targetId && name) {
     const matches = searchPeopleMemory(name);
     const exact = matches.filter(m => m.name.toLowerCase() === name.toLowerCase());
     const pick = exact.length === 1 ? exact[0] : (matches.length === 1 ? matches[0] : null);
-    if (pick) {
-      // Enrich the matched row with any new handle.
-      if (slackId && !pick.slack_id) {
-        try {
-          db.prepare(`UPDATE people_memory SET slack_id = ?, kind = 'internal', source = 'slack', updated_at = datetime('now') WHERE person_id = ?`).run(slackId, pick.person_id);
-          pick.slack_id = slackId; pick.kind = 'internal';
-        } catch { /* taken */ }
-      }
-      if (email && !pick.email) {
-        db.prepare(`UPDATE people_memory SET email = ?, updated_at = datetime('now') WHERE person_id = ?`).run(email, pick.person_id);
-        pick.email = email;
-      }
-      return { person_id: pick.person_id, created: false, row: pick };
+    // A name is never strong enough to hand back a row that already belongs to
+    // a DIFFERENT Slack identity.
+    if (pick && !(slackId && pick.slack_id && pick.slack_id !== slackId)) targetId = pick.person_id;
+  }
+
+  // 3. Enrich the matched row with whatever handle it doesn't have yet.
+  if (targetId) {
+    if (slackId && !getPersonById(targetId)?.slack_id) {
+      // bySlack was empty ⇒ no row owns this slack_id ⇒ the UNIQUE index on
+      // slack_id cannot fire. Promote to internal (Slack wins); never re-kind
+      // the assistant's own SELF row.
+      db.prepare(`
+        UPDATE people_memory
+           SET slack_id = ?, source = 'slack', updated_at = datetime('now'),
+               kind = CASE WHEN kind = 'self' THEN kind ELSE 'internal' END
+         WHERE person_id = ?
+      `).run(slackId, targetId);
     }
+    if (usableEmail) targetId = setPersonEmail(targetId, usableEmail) ?? targetId;
+    const row = getPersonById(targetId);
+    return row ? { person_id: row.person_id, created: false, row } : null;
   }
 
   // 4. create — requires at least one handle.
-  if (!slackId && !email && !name) return null;
   const personId = slackId ? `p_${slackId.replace(/[^A-Za-z0-9]/g, '_')}` : newPersonId();
   const ownerDomain = (input.ownerDomain ?? '').trim().toLowerCase();
-  const kind: 'internal' | 'external' =
+  const kind: 'internal' | 'external' | 'self' =
     input.kindHint
     ?? (slackId ? 'internal'
-      : (email && ownerDomain && email.endsWith('@' + ownerDomain)) ? 'internal'
+      : (usableEmail && ownerDomain && usableEmail.endsWith('@' + ownerDomain)) ? 'internal'
       : 'external');
-  const source = slackId ? 'slack' : (email ? 'calendar' : 'manual');
-  const displayName = name ?? (email ? email.split('@')[0] : (slackId ?? 'Unknown'));
+  const source = slackId ? 'slack' : (usableEmail ? 'calendar' : 'manual');
+  const displayName = name ?? (usableEmail ? usableEmail.split('@')[0] : (slackId ?? 'Unknown'));
   try {
     db.prepare(`
       INSERT INTO people_memory (person_id, slack_id, email, kind, source, name, gender, last_seen)
       VALUES (?, ?, ?, ?, ?, ?, 'unknown', datetime('now'))
-    `).run(personId, slackId ?? null, email ?? null, kind, source, displayName);
+    `).run(personId, slackId ?? null, usableEmail ?? null, kind, source, displayName);
   } catch {
     // Lost a race / unique collision — re-resolve by the strongest handle.
-    const again = slackId ? getPersonMemory(slackId) : (email ? getPersonByEmail(email) : null);
+    const again = slackId ? getPersonMemory(slackId) : (usableEmail ? getPersonByEmail(usableEmail) : null);
     if (again) return { person_id: again.person_id, created: false, row: again };
     return null;
   }

@@ -15,7 +15,7 @@
  * none), never throws.
  */
 
-import logger from '../../utils/logger';
+import logger from '../utils/logger';
 
 export interface AttendeeContactInput {
   name?: string;
@@ -44,8 +44,8 @@ export function resolveAttendeeEmail(input: AttendeeContactInput): ResolvedAtten
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getPersonMemory, searchPeopleMemory } = require('../../db/people') as
-      typeof import('../../db/people');
+    const { getPersonMemory, searchPeopleMemory } = require('../db/people') as
+      typeof import('../db/people');
 
     if (slackId) {
       const mem = getPersonMemory(slackId);
@@ -120,8 +120,9 @@ export function nameGenuinelyMatches(candidateName: string | undefined, candidat
  *   - 0 internal matches  → UNRESOLVED (external / unknown — email only at
  *     booking; never blocks showing options). Returned in `unresolved` so the
  *     caller can tell Sonnet "show times now, don't demand their email."
- *   - >1 internal matches → UNRESOLVED (ambiguous — the model disambiguates;
- *     we never fuzzy-guess which "Lori").
+ *   - >1 DISTINCT internal people (different emails) → UNRESOLVED (ambiguous —
+ *     the model disambiguates; we never fuzzy-guess which "Lori"). Duplicate
+ *     rows for the SAME email (calendar + Slack) collapse to one person first.
  *   - the owner himself is DROPPED from both lists — he's the search BASE, not
  *     an attendee, and must never be flagged as an unresolved/external person.
  *     Any excludeEmails (e.g. the requester) are dropped from `resolved` too.
@@ -150,7 +151,7 @@ export function resolveNamedInternalAttendees(params: {
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { searchPeopleMemory } = require('../../db/people') as typeof import('../../db/people');
+    const { searchPeopleMemory, getPersonByEmail } = require('../db/people') as typeof import('../db/people');
     for (const rawName of names) {
       const name = (rawName ?? '').trim();
       if (!name) continue;
@@ -170,16 +171,32 @@ export function resolveNamedInternalAttendees(params: {
         m.email && m.email.includes('@') && m.email.toLowerCase().endsWith('@' + ownerDomain)
         && nameGenuinelyMatches(m.name, m.email, name),
       );
-      // SINGLE UNAMBIGUOUS internal match only — never fuzzy-guess.
-      if (internal.length !== 1) {
-        unresolved.push(name);  // 0 (external/unknown) or >1 (ambiguous)
+      // Collapse duplicate rows for the SAME person before the ambiguity test.
+      // people_memory legitimately holds two rows for one human — a
+      // calendar-sourced, email-only row (slack_id NULL) and the later
+      // Slack-sourced row, sharing one email (e.g. luke.j@reflectiz.com). Those
+      // are ONE internal person, not an ambiguous pair: email is the logical key
+      // (getPersonByEmail's "Slack wins" merge). Counting raw rows made a known
+      // colleague who exists as both rows read as ">1 → ambiguous" and silently
+      // dropped him from the search — Luke Joas (07-24) resolved turn 1 only
+      // because Sonnet happened to call find_slack_user; turn 2 she didn't and
+      // he vanished from every find_available_slots slot.
+      const distinctEmails = new Set(internal.map(m => m.email!.toLowerCase()));
+      // SINGLE UNAMBIGUOUS internal PERSON only — never fuzzy-guess.
+      if (distinctEmails.size !== 1) {
+        unresolved.push(name);  // 0 (external/unknown) or >1 distinct people (ambiguous)
         continue;
       }
-      const email = internal[0].email!.toLowerCase();
+      const email = [...distinctEmails][0];
       if (exclude.has(email)) continue;   // requester etc. — handled elsewhere, not "external"
       if (seen.has(email)) continue;
       seen.add(email);
-      resolved.push({ name: internal[0].name ?? name, email });
+      // Narration name from the ONE canonical row for this email — the SAME
+      // "Slack wins, then most-recent" tiebreak getPersonByEmail owns; reuse it
+      // so the two never drift (a re-implemented ORDER BY would). Empty/missing
+      // canonical name → the raw query name.
+      const canonical = getPersonByEmail(email);
+      resolved.push({ name: canonical?.name || name, email });
     }
   } catch (err) {
     logger.warn('resolveNamedInternalAttendees threw — returning what resolved', { err: String(err).slice(0, 200) });

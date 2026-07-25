@@ -6,9 +6,12 @@ name: Build and Deploy Maelle to GKE (EU)
 #     (version + gitSha) is correct in-container — the deploy-verification signal.
 
 on:
-  push:
-    branches:
-      - master
+  # Manual-only (Run workflow button). We are NOT on the GKE path right now
+  # (pivoted to a VM) and the GCP side (Workload Identity, cluster) isn't
+  # provisioned — a push trigger just fails on every commit and emails. Kept
+  # runnable so this stays a ready GKE fallback; re-add the push trigger only
+  # once GKE is live and configured.
+  workflow_dispatch: {}
 
 permissions:
   contents: 'read'

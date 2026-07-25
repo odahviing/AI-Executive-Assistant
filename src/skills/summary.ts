@@ -32,7 +32,7 @@ import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import type { Skill, SkillContext } from './types';
 import type { UserProfile } from '../config/userProfile';
-import { nameGenuinelyMatches } from './meetings/resolveAttendeeEmails';
+import { nameGenuinelyMatches } from '../memory/resolveAttendeeEmails';
 import {
   getSummarySessionByThread,
   createSummarySession,

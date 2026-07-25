@@ -2,6 +2,35 @@
 
 ---
 
+## 4.1.0 — the agent framework: Maelle is built by a squad of charter-bound agents
+
+Development moved from parallel human chats to a **seven-lane agent framework**. Each lane owns an area of the codebase and carries a charter — the owner's product rules as its system prompt — and a Manager orchestrates them: it pulls work (open GitHub `Bug` issues + a nightly 24h chat-quality log review), triages into atomic issues, dispatches the lanes in parallel with `context` last, chains cross-lane dependencies, guard-verifies each fix, and maintains a cumulative report. Agents build in the working tree and **never commit** — the owner alone wraps. The first real runs found and fixed a live bug (an attendee silently dropped from a multi-attendee search) and then its root cause in the person store.
+
+### Added
+- The squad (`.claude/agents/`): `meeting` (scheduling core) · `requests` (the async work-item spine) · `guard` (output-time gates) · `people` (identity, memory, social) · `context` (everything Maelle is told) · `slack` (transport) · `other` (the remainder). One rule-tag letter each — M/R/G/P/C/S/O.
+- The Manager (`.claude/skills/manager/`) — the owner's control panel: `run` · `status` · `report` · `resend <id>` · `wrap` · `watch` (nightly 19:00). It routes by where the durable fix lives, merges same-root issues, escalates rather than guessing, and never writes code itself.
+- Bugger (`.claude/workflows/bugger.js`) — the loop engine, with `.claude/agent-loop/` as its report + state trail.
+
+### Fixed
+- **The person store minted two rows for one human.** `upsertPersonMemory` ran its own `INSERT … ON CONFLICT(slack_id)` around the `resolvePerson` chokepoint, so someone first seen on the calendar (email, no slack_id) gained a second row the first time they appeared on Slack. The parallel insert is deleted; `resolvePerson` now does an up-front two-handle (slack_id + email) lookup and MERGES instead of leaving the split alone; one `mergePersonRows` and one `setPersonEmail` are the only writers of the identity column. The mirror order — slack-first, email learned later — is closed too.
+- **An attendee was silently dropped from a multi-attendee search.** `resolveNamedInternalAttendees` counted raw `people_memory` rows, so a person holding duplicate rows read as "ambiguous" and never entered the deterministic search union — slots were offered validated against everyone except them. It now collapses matches by distinct email; two genuinely different emails still stay model-disambiguated.
+- **Timezone provenance.** Merge precedence let an incoming Slack-profile zone clobber an owner-taught one while `timezone_set_by` still read `owner` — the row lied about its own provenance. Owner-set now wins; auto→auto still updates.
+
+### Changed
+- **The output gate stack left the delivery pipeline.** `postReply.ts` (989 → 348 lines) is transport only — save, normalize, send — and all gate policy (concision, claim-check, humanGate, date verify, security gate) moved verbatim to `utils/guards/runOutputGates.ts`. No gate logic was redesigned: same gates, same order, same owner/colleague paths, same fail-open semantics.
+- **Attendee resolution moved to the people layer** — `skills/meetings/resolveAttendeeEmails.ts` → `memory/resolveAttendeeEmails.ts`. It queries the person store and is consumed by the planner, summaries and the turn-context builder, so it belongs with identity rather than with scheduling.
+- **The GKE deploy workflow is manual-only** (`workflow_dispatch`). After the VM pivot the cluster isn't provisioned, so the push trigger failed on every commit; it stays runnable as a fallback.
+
+### Migration
+- `v4_0_4_dedupe_people_email` collapses existing duplicate-email `people_memory` rows through the same `mergePersonRows` the runtime uses, so cleanup and prevention cannot drift. Every affected row is dumped to `data/migrations/` **before** the first merge — no backup written means no merge attempted. It runs on each boot and self-terminates once the table is clean. Verified against a sandboxed copy of the live database (76→75 rows, 73→72 md files, zero orphans, a second sweep a clean no-op); the live database is untouched until the next boot.
+
+### Invariants preserved
+- Agents never commit, never bump a version, never wrap — the owner is the only committer.
+- Security and privacy are enforced in code, never by prompt: a tool returns only what its caller may see.
+- Ambiguous log-review findings are shown to the owner and never auto-fixed.
+
+---
+
 ## 4.0.3 — real-day bug wave: slot spread, approval verdicts, cross-TZ attendees, image carry-over, honesty guards
 
 A full day of live-use bugs, triaged and root-caused across every subsystem, then fixed. Prod ran 4.0.1 all day (4.0.2 was committed but not deployed), so none of these were 4.0.2 regressions. The wave clustered into four areas: meeting slot-finding (a cross-TZ request collapsing to a single option; a wrapping-band clamp; no-record attendee timezones; online-meeting location), approval verdict routing (`reject` vs `amend`), image loss across turns, and honesty guards. Restart to load.

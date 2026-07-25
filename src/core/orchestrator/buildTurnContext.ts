@@ -223,8 +223,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
   if (turnMeetingPeople.length > 0) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { resolveNamedInternalAttendees } = require('../../skills/meetings/resolveAttendeeEmails') as
-        typeof import('../../skills/meetings/resolveAttendeeEmails');
+      const { resolveNamedInternalAttendees } = require('../../memory/resolveAttendeeEmails') as
+        typeof import('../../memory/resolveAttendeeEmails');
       const { resolved, unresolved } = resolveNamedInternalAttendees({
         names: turnMeetingPeople,
         ownerEmail: profile.user.email,

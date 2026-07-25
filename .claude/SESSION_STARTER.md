@@ -1,6 +1,6 @@
 # Maelle session context
 
-Working on Maelle at `E:/Code/Maelle`. **Current version: v4.0.3** — `package.json` is the source of truth. **HEAD = the 4.0.3 wrap commit** (run `git log -1` for the SHA). The boot log stamps `version` + `gitSha` — confirm it matches HEAD after any restart. **Running model: `claude-sonnet-5`** — the Sonnet-5 retry is LIVE: the orchestrator runs adaptive thinking at `high`, and (4.0.2) COMPOSITION passes also think — brief `medium`, summary `medium`, knowledge `low`; the ~25 cheap classifier/guard passes stay thinking-off. 4.0.2 also parallelized the owner-facing guard stack (claim+humanGate+date, one wall-clock) + forced humanGate's verdict tool + moved close_loop to Haiku. Revert model = flip `MODEL_SONNET` back to `claude-sonnet-4-6` (one line). **4.0.3** = a real-day bug wave across all subsystems (meeting slot spread + cross-TZ, approval `reject`-vs-`amend` verdicts, image re-attach across turns, honesty guards, brief/news routing — see CHANGELOG); the 4.0.2-deferred `isBriefRequest` misroute is now FIXED. **Known follow-ups:** Ayala `MAX_PER_DAY` pre-spread cap (a single wide cross-TZ window still surfaces ~2 options, not the fuller set); M3 no-TZ fallback uses the owner's zone, not the requester's.
+Working on Maelle at `E:/Code/Maelle`. **Current version: v4.1.0** — `package.json` is the source of truth. **HEAD = the 4.1.0 wrap commit** (run `git log -1` for the SHA). **4.1.0 = the agent framework** (the squad + Manager + Bugger loop below) plus the person-store "one human, one row" fix and its boot migration, the attendee-resolution fix, and the gate stack moving out of the delivery pipeline. The boot log stamps `version` + `gitSha` — confirm it matches HEAD after any restart. **Running model: `claude-sonnet-5`** — the Sonnet-5 retry is LIVE: the orchestrator runs adaptive thinking at `high`, and (4.0.2) COMPOSITION passes also think — brief `medium`, summary `medium`, knowledge `low`; the ~25 cheap classifier/guard passes stay thinking-off. 4.0.2 also parallelized the owner-facing guard stack (claim+humanGate+date, one wall-clock) + forced humanGate's verdict tool + moved close_loop to Haiku. Revert model = flip `MODEL_SONNET` back to `claude-sonnet-4-6` (one line). **4.0.3** = a real-day bug wave across all subsystems (meeting slot spread + cross-TZ, approval `reject`-vs-`amend` verdicts, image re-attach across turns, honesty guards, brief/news routing — see CHANGELOG); the 4.0.2-deferred `isBriefRequest` misroute is now FIXED. **Known follow-ups:** Ayala `MAX_PER_DAY` pre-spread cap (a single wide cross-TZ window still surfaces ~2 options, not the fuller set); M3 no-TZ fallback uses the owner's zone, not the requester's.
 
 ## This chat = FEATURES **and** BUGS
 
@@ -11,6 +11,52 @@ General features + bugs chat. Standing mode:
 - **Build only on an explicit per-item "fix it / build it / do it"** on a *specific* bug/feature. Bare "ok / yes / go" is ambiguous — ask. On a build signal: edit → typecheck → **STOP** (uncommitted).
 - **Wrap only on an explicit ship word** ("wrap / ship / commit / cut a version / bundle"). Default bump **PATCH**. (This session's follow-up was an explicit "commit but keep it 4.0.0" → committed with NO bump.)
 - **Prompt is a budget, not a junk drawer.** Enforcement → code (chokepoint guard / a return-value the model reacts to / a tool that owns the decision). Prompt only for judgment / tone / format / language.
+
+## The agent framework — how Maelle is built now (`.claude/agents/` + `.claude/skills/manager`)
+
+Maelle is built by **seven lane agents** whose charter file IS their system prompt, plus a **Manager** that orchestrates them. Two modes, one set of lanes.
+
+**Mode 1 — the autonomous bug loop ("Bugger").** The **Manager** (`/manager`, `.claude/skills/manager/SKILL.md`) is the owner's control panel. ONE run a day at **18:00**: intake (open GitHub `Bug` issues **+** a 24h chat-quality log review) → triage to atomic issues → dispatch the code lanes **in parallel** (meeting · requests · guard · people · slack · other) → **`context` LAST** → chain dependencies → guard-verify → cumulative report at `.claude/agent-loop/report.md`. Engine: `.claude/workflows/bugger.js`. Agents **build within their charter WITHOUT a per-item "go"** — that is the loop's whole point, and it **supersedes the propose-first standing mode above, which governs interactive human chats, NOT the loop's agents.**
+
+**Mode 2 — interactive / feature work.** An owner-driven chat. Propose-first applies to *the chat*; the lane agents can still be invoked directly to build a scoped piece. **Do NOT route features through the Manager** — its intake and verdict schemas are bug-shaped (symptom / root cause / reappearance). Instead: **design first** — where it belongs, what it reuses, the contract between lanes, who builds what in what order — get the owner's approval, then dispatch the lanes in that order, guard-verify, and let the owner wrap.
+
+**Feature dispatches — one charter clarification that matters.** The charters' *reduce-LOC · reduce-prompt · no-new-state* reflexes are **bug hygiene, not a ban on building.** New capability legitimately ADDS code, and sometimes state or prompt. The bar for an addition is: it **rides an existing spine, duplicates nothing, and deletes whatever it replaces.** An agent must not refuse a sanctioned feature on "the diff must trend net-negative" grounds.
+
+**Shared by BOTH modes:** only the **owner** commits / wraps (agents never commit — they build in the tree and stop) · code-first · prove the root cause from code + logs · **security & privacy are enforced in code, never prompt** · deep fix, never a patch · **no-guess: unsure → escalate, don't build** · no regex on natural language (multilingual). Ambiguous log-review findings are **shown to the owner, never auto-fixed**. An agent that is unsure, blocked by its charter, or facing an owner-only judgment returns a verdict up the chain — it does not guess.
+
+### The squad — lanes & boundaries
+
+Every lane takes the product requirement into a different area. At a glance:
+
+- **meeting — the secretary.** How Maelle thinks and works on **meetings and the calendar**. Not news, not people.
+- **requests — the spine / tasker.** Owns the **lifecycle stage** of every async process: raise → track → decide → replay → close → loop back.
+- **guard — what stops her making mistakes.** The output-time net, and nothing more.
+- **people — who she works with.** Identity, what she remembers, and the social layer.
+- **context.** Everything she is told before she acts — the system prompt, tool descriptions, learned prefs.
+- **slack — the pipes.** How a message reaches her and how an answer reaches a person.
+- **other.** Whatever no lane owns yet; it shrinks as lanes take over.
+
+*Rule tags are one letter per lane:* **M**eeting · **R**equests · **G**uard · **P**eople · **C**ontext · **S**lack · **O**ther.
+
+| Lane | Owns | Never touches |
+|---|---|---|
+| **meeting** | deterministic scheduling core — search / validate / book / move / cancel, free-busy, TZ + Working-Elsewhere, floating blocks, Graph + cache | the requests spine · the guards · prompt wording · transport |
+| **requests** | the async work-item spine — everything with a row in `requests` (approvals, outreach, reminders, follow-ups, research): raise → track → decide → replay → close → loop back, incl. timers/expiry, the requester relay and the owner's daily decision thread | the meeting planner core · the guards · the prompt · **what an item DOES when it fires** (that's its domain lane) |
+| **guard** | output-time gate stack (claimChecker / humanGate / dateVerifier / securityGate / availabilityPreCheck) + `postReply` orchestration + `summarizeToolCall` truthfulness. Also the loop's **verifier** | the flows the guards protect — a broken flow is fixed in ITS lane, never papered over |
+| **people** | identity + the person store (`db/people.ts`) + people memory + social (topics, codas, engagement) + Maelle's own self row | other lanes' *use* of person data |
+| **context** | the context budget — `systemPrompt.ts`, tool descriptions, learned-MD prefs. **Runs LAST** | anything code can enforce; **never** security / privacy; conversation/thread context (slack) |
+| **slack** | the transport — inbound routing + queue, threading, DM/MPIM/channel posture, authority by authenticated sender, dedup + catch-up, the `postReply` delivery pipeline, the `Connection` abstraction, media/platform features | the **gate decisions** inside postReply (guard) · what an event *means* (requests) · person data (people) |
+| **other** | the net — news, brief, routines and non-request async jobs, Graph plumbing beyond the calendar, core orchestrator (non-prompt / non-guard), DB, health, config, scripts | anything a lane owns |
+
+**Seams that cause bouncing — settle them, don't guess:**
+- **Route by where the durable FIX lives, not where the symptom appeared.** A leak *appears* at output but is usually fixed in the flow that produced the data.
+- **guard vs flow:** the gates = guard; whatever fed them = its own lane. **A missing backstop is not its own bug.**
+- **people vs meeting:** the person store + its semantics = people; which attendees enter a search = meeting.
+- **people vs context:** person *facts* = the store (people); the owner's *opinion* of a person = learned MD (people routes the content, context owns the injection).
+- **slack vs everyone — the WhatsApp litmus:** *if Maelle switched to WhatsApp tomorrow, would this code change?* Yes → slack. No → the domain lane. (So: the `postReply` **pipeline** is slack, the **gates inside it** are guard; a ✅ reaction *arrives* via slack, what it *resolves* is requests.)
+- **`context` is a last-resort destination** — never route there merely because a symptom is visible in a reply.
+- **`other` only when no specialist owns it** — it is not a bin for the unclear; unclear = escalate to the owner.
+- **OPEN ownership question:** dense packing / calendar-health auto-move / floating-block defrag (`calendarHealth`, `rebalanceFloatingBlocks`, `calendarDensity`) historically sat outside the planner, but meeting's M7 (dense calendar, long breaks) already governs it — **owner to confirm** whether it belongs to `meeting` (recommended) or stays in `other`.
 
 ## ⚠️ Sonnet 5 RETRY is LIVE as of 4.0.1 — orchestrator = adaptive thinking, effort `high`
 
@@ -31,17 +77,11 @@ General features + bugs chat. Standing mode:
 - **Health scan skips already-elapsed events** (no more flagging a past meeting) + **stale OOF rows on a full-day-OOO day self-resolve** (the Aug-13 flight re-flag).
 - **Bare slack-id outbound scrub** (guard chat — `textScrubber`, deterministic `@U…` → `<@id>`) + **group-DM "name whose conflict" narration** (prompt chat — `systemPrompt`).
 
-## Parallel chats on the same repo — route work to the right one
+## Shared tree — several lanes edit at once
 
-Assume 2–4 chats have uncommitted edits at any time. At wrap: `git fetch` + read the FULL working tree and bundle theirs too (this session's `cda1728` swept the guard chat's `textScrubber` + prompt chat's `systemPrompt` in per the all-chats policy). Never commit only your own files without checking the rest.
+Assume multiple lanes (and chats) hold uncommitted edits at any time. At wrap: `git fetch`, read the **FULL** working tree, and bundle everyone's work — never commit only your own files without checking the rest (`cda1728` swept the guard lane's `textScrubber` + the prompt lane's `systemPrompt` per this policy). Re-baseline before editing; line numbers move under you. Cross-lane hand-offs are self-contained blocks: root cause + `file:line` + log/DB evidence + a fix framed as a **suggestion to verify, not a mandate**.
 
-- **Meeting agent** — deterministic scheduling core, free/busy, slot finder, TZ/WE, create/move/close-loop. **OPEN item for them:** the `addFromEvent` union-vs-replace bug (below).
-- **Guard agent** — the gate stack (`claimChecker`/`securityGate`/`humanGate`/`dateVerifier`/`weekdayGuard`/`postReply`). Shipped the bare-id scrub this session. **Pending:** guard-class audit findings M6/M7/M12/L10/L16/L17 (in `V4_AUDIT_HANDOFF.md`).
-- **Prompt agent** — orchestrator system prompt + tool descriptions + per-skill sections + yaml. Shipped the group-DM narration this session.
-- **Approval agent** — approvals / requests-spine / colleague close-loop. **OWNS bug 1.3 entirely (below) — do NOT touch the approval/escalation code from other chats.**
-- **GCP migration chat** — VM cutover; infra committed in 4.0.0; blocked on Idan's `.env` + SSH.
-
-Routing: honesty/leak → guard · narration/tone/tool-wording/yaml → prompt · approvals/close-loop → approval · deterministic scheduling → meeting · infra/deploy → GCP. **Exception:** dense packing / calendar-health auto-move / floating-block defrag (calendarHealth + rebalanceFloatingBlocks + calendarDensity) is owned by **this general chat**. Hand-offs = self-contained paste-blocks (root cause + `file:line` + log/DB evidence + a SUGGESTED fix framed as a suggestion to verify, not a mandate).
+**Still owner-driven (no lane owns these):** the GCP VM cutover (infra committed in 4.0.0; blocked on Idan's `.env` + SSH) and model/LLM-layer campaigns (`llm/models.ts`, thinking policy, effort per surface) — deliberate projects, not nightly bug flow.
 
 ## Open / deferred bugs
 

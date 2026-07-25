@@ -129,8 +129,8 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           // dropped → attendee_missing_email → Maelle asks the colleague for an
           // email she already has on file.
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { resolveAttendeeEmail } = require('../../resolveAttendeeEmails') as
-            typeof import('../../resolveAttendeeEmails');
+          const { resolveAttendeeEmail } = require('../../../../memory/resolveAttendeeEmails') as
+            typeof import('../../../../memory/resolveAttendeeEmails');
           const addList = rawAdd
             .map(a => {
               const resolved = resolveAttendeeEmail({ name: a.name, email: a.email });

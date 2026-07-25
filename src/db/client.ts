@@ -5,6 +5,7 @@ import { config } from '../config';
 import logger from '../utils/logger';
 import { runV207ConsolidateRequests } from './migrations/v2_0_7_consolidate_requests';
 import { runPersonStoreMigration } from './migrations/v3_2_0_person_store';
+import { runDedupePeopleByEmail } from './migrations/v4_0_4_dedupe_people_email';
 
 let db: Database.Database;
 
@@ -41,6 +42,16 @@ export function getDb(): Database.Database {
     // person-store rebuild (which carries a fixed column list) so it lands on the
     // final table shape in one boot; idempotent via try/catch.
     try { db.exec(`ALTER TABLE people_memory ADD COLUMN is_vip INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
+    // v4.0.4 — one human, one row. Collapse any people_memory rows that share an
+    // email (the pre-4.0.4 upsertPersonMemory could mint a second row for someone
+    // already on file from the calendar). Runs LAST so the merge writes against
+    // the final column shape (is_vip included). Cheap grouped scan; no-ops on a
+    // clean table. Backs up every affected row before touching anything.
+    try {
+      runDedupePeopleByEmail(db, config.DB_PATH);
+    } catch (err) {
+      logger.error('v4.0.4 people-dedupe migration threw — continuing', { err: String(err) });
+    }
     logger.info('Database initialized', { path: config.DB_PATH });
   }
   return db;
