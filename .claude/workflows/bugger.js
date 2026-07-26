@@ -185,10 +185,33 @@ const dispatch = (lane, issues) =>
     { label: `build:${lane}`, phase: lane === 'context' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
   )
 
+// A dependency ask is real work REGARDLESS of what the lane concluded about its
+// own issue. This filter used to require `verdict === 'needs-dependency'`, which
+// silently discarded any ask attached to a `built` verdict — and "I finished my
+// part, and this adjacent piece belongs to another lane" is the COMMON case, not
+// the rare one.
+//
+// Measured on run wf_6b869440-ef7: five asks were attached, ONE was dispatched.
+// The four dropped included a dead-code deletion, a tool-tape rendering fix, a
+// prompt-guidance gap that materially strengthened the fix it belonged to, and
+// the verify's own prescription for a harm it had just proved. All four looked
+// like success in the report because their parent issues said `built`.
+const DISPATCHABLE_DEP = new Set(['built', 'needs-dependency', 'already-fixed'])
+const hasAsk = (r) => r.dependencyAgent && String(r.dependencyAsk || '').trim().length > 0
 const depAsksFor = (lane, rs) =>
   rs
-    .filter((r) => r.verdict === 'needs-dependency' && r.dependencyAgent === lane)
-    .map((r) => ({ id: `${r.id}>dep`, symptom: r.dependencyAsk, lane, severity: 'high', clarity: 'clear', from: r.id }))
+    .filter((r) => hasAsk(r) && r.dependencyAgent === lane && DISPATCHABLE_DEP.has(r.verdict))
+    .map((r) => ({ id: `${r.id}>dep`, symptom: r.dependencyAsk, lane, severity: 'high', clarity: 'clear', from: r.id, fromVerdict: r.verdict }))
+
+// Asks the engine must NOT auto-dispatch: the parent verdict is itself waiting
+// on the owner (`needs-owner-decision` / `blocked-charter`), so building the
+// dependency could implement something he is about to decline. These are
+// RETURNED rather than executed — which is the actual fix here. The bug was
+// never that they went undispatched; it was that they went unmentioned.
+const deferredDepAsks = (rs) =>
+  rs
+    .filter((r) => hasAsk(r) && !DISPATCHABLE_DEP.has(r.verdict))
+    .map((r) => ({ from: r.id, fromVerdict: r.verdict, lane: r.dependencyAgent, ask: r.dependencyAsk }))
 
 // ---- 1. Intake (sources in parallel) — SKIPPED entirely for a preset list ----
 let findings = []
@@ -202,7 +225,7 @@ const intake = await parallel(
   SOURCES.map((src) => () => {
     if (src === 'github') {
       return agent(
-        'Run ONLY this one command: `gh issue list --label Bug --state open --json number,title,body,labels` (read-only). Do NOT orient, read other files, or explore — just this command. SKIP any issue already labeled `Agent`. Return each remaining open bug as a finding {source:"github", ref:"#<number>", symptom:<title>, evidence:<body / any file:line it names>, clarity:"clear"}. If the list is empty, return {findings:[]} immediately.',
+        'Run ONLY this one command: `gh issue list --label Bug --state open --json number,title,body,labels` (read-only). Do NOT orient, read other files, or explore — just this command. Skip any issue labelled `Agent` **if you see one** — that label does not currently exist in this repo, so expect it never to match; de-duplication is handled downstream by the ledger, not here, so do NOT go looking for another way to filter. Return each remaining open bug as a finding {source:"github", ref:"#<number>", symptom:<title>, evidence:<body **plus any file:line the body names, quoted verbatim** — the triage and Locate passes downstream can only use a citation you actually carry through>, clarity:"clear"}. If the list is empty, return {findings:[]} immediately.',
         { label: 'intake:github', phase: 'Intake', effort: 'low', model: 'haiku', schema: FINDINGS },
       )
     }
@@ -382,6 +405,7 @@ if (tail.length || resumes.length) {
 phase('Verify')
 let verified = results
 let verifiedClean = []
+let verifyDepAsks = []
 if (VERIFY) {
   const built = results.filter((r) => r.verdict === 'built')
   if (built.length) {
@@ -410,6 +434,15 @@ if (VERIFY) {
       { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'guard', effort: 'xhigh', schema: VERIFY_OUT },
     )
     verifiedClean = (check && check.verifiedClean) || []
+    // The verify's OWN dependency asks were being discarded here — the overturn
+    // read only `verdict` and `notes`, so when the verifier said "this needs the
+    // owner, and here is precisely what would fix it", the prescription was
+    // thrown away and only the objection survived. That happened on
+    // wf_6b869440-ef7 to the one finding that mattered most. The verify runs
+    // last so its asks cannot be dispatched in this run — they must be reported.
+    verifyDepAsks = ((check && check.results) || [])
+      .filter((x) => hasAsk(x))
+      .map((x) => ({ from: x.id, fromVerdict: x.verdict || 'verify', lane: x.dependencyAgent, ask: x.dependencyAsk, fromVerify: true }))
     const overturned = new Map(
       ((check && check.results) || [])
         .filter((x) => x.verdict && x.verdict !== 'built')
@@ -444,4 +477,11 @@ return {
   // `priorClean` next run. It is the only thing that stops each verify starting
   // from zero on ground an earlier one already proved.
   verifiedClean,
+  // Dependency asks that were deliberately NOT dispatched, because their parent
+  // verdict is waiting on the owner. **The Manager MUST render these in the
+  // report** — every one is a lane naming specific work in another lane's files,
+  // with a file:line. Dropping them silently is the bug this field exists to
+  // close, and an unreported ask is indistinguishable from one that never
+  // happened. Route the ones he approves via `args.issues` next run.
+  deferredDepAsks: [...deferredDepAsks(verified), ...verifyDepAsks],
 }
