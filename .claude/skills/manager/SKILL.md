@@ -35,7 +35,7 @@ You hold the **only cross-lane view of Maelle**, so decomposition, routing, and 
 3. **The report file** — `.claude/agent-loop/report.md`, cumulative *since the last wrap*. It persists, so an unattended 18:00 run is waiting for the owner when he opens this chat at ~21:00.
 
 ## State you own
-- `.claude/agent-loop/state.json` — `lastSeenIso` (log-review watermark), `lastRun` (`{id,status}`, for resume), `lastWrapIso`, `pendingOverflow`.
+- `.claude/agent-loop/state.json` — `lastSeenIso` (log-review watermark), `lastRun` (`{id,status}`, for resume), `lastWrapIso`, `pendingOverflow`, **`nextReportId`** (the stable row-id counter — see the ID scheme below; assign then increment, never renumber), `verifiedClean` (passed back as `priorClean`).
 - `.claude/agent-loop/report.md` — the cumulative **to-do**, rewritten each run and **cleared at wrap**.
 - `.claude/agent-loop/ledger.jsonl` — the durable **history**, append-only, **never cleared**. One line per verdict:
   `{"date","runId","lane","ref","finding","rootCause","verdict","state","note"}`
@@ -184,28 +184,56 @@ If a legacy `sleep`-loop timer from an earlier session is still running, stop it
 
 ## The report / issue table (show this prominently)
 
-**Lead with the chat, not the code.** Every row starts with *what a person saw happen* — a scene, with the real names and the real words Maelle said. Only then the bug, the fix, the agent, the risk. The owner reads this to judge harm; he cannot judge harm from a rule number or a file path.
+### ID scheme — ONE sequence, stable forever. No prefixes.
 
-| # | What happened (in chat) | The bug | The fix | Agent | Risk |
-|---|-------------------------|---------|---------|-------|------|
+**Rows are numbered `1, 2, 3…` and a row keeps its number for life.** Not per-run, not per-origin, no letters.
 
-The five columns, exactly:
-1. **What happened (in chat)** — the scene. *"Lori wanted to move a meeting and it got moved to Friday with no approval."* Quote what Maelle actually said when it's damning. Name who was talking. If it happened more than once, say how many times and when.
-2. **The bug** — one clause, plain. *"Ignored busy/free."* Not the mechanism, the failure.
-3. **The fix** — what changed, in the same register. *"Moved the check earlier, added a chain."* Name the file only when he'd need it to review.
-4. **Agent** — the lane that built it.
-5. **Risk** — what to eyeball before wrap, or **None**. Never leave blank; "None" is a claim worth making.
+This is a hard rule because the alternative already failed: runs invented `B1`, `N1`, `P14`, `D7` with nobody defining what B, N, P or D meant, so the owner could not reference a row and `build <id>` was unusable. **If you find yourself inventing a prefix, stop — you are recreating that bug.**
+
+- `state.json` holds **`nextReportId`**. When a row first enters the report, assign the current value and increment. **Never renumber, never reuse**, even after the row is wrapped and deleted — `14` must mean the same thing next month as it does tonight.
+- A row that comes back (reappearance) keeps its **original** number and says so.
+
+### Columns
+
+**Lead with the chat, not the code**, and always say what the owner must DO:
+
+| # | What a person saw | What you need to do | Lane | Detail |
+|---|-------------------|---------------------|------|--------|
+
+1. **#** — the stable id.
+2. **What a person saw** — the scene, with real names and Maelle's real words. *"Lori wanted to move a meeting and it got moved to Friday with no approval."* Quote her when it's damning. If it happened more than once, say how many times.
+3. **What you need to do** — **exactly one of these four, verbatim.** This column is why the report exists; a row he cannot act on is noise:
+   - **`Nothing — wraps with the rest`** — built and verified. He just says `wrap`.
+   - **`Answer: <the actual question>`** — put the question IN the cell. Not "needs your decision" — the question itself, short enough to answer in a sentence.
+   - **`Say "build <n>"`** — found, understood, not built. He decides whether it's worth doing.
+   - **`Check before wrap: <what to look at>`** — built, but something specific needs his eye first.
+4. **Lane** — who owns it.
+5. **Detail** — the bug, the fix, the risk, the `file:line`. One cell, as long as it needs to be. **This is reference material, not the thing he reads first.**
+
+### Order
+
+**Group by the action column, in this order** — most-actionable first, so the top of the report is always his to-do list:
+1. `Answer:` rows — he is the blocker.
+2. `Check before wrap:` rows.
+3. `Say "build n"` rows.
+4. `Nothing` rows — the built work, collapsed if long.
+
+**If a row cannot be told as something that happened in a chat, it is not ready to be a row.** A finding with no scene goes in the prose watch-list below the tables.
 
 **If a row cannot be told as something that happened in a chat, it is not ready to be a row.** A finding with no scene is either not understood yet or is a `watch` item — put it in the prose section below the tables, not in the table.
 
-Order by what the owner must act on, most-actionable first:
-1. `needs-owner-decision` and `blocked-charter` — **the owner must act.** These swap the *Fix* column for **Why it's his call**, and drop *Risk*.
-2. `built` — done, awaiting his review + wrap.
-3. `flagged-for-owner` — ambiguous log findings; **shown, never fixed** (he decides / fixes these).
-4. `already-fixed` — verified as not reproducing.
-5. `pending` — deferred by the per-run cap; next run picks them up.
+**Verdict → action column**, so the mapping is never improvised:
 
-Below the tables, in prose: a **watch** list (real but not actionable now), anything **carried forward** from earlier waves, and — always — whether there is **runtime evidence** for the fixes or whether they are reasoning from code. A wave with no evidence must say so plainly; name the cheapest check that would settle it.
+| engine verdict | What you need to do |
+|---|---|
+| `built` (verify held) | `Nothing — wraps with the rest` |
+| `built` but carrying a risk to eyeball | `Check before wrap: <what>` |
+| `needs-owner-decision` · `blocked-charter` | `Answer: <the question>` |
+| `flagged-for-owner` (ambiguous log finding) | `Answer: is this a bug?` — never auto-fixed |
+| parked / audit backlog / `pending` | `Say "build <n>"` |
+| `already-fixed` | drop the row; note it in the manifest line only |
+
+Below the tables, in prose: a **watch** list (real but not actionable now), anything **carried forward**, and — always — whether there is **runtime evidence** for the fixes or whether they are reasoning from code. A wave with no evidence must say so plainly; name the cheapest check that would settle it.
 
 ## Verify discipline — how much verification a wave earns
 

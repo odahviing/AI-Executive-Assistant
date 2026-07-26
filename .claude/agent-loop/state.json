@@ -1,9 +1,12 @@
 {
-  "lastSeenIso": "2026-07-26T11:00:00+0300",
-  "lastRun": { "id": "manual-checkslot-verify", "status": "complete" },
+  "lastSeenIso": "2026-07-26T19:19:00+0300",
+  "lastRun": { "id": "wf_40d78c7e-80b", "status": "complete" },
   "lastWrapIso": "2026-07-26T11:00:00+0300",
   "openIssues": [],
   "pendingOverflow": [],
+
+  "_nextReportIdNote": "Stable report-row ids, ONE flat sequence, no letter prefixes. Assign the current value when a row FIRST enters report.md, then increment. NEVER renumber and NEVER reuse — even after a row is wrapped and deleted, so `14` means the same thing next month. A row that reappears keeps its original number. Starts at 100 deliberately: the rows written before 2026-07-26 evening carry legacy labels (P1-P32, D7-D8, B1-B6, N1-N2) from four undefined prefix schemes nobody documented, which is exactly why this counter exists. Those keep their labels until the next full report rewrite migrates them; new rows take 100+, so no collision is possible in the meantime.",
+  "nextReportId": 100,
 
   "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. DROP an entry the moment a wave changes the code it describes — a stale 'proven clean' silences a real check, which is worse than having no list. When in doubt, drop it.",
   "verifiedClean": [
@@ -16,6 +19,16 @@
     "The date verifier cannot corrupt a reply — it swaps only the weekday token inside the detector's own matched span, and is a no-op when the lookup agrees",
     "pickSpreadSlots `anchorMode:'first_round'` is byte-equivalent to the pre-2026-07-26 behaviour for both existing callers (the move handler and the must-be recovery)",
     "The deleted softOccupied pass is faithfully replaced by the hoisted occupancy scan, and is strictly better: it additionally honours excludeEventIds and masks a private subject",
-    "`payload.honest_hard_reason` has exactly one writer (code-derived, model input deleted pre-gate) and one reader (owner-facing composer); no colleague path reads it"
+    "`payload.honest_hard_reason` has exactly one writer (code-derived, model input deleted pre-gate) and one reader (owner-facing composer); no colleague path reads it",
+    "`npx tsc --noEmit -p E:/Code/Maelle/tsconfig.json` is green on the full working tree as of the wf_6b869440-ef7 diff (all 14 changed src files)",
+    "The new delete_meeting success payload still produces `[delete_meeting OK <subject>] mutated=book`: mutationOutcome (turnHelpers.ts:70-85) reads `success:true`, MUTATION_DOMAIN maps delete_meeting→'book' (:109), and renderToolSummary's OK branch (:292-293) is unchanged — so the claim-checker shield still covers a cancel narration, including a mixed sweep where one call returned event_not_found",
+    "The `event_not_found` payload can never be mistaken for a cancellation: `error` is a string so renderToolSummary's error-first branch (turnHelpers.ts:199-201) renders `[delete_meeting FAILED: event_not_found]`, and mutationDomain returns null at :137, so no `mutated=` marker and no entry in the pinned action tape (MUTATION_OK_RE matches ' OK' only)",
+    "No circular import was introduced by calendarMutations.ts importing `verifyEventDeleted` from './calendarReads' — src/connectors/graph/calendarReads.ts imports only luxon, logger, graphClient and calendarTypes (no calendarMutations, no barrel)",
+    "`getEventType` (connectors/graph/calendarReads.ts:898-927) selects start/end and returns `start.timeZone` with no Prefer header, so the handler's `DateTime.fromISO(startDateTime, {zone: startTimeZone ?? 'UTC'}).setZone(ownerTz)` label derivation is bound to the event's own zone and never to the server clock",
+    "The removed decline-relay surface is fully dead: zero live references in src to `decline_and_relay`, `suggestedDmText`, `organizerSlackId`, `relay_status`, or `initiatorSlackId` (only stale `.claude/**` docs and one explanatory comment)",
+    "The orchestrator's delete idempotency short-circuit (index.ts:489-510) and its ledger prune (:782-799) are provably dead code: both read `toolUse.input.event_id ?? .id` while delete_meeting's schema declares only `meeting_id` (meetings.ts:518-525). Inert, not harmful — the handler now owns both jobs",
+    "calendar_issues `issue_class` is plain `TEXT NOT NULL` with no CHECK constraint, so adding the `missing_category` value needs no migration (verified live: db-query returns 51 rows across 5 classes, zero missing_category ever)",
+    "markStaleResolved mints TERMINAL `resolved` rows for FUTURE-dated events routinely in production — verified live, e.g. a 2026-07-27 overlap row and three 07-2x floating-block rows carrying `[auto-stale: conditions vanished]`. Any future reasoning about calendar_issues suppression can take this as established fact",
+    "Routine/brief history rows cannot trip the ack-guard (buildTurnContext.ts:941-963) or the action tape (:418): both key on a `[<tool> OK` substring in the assistant row, and `recordAssistantThreadPost` writes prose only. Pre-fix those threads had no history at all, so this is an uncovered gap and not a regression"
   ]
 }
