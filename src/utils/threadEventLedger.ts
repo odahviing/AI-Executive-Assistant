@@ -40,20 +40,6 @@ export function recordThreadEvent(threadTs: string, subject: string, eventId: st
   ledger.set(threadTs, deduped.slice(-MAX_PER_THREAD));
 }
 
-/**
- * Drop an event from the thread ledger — call when it's DELETED, so a later
- * reference-back ("change the one I just booked", "move it") never resolves to a
- * dead event_id. Without this the ledger kept handing Sonnet an id Graph would
- * 404 on after a delete (rule 12 — reference-back must just work).
- */
-export function forgetThreadEvent(threadTs: string, eventId: string): void {
-  if (!threadTs || !eventId) return;
-  const existing = ledger.get(threadTs);
-  if (!existing) return;
-  const filtered = existing.filter(e => e.eventId !== eventId);
-  if (filtered.length !== existing.length) ledger.set(threadTs, filtered);
-}
-
 /** All events touched in this thread, oldest→newest. Empty when none. */
 export function getThreadEvents(threadTs: string): LedgerEntry[] {
   if (!threadTs) return [];
@@ -94,6 +80,32 @@ export function recordViewedThreadEvents(
 export function getViewedThreadEvents(threadTs: string): LedgerEntry[] {
   if (!threadTs) return [];
   return viewedLedger.get(threadTs) ?? [];
+}
+
+/**
+ * Drop an event from BOTH ledgers — call when it's cancelled, so a later
+ * reference-back ("change the one I just booked", "move it") never resolves to a
+ * dead event_id, and no injected block still presents it as live.
+ *
+ * v4.2.x (#147.2) — the VIEWED ledger is pruned too, and that is the half that
+ * actually mattered. Most cancellations are of meetings Maelle never booked: the
+ * owner reads his week via get_calendar (→ viewedLedger), then says "decline the
+ * standups". Pruning only the created/edited ledger above left all 12 cancelled
+ * occurrences in the block buildTurnContext injects as "MEETINGS YOU'VE PULLED UP
+ * THIS THREAD (already on Idan's calendar)" — so for the rest of the thread the
+ * model was still told cancelled meetings were live. That is what produced the
+ * re-deletes ("The specified object was not found in the store") and the
+ * mis-stated list ("all 11 declined" across 12 successful deletes, Aug 27
+ * silently dropped) in the 2026-07-26 vacation thread.
+ */
+export function forgetThreadEvent(threadTs: string, eventId: string): void {
+  if (!threadTs || !eventId) return;
+  for (const store of [ledger, viewedLedger]) {
+    const existing = store.get(threadTs);
+    if (!existing) continue;
+    const filtered = existing.filter(e => e.eventId !== eventId);
+    if (filtered.length !== existing.length) store.set(threadTs, filtered);
+  }
 }
 
 /**

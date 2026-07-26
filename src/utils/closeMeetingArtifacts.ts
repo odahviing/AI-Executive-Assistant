@@ -16,9 +16,13 @@
  *      outcome_external_event_id, details meeting_id, and origin_thread_ts.
  *      See step 5 for the full cascade.
  *
- *   2. Close outreach_jobs with intent='meeting_reschedule' whose context_json
- *      references this meeting_id. Cancels their outreach_expiry +
- *      outreach_decision follow-up tasks.
+ *   2. Close reschedule outreach whose context_json references this meeting_id, by
+ *      closing its REQUEST — the lifecycle owner, which clears the row's own
+ *      timers too. (The old "cancel its outreach_expiry / outreach_decision task"
+ *      step went with those task types when outreach timing moved onto the spine.)
+ *      Scoped to mutations that could actually settle the ask: `reason:'updated'`
+ *      is skipped (it never changes the time), and 'deleted' closes 'cancelled'
+ *      rather than 'resolved'. See the step for why.
  *
  *   3. Cancel open follow_up / reminder tasks whose payload_json references
  *      this meeting_id. These are Sonnet-created "remind me to update Yael"
@@ -98,41 +102,47 @@ export async function closeMeetingArtifacts(params: {
     // the requests spine), so the scan always matched zero rows. Pending
     // approvals are spine requests now, closed by the request cascade in step 5.
 
-    // 2. Outreach jobs with intent='meeting_reschedule' referencing this meeting.
-    // The status filter is the open/closed sentinel described in db/jobs.ts
-    // (top block): rows sit at the default 'sent' until closeRequest cascades
-    // them to 'cancelled'. This scan depends on that cascade — without it,
-    // already-closed outreach keeps matching here forever.
-    const outreachRows = db.prepare(`
-      SELECT id, context_json FROM outreach_jobs
-      WHERE owner_user_id = ?
-        AND intent = 'meeting_reschedule'
-        AND status IN ('sent', 'no_response', 'replied')
-    `).all(params.ownerUserId) as Array<{ id: string; context_json: string }>;
-
-    const matchingOutreachIds: string[] = [];
-    for (const row of outreachRows) {
-      if (payloadReferencesMeeting(row.context_json, params.meetingId)) {
-        matchingOutreachIds.push(row.id);
-      }
-    }
-
-    if (matchingOutreachIds.length > 0) {
-      // v3.1.1 — close the linked REQUEST for each matching meeting_reschedule
-      // outreach (the request owns lifecycle now), and drop the dead
-      // outreach_expiry/outreach_decision TASK cancel (those task types no
-      // longer exist — outreach timing is on the spine). No direct
-      // outreach_jobs.status write here on purpose: closeRequest cascades the
-      // column to 'cancelled' (closeRequest.ts:99-113), which is what drops
-      // the row out of the SELECT above on the next pass.
+    // 2. Reschedule outreach still awaiting an outcome that references this
+    // meeting. #41 — openness comes from the linked REQUEST, asked once in
+    // db/jobs.ts; the rows this returns are exactly the ones there is still
+    // something to close.
+    //
+    // A reschedule outreach asks a human about a TIME. `reason: 'updated'` is the
+    // one mutation that provably did not change the time — its only call site
+    // (skills/meetings/ops/handlers/moveMeeting.ts, the venue/subject/category/
+    // attendee branch) passes no start/end to updateMeeting. Closing the ask there
+    // recorded a false outcome ("resolved: meeting_updated") and dropped a live
+    // question to a colleague because the owner renamed the meeting or recategorized
+    // it. Nothing is orphaned by skipping: the ask carries its own `outreach_expiry`
+    // timer (skills/meetingReschedule.ts → notifyColleagueOfMove) and the colleague's
+    // reply closes it through handleRescheduleReply, so this cascade is no longer its
+    // only exit.
+    if (params.reason !== 'updated') {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getLinkedRequestIdForOutreach } = require('../db/jobs') as typeof import('../db/jobs');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { closeRequest } = require('../core/requests/closeRequest') as typeof import('../core/requests/closeRequest');
-      for (const outreachId of matchingOutreachIds) {
-        const reqId = getLinkedRequestIdForOutreach(outreachId);
-        if (reqId) closeRequest({ id: reqId, state: 'resolved', closureReason: `meeting_${params.reason}`, closedBy: 'meeting_cascade' });
-        result.outreachClosed++;
+      const { getOpenRescheduleOutreach } = require('../db/jobs') as typeof import('../db/jobs');
+      const matchingOutreach = getOpenRescheduleOutreach(params.ownerUserId)
+        .filter(row => payloadReferencesMeeting(row.context_json, params.meetingId));
+
+      if (matchingOutreach.length > 0) {
+        // v3.1.1 — close the linked REQUEST for each match: the request owns the
+        // lifecycle, so closing it IS closing the outreach, and it is what drops the
+        // row out of the scan above on the next pass. `request_id` is non-null by
+        // construction (the reader INNER JOINs on it), so the counter below now only
+        // counts closures that actually happened.
+        //
+        // State matches reality, the same split step 5 already makes: the meeting
+        // still exists → the ask was overtaken by a real booking → 'resolved'; the
+        // meeting is GONE → there is nothing left to agree to → 'cancelled'. This
+        // step used to hardcode 'resolved' for every reason, so a deleted meeting
+        // closed its colleague ask as a success and the brief narrated it as one.
+        const closureState = params.reason === 'deleted' ? 'cancelled' : 'resolved';
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { closeRequest } = require('../core/requests/closeRequest') as typeof import('../core/requests/closeRequest');
+        for (const row of matchingOutreach) {
+          if (!row.request_id) continue;
+          closeRequest({ id: row.request_id, state: closureState, closureReason: `meeting_${params.reason}`, closedBy: 'meeting_cascade' });
+          result.outreachClosed++;
+        }
       }
     }
 

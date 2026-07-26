@@ -97,7 +97,6 @@ function initSchema(db: Database.Database): void {
       colleague_tz    TEXT,
       message         TEXT NOT NULL,   -- what Maelle sent
       await_reply     INTEGER NOT NULL DEFAULT 1,  -- 1=wait for reply, 0=just send
-      status          TEXT NOT NULL DEFAULT 'sent', -- sent | replied | no_response | cancelled
       reply_text      TEXT,
       sent_at         TEXT,
       reply_deadline  TEXT
@@ -223,6 +222,23 @@ function initSchema(db: Database.Database): void {
   for (const sql of columnMigrations) {
     try { db.exec(sql); } catch (_) { /* column already exists — safe to ignore */ }
   }
+
+  // #41 ("only one spine", owner ruling 2026-07-26) — retire outreach_jobs.status.
+  // The linked `requests` row owns outreach lifecycle (state / phase / timers);
+  // this column was a second one that never actually tracked anything: a row was
+  // born at the SQL default 'sent' and only a cascade moved it, so fire-and-forget
+  // sends (request `resolved` at birth) and every pre-bridge row (request_id NULL)
+  // sat at 'sent' forever. Its last reader (calendarHealth's reschedule-ping dedup)
+  // and both cascade writes are gone — see the ONE SPINE block at the top of
+  // db/jobs.ts. Nothing SELECTs or UPDATEs it, the OutreachJob interface has no
+  // `status` member (so `SELECT *` readers discard it structurally), and the INSERT
+  // omits the column. No history kept — same call as the `approvals` DROP TABLE
+  // above and people_memory's `social_topics` DROP COLUMN further down: leave no
+  // dead storage. The 115 rows on disk carried only values written by removed code
+  // (49 'done' + 2 'expired', all pre-bridge; 29 'cancelled'; 16 'replied'; 19
+  // 'sent'). Idempotent: throws "no such column" on every boot after the first,
+  // and on a fresh DB where the CREATE TABLE above never made it.
+  try { db.exec(`ALTER TABLE outreach_jobs DROP COLUMN status`); } catch (_) {}
 
   // Create tasks and events tables if they don't exist
   db.exec(`

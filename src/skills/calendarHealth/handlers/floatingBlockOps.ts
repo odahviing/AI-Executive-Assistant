@@ -6,9 +6,10 @@
  */
 import { DateTime } from 'luxon';
 import {
-  getCalendarEvents,
+  getOwnerEventsForDecision,
   type CalendarEvent,
   createMeeting,
+  CalendarOfflineError,
 } from '../../../connectors/graph/calendar';
 import logger from '../../../utils/logger';
 import type { PreferPosition, AnchorEvent } from '../../../utils/floatingBlocks';
@@ -64,14 +65,16 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
           };
         }
 
-        // Get events for the day to find a free slot in the block window
-        let events: CalendarEvent[];
-        try {
-          events = await getCalendarEvents(userEmail, date, date, timezone);
-        } catch (err) {
-          logger.error('book_floating_block: failed to fetch events', { err, blockName });
-          return { error: 'Failed to fetch calendar events.' };
-        }
+        // Get events for the day to find a free slot in the block window.
+        // P24 / D4 — the SHARED owner-event read, no local catch. This read decides
+        // WHERE the block lands and whether it collides, so an unreadable calendar
+        // is a blind spot, not a placement. It sat BEFORE the planMeeting call
+        // below, so its own mechanical `Failed to fetch calendar events.` was what
+        // an outage actually produced for this tool — the skill's D4 wrapper never
+        // saw a typed error to answer. Same read, same retry, same one refusal now.
+        const events: CalendarEvent[] = await getOwnerEventsForDecision(
+          userEmail, date, date, timezone,
+        );
 
         const windowStart = DateTime.fromISO(`${date}T${block.preferred_start}`, { zone: timezone });
         const windowEnd = DateTime.fromISO(`${date}T${block.preferred_end}`, { zone: timezone });
@@ -152,7 +155,6 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
               profile,
               intent: 'new_booking',
               initiator: 'owner',
-              initiatorSlackId: context.userId,
               slotStartIso: overrideStart.toISO()!,
               slotEndIso: overrideEnd.toISO()!,
               subject: blockLabel,
@@ -174,6 +176,11 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
               blockIsOnline = plan.isOnline;
             }
           } catch (err) {
+            // D4 — the blind spot is never a classification fallback. Same
+            // one-liner the create / move / search handlers carry around their own
+            // best-effort catches: an unreadable owner calendar goes to the skill's
+            // one refusal, it does not silently become "no category".
+            if (err instanceof CalendarOfflineError) throw err;
             logger.warn('book_floating_block override-path: planMeeting threw, falling back to raw category', {
               err: String(err).slice(0, 200),
             });
@@ -397,7 +404,6 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
             profile,
             intent: 'new_booking',
             initiator: 'owner',
-            initiatorSlackId: context.userId,
             slotStartIso: blockStart.toISO()!,
             slotEndIso: blockEnd.toISO()!,
             subject: blockLabel,
@@ -422,6 +428,10 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
             blockIsOnline = plan.isOnline;
           }
         } catch (err) {
+          // D4 — as on the override path above, and it matters more here:
+          // `allowRelaxed:false` means this plan call can REFUSE, so swallowing an
+          // unreadable calendar would book the block with no rule check at all.
+          if (err instanceof CalendarOfflineError) throw err;
           logger.warn('book_floating_block: planMeeting threw, falling back to yaml category', {
             err: String(err).slice(0, 200),
           });

@@ -4,9 +4,9 @@ import type { UserProfile } from '../config/userProfile';
 import {
   getOwnerEventsForDecision,
   updateMeeting,
-  CalendarOfflineError,
 } from '../connectors/graph/calendar';
 import { SchedulingSkill as _LegacyOpsSkill } from './meetings/ops';
+import { withCalendarOfflineRefusal } from './meetings/calendarOffline';
 import logger from '../utils/logger';
 import { DateTime } from 'luxon';
 import { calendarListingFormatRule } from '../utils/calendarListingFormat';
@@ -550,42 +550,20 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
   }
 
   /**
-   * D4 — the ONE place a "his calendar is unreadable" fault becomes an answer.
-   *
-   * Every meeting tool the model can call arrives here, including the ones this
-   * class delegates to SchedulingSkill, so the refusal is written once and no
-   * individual handler can forget it or word it differently. The typed error
-   * comes from exactly two places, both of them a read of the OWNER's own
-   * calendar that a scheduling decision depends on: `getOwnerEventsForDecision`
-   * (his events) and the slot walker's free/busy read (his busy blocks). So this
-   * maps a genuine blind spot, never a routine "he's busy" or "nothing fits".
-   *
-   * Deliberately NOT a catch-all for Graph errors. A cancel, a floating-block
-   * op and a pure `get_calendar` read never take this path (a cancel carries no
-   * slot, so planMeeting never loads events for it), and refusing those because
-   * something else was unreadable would be over-reach.
+   * D4 — every meeting tool the model can call arrives here, including the ones
+   * this class delegates to SchedulingSkill, so an unreadable owner calendar
+   * becomes ONE written refusal instead of a raw Graph string no handler owns.
+   * P24 — the refusal itself moved to `meetings/calendarOffline` so the
+   * calendar-health dispatcher rides the same one (it reaches the same reads);
+   * that file carries the full note.
    */
   async executeToolCall(
     toolName: string,
     args: Record<string, unknown>,
     context: SkillContext,
   ): Promise<unknown | null> {
-    try {
-      return await this.dispatchToolCall(toolName, args, context);
-    } catch (err) {
-      if (err instanceof CalendarOfflineError) {
-        const ownerFirst = context.profile.user.name.split(' ')[0];
-        logger.error('meeting tool refused — owner calendar offline', {
-          toolName, requester: context.userId, detail: err.detail,
-        });
-        return {
-          success: false,
-          error: 'calendar_offline',
-          message: `I can't reach ${ownerFirst}'s calendar right now — it's offline on my side, so I genuinely cannot see what's on his day. Nothing was booked, moved or cancelled. This is NOT "he's busy" and NOT "no time fits": I have no information at all, so do not answer as if either were true, do not offer times, do not claim anything about his availability, and do not raise an approval (he would be deciding blind too). Say plainly that his calendar is unreachable at the moment and offer to try again shortly.`,
-        };
-      }
-      throw err;
-    }
+    return withCalendarOfflineRefusal(toolName, context, () =>
+      this.dispatchToolCall(toolName, args, context));
   }
 
   private async dispatchToolCall(
@@ -1317,8 +1295,9 @@ DELETE-MEETING PROTOCOL — irreversible, follow exactly:
 3. If one match → when the owner already named which one (by description like "the video interview one", or "that one" about a meeting you surfaced) and exactly one matches, that instruction IS the yes — delete and report it, don't re-ask. Otherwise show the match (subject + day + time), ask "Delete 'Subject' on Thursday at 14:00 — yes?", and wait for a clear yes.
 4. If multiple matches → list them numbered, ask which one. Never bulk-delete.
 5. For MULTIPLE delete requests in one message (e.g. "delete Moshe AND sales ops"): handle them ONE AT A TIME. Confirm the first, delete it, confirm the second, delete it. Do not batch.
-6. AFTER delete_meeting returns success: the reply MUST name what was deleted, using the subject + day + time FROM the tool result — not from memory. Example: "Deleted 'Sales Sync' from Wed 22 Apr 16:15." If you claim to have deleted something but the tool did not return success, you are lying.
-7. The orchestrator will short-circuit a second delete_meeting call with the SAME event_id as a safety net (returns ok:false, reason:already_deleted_this_turn). When you see that signal, do NOT narrate a second deletion — say only what was actually deleted.
+6. AFTER delete_meeting returns success: the reply MUST name what was deleted by quoting the result's \`cancelled_label\` (subject + day + time, computed from the calendar) — never from memory, never rebuilt from the subject text. On a multi-occurrence sweep, one line per SUCCESSFUL call's \`cancelled_label\`, nothing added and nothing left out. If you claim to have deleted something but the tool did not return success, you are lying.
+7. Cancelling sends NO Slack message — the calendar op itself notifies (an Outlook cancellation to attendees when ${firstName} organized it, an Outlook decline to the organizer when he didn't). The result's \`notified_via\` is the only truth about who heard; never write "I let X know" / "X has been notified", and never describe a decline as permanent or as covering other dates — one call = one occurrence.
+8. A result with error \`event_not_found\` means that id is not on the calendar (already cancelled, or stale) and NOTHING changed. Do not count it as cancelled; re-read the day with get_calendar if it should still exist.
 - get_calendar / get_free_busy / find_available_slots — reads for specific scheduling decisions.
 - analyze_calendar / manage_calendar_issue — weekly review & issue handling.
 
@@ -1385,7 +1364,7 @@ REPAIR WITH MOVE, NOT CREATE. When meetings are misplaced (wrong week/day/time),
 
 OWNERSHIP — try the tool, planMeeting decides (v2.7.0).
 Don't pre-refuse a move / cancel / update based on what you think the organizer is. The tool itself runs the ownership check (findMeetingOwner — checks the requests spine FIRST, falls back to Graph organizer). Just call the tool and trust its return:
-- delete_meeting on an event ${firstName} didn't organize → tool runs decline_and_relay path: removes the event from ${firstName}'s side AND auto-DMs the organizer politely. No need to ask ${firstName} for permission first; that's the planMeeting verdict.
+- delete_meeting on an event ${firstName} didn't organize → the tool declines his copy on the calendar, and Outlook sends the organizer the decline for that occurrence. No Slack DM goes out, and none is needed. No need to ask ${firstName} for permission first; that's the planMeeting verdict.
 - move_meeting on an event ${firstName} didn't organize → tool returns error: 'not_organizer'. Narrate honestly: "<organizer> set that one up — only they can shift the time. Want me to flag it so ${firstName} can ping them?" Don't DM the organizer automatically (per owner direction).
 - update_meeting on an event ${firstName} didn't organize → same as move_meeting (returns error: 'not_organizer').
 - create_meeting / move_meeting on events ${firstName} DOES organize: tool runs planMeeting → location/category/rules/attendee-freebusy all decided inside. If rules fail, the tool returns error: 'rule_violation' with a suggested_ask_text. Owner-path: surface for confirmation in-thread; if he says yes, RETRY THE SAME TOOL with relaxed=true. NEVER call create_approval for owner-path after he answered in-thread. Colleague-path: call create_approval(kind=policy_exception) with that text.

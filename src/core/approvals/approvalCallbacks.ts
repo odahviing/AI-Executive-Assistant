@@ -168,20 +168,46 @@ export async function resolveConsequenceTravel(
 }
 
 /**
+ * The SLOT an action would occupy, as a comparable signature — or `null` when no
+ * start can be read off it, which means nothing about the slot can be proven.
+ *
+ * Only used to answer one question: did a counter MOVE the slot? Compares
+ * structured ISO fields, never prose.
+ */
+function slotSignature(cb: ToolCallback | undefined): string | null {
+  const a = cb?.args as Record<string, unknown> | undefined;
+  if (!a) return null;
+  const start = [a.start, a.new_start, a.start_time].find(v => typeof v === 'string' && v.trim());
+  if (typeof start !== 'string') return null;
+  const end = [a.end, a.new_end].find(v => typeof v === 'string' && v.trim());
+  return `${start}|${typeof end === 'string' ? end : ''}`;
+}
+
+/**
  * THE owner-facing approval ask — assembled in ONE place, for every surface
  * that puts this ask in front of him to decide.
  *
- * Two surfaces call this, and both are LIVE DECISION SURFACES: the first raise
- * (`create_approval`) and the re-ask revival, which re-posts the same ask into
- * today's decision thread and re-stamps `terminal_dm_msg_ts` — so a ✅ there
- * resolves the approval exactly as one on the original does. A second assembly
- * site is precisely how the revival came to carry the bare `description`,
- * naming neither the conflict he was overriding nor what a ✅ authorizes.
+ * THREE surfaces call this, and all three are LIVE DECISION SURFACES — each one
+ * re-stamps `terminal_dm_msg_ts`, so a ✅ on any of them resolves the approval
+ * and replays the stored action:
+ *   1. the first raise (`create_approval`),
+ *   2. the re-ask revival, when the requester chases a cold ask,
+ *   3. the colleague bounce-back (`notifyOwnerOfColleaguePushback`) — a counter
+ *      or a refusal handing the decision back to him.
+ * Each of the three had to be taught the hard reason SEPARATELY, and each in turn
+ * shipped without it: surface 1 assembled its text twice and the rebuild dropped
+ * the reason, surface 2 posted the bare `description`, surface 3 posted a
+ * hand-rolled line plus a locally-rebuilt consequence. That is why there is now
+ * exactly one assembly site and no surface composes its own body: a new decision
+ * surface gets the reason by construction, or it isn't a decision surface.
  *
  * Parts, in reading order:
+ *   0. `lead` — the surface's own opening line, when it has one ("X asked again",
+ *      "X countered — approve, reject, or counter again?"). Optional; a first
+ *      raise has none.
  *   1. `details.honest_hard_reason` (#142c) — checkSlot's owner-viewer label for
  *      a HARD double-book, written ONLY by the code path that PROVED it (never
- *      by the model). It LEADS, above whatever soft framing the ask prose chose.
+ *      by the model). It LEADS the ask, above whatever soft framing the prose chose.
  *   2. `askText` — the ask itself.
  *   3. the consequence (v2.9.1) — "If yes → I'll X", verbalized from the stored
  *      on_approve with any stored counter merged in exactly as the resolver
@@ -189,14 +215,22 @@ export async function resolveConsequenceTravel(
  *      because it says what he is authorizing, not why it needs him.
  * A missing part just drops out; it can never take another part with it.
  *
- * `reAsk` marks the revival. Both time-dependent parts are REPLAYED from the
- * row, never re-derived: the ✅ replays the STORED action, so the ask must be
- * described by the reason derived against THAT stored slot — re-checking the
- * calendar here could only produce a reason for a different slot, or flip the
- * lead line off mid-thread on a transient read. Replay can go stale (the
- * collision may have cleared since), so the revival does not assert it in the
- * present tense: it says when the check was made and lets him read it as of
+ * Both time-dependent parts are REPLAYED from the row, never re-derived: the ✅
+ * replays the STORED action, so the ask must be described by the reason derived
+ * against THAT stored slot — re-checking the calendar here could only produce a
+ * reason for a different slot, or flip the lead line off mid-thread on a
+ * transient read. `reSurface` marks any re-post of an ask already raised: replay
+ * can go stale (the collision may have cleared since), so it is not asserted in
+ * the present tense — it says when the check was made and lets him read it as of
  * then. Honest either way, and no Graph call on a tool path.
+ *
+ * WHEN A COUNTER SUPPRESSES THE REASON — and when it must not. The reason was
+ * proven against one slot; a counter that MOVES the slot makes it describe an
+ * action a ✅ no longer fires, so it is withheld. But the test is the slot, not
+ * the mere existence of a counter: a counter that only renames the meeting (or
+ * carries prose that merges into no time field) leaves the collision exactly as
+ * proven, and withholding it there is how a colleague's subject-only counter
+ * silenced a real double-book at the moment he ticked ✅.
  */
 export async function composeOwnerAskText(input: {
   askText: string;
@@ -205,47 +239,41 @@ export async function composeOwnerAskText(input: {
   profile: UserProfile;
   /** For the log line when the consequence build throws. */
   requestId: string;
-  /** Present only on the re-ask revival of an ask already raised. */
-  reAsk?: { requesterFirst: string; raisedAt: string | null };
+  /** The surface's own opening line. Absent on a first raise. */
+  lead?: string;
+  /** Present on any surface RE-posting an ask already raised (revival, bounce-back). */
+  reSurface?: { raisedAt: string | null };
 }): Promise<string> {
-  const { askText, details, profile, requestId, reAsk } = input;
+  const { askText, details, profile, requestId, lead, reSurface } = input;
 
   // A stored counter is what a ✅ ACTUALLY replays: resolveRequest merges
   // `details.counter` into on_approve before running it (resolver.ts:415-425),
   // for any amend round, owner's or colleague's. So the preview verbalizes the
-  // MERGED action — otherwise a revival of a countered row (bounced back to
-  // awaiting_owner, so revivable) would promise the ORIGINAL slot and book the
-  // counter's: the "I thought yes meant 14:00, got 16:00" failure.
+  // MERGED action — otherwise a countered row bounced back to awaiting_owner
+  // would promise the ORIGINAL slot and book the counter's: the "I thought yes
+  // meant 14:00, got 16:00" failure.
   const rawCounter = details?.counter;
   const counter = rawCounter && typeof rawCounter === 'object' && !Array.isArray(rawCounter)
     ? rawCounter as Record<string, unknown>
     : null;
   const countered = !!counter && Object.keys(counter).length > 0;
 
-  // The hard reason was derived against the STORED slot. Once a counter is in
-  // play the action a ✅ fires is a different one, so that reason may no longer
-  // describe what he'd be authorizing — and a lead line he acts on has to be
-  // true. Withhold rather than assert: the ask prose still carries the original
-  // framing, and the consequence below names the real merged action.
-  const stored = countered ? undefined : details?.honest_hard_reason;
-  const honest = typeof stored === 'string' ? stored.trim() : '';
-  let hardReason = honest;
-  if (honest && reAsk) {
-    // created_at is SQLite-UTC ('YYYY-MM-DD HH:MM:SS'); anything else renders
-    // invalid and simply drops the parenthetical rather than the reason.
-    const raised = reAsk.raisedAt
-      ? DateTime.fromSQL(reAsk.raisedAt, { zone: 'utc' }).setZone(profile.user.timezone)
-      : null;
-    const when = raised?.isValid ? ` (${raised.toFormat('EEE d MMM, HH:mm')})` : '';
-    hardReason = `Checked when I raised this${when}: ${honest}`;
-  }
-
   let consequence: string | null = null;
+  // Does the action a ✅ now fires still occupy the slot the hard reason was
+  // proven against? No counter → nothing moved it. Initialised so that a throw
+  // below can only ever withhold a reason that a counter had already put in
+  // doubt — an uncountered ask keeps its reason regardless.
+  let slotHeld = !countered;
   try {
     const callbacks = extractCallbacks(details);
-    const effective = (countered && counter && callbacks.on_approve)
-      ? { ...callbacks, on_approve: mergeAmendIntoApprove(callbacks.on_approve, counter) }
-      : callbacks;
+    const mergedApprove = (countered && counter && callbacks.on_approve)
+      ? mergeAmendIntoApprove(callbacks.on_approve, counter)
+      : callbacks.on_approve;
+    if (countered) {
+      const before = slotSignature(callbacks.on_approve);
+      slotHeld = before !== null && before === slotSignature(mergedApprove);
+    }
+    const effective = mergedApprove ? { ...callbacks, on_approve: mergedApprove } : callbacks;
     // v3.5.x (WE preview) — resolve trip context so the preview clock matches
     // the booked-confirmation on a trip day.
     const travel = await resolveConsequenceTravel(effective, profile);
@@ -256,9 +284,18 @@ export async function composeOwnerAskText(input: {
     });
   }
 
-  const lead = reAsk
-    ? `${reAsk.requesterFirst} just asked again about this — still need your call:`
-    : '';
+  const stored = slotHeld ? details?.honest_hard_reason : undefined;
+  const honest = typeof stored === 'string' ? stored.trim() : '';
+  let hardReason = honest;
+  if (honest && reSurface) {
+    // created_at is SQLite-UTC ('YYYY-MM-DD HH:MM:SS'); anything else renders
+    // invalid and simply drops the parenthetical rather than the reason.
+    const raised = reSurface.raisedAt
+      ? DateTime.fromSQL(reSurface.raisedAt, { zone: 'utc' }).setZone(profile.user.timezone)
+      : null;
+    const when = raised?.isValid ? ` (${raised.toFormat('EEE d MMM, HH:mm')})` : '';
+    hardReason = `Checked when I raised this${when}: ${honest}`;
+  }
 
   return [lead, hardReason, askText, consequence].filter(Boolean).join('\n\n');
 }

@@ -30,11 +30,11 @@ import {
 import {
   getDb,
   auditLog,
-  getSuppressedEventIds,
   dismissFloatingBlockGap,
   searchPeopleMemory,
   getPersonMemory,
 } from '../../../../db';
+import { grantRelaxed } from '../../bookingRequest';
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
@@ -1072,7 +1072,6 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             profile: context.profile,
             intent: 'move',
             initiator: context.senderRole === 'colleague' ? 'colleague' : 'owner',
-            initiatorSlackId: context.userId,
             slotStartIso: effectiveStart,
             slotEndIso: effectiveEnd,
             subject: args.meeting_subject as string | undefined,
@@ -1091,7 +1090,15 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             // physical signal and resolveLocation defaults to day-type rules.
             locationHint: args.location as string | undefined,
             isOnlineHint: typeof args.is_online === 'boolean' ? args.is_online : undefined,
-            allowRelaxed: args.relaxed === true,
+            // P22 (v4.2.x) — THE grant, not a local read of args.relaxed. This
+            // line used to be `args.relaxed === true` with no sender check, the
+            // only site in the codebase that set allowRelaxed without one — so
+            // the invariant "allowRelaxed implies the owner" (scheduleRules.ts,
+            // rule-1 note) was true in the comment and false here. Inert in
+            // practice (the colleague gate above validates the destination
+            // STRICTLY and returns needs_owner_approval before this call), but
+            // an invariant with a live counter-example is not an invariant.
+            allowRelaxed: grantRelaxed(args, context).relaxed,
             // v4.1.x (M12) — the owner alone sees the real subject of whatever
             // he'd be colliding with; a colleague-path move never does.
             viewer: subjectViewerFor(context),

@@ -1,8 +1,8 @@
 {
   "lastSeenIso": "2026-07-26T19:19:00+0300",
   "_lastRunNote": "status MUST be one of complete | running | stopped. `stopped` exists because a run the owner kills leaves `running` set forever, and the resume rule then re-fired on every subsequent turn — a restart loop that spawned wf_79ce66bb-efc while wf_62f4811d-7fe was already dead. NEVER auto-resume: a dead run and a slow one are indistinguishable from this file, so resuming is a guess. Report the state and ask.",
-  "lastRun": { "id": "wf_62f4811d-7fe", "status": "stopped", "note": "owner-stopped 2026-07-26 ~20:31, 4 agents started / 3 returned. wf_79ce66bb-efc started at 20:34 as a restart-loop artefact, not a request." },
-  "lastWrapIso": "2026-07-26T11:00:00+0300",
+  "lastRun": { "id": "manual-owner-batch-4.2.1", "status": "complete", "note": "Seven lanes dispatched DIRECTLY (not via bugger) on the owner's item-by-item ruling over the 4.2.0 parked backlog + GitHub #147/#148. Combined adversarial verify: safe to ship. Wrapped as 4.2.1." },
+  "lastWrapIso": "2026-07-26T23:59:00+0300",
   "openIssues": [],
   "pendingOverflow": [],
 
@@ -12,19 +12,14 @@
   "_nextReportIdNote": "Stable report-row ids, ONE flat sequence, no letter prefixes. Assign the current value when a row FIRST enters report.md, then increment. NEVER renumber and NEVER reuse — even after a row is wrapped and deleted, so `14` means the same thing next month. A row that reappears keeps its original number. Starts at 100 deliberately: the rows written before 2026-07-26 evening carry legacy labels (P1-P32, D7-D8, B1-B6, N1-N2) from four undefined prefix schemes nobody documented, which is exactly why this counter exists. Those keep their labels until the next full report rewrite migrates them; new rows take 100+, so no collision is possible in the meantime.",
   "nextReportId": 100,
 
-  "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. DROP an entry the moment a wave changes the code it describes — a stale 'proven clean' silences a real check, which is worse than having no list. When in doubt, drop it.",
+  "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. DROP an entry the moment a wave changes the code it describes — a stale 'proven clean' silences a real check, which is worse than having no list. When in doubt, drop it. PRUNED at the 4.2.1 wrap: six entries deleted because 4.2.1 changed the code they described — the checkSlot ladder gained a work-band fit computed above it and `occupancy` became `slotFacts`; `honest_hard_reason`'s reason gate became slot-based rather than counter-based; the all-day-WE occupancy classification changed; `recordAssistantThreadPost` no longer exists; and the typecheck stamp was superseded.",
   "verifiedClean": [
-    "checkSlot rule ordering is verdict-preserving — reordering a first-violation-wins ladder cannot change `passes`, only which violation is reported (proved 2026-07-26 over all 6 call sites)",
     "`viewer` is default-deny at every checkSlot call site; the only two passing 'owner' are planMeeting (owner AND not MPIM) and tasks/skill.ts (owner-bound label, traced to its only readers)",
     "The walker's ISO-week event fetch is a strict SUPERSET of the searched range — startOf(week) of the first day, endOf(week) of the last — so a multi-week search cannot validate against a partial calendar",
-    "`RuleCheckResult.level` has exactly one construction site (checkSlot) and is computed unconditionally before any return — no literal default can assert 'free' where the scan did not run",
     "The `mutated=` marker port is faithful: all 22 alternations of the old tool-name matcher are present in MUTATION_DOMAIN, and MUTATION_OK_RE leaves the pinned tool tape byte-identical",
     "runCodaGates fails CLOSED on both legs and returns a verdict carrying no text, so it is structurally incapable of corrupting a coda",
     "The date verifier cannot corrupt a reply — it swaps only the weekday token inside the detector's own matched span, and is a no-op when the lookup agrees",
     "pickSpreadSlots `anchorMode:'first_round'` is byte-equivalent to the pre-2026-07-26 behaviour for both existing callers (the move handler and the must-be recovery)",
-    "The deleted softOccupied pass is faithfully replaced by the hoisted occupancy scan, and is strictly better: it additionally honours excludeEventIds and masks a private subject",
-    "`payload.honest_hard_reason` has exactly one writer (code-derived, model input deleted pre-gate) and one reader (owner-facing composer); no colleague path reads it",
-    "`npx tsc --noEmit -p E:/Code/Maelle/tsconfig.json` is green on the full working tree as of the wf_6b869440-ef7 diff (all 14 changed src files)",
     "The new delete_meeting success payload still produces `[delete_meeting OK <subject>] mutated=book`: mutationOutcome (turnHelpers.ts:70-85) reads `success:true`, MUTATION_DOMAIN maps delete_meeting→'book' (:109), and renderToolSummary's OK branch (:292-293) is unchanged — so the claim-checker shield still covers a cancel narration, including a mixed sweep where one call returned event_not_found",
     "The `event_not_found` payload can never be mistaken for a cancellation: `error` is a string so renderToolSummary's error-first branch (turnHelpers.ts:199-201) renders `[delete_meeting FAILED: event_not_found]`, and mutationDomain returns null at :137, so no `mutated=` marker and no entry in the pinned action tape (MUTATION_OK_RE matches ' OK' only)",
     "No circular import was introduced by calendarMutations.ts importing `verifyEventDeleted` from './calendarReads' — src/connectors/graph/calendarReads.ts imports only luxon, logger, graphClient and calendarTypes (no calendarMutations, no barrel)",
@@ -33,6 +28,16 @@
     "The orchestrator's delete idempotency short-circuit (index.ts:489-510) and its ledger prune (:782-799) are provably dead code: both read `toolUse.input.event_id ?? .id` while delete_meeting's schema declares only `meeting_id` (meetings.ts:518-525). Inert, not harmful — the handler now owns both jobs",
     "calendar_issues `issue_class` is plain `TEXT NOT NULL` with no CHECK constraint, so adding the `missing_category` value needs no migration (verified live: db-query returns 51 rows across 5 classes, zero missing_category ever)",
     "markStaleResolved mints TERMINAL `resolved` rows for FUTURE-dated events routinely in production — verified live, e.g. a 2026-07-27 overlap row and three 07-2x floating-block rows carrying `[auto-stale: conditions vanished]`. Any future reasoning about calendar_issues suppression can take this as established fact",
-    "Routine/brief history rows cannot trip the ack-guard (buildTurnContext.ts:941-963) or the action tape (:418): both key on a `[<tool> OK` substring in the assistant row, and `recordAssistantThreadPost` writes prose only. Pre-fix those threads had no history at all, so this is an uncovered gap and not a regression"
+    "Routine/brief history rows cannot trip the ack-guard (buildTurnContext.ts:941-963) or the action tape (:418): both key on a `[<tool> OK` substring in the assistant row, and the routine/brief writers store prose only",
+    "A4's scrubber change is byte-identical on all 12 P3-protected forms — RUNTIME-verified by compiling the real file and running an 18-case matrix plus 3 assertion groups (both 2026-07-21 drafts, `<@U|label>`, naked 9- and 11-char ids, `@U`, all-caps prose, Hebrew-with-mention, channel ref, URL)",
+    "The `find_slack_channel` tool has never been invoked — the log hits are the tool-catalog array being logged, not calls",
+    "4.2.1 VERIFY: conversation history is written exactly ONCE on the reply path, at postReply Step 3b, above both the ack-return and sendReply; no third writer exists on that path",
+    "4.2.1 VERIFY: every `await` on both legs of runOutputGates sits inside a try (including both internal wrappers), so the gate stack cannot throw out into postReply",
+    "4.2.1 VERIFY: zero reads or writes of `outreach_jobs.status` remain — `OutreachJob` has no `status` member so every `SELECT *` consumer discards it structurally, the INSERT uses an explicit column list, and the UPDATE key-strip is present and load-bearing",
+    "4.2.1 VERIFY: the `outreach_jobs.status` DROP COLUMN is the ONLY schema change in the whole 4.2.1 diff — a grep for added ALTER/DROP/CREATE TABLE/CREATE INDEX across all 53 files returns that one line. initSchema is safe on both a fresh and an existing DB",
+    "4.2.1 VERIFY: the day-summary noise fold keys on the validator's own `outsideWorkHours` fact (one construction site, spread into every return), so an IN-HOURS blocker can never be relabeled; every single-window caller reads the global `rejectedCounts`, which keeps true per-slot labels",
+    "4.2.1 VERIFY: `grantRelaxed` grants only on `senderRole === 'owner'`; every replaced site spelled either that same conjunction or an exact alias of it, so no site widened. The policy_exception replay still books, via a synthetic owner context",
+    "4.2.1 VERIFY: `parseGraphFreeBusySlot` returns offset-carrying ISO, so the bare-instant filter resolves absolutely — the naive-string/server-zone hazard does not exist, and the covering-block filter can neither invent nor drop a block",
+    "4.2.1 VERIFY — CROSS-CUTTING, DO NOT REVERT INDEPENDENTLY: P25's occupancy-above-work-hours promotion and P32's all-day-WE demotion are load-bearing on EACH OTHER. Without P32, the promotion turns every all-day-WE day into a hard NOT BOOKABLE on the colleague pre-check instead of an escalatable 'outside his hours'"
   ]
 }

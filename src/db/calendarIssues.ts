@@ -1,11 +1,14 @@
 /**
  * Calendar Issues — v3.0.3 redesign.
  *
- * One row per CLUSTER of linked events. Clusters form via shared overlap
- * edges: events linked by an overlap issue belong to the same cluster.
+ * One row per CLUSTER of linked events, PER AXIS. Clusters form via shared
+ * overlap edges: events linked by an overlap issue belong to the same cluster.
  * Single-event issues (work_on_day_off, missing_floating_block, etc.) each
  * own a single-event cluster. Pair issues (overlap) merge their two events
- * into one cluster.
+ * into one cluster. Two issues on the same event but on DIFFERENT axes (see
+ * `QUESTION_ONLY_CLASSES`) never share a cluster or a row — a problem with the
+ * owner's day and an open question about an event's metadata are independent
+ * facts, each of which has to be trackable, answerable and closable alone.
  *
  * For each cluster, the detector finds the HIGHEST-PRIORITY issue across
  * all its events. That issue becomes the row's `issue_class`; its event
@@ -20,6 +23,7 @@
  *   4. category_limit
  *   5. missing_floating_block
  *   6. busy_day
+ *   7. missing_category
  *
  * Status lifecycle:
  *   new → awaiting_owner → (approved | in_progress | owner_side)
@@ -27,16 +31,17 @@
  *                                       resolved        resolved
  *   resolved/approved/dismissed are terminal.
  *
- * Suppression: at detection time, if a row exists for the cluster (matched
- * by event_id IN cluster OR peer_event_id IN cluster) AND its status is
- * terminal → suppress. If active → no-op (already tracked). If absent →
- * INSERT.
+ * Suppression: at detection time, only rows on the cluster's OWN AXIS (see
+ * `QUESTION_ONLY_CLASSES`) are consulted — matched by event_id IN cluster OR
+ * peer_event_id IN cluster. If such a row is terminal → suppress. If active →
+ * update in place (already tracked). If absent → INSERT.
  *
  * Auto-stale: after each detection pass, rows not re-emitted are flipped
  * to status='resolved' (their underlying condition vanished).
  *
- * Cascade: on event move/delete/cancel, rows where event_id=E or
- * peer_event_id=E are resolved.
+ * Cascade: on event move/delete/cancel, the PROBLEM-axis rows where event_id=E
+ * or peer_event_id=E are resolved. A question row closes when it is answered,
+ * not when the event it asks about changes.
  *
  * Past filter: rows with event_end_ms < now() are filtered out at read
  * time. No need for a cron to expire them.
@@ -55,7 +60,30 @@ export type IssueClass =
   | 'overlap'
   | 'category_limit'
   | 'missing_floating_block'
-  | 'busy_day';
+  | 'busy_day'
+  // v4.2.x (#148) — an event the health check couldn't confidently categorize,
+  // so it ASKED the owner.
+  //
+  // NOT a regression — settled from history, because it looked like one. The
+  // owner has been SEEING missing-category flags since v1.7.0 and was right
+  // about that: the detector and its narration shipped in the very first commit
+  // (84d399c, calendarHealth.ts:255) and have run every day since. What never
+  // existed is the ROW. The DB write gate was `issue.type === 'double_booking'
+  // || issue.type === 'oof_conflict'` from 84d399c through ef18d1b^, and the
+  // 3.0.3 cluster redesign carried the same exclusion forward as an explicit
+  // `if (!cls) continue; // missing_category / unknown — not tracked`. Across
+  // every revision the literal 'missing_category' appears in exactly one file
+  // (calendarHealth, later its split) and never in this one. No commit removed
+  // it; there is nothing to restore. Live DB agrees: zero rows of this class,
+  // ever.
+  //
+  // So the flagging was real and the memory was not, which is why the question
+  // had no memory: with no row, the "RECENT CALENDAR ISSUES" block
+  // buildTurnContext injects carried nothing, so the owner's one-word answer
+  // ("Meeting") arrived with no event, no date and no open question attached —
+  // and got read as a booking request. Lowest priority, so it never steals a
+  // cluster's anchor from a real conflict on the same event.
+  | 'missing_category';
 
 export type IssueStatus =
   | 'new'
@@ -75,6 +103,7 @@ const CLASS_PRIORITY: Record<IssueClass, number> = {
   category_limit:         4,
   missing_floating_block: 5,
   busy_day:               6,
+  missing_category:       7,
 };
 
 const TERMINAL_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
@@ -84,6 +113,53 @@ const TERMINAL_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
 const ACTIVE_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
   'new', 'awaiting_owner', 'in_progress', 'owner_side',
 ]);
+
+/**
+ * v4.2.x (#148) — the two AXES. One concept, governing three things:
+ * clustering, row identity, and suppression.
+ *
+ * Every class above except these says "something about this event is wrong with
+ * the owner's day" (it clashes, it's on a day off, the day is overloaded). Those
+ * are all restatements of one day-shape complaint, so they legitimately share a
+ * cluster and a row: the highest-priority one anchors it, moving that event
+ * resolves the rest, and a terminal row means "he's acknowledged the problem on
+ * this event — stop nagging" for all of them.
+ *
+ * `missing_category` is NOT that. It's a QUESTION about the event's metadata,
+ * and answering it ("Meeting") says nothing whatsoever about whether the event
+ * clashes with something. Sharing an axis with the day-shape classes broke it in
+ * both directions:
+ *   • SUPPRESSION — the answer flips the row terminal (markStaleResolved, once
+ *     the category is present), the event_id lands in `getSuppressedEventIds`,
+ *     and from then until the event ends a REAL double-booking on it is dropped
+ *     at `checkHealth.ts:350` — no row, no narration, no log line. A silent
+ *     missed conflict, which is worse than the bug #148 fixed.
+ *   • CLUSTERING / ROW IDENTITY — an uncategorized event that ALSO clashes emits
+ *     both issues from the same `nonAllDay` set (checkHealth.ts:374 and :491),
+ *     so they land in one cluster; the overlap anchors it (priority 3 vs 7) and
+ *     the question's class, event and time notes are dropped. The question then
+ *     has no row — exactly the no-memory state #148 exists to end — and, worse,
+ *     an active row can be re-anchored across axes or deleted by the merge.
+ *
+ * So both are axis-scoped: a cluster holds one axis, and a row only speaks for
+ * classes on its own axis. For the six pre-existing classes this is a no-op, and
+ * structurally so, not just by luck: `missing_category` was never in any write
+ * gate in the project's history (see the type union above), so no row of the new
+ * axis exists to change how the old six cluster or suppress each other. Their
+ * behaviour before the first `missing_category` row is written is byte-identical.
+ *
+ * Precedent: `getWaivedFloatingBlockEventIds` below already scopes its read to
+ * one class for the same reason.
+ */
+const QUESTION_ONLY_CLASSES: ReadonlySet<IssueClass> = new Set<IssueClass>([
+  'missing_category',
+]);
+
+/** True when two classes sit on the same axis — i.e. they may share a cluster
+ *  and a row, and a terminal row of one may suppress a detection of the other. */
+function sameAxis(a: IssueClass, b: IssueClass): boolean {
+  return QUESTION_ONLY_CLASSES.has(a) === QUESTION_ONLY_CLASSES.has(b);
+}
 
 /** Single detected issue, pre-clustering. The detector emits these in
  *  memory; the cluster builder groups them and writes rows. */
@@ -138,15 +214,29 @@ export interface CalendarIssueRow {
 
 // ── Cluster building ─────────────────────────────────────────────────────────
 
-/** Group detected issues into clusters via connected components.
- *  Two issues land in the same cluster iff they share an event_id, or one
- *  is an overlap that links them via peer_event_id. */
+/** Group detected issues into clusters via connected components, ONE AXIS AT A
+ *  TIME (see `QUESTION_ONLY_CLASSES`). Two issues land in the same cluster iff
+ *  they are on the same axis AND they share an event_id, or one is an overlap
+ *  that links them via peer_event_id. */
 export function buildClusters(
   issues: DetectedIssue[],
   eventDateByEventId: Map<string, string>,
 ): IssueCluster[] {
   if (issues.length === 0) return [];
+  const problems = issues.filter(i => !QUESTION_ONLY_CLASSES.has(i.class));
+  const questions = issues.filter(i => QUESTION_ONLY_CLASSES.has(i.class));
+  const out: IssueCluster[] = [];
+  for (const axis of [problems, questions]) {
+    if (axis.length > 0) out.push(...clustersForOneAxis(axis, eventDateByEventId));
+  }
+  return out;
+}
 
+/** The connected-components pass. Called once per axis by `buildClusters`. */
+function clustersForOneAxis(
+  issues: DetectedIssue[],
+  eventDateByEventId: Map<string, string>,
+): IssueCluster[] {
   // Union-find over event_ids.
   const parent = new Map<string, string>();
   const find = (x: string): string => {
@@ -221,6 +311,8 @@ export function buildClusters(
 
 /**
  * Upsert a cluster's row. Three paths:
+ * Only rows on the cluster's own AXIS are considered (see
+ * `QUESTION_ONLY_CLASSES`); a row on the other axis is left entirely alone.
  *   - 0 existing rows touched by cluster → INSERT new row
  *   - 1 row whose event_id is in cluster.events → UPDATE in place
  *       (also covers the migrate-anchor case: row.event_id may differ from
@@ -240,14 +332,21 @@ export function upsertCluster(
 ): { action: 'insert' | 'update' | 'merge' | 'suppressed' | 'noop'; row_id?: string } {
   const db = getDb();
 
-  // Look up any rows whose event_id is in this cluster.
+  // Look up any rows whose event_id is in this cluster, then keep only the ones
+  // on the cluster's OWN AXIS (see QUESTION_ONLY_CLASSES). Cross-axis rows are
+  // invisible here, which is what makes a category question and a conflict on
+  // the same event two independent rows: a settled question can't suppress a
+  // real conflict from being tracked, an active question can't be re-anchored
+  // into an overlap row (losing its class and its notes), and the 2+ merge
+  // below can't delete one axis's row in the other's name.
   const eventIds = Array.from(cluster.events);
   const placeholders = eventIds.map(() => '?').join(',');
-  const existing = db.prepare(`
+  const existing = (db.prepare(`
     SELECT * FROM calendar_issues
     WHERE owner_user_id = ?
       AND (event_id IN (${placeholders}) OR peer_event_id IN (${placeholders}))
-  `).all(ownerUserId, ...eventIds, ...eventIds) as CalendarIssueRow[];
+  `).all(ownerUserId, ...eventIds, ...eventIds) as CalendarIssueRow[])
+    .filter(r => sameAxis(r.issue_class, cluster.anchor_class));
 
   // Any terminal row → suppressed.
   const terminal = existing.find(r => TERMINAL_STATUSES.has(r.status));
@@ -367,24 +466,57 @@ export function markStaleResolved(
 
 /**
  * Called from closeMeetingArtifacts on every event move/delete/cancel.
- * Resolves any non-terminal row that references this event_id as either
- * the anchor or the peer.
+ * Resolves the non-terminal PROBLEM-axis rows that reference this event_id as
+ * either the anchor or the peer — every day-shape complaint was computed FROM
+ * the event's time, so changing the event voids it and "he acted on it" is the
+ * right reading.
+ *
+ * v4.2.x (#148) — the QUESTION axis is deliberately NOT part of that cascade,
+ * and is reachable only through an explicit `opts.onlyClass`. Moving or renaming
+ * an event is not an ANSWER to "which category should this be?", but the cascade
+ * resolve is terminal, and a terminal row suppresses re-detection until the
+ * event ends (upsertCluster) — so an unscoped cascade meant that rescheduling
+ * the very meeting Maelle had just asked about killed the question for good and
+ * left the event uncategorized in silence. The question closes when it is
+ * ANSWERED (`set_event_category` → onlyClass:'missing_category'), or when the
+ * category shows up by any other route and the next detection pass auto-stales
+ * the row. For the six pre-existing classes this changes nothing — they are all
+ * problem-axis, so every existing caller behaves exactly as before.
+ *
+ * Residual, accepted: a DELETED event's question row is not cascaded away; it
+ * auto-stales on the next detection pass over that date and can never mislead
+ * (`set_event_category` on a dead id fails at Graph). Closing it at delete time
+ * needs the `reason` this helper doesn't get — one line in closeMeetingArtifacts
+ * (requests lane), not worth a cross-lane round-trip on its own.
+ *
+ * `opts.note` replaces the default cascade marker so the row records why it
+ * closed.
  */
 export function resolveCalendarIssuesForMeeting(
   ownerUserId: string,
   meetingId: string,
+  opts: { onlyClass?: IssueClass; note?: string } = {},
 ): number {
   if (!ownerUserId || !meetingId) return 0;
   const db = getDb();
+  const questionClasses = Array.from(QUESTION_ONLY_CLASSES);
+  const classClause = opts.onlyClass
+    ? 'AND issue_class = ?'
+    : `AND issue_class NOT IN (${questionClasses.map(() => '?').join(',')})`;
   const result = db.prepare(`
     UPDATE calendar_issues
     SET status = 'resolved',
-        notes = COALESCE(notes, '') || ' [cascade: anchor/peer event changed]',
+        notes = COALESCE(notes, '') || ?,
         updated_at = datetime('now')
     WHERE owner_user_id = ?
       AND status IN ('new','awaiting_owner','in_progress','owner_side')
       AND (event_id = ? OR peer_event_id = ?)
-  `).run(ownerUserId, meetingId, meetingId);
+      ${classClause}
+  `).run(
+    opts.note ?? ' [cascade: anchor/peer event changed]',
+    ownerUserId, meetingId, meetingId,
+    ...(opts.onlyClass ? [opts.onlyClass] : questionClasses),
+  );
   return result.changes;
 }
 
@@ -411,19 +543,31 @@ export function getCalendarIssueById(id: string): CalendarIssueRow | null {
 }
 
 /** Set of event_ids referenced by TERMINAL rows (approved/dismissed/resolved
- *  + event_end_ms still in the future). Read-only callers (analyze_calendar,
- *  brief-pre-filter) use this to drop issues whose event_ids fall in the set,
- *  so the owner doesn't see already-acknowledged conflicts re-narrated.
+ *  + event_end_ms still in the future). Read-only callers (the double_booking /
+ *  dead-gap detectors, analyze_calendar, brief-pre-filter, routine narration)
+ *  use this to drop issues whose event_ids fall in the set, so the owner doesn't
+ *  see already-acknowledged conflicts re-narrated or re-auto-moved.
  *  Write-path callers (upsertCluster) handle suppression independently via
- *  the 'suppressed' return value. */
-export function getSuppressedEventIds(ownerUserId: string): Set<string> {
+ *  the 'suppressed' return value.
+ *
+ *  v4.2.x (#148) — AXIS-SCOPED. `forClass` names the class being suppressed, and
+ *  only terminal rows on that class's axis are returned (see
+ *  QUESTION_ONLY_CLASSES). Omit it for the conflict axis, which is what every
+ *  day-shape detector wants: an answered "which category?" must never silence a
+ *  double-booking. Pass a question-only class to get that question's own settled
+ *  set (so a dismissed category ask isn't re-narrated every run). */
+export function getSuppressedEventIds(ownerUserId: string, forClass?: IssueClass): Set<string> {
   const db = getDb();
+  const questionAxis = forClass !== undefined && QUESTION_ONLY_CLASSES.has(forClass);
+  const axisClasses = Array.from(QUESTION_ONLY_CLASSES);
+  const placeholders = axisClasses.map(() => '?').join(',');
   const rows = db.prepare(`
     SELECT event_id, peer_event_id FROM calendar_issues
     WHERE owner_user_id = ?
       AND status IN ('approved','dismissed','resolved')
       AND event_end_ms > ?
-  `).all(ownerUserId, Date.now()) as Array<{ event_id: string; peer_event_id: string | null }>;
+      AND issue_class ${questionAxis ? 'IN' : 'NOT IN'} (${placeholders})
+  `).all(ownerUserId, Date.now(), ...axisClasses) as Array<{ event_id: string; peer_event_id: string | null }>;
   const out = new Set<string>();
   for (const r of rows) {
     out.add(r.event_id);

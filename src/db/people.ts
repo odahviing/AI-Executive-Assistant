@@ -131,6 +131,29 @@ export interface PersonMemory {
 
 const SET_BY_RANK: Record<CoreFieldSetBy, number> = { owner: 3, person: 2, auto: 1 };
 
+/**
+ * v4.2.x — the effective authority behind a row's stored gender.
+ *
+ * `gender_confirmed` predates `gender_set_by` and is documented above as the
+ * back-compat mirror ("new code reads gender_set_by") — but it is a SECOND
+ * authority signal, and the provenance chain only ever consulted the first. A row
+ * carrying confirmed=1 with a NULL or 'auto' provenance tag (the shape every
+ * pre-v3.5 row has, and the shape `confirmPersonGenderById` used to mint) then
+ * ranked 0 or 1, so BOTH ends of the chain misread it: an auto detection could
+ * overwrite a gender the person themselves confirmed — the invariant
+ * `genderDetect.ts` documents as "enforced in people.ts" and which was not — and
+ * a merge could pick the OTHER row's auto guess while carrying confirmed=1
+ * forward, leaving a row that claims a confirmed gender for a value nobody
+ * confirmed.
+ *
+ * A confirmation is a human statement by definition, so it FLOORS the rank at
+ * 'person'. This is the one place the two columns are reconciled; every gender
+ * authority comparison goes through it.
+ */
+function genderRank(setBy?: CoreFieldSetBy | null, confirmed?: number | null): number {
+  return Math.max(setBy ? SET_BY_RANK[setBy] : 0, confirmed ? SET_BY_RANK.person : 0);
+}
+
 // ── Reading the interaction timeline ─────────────────────────────────────────
 //
 // Two kinds of entry live in one log and they need different treatment:
@@ -308,11 +331,35 @@ export function setPersonVipById(personId: string, vip: boolean): void {
 }
 
 /**
- * v2.2.2 (#46) — single choke-point for writing core attendee fields with
- * provenance enforcement. Returns true when the write happened.
+ * v2.2.2 (#46) — the core attendee fields whose writes are provenance-gated.
+ * v4.2.x — `name_he` joined them: it had its own setter running a byte-identical
+ * copy of the rank chain, which is one authority rule in two places (and the copy
+ * returned void, so its outcome could never be reported).
+ */
+export type CoreProvenanceField = 'gender' | 'timezone' | 'state' | 'name_he';
+
+/**
+ * v4.2.x — the outcome of a provenance-gated write.
  *
- *   field: 'gender' | 'timezone' | 'state'
- *   by:    'owner' | 'person' | 'auto'
+ * This used to be a boolean, and a boolean cannot say WHY nothing was written —
+ * yet the two reasons are opposite facts about the world. "A higher authority
+ * holds a DIFFERENT value" is a refusal. "The row already says exactly this" is
+ * nothing-to-do. Every caller that reports back to a human collapsed both into a
+ * refusal, so re-confirming a gender already on file at the same authority came
+ * back as `higher_authority_already_set` — Maelle reporting she couldn't save
+ * something that was already true. The distinction is drawn HERE, beside the rank
+ * comparison, so no caller re-derives it (there is one provenance decision, in
+ * one place, and it is this one).
+ */
+export type CoreFieldWrite =
+  | 'applied'                 // written: a new value, or the same value at a raised authority
+  | 'already_set'             // no write needed — the stored value already matches the request
+  | 'refused_lower_authority' // a higher authority holds a DIFFERENT value
+  | 'no_value'                // nothing usable to write
+  | 'no_person';              // no row for this identity
+
+/**
+ * Single choke-point for writing a core field with provenance enforcement.
  *
  * Authority: owner overrides anyone; person overrides only auto; auto cannot
  * overwrite anything already set by owner or person. Empty/null current values
@@ -320,44 +367,61 @@ export function setPersonVipById(personId: string, vip: boolean): void {
  */
 export function setCoreFieldWithProvenance(
   slackId: string,
-  field: 'gender' | 'timezone' | 'state',
+  field: CoreProvenanceField,
   value: string,
   by: CoreFieldSetBy,
-): boolean {
+): CoreFieldWrite {
   const pid = personIdForSlackId(slackId);
-  return pid ? setCoreFieldWithProvenanceById(pid, field, value, by) : false;
+  return pid ? setCoreFieldWithProvenanceById(pid, field, value, by) : 'no_person';
 }
 
 /** v3.2.0 — person_id-keyed worker (works for externals too). */
 export function setCoreFieldWithProvenanceById(
   personId: string,
-  field: 'gender' | 'timezone' | 'state',
+  field: CoreProvenanceField,
   value: string,
   by: CoreFieldSetBy,
-): boolean {
-  if (!value || !value.trim()) return false;
+): CoreFieldWrite {
+  const next = (value ?? '').trim();
+  if (!next) return 'no_value';
   const db = getDb();
   const setByCol = `${field}_set_by` as const;
-  const row = db.prepare(`SELECT ${field} as value, ${setByCol} as setBy FROM people_memory WHERE person_id = ?`).get(personId) as
-    | { value: string | null; setBy: CoreFieldSetBy | null }
+  const row = db.prepare(
+    `SELECT ${field} as value, ${setByCol} as setBy, gender_confirmed as confirmed FROM people_memory WHERE person_id = ?`,
+  ).get(personId) as
+    | { value: string | null; setBy: CoreFieldSetBy | null; confirmed: number | null }
     | undefined;
 
   // No row yet — caller must create first; we no-op rather than create.
-  if (!row) return false;
+  if (!row) return 'no_person';
 
   const currentSetBy = row.setBy ?? null;
   const currentValue = (row.value ?? '').toString();
   const newRank = SET_BY_RANK[by];
-  const currentRank = currentSetBy ? SET_BY_RANK[currentSetBy] : 0;
+  // Gender has a second authority column; genderRank folds them into one rank so
+  // a confirmed-but-untagged value can't be read as unowned.
+  const currentRank = field === 'gender'
+    ? genderRank(currentSetBy, row.confirmed)
+    : (currentSetBy ? SET_BY_RANK[currentSetBy] : 0);
 
-  // Block lower-rank overwrite of an existing value.
-  if (currentValue && currentSetBy && newRank < currentRank) return false;
-  // Same rank, same value — no-op (avoid touching updated_at).
-  if (currentValue === value.trim() && currentSetBy === by) return false;
+  if (currentValue === next) {
+    // Already what was asked. The only work left is RAISING the authority behind
+    // it (a person's word promoted to the owner's) — and when there is none to
+    // raise, nothing needed doing. That is NOT a refusal even when a higher
+    // authority holds the field, because what it holds is this very value.
+    if (newRank <= currentRank) return 'already_set';
+  } else if (currentValue && newRank < currentRank) {
+    // A different value, and a higher authority owns the field — the one case
+    // where a write is genuinely refused. The test is the RANK, not whether a
+    // provenance tag happens to be present: an untagged rank stays 0, so this
+    // never fires for an untagged row (the lowest incoming rank is auto=1) while
+    // a confirmed gender still defends itself.
+    return 'refused_lower_authority';
+  }
 
   db.prepare(
     `UPDATE people_memory SET ${field} = ?, ${setByCol} = ?, updated_at = datetime('now') WHERE person_id = ?`,
-  ).run(value.trim(), by, personId);
+  ).run(next, by, personId);
 
   // Side effect: setting gender via this path also flips gender_confirmed for
   // back-compat readers (gender_confirmed=1 means owner OR person, not auto).
@@ -365,7 +429,7 @@ export function setCoreFieldWithProvenanceById(
     db.prepare(`UPDATE people_memory SET gender_confirmed = 1 WHERE person_id = ?`).run(personId);
   }
 
-  return true;
+  return 'applied';
 }
 
 /** v3.2.0 — resolve a slack_id to its surrogate person_id (null if no row). */
@@ -377,37 +441,17 @@ export function personIdForSlackId(slackId: string): string | null {
 }
 
 /**
- * Set or update the native-script spelling of a contact's name.
+ * The native-script spelling of a name (`name_he` — Hebrew/Cyrillic/Arabic) is a
+ * core field like any other: provenance-aware (owner > person > auto), so an owner
+ * correction ("עידן not אידן") sticks and an auto guess (capture pass /
+ * first-time transliteration) can't overwrite it. That is what freezes the
+ * spelling — once stored it's reused verbatim, never re-guessed.
  *
- * v3.5.x — provenance-aware (owner > person > auto), matching the core-field
- * authority chain. An owner correction ("עידן not אידן") sticks; an auto guess
- * (capture pass / first-time transliteration) can't overwrite an owner/person
- * value. Defaults to 'auto' so legacy callers behave as before. This is what
- * freezes the spelling: once stored it's reused verbatim, never re-guessed.
+ * v4.2.x — it no longer has its own setter. `setPersonNameHe(By)` re-implemented
+ * the same rank chain in a second place and returned void, so a refused write was
+ * indistinguishable from a landed one at the tool surface. Callers now use
+ * `setCoreFieldWithProvenance(By)(…, 'name_he', …)` and get the real outcome.
  */
-export function setPersonNameHe(slackId: string, nameHe: string, by: CoreFieldSetBy = 'auto'): void {
-  const pid = personIdForSlackId(slackId);
-  if (pid) setPersonNameHeById(pid, nameHe, by);
-}
-
-/** v3.2.0 — person_id-keyed worker. v3.5.x — provenance-aware. */
-export function setPersonNameHeById(personId: string, nameHe: string, by: CoreFieldSetBy = 'auto'): void {
-  if (!nameHe || !nameHe.trim()) return;
-  const db = getDb();
-  const row = db.prepare(
-    `SELECT name_he as value, name_he_set_by as setBy FROM people_memory WHERE person_id = ?`,
-  ).get(personId) as { value: string | null; setBy: CoreFieldSetBy | null } | undefined;
-  if (!row) return;
-  const currentValue = (row.value ?? '').toString();
-  const currentRank = row.setBy ? SET_BY_RANK[row.setBy] : 0;
-  // Block a lower-rank overwrite of an existing value (auto can't clobber owner).
-  if (currentValue && SET_BY_RANK[by] < currentRank) return;
-  // Same value + same provenance — no-op (don't churn updated_at).
-  if (currentValue === nameHe.trim() && row.setBy === by) return;
-  db.prepare(`
-    UPDATE people_memory SET name_he = ?, name_he_set_by = ?, updated_at = datetime('now') WHERE person_id = ?
-  `).run(nameHe.trim(), by, personId);
-}
 
 /**
  * Create or update a contact in people_memory from a SLACK signal (users.info
@@ -434,16 +478,18 @@ export function upsertPersonMemory(params: {
   slackId: string;
   name: string;
   email?: string;
+  /**
+   * A Slack-derived zone (users.info / profile pull) — always recorded as 'auto',
+   * which is what every remaining caller is. A STATED zone ("I'm in Boston") is
+   * not an upsert concern: it goes straight to `setCoreFieldWithProvenance` with
+   * the stater's authority. The old `timezoneSetBy` override had exactly one
+   * caller — update_person_profile — which ALSO wrote the same field through the
+   * provenance helper moments later, so the first write's outcome was
+   * unobservable and the second always came back "already_set". One write, one
+   * reportable outcome; the parameter went with the duplicate.
+   */
   timezone?: string;
   gender?: PersonGender;
-  /**
-   * v2.2.2 (#46) — provenance for the timezone write. Defaults to 'auto'
-   * (Slack profile / users.info pulls). Owner-path callers pass 'owner' so the
-   * value is locked against later auto-overwrite. The write itself rides
-   * `setCoreFieldWithProvenanceById` (below) — the authority chain is enforced
-   * there, in ONE place, not re-implemented in this statement.
-   */
-  timezoneSetBy?: CoreFieldSetBy;
 }): void {
   if (!params.slackId) return;
   const db = getDb();
@@ -461,7 +507,7 @@ export function upsertPersonMemory(params: {
 
   // NOTE: gender is only written when explicitly supplied AND not 'unknown'.
   // Respect gender_confirmed: never overwrite a confirmed gender here. A
-  // confirmed update must go through confirmPersonGender().
+  // confirmed update must go through confirmPersonGenderById().
   db.prepare(`
     UPDATE people_memory SET
       name             = @name,
@@ -487,7 +533,7 @@ export function upsertPersonMemory(params: {
   // never touched; the moment a merge folds such a row onto a Slack row (which is
   // now the point) it would silently clobber a taught timezone.
   if (params.timezone) {
-    setCoreFieldWithProvenanceById(personId, 'timezone', params.timezone, params.timezoneSetBy ?? 'auto');
+    setCoreFieldWithProvenanceById(personId, 'timezone', params.timezone, 'auto');
     // v2.2.2 (#46) — refresh the auto-derived working hours off whatever zone is
     // now STORED (the write above may have been refused as lower-authority).
     // Cheap; idempotent inside the helper.
@@ -506,24 +552,32 @@ export function upsertPersonMemory(params: {
 }
 
 /**
- * Human-confirmed gender write. Sets gender_confirmed = 1 so that no
- * downstream auto-detector can overwrite it. Call this when the person
- * themselves states their gender (e.g. "אני את - נקבה", "I'm a guy"),
- * or when the owner confirms on their behalf.
+ * Human-confirmed gender write — the person themselves stating it ("אני את -
+ * נקבה", "I'm a guy"), or the owner confirming on their behalf (`by: 'owner'`).
+ *
+ * v4.2.x — delegates to `setCoreFieldWithProvenanceById` instead of running its
+ * own UPDATE. The old statement wrote `gender_confirmed = 1` and left
+ * `gender_set_by` untouched, which is precisely how a row acquired a confirmed
+ * flag over an 'auto' (or untagged) provenance — the split authority `genderRank`
+ * now has to defend against. One writer, both columns, one authority chain.
+ *
+ * Returns the write outcome (`CoreFieldWrite`), which the caller owes a human:
+ * `refused_lower_authority` is the only real refusal (a HIGHER authority holds a
+ * DIFFERENT gender), `already_set` means it was on file exactly as stated, and
+ * 'unknown' is the absence of a gender — it can never be "confirmed", so it comes
+ * back as `no_value`. Callers must not claim it saved on anything but `applied` /
+ * `already_set`.
+ *
+ * person_id-keyed (works for externals too). The slack_id-keyed wrapper went with
+ * the old UPDATE — it had no callers, and every path already holds a person_id
+ * from `resolvePerson` / `resolvePersonTarget`.
  */
-export function confirmPersonGender(slackId: string, gender: PersonGender): void {
-  const pid = personIdForSlackId(slackId);
-  if (pid) confirmPersonGenderById(pid, gender);
-}
-
-/** v3.2.0 — person_id-keyed worker. */
-export function confirmPersonGenderById(personId: string, gender: PersonGender): void {
-  const db = getDb();
-  db.prepare(`
-    UPDATE people_memory
-       SET gender = ?, gender_confirmed = 1, updated_at = datetime('now')
-     WHERE person_id = ?
-  `).run(gender, personId);
+export function confirmPersonGenderById(personId: string, gender: PersonGender, by: CoreFieldSetBy = 'person'): CoreFieldWrite {
+  if (gender !== 'male' && gender !== 'female') return 'no_value';
+  // A confirmation is a human statement by construction — 'auto' is not a thing
+  // this function can express, so an auto caller is treated as the person's word
+  // rather than silently downgraded to a guess that also flips confirmed.
+  return setCoreFieldWithProvenanceById(personId, 'gender', gender, by === 'auto' ? 'person' : by);
 }
 
 // ── v3.5.x — derived outbound language ───────────────────────────────────────
@@ -829,18 +883,23 @@ function earlierOf(a?: string | null, b?: string | null): string | null {
   return kb < ka ? (b ?? null) : (a ?? null);
 }
 
-/** Provenance-aware field pick for a merge (owner > person > auto; ties → `a`). */
+/**
+ * Provenance-aware field pick for a merge (owner > person > auto; ties → `a`).
+ * `rank` overrides the tag-derived rank for a field whose authority isn't carried
+ * by `_set_by` alone — gender, whose confirmed flag is a second signal
+ * (`genderRank`).
+ */
 function pickByProvenance(
-  a: { value?: string | null; setBy?: CoreFieldSetBy | null },
-  b: { value?: string | null; setBy?: CoreFieldSetBy | null },
+  a: { value?: string | null; setBy?: CoreFieldSetBy | null; rank?: number },
+  b: { value?: string | null; setBy?: CoreFieldSetBy | null; rank?: number },
 ): { value: string | null; setBy: CoreFieldSetBy | null } {
   const av = (a.value ?? '').trim();
   const bv = (b.value ?? '').trim();
   if (!av && !bv) return { value: null, setBy: null };
   if (!av) return { value: bv, setBy: b.setBy ?? null };
   if (!bv) return { value: av, setBy: a.setBy ?? null };
-  const ar = a.setBy ? SET_BY_RANK[a.setBy] : 0;
-  const br = b.setBy ? SET_BY_RANK[b.setBy] : 0;
+  const ar = a.rank ?? (a.setBy ? SET_BY_RANK[a.setBy] : 0);
+  const br = b.rank ?? (b.setBy ? SET_BY_RANK[b.setBy] : 0);
   return br > ar ? { value: bv, setBy: b.setBy ?? null } : { value: av, setBy: a.setBy ?? null };
 }
 
@@ -887,14 +946,18 @@ type PersonRow = PersonMemory & { engagement_rank?: number; proactive_pending?: 
  * guarantees nothing is lost: handles are COALESCEd, provenance-tagged fields
  * keep the higher authority, notes / interaction_log are unioned + deduped,
  * profile_json is shallow-merged, `created_at` keeps the EARLIER date (we've
- * known the person since then), the recency stamps keep the LATER value, and
- * the loser's per-person md file is folded into the survivor's so no file is
- * orphaned (an orphan would surface as a phantom duplicate in the md catalog).
+ * known the person since then), and the recency stamps keep the LATER value.
  *
- * Two refusals, both because merging would DESTROY identity rather than repair
+ * The loser's per-person md file is folded into the survivor's BEFORE the rows
+ * collapse, and a fold that didn't complete DEFERS the collapse — see the
+ * comment at the call below for why that order is the only recoverable one.
+ *
+ * Three refusals. Two because merging would DESTROY identity rather than repair
  * it: a kind='self' row (Maelle's own row — merging it is how colleague gossip
  * would reach it), and two DIFFERENT slack_ids (two Slack accounts on one
- * address are two people; keeping them apart is the conservative read).
+ * address are two people; keeping them apart is the conservative read). The
+ * third is the md fold above — a deferral, not a verdict on identity: the pair
+ * stays visible to the sweep and the next attempt finishes the job.
  */
 export function mergePersonRows(survivorId: string, loserId: string): boolean {
   if (!survivorId || !loserId || survivorId === loserId) return false;
@@ -927,9 +990,22 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
     { value: survivor.state, setBy: survivor.state_set_by },
     { value: loser.state, setBy: loser.state_set_by },
   );
+  // Gender's authority is the pair (gender_set_by, gender_confirmed) — see
+  // genderRank. Ranking on the tag alone let a confirmed value lose to the other
+  // row's auto guess while `gender_confirmed` was max()'d forward, producing a row
+  // that claimed a confirmed gender for a value nobody confirmed.
+  const survivorGenderRank = genderRank(survivor.gender_set_by, survivor.gender_confirmed);
+  const loserGenderRank    = genderRank(loser.gender_set_by, loser.gender_confirmed);
   const gender = pickByProvenance(
-    { value: survivor.gender === 'unknown' ? null : survivor.gender, setBy: survivor.gender_set_by },
-    { value: loser.gender === 'unknown' ? null : loser.gender, setBy: loser.gender_set_by },
+    { value: survivor.gender === 'unknown' ? null : survivor.gender, setBy: survivor.gender_set_by, rank: survivorGenderRank },
+    { value: loser.gender === 'unknown' ? null : loser.gender, setBy: loser.gender_set_by, rank: loserGenderRank },
+  );
+  // The authority that stands behind the SURVIVING value — read off whichever
+  // side(s) actually hold that value, so a confirmation follows the gender it
+  // confirmed instead of being inherited by the one that won.
+  const genderRankKept = Math.max(
+    gender.value && gender.value === survivor.gender ? survivorGenderRank : 0,
+    gender.value && gender.value === loser.gender    ? loserGenderRank    : 0,
   );
 
   // engagement_rank: a non-default (≠2) value carries real signal; when both do
@@ -966,8 +1042,11 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
     state:                state.value,
     state_set_by:         state.setBy,
     gender:               gender.value ?? 'unknown',
-    gender_set_by:        gender.setBy,
-    gender_confirmed:     Math.max(survivor.gender_confirmed ?? 0, loser.gender_confirmed ?? 0),
+    // Both columns come out of the SAME rank, so a merged row can never again
+    // hold a confirmed flag over an auto value (nor lose a legacy confirmation
+    // that arrived with no provenance tag — it is re-tagged 'person' here).
+    gender_set_by:        gender.setBy ?? (genderRankKept >= SET_BY_RANK.person ? 'person' : null),
+    gender_confirmed:     genderRankKept >= SET_BY_RANK.person ? 1 : 0,
     is_vip:               Math.max(survivor.is_vip ?? 0, loser.is_vip ?? 0),
     engagement_rank:      engagementRank,
     proactive_pending:    Math.max(survivor.proactive_pending ?? 0, loser.proactive_pending ?? 0),
@@ -1009,6 +1088,33 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
     `).run(merged);
   });
 
+  // Fold the loser's md file into the survivor's FIRST — the row transaction is
+  // the commit point of the WHOLE merge, files included. Files and SQLite are
+  // separate durability domains, so these two halves can never be one atomic
+  // commit; the order is what decides where an interrupted merge leaves residue.
+  // Rows-first (the v4.0.4 shape) left the unrecoverable side: process death
+  // between the commit and the fold orphaned `<loserId>.md` forever, because the
+  // dedupe sweep looks for duplicate ROWS and by then there were none — and the
+  // orphan file still renders as a phantom duplicate person in the prompt
+  // catalog, i.e. exactly the bug v4.0.4 removed. Md-first inverts it: any
+  // failure leaves the pair still duplicated, which the boot sweep already finds
+  // and retries, and the fold is idempotent so the retry is free.
+  // Lazy require: the md layer owns the file layout and itself reads the DB, so
+  // the dependency is resolved at call time in both directions (same pattern as
+  // refreshAutoWorkingHours).
+  let mdFolded = false;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { mergePersonMdFiles } = require('../memory/peopleMemory') as typeof import('../memory/peopleMemory');
+    mdFolded = mergePersonMdFiles(survivorId, loserId, merged.name);
+  } catch (err) {
+    logger.warn('person store — md-file merge threw', { survivorId, loserId, err: String(err).slice(0, 200) });
+  }
+  if (!mdFolded) {
+    logger.warn('person store — merge deferred: the loser\'s md file is still on disk', { survivorId, loserId });
+    return false;
+  }
+
   try {
     apply.immediate();
   } catch (err) {
@@ -1019,17 +1125,6 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
   logger.warn('person store — merged two rows for one person', {
     survivorId, loserId, email: merged.email, slackId: merged.slack_id, name: merged.name,
   });
-
-  // Fold the loser's md file into the survivor's. Lazy require: the md layer
-  // owns the file layout and itself reads the DB, so the dependency is resolved
-  // at call time in both directions (same pattern as refreshAutoWorkingHours).
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { mergePersonMdFiles } = require('../memory/peopleMemory') as typeof import('../memory/peopleMemory');
-    mergePersonMdFiles(survivorId, loserId, merged.name);
-  } catch (err) {
-    logger.warn('person store — md-file merge failed after row merge', { survivorId, loserId, err: String(err).slice(0, 200) });
-  }
 
   return true;
 }

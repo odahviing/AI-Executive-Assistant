@@ -1,5 +1,5 @@
 import { completeTask, markTaskInformed, updateTask } from '../index';
-import { getDb } from '../../db';
+import { getDb, appendToConversation } from '../../db';
 import { runOrchestrator } from '../../core/orchestrator';
 import { assessLateness } from '../lateness';
 import { sendMorningBriefing } from '../briefs';
@@ -237,6 +237,12 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       // every other cron shares the general one. The briefing isn't here — it
       // posts via sendMorningBriefing with its own icon.
       const decorated = `${routineIcon(routine)} ${cleaned}`;
+      // The ts of the message the owner actually ends up looking at — the one
+      // his reply threads under. The placeholder EDIT keeps the placeholder's
+      // ts; both fallbacks mint a new one. Captured because the reply-history
+      // record below has to be keyed on the thread he'll reply into, not on
+      // the ts we happened to run the orchestrator under.
+      let deliveredTs: string | undefined;
       if (placeholderTs) {
         // Swap the placeholder for the final content. Same message id, no new
         // notification noise. Slack auto-clears the assistant-panel status
@@ -254,16 +260,45 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
           logger.warn('dispatchRoutine — placeholder update failed, posting fresh message', {
             routineId: routine.id, detail: upd ? upd.detail : 'no_update_verb',
           });
-          if (conn) await conn.postToChannel(routine.owner_channel, decorated);
+          const fresh = conn ? await conn.postToChannel(routine.owner_channel, decorated) : undefined;
+          if (fresh && fresh.ok) deliveredTs = fresh.ts;
+        } else {
+          // Edit landed — the message still lives at the placeholder's ts.
+          deliveredTs = upd.ts ?? placeholderTs;
         }
       } else if (conn) {
         // Placeholder path failed earlier — fall back to original behaviour.
         // v2.5.1 — no title prepend. The bot-style "*Routine title*\n..."
         // header read as machine framing. Routines that legitimately want
         // a header have Sonnet write one in the body. Most don't.
-        await conn.postToChannel(routine.owner_channel, decorated);
+        const fresh = await conn.postToChannel(routine.owner_channel, decorated);
+        if (fresh.ok) deliveredTs = fresh.ts;
       } else {
         logger.warn('dispatchRoutine — no Slack connection registered, routine output dropped', { routineId: routine.id });
+      }
+
+      // A routine ASKS things ("which category?", "want me to move it?"), and the
+      // owner answers by replying in this thread. Pre-fix nothing wrote that
+      // question to `conversations`, so processMessage's getConversationHistory
+      // came back EMPTY and Maelle answered his reply with no idea what she had
+      // just asked (2026-07-26 10:01, threadTs 1785060015.621749 —
+      // `historyLength:0` on a reply to the health routine's own question).
+      //
+      // Thread memory is thread memory: the SAME appendToConversation the
+      // interactive path uses (postReply.ts:407 for the assistant turn), keyed on
+      // the ts the owner replies under. No `user` row is invented — a scheduled
+      // post has no inbound, and every other place Maelle speaks unprompted
+      // records exactly one assistant row too (handlers.ts:339 summary draft,
+      // :860 reaction resolve, coordinator.ts:343, meetingReschedule.ts:268).
+      // The bracketed label rides that same convention so the next turn knows
+      // this was a scheduled post and not an answer to something he said.
+      // Stored WITHOUT the glyph — that is transport decoration, and the
+      // interactive path stores the undecorated draft too.
+      if (deliveredTs) {
+        appendToConversation(deliveredTs, routine.owner_channel, {
+          role: 'assistant',
+          content: `[Scheduled routine: ${routine.title}]\n${cleaned}`,
+        });
       }
     } else {
       // Silent return — delete the placeholder so the owner doesn't see a

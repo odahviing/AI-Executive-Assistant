@@ -9,6 +9,7 @@ import {
   handleSetEventCategory,
   handleManageCalendarIssue,
 } from './calendarHealth/handlers/categoryOps';
+import { withCalendarOfflineRefusal } from './meetings/calendarOffline';
 
 export class CalendarHealthSkill implements Skill {
   id = 'calendar' as const;
@@ -178,6 +179,16 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
     ];
   }
 
+  /**
+   * P24 — dispatch through the SAME D4 refusal the meeting tools use
+   * (meetings/calendarOffline). These four tools read the owner's own calendar
+   * through the very same helpers — the health scan's defrag calls the slot walker,
+   * `book_floating_block` goes through planMeeting — so they can raise the same
+   * typed offline error; with no catch here the registry handed the model a raw
+   * `CalendarOfflineError: Owner calendar unreadable: <Graph text>` string to
+   * improvise around, while the meeting surface next to it refused in words. Same
+   * voice, not a second one.
+   */
   async executeToolCall(
     toolName: string,
     args: Record<string, unknown>,
@@ -187,22 +198,24 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
     const { email: userEmail, timezone } = profile.user;
     const opCtx: OpCtx = { context, self: this, profile, userEmail, timezone };
 
-    switch (toolName) {
-      case 'check_calendar_health':
-        return handleCheckHealth(args, opCtx);
+    return withCalendarOfflineRefusal(toolName, context, async () => {
+      switch (toolName) {
+        case 'check_calendar_health':
+          return handleCheckHealth(args, opCtx);
 
-      case 'book_floating_block':
-        return handleBookFloatingBlock(args, opCtx);
+        case 'book_floating_block':
+          return handleBookFloatingBlock(args, opCtx);
 
-      case 'set_event_category':
-        return handleSetEventCategory(args, opCtx);
+        case 'set_event_category':
+          return handleSetEventCategory(args, opCtx);
 
-      case 'manage_calendar_issue':
-        return handleManageCalendarIssue(args, opCtx);
+        case 'manage_calendar_issue':
+          return handleManageCalendarIssue(args, opCtx);
 
-      default:
-        return null;
-    }
+        default:
+          return null;
+      }
+    });
   }
 
   getSystemPromptSection(profile: UserProfile, scopes?: string[], isOwner?: boolean): string {

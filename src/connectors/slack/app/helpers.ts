@@ -110,6 +110,18 @@ export function isOverloadError(err: unknown): boolean {
   }
 
 /**
+ * The one line for "the model itself is overloaded" — a real 529 /
+ * `overloaded_error` off the wire. Shared rather than repeated because it is the
+ * same condition in the same voice wherever it surfaces, and the two callers reach
+ * it from different shapes: `failureReply` below judges an ERROR OBJECT via
+ * isOverloadError, while the doc-ingestion path in handlers.ts already holds a
+ * boolean (`res.overloaded` off extractSlackDocText) and so cannot call
+ * failureReply at all. A string can be shared across that difference even though
+ * the function cannot.
+ */
+export const OVERLOAD_REPLY = `Quick coffee break, ping me again in a couple of minutes?`;
+
+/**
  * What Maelle says when a turn dies before she could answer.
  *
  * TWO lines, and only two, because two is all we can honestly tell apart from
@@ -127,7 +139,7 @@ export function isOverloadError(err: unknown): boolean {
  */
 export function failureReply(err: unknown): string {
   return isOverloadError(err)
-    ? `Quick coffee break, ping me again in a couple of minutes?`
+    ? OVERLOAD_REPLY
     : `Something's off on my end, give me a minute and try again?`;
 }
 

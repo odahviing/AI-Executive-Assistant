@@ -4,8 +4,8 @@
  *
  * Scenario: Maelle tells Michal "Wed 29 Apr noon works for the bank visit,
  * confirm with Inbar." Inbar (or her assistant) creates the meeting from
- * their side. The invite arrives on Idan's calendar. Maelle's outreach row
- * is still `status='sent'`, so the next morning she'd narrate "still waiting
+ * their side. The invite arrives on Idan's calendar. Maelle's outreach request is
+ * still awaiting_colleague, so the next morning she'd narrate "still waiting
  * to hear back" — wrong. This helper scans the calendar for events that
  * match the proposed slots + subject keyword, and if one's there, reports
  * back what happened so the brief can close the loop honestly.

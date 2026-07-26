@@ -27,9 +27,11 @@
  *     `!isOwner`. No more `+1 for owner` math.
  *   - `slot.durationMin` is snapped to `profile.meetings.allowed_durations`.
  *     `slot.endIso` is recomputed to match the snapped duration.
- *   - `relaxed` is the POST-GATE value. The raw `args.relaxed` is honored
- *     only when (a) initiator is owner, (b) owner is in an MPIM and just
- *     proposed this exact slot, or (c) the call is a deferred-replay.
+ *   - `relaxed` is the POST-GATE value: the raw `args.relaxed` is honored only
+ *     when the AUTHENTICATED sender is the owner. `grantRelaxed` is the one
+ *     function that decides it, exported so the paths that don't normalize
+ *     (move_meeting) and the ones that gate before normalizing
+ *     (find_available_slots) share the same decision instead of copying it.
  *   - `sensitivity` is the POST-GATE value. On colleague-path, dropped
  *     unless the colleague's email is in `participants`.
  *   - Emails are auto-filled from people_memory by slack_id or name match
@@ -62,7 +64,6 @@ export interface BookingParticipant {
 export interface BookingRequest {
   intent: BookingIntent;
   initiator: 'owner' | 'colleague';
-  initiatorSlackId: string;
 
   // Slot — durationMin is snapped to allowed_durations, slotEndIso
   // recomputed to match. Flat fields (matching the legacy PlanMeetingInput
@@ -92,10 +93,10 @@ export interface BookingRequest {
   priorSlotStartIso?: string;
   priorSlotEndIso?: string;
 
-  // Owner-explicit override path. Already gated for senderRole + owner-in-
-  // MPIM-proposed. Handlers should NEVER set this from raw args directly.
+  // Owner-explicit override path, already gated on the authenticated sender.
+  // Handlers NEVER set this from raw args — they call `grantRelaxed` (P22).
   relaxed: boolean;
-  relaxedReason: 'owner_direct' | 'deferred_replay' | 'none';
+  relaxedReason: 'owner_direct' | 'none';
 
   // Cross-cutting signals the downstream pipeline needs. Computed once
   // here so individual rule checks / detectors don't each re-load them.
@@ -118,8 +119,6 @@ export interface BookingRequest {
 export interface NormalizeOptions {
   /** Optional pre-determined intent override (e.g. for find_slots called inside coord). */
   intent?: BookingIntent;
-  /** When true, treat this call as a deferred-replay — preserves relaxed=true regardless of senderRole. */
-  isDeferredReplay?: boolean;
 }
 
 /**
@@ -151,8 +150,8 @@ export async function normalizeBookingRequest(
   // ── Sensitivity — colleague-path gate ──
   const sensitivity = await gateSensitivity(args, context, participants);
 
-  // ── relaxed — gated by initiator + owner-in-MPIM-proposed + deferred-replay ──
-  const { relaxed, relaxedReason } = await gateRelaxed(args, context, options);
+  // ── relaxed — THE grant, shared with every non-normalizing path (P22) ──
+  const { relaxed, relaxedReason } = grantRelaxed(args, context);
 
   // ── Cross-cutting context ──
   const ctx = buildContext(profile, context, slot);
@@ -160,7 +159,6 @@ export async function normalizeBookingRequest(
   return {
     intent,
     initiator,
-    initiatorSlackId: context.userId,
     slotStartIso: slot?.startIso,
     slotEndIso: slot?.endIso,
     durationMin: slot?.durationMin,
@@ -372,58 +370,67 @@ async function gateSensitivity(
 }
 
 /**
- * THE only place `relaxed` is granted. Owner-authenticated direct, or a replay
- * of something he already approved — nothing else.
+ * THE only place `relaxed` is granted — for EVERY meeting path, not just the
+ * ones that route through this normalizer.
  *
- * D7 (owner 2026-07-26: *"yes, if i want to do something wrong in group chat,
- * raise for approval or at least tell me"*). There used to be a third grant: in
- * an MPIM with the owner present, a booking auto-relaxed. That was silent by
- * construction. The group-DM clamp (processMessage) makes his `senderRole`
- * 'colleague', so `initiator` is 'colleague' — which means planMeeting's
- * one-step owner heads-up (`initiator === 'owner'`) could never fire, while
- * `allowRelaxed` waved rules 0, 0b, 2-4, 5, 6, 7, 8 and 9 through. His override
- * in a group DM waived eight rules and told him about none of them.
+ * P22 (v4.2.x) — exported, and every caller now reads `args.relaxed` through
+ * here. It used to be private to `normalizeBookingRequest`, so the paths that
+ * never normalized (move_meeting) or that gate before normalizing
+ * (find_available_slots) each re-derived the same authorization inline. Six
+ * copies of one decision, and `move_meeting` was the copy that got it wrong:
+ * `allowRelaxed: args.relaxed === true` with no `senderRole` conjunct at all
+ * (moveMeeting.ts). That made the documented invariant *"`allowRelaxed` implies
+ * the owner"* (scheduleRules.ts, rule-1 note) false in code, and violated this
+ * module's own contract that handlers never set it from raw args
+ * (planMeeting.ts, `allowRelaxed`). Nothing exploited it — move_meeting's
+ * colleague gate validates the destination STRICTLY and returns
+ * `needs_owner_approval` before the plan call, so a colleague could only reach
+ * it with a slot that already passed unrelaxed. But it was one edit away from
+ * waiving rules 0b, 2-4, 5, 6, 7, 8 and 9 on colleague authority, and no reader
+ * could trust the invariant while a counter-example sat in the tree. One
+ * function, so there is nothing left to drift.
  *
- * He asked for approval, or at minimum notice. Approval is the right half, and
- * it is what the clamp already decided: the clamp is an anti-cheat boundary
- * across ALL tools, and his flag-and-override in his own group DM is delivered
- * through the approval flow, not by re-granting in-group authority. Adding a
- * "here's what I waived" notice instead would leave the booking landing on
- * colleague-level authority and make the notice the only control — a wish, not
- * a control. So he now gets normal colleague treatment in a group DM:
- * rule-compliant alternatives first, and on insistence a policy_exception that
- * reaches him in his own DM, where he IS the owner.
+ * Owner-authenticated direct is now the ONLY grant. `senderRole` is the
+ * authenticated sender post-clamp — never a claim from the message.
  *
- * The mechanism that granted it deserved to go on its own merits. It keyed on
- * the literal string "sender: <owner name>" appearing in message CONTENT — an
- * authorization decision made on a claim inside a message rather than on the
- * authenticated sender — and it read that claim with an English/Hebrew regex
- * phrase list, so the same override was unavailable to him in Russian or Spanish
- * and available to anyone whose message happened to contain the string.
+ * The two grants that used to exist and why neither survives:
+ *   • OWNER-IN-MPIM PROPOSED — D7 (owner 2026-07-26: *"yes, if i want to do
+ *     something wrong in group chat, raise for approval or at least tell me"*).
+ *     Silent by construction: the group-DM clamp (processMessage) makes his
+ *     `senderRole` 'colleague', so planMeeting's one-step owner heads-up
+ *     (`initiator === 'owner'`) could never fire while `allowRelaxed` waved
+ *     eight rules through — his override waived eight rules and told him about
+ *     none of them. Approval is the right half, and it is what the clamp already
+ *     decided: the clamp is an anti-cheat boundary across ALL tools, and his
+ *     flag-and-override in his own group DM is delivered through the approval
+ *     flow, not by re-granting in-group authority. A "here's what I waived"
+ *     notice instead would leave the booking on colleague-level authority and
+ *     make the notice the only control — a wish, not a control. The mechanism
+ *     also deserved to go on its own merits: it keyed on the literal string
+ *     "sender: <owner name>" appearing in message CONTENT — an authorization
+ *     decision made on a claim inside a message rather than on the authenticated
+ *     sender — and read that claim with an English/Hebrew regex phrase list, so
+ *     the same override was unavailable to him in Russian or Spanish and
+ *     available to anyone whose message happened to contain the string.
+ *   • DEFERRED REPLAY — removed here as unreachable, not as a policy change. It
+ *     was gated on a `NormalizeOptions.isDeferredReplay` flag that no call site
+ *     ever passed, and it did not need to: a replay runs on a synthetic context
+ *     with `senderRole: 'owner'` (deferredActionReplay.ts), so it is granted by
+ *     the owner branch below. A replay's relaxed still survives, exactly as it
+ *     did before.
  */
-async function gateRelaxed(
+export function grantRelaxed(
   args: Record<string, unknown>,
   context: SkillContext,
-  options: NormalizeOptions,
-): Promise<{ relaxed: boolean; relaxedReason: BookingRequest['relaxedReason'] }> {
+): { relaxed: boolean; relaxedReason: BookingRequest['relaxedReason'] } {
   const rawRelaxed = args.relaxed === true;
 
-  // Deferred replay always preserves relaxed regardless of senderRole — the
-  // approval already went through owner; the replay is the authoritative re-run.
-  // (It runs on a synthetic OWNER context, deferredActionReplay.ts:76, so it is
-  // not a colleague path wearing an override.)
-  if (options.isDeferredReplay && rawRelaxed) {
-    return { relaxed: true, relaxedReason: 'deferred_replay' };
-  }
-
-  // Owner-path direct: relaxed honored straight through. `senderRole` is the
-  // authenticated sender post-clamp — never a claim from the message.
   if (context.senderRole === 'owner' && rawRelaxed) {
     return { relaxed: true, relaxedReason: 'owner_direct' };
   }
 
   if (rawRelaxed) {
-    logger.info('gateRelaxed — relaxed requested on a non-owner context, DENIED', {
+    logger.info('grantRelaxed — relaxed requested on a non-owner context, DENIED', {
       requester: context.userId, isMpim: context.isMpim === true,
       isOwnerInGroup: context.isOwnerInGroup === true,
     });

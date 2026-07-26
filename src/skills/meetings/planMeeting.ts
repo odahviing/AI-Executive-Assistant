@@ -9,7 +9,8 @@
  *   find_slots            — caller should run findAvailableSlots & return options
  *   confirm_override      — owner-initiated, rule failed → ask owner for relaxed override
  *   escalate_approval     — colleague-initiated, rule failed → create_approval(kind=policy_exception)
- *   decline_and_relay     — owner-attendee cancel asked → decline-on-owner-side + DM organizer
+ *   decline_as_attendee   — owner-attendee cancel asked → decline his copy on Graph;
+ *                           Outlook's own decline response tells the organizer (no Slack DM)
  *   refuse_not_owners     — owner-attendee move asked → polite refuse, no DM (per D4)
  *
  * Pipeline (strict order):
@@ -44,7 +45,7 @@ import { renderWeDualClock } from '../../utils/weTimeResolver';
 import { getTravelContextForInstant } from '../../utils/workingElsewhere';
 import { detectCategory } from './detectCategory';
 import { findMeetingOwner, type MeetingOwnerInfo } from './findMeetingOwner';
-import { getCurrentTravel, getPersonMemory, searchPeopleMemory } from '../../db/people';
+import { getCurrentTravel, searchPeopleMemory } from '../../db/people';
 import logger from '../../utils/logger';
 import type { BookingRequest } from './bookingRequest';
 
@@ -64,7 +65,10 @@ export interface PlanMeetingInput {
   profile: UserProfile;
   intent: IntentKind;
   initiator: 'owner' | 'colleague';
-  initiatorSlackId: string;          // who's asking right now
+  // v4.2.x — `initiatorSlackId` is gone with the decline-relay branch (#147):
+  // comparing the asker's slack id to the organizer's was only ever used to
+  // decide whether to DM the organizer, and nothing DMs on a cancel now. The
+  // asker's ROLE (`initiator` above) is what the rules actually key on.
 
   // Time
   slotStartIso?: string;
@@ -142,7 +146,6 @@ export function planInputFromBookingRequest(
     profile,
     intent: req.intent,
     initiator: req.initiator,
-    initiatorSlackId: req.initiatorSlackId,
     slotStartIso: req.slotStartIso,
     slotEndIso: req.slotEndIso,
     durationMin: req.durationMin,
@@ -217,7 +220,7 @@ export type PlanAction =
    * shape the caller cannot flatten by accident.
    */
   | { action: 'propose_alternative'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; alternatives: Array<{ start: string; end: string; label: string }>; widenedAlternatives: Array<{ start: string; end: string; label: string }>; requestedDay: string; category: string | null }
-  | { action: 'decline_and_relay'; organizerName: string | null; organizerEmail: string | null; organizerSlackId: string | null; suggestedDmText: string }
+  | { action: 'decline_as_attendee'; organizerName: string | null; organizerEmail: string | null }
   | { action: 'refuse_not_owners'; organizerName: string | null; organizerEmail: string | null }
   | { action: 'ask_location_mode'; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; reasoning: string }
   | { action: 'room_unavailable_large'; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; reasoning: string };
@@ -261,29 +264,18 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           organizerEmail: ownerInfo.organizerEmail,
         };
       }
-      // intent === 'cancel'
-      // Per D3: if asker == requester/organizer, JUST do it (decline owner side).
-      const askerIsOwnerOfMeeting =
-        (ownerInfo.requesterSlackId && input.initiatorSlackId === ownerInfo.requesterSlackId) ||
-        (ownerInfo.organizerEmail && ownerEmail !== ownerInfo.organizerEmail
-          && participantEmail(participants, input.initiatorSlackId, profile) === ownerInfo.organizerEmail);
-      if (askerIsOwnerOfMeeting) {
-        // Just decline on owner's side — the asker owns the meeting.
-        return {
-          action: 'book',
-          isOnline: false, location: '', category: null,
-          reasoning: 'asker is the meeting requester/organizer — decline owner side directly',
-        };
-      }
-      // Asker != owner of meeting → decline-and-relay (per Q1=B for owner ask, D3 for colleague ask)
-      const target = ownerInfo.organizerName ?? ownerInfo.organizerEmail ?? 'the organizer';
-      const ownerFirst = profile.user.name.split(' ')[0];
+      // intent === 'cancel' → ONE outcome, whoever asked: decline the owner's
+      // own copy. v4.2.x (#147) collapsed what used to be two branches (asker-is-
+      // the-organizer → silent decline; anyone else → decline + a Slack DM to the
+      // organizer). They only ever differed by that DM, and the DM is gone: the
+      // organizer's notice is Outlook's own decline response, sent by
+      // `declineMeeting` on the Graph call itself. So there is nothing left to
+      // branch on, and `askerIsOwnerOfMeeting` (plus its `participantEmail`
+      // helper) went with it.
       return {
-        action: 'decline_and_relay',
+        action: 'decline_as_attendee',
         organizerName: ownerInfo.organizerName,
         organizerEmail: ownerInfo.organizerEmail,
-        organizerSlackId: ownerInfo.requesterSlackId,
-        suggestedDmText: `Hey${ownerInfo.organizerName ? ' ' + ownerInfo.organizerName.split(' ')[0] : ''} — ${ownerFirst} won't be able to make "${input.subject ?? 'the meeting'}" anymore. I've removed it from his side. If you'd like to cancel for everyone, just let me know.`,
       };
     }
     // Owner IS organizer → fall through to normal pipeline (book = delete/move on Graph).
@@ -740,12 +732,22 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       }
       if (internalEmails.length > 0) {
         try {
+          // P15 — `notChecked` = the read never happened for this window. It used
+          // to come back as `{}`, `fb[email] ?? []` read it as "free", and the
+          // booking went through with no heads-up at all: the ONE place that tells
+          // the owner "Simon is busy then" silently said nothing. Handled as a
+          // NOTICE, not a block — an unread calendar is not evidence of a clash
+          // either, and turning it into a confirm round would be #137 in reverse
+          // (and would cost an M4 round on every Graph hiccup).
+          const fbDiag: { notChecked?: string[] } = {};
           const fb = await getFreeBusy(
             ownerEmail, internalEmails,
             input.slotStartIso, input.slotEndIso,
             profile.user.timezone,
             input.allowRelaxed === true,   // override/replay reads fresh — never annotate a stale "busy"
+            fbDiag,
           );
+          const notChecked = fbDiag.notChecked ?? [];
           const slotStart = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone, setZone: true });
           const slotEnd = DateTime.fromISO(input.slotEndIso, { zone: profile.user.timezone, setZone: true });
           // v2.8.5 — pre-compute prior-event window for source-event exclusion.
@@ -809,6 +811,18 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
               attendeeBusyLabel = label;
               gates.push({ kind: 'attendee_busy', ask: askText });
             }
+          } else if (notChecked.length > 0) {
+            // P15 — nobody's calendar was read, so there is nothing to say about a
+            // clash, and saying nothing is what made this a bug: the booking went
+            // out looking verified. Rides the SAME notice channel a busy attendee
+            // uses on the override/move path, so it books and the owner hears the
+            // truth — "I couldn't check" — rather than a silence that reads as
+            // "everyone's free" (M11).
+            const who = notChecked.map(e => e.split('@')[0]).join(', ');
+            logger.warn('planMeeting — attendee free/busy was never read for this slot', {
+              notChecked, slot: input.slotStartIso,
+            });
+            attendeeBusyNotice = `I couldn't check ${who}'s availability for this time — their calendar didn't come back, so this isn't confirmed on their side`;
           }
         } catch (err) {
           // Permission errors (Calendars.Read) or transient Graph failures —
@@ -1017,21 +1031,3 @@ function pickCanonicalCategory(profile: UserProfile, raw: string[]): string | nu
   return null;
 }
 
-function participantEmail(parts: PlanParticipant[], slackId: string, profile: UserProfile): string | null {
-  const found = parts.find(p => p.slack_id === slackId);
-  if (found?.email) return found.email.toLowerCase();
-  // owner case
-  if (profile.user.slack_user_id === slackId) return profile.user.email.toLowerCase();
-  // v2.7.0 — legacy-meeting fallback (e.g. Yael cancelling her own Calendly
-  // meeting that wasn't booked via Maelle). participants[] is [] for
-  // cancel/move intents, but the asker's slack_id resolves to an email
-  // through people_memory. Lets us compare asker-email to organizer-email
-  // so "asker IS organizer" detection works for legacy events too.
-  try {
-    const mem = getPersonMemory(slackId);
-    if (mem?.email) return mem.email.toLowerCase();
-  } catch {
-    // fail open — null forces decline_and_relay which is the conservative outcome
-  }
-  return null;
-}

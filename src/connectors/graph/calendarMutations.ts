@@ -2,6 +2,7 @@ import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
 import { auditLog } from '../../db';
 import { getClient } from './graphClient';
+import { verifyEventDeleted } from './calendarReads';
 import type { CreateMeetingParams, CreatedMeeting, UpdateMeetingParams } from './calendarTypes';
 
 /**
@@ -24,7 +25,7 @@ function normalizeForGraph(iso: string, tz: string): string {
   const dt = DateTime.fromISO(iso, { zone: tz, setZone: true });
   if (!dt.isValid) return iso;  // fail open — let Graph reject if truly malformed
   return dt.setZone(tz).toISO({ includeOffset: false, suppressMilliseconds: true })!;
-}
+}
 
 export async function updateMeeting(params: UpdateMeetingParams): Promise<void> {
   const client = getClient();
@@ -103,13 +104,13 @@ export async function updateMeeting(params: UpdateMeetingParams): Promise<void> 
     logger.error('Failed to update meeting', { err, meetingId: params.meetingId, fields: Object.keys(patchedFields) });
     throw err;
   }
-}
+}
 
 export async function deleteMeeting(
   userEmail: string,
   meetingId: string,
   options: { comment?: string } = {},
-): Promise<void> {
+): Promise<{ cancellationSent: boolean }> {
   const client = getClient();
 
   // v2.8.6 — use Graph's POST /cancel endpoint instead of bare DELETE. Pre-fix
@@ -121,13 +122,16 @@ export async function deleteMeeting(
   //
   // /cancel is the right endpoint: it sends a "Cancelled: <subject>" invite
   // to every attendee AND removes the event from the organizer's calendar in
-  // one call. Requires the user to be the organizer; non-organizer cancels
-  // (when owner is invited to someone else's meeting) take the v2.7.0
-  // not_organizer path instead, which never reaches here.
+  // one call. ORGANIZER-ONLY: Graph rejects it with 400 for an attendee, so
+  // the owner-is-attendee case must go through `declineMeeting` below — never
+  // here. (Pre-#147 it DID come here, and the 400 fallback silently degraded
+  // every attendee-side decline to a bare DELETE, notifying nobody.)
   //
-  // Fallback: if Graph rejects /cancel (rare — happens when the event is in
-  // a draft state with no attendees), retry with DELETE. Solo events
-  // ("personal block" with no attendees) tolerate either endpoint.
+  // Fallback: if Graph rejects /cancel, retry with DELETE. On the organizer
+  // path that means the event has no attendees — a solo "personal block",
+  // where there is nobody to notify and DELETE is the right call anyway.
+  // `cancellationSent` reports which of the two landed, so the caller can say
+  // truthfully whether an Outlook cancellation actually went out.
   // v3.2.x (#121) — invalidate before the delete attempt; covers both the
   // /cancel and DELETE-fallback success returns in one place. A throw after
   // this just costs a harmless cache miss (next read re-fetches and correctly
@@ -138,21 +142,77 @@ export async function deleteMeeting(
     await client.api(`/users/${userEmail}/events/${meetingId}/cancel`).post({
       Comment: options.comment ?? '',
     });
-    return;
+    return { cancellationSent: true };
   } catch (err: any) {
     const code = err?.statusCode ?? err?.code;
     // 400 BadRequest happens when the event has no attendees — fall back to
     // DELETE (which is the right call for solo events anyway).
     if (code === 400 || code === 'ErrorMissingArgument') {
-      logger.info('deleteMeeting — /cancel rejected (likely no attendees), falling back to DELETE', {
+      logger.info('deleteMeeting — /cancel rejected (no attendees), falling back to DELETE', {
         meetingId, code,
       });
       await client.api(`/users/${userEmail}/events/${meetingId}`).delete();
-      return;
+      return { cancellationSent: false };
     }
     throw err;
   }
-}
+}
+
+/**
+ * v4.2.x (#147) — DECLINE the owner's copy of a meeting he did NOT organize.
+ *
+ * This is the attendee half of the cancel path; `deleteMeeting` above is the
+ * organizer half. It exists because Graph refuses `/cancel` for a non-organizer
+ * (400), and the fallback there degrades to a bare DELETE: the event vanished
+ * from the owner's calendar and the organizer was told NOTHING. Proven on the
+ * 2026-07-26 vacation-decline thread — every attendee-side delete logged
+ * "/cancel rejected … falling back to DELETE", so not one of the 17 organizers
+ * got an Outlook notice. Maelle papered over that by DMing the organizer on
+ * Slack and marking it "sent" before the send even ran (#147.2/.4: the false
+ * "Julia's been notified", and a per-occurrence DM that said "won't make it
+ * anymore" when two dates were declined).
+ *
+ * `sendResponse: true` is what puts "Declined" in the organizer's Outlook, and
+ * an Outlook decline is per-occurrence by construction — it can neither claim a
+ * notification that didn't happen nor overstate the scope.
+ *
+ * If Graph REFUSES the decline, the likeliest reason is that the owner is the
+ * organizer after all (Graph won't let an organizer decline their own meeting) —
+ * an ownership read that came back wrong. So fall through to the organizer verb
+ * rather than a bare DELETE: a mis-read must never silently strip a meeting off
+ * his calendar with nobody told. `notified` reports which of the three actually
+ * happened, so the caller states it instead of assuming it.
+ *
+ * Retention: Outlook normally drops a declined meeting off the attendee's
+ * calendar, but that is not a contract we can lean on — so verify and remove
+ * the leftover copy ourselves. The caller's post-condition ("it is off his
+ * calendar") therefore holds on every branch.
+ */
+export async function declineMeeting(
+  userEmail: string,
+  meetingId: string,
+  options: { comment?: string } = {},
+): Promise<{ notified: 'organizer' | 'attendees' | 'nobody' }> {
+  const client = getClient();
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  (require('./calendarCache') as typeof import('./calendarCache')).invalidateCalendarCache(userEmail, 'delete_meeting');
+  try {
+    await client.api(`/users/${userEmail}/events/${meetingId}/decline`).post({
+      SendResponse: true,
+      Comment: options.comment ?? '',
+    });
+  } catch (err: any) {
+    logger.warn('declineMeeting — /decline rejected, falling back to the organizer verb', {
+      meetingId, code: err?.statusCode ?? err?.code,
+    });
+    const { cancellationSent } = await deleteMeeting(userEmail, meetingId, options);
+    return { notified: cancellationSent ? 'attendees' : 'nobody' };
+  }
+  if (!(await verifyEventDeleted(userEmail, meetingId))) {
+    await client.api(`/users/${userEmail}/events/${meetingId}`).delete();
+  }
+  return { notified: 'organizer' };
+}
 
 export async function createMeeting(params: CreateMeetingParams): Promise<CreatedMeeting> {
   const client = getClient();
@@ -259,4 +319,4 @@ export async function createMeeting(params: CreateMeetingParams): Promise<Create
     logger.error('Failed to create meeting', { err, subject: params.subject });
     throw err;
   }
-}
+}

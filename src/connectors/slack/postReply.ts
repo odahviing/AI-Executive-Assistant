@@ -9,12 +9,12 @@
  *
  * Steps, in order:
  *   1  Deliberation guard (guard module) on the raw draft.
- *   1b Save what the user will actually SEE to conversation history (so
- *      Claude's next turn sees what she did, not the deliberation chain).
  *   2  Normalize markdown artefacts (** → *, etc) for Slack rendering, and
  *      park a 'Finishing up' status in the assistant panel.
  *   3  Run the output gate stack (guard module). Owner path and colleague
  *      path are both decided in there; it returns the text to send.
+ *   3b Save what the person will actually SEE to conversation history — the
+ *      POST-gate text, so the record and the wire can never disagree.
  *   4  Ack-class emoji replacement, then the colleague shadow-notify.
  *   5  Audio vs text branch based on the input modality + TTS availability.
  *   6  Optional approval footer when the orchestrator flagged a pending ask.
@@ -399,13 +399,6 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // Falls back to the original draft on any error.
   const finalReply = await runDeliberationGuard(result.reply, profile);
 
-  // Step 1b — persist what the user will actually see to history. Future turns
-  // reading the conversation see the answer, not the raw deliberation chain.
-  const savedContent = result.toolSummaries?.length
-    ? `${result.toolSummaries.join(' ')}\n${finalReply}`
-    : finalReply;
-  appendToConversation(threadTs, channelId, { role: 'assistant', content: savedContent });
-
   // Step 2 — normalize markdown → Slack mrkdwn.
   let cleanReply = formatForSlack(finalReply);
 
@@ -430,17 +423,75 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   }
 
   // Step 3 — the output-time GATE STACK (guard lane, utils/guards/runOutputGates).
-  // Owner-private path (1:1 DM): claim-check + humanGate + date-verify (probed
-  // concurrently, exact serial chain on any flag). Colleague-READABLE path — a
-  // colleague DM, a channel, or the owner speaking in a group DM: claim-check
-  // (owner's own turn only) → date-verify → security gate → humanGate. Every
-  // gate fails OPEN, so a throw in there returns the draft we handed it, and no
-  // gate can re-enter the orchestrator.
+  //
+  // WHICH gates run on which leg, in WHAT order, and what a verdict may do about
+  // the text are that module's policy, not this pipeline's — canonical note in its
+  // own module header. This comment used to carry a COPY of the order, and it went
+  // stale the moment guard moved date-verify last on the colleague leg (P20): a
+  // pointer cannot rot, a duplicated enumeration did. Don't re-add one here.
+  //
+  // What the delivery pipeline is entitled to assume, and no more: the call returns
+  // the text to send, and nothing in there re-enters the orchestrator (G4). Since
+  // guard's P26 it also always DOES return — every await and every rewrite on both
+  // legs now sits inside a try. But returning is not the same as returning the
+  // DRAFT, and the two unavailability cases were given deliberately different
+  // behaviours that this pipeline must not flatten: the spoof-input db read fails
+  // OPEN (the answer is untouched, and all three inputs are cleared together so the
+  // identity half stands down as a unit rather than running half-fed), while the LEAK
+  // gate fails SAFE — a fixed line of guard's own text, an ERROR log carrying the
+  // draft it dropped, and delivery, history and the remaining gates all carry on. So
+  // a gate failure costs the ANSWER, never the DELIVERY, and what lands back here can
+  // be text that no draft ever contained. Which is the sharpest reason the history
+  // write sits BELOW this line and not above it — see Step 3b.
   cleanReply = await runOutputGates(cleanReply, {
     profile, result,
     history, userMessage,
     senderId, channelId, threadTs,
     role, colleagueName, isMpim, isOwnerInGroup, mpimMemberIds,
+  });
+
+  // Step 3b — persist history, and NOT one line above the gate stack, where this
+  // write used to live. Up there the record kept the PRE-gate draft while the person
+  // received the post-gate one: the owner leg papered over half of it (the claim
+  // rewriter and the date swapper each append their correction), but the colleague
+  // leg's rewriters — securityGate, humanGate — append nothing, so a leak the gates
+  // caught and scrubbed was stored intact and replayed three ways: the next turn's
+  // model context (processMessage.ts:256), `recall_interactions`
+  // (core/assistant.ts:552), and the capture pass that mines the transcript for the
+  // social subjects the coda is built from (memory/capturePass.ts:418). The gates
+  // protected the wire and not the record — 2026-07-26 08:42:57, humanGate rewrote a
+  // colleague reply in thread 1784807021.443139; it also changed the QUESTION the
+  // draft asked, so history had Maelle asking something she never asked.
+  //
+  // A third corrective append was not the fix: appendToConversation only appends,
+  // then trims to the last 20 (db/conversations.ts:33-35), so the leaky row stays in
+  // the blob — still replayed, still feeding the capture pass — and evicts a real
+  // message to sit there. One write, of the vetted text, where the vetted text exists.
+  //
+  // Safe to move because nothing in between reads the stored blob: formatForSlack is
+  // a pure transform, setAssistantStatus is a Slack call, and the gate stack reads
+  // the `history` ARRAY it was handed — snapshotted at message arrival, before even
+  // this turn's user row — so it cannot see this write from either side of the move.
+  // Below the gates is also the more honest record twice over: when the leak gate is
+  // unavailable it SUBSTITUTES a fixed line for the draft rather than passing it
+  // through (Step 3), so a row written above the gates would preserve, and then
+  // replay, a draft that nothing vetted and that the colleague never saw — while the
+  // person holds the substitute; and `cleanReply` has been through formatForSlack, which is
+  // where scrubInternalLeakage runs — the pre-gate draft never was, so history also
+  // used to keep raw slack ids, Graph ids and verbatim tool names.
+  //
+  // The tool markers stay RAW on purpose: the claim-checker's truthful-recap shield
+  // reads `mutated=<domain>` out of prior assistant rows and the scrubber strips tool
+  // names, so formatting the action tape would erase the evidence the shield needs.
+  // Only the prose half is the scrubber's business.
+  //
+  // ABOVE Step 4.5, so the ack-reaction branch — which returns before Step 5 — still
+  // records the answer its 👍 stood in for, exactly as it did before.
+  appendToConversation(threadTs, channelId, {
+    role: 'assistant',
+    content: result.toolSummaries?.length
+      ? `${result.toolSummaries.join(' ')}\n${cleanReply}`
+      : cleanReply,
   });
 
   // Step 4.5 (v2.6.2) — ack-class emoji replacement. When the cleaned reply

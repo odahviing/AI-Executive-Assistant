@@ -1,4 +1,5 @@
 import { getDb } from '../db';
+import { getActiveOutreachForThread } from '../db/jobs';
 import logger from '../utils/logger';
 import type { Task, TaskType, TaskStatus } from './types';
 
@@ -127,21 +128,13 @@ export function getActiveJobsForThread(ownerUserId: string, threadTs: string): {
     AND status IN ('new', 'in_progress', 'pending_owner', 'pending_colleague')
   `).all(ownerUserId, threadTs) as Task[];
 
-  // The status filter is the open/closed sentinel described in db/jobs.ts (top
-  // block): a row sits at the SQL default 'sent' until closeRequest cascades it
-  // to 'cancelled'. This is the most consequential of that column's four
-  // readers — what survives here is injected into the system prompt as "ACTIVE
-  // IN THIS THREAD — you already committed to these" on every owner turn
-  // (core/orchestrator/buildTurnContext.ts:356), so if the cascade ever stops
-  // writing 'cancelled', closed outreach is presented to the model as live work
-  // forever ("still waiting on Idan" about a dead request).
-  const outreachJobs = db.prepare(`
-    SELECT * FROM outreach_jobs
-    WHERE owner_user_id = ?
-    AND owner_thread_ts = ?
-    AND status NOT IN ('replied', 'cancelled', 'no_response')
-    ORDER BY created_at DESC
-  `).all(ownerUserId, threadTs) as import('../db').OutreachJob[];
+  // #41 — "is this outreach still open?" is a question about its REQUEST, and it
+  // is asked in exactly one place (db/jobs.ts). This is the most consequential
+  // caller: what comes back is injected into the system prompt as "ACTIVE IN THIS
+  // THREAD — you already committed to these" on every owner turn
+  // (core/orchestrator/buildTurnContext.ts:356), so a row that is finished but
+  // reads as live is fed to the model as a live commitment.
+  const outreachJobs = getActiveOutreachForThread(ownerUserId, threadTs);
 
   return { tasks, outreachJobs };
 }

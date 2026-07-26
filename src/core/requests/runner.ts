@@ -21,6 +21,7 @@ import type { App } from '@slack/bolt';
 import type { UserProfile } from '../../config/userProfile';
 import { getDueRequests, updateRequest } from '../../db/requests';
 import { getOutreachJobByRequestId } from '../../db/jobs';
+import { workTimeBaseFromNow } from '../../utils/workHours';
 import { closeRequest } from './closeRequest';
 import type { NextCheckHandler, RequestRow } from './types';
 import { parseDetails } from './types';
@@ -226,8 +227,8 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
 }
 
 /**
- * Approval midpoint reminder — nag the owner once at the halfway point.
- * Then re-arm next_check_at = expires_at, handler = 'expiry'.
+ * Approval midpoint reminder — nag the owner once at the halfway point, inside
+ * his work hours. Then re-arm next_check_at = expires_at, handler = 'expiry'.
  */
 async function runApprovalReminder(row: RequestRow, profile: UserProfile): Promise<'rearmed' | 'closed'> {
   // #42 — never nag the owner about a call that isn't his to make. Every
@@ -251,6 +252,45 @@ async function runApprovalReminder(row: RequestRow, profile: UserProfile): Promi
     updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
     return 'rearmed';
   }
+
+  // R5 — an owner-facing ping respects his work hours. The midpoint is plain
+  // wall-clock arithmetic laid over a WORKDAY-aware expiry (tasks/skill.ts), so
+  // the two disagree the moment a weekend sits between them: a Thursday ask whose
+  // 2-workday deadline lands on Monday midpoints onto SATURDAY, and the nag fired
+  // there.
+  //
+  // Clamped HERE, at the send, not at the raise. This is the ONE place the nag is
+  // emitted, so every arming path is covered by construction; and a per-date
+  // schedule override added AFTER the raise (a day off, changed hours) invalidates
+  // a raise-time clamp but can never invalidate this one — it is evaluated at fire
+  // time against the same accessor everything else reads (getEffectiveWorkDay, via
+  // workTimeBaseFromNow). That helper is already this spine's convention for
+  // owner-facing timing (timersForWaitingSide, create_approval's expiry base):
+  // NOW when he is inside work hours, else the next work-time start.
+  //
+  // Only the NUDGE defers. Expiry does not — a closure is an outcome both sides
+  // are owed on time (R4), not a nudge that can wait for Sunday.
+  const nextWorkTime = workTimeBaseFromNow(profile);
+  const deferMs = Date.parse(nextWorkTime);
+  if (Number.isFinite(deferMs) && deferMs > Date.now() + 60_000) {
+    const expiresMs = Date.parse(row.expires_at);
+    if (Number.isFinite(expiresMs) && deferMs >= expiresMs) {
+      // The next work-hours slot is past the deadline: the nag would either
+      // announce a closing time already gone, or land after expiry has closed the
+      // row. Drop the nudge and go straight to the honest outcome.
+      logger.info('runApprovalReminder — next work-hours slot is past expiry, skipping the nag', {
+        requestId: row.id, expiresAt: row.expires_at, nextWorkTime,
+      });
+      updateRequest(row.id, { nextCheckAt: row.expires_at, nextCheckHandler: 'expiry' });
+      return 'rearmed';
+    }
+    logger.info('runApprovalReminder — outside the owner work hours, deferring the nag', {
+      requestId: row.id, nextWorkTime, expiresAt: row.expires_at,
+    });
+    updateRequest(row.id, { nextCheckAt: nextWorkTime, nextCheckHandler: 'approval_reminder' });
+    return 'rearmed';
+  }
+
   // Nag DM. We deliberately do NOT stamp terminal_dm_msg_ts on this DM —
   // emoji ✅ on the reminder is a no-op per Q3. The owner must react on the
   // original (terminal_dm_msg_ts) or reply in chat.

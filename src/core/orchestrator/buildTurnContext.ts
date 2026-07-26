@@ -723,6 +723,15 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
   // throughout the workday), inject as a compact block. Sonnet uses the
   // IDs to call delete_meeting / manage_calendar_issue directly instead
   // of subject re-search.
+  //
+  // v4.2.x (#148) — the guidance now covers BOTH directions a row can be
+  // referenced. Health tracks `missing_category` (checkHealth.ts:1309, status
+  // awaiting_owner), so some rows are no longer a problem Maelle reported but a
+  // QUESTION she asked; the answer arrives as one word ("Meeting"), which read
+  // as a fresh booking request while the text only taught delete/fix/cancel.
+  // Class-keyed, not status-keyed: an awaiting_owner OVERLAP row is still a
+  // problem, and only `missing_category` is answered by a category name
+  // (db/calendarIssues.ts QUESTION_ONLY_CLASSES).
   let recentCalendarIssuesBlock = '';
   if (isOwnerPath) {
     try {
@@ -751,7 +760,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
           const noteSnip = (r.notes ?? '').slice(0, 180).replace(/\s+/g, ' ').trim();
           return `  - issue_id=${r.id} (${r.issue_class} on ${r.event_date}, status=${r.status}): event_id=${r.event_id}${peerPart}\n    notes: ${noteSnip}`;
         });
-        recentCalendarIssuesBlock = `## RECENT CALENDAR ISSUES (last 6h — use these IDs, do not re-search by subject)\n\nThe calendar_health routine or the brief surfaced the following issues recently. If the owner says "delete it" / "fix it" / "cancel it" referring to one of these, USE the event_id (or peer_event_id when the reference is to the second event) directly with delete_meeting / move_meeting / update_meeting. Do NOT do a fresh get_calendar subject search — the event may have already vanished externally while you still have the id from the surface.\n\n${lines.join('\n')}`;
+        recentCalendarIssuesBlock = `## RECENT CALENDAR ISSUES (last 6h — act by id, not by subject search)\n\nThe calendar_health routine or the brief surfaced these. Resolve them from the ids below; the event may have vanished externally since, so a fresh get_calendar subject search can miss it.\n\n- "delete it" / "fix it" / "cancel it" → act on that row's event_id (peer_event_id when the reference is the second event) with delete_meeting / move_meeting / update_meeting.\n- issue_class=missing_category + status=awaiting_owner is a "which category?" question YOU asked; the notes name the event and when it is. A short reply naming a category, in any language, ANSWERS that row — call set_event_category(event_id=<the row's event_id>, categories=[...]) and confirm it as the answer you were waiting for (answered_open_question:true in the result = that question is now closed). Several open at once → take the event the reply points to, or ask which.\n\n${lines.join('\n')}`;
       }
     } catch (err) {
       logger.warn('recentCalendarIssues block builder threw — proceeding without it', {

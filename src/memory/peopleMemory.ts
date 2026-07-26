@@ -146,13 +146,26 @@ function mergeMarkdownSections(base: string, incoming: string): string {
 }
 
 /**
- * v4.0.4 — fold one person's md file into another's, called by
- * `db/people.mergePersonRows` right after two rows for one human collapse.
+ * v4.0.4 — fold one person's md file into another's. v4.2.x — called by
+ * `db/people.mergePersonRows` as a PRECONDITION of the row collapse, not as a
+ * follow-up to it, and it reports whether the fold actually completed.
  *
- * Without this the loser's `<person_id>.md` is ORPHANED: nothing in the DB
+ * Without the fold the loser's `<person_id>.md` is ORPHANED: nothing in the DB
  * points at it any more, but `formatPeopleCatalogSync` reads the DIRECTORY, so
  * the file keeps rendering as a second "Luke Joas" in the prompt catalog — the
  * duplicate we just removed, resurrected one layer up.
+ *
+ * Files and SQLite are separate durability domains, so the row merge and the md
+ * fold can never be ONE atomic commit. What can be decided is which side a crash
+ * leaves residue on. Row-first (the v4.0.4 shape) left the unrecoverable one: a
+ * clean DB plus an orphan file that the dedupe sweep will never revisit, because
+ * the sweep looks for duplicate ROWS and there are none any more. Md-first
+ * inverts it — an interrupted merge leaves the pair still duplicated, which is
+ * exactly the state the boot sweep exists to find and retry. Hence two
+ * properties this function must keep: it is IDEMPOTENT (a re-run after a partial
+ * fold is a no-op, or a line-deduped re-merge), and it RETURNS false when any
+ * `_people` directory still holds the loser's file, which the caller treats as
+ * "do not collapse the rows yet".
  *
  * Profile-independent on purpose (the db layer has no UserProfile): md files are
  * keyed ONLY by person_id, so every `config/users/*_people` directory is swept —
@@ -164,15 +177,25 @@ function mergeMarkdownSections(base: string, incoming: string): string {
  * that already existed keeps its own h1 — that line is the documented
  * owner-editable display override.
  */
-export function mergePersonMdFiles(survivorId: string, loserId: string, survivorName?: string): void {
-  if (!survivorId || !loserId || survivorId === loserId) return;
+export function mergePersonMdFiles(survivorId: string, loserId: string, survivorName?: string): boolean {
+  if (!survivorId || !loserId || survivorId === loserId) return false;
   // Both ids are internal surrogates, never user input — belt-and-braces anyway.
-  if (/[\\/\0]|\.\./.test(survivorId + loserId)) return;
+  if (/[\\/\0]|\.\./.test(survivorId + loserId)) return false;
 
   const usersRoot = path.resolve(process.cwd(), 'config', 'users');
   let entries: string[];
-  try { entries = readdirSync(usersRoot); } catch { return; }
+  try {
+    entries = readdirSync(usersRoot);
+  } catch (err) {
+    // Can't see the file side ⇒ can't promise it is clean. Refuse rather than
+    // let the rows collapse over an md file we never looked at.
+    logger.warn('person memory — md merge could not read the users root', {
+      survivorId, loserId, err: String(err).slice(0, 200),
+    });
+    return false;
+  }
 
+  let complete = true;
   for (const entry of entries) {
     if (!entry.endsWith('_people')) continue;
     const root = path.resolve(usersRoot, entry);
@@ -193,19 +216,24 @@ export function mergePersonMdFiles(survivorId: string, loserId: string, survivor
         logger.info('person memory — md file re-keyed to the surviving person', {
           dir: entry, from: `${loserId}.md`, to: `${survivorId}.md`,
         });
-        continue;
+      } else {
+        const survivorMd = readFileSync(survivorPath, 'utf-8');
+        const mergedMd = mergeMarkdownSections(survivorMd, readFileSync(loserPath, 'utf-8'));
+        if (mergedMd !== survivorMd) writeFileSync(survivorPath, mergedMd, 'utf-8');
+        unlinkSync(loserPath);
+        logger.info('person memory — md files merged', { dir: entry, survivorId, loserId });
       }
-      const survivorMd = readFileSync(survivorPath, 'utf-8');
-      const mergedMd = mergeMarkdownSections(survivorMd, readFileSync(loserPath, 'utf-8'));
-      if (mergedMd !== survivorMd) writeFileSync(survivorPath, mergedMd, 'utf-8');
-      unlinkSync(loserPath);
-      logger.info('person memory — md files merged', { dir: entry, survivorId, loserId });
     } catch (err) {
       logger.warn('person memory — md merge failed, both files left in place', {
         dir: entry, survivorId, loserId, err: String(err).slice(0, 200),
       });
     }
+    // Postcondition asserted on disk, not inferred from control flow: a rename
+    // that half-succeeded, a failed unlink, or a caught error all read the same
+    // way here — the loser's file is still there, so the merge is not done.
+    if (existsSync(loserPath)) complete = false;
   }
+  return complete;
 }
 
 /** List every people-memory file the owner has, with a short "what's in it" hint. */

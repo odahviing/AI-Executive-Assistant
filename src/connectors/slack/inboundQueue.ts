@@ -223,9 +223,19 @@ export function enqueueMessage(params: {
         key, newMessagePreview: params.text.slice(0, 60),
       });
       state.inFlight.abort();
-      // The aborted turn's "current message" is still in pending (the runner
-      // hasn't cleared it on abort). Append the new message; both will be
-      // merged together when the abort propagates back here.
+      // Only the NEW message goes in pending. The aborted turn's text is not
+      // there to re-merge: scheduleRun snapshots the batch and empties pending
+      // before it runs (:271-272), and its abort branch discards that snapshot
+      // rather than pushing it back (:299-308). So the next turn's mergedText is
+      // this message alone.
+      //
+      // Nothing is lost by that, which is why the abort branch doesn't bother
+      // restoring it: every inbound message is written to conversation history at
+      // ARRIVAL, before it is ever enqueued (processMessage.ts:288), and the turn
+      // that ends up running is the LAST message's runner (:278-280) — whose
+      // history snapshot was taken after the earlier message was already stored.
+      // The superseded message reaches the model as the preceding user turn in
+      // history, not as merged text.
       state.pending.push(msg);
       // The aborted turn's catch handler in scheduleRun will detect the
       // abort and re-trigger debounce; we don't need to start a new timer

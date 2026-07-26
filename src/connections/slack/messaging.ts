@@ -48,8 +48,6 @@ export interface SlackUserSearchResult {
 export interface SlackChannelSearchResult {
   id: string;
   name: string;
-  is_private: boolean;
-  is_archived: boolean;
 }
 
 export type SendOutcome =
@@ -352,6 +350,29 @@ export async function findUserByName(
   }
 }
 
+/**
+ * Resolve a channel NAME to an id, for `message_colleague(channel_id)`.
+ *
+ * The payload is two fields on purpose. `id` is what the caller cannot work
+ * without; `name` is needed to tell several substring matches apart and to confirm
+ * back to the owner which channel was picked. Nothing else crosses, and the tool
+ * wrapper in index.ts returns exactly these two (shared rule 10 — return the least
+ * the caller needs).
+ *
+ * `is_private` and `is_archived` used to be computed here and were dropped, unread,
+ * by every caller. They are DELETED rather than plumbed further: an unread field on
+ * a payload that ends up in the model's context is exactly what rule 10 warns about
+ * — the next reader widens the return "so the model can decide", and a private
+ * channel's name in the context cannot be taken back. `exclude_archived` below
+ * already makes the archived bit a constant.
+ *
+ * ⚠️ OPEN — owner's call, not settled here. `types` still lists `private_channel`,
+ * so a private channel the BOT belongs to can be matched by a fuzzy name search and
+ * its name handed to the model; on a colleague-readable surface (S6 — the owner is
+ * not the owner in an MPIM) that name can then be read out to the room. Narrowing to
+ * `public_channel` closes it and also removes posting to private channels entirely.
+ * Never invoked in any log to date, so this is hardening, not an incident.
+ */
 export async function findChannelByName(
   app: App,
   botToken: string,
@@ -373,8 +394,6 @@ export async function findChannelByName(
       .map(c => ({
         id: c.id,
         name: c.name,
-        is_private: !!c.is_private,
-        is_archived: !!c.is_archived,
       }));
   } catch (err) {
     logger.error('findChannelByName failed', { err: String(err), name });

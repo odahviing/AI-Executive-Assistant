@@ -47,7 +47,21 @@ export async function annotateSlotsWithAttendeeStatus<S extends { start: string;
 
   let busyRanges: Array<{ start: number; end: number; status: string }> = [];
   try {
-    const busyMap = await getFreeBusy(params.callerEmail, [params.attendeeEmail], earliest, latest, params.timezone);
+    // P15 — `notChecked` = the read never happened for this window (malformed
+    // window / Graph rejected it). It used to come back as `{}`, which this
+    // function's `?? []` below turned into "no busy blocks" and then into
+    // `attendeeStatus: 'free'` on every slot — a recipient told "you look free"
+    // about times nobody looked at. The throw path a few lines down has always
+    // answered 'unknown' for exactly this situation; this is the same answer for
+    // the same situation, arriving by a different route.
+    const fbDiag: { notChecked?: string[] } = {};
+    const busyMap = await getFreeBusy(params.callerEmail, [params.attendeeEmail], earliest, latest, params.timezone, false, fbDiag);
+    if ((fbDiag.notChecked ?? []).length > 0) {
+      logger.warn('annotateSlotsWithAttendeeStatus: free/busy was never read — returning unknown', {
+        attendeeEmail: params.attendeeEmail, earliest, latest,
+      });
+      return params.slots.map(slot => ({ slot, attendeeStatus: 'unknown' as const }));
+    }
     const slots = busyMap[params.attendeeEmail] ?? [];
     busyRanges = slots
       .filter(s => s.status !== 'free')

@@ -4,7 +4,13 @@
  * What lives here:
  *   - handleOutreachReply: triggered by app.ts when a colleague replies to an
  *     outreach — classifies (continue/done/schedule) and progresses the job
- *   - findSlackUser / findSlackChannel / openDM: Slack utilities
+ *   - findSlackUser / openDM: Slack utilities
+ *
+ * `findSlackChannel` was here too and is GONE (v4.2.x): zero callers, and it was a
+ * second copy of connections/slack/messaging.findChannelByName — same
+ * conversations.list, same substring filter — which meant a second, separately
+ * maintained path that listed private channels. One listing path is enough, and it
+ * belongs behind the Connection (S12), not in the connector.
  *
  * What used to live here but is gone in 1.6:
  *   - sendCoordinationDM / handleCoordinationReply / confirmAndBook / handleDecline:
@@ -427,30 +433,6 @@ export async function findSlackUser(
       }));
   } catch (err) {
     logger.error('Failed to search Slack users', { err, name });
-    return [];
-  }
-}
-
-export async function findSlackChannel(
-  app: App,
-  bot_token: string,
-  name: string
-): Promise<Array<{ id: string; name: string }>> {
-  try {
-    const result = await app.client.conversations.list({
-      token: bot_token,
-      types: 'public_channel,private_channel',
-      exclude_archived: true,
-      limit: 200,
-    });
-    const channels = (result.channels ?? []) as any[];
-    const query = name.toLowerCase().replace(/^#/, '');
-
-    return channels
-      .filter(c => c.name?.toLowerCase().includes(query))
-      .map(c => ({ id: c.id, name: c.name }));
-  } catch (err) {
-    logger.error('Failed to search Slack channels', { err, name });
     return [];
   }
 }

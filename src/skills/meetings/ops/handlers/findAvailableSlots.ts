@@ -30,11 +30,11 @@ import {
 import {
   getDb,
   auditLog,
-  getSuppressedEventIds,
   dismissFloatingBlockGap,
   searchPeopleMemory,
   getPersonMemory,
 } from '../../../../db';
+import { grantRelaxed } from '../../bookingRequest';
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
@@ -59,6 +59,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
   // share. His sub-lead-time booking in a group goes through the approval flow,
   // not through re-granting authority in the group.
   const isOwnerPath = context.senderRole === 'owner';
+  // P22 (v4.2.x) — THE grant, resolved ONCE per call. Five sites below used to
+  // spell `args.relaxed === true && context.senderRole === 'owner'` inline (and
+  // one of them as `&& isOwnerInitiatedSearch`, the same predicate under a
+  // second name). All five were correct; the problem was that a sixth copy of
+  // the same decision, in move_meeting, was not — so the decision now lives in
+  // exactly one function (bookingRequest.grantRelaxed) and every path reads it.
+  // Resolving it here rather than per-site also means the DENIED log fires once
+  // per tool call, not once per internal search.
+  const relaxedGranted = grantRelaxed(args, context).relaxed;
   const leadHours = bookingLeadTimeHours(context.profile, isOwnerPath ? 'owner' : 'colleague');
   const viewer = subjectViewerFor(context);
   const offerCount = offeredSlotCount(context.profile);
@@ -475,7 +484,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
 
           const ignoreAttendeeBusy =
             args.ignore_attendee_availability === true
-            || (args.relaxed === true && isOwnerInitiatedSearch);
+            || relaxedGranted;
 
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { loadAttendeeAvailabilityForEmails } = require('../../../../utils/attendeeAvailability') as
@@ -547,6 +556,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               blocked_by?: Array<{ email: string; slots_blocked: number }>;
             }>;
             unresolvedAttendees?: string[];
+            attendeesNotChecked?: string[];
           } = {};
 
           // v2.7.6 — narrow-window detection. When owner explicitly named a
@@ -651,7 +661,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
                   profile: context.profile,
                   category: args.category as string | undefined,
-                  relaxed: args.relaxed === true && context.senderRole === 'owner',
+                  relaxed: relaxedGranted,
                   excludeEventIds: Array.isArray(args.moving_event_ids)
                     ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
                     : undefined,
@@ -729,7 +739,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               profile: context.profile,
               // v2.3.2 (2A) — relaxed mode opt-in (owner-only). Bypasses
               // focus / lunch / work-hours; keeps the 5-min between-meeting buffer.
-              relaxed: args.relaxed === true && context.senderRole === 'owner',
+              relaxed: relaxedGranted,
               // v2.4.1 — when validating/discovering a MOVE, the meeting(s)
               // being moved are subtracted from busy AND forbidden as
               // candidates. See findAvailableSlots.excludeEventIds for the full
@@ -754,7 +764,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               attendeeAvailabilityCount: attendeeAvailability?.length ?? 0,
               ignoreAttendeeBusy,
               userNamedNarrowWindow,
-              relaxed: args.relaxed === true && context.senderRole === 'owner',
+              relaxed: relaxedGranted,
               slotCount: rawSlots.length,
               firstSlots: rawSlots.slice(0, 5).map(s => ({ start: s.start, end: s.end })),
               daySummary: diagnosticsOut.daySummary?.map(d => ({
@@ -781,6 +791,28 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               logger.warn('find_available_slots — unresolved internal attendee email(s)', {
                 unresolvedInternal,
                 entries,
+              });
+            }
+
+            // P15 — attendees whose calendars were never READ (malformed window /
+            // Graph rejected it), as opposed to addresses that don't exist. Both
+            // used to arrive as "no busy data" and be offered as free; they get
+            // separate wording because the requester's next move is different —
+            // a bad address is the model's to fix, an unread window is not, and
+            // telling the owner his colleague's address is a typo when it isn't
+            // is the confidently-wrong reason M11 forbids. Deliberately NOT a
+            // refusal: the slots are still the owner's own valid openings, and
+            // refusing them would be #137 in reverse. It withholds only the claim
+            // that they work for the other people.
+            const notChecked = (diagnosticsOut.attendeesNotChecked ?? []);
+            let attendeeNotCheckedWarning: Record<string, unknown> | undefined;
+            if (notChecked.length > 0) {
+              attendeeNotCheckedWarning = {
+                attendees_not_checked: notChecked,
+                _attendee_not_checked_warning: `Availability for ${notChecked.join(', ')} could NOT be read for this window — the free/busy request failed, so their calendars were never looked at. These are NOT confirmed-free times for them. Present the slots as ${context.profile.user.name.split(' ')[0]}'s own openings and say plainly that you could not check the other side, or re-call with a narrower/valid window. Never say they are free, and never say their address is wrong — it isn't.`,
+              };
+              logger.warn('find_available_slots — attendee free/busy was never read for this window', {
+                notChecked, searchFrom: effectiveSearchFrom, searchTo: args.search_to,
               });
             }
 
@@ -849,7 +881,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // relaxed=true so soft-rule-breaking slots surface tagged. Lets
             // Sonnet narrate "12:30 fits everyone but breaks your focus block
             // — book anyway?" instead of "Monday fully booked." Owner-path only.
-            const isAlreadyRelaxed = args.relaxed === true && context.senderRole === 'owner';
+            const isAlreadyRelaxed = relaxedGranted;
             // #128 part-2 — a colleague's MUST-BE request (Sonnet sets must_be:
             // they named a specific time, or said "has to be today/tomorrow" and
             // the owner's clean options are too far) reuses the SAME relaxed
@@ -950,12 +982,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               }
             }
             if (rawSlots.length === 0 && !shouldRecover && colleagueOwnerOnlySlots.length === 0 && ownerAttendeeTaggedSlots.length === 0) {
-              if (attendeeEmailWarning || colleagueSoftBlockHint) {
+              if (attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint) {
                 return {
                   slots: rawSlots,
                   ...(diagnosticsOut.daySummary && diagnosticsOut.daySummary.length > 0
                     ? { day_summary: diagnosticsOut.daySummary } : {}),
                   ...(attendeeEmailWarning ?? {}),
+                  ...(attendeeNotCheckedWarning ?? {}),
                   ...(colleagueSoftBlockHint ?? {}),
                   ...tzGroundingFields,
                 };
@@ -1035,11 +1068,12 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               }
               if (relaxedRecoverySlots.length === 0) {
                 // Recovery also empty — return original empty result with day_summary.
-                if ((strictDaySummary && strictDaySummary.length > 0) || attendeeEmailWarning || colleagueSoftBlockHint) {
+                if ((strictDaySummary && strictDaySummary.length > 0) || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint) {
                   return {
                     slots: [],
                     ...(strictDaySummary && strictDaySummary.length > 0 ? { day_summary: strictDaySummary } : {}),
                     ...(attendeeEmailWarning ?? {}),
+                    ...(attendeeNotCheckedWarning ?? {}),
                     ...(colleagueSoftBlockHint ?? {}),
                   };
                 }
@@ -1232,7 +1266,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                     travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
                     profile: context.profile,
                     category: args.category as string | undefined,
-                    relaxed: args.relaxed === true && context.senderRole === 'owner',
+                    relaxed: relaxedGranted,
                     excludeEventIds: Array.isArray(args.moving_event_ids)
                       ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
                       : undefined,
@@ -1484,7 +1518,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // (the tier holds them back otherwise), so their appearance IS the
             // signal to narrate the trade-off.
             const hasOverOptional = annotatedSlots.some((s: any) => typeof s.over_optional === 'string' && s.over_optional.length > 0);
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus) {
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               // #148 — grounded timezone strings so Sonnet quotes the conversion, never recomputes it.
               Object.assign(result, tzGroundingFields);
@@ -1495,6 +1529,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               if (travelers.length > 0) result.travelers = travelers;
               if (hasDaySummary) result.day_summary = daySummary;
               if (attendeeEmailWarning) Object.assign(result, attendeeEmailWarning);
+              if (attendeeNotCheckedWarning) Object.assign(result, attendeeNotCheckedWarning);
               if (colleagueSoftBlockHint) Object.assign(result, colleagueSoftBlockHint);
               if (hasAttendeeConflicts && !usedOwnerAttendeeTagged) {
                 result._attendee_conflicts_note =

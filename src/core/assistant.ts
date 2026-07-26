@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
-import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, setPersonNameHe, confirmPersonGender, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, resolvePerson, getRecentChannelMessages, readInteractionLog, BOOKING_SNAPSHOT_FRAME, type PersonProfile, type PersonInteraction, type PersonNote } from '../db';
+import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, resolvePerson, getRecentChannelMessages, readInteractionLog, BOOKING_SNAPSHOT_FRAME, type PersonProfile, type PersonInteraction, type PersonNote, type CoreFieldWrite } from '../db';
 import { getConnection } from '../connections/registry';
 import {
   readPersonMemory,
@@ -13,6 +13,38 @@ import {
 import { writeSkillPreferences, PREF_SKILLS } from '../utils/skillPreferences';
 import { DateTime } from 'luxon';
 import logger from '../utils/logger';
+
+/**
+ * Turn the per-field outcomes of core-field writes into the honest part of an
+ * `update_person_profile` payload.
+ *
+ * Three outcomes, three different things to say, and only one of them is a
+ * problem: a value that LANDED, a value that was ALREADY exactly that, and a
+ * value REFUSED because a higher authority holds a different one. This used to be
+ * inferred at the tool surface by re-reading the row and string-comparing it to
+ * the request — a second, weaker copy of a decision the store already makes
+ * (`CoreFieldWrite`, db/people.ts), which could not tell "already true" from
+ * "saved" at all. The store decides; this only phrases it.
+ */
+function describeCoreWrites(
+  writes: Array<[field: string, outcome: CoreFieldWrite]>,
+  ownerFirstName: string,
+): { not_saved?: string[]; already_set?: string[]; notes: string[] } {
+  const refused = writes.filter(([, o]) => o === 'refused_lower_authority').map(([f]) => f);
+  const already = writes.filter(([, o]) => o === 'already_set').map(([f]) => f);
+  const notes: string[] = [];
+  if (refused.length > 0) {
+    notes.push(`${refused.join(', ')} kept the value ${ownerFirstName} already set — his entry outranks a self-correction. Don't say it's saved; say you've noted it and will confirm with him.`);
+  }
+  if (already.length > 0) {
+    notes.push(`${already.join(', ')} already had exactly that value on file — nothing needed changing, and nothing was refused. Say it's already what you have rather than announcing an update.`);
+  }
+  return {
+    ...(refused.length > 0 ? { not_saved: refused } : {}),
+    ...(already.length > 0 ? { already_set: already } : {}),
+    notes,
+  };
+}
 
 /**
  * Assistant Skill — always active, handles learning and memory.
@@ -718,16 +750,36 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const gender  = args.gender as 'male' | 'female';
         const setBy = isOwner ? 'owner' : 'person';
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { setCoreFieldWithProvenanceById, confirmPersonGenderById } = require('../db') as typeof import('../db');
-        const wrote = setCoreFieldWithProvenanceById(target.personId, 'gender', gender, setBy);
-        if (!wrote) {
-          // Higher-rank value already locked — surface so the LLM doesn't claim it saved.
-          logger.info('confirm_gender refused — higher-rank provenance already set', { personId: target.personId, gender, setBy });
+        const { confirmPersonGenderById } = require('../db') as typeof import('../db');
+        // ONE call: the store's confirmation writer owns both authority columns
+        // (gender_set_by + the gender_confirmed mirror) — v4.2.x folded them, so
+        // the old second "belt-and-suspenders" write is gone with the split.
+        const outcome = confirmPersonGenderById(target.personId, gender, setBy);
+        if (outcome === 'refused_lower_authority') {
+          // A higher authority holds a DIFFERENT gender — surface so the LLM
+          // doesn't claim it saved. This is the ONLY honest refusal: the store's
+          // `already_set` outcome (below) used to arrive here as a bare `false`
+          // too, so re-stating a gender already on file at that same authority was
+          // reported as a refusal for something that was already true.
+          logger.info('confirm_gender refused — a higher authority holds a different gender', { personId: target.personId, gender, setBy });
           return { confirmed: false, reason: 'higher_authority_already_set', name: target.name };
         }
-        // Belt-and-suspenders: also flip gender_confirmed (setCoreFieldWithProvenance
-        // already does when by != 'auto'; kept for back-compat readers).
-        confirmPersonGenderById(target.personId, gender);
+        if (outcome === 'already_set') {
+          logger.info('Gender already on file as stated — no write needed', { personId: target.personId, name: target.name, gender, setBy });
+          return {
+            confirmed: true,
+            already_on_file: true,
+            name: target.name,
+            gender,
+            _note: `${target.name}'s gender was already on file as ${gender} — nothing needed changing, and nothing was refused. Confirm it briefly and use the right gendered forms; don't report a problem and don't ask again.`,
+          };
+        }
+        if (outcome !== 'applied') {
+          // 'no_value' (gender wasn't male/female) / 'no_person' (no row) — neither
+          // is a refusal, and neither is a save.
+          logger.warn('confirm_gender — nothing written', { personId: target.personId, gender, setBy, outcome });
+          return { confirmed: false, reason: outcome, name: target.name };
+        }
         logger.info('Gender confirmed (human-locked)', { personId: target.personId, name: target.name, gender, setBy, confirmedBy: context.userId });
         return { confirmed: true, name: target.name, gender, set_by: setBy };
       }
@@ -947,10 +999,11 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // contact with no Slack account / calendar.
         if (!slackId) {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { setCoreFieldWithProvenanceById, setPersonNameHeById, updatePersonProfileById } = require('../db') as typeof import('../db');
-          if (timezone && timezone.trim()) setCoreFieldWithProvenanceById(target.personId, 'timezone', timezone.trim(), setBy);
-          if (state && state.trim()) setCoreFieldWithProvenanceById(target.personId, 'state', state.trim(), setBy);
-          if (nameHe && nameHe.trim()) setPersonNameHeById(target.personId, nameHe.trim(), setBy);
+          const { setCoreFieldWithProvenanceById, updatePersonProfileById } = require('../db') as typeof import('../db');
+          const coreWrites: Array<[string, CoreFieldWrite]> = [];
+          if (timezone && timezone.trim()) coreWrites.push(['timezone', setCoreFieldWithProvenanceById(target.personId, 'timezone', timezone.trim(), setBy)]);
+          if (state && state.trim()) coreWrites.push(['state', setCoreFieldWithProvenanceById(target.personId, 'state', state.trim(), setBy)]);
+          if (nameHe && nameHe.trim()) coreWrites.push(['name_he', setCoreFieldWithProvenanceById(target.personId, 'name_he', nameHe.trim(), setBy)]);
           updatePersonProfileById(target.personId, {
             communication_style: args.communication_style as string | undefined,
             language_preference: args.language_preference as string | undefined,
@@ -967,16 +1020,27 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
             setPersonVipById(target.personId, args.vip);
           }
           logger.info('Person profile updated (external)', { personId: target.personId, name: target.name });
-          return { updated: true, name: target.name, external: true };
+          const described = describeCoreWrites(coreWrites, context.profile.user.name.split(' ')[0]);
+          return {
+            updated: true, name: target.name, external: true,
+            ...(described.not_saved ? { not_saved: described.not_saved } : {}),
+            ...(described.already_set ? { already_set: described.already_set } : {}),
+            ...(described.notes.length > 0 ? { _note: described.notes.join(' ') } : {}),
+          };
         }
 
-        // v2.2.2 (#46) — route every core field through the provenance helper.
-        // Ensure the row exists first; upsertPersonMemory tracks tz_set_by
-        // when we pass timezone alongside.
-        upsertPersonMemory({ slackId, name, timezone, timezoneSetBy: setBy });
+        // v2.2.2 (#46) — route every core field through the provenance helper, and
+        // collect each write's outcome: what landed, what was already exactly that,
+        // and what a higher authority refused. Ensure the row exists first — the
+        // upsert only writes the name here, because a STATED timezone belongs to
+        // the provenance write below (passing it both ways wrote the field twice).
+        upsertPersonMemory({ slackId, name });
+        const coreWrites: Array<[string, CoreFieldWrite]> = [];
 
         if (nameHe && nameHe.trim()) {
-          setPersonNameHe(slackId, nameHe.trim(), setBy);
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { setCoreFieldWithProvenance } = require('../db') as typeof import('../db');
+          coreWrites.push(['name_he', setCoreFieldWithProvenance(slackId, 'name_he', nameHe.trim(), setBy)]);
         }
 
         // v2.2.2 (#46) — STATE: free-text location, stamped with who stated it.
@@ -985,7 +1049,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // a zone inferred from a stated city has that same statement as its source.
         if (state && state.trim()) {
           const { setCoreFieldWithProvenance } = require('../db') as typeof import('../db');
-          setCoreFieldWithProvenance(slackId, 'state', state.trim(), setBy);
+          coreWrites.push(['state', setCoreFieldWithProvenance(slackId, 'state', state.trim(), setBy)]);
           if (!timezone) {
             // Static-first lookup; Sonnet fallback if needed. Fire-and-forget.
             void (async () => {
@@ -1017,14 +1081,16 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         }
 
         // v2.2.2 (#46) — an explicitly passed timezone is an authoritative
-        // statement by whoever sent the turn. upsertPersonMemory only writes via
-        // COALESCE so an existing value isn't touched there; the provenance
-        // helper does the overwrite AND records the source.
+        // statement by whoever sent the turn. This is the ONLY write of the field
+        // on this path (the upsert above no longer takes it), so its outcome is
+        // the one that gets reported.
         if (timezone && timezone.trim()) {
           const { setCoreFieldWithProvenance } = require('../db') as typeof import('../db');
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { refreshAutoWorkingHours } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
-          setCoreFieldWithProvenance(slackId, 'timezone', timezone.trim(), setBy);
+          coreWrites.push(['timezone', setCoreFieldWithProvenance(slackId, 'timezone', timezone.trim(), setBy)]);
+          // Refresh the auto-derived working hours off whatever zone is now STORED
+          // (the write may have been refused as lower-authority).
           refreshAutoWorkingHours(slackId);
         }
 
@@ -1126,29 +1192,21 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           notes.push(`You updated slot-relevant fields for ${name}. Any prior find_available_slots results involving ${name} are now stale — the candidate set changes with the new constraint. Re-run find_available_slots before proposing options to the owner. Do not mentally filter old slot candidates; the tool's diagnostics (day_summary, attendee work-hours filter, etc.) need to re-evaluate.`);
         }
 
-        // Colleague-self path: a core field the OWNER already set outranks a
-        // person's statement about themselves (SET_BY_RANK, db/people.ts), so
-        // that write silently no-ops. Say so, rather than let Maelle report a
-        // save that never landed — the same honesty confirm_gender owes via
-        // `higher_authority_already_set`. Compared against the STORED row, so a
-        // refusal is never confused with an idempotent no-op.
-        if (!isOwner) {
-          const after = getPersonMemoryRow(slackId);
-          const refused = ([
-            ['timezone', timezone?.trim(), after?.timezone],
-            ['state',    state?.trim(),    after?.state],
-            ['name_he',  nameHe?.trim(),   after?.name_he],
-          ] as Array<[string, string | undefined, string | undefined]>)
-            .filter(([, want, got]) => want && want !== got)
-            .map(([field]) => field);
-          if (refused.length > 0) {
-            base.not_saved = refused;
-            notes.push(`${refused.join(', ')} kept the value ${context.profile.user.name.split(' ')[0]} already set — his entry outranks a self-correction. Don't say it's saved; say you've noted it and will confirm with him.`);
-            logger.info('update_person_profile (colleague-self) — fields refused, owner value outranks', {
-              requesterId: context.userId, refused,
-            });
-          }
+        // What each core-field write actually did. A field the OWNER already set
+        // outranks a person's statement about themselves (SET_BY_RANK,
+        // db/people.ts), so a colleague's correction can be refused — say so
+        // rather than report a save that never landed. And a field that already
+        // held exactly the stated value is neither: nothing needed doing, which is
+        // the honesty confirm_gender owes too.
+        const described = describeCoreWrites(coreWrites, context.profile.user.name.split(' ')[0]);
+        if (described.not_saved) {
+          base.not_saved = described.not_saved;
+          logger.info('update_person_profile — fields refused, a higher authority outranks the writer', {
+            requesterId: context.userId, isOwner, refused: described.not_saved,
+          });
         }
+        if (described.already_set) base.already_set = described.already_set;
+        notes.push(...described.notes);
 
         if (notes.length > 0) base._note = notes.join(' ');
         return base;

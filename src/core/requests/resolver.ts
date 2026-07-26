@@ -18,6 +18,7 @@ import { closeRequest } from './closeRequest';
 import type { RequestRow } from './types';
 import { parseDetails } from './types';
 import {
+  composeOwnerAskText,
   extractCallbacks,
   mergeAmendIntoApprove,
   RESOLVER_REPLAY_TOOLS,
@@ -325,8 +326,9 @@ export async function resolveRequest(
           amended_by: 'colleague',
         },
       });
-      // Notify OWNER about the colleague's counter-counter.
-      await notifyOwnerOfColleaguePushback(row, 'amend', verdict.reason, ctx, verdict.counter);
+      // Hand the decision back to the OWNER (composed from the row we just wrote —
+      // the stored counter is what a ✅ there replays).
+      await notifyOwnerOfColleaguePushback(row, 'amend', verdict.reason, ctx);
       return {
         ok: true, request_id: requestId, state: 'awaiting_owner',
         effect: `colleague counter-amend bounced back to owner (round ${amendRound})`,
@@ -1034,64 +1036,58 @@ RULES:
 }
 
 /**
- * v2.9.1 — colleague responded to owner's counter (amending state). DM owner
- * to bring his attention back, with the colleague's pushback. The original
- * approval is now back to awaiting_owner so the system prompt's PENDING
- * APPROVALS block will show it next time owner messages, but a fresh DM
- * is much more responsive.
+ * v2.9.1 — colleague responded to owner's counter (amending state). Hand the
+ * decision back to the owner: the request is already back in awaiting_owner, and
+ * this post re-stamps `terminal_dm_msg_ts`, so a ✅ HERE resolves the approval and
+ * replays the stored action. That makes this a full owner-decision surface, not a
+ * notification — so it composes through `composeOwnerAskText` like the other two
+ * (first raise, re-ask revival) and cannot omit the proven hard reason or what a
+ * yes actually does. It used to hand-roll its own line plus a locally-rebuilt
+ * consequence, which is how a colleague's SUBJECT-ONLY counter could hand him a
+ * ✅ that booked over a meeting he already had without ever naming the clash: the
+ * counter moved no time at all, yet the proven collision appeared nowhere on the
+ * message he ticked. Both verdicts route here — a ✅ after a colleague's REJECT
+ * books just as surely as one after a counter.
+ *
+ * Reads the row FRESH: resolveRequest has just written `details.counter` (the
+ * colleague's) and re-aimed the timers, and the `row` captured at entry predates
+ * that. Reading it back is also what keeps the lead and the consequence on ONE
+ * source — the stored counter that a ✅ will actually replay (R3).
  */
 async function notifyOwnerOfColleaguePushback(
   row: RequestRow,
   verdict: 'reject' | 'amend',
   reason: string | undefined,
   ctx: ResolveContext,
-  colleagueCounter?: Record<string, unknown>,
 ): Promise<void> {
-  const requesterName = row.requester_name?.split(' ')[0] ?? 'the colleague';
-  const subject = row.subject || 'the ask';
-  let body: string;
-  if (verdict === 'reject') {
-    const tail = reason && reason.trim() ? ` (${reason.trim()})` : '';
-    body = `${requesterName} said the counter doesn't work${tail}. Back to you on "${subject}" — want to suggest something else, or drop it?`;
-  } else {
-    const cnt = colleagueCounter ? summarizeCounter(colleagueCounter) : '';
-    body = `${requesterName} countered with ${cnt || 'an alternative'} on "${subject}". Approve, reject, or counter again?`;
-    // Append the REBUILT consequence line so the owner sees what saying yes
-    // actually does NOW (after the counter merges into on_approve.args).
-    // Pre-fix the only consequence line the owner saw was the one from the
-    // original create_approval DM, which reflected the ORIGINAL slot — but
-    // approving here would replay the MERGED args (new slot). The fresh
-    // line eliminates the "I thought yes meant 14:00, got 16:00" confusion.
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { extractCallbacks, mergeAmendIntoApprove, buildConsequenceText, resolveConsequenceTravel } =
-        require('../approvals/approvalCallbacks') as
-          typeof import('../approvals/approvalCallbacks');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { parseDetails } = require('./types') as typeof import('./types');
-      const details = parseDetails<Record<string, unknown>>(row) ?? {};
-      const callbacks = extractCallbacks(details);
-      if (callbacks.on_approve && colleagueCounter) {
-        const merged = mergeAmendIntoApprove(callbacks.on_approve, colleagueCounter);
-        // v3.5.x (WE preview) — same trip-aware clock as the create_approval
-        // preview, so the re-decide line matches the booked-confirmation.
-        const travel = await resolveConsequenceTravel({ on_approve: merged }, ctx.profile);
-        const consequence = buildConsequenceText({ on_approve: merged }, ctx.profile, travel);
-        if (consequence) {
-          body = `${body}\n\n${consequence}`;
-        }
-      }
-    } catch (err) {
-      logger.warn('notifyOwnerOfColleaguePushback — consequence rebuild threw, sending bare body', {
-        id: row.id, err: String(err).slice(0, 200),
-      });
-    }
-  }
+  const fresh = getRequest(row.id) ?? row;
   try {
+    const details = parseDetails<Record<string, unknown>>(fresh) ?? {};
+    const requesterName = fresh.requester_name?.split(' ')[0] ?? 'the colleague';
+    const subject = fresh.subject || 'the ask';
+    let lead: string;
+    if (verdict === 'reject') {
+      const tail = reason && reason.trim() ? ` (${reason.trim()})` : '';
+      lead = `${requesterName} said the counter doesn't work${tail}. Back to you on "${subject}" — want to suggest something else, or drop it?`;
+    } else {
+      const stored = details.counter && typeof details.counter === 'object' && !Array.isArray(details.counter)
+        ? details.counter as Record<string, unknown>
+        : null;
+      const cnt = summarizeCounter(stored);
+      lead = `${requesterName} countered with ${cnt || 'an alternative'} on "${subject}". Approve, reject, or counter again?`;
+    }
+    const body = await composeOwnerAskText({
+      askText: fresh.description ?? fresh.subject,
+      details,
+      profile: ctx.profile,
+      requestId: fresh.id,
+      lead,
+      reSurface: { raisedAt: fresh.created_at },
+    });
     const { getConnection } = await import('../../connections/registry');
-    const conn = getConnection(row.owner_user_id, 'slack');
+    const conn = getConnection(fresh.owner_user_id, 'slack');
     if (!conn) {
-      logger.warn('notifyOwnerOfColleaguePushback — no Slack connection', { id: row.id });
+      logger.warn('notifyOwnerOfColleaguePushback — no Slack connection', { id: fresh.id });
       return;
     }
     // #45 — a decision coming BACK to the owner is still a decision, so it goes
@@ -1110,10 +1106,10 @@ async function notifyOwnerOfColleaguePushback(
       profile: ctx.profile, conn, text: body, label: `colleague ${verdict} bounce-back`,
     });
     if (res.ok) {
-      updateRequest(row.id, {
-        ownerDmChannel: res.channel ?? row.owner_dm_channel ?? undefined,
-        ownerDmThreadTs: res.threadTs ?? row.owner_dm_thread_ts ?? undefined,
-        terminalDmMsgTs: res.ts ?? row.terminal_dm_msg_ts ?? undefined,
+      updateRequest(fresh.id, {
+        ownerDmChannel: res.channel ?? fresh.owner_dm_channel ?? undefined,
+        ownerDmThreadTs: res.threadTs ?? fresh.owner_dm_thread_ts ?? undefined,
+        terminalDmMsgTs: res.ts ?? fresh.terminal_dm_msg_ts ?? undefined,
       });
     }
   } catch (err) {

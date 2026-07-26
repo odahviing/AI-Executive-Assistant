@@ -133,7 +133,7 @@ export async function detectAndSaveGender(params: {
   }
 
   if (gender !== 'unknown') {
-    const wrote = setCoreFieldWithProvenance(slackId, 'gender', gender, setBy);
-    logger.debug('Gender saved', { slackId, name, gender, setBy, wrote });
+    const outcome = setCoreFieldWithProvenance(slackId, 'gender', gender, setBy);
+    logger.debug('Gender saved', { slackId, name, gender, setBy, outcome });
   }
 }

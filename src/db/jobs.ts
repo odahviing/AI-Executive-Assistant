@@ -2,51 +2,49 @@ import { getDb } from './client';
 import { closeRequest } from '../core/requests/closeRequest';
 
 // ══════════════════════════════════════════════════════════════════════════
-// PATH 2 INVARIANT (v3.1.0+) — read this once, the rest of the file references it.
+// ONE SPINE (#41, owner ruling 2026-07-26 — "only one spine") — read this once.
 //
-// The `requests` table is the single source of truth for outreach LIFECYCLE:
-// state, phase, timers, what the brief and the rate-limiter read. The physical
-// `outreach_jobs.status` column is NOT that lifecycle — but it is NOT dead
-// either. It is a coarse open/closed sentinel that FOUR live queries filter on,
-// so it is load-bearing today. Do not delete the column or the cascade writes
-// without re-pointing every reader below first (deferred as #41).
+// `outreach_jobs` is PAYLOAD. The linked `requests` row is the LIFECYCLE, and it
+// is the only thing that answers "is this outreach still open?" — state, phase,
+// timers, what the brief and the rate-limiter read. Every open/closed question in
+// this codebase now goes through the two spine-backed readers below
+// (`getActiveOutreachForThread`, `getOpenRescheduleOutreach`) or
+// `getOutreachJobsByColleague`.
 //
-// • `OutreachStatus` (the TS type) is the TRANSITION SIGNAL passed to
-//   createOutreachJob / updateOutreachJob — it drives the linked request and
-//   the terminal cascade. NEITHER function writes the column: the INSERT omits
-//   it (→ SQL default 'sent', db/client.ts:100) and updateOutreachJob strips it
-//   (:269 below). So a row sits at 'sent' from birth until a cascade moves it.
-// • The column is moved by exactly TWO cascades, both outside this file:
-//     closeRequest        → 'cancelled' when the linked request closes
-//                           (core/requests/closeRequest.ts:124-133; it also
-//                           READS the column at :127 to stay idempotent)
-//     closeFollowup       → 'replied' on a real colleague reply
-//                           (connectors/slack/recentOutboundContext.ts:132-140)
-// • FOUR readers filter on it — and they DO NOT all point the same way. Three
-//   read a non-terminal row as "still in play, keep acting on it":
-//     tasks/index.ts:130-136                          (getActiveJobsForThread)
-//     utils/closeMeetingArtifacts.ts:106-110          (meeting-cascade close)
-//     utils/cleanupVanishedMeetingArtifacts.ts:75-80  (vanished-meeting sweep)
-//   The fourth reads the SAME 'sent' row as "a ping already went out, stand
-//   down" — the opposite polarity:
-//     skills/calendarHealth/.../checkHealth.ts:852-855 (reschedule-ping dedup)
-//   So dropping the 'cancelled' cascade breaks them in OPPOSITE directions:
-//   the first three keep chasing outreach that is already closed, while the
-//   health check's `status = 'sent'` probe matches forever, so the overlap
-//   autofix logs "move notice for this event already open; skipping" on every
-//   run and never fires again — permanent OVER-suppression, not a lost one.
-//   The first of the four is the user-visible one: getActiveJobsForThread is
-//   called on every owner turn (core/orchestrator/buildTurnContext.ts:356) and
-//   its rows become the "ACTIVE IN THIS THREAD — you already committed to
-//   these" prompt block (:408), so a stale row is fed to the model as live
-//   work indefinitely — the "still waiting on Idan" confabulation class
-//   (#145-followup).
-//   ('no_response' appears in three of those filters but nothing writes it any
-//   more — a dead value in the lists, harmless.)
-// • Anything richer than open/closed — "is this awaiting the colleague?",
-//   phase, next check — reads the request (see getOutreachLifecycle). Readers
-//   that track CONVERSATIONAL closure use `followup_closed_at` instead and
-//   never touch status (recentOutboundContext.ts:99-108, :347-351).
+// There is NO `outreach_jobs.status` column any more. It reached zero readers and
+// zero writers and was then physically dropped by the idempotent migration in
+// db/client.ts (right after the outreach_jobs ADD COLUMN list). Do NOT re-add it:
+// a value nothing reads is the second lifecycle #41 exists to kill, and a stale one
+// invites the next reader to trust it.
+//
+// WHY it could never have been that answer — proven on disk 2026-07-26, not
+// inferred. A row was born at the SQL default 'sent' and only a cascade ever moved
+// it. But `createOutreachJob` creates a FIRE-AND-FORGET outreach
+// (`await_reply === 0`) with its request already `resolved`, so closeRequest never
+// ran on it and the cascade never fired: 12 rows sat at 'sent' with a resolved
+// request and `closed_at IS NULL`. A further 86 rows predated the bridge and carried
+// `request_id` NULL, so nothing could ever close them at all. Counted before the
+// drop: the old thread filter (`status NOT IN ('replied','cancelled','no_response')`)
+// matched 70 rows, and the old reschedule filter (`status IN ('sent','no_response',
+// 'replied')`) matched 2 — while the number with an actually-open request was ZERO.
+// The spine has no such gap: born-resolved is resolved, and no request means no work
+// item. The last reader was calendarHealth's reschedule-ping dedup
+// (`intent='meeting_reschedule' AND status='sent'`, INVERTED polarity: a match
+// SUPPRESSES the overlap autofix); it moved to `getOpenRescheduleOutreach(ownerUserId)`
+// filtered to the event id (skills/calendarHealth/handlers/checkHealth.ts:864-889 —
+// live before/after: old probe 1 row, spine reader 0, and that 1 row was the
+// un-closeable request_id-NULL row that suppressed the autofix for its event forever).
+// With it gone the two cascade writes went too, in reader-then-writer order:
+// closeFollowup's 'replied' (connectors/slack/recentOutboundContext.ts) and
+// closeRequest's 'cancelled' (core/requests/closeRequest.ts).
+//
+// `OutreachTransition` (the TS type) is the TRANSITION SIGNAL passed to
+// createOutreachJob / updateOutreachJob — it picks the linked request's state and
+// drives the terminal cascade. It is not a second lifecycle and neither function
+// persists it (nothing could now: there is no column to persist it to).
+//
+// Conversational follow-up closure is a different question with its own field —
+// `followup_closed_at` (recentOutboundContext.ts) — and never touched status.
 // ══════════════════════════════════════════════════════════════════════════
 
 // ── Bridge helpers (v2.7.0) ──────────────────────────────────────────────────
@@ -82,16 +80,22 @@ export function getPendingRequestCountForColleague(ownerUserId: string, colleagu
 // ── Outreach jobs ─────────────────────────────────────────────────────────────
 
 /**
- * v3.1 (Path 2 Stage 7) — outreach LIFECYCLE lives on the linked request
- * (state + phase), not on this type. `OutreachStatus` is the TRANSITION SIGNAL
- * passed to createOutreachJob / updateOutreachJob: it drives the request + the
- * terminal cascade, and neither of those two functions persists it. The
- * physical `outreach_jobs.status` column still exists and is still read as an
- * open/closed sentinel by three scans — see the PATH 2 INVARIANT block at the
- * top of this file before touching it.
+ * Outreach LIFECYCLE lives on the linked request (state + phase), never on this
+ * type. This is the TRANSITION SIGNAL passed to createOutreachJob /
+ * updateOutreachJob: it picks the request's birth state and drives the terminal
+ * cascade, and neither function persists it — the physical column is gone (see the
+ * ONE SPINE block at the top of this file).
+ *
+ * These four are the only values any caller passes — verified by grep over all 19
+ * call sites 2026-07-26: 'sent' (tasks/dispatchers/summaryActionFollowup.ts:166,
+ * skills/meetingReschedule.ts:570), 'pending_scheduled' (skills/outreach.ts:216),
+ * 'replied' (connectors/slack/coordinator.ts:322,363 + six sites in
+ * skills/meetingReschedule.ts), 'cancelled' (skills/outreach.ts:322,332,445,
+ * skills/meetingReschedule.ts:594). The old union also carried 'done', 'expired',
+ * 'failed' and 'no_response' with ZERO producers — the branches keyed on them were
+ * unreachable and went with the column.
  */
-export type OutreachStatus =
-  | 'sent' | 'replied' | 'no_response' | 'cancelled' | 'pending_scheduled' | 'done' | 'expired' | 'failed';
+export type OutreachTransition = 'sent' | 'pending_scheduled' | 'replied' | 'cancelled';
 
 export interface OutreachJob {
   id: string;
@@ -134,13 +138,13 @@ export interface OutreachJob {
   // fresh top-level DM.
   dm_message_ts?: string;
   dm_channel_id?: string;
-  // v2.6.1 (D4) — DM follow-up tracking, independent of `status`. Populated
-  // when the conversation around this outbound DM has closed: emoji reaction
-  // on the message, thread reply, deterministic <10min match, LLM-classified
-  // 10min-24h response, 24h auto-expiry, or any existing pipeline transition
-  // (status → replied/done/cancelled/expired/failed via handleOutreachReply
-  // / meetingReschedule / coordinator paths). The latter is auto-set inside
-  // updateOutreachJob below so existing call sites don't need to be touched.
+  // v2.6.1 (D4) — DM follow-up tracking, independent of the request's lifecycle.
+  // Populated when the conversation around this outbound DM has closed: emoji
+  // reaction on the message, thread reply, deterministic <10min match,
+  // LLM-classified 10min-24h response, 24h auto-expiry, or a terminal transition
+  // signal ('replied' / 'cancelled' via handleOutreachReply / meetingReschedule /
+  // coordinator paths). The latter is auto-set inside updateOutreachJob below so
+  // existing call sites don't need to be touched.
   followup_closed_at?: string;
   followup_close_reason?:
     | 'deterministic_match'
@@ -154,7 +158,7 @@ export interface OutreachJob {
 }
 
 export function createOutreachJob(
-  params: Omit<OutreachJob, 'id' | 'created_at' | 'updated_at'> & { status?: OutreachStatus },
+  params: Omit<OutreachJob, 'id' | 'created_at' | 'updated_at'> & { status?: OutreachTransition },
 ): string {
   const db = getDb();
   const id = `out_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -236,11 +240,9 @@ export function createOutreachJob(
     });
   }
 
-  // v3.1 (Path 2 Stage 7) — the INSERT omits `status`, so the row starts at the
-  // SQL default 'sent' (db/client.ts:100). That default is what the three
-  // open/closed scans key on (top-of-file block), so it is deliberate, not a
-  // leftover. params.status above is the transition signal that set
-  // reqState/phase/next_check; lifecycle itself is the linked request.
+  // There is no `status` column to insert — openness is read off the linked
+  // request (top-of-file). `params.status` above is the transition signal that
+  // picked reqState/phase/next_check, and it stops there.
   db.prepare(`
     INSERT INTO outreach_jobs (
       id, owner_user_id, owner_channel, owner_thread_ts,
@@ -275,13 +277,13 @@ export function createOutreachJob(
   return id;
 }
 
-export function updateOutreachJob(id: string, updates: Partial<OutreachJob> & { status?: OutreachStatus }): void {
+export function updateOutreachJob(id: string, updates: Partial<OutreachJob> & { status?: OutreachTransition }): void {
   const db = getDb();
-  // v3.1 (Path 2 Stage 7) — `status` here is a transition SIGNAL: it drives the
-  // linked request + the terminal cascade below, and THIS function never writes
-  // it to the column. The column itself is moved only by the two cascades named
-  // in the top-of-file block (closeRequest → 'cancelled', closeFollowup →
-  // 'replied').
+  // `status` here is a transition SIGNAL: it drives the linked request + the
+  // terminal cascade below and is never written anywhere. The filter below is now
+  // LOAD-BEARING, not just tidy: the physical column is gone (#41, db/client.ts),
+  // so letting `status` through would build `SET status = @status` and throw
+  // "no such column: status" on every terminal transition.
   const dataKeys = Object.keys(updates).filter(k => k !== 'id' && k !== 'created_at' && k !== 'status');
   if (dataKeys.length > 0) {
     const fields = dataKeys.map(k => `${k} = @${k}`).join(', ');
@@ -290,26 +292,13 @@ export function updateOutreachJob(id: string, updates: Partial<OutreachJob> & { 
     db.prepare(`UPDATE outreach_jobs SET ${fields}, updated_at = datetime('now') WHERE id = @id`).run(params);
   }
 
-  // v2.6.1 (D4) — when status transitions to terminal via the existing
-  // pipelines (handleOutreachReply, meetingReschedule, outreachExpiry,
-  // outreachDecision, etc.) ALSO close followup_closed_at if not already
-  // set. Without this, the existing reply pipeline consumes the outreach
-  // (status → replied) but the D4 followup tracker stays open, and a
-  // SECOND inbound DM from the same colleague would falsely match the
-  // already-consumed row. Idempotent — preserves existing
-  // followup_close_reason if D4's own paths already closed it.
-  const terminalForFollowup = (() => {
-    switch (updates.status) {
-      case 'replied':
-      case 'done':
-      case 'cancelled':
-      case 'expired':
-      case 'failed':
-        return true;
-      default:
-        return false;
-    }
-  })();
+  // v2.6.1 (D4) — when the transition signal is terminal (via handleOutreachReply,
+  // meetingReschedule, the coordinator relay, or a failed send) ALSO close
+  // followup_closed_at if not already set. Without this, the reply pipeline consumes
+  // the outreach but the D4 followup tracker stays open, and a SECOND inbound DM from
+  // the same colleague would falsely match the already-consumed row. Idempotent —
+  // preserves an existing followup_close_reason if D4's own paths already closed it.
+  const terminalForFollowup = updates.status === 'replied' || updates.status === 'cancelled';
   if (terminalForFollowup) {
     db.prepare(`
       UPDATE outreach_jobs
@@ -321,26 +310,15 @@ export function updateOutreachJob(id: string, updates: Partial<OutreachJob> & { 
 
   // v2.2.4 — defensive linked-task closure. Every outreach has a parent task
   // created by message_colleague (skill_origin='outreach', skill_ref=jobId).
-  // When the outreach reaches a terminal status, the parent task should
-  // follow. Most call sites already do this explicitly (closeFireAndForget,
-  // the outreach reply pipeline), but newer paths (verifier-driven 'done',
-  // outreach_decision auto-close) didn't — leaving stranded pending tasks
-  // that the v2.2.4 tasks-first brief would re-surface forever. Idempotent:
-  // tasks already in a terminal state won't be touched (the IN clause
-  // narrows it). Cancellation paths cancel the task; success paths complete.
-  const terminalTask = (() => {
-    switch (updates.status) {
-      case 'done':
-      case 'replied':
-        return 'completed';
-      case 'cancelled':
-      case 'expired':
-      case 'failed':
-        return 'cancelled';
-      default:
-        return null;
-    }
-  })();
+  // When the outreach reaches a terminal transition, the parent task should
+  // follow. Most call sites already do this explicitly, but not all — leaving
+  // stranded pending tasks that the v2.2.4 tasks-first brief would re-surface
+  // forever. Idempotent: tasks already in a terminal state won't be touched (the
+  // IN clause narrows it). A reply completes the task; a cancel cancels it.
+  const terminalTask: 'completed' | 'cancelled' | null =
+    updates.status === 'replied' ? 'completed'
+    : updates.status === 'cancelled' ? 'cancelled'
+    : null;
   if (terminalTask) {
     if (terminalTask === 'completed') {
       db.prepare(
@@ -360,10 +338,8 @@ export function updateOutreachJob(id: string, updates: Partial<OutreachJob> & { 
     // so audit can trace which path closed it.
     const linkedRequestId = getLinkedRequestIdForOutreach(id);
     if (linkedRequestId) {
-      const requestState: 'resolved' | 'cancelled' | 'expired' =
-        updates.status === 'replied' || updates.status === 'done' ? 'resolved'
-        : updates.status === 'expired' ? 'expired'
-        : 'cancelled';
+      const requestState: 'resolved' | 'cancelled' =
+        updates.status === 'replied' ? 'resolved' : 'cancelled';
       try {
         closeRequest({
           id: linkedRequestId,
@@ -375,13 +351,20 @@ export function updateOutreachJob(id: string, updates: Partial<OutreachJob> & { 
     }
   }
 
-  // v1.6.9 — terminal-state history. When an outreach resolves (replied /
-  // no_response), write past-tense history to the colleague's
-  // interaction_log so Maelle remembers "we talked about X last week" in
-  // future conversations. We do NOT write on 'sent' (in-flight) or
-  // 'cancelled' (purge / owner cancel — not worth remembering).
-  const terminal = updates.status;
-  if (terminal === 'replied' || terminal === 'no_response') {
+  // v1.6.9 — terminal-state history. When an outreach gets a reply, write
+  // past-tense history to the colleague's interaction_log so Maelle remembers "we
+  // talked about X last week" in future conversations. We do NOT write on 'sent' /
+  // 'pending_scheduled' (in-flight) or 'cancelled' (purge / owner cancel — not
+  // worth remembering).
+  //
+  // #41: this used to have a second arm for a 'no_response' signal, which no caller
+  // has ever passed since outreach expiry became a spine timer — the expiry path
+  // closes the REQUEST directly (core/requests/runner.ts, closureReason
+  // 'outreach_no_response') and never calls this function. So a
+  // "reached out, never heard back" line is not written today. That is a real gap in
+  // people-memory, but filling it belongs on the spine's expiry path, not on a dead
+  // branch here.
+  if (updates.status === 'replied') {
     try {
       const job = db.prepare(
         `SELECT colleague_slack_id, colleague_name, message, reply_text FROM outreach_jobs WHERE id = ?`
@@ -393,20 +376,11 @@ export function updateOutreachJob(id: string, updates: Partial<OutreachJob> & { 
         if (existing) {
           const today = new Date().toISOString().slice(0, 10);
           const msgPreview = (job.message || '').slice(0, 140);
-          let summary = '';
-          if (terminal === 'replied') {
-            const replyPreview = (job.reply_text || '').slice(0, 140);
-            summary = `Exchange: sent "${msgPreview}" → replied: "${replyPreview}".`;
-          } else {
-            summary = `Reached out ("${msgPreview}") — no response after follow-ups.`;
-          }
+          const replyPreview = (job.reply_text || '').slice(0, 140);
+          const summary = `Exchange: sent "${msgPreview}" → replied: "${replyPreview}".`;
           let log: Array<{ date: string; type: string; summary: string }> = [];
           try { log = JSON.parse(existing.interaction_log || '[]'); } catch (_) {}
-          log.push({
-            date: today,
-            type: terminal === 'replied' ? 'message_sent' : 'message_sent',
-            summary,
-          });
+          log.push({ date: today, type: 'message_sent', summary });
           db.prepare(
             `UPDATE people_memory SET interaction_log = ?, updated_at = datetime('now') WHERE slack_id = ?`
           ).run(JSON.stringify(log), job.colleague_slack_id);
@@ -439,6 +413,61 @@ export function getOutreachJobsByColleague(
     AND oj.created_at >= datetime('now', '-7 days')
     ORDER BY oj.created_at DESC
   `).all(colleagueSlackId, ownerUserId) as OutreachJob[];
+}
+
+/** The one open-state set on the spine — same one getOpenRequestsForOwner uses. */
+const OPEN_REQUEST_STATES = `('awaiting_owner','awaiting_colleague','in_flight')`;
+
+/**
+ * #41 — outreach still IN FLIGHT in a given owner thread. Feeds the "ACTIVE IN
+ * THIS THREAD — you already committed to these" prompt block on every owner turn
+ * (tasks/index.ts → core/orchestrator/buildTurnContext.ts).
+ *
+ * Openness is the linked REQUEST's state. It used to be
+ * `outreach_jobs.status NOT IN ('replied','cancelled','no_response')`, which is
+ * how a fire-and-forget send — request `resolved` at birth, so no cascade ever
+ * moved its column off 'sent' — stayed in this block forever, and how every
+ * pre-bridge row with `request_id` NULL did too. The model was then told, in a
+ * block headed "you already committed to these", about work that was finished:
+ * the "still waiting on Idan" confabulation class. That old filter matched 70 rows
+ * on disk the day this was re-pointed, none of them with an open request.
+ *
+ * The JOIN is deliberate: no linked request means no lifecycle, and something
+ * nothing can ever close does not belong in a list of live commitments.
+ */
+export function getActiveOutreachForThread(ownerUserId: string, threadTs: string): OutreachJob[] {
+  return getDb().prepare(`
+    SELECT oj.* FROM outreach_jobs oj
+    JOIN requests r ON oj.request_id = r.id
+    WHERE oj.owner_user_id = ?
+      AND oj.owner_thread_ts = ?
+      AND r.state IN ${OPEN_REQUEST_STATES}
+    ORDER BY oj.created_at DESC
+  `).all(ownerUserId, threadTs) as OutreachJob[];
+}
+
+/**
+ * #41 — reschedule outreach still awaiting an outcome, for the two meeting-artifact
+ * sweeps (`closeMeetingArtifacts`, `cleanupVanishedMeetingArtifacts`). Each had its
+ * own copy of `status IN ('sent','no_response','replied')`; both now ask the spine
+ * here, once.
+ *
+ * That old filter kept rows whose request was already resolved (a replied-to
+ * reschedule) and rows with no request at all — so the vanished-meeting sweep spent
+ * a Graph existence check on the same settled event on every brief, forever, and
+ * the mutation cascade counted `outreachClosed` for rows whose closeRequest was a
+ * no-op or impossible. Nothing is lost by the tighter filter: a row this drops is
+ * one neither sweep could act on.
+ */
+export function getOpenRescheduleOutreach(ownerUserId: string): OutreachJob[] {
+  return getDb().prepare(`
+    SELECT oj.* FROM outreach_jobs oj
+    JOIN requests r ON oj.request_id = r.id
+    WHERE oj.owner_user_id = ?
+      AND oj.intent = 'meeting_reschedule'
+      AND r.state IN ${OPEN_REQUEST_STATES}
+    ORDER BY oj.created_at DESC
+  `).all(ownerUserId) as OutreachJob[];
 }
 
 // v3.1 (Path 2 Stage 6/7) — getExpiredOutreachJobs / closeFireAndForgetOutreach

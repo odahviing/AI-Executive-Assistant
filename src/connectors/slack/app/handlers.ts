@@ -15,7 +15,7 @@ import { downloadSlackImage, buildImageBlock, type AnthropicImageBlock } from '.
 import logger from '../../../utils/logger';
 import { registerInboundReplay } from '../inboundReplayRegistry';
 import { markProcessed, markContentProcessed } from '../processedDedup';
-import { is1on1DM } from './helpers';
+import { is1on1DM, OVERLOAD_REPLY } from './helpers';
 import { isSlackDocFile, isSlackImageFile, extractSlackDocText } from './fileIngestion';
 import type { SlackAppContext } from './context';
 
@@ -175,11 +175,17 @@ export function registerDmHandler(ctx: SlackAppContext): void {
             const fileLabel = docFile.name || docFile.title || `file ${i + 1}`;
             const res = await extractSlackDocText(docFile, assistant.slack.bot_token, FILE_TEXT_CAP);
             if (!res.ok) {
+              // Only the overload line is shared with the turn-failure path — it is
+              // the same 529, so it must read the same (helpers.ts OVERLOAD_REPLY).
+              // The other four are NOT foldable into failureReply and shouldn't be:
+              // each names the FILE that failed and what to do about that file, which
+              // is the whole value of saying anything here, while failureReply is
+              // deliberately incapable of naming a cause (see its own doc comment).
               await saySafe(
                 res.reason === 'download' ? `Couldn't open ${fileLabel}, try sending it again?`
                 : res.reason === 'parse' ? `Couldn't read ${fileLabel} (maybe scanned images or encrypted). Send a text version?`
                 : res.reason === 'empty' ? `${fileLabel} looks empty, was the export complete?`
-                : res.overloaded ? `Quick coffee break, ping me again in a couple of minutes?`
+                : res.overloaded ? OVERLOAD_REPLY
                 : `Something jammed reading ${fileLabel}, try that one again in a minute?`,
               );
               continue;

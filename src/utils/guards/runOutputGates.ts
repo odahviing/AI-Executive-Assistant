@@ -10,9 +10,9 @@
  * and are still dynamically imported — a clean reply never loads them twice.
  *
  * THREE entry points, because pipeline steps legitimately sit between them:
- *   1. runDeliberationGuard(draft, profile) — runs BEFORE postReply persists
- *      the draft to conversation history, so history stores what the user will
- *      actually see (the answer, not the deliberation chain).
+ *   1. runDeliberationGuard(draft, profile) — runs on the RAW draft, before
+ *      postReply normalizes it to Slack mrkdwn, because what it strips is Maelle's
+ *      own prose narration and the trigger reads that prose as she wrote it.
  *   2. runOutputGates(draft, ctx) — the whole gate stack, on the already
  *      normalized Slack-mrkdwn draft; returns the text to send.
  *   3. runCodaGates(coda, ctx) — the SOCIAL CODA's own, much smaller gate. It is
@@ -27,15 +27,39 @@
  *     humanGate('owner') + date-verify, probed concurrently, exact serial chain
  *     on any flag.
  *   COLLEAGUE-READABLE (a colleague DM, a channel, or the owner in a group DM):
- *     claim-check (only when the owner is the one acting) → date-verify →
- *     security gate → humanGate('internal'). Voice runs LAST so every earlier
- *     rewrite is voice-checked, and the leak scrub runs after every rewriter
- *     that could emit an internal token.
+ *     claim-check (only when the owner is the one acting) → security gate →
+ *     humanGate('internal') → date-verify. The leak scrub runs after every
+ *     rewriter that could emit an internal token, voice after every rewriter
+ *     that could write like a machine, and date-verify LAST — after every
+ *     rewriter, on both legs, because it is the only check whose subject
+ *     (a weekday word) a REWRITER can introduce.
  *
  * NOTHING here re-runs the orchestrator (G4). Every remedy is either a
- * deterministic edit or a single tool-less rewrite pass.
+ * deterministic edit or a single tool-less rewrite pass. And since v4.2.x nothing
+ * here writes to conversation history either: postReply persists ONCE, on the text
+ * this returns (its Step 3b), so a corrected reply is simply what gets stored
+ * — no gate has to chase the record with a second row.
  *
- * Every gate FAILS OPEN: a throw anywhere leaves the draft it was handed.
+ * NOTHING here throws, and nothing here can cost a person their message. Every
+ * gate call is individually try/caught. A VERDICT gate fails OPEN — an error leaves
+ * the draft it was handed, so the worst case is that a rare defect ships (G6's safe
+ * miss). The colleague leg's LEAK gate is the one that may not fail open, because
+ * handing a colleague an unvetted draft is the exact failure it exists to prevent,
+ * so it fails SAFE: the catch swaps the reply for a fixed line of our own text
+ * (below). Delivery is kept; only the content is given up.
+ *
+ * v4.2.x — the first sentence is now TRUE. It used to say "every gate FAILS OPEN: a
+ * throw anywhere leaves the draft it was handed" while two awaits in the colleague
+ * leg's security block sat outside any try: the `../../db` import behind the spoof
+ * inputs, and `filterColleagueReply` itself. Since the delivery pipeline moved the
+ * history write BELOW this call, a throw there did not leave the draft it was handed
+ * — it left the FUNCTION, so postReply never sent and never stored, and the runner's
+ * catch answered with the generic failure line instead (processMessage.ts:744,
+ * `delivered` still false). One unloadable module and the entire answer was gone, on
+ * the one leg where a non-owner is reading it.
+ *
+ * runCodaGates inverts the contract deliberately (fail-CLOSED, drop) and cannot
+ * throw either; runDeliberationGuard fails open.
  */
 
 import { getAnthropicClient } from '../../llm/client';
@@ -44,7 +68,6 @@ import { SONNET, MODEL_SONNET } from '../../llm/models';
 import type { UserProfile } from '../../config/userProfile';
 import type { SenderRole } from '../../connectors/slack/postReply';
 import type { HumanGateAudience } from '../humanGate';
-import { appendToConversation } from '../../db';
 import type { OrchestratorOutput } from '../../core/orchestrator';
 import { formatForSlack } from '../../connections/slack/formatting';
 import logger from '../logger';
@@ -100,13 +123,33 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // surface in the system shipped with NO leak gate and the wrong voice frame —
   // and the SAME room was gated differently depending on who had spoken last.
   //
+  // v4.2.x — ownerIsActing now asks its question DIRECTLY, of the authenticated
+  // Slack sender, instead of through a proxy that answered it for two surfaces out
+  // of three. `role` is derived from exactly this comparison (app.ts:95) and is then
+  // CLAMPED to 'colleague' in an MPIM, in a channel, and in colleague-test mode
+  // (processMessage.ts:122) — so the old `role === 'owner' || isOwnerInGroup` pair
+  // covered the DM and the group DM and silently missed the CHANNEL: the owner
+  // @-mentions Maelle in a real channel, she claims she messaged someone or moved
+  // something, and the phantom-action check never ran, because the group-DM fix
+  // repaired the MPIM half of the clamp with `isOwnerInGroup` and there is no
+  // `isOwnerInChannel` on this side of the wire (processMessage.ts:121 computes one
+  // and never passes it). Keyed on the authenticated identity in code, this covers
+  // every present and future surface without a third flag to plumb or forget
+  // (shared rule 10, G2). It can only ADD the honesty check, never drop it:
+  // `role === 'owner'` and `isOwnerInGroup` both already imply senderId is the
+  // owner's, so this predicate is a strict superset of the pair it replaces.
+  //
+  // The one surface it newly covers besides the channel is colleague-test mode,
+  // and that is correct rather than incidental: the reader there IS the owner, so
+  // he is exactly the person the check exists to inform.
+  //
   // colleagueReadable keys on `role` — the clamp's own answer to "who can see
   // this" — which keeps it fail-closed for a future 'unknown' sender too. The
   // `|| isOwnerInGroup` arm is redundant TODAY (the clamp already sets role to
   // 'colleague' in any MPIM) and is written anyway so the predicate is true on
   // its own terms: a group DM has other members by definition, so if that clamp
   // ever moves this fails CLOSED — it adds the leak gate rather than dropping it.
-  const ownerIsActing = role === 'owner' || isOwnerInGroup === true;
+  const ownerIsActing = senderId === profile.user.slack_user_id;
   const colleagueReadable = role !== 'owner' || isOwnerInGroup === true;
   // ONE frame decision, shared by every humanGate call below, and the same
   // convention runCodaGates already uses: anything that is not the authenticated
@@ -152,12 +195,12 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // this text, so there is nothing to leak-scrub and the direct-address voice
     // frame is the right one.
     //
-    // v4.0.x PROBE/parallelize: these three are side-effect-free cores
-    // (the rewrite + appendToConversation live in the wrappers below,
-    // not the cores), and a rewrite is RARE. Run all three CONCURRENTLY on the
-    // post-concision text; if NONE wants a change (>95% of turns) ship as-is —
-    // byte- AND side-effect-identical to the serial chain, which on a clean turn
-    // also rewrites nothing and appends nothing. If ANY flags, fall back to the
+    // v4.0.x PROBE/parallelize: these three are side-effect-free cores (the
+    // rewrites live in the wrappers below, not the cores — and since v4.2.x nothing
+    // in this module writes to history at all), and a rewrite is RARE. Run all three
+    // CONCURRENTLY on the post-concision text; if NONE wants a change (>95% of
+    // turns) ship as-is — byte- AND side-effect-identical to the serial chain, which
+    // on a clean turn also rewrites nothing. If ANY flags, fall back to the
     // untouched serial chain → byte-identical to the pre-4.0 behavior (the probe's
     // Haiku calls are wasted on that rare turn). Fail-safe: a probe error falls
     // through to serial. Collapses 3 serial round-trips → 1 wall-clock on the
@@ -210,10 +253,10 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // Everything here is decided by the reader, not the sender, with one
     // exception: the honesty check, which is decided by who is acting.
     //
-    // claim-check (owner acting only) → date-verify → security gate →
-    // humanGate('internal'). Voice LAST so every earlier rewrite gets
-    // voice-checked, and the leak scrub after every rewriter that could emit an
-    // internal token.
+    // claim-check (owner acting only) → security gate → humanGate('internal') →
+    // date-verify. The leak scrub runs after every rewriter that could emit an
+    // internal token, voice after every rewriter that could write like a machine,
+    // and date-verify LAST — see the note at its call below.
 
     // The phantom-action honesty check, kept for the owner's own turn in a
     // shared room. A straight "route the group DM to the colleague leg" would
@@ -232,17 +275,15 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
       cleanReply = await runClaimCheckAndMaybeRewrite(ctx, cleanReply);
     }
 
-    // Date-verify. Catches "Thursday 11 June" when the 11th is a Wednesday, in
-    // any language — a wrong date to a colleague is just as bad.
-    cleanReply = await runDateVerifierAndMaybeRetry(ctx, cleanReply);
-
     // Security gate (leak filter + identity-spoof). This is the gate a group DM
-    // never had: every disclosure trigger — self_ai_claim, self_internals,
-    // model_leak, json_echo, tool_tag_echo, role_header_echo, inject_marker,
-    // internal_ref_id (req_/task_), slack_channel_ref — was skipped on the
-    // owner's turns in a room full of colleagues, leaving scrubInternalLeakage
-    // (inside formatForSlack) as the only thing between an internal token and a
-    // colleague's screen.
+    // never had: every trigger in securityGate's TRIGGER_PATTERNS — the disclosure
+    // ones and the identifier ones alike — was skipped on the owner's turns in a
+    // room full of colleagues, leaving scrubInternalLeakage (inside formatForSlack)
+    // as the only thing between an internal token and a colleague's screen. Named
+    // by POINTER, not re-listed here: a copy of that list is one more thing to keep
+    // in sync, and the copy that used to sit here had already gone stale twice over
+    // (it filed internal_ref_id under "disclosure", and it carried a trigger the
+    // gate has since retired).
     //
     // v3.0.5 — pull verified colleague email from people_memory (written at
     // message-arrival in app.ts via users.info → upsertPersonMemory). Extract
@@ -265,13 +306,32 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     let recentUserMessages: string[] | undefined;
     let ownerEmail: string | undefined;
     if (!ownerIsActing) {
-      const { getPersonMemory } = await import('../../db');
-      verifiedSenderEmail = getPersonMemory(senderId)?.email ?? undefined;
-      recentUserMessages = history
-        .filter(h => h.role === 'user')
-        .slice(-5)
-        .map(h => h.content);
-      ownerEmail = profile.user.email;
+      try {
+        const { getPersonMemory } = await import('../../db');
+        verifiedSenderEmail = getPersonMemory(senderId)?.email ?? undefined;
+        recentUserMessages = history
+          .filter(h => h.role === 'user')
+          .slice(-5)
+          .map(h => h.content);
+        ownerEmail = profile.user.email;
+      } catch (err) {
+        // A db read is not a gate verdict, and it must not be able to cost a
+        // colleague their answer. Degrade to the leak-scan-only mode the gate
+        // already documents — and degrade ALL THE WAY: the spoof branch needs
+        // colleagueName + ownerEmail + recentUserMessages TOGETHER
+        // (securityGate.ts:456), so a half-filled set is the dangerous state, not
+        // the safe one — it would leave detectClaimedEmail running without the
+        // sender's verified address, which makes every on-domain email in the
+        // thread look like an identity claim and hands a WRONG refusal to a
+        // correct reply. All three cleared, so the leak scan still runs on the
+        // full draft and only the identity half stands down.
+        verifiedSenderEmail = undefined;
+        recentUserMessages = undefined;
+        ownerEmail = undefined;
+        logger.warn('Spoof inputs unavailable — security gate running leak-scan-only', {
+          senderId, threadTs, err: String(err).slice(0, 200),
+        });
+      }
     }
     // v4.1.x — normalize the gate's output like every OTHER rewrite path in this
     // file does. This was the one rewrite that shipped raw: securityGate's Sonnet
@@ -282,16 +342,56 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // too. Running it through formatForSlack also makes textScrubber the LAST word
     // on the slack-id token on this path: whatever the rewriter did with an id, the
     // scrubber re-wraps it into a rendered mention.
-    cleanReply = formatForSlack(await runSecurityGate({
-      reply: cleanReply,
-      colleagueName,
-      senderId,
-      assistantName: profile.assistant.name,
-      ownerFirstName: profile.user.name.split(' ')[0],
-      verifiedSenderEmail,
-      ownerEmail,
-      recentUserMessages,
-    }));
+    //
+    // v4.2.x — and it is CAUGHT, which it was not. Together with the db read above,
+    // this was the only await in the stack outside a try, and what it cost was the
+    // whole answer, on the one leg where a non-owner is reading: the throw reached the
+    // runner's catch (processMessage.ts:720) with `delivered` still false, so the
+    // colleague got the generic failure line instead of their reply, and nothing was
+    // stored either (postReply's history write sits below this call).
+    //
+    // Fail SAFE, not open — those are different things here, and the difference is
+    // the whole point of catching it. This is the LEAK gate: passing the draft
+    // through because the gate is unavailable would ship a colleague-facing reply
+    // that nothing vetted for the classes only this gate covers (self-as-AI,
+    // internals, model/provider, payload echoes, req_/task_ ids, spoof) — the exact
+    // fail-open P3 closed one layer down. formatForSlack has already run on this
+    // draft (postReply Step 2) and it is NOT a substitute: it knows about graph ids,
+    // account ids, tz strings and tool names, and nothing else on that list.
+    //
+    // So the remedy keeps the DELIVERY and gives up the CONTENT: a fixed line of our
+    // own text, which cannot leak because none of the draft survives in it. The
+    // colleague gets a human sentence that invites the retry (the failure is
+    // infrastructure — a module that would not load — so a retry is the only thing
+    // that can help), history keeps a coherent record of what she actually said, and
+    // the gates below run on a line they will trivially pass.
+    //
+    // A local literal rather than securityGate's own SAFE_FALLBACK, for two reasons.
+    // The case we are in is "that module would not load", so anything imported from it
+    // — its canned line included — is precisely what is unavailable. And its wording
+    // is wrong here: "let me check that with <owner> and come back to you" promises a
+    // follow-up, and after this catch there is no follow-up, only an ERROR log. A
+    // guard must not fix a leak by telling a colleague something untrue. Fixed
+    // English, same accepted compromise as that fallback and imageGuard's refusal.
+    try {
+      cleanReply = formatForSlack(await runSecurityGate({
+        reply: cleanReply,
+        colleagueName,
+        senderId,
+        assistantName: profile.assistant.name,
+        ownerFirstName: profile.user.name.split(' ')[0],
+        verifiedSenderEmail,
+        ownerEmail,
+        recentUserMessages,
+      }));
+    } catch (err) {
+      logger.error('Security gate unavailable on a colleague-readable reply — the draft was never vetted, substituting a safe line', {
+        senderId, channelId, threadTs, colleagueName,
+        err: String(err).slice(0, 300),
+        lostDraftPreview: cleanReply.slice(0, 500),
+      });
+      cleanReply = `Sorry, that one didn't come out right, mind asking me again?`;
+    }
 
     // (v2.6.5) — colleague-facing humanness gate. Same gate that runs on the
     // owner-private leg above, in the reader's frame.
@@ -315,6 +415,27 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     } catch (err) {
       logger.warn('humanGate (colleague-path) threw — leaving draft unchanged', { err: String(err).slice(0, 200) });
     }
+
+    // Date-verify. Catches "Thursday 11 June" when the 11th is a Wednesday, in any
+    // language — a wrong date to a colleague is just as bad.
+    //
+    // v4.2.x — LAST, after both rewriters, which is where the owner leg has always
+    // had it (claim → humanGate → date). It used to run SECOND here, before the
+    // security rewriter and the voice rewriter, so a weekday word that either of them
+    // introduced reached the colleague with nothing checking it: this is the only
+    // gate whose subject a REWRITER can introduce, and neither rewriter's
+    // fact-preservation veto looks at weekday words (humanGate.ts:306 checks
+    // mentions, clock times, numeric dates and questions — a weekday is a WORD, and
+    // regex on weekday names is banned anyway, G7). Verifying the pre-rewrite draft
+    // verified a string nobody received.
+    //
+    // Safe to run after the leak scrub, and the only gate of which that is true: it
+    // adds no prose of its own. Its whole action is swapping one weekday token for
+    // another inside the detector's own matched span (dateVerifier.ts:21), so it
+    // cannot manufacture an internal token or a machine voice for the gates above to
+    // have caught. The swap normalizes through formatForSlack for that last mile all
+    // the same, like every other rewrite path in this file.
+    cleanReply = await runDateVerifierAndMaybeRetry(ctx, cleanReply);
   }
 
   return cleanReply;
@@ -340,10 +461,8 @@ export interface CodaGateVerdict {
  *
  *  - the claim-checker's remedy is rewriteOwningTheMiss, which on a false
  *    positive turns a social question into an apology about work;
- *  - securityGate's identity-spoof branch triggers off `recentUserMessages`, NOT
- *    the draft, so it would hand the SAME refusal to the person twice;
- *  - and the claim/date wrappers both appendToConversation, which would push a
- *    second assistant row for a turn history already recorded.
+ *  - and securityGate's identity-spoof branch triggers off `recentUserMessages`, NOT
+ *    the draft, so it would hand the SAME refusal to the person twice.
  *
  * What DOES apply is the pair of checks that judge the text itself. Both run in
  * DETECT-ONLY form: this function's return type carries no text, so it is
@@ -358,9 +477,13 @@ export interface CodaGateVerdict {
  *     2). Free, so it runs first and a hit costs no LLM call. It is NOT redundant
  *     with the coda's inputs being "just a topic label": those labels and topic
  *     beats are free text Haiku derived from the DM transcript (social_subjects /
- *     social_topics), and that transcript includes the PRE-gate draft plus the raw
- *     `[tool …]` markers (postReply Step 1b) — so a structured internal id CAN
- *     reach the generator's prompt, and this is the check that stops it leaving.
+ *     social_topics), and each assistant turn in that transcript carries the raw
+ *     `[tool …]` action tape (postReply's Step 3b) — deliberately unscrubbed, because
+ *     textScrubber strips tool names and the claim-checker's truthful-recap shield
+ *     reads `mutated=<domain>` out of exactly those markers. So a structured
+ *     internal id CAN still reach the generator's prompt — the reply PROSE up there
+ *     is post-gate now, the tape is not — and this is the check that stops it
+ *     leaving.
  *  2. runHumanGate — the VOICE half, and the language-agnostic one, in the coda's
  *     audience frame ('owner' vs 'internal'). Kept because the coda is the ONE
  *     message Maelle sends unprompted, most often to a COLLEAGUE (5 of the 6
@@ -468,10 +591,12 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
     // this one. A TRUTHFUL recap of an action done last turn ("Yael moved to
     // 11:30 ✓") has no CURRENT-turn tool, so a current-turn-only check flagged
     // it and own-the-miss NEGATED a true statement (the crash-recovery recap).
-    // Step 1b saves each turn's `[tool OK ...]` markers into the assistant's
-    // conversation content, so the matching tool's marker is in ctx.history —
-    // scan it too. Over-suppressing a genuinely-phantom claim in a thread where
-    // a similar tool ran earlier is a safe MISS (R7); denying real work is not.
+    // The reply pipeline saves each turn's `[tool OK ...]` markers into the
+    // assistant's conversation content (postReply's Step 3b — and it stores
+    // them RAW for this reason: formatForSlack would strip the tool names this
+    // shield matches on), so the matching tool's marker is in ctx.history — scan it
+    // too. Over-suppressing a genuinely-phantom claim in a thread where a similar
+    // tool ran earlier is a safe MISS (R7); denying real work is not.
     const priorAssistantText = (ctx.history ?? [])
       .filter(h => h.role === 'assistant')
       .map(h => h.content)
@@ -577,14 +702,16 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
         // the checker read, so it can't invert a true completed action it can't see.
         toolSummaries: result.toolSummaries ?? [],
       });
+      // v4.2.x — no history write here any more. This used to append the honest
+      // version so the next turn wouldn't act on the dishonest draft, because the
+      // record was written one line ABOVE the gate stack and the correction had to
+      // chase it. postReply persists ONCE, after the gates (its Step 3b), so
+      // the honest text is simply what gets stored — and this append had become a
+      // duplicate row, spending one of the 20 the blob keeps to say the same thing
+      // twice. The rewrite is still made visible to the owner where it always was:
+      // the warn above.
       if (rewritten && rewritten.trim().length > 0) {
         cleanReply = formatForSlack(rewritten);
-        // Record the honest version so the NEXT turn doesn't act on the
-        // dishonest draft. Note this APPENDS (db/conversations.ts:26 pushes onto
-        // the context blob) — it does not replace Step 1b's entry, so the turn
-        // shows twice in history, with the honest line last. Acceptable on this
-        // rare path: last-write-wins is what the next turn reads.
-        appendToConversation(ctx.threadTs, ctx.channelId, { role: 'assistant', content: cleanReply });
       }
     } catch (rwErr) {
       logger.warn('Claim-checker rewrite errored — keeping original draft', { err: String(rwErr) });
@@ -691,7 +818,18 @@ async function runDateVerifierAndMaybeRetry(ctx: OutputGateContext, initialReply
         cleanReply = cleanReply.split(mm.matchedText).join(corrected);
       }
     }
-    appendToConversation(ctx.threadTs, ctx.channelId, { role: 'assistant', content: cleanReply });
+    // v4.2.x — normalize the corrected text, and only when a swap actually landed
+    // (a mismatch whose span isn't literally present in the draft changes nothing —
+    // the swap's own no-op guard, above). This is the same normalization every other
+    // rewrite path in this file gets, and it matters now that this gate runs last on
+    // the colleague leg: `correctWeekday` is an extractor-supplied string and nothing
+    // downstream would scrub it.
+    //
+    // The history write that used to sit here is GONE. It existed to chase a record
+    // that had already been written one line above the gate stack; postReply now
+    // persists once, after the gates (its Step 3b), so the corrected text is
+    // what gets stored and a write here would only duplicate the row.
+    if (cleanReply !== initialReply) cleanReply = formatForSlack(cleanReply);
   } catch (err) {
     logger.warn('Date verifier threw — sending original reply', { err: String(err) });
   }

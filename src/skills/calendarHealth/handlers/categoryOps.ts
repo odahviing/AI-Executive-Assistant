@@ -6,12 +6,18 @@
  * body uses).
  */
 import { updateMeeting } from '../../../connectors/graph/calendar';
-import { auditLog, getActiveCalendarIssues, updateCalendarIssueStatus, type IssueStatus } from '../../../db';
+import {
+  auditLog,
+  getActiveCalendarIssues,
+  resolveCalendarIssuesForMeeting,
+  updateCalendarIssueStatus,
+  type IssueStatus,
+} from '../../../db';
 import logger from '../../../utils/logger';
 import type { OpCtx } from './context';
 
 export async function handleSetEventCategory(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
-  const { userEmail, timezone } = ctx;
+  const { profile, userEmail, timezone } = ctx;
         const eventId = args.event_id as string;
         const categories = args.categories as string[];
 
@@ -23,10 +29,42 @@ export async function handleSetEventCategory(args: Record<string, unknown>, ctx:
             categories,
           });
 
+          // #148 — the ANSWER closes the QUESTION, here, at the one place that
+          // knows the category actually landed on Graph. Health writes a
+          // `missing_category` row (status awaiting_owner) for every event it had
+          // to ask about; without this the row stayed open after the owner
+          // answered, and buildTurnContext kept injecting it as an outstanding
+          // question for the next 6 hours — so Maelle asked again. That "asked
+          // again without remembering" is the second half of #148, and no prompt
+          // wording fixes it while the state still says the question is open.
+          // Class-scoped: a live overlap / busy_day row on the same event stays
+          // open, because a category answer says nothing about a clash.
+          let closedIssueRows = 0;
+          try {
+            closedIssueRows = resolveCalendarIssuesForMeeting(profile.user.slack_user_id, eventId, {
+              onlyClass: 'missing_category',
+              note: ` [answered: category set to ${categories.join(', ')}]`,
+            });
+            if (closedIssueRows > 0) {
+              logger.info('set_event_category — category question closed', {
+                eventId, categories, closedIssueRows,
+              });
+            }
+          } catch (err) {
+            // Non-fatal: the category IS set. Worst case the row auto-stales on
+            // the next health pass (the event no longer lacks a category).
+            logger.warn('set_event_category — could not close the missing_category row', {
+              eventId, err: String(err).slice(0, 200),
+            });
+          }
+
           return {
             updated: true,
             event_id: eventId,
             categories,
+            /** #148 — >0 means this call ANSWERED an open category question, so
+             *  the reply confirms the answer instead of re-asking. */
+            answered_open_question: closedIssueRows > 0,
             message: `Categories set to: ${categories.join(', ')}`,
           };
         } catch (err) {

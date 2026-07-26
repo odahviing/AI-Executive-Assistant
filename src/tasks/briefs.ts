@@ -5,7 +5,7 @@ import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import { config } from '../config';
-import { markEventsSeen, getDb, getPreferences } from '../db';
+import { markEventsSeen, getDb, getPreferences, appendToConversation } from '../db';
 import {
   getRequestsForBrief,
   markRequestSurfaced,
@@ -792,6 +792,10 @@ export async function sendMorningBriefing(
     logger.warn('briefs — humanGate threw, sending raw', { err: String(err).slice(0, 200) });
   }
 
+  // What goes into thread history: the gated text, before decoration. The glyph
+  // is transport garnish and the interactive path stores undecorated drafts too.
+  const briefForHistory = textToSend;
+
   // ☀️ briefing glyph so the daily thread reads distinct in the sidebar (the
   // owner's OWN threads never get an icon). Added AFTER humanGate so the gate
   // never sees/rewrites the emoji.
@@ -803,10 +807,31 @@ export async function sendMorningBriefing(
   if (conn) {
     // v3.2.6 — when the brief carries news source links, suppress Slack's
     // link/media unfurl so it doesn't balloon into 15–20 previews.
-    await conn.postToChannel(ownerChannel, textToSend, {
+    const posted = await conn.postToChannel(ownerChannel, textToSend, {
       ...(threadTs ? { threadTs } : {}),
       ...(newsBundle ? { unfurl: false } : {}),
     });
+    // The brief is the other post Maelle makes on her OWN initiative, and the
+    // owner answers it in-thread ("move the 3pm", "what's item 3?"). Nothing
+    // recorded it in `conversations`, so that reply loaded an empty history and
+    // she had to re-derive the whole day — the same gap the routine dispatcher
+    // had. On the ON-DEMAND path the gap is half as wide and just as real: the
+    // brief short-circuit (processMessage.ts:500) returns before postReply, so
+    // his ask was stored and the answer wasn't.
+    //
+    // Same appendToConversation the interactive path uses, one assistant row, no
+    // invented inbound. Keyed on the thread he replies into: the thread he ASKED
+    // in when he requested it, otherwise the scheduled post's own ts, which
+    // becomes the thread root.
+    if (posted.ok) {
+      const historyThread = threadTs ?? posted.ts;
+      if (historyThread) {
+        appendToConversation(historyThread, ownerChannel, {
+          role: 'assistant',
+          content: `[Morning brief posted]\n${briefForHistory}`,
+        });
+      }
+    }
   } else {
     logger.warn('briefs — no Slack connection registered', { ownerUserId });
   }

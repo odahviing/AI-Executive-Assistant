@@ -478,9 +478,27 @@ export async function precheckAvailability(params: {
         });
       }
     } catch (err) {
-      // Single-slot failure shouldn't break the rest; log and skip.
-      logger.debug('availabilityPreCheck — single slot threw', {
-        date: pair.date, time: pair.time, err: String(err).slice(0, 200),
+      // Single-slot failure shouldn't break the rest; log and skip. The SKIP is what
+      // keeps this honest: no verdict is emitted for this pair, and if every pair
+      // fails the caller injects no block at all (`verdicts.length === 0` below →
+      // `ran: false` → buildTurnContext.ts:573 adds nothing), so a blind pre-check
+      // can never assert "bookable" or "not bookable" with no data behind it. The
+      // data source is built for that too: `getCalendarEvents` THROWS instead of
+      // returning `[]` precisely because "no events" and "a completely free week"
+      // are the same value (calendarReads.ts:281, CalendarOfflineError).
+      //
+      // v4.2.x — WARN, not debug. Debug is not persisted (zero `"level":"debug"`
+      // rows in any log on disk), so the ONE path where this pre-check goes blind
+      // was the one event a log review could not see, and "did she answer without
+      // data?" was unanswerable from the tape. Behaviour is unchanged on purpose:
+      // an unreadable owner calendar already has an owner — D4's refusal in the
+      // meeting lane — and a second "I couldn't check" narration from here would be
+      // a competing voice for the same fact (G1/G2). Make it visible; leave the
+      // remedy where it lives.
+      logger.warn('availabilityPreCheck — slot check threw; NO verdict emitted for this time', {
+        date: pair.date, time: pair.time,
+        errName: err instanceof Error ? err.name : typeof err,
+        err: String(err).slice(0, 200),
       });
     }
   }
@@ -660,5 +678,5 @@ I pre-checked the times in this colleague's question against ${profile.user.name
 
 ${lines.join('\n')}
 
-If a slot is NOT BOOKABLE, say so honestly ("he's booked then" / "that doesn't work"). If it's NOT CLEAN, it breaks one of ${profile.user.name.split(' ')[0]}'s OWN rules (outside his usual hours, a per-day category limit, or his day-load protection) — it is HIS to override, so do NOT flatly refuse and do NOT book: use the high-level reason on that line, and if the colleague wants that exact time, escalate via create_approval(kind=policy_exception) so he decides. If it's BOOKABLE, you can confirm. These verdicts run the SAME checkSlot the booking flow uses (work hours, buffer, focus blocks, category limits) — so your answer here matches what happens at booking time; never eyeball get_calendar and disagree.`;
+If a slot is NOT BOOKABLE, say so honestly ("that doesn't work"): follow the reason on that line, and never give one it rules out. If it's NOT CLEAN, it breaks one of ${profile.user.name.split(' ')[0]}'s OWN rules (outside his usual hours, a per-day category limit, or his day-load protection) — it is HIS to override, so do NOT flatly refuse and do NOT book: use the high-level reason on that line, and if the colleague wants that exact time, escalate via create_approval(kind=policy_exception) so he decides. If it's BOOKABLE, you can confirm. These verdicts run the SAME checkSlot the booking flow uses (work hours, buffer, focus blocks, category limits) — so your answer here matches what happens at booking time; never eyeball get_calendar and disagree.`;
 }

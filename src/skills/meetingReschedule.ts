@@ -25,8 +25,9 @@ import { SONNET } from '../llm/models';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import type { OutreachJob } from '../db/jobs';
-import { createOutreachJob, updateOutreachJob } from '../db/jobs';
+import { createOutreachJob, updateOutreachJob, getLinkedRequestIdForOutreach } from '../db/jobs';
 import { updateRequest } from '../db/requests';
+import { calcResponseDeadline } from '../utils/responseDeadline';
 import { getDb } from '../db';
 import { updateMeeting, findAvailableSlots } from '../connectors/graph/calendar';
 import { appendToConversation } from '../db';
@@ -511,6 +512,15 @@ export async function handleRescheduleReply(
  * `handleRescheduleReply`: "fine" → no-op confirm; "doesn't work" → owner
  * approval w/ revert; a counter → auto-accept (same-week, rule-compliant) or ask.
  * Best-effort; never throws (a notify failure must not unwind the move).
+ *
+ * R4/R5 — this ask ENDS ON ITS OWN. It is `await_reply: 1`, so it needs the two
+ * things that make silence a complete outcome instead of an orphan: a
+ * `reply_deadline` (the only thing that arms the linked request's
+ * `outreach_expiry` timer) and the owner's return channel on that request (the
+ * only thing that lets the expiry tombstone reach him). Both were missing until
+ * 2026-07-26, which is why the request was born `awaiting_colleague` with
+ * `next_check_at` NULL and a later calendar mutation was the ONLY thing that
+ * could ever close it. See the block at the createOutreachJob call below.
  */
 export async function notifyColleagueOfMove(params: {
   profile: UserProfile;
@@ -560,13 +570,64 @@ export async function notifyColleagueOfMove(params: {
       status: 'sent',
       sent_at: new Date().toISOString(),
       intent: 'meeting_reschedule',
+      // `reply_deadline` is the ONLY thing that arms the linked request's
+      // `outreach_expiry` next_check (db/jobs.ts — the reply_deadline branch of
+      // createOutreachJob). Omitting it fell through to the "no explicit
+      // deadline" branch: state `awaiting_colleague`, phase
+      // `outreach:awaiting_reply`, next_check_at NULL — an ask with no terminal
+      // path, which is what left a calendar mutation as its only possible
+      // closer. Same shared convention message_colleague uses (3 working hours
+      // in THEIR zone, skills/outreach.ts → calcResponseDeadline), so silence
+      // resolves the way it does for every other await_reply outreach: expire,
+      // close, tell both sides.
+      reply_deadline: calcResponseDeadline(params.colleagueTz ?? tz),
       context_json: JSON.stringify(ctx),
     });
 
     const res = await conn.sendDirect(params.colleagueSlackId, message);
-    if (res.ok && res.ts) {
+    if (!res.ok) {
+      // Not delivered → there is no ask. Cancel it through the spine (the bridge in
+      // updateOutreachJob closes the linked request) rather than leaving a live
+      // `awaiting_colleague` row: with the timer now armed, an undelivered notice
+      // would otherwise expire and tell the owner "they never replied" about a
+      // message that never arrived. Mirrors skills/outreach.ts's send-failure path.
+      updateOutreachJob(jobId, {
+        status: 'cancelled',
+        reply_text: `Move notice not delivered: ${res.reason}`,
+      });
+      logger.warn('notifyColleagueOfMove — DM not delivered, ask cancelled (move stands)', {
+        jobId, colleague: params.colleagueName, meetingId: params.meetingId, reason: res.reason,
+      });
+      return;
+    }
+    // Delivered. `ts` is optional — without it we just can't thread follow-ups to
+    // the DM; the ask itself stays live and the reply still routes by colleague
+    // (db/jobs.ts → getOutreachJobsByColleague), so a missing ts is not a failure.
+    if (res.ts) {
       updateOutreachJob(jobId, { dm_channel_id: res.ref, dm_message_ts: res.ts });
     }
+
+    // The expiry tombstone to the owner is gated on the REQUEST's
+    // `owner_dm_channel` (core/requests/runner.ts — runOutreachExpiryOrDecision),
+    // and createOutreachJob never sets it: only message_colleague stamped it
+    // post-send. So this class expired silently on the owner's side even once the
+    // timer existed. Channel ONLY — never the thread ts: on the autofix path
+    // `ownerThreadTs` is the pseudo-key `brief_health_<ownerId>` (tasks/briefs.ts),
+    // not a Slack ts, and it is passed straight through to chat.postMessage, which
+    // rejects an invalid thread_ts. A top-level DM in his own channel is the right
+    // home for an autofix tombstone anyway — the daily decision thread is
+    // approvals-only by owner ruling (utils/ownerDailyThread.ts).
+    if (params.ownerChannel) {
+      try {
+        const linkedRequestId = getLinkedRequestIdForOutreach(jobId);
+        if (linkedRequestId) updateRequest(linkedRequestId, { ownerDmChannel: params.ownerChannel });
+      } catch (err) {
+        logger.warn('notifyColleagueOfMove — owner return-channel stamp failed (expiry tombstone may not land)', {
+          jobId, err: String(err).slice(0, 200),
+        });
+      }
+    }
+
     logger.info('notifyColleagueOfMove — sent move notice', {
       jobId, colleague: params.colleagueName, meetingId: params.meetingId, newStart: params.newStartIso,
     });

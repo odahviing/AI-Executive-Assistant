@@ -46,13 +46,27 @@ export async function checkMeetingRoomAvailability(params: {
 
   let isBusy = false;
   try {
+    // P15 — `notChecked` means the free/busy read never happened for this window
+    // (malformed window / Graph rejected it), which used to come back as `{}` and
+    // land on `room_free`. "The room's free" is one of M11's own examples of a
+    // reason that has to be TRUE; an unread calendar is not evidence of a free
+    // room. Same outcome as the throw path below, which already declines to guess.
+    const fbDiag: { notChecked?: string[] } = {};
     const fb = await getFreeBusy(
       profile.user.email,
       [roomEmail],
       startIso,
       endIso,
       profile.user.timezone,
+      false,
+      fbDiag,
     );
+    if ((fbDiag.notChecked ?? []).length > 0) {
+      logger.warn('checkMeetingRoomAvailability — room free/busy was never read; not claiming the room is free', {
+        roomEmail, startIso, endIso,
+      });
+      return { kind: 'skip', reason: 'room availability could not be read' };
+    }
     const slots = fb[roomEmail] ?? [];
     const slotStart = DateTime.fromISO(startIso);
     const slotEnd = DateTime.fromISO(endIso);

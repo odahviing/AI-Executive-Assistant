@@ -46,7 +46,6 @@ import {
   setCoreFieldWithProvenance,
   appendPersonNote,
   appendPersonInteraction,
-  setPersonNameHe,
   type PersonProfile,
 } from '../db';
 import { readPersonMemory, writePersonSection, slugifyName } from './peopleMemory';
@@ -222,7 +221,7 @@ async function applyDelta(
   if (delta.state) setCoreFieldWithProvenance(slackId, 'state', delta.state, 'auto');
   // v3.5.x — capture as an 'auto' guess (provenance-aware): freezes the spelling
   // so it's reused verbatim, but an owner correction can never be clobbered.
-  if (delta.name_he) setPersonNameHe(slackId, delta.name_he, 'auto');
+  if (delta.name_he) setCoreFieldWithProvenance(slackId, 'name_he', delta.name_he, 'auto');
 
   // profile_json fields — direct merge via updatePersonProfile.
   const profileUpdates: Partial<PersonProfile> = {};

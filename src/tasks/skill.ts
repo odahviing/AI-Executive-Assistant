@@ -921,15 +921,14 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             // message he could sign named neither the double-book he was overriding
             // nor the booking it would fire, and #45 had already moved it into
             // TODAY's thread, days away from the full-text original.
+            const requesterFirst = existing.requester_name?.split(' ')[0] ?? 'they';
             const reviveText = await composeOwnerAskText({
               askText: existing.description ?? existing.subject,
               details: parseDetails(existing),
               profile,
               requestId: existing.id,
-              reAsk: {
-                requesterFirst: existing.requester_name?.split(' ')[0] ?? 'they',
-                raisedAt: existing.created_at,
-              },
+              lead: `${requesterFirst} just asked again about this — still need your call:`,
+              reSurface: { raisedAt: existing.created_at },
             });
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { postOwnerDecision } = require('../utils/ownerDailyThread') as

@@ -155,6 +155,12 @@ export async function findAvailableSlots(params: {
     // (their "busy" was empty by nonexistence, not by freedom). Owner email
     // excluded. Caller decides how to warn (ops.ts flags owner-domain ones).
     unresolvedAttendees?: string[];
+    // P15 (v4.2.x) — attendees whose free/busy was never READ for this window:
+    // the request was malformed or Graph rejected it, so their "busy" was empty
+    // because nobody asked. Owner email excluded. Same "don't call them free"
+    // consequence as `unresolvedAttendees`, opposite cause — a bad address is the
+    // model's to correct, a bad window is not.
+    attendeesNotChecked?: string[];
   };
 }): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }>> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
@@ -194,7 +200,7 @@ export async function findAvailableSlots(params: {
     const windowFrom = params.searchFrom;
     const windowTo = currentTo.toISO()!;
 
-    const fbDiag: { unresolved?: string[] } = {};
+    const fbDiag: { unresolved?: string[]; notChecked?: string[] } = {};
     // D4 — this call always carries the OWNER's own row (busyFilterEmails is
     // [owner, ...attendees]) and getSchedule is one POST for all of them: a
     // per-person failure comes back as a per-schedule `error` entry, so a THROW
@@ -229,6 +235,11 @@ export async function findAvailableSlots(params: {
     if (params.diagnosticsOut) {
       const ownerLower = params.userEmail.toLowerCase();
       params.diagnosticsOut.unresolvedAttendees = (fbDiag.unresolved ?? []).filter(e => e !== ownerLower);
+      // P15 — a read that never happened, kept SEPARATE from "Graph says this
+      // mailbox doesn't exist". Both mean "no data, don't call them free", but the
+      // handler states the reason out loud, and telling the owner an address is a
+      // typo when the window was malformed is the M11 failure in a smaller font.
+      params.diagnosticsOut.attendeesNotChecked = (fbDiag.notChecked ?? []).filter(e => e !== ownerLower);
     }
 
     // FreeBusySlot.start/end now carry an explicit IANA offset (set by
@@ -663,8 +674,16 @@ export async function findAvailableSlots(params: {
     // narration is unchanged after the validator unification.
     const mapVerdictToRejectLabel = (kind: string | undefined, dayType: 'office' | 'home' | 'other'): string => {
       switch (kind) {
-        // Both mean "too soon"; one label keeps day_summary narration stable.
-        case 'in_the_past': return 'within_lead_time';
+        // P13 (v4.2.x) — NOT folded into `within_lead_time` any more. They are not
+        // the same fact: "too soon" is one of the owner's rules and he can waive
+        // it, "already happened" is not and nobody can. Folding them put elapsed
+        // times inside SOFT_REJECT_PREFIXES, and the colleague hint downstream
+        // then described a time that had simply passed as held by "day-load
+        // protections" and invited a policy_exception over it. The walker's own
+        // past-floor above means checkSlot should never reach here with this
+        // verdict (same predicate, same instant, one iteration earlier); the case
+        // stays so that if it ever does, the reason handed onward is the true one.
+        case 'in_the_past': return 'in_the_past';
         case 'within_lead_time': return 'within_lead_time';
         case 'outside_working_hours': return 'outside_owner_work_hours';
         case 'floating_block_overlap': return 'floating_block_no_room';
@@ -678,14 +697,26 @@ export async function findAvailableSlots(params: {
         default: return 'owner_busy_collision';
       }
     };
-    const trackReject = (reason: string, slotIso: string) => {
+    // P25 — `outOfWorkHours` is the VALIDATOR's own fact about this slot
+    // (`checkSlot(...).outsideWorkHours`), not a re-derivation out here. The global
+    // `rejectedCounts` / `rejectedExamples` keep the true per-slot reason — the
+    // single-window validation callers read `Object.keys(rejectedCounts)[0]` for
+    // the reason they hand back, and that must stay the specific truth about the
+    // one time asked about. Only the PER-DAY map files the rejection under the
+    // noise label, because that map answers "why did this DAY yield nothing", and
+    // an hour outside his working day was never a candidate to begin with. Before,
+    // out-of-hours-ness was inferred from the label; the day a hard collision
+    // started outranking rule 5, out-of-hours slots stopped being noise and a
+    // 20:30 dinner became the reported reason a day was blocked.
+    const trackReject = (reason: string, slotIso: string, outOfWorkHours = false) => {
       rejectedCounts[reason] = (rejectedCounts[reason] ?? 0) + 1;
       if (!rejectedExamples[reason]) rejectedExamples[reason] = [];
       if (rejectedExamples[reason].length < 5) rejectedExamples[reason].push(slotIso);
       const day = slotIso.slice(0, 10);  // yyyy-MM-dd prefix of ISO
+      const dayReason = outOfWorkHours ? 'outside_owner_work_hours' : reason;
       let dayMap = dayReasons.get(day);
       if (!dayMap) { dayMap = new Map(); dayReasons.set(day, dayMap); }
-      dayMap.set(reason, (dayMap.get(reason) ?? 0) + 1);
+      dayMap.set(dayReason, (dayMap.get(dayReason) ?? 0) + 1);
     };
 
     // All workweek days regardless of meetingMode filter — used to detect
@@ -821,39 +852,57 @@ export async function findAvailableSlots(params: {
           continue;
         }
       }
-      // #128 / D5 (owner 2026-07-26: "we need to have priority of reasons") —
-      // the booking lead time is checkSlot rule 0b and is now decided THERE,
-      // inside the validator's own ladder, where a real commitment (rule 8)
-      // outranks it. It used to run HERE, ahead of checkSlot, deliberately —
-      // "so the rejection is blamed on 'too soon'". That is exactly what broke:
-      // a same-day afternoon that was ALSO booked solid came back labelled
-      // `within_lead_time`, a SOFT prefix, so the colleague hint downstream told
-      // the requester those times were held by "day-load protections — NOT by
-      // real meetings" and invited him to push for an override on a full
-      // calendar. Round 1 fixed this ranking inside checkSlot; a second,
-      // independent ranking out here just re-opened it. One ladder now.
+      // ── (a) THE PAST — a universal floor on the OFFER, not a rule ──────────
+      // P13 (v4.2.x) — this floor used to apply only when `relaxed`; every other
+      // search let past slots fall through to checkSlot, whose rule 0 returns
+      // `in_the_past`, which `mapVerdictToRejectLabel` collapsed into
+      // `within_lead_time`. `within_lead_time` is a SOFT_REJECT_PREFIX, so the
+      // colleague hint (ops/handlers/findAvailableSlots) told a requester that
+      // those times "were excluded by <owner>'s day-load protections rather than
+      // by a real meeting" and invited him to raise a policy_exception over them.
+      // The times in question had simply already happened. A search with
+      // `search_from` at midnight on the current day (which is what a bare date
+      // arg produces — logs/maelle-2026-07-20.log, `within_lead_time: 65` with
+      // examples at 00:00/00:15/00:30/00:45/01:00 on a search run at 12:11) put
+      // the whole elapsed morning into that claim. Nobody can override yesterday,
+      // so offering the override is a false statement about the owner's rules AND
+      // a wasted approval round-trip.
       //
-      // What legitimately stays is the half checkSlot cannot express:
-      //   • RELAXED — a total owner override waives rule 0b AND rule 0, but an
-      //     OFFER is not a booking: a time that has already gone is not an option
-      //     to choose from, so a relaxed search still floors at "now". checkSlot
-      //     ranks `in_the_past` ABOVE the collision too, so this position agrees
-      //     with the ladder rather than competing with it.
-      //   • NO PROFILE — the degenerate no-UserProfile caller never reaches
-      //     checkSlot at all, so the floor has nowhere else to live.
+      // Now: one floor, every caller, above every other reason — a time that has
+      // gone is not an option to choose from, whatever else is true about it. It
+      // sits here rather than as a `search_from` clamp so the skipped slots are
+      // still COUNTED and labelled truthfully: a fully-elapsed window would
+      // otherwise produce zero rejections, and the single-window validation
+      // callers read `Object.keys(rejectedCounts)[0]` for their reason — an empty
+      // map humanizes to 'unknown', the mechanical non-answer M11 forbids.
+      // `in_the_past` is not a soft prefix and already humanizes to "that time has
+      // already passed" (ops/violationLabels).
+      if (cursor.getTime() < Date.now()) {
+        trackReject('in_the_past', cursorDt.toISO()!);
+        cursor = new Date(cursor.getTime() + step);
+        continue;
+      }
+      // ── (b) NO PROFILE — the lead-time floor with nowhere else to live ─────
+      // #128 / D5 (owner 2026-07-26: "we need to have priority of reasons") — for
+      // every real caller the booking lead time is checkSlot rule 0b, decided
+      // THERE, inside the validator's own ladder, where a real commitment (rule 8)
+      // outranks it. It used to run out here ahead of checkSlot, deliberately —
+      // "so the rejection is blamed on 'too soon'" — and that is what broke: a
+      // same-day afternoon that was ALSO booked solid came back labelled
+      // `within_lead_time` and got the same "merely protective" claim. Round 1
+      // fixed the ranking inside checkSlot; a second, independent ranking out here
+      // just re-opened it. One ladder now. The degenerate no-UserProfile caller
+      // never reaches checkSlot at all, so its floor stays here.
       //
       // Side effect, checked and accepted: a same-day slot where an ATTENDEE is
-      // also busy now reports the attendee instead of "too soon", because the
-      // walker's attendee pass still sits above checkSlot. Both are true and
-      // neither is in SOFT_REJECT_PREFIXES, so neither can produce the
-      // "merely protective" claim this fix exists to kill. The attendee pass was
-      // NOT hoisted below checkSlot with the lead time: day_summary's per-attendee
-      // `blocked_by` attribution ("Isaac blocked 8 slots on Monday") is built from
-      // those labels, and owner rules shadowing them would silently empty it.
-      const tooSoon = params.relaxed
-        ? cursor.getTime() < Date.now()
-        : (!profile && isWithinBookingLeadTime(cursor.getTime(), params.minBufferHours));
-      if (tooSoon) {
+      // also busy reports the attendee instead of "too soon", because the walker's
+      // attendee pass still sits above checkSlot. Both are true and neither is in
+      // SOFT_REJECT_PREFIXES, so neither can produce the "merely protective"
+      // claim. The attendee pass was NOT hoisted below checkSlot with the lead
+      // time: day_summary's per-attendee `blocked_by` attribution ("Isaac blocked
+      // 8 slots on Monday") is built from those labels, and owner rules shadowing
+      // them would silently empty it.
+      if (!profile && isWithinBookingLeadTime(cursor.getTime(), params.minBufferHours)) {
         trackReject('within_lead_time', cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
         continue;
@@ -1006,7 +1055,13 @@ export async function findAvailableSlots(params: {
         });
         verdictOverOptional = verdict.overOptional;
         if (!verdict.passes) {
-          trackReject(mapVerdictToRejectLabel(verdict.violation_kind, dayType), cursorDt.toISO()!);
+          trackReject(
+            mapVerdictToRejectLabel(verdict.violation_kind, dayType),
+            cursorDt.toISO()!,
+            // P25 — the day narration counts in-hours slots only; which rule won on
+            // an out-of-hours slot is irrelevant to "why was this day empty".
+            verdict.outsideWorkHours === true,
+          );
           cursor = new Date(cursor.getTime() + step);
           continue;
         }
@@ -1169,7 +1224,11 @@ export async function findAvailableSlots(params: {
         // surviving all rules per day; top_reasons=top 2 rejection causes when
         // accepted=0. `outside_owner_work_hours` is iteration noise (every
         // quarter-hour outside work hours gets tracked) — excluded from
-        // top_reasons.
+        // top_reasons. P25 — every out-of-hours rejection now arrives under that one
+        // label whatever rule reported it (see trackReject), so the filter matches
+        // the fact instead of matching whichever rule happened to win. When a day
+        // has NOTHING else (a window entirely outside his hours) the empty-ranking
+        // fallback below still reports it, which is the day's true reason.
         const IRRELEVANT_FOR_DAY = new Set(['outside_owner_work_hours']);
         const acceptedPerDay = new Map<string, number>();
         for (const c of candidates) {

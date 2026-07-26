@@ -590,41 +590,103 @@ export async function getFreeBusy(
   endDate: string,
   timezone: string,
   forceRefresh: boolean = false,
-  // v3.3.7 (#124h) — optional by-reference diagnostics. `unresolved` is filled
-  // with addresses Graph could NOT resolve to a mailbox (per-schedule `error`
-  // entry, or address missing from the response). Pre-fix this was silently
-  // dropped, so a guessed/typo'd internal address read as FULLY FREE — the
-  // "elinor.avny@" slots were offered without ever checking the real Elinor.
-  diagnostics?: { unresolved?: string[] },
+  // v3.3.7 (#124h) — optional by-reference diagnostics.
+  //
+  // `unresolved` — addresses Graph ANSWERED about and could not resolve to a
+  // mailbox (per-schedule `error` entry, or address missing from the response).
+  // Pre-fix this was silently dropped, so a guessed/typo'd internal address read
+  // as FULLY FREE — the "elinor.avny@" slots were offered without ever checking
+  // the real Elinor.
+  //
+  // `notChecked` — P15 (v4.2.x). Addresses NOBODY asked Graph about, because the
+  // request could not be made at all (the two branches below, and the
+  // ErrorInvalidTimeInterval catch). Deliberately a SECOND list, not folded into
+  // `unresolved`: the consequence is the same ("no data — do not read as free")
+  // but the REASON is opposite, and `unresolved`'s consumers state that reason out
+  // loud ("these addresses do NOT exist in the company directory", create_meeting
+  // / find_available_slots). Saying that about a live mailbox because the window
+  // was malformed is a confidently wrong reason, which is the M11 failure this fix
+  // exists to remove — not a smaller version of it.
+  diagnostics?: { unresolved?: string[]; notChecked?: string[] },
 ): Promise<Record<string, FreeBusySlot[]>> {
   // v2.7.6 — guard against invalid time windows that crash Graph's
   // getSchedule with ErrorInvalidTimeInterval. Graph requires
   // startTime < endTime AND a window between 1 hour and 62 days. Pre-fix,
   // the auto-expand loop in findAvailableSlots could produce equal or
   // inverted windows on edge cases (off-by-one when search_from was at the
-  // boundary of an iteration). Throw a clean TypeError instead of poking
-  // Graph and letting the slot finder die mid-loop with an opaque 400.
+  // boundary of an iteration).
+  //
+  // P15 (v4.2.x) — every branch here used to `return {}`, and `{}` is
+  // indistinguishable from "asked about everyone, nobody is busy". So a
+  // malformed window read as "the whole company is free", which is the single
+  // most dangerous wrong answer this function can give. Two different problems
+  // were hiding under one fail-open, and they get two different treatments:
+  //   • an INSTANT (start === end) is not malformed at all — see below;
+  //   • a genuinely unanswerable window still returns without throwing (a throw
+  //     here is what #137 was: a deterministic 400 dressed up as a conflict and
+  //     mis-escalated to an approval, and it would also kill the slot walker
+  //     mid-loop), but it now reports every requested address in
+  //     `diagnostics.notChecked`, so a caller can say "I could not check" instead
+  //     of "they are free".
   const parsedStart = DateTime.fromISO(startDate, { zone: timezone });
   const parsedEnd = DateTime.fromISO(endDate, { zone: timezone });
-  if (!parsedStart.isValid || !parsedEnd.isValid) {
-    logger.warn('getFreeBusy — invalid date param, returning empty', {
-      startDate, endDate, parsedStartValid: parsedStart.isValid, parsedEndValid: parsedEnd.isValid,
+  const nothingChecked = (why: string): Record<string, FreeBusySlot[]> => {
+    if (diagnostics) diagnostics.notChecked = emails.map(e => e.toLowerCase());
+    logger.warn(`getFreeBusy — ${why}; NO availability was read for anyone in this window`, {
+      startDate, endDate, emails,
     });
     return {};
+  };
+  if (!parsedStart.isValid || !parsedEnd.isValid) {
+    return nothingChecked('unparseable date param');
   }
   const windowMinutes = parsedEnd.diff(parsedStart, 'minutes').minutes;
-  if (windowMinutes <= 0) {
-    logger.warn('getFreeBusy — zero or inverted window, returning empty', {
-      startDate, endDate, windowMinutes,
-    });
-    return {};
+  // P15 — an INSTANT, i.e. start === end. This is the branch with all the real
+  // traffic: availabilityPreCheck normalizes a colleague's "יש משהו אחרי 17:00?"
+  // to a single instant with no end and calls straight through, so a
+  // zero-length window arrived four times per turn and every attendee came back
+  // "free" (logs/maelle-2026-07-20.log, `windowMinutes: 0`, startDate ===
+  // endDate, 8 hits that day alone). It is a perfectly well-formed question —
+  // "what holds this moment?" — that Graph simply cannot be asked directly, so
+  // ask the smallest window Graph does accept and filter the answer back down to
+  // the blocks that genuinely cover the instant. Nothing is invented: the
+  // meeting length is not guessed (there is no meeting), and a block that merely
+  // starts later inside the widened hour is dropped, so no false "busy" either.
+  // A block ENDING exactly at the instant is not a conflict (back-to-back is the
+  // preferred shape, M7), hence `start <= t < end`.
+  if (parsedEnd.toMillis() === parsedStart.toMillis()) {
+    const widenedEnd = parsedStart.plus({ minutes: 60 }).toISO()!;
+    const wide = await getFreeBusy(callerEmail, emails, startDate, widenedEnd, timezone, forceRefresh, diagnostics);
+    const instantMs = parsedStart.toMillis();
+    const atInstant: Record<string, FreeBusySlot[]> = {};
+    // Iterate the RESULT's keys, not `emails`: "checked, free" must stay an empty
+    // array and "Graph never answered for this address" must stay an absent key,
+    // exactly as the normal path leaves them.
+    for (const [email, slots] of Object.entries(wide)) {
+      atInstant[email] = slots.filter(s => {
+        const sStart = DateTime.fromISO(s.start).toMillis();
+        const sEnd = DateTime.fromISO(s.end).toMillis();
+        return sStart <= instantMs && instantMs < sEnd;
+      });
+    }
+    return atInstant;
+  }
+  if (windowMinutes < 0) {
+    // Genuinely malformed — an inverted window has no instant reading and no
+    // repair: there is no way to tell whether the start or the end is the typo.
+    return nothingChecked('inverted window (end before start)');
   }
   if (windowMinutes > 62 * 24 * 60) {
     logger.warn('getFreeBusy — window > 62 days, clamping to 62 days', {
       startDate, endDate, windowMinutes,
     });
     const clamped = parsedStart.plus({ days: 62 }).toISO()!;
-    return getFreeBusy(callerEmail, emails, startDate, clamped, timezone);
+    // P15 — forward `forceRefresh` and `diagnostics`. This recursion used to drop
+    // both, so a >62-day call came back with `unresolved` (and now `notChecked`)
+    // permanently empty: a typo'd attendee inside a long window reported as
+    // resolved-and-free, the exact #124h failure, reachable by making the window
+    // wider. Same reason the instant branch above forwards them.
+    return getFreeBusy(callerEmail, emails, startDate, clamped, timezone, forceRefresh, diagnostics);
   }
 
   // v3.2.x (#121) — cross-turn free/busy cache (others' calendars change like
@@ -638,6 +700,11 @@ export async function getFreeBusy(
     if (hit) {
       if (diagnostics) {
         diagnostics.unresolved = fbCache.getCachedFreeBusy<string[]>(`${fbKey}|unresolved`) ?? [];
+        // P15 — only a SUCCESSFUL read is ever cached, so a hit means everyone in
+        // this window was checked. Stated rather than left undefined: a caller
+        // reusing one diagnostics object across windows must not inherit a
+        // previous window's "not checked" and refuse to trust good data.
+        diagnostics.notChecked = [];
       }
       return hit;
     }
@@ -702,13 +769,30 @@ export async function getFreeBusy(
         'A tenant admin needs to grant Calendars.Read application permission in Azure AD.',
       );
     }
-    // ErrorInvalidTimeInterval — return empty so the slot finder iteration
-    // doesn't die. Pre-fix, this 400 propagated up and broke the whole search.
-    if (err?.code === 'ErrorInvalidTimeInterval' || err?.body?.includes?.('ErrorInvalidTimeInterval')) {
-      logger.warn('getFreeBusy — Graph returned ErrorInvalidTimeInterval, returning empty', {
-        startDate, endDate, emails,
-      });
-      return {};
+    // Graph rejected the window. Still returns rather than throwing: the slot
+    // finder iterates windows and a throw here killed the whole search, and #137
+    // is the standing lesson that a deterministic 400 must never be dressed up as
+    // a scheduling verdict. P15 — but it reports every requested address as NOT
+    // CHECKED, because that is what happened. Before, this was the third path by
+    // which a malformed request read as "they are all free"; the difference matters
+    // most here, since a caller can retry a window it now knows was never read.
+    //
+    // A2 — BOTH window rejections, one branch. `ErrorInvalidMergedFreeBusyInterval`
+    // is the OTHER way this call can be refused for its window: Graph's minimum
+    // availabilityViewInterval is 5 min AND the interval must be under the window,
+    // so a 1–5 minute window has no valid interval at all and the derivation above
+    // floors at 5 and gets a 400. Nothing to prevent — no real meeting is under 10
+    // minutes and widening a caller's window would invent a question nobody asked —
+    // so it gets P15's treatment rather than a third path: no throw, everyone
+    // reported unchecked, the caller free to say "I could not check" and retry a
+    // sane window. It failed CLOSED before (uncaught → up through the walker's
+    // non-outage rethrow → a raw Graph code in her context), which is why there is
+    // no log evidence of a wrong answer from it; the fix is the wording and the
+    // `notChecked` list, not the safety.
+    const windowRejection = ['ErrorInvalidTimeInterval', 'ErrorInvalidMergedFreeBusyInterval']
+      .find(code => err?.code === code || err?.body?.includes?.(code));
+    if (windowRejection) {
+      return nothingChecked(`Graph rejected the window (${windowRejection})`);
     }
     throw err;
   }

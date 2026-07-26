@@ -102,15 +102,70 @@ function humanizeIanaToken(match: string): string {
   return '';
 }
 
+/**
+ * v4.2.x (G2/G3) — THE shape of a Slack account id, written ONCE.
+ *
+ * Both regexes below are built from it: the WRAPPER that turns a naked id into a
+ * rendered mention, and the READER (`RAW_SLACK_ID_RE`) that the output gates use to
+ * ask "did an unwrapped id survive?". They used to be typed separately and had
+ * drifted — the wrapper capped the run at `{7,10}` while the reader was open-ended
+ * `{7,}` — so an id 11+ chars past the `U`/`W` was DETECTED as a leak and could
+ * never be WRAPPED. securityGate then shipped the draft anyway on the
+ * identifier-class fail-open whose entire justification is "textScrubber re-wraps
+ * this token on the way out": a no-op for exactly the ids that reached it. That is
+ * the 2026-07-01 Oran-leak shape (a raw account id in front of a colleague),
+ * re-opened by a two-character width difference.
+ *
+ * Slack documents no maximum length for account ids (member ids have already grown
+ * from 9 to 11 characters), so nothing here may assume one. Uppercase-only with a
+ * REQUIRED digit is what keeps all-caps words ("MEETING", "UPDATED") out.
+ */
+const SLACK_ID_SHAPE = '[UW](?=[A-Z0-9]*\\d)[A-Z0-9]{7,}';
+
+/**
+ * A RENDERED mention — `<@U…>`, or the legacy `<@U…|label>`. The one form of this
+ * token that is CORRECT output rather than a leak (Slack draws it as the person's
+ * @name), and therefore the one form the predicate below skips.
+ *
+ * Rendering requires the CLOSING `>`: Slack prints `<@U…` with no `>` as literal
+ * text, so a half-written mention is a raw id in a costume, not a mention.
+ */
+const RENDERED_MENTION = `<@${SLACK_ID_SHAPE}(?:\\|[^>\\n]*)?>`;
+
+/**
+ * v4.2.x (G2) — THE predicate: "an account id that is NOT a rendered mention".
+ * One string, both jobs — the WRAPPER below replaces every hit, the READER
+ * (`RAW_SLACK_ID_RE`) tests for one.
+ *
+ * It used to be two hand-typed lookbehinds, `(?<!<@)(?<!<)` on the wrapper and
+ * `(?<![@<])` on the reader, and both excluded a preceding `<` outright. So
+ * `<U0ARK5814PQ` — an id behind a lone, unclosed angle bracket — was invisible to
+ * BOTH: the wrapper could not wrap it, the reader could not flag it, and Slack
+ * renders it as literal text, so it just shipped. Same for `<@U0ARK5814PQ` with the
+ * `>` missing. Those lookbehinds were answering "am I inside a rendered mention?"
+ * through a proxy — any `<` to the left — and the proxy is wrong in exactly the
+ * cases where the mention is broken. The lookahead answers it directly instead, so
+ * a broken half-mention is simply a raw id again, and gets treated like one.
+ *
+ * Groups: 1 = a stray opening `<` if one was consumed, 2 = the id, 3 = a stray
+ * closing `>`. The replacer keeps group 3 only when group 1 is empty, because a `>`
+ * beside an id that brought no `<` of its own belongs to whatever came before it.
+ *
+ * `(?<![<@])` stays, doing the job it can actually do: it blocks the two positions
+ * INSIDE a rendered `<@U…>` (the `@` and the `U`), so a proper mention comes out
+ * byte-identical — the 2026-07-21 de-tagging regression stays fixed by
+ * construction, on both patterns at once rather than in two places that can drift.
+ */
+const UNRENDERED_SLACK_ID =
+  `(?<![<@])(?!${RENDERED_MENTION})(<?)@?\\b(${SLACK_ID_SHAPE})\\b(>?)`;
+
 // v4.0.x — bare / @-prefixed Slack user id leaked as literal text (NOT a rendered
 // <@…> mention): the group/DM context header feeds "Name (slack_id: U…)" and the
 // model sometimes echoes the id bare (Alex Wiggins → "@U09DGGSJJP9 …", 2026-07-21).
 // This deterministic scrub is the path-agnostic fix (runs on every outbound via
-// formatForSlack). Wrap → <@id> so Slack renders the display name. Tuned to Slack's
-// id shape: uppercase-only + a REQUIRED digit (so all-caps words like "MEETING" /
-// "UPDATED" can't match); the two lookbehinds prevent double-wrapping an id already
-// inside a proper <@…>/<#…> mention. Structured token → the allowed kind of regex.
-const BARE_SLACK_ID_RE = /(?<!<@)(?<!<)@?\b([UW](?=[A-Z0-9]*\d)[A-Z0-9]{7,10})\b/g;
+// formatForSlack). Wrap → <@id> so Slack renders the display name. Structured
+// token → the allowed kind of regex (G7).
+const BARE_SLACK_ID_RE = new RegExp(UNRENDERED_SLACK_ID, 'g');
 
 /**
  * v4.1.x (G2) — THE single definition of "a raw Slack account id shown as literal
@@ -125,17 +180,24 @@ const BARE_SLACK_ID_RE = /(?<!<@)(?<!<)@?\b([UW](?=[A-Z0-9]*\d)[A-Z0-9]{7,10})\b
  * stripped it out of two correct colleague replies (logs/maelle-2026-07-21.log:838,
  * :908). A rendered mention is CORRECT output, never a leak.
  *
- * The `(?<![@<])` lookbehind is what encodes that: an id inside `<@…>`, or carrying
- * an `@` prefix, is either already rendered or already handled above — only a truly
- * naked id matches. No `/g` flag on purpose: callers use `.test()`, which is
- * stateful (and therefore alternates true/false) on a global regex.
+ * No `/g` flag on purpose: callers use `.test()`, which is stateful (and therefore
+ * alternates true/false) on a global regex.
+ *
+ * Not merely the same SHAPE as the wrapper now but the same PREDICATE, so a hit
+ * here means "this text never went through the scrubber" (a path that skips
+ * formatForSlack, or a gate re-scanning a rewriter's fresh output) — never "the
+ * wrapper saw this id and couldn't act", and never "the two patterns disagree".
  */
-export const RAW_SLACK_ID_RE = /(?<![@<])\b[UW](?=[A-Z0-9]*\d)[A-Z0-9]{7,}\b/;
+export const RAW_SLACK_ID_RE = new RegExp(UNRENDERED_SLACK_ID);
 
 export function scrubInternalLeakage(text: string): string {
   return text
     .replace(GRAPH_ID_RE, '')
-    .replace(BARE_SLACK_ID_RE, '<@$1>')
+    // Always emits the rendered form. The stray `>` is only swallowed when a stray
+    // `<` came with it — otherwise it belonged to whatever preceded the id, so it is
+    // handed back untouched.
+    .replace(BARE_SLACK_ID_RE, (_m: string, open: string, id: string, close: string) =>
+      `<@${id}>${open ? '' : close}`)
     .replace(IANA_TZ_RE, humanizeIanaToken)
     // v2.3.2 — sentence-separator dashes. Both forms ("foo - bar" and the
     // em-dash "foo — bar") are AI writing tells and the prompt rule alone

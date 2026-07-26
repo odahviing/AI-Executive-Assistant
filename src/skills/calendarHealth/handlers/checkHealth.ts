@@ -8,6 +8,7 @@
 import { DateTime } from 'luxon';
 import {
   getCalendarEvents,
+  getOwnerEventsForDecision,
   type CalendarEvent,
   updateMeeting,
   findAvailableSlots,
@@ -115,20 +116,32 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             ? args.mode
             : (profile.behavior.calendar_health_mode ?? 'passive');
 
-        let events: CalendarEvent[];
-        try {
-          events = await getCalendarEvents(userEmail, startDate, endDate, timezone);
-        } catch (err) {
-          logger.error('Calendar health: failed to fetch events', { err });
-          return { error: 'Failed to fetch calendar events.' };
-        }
+        // P24 / D4 — through the SHARED owner-event read (one fresh retry, then a
+        // typed `CalendarOfflineError` for an outage-shaped fault only), and with no
+        // local catch. This scan decides autonomous auto-moves and tells the owner
+        // his day is clean, so an unreadable calendar is the same blind spot the
+        // search and write paths have and it gets the same answer: the skill's D4
+        // wrapper (skills/calendarHealth.ts → meetings/calendarOffline) turns it
+        // into "his calendar is offline". The old local catch swallowed EVERY fault
+        // into `Failed to fetch calendar events.` — a mechanical non-answer with no
+        // cause, no retry and no instruction (M11), competing with the written
+        // refusal the meeting tools return for the same outage. Fail-closed is
+        // unchanged: no events read → no health verdict, and a deterministic fault
+        // (403 consent, 404 mailbox, malformed window) still travels up with its own
+        // true reason instead of being relabelled as weather.
+        const events: CalendarEvent[] = await getOwnerEventsForDecision(
+          userEmail, startDate, endDate, timezone,
+        );
 
         const issues: HealthIssue[] = [];
         // v3.7.x (#139) — auto-fix MEMORY. Two owner-scoped reads, consulted by
         // the double_booking detector below so active mode never re-flags or
         // re-moves a clash the owner already settled:
-        //   • dismissedEventIds — issues he dismissed/approved/resolved (a revert
-        //     writes a dismissal). "If I said no, it's no."
+        //   • dismissedEventIds — CONFLICT-axis issues he dismissed/approved/
+        //     resolved (a revert writes a dismissal). "If I said no, it's no."
+        //     #148 — axis-scoped: a settled `missing_category` question is NOT in
+        //     here, so answering "which category?" can't blind the detector to a
+        //     real clash on that event (db/calendarIssues.ts QUESTION_ONLY_CLASSES).
         //   • recentlyAutoMovedIds — meetings I auto-moved in the last 12h. If a
         //     cleared clash is BACK, he reverted it (by hand or via
         //     revert_last_auto_move); re-moving is the exact "no memory" bug.
@@ -476,12 +489,19 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
           }
 
           // ── Missing categories ─────────────────────────────────────────────
+          // #148 — the description becomes the tracked row's `notes`, which is
+          // what the next turn sees when the owner answers the category
+          // question. So it names the occurrence fully: subject + owner-local
+          // day and time, same shape as oof_conflict above. Pre-fix it was
+          // subject-only, and Maelle's follow-up was "I don't have the subject,
+          // time, or attendees for it".
           for (const e of nonAllDay) {
             if (!e.categories || e.categories.length === 0) {
+              const cStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
               issues.push({
                 type: 'missing_category',
                 date: dayStr,
-                description: `"${e.subject}" has no category`,
+                description: `"${e.subject}" on ${cStart.toFormat('EEE d MMM')} at ${cStart.toFormat('HH:mm')} has no category`,
                 eventIds: [e.id],
                 suggestion: profile.categories && profile.categories.length > 0
                   ? `Add a category — choose from ${profile.categories.map(c => c.name).join(', ')}`
@@ -846,13 +866,20 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                     // + notify again on a later run. The direct move usually
                     // self-resolves the overlap, but this guards the window
                     // before the colleague replies (and a revert→re-detect race).
+                    //
+                    // #41 — "open" is the linked REQUEST's state, via the one spine
+                    // reader (db/jobs.ts → getOpenRescheduleOutreach). It used to read
+                    // `outreach_jobs.status = 'sent'`, which is not a lifecycle: a row
+                    // is born at the SQL default 'sent' and only a cascade moves it, so
+                    // a row whose bridge never linked a request (out_1783936884258_ueze,
+                    // 2026-07-13, request_id NULL) sat at 'sent' forever and suppressed
+                    // this autofix for that event permanently. This probe was the last
+                    // reader of that column.
                     try {
                       // eslint-disable-next-line @typescript-eslint/no-require-imports
-                      const { getDb } = require('../../../db') as typeof import('../../../db');
-                      const inflight = getDb().prepare(
-                        `SELECT 1 FROM outreach_jobs WHERE owner_user_id = ? AND intent = 'meeting_reschedule'
-                           AND status = 'sent' AND context_json LIKE ? LIMIT 1`,
-                      ).get(ownerUserId, `%${movable.id}%`);
+                      const { getOpenRescheduleOutreach } = require('../../../db/jobs') as typeof import('../../../db/jobs');
+                      const inflight = getOpenRescheduleOutreach(ownerUserId)
+                        .some(j => (j.context_json ?? '').includes(movable.id));
                       if (inflight) {
                         logger.info('Overlap autofix — move notice for this event already open; skipping', { movableId: movable.id });
                         continue;
@@ -1288,6 +1315,15 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
           category_limit_exceeded:  'category_limit',
           missing_floating_block:   'missing_floating_block',
           busy_day:                 'busy_day',
+          // #148 — track the "which category should this be?" ask. Active mode
+          // only reaches the write path for issues it could NOT auto-fix, i.e.
+          // exactly the events the classifier wasn't confident about and Maelle
+          // therefore asked the owner about. The row (status awaiting_owner) is
+          // what gives that question a memory: buildTurnContext's RECENT
+          // CALENDAR ISSUES block then carries the event_id, the date and the
+          // note into the next turn, so a one-word answer lands on the event
+          // instead of being read as a fresh booking request.
+          missing_category:         'missing_category',
         };
 
         const detectedForWrite: DetectedIssue[] = [];
@@ -1295,7 +1331,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         for (const issue of issues) {
           if (issue.fixed) continue;  // active-mode success → no row
           const cls = classMap[issue.type];
-          if (!cls) continue;          // missing_category / unknown — not tracked
+          if (!cls) continue;          // unknown class — not tracked
           const eIds = issue.eventIds ?? [];
           let primaryId: string | undefined = eIds[0];
           let peerId: string | undefined = eIds[1];
@@ -1375,17 +1411,25 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // summaryText never did, so a busy_day / category_limit re-flagged EVERY
         // run despite a terminal row — the "I told you 3 times to ignore it" bug.
         // Only un-fixed "! Detected" lines are gated; fixes/failures still narrate.
+        // #148 — two sets, one per suppression axis (db/calendarIssues.ts,
+        // QUESTION_ONLY_CLASSES). An acknowledged CONFLICT on an event silences
+        // the other day-shape complaints about it; a settled CATEGORY QUESTION
+        // silences only itself. Sharing one set would have made every answered
+        // category ask hide the event's real double-bookings from here on.
         let suppressedForNarration: Set<string> = new Set();
+        let settledCategoryQuestions: Set<string> = new Set();
         try {
           suppressedForNarration = getSuppressedEventIds(ownerUserId);
+          settledCategoryQuestions = getSuppressedEventIds(ownerUserId, 'missing_category');
         } catch (err) {
           logger.warn('calendar health: suppressed-id load failed — narration unfiltered', {
             err: String(err).slice(0, 120),
           });
         }
         const isAckSuppressed = (i: HealthIssue): boolean => {
-          if (i.synthetic_id && suppressedForNarration.has(i.synthetic_id)) return true;
-          for (const id of (i.eventIds ?? [])) if (suppressedForNarration.has(id)) return true;
+          const axis = i.type === 'missing_category' ? settledCategoryQuestions : suppressedForNarration;
+          if (i.synthetic_id && axis.has(i.synthetic_id)) return true;
+          for (const id of (i.eventIds ?? [])) if (axis.has(id)) return true;
           return false;
         };
 

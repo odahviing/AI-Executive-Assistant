@@ -257,6 +257,15 @@ interface DayAnalysis {
    * what it changes is the free-time maths below, which counted the whole
    * untouched work window as focus time and told the owner he had "8h free"
    * on a day he was away.
+   *
+   * P30 — a WORK-DAY-row fact, deliberately never set on a `day_off` row, and
+   * that is the whole contract: it exists to correct a work day's free-time
+   * arithmetic. A day-off row has no arithmetic to correct (`isWorkDay:false`,
+   * `freeMinInWorkHours` hard 0, no `no_buffer` issue), and its only structured
+   * reader skips those rows outright (buildTurnContext's calendar-health block
+   * `continue`s on `dayType === 'day_off'`), so setting it there would be a
+   * set-but-unread field — a reader looking for the truth about a day off already
+   * has `isWorkDay:false` and cannot be misled by the absence.
    */
   outOfOfficeAllDay?: true;
   events: ProcessedEvent[];   // sorted by start, mine only, not cancelled
@@ -287,7 +296,8 @@ export function analyzeCalendar(
   const fb = require('../../../utils/floatingBlocks') as typeof import('../../../utils/floatingBlocks');
   const floatingBlocks = fb.getFloatingBlocks(profile);
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { requiredFreeMinutesForWorkDay } = require('../../../utils/scheduleRules') as typeof import('../../../utils/scheduleRules');
+  const { requiredFreeMinutesForWorkDay, isAllDayOutOfOffice } =
+    require('../../../utils/scheduleRules') as typeof import('../../../utils/scheduleRules');
   // v3.6.x (bug 1.13) — required free time is now LENGTH-based, not a fixed
   // office/home target: 1h free per 4h worked, rounded UP to the next 15 min,
   // off the TOTAL work-window minutes for the day (morning + night shift
@@ -364,7 +374,11 @@ export function analyzeCalendar(
     // being a work day. Not merged into `isWorkDay`: that would swap the
     // `oof_with_meetings` issue for `work_on_day_off` and rewrite issue classes
     // #146 depends on. It only gates the free-time maths at the end.
-    const outOfOfficeAllDay = myEvents.some(e => e.isAllDay && e.showAs === 'oof' && !e.isCancelled);
+    // P29 — through THE predicate (scheduleRules.isAllDayOutOfOffice), not a local
+    // copy of its three-way test. The copy agreed exactly, which is why it had to
+    // go: "is he out that day" is one question, and two implementations of it would
+    // eventually answer differently for the validator and for the narration.
+    const outOfOfficeAllDay = myEvents.some(isAllDayOutOfOffice);
     const nonAllDayMeetings = myEvents.filter(e => !e.isAllDay && e.showAs !== 'oof');
 
     if (oofEvent && nonAllDayMeetings.length > 0) {

@@ -30,7 +30,6 @@ import {
 import {
   getDb,
   auditLog,
-  getSuppressedEventIds,
   dismissFloatingBlockGap,
   searchPeopleMemory,
   getPersonMemory,
@@ -911,7 +910,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           };
         }
         // plan.action === 'book' — extract isOnline/location/category and proceed.
-        // (Other plan kinds — find_slots / decline_and_relay / refuse_not_owners —
+        // (Other plan kinds — find_slots / decline_as_attendee / refuse_not_owners —
         // can't reach here from a new_booking intent; the type narrowing makes
         // the cast unconditional after the early-return.)
         if (plan.action !== 'book') {
@@ -929,9 +928,31 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // better". The caller insists by re-calling with keep_requested_time.
         // Gated on packing_preference==='dense' → byte-identical for other
         // tenants; fail-open (any throw books as requested). Skipped under
-        // relaxed=true — an owner override / approved policy_exception replay
+        // relaxed — an owner override / approved policy_exception replay
         // already decided the exact time; never counter-offer over it.
-        if (args.keep_requested_time !== true && args.relaxed !== true) {
+        //
+        // A3 — `bookingRequest.relaxed`, not `args.relaxed`. This was the last raw
+        // read of that arg anywhere in the subsystem (P22 made `grantRelaxed` the one
+        // grant, keyed on the AUTHENTICATED sender). It granted nothing, so no rule
+        // was waived by it — but it waived an owner PROTECTION, and it waived it on
+        // an arg the model fills from message content rather than on identity. The
+        // suppression's own stated reason ("an owner override already decided the
+        // exact time") is only ever true of the gated value: on a colleague turn — or
+        // the owner's own turn inside a group DM, where the MPIM clamp makes his
+        // senderRole 'colleague' — `relaxed:true` decides nothing at all.
+        //
+        // THE DELTA, plainly: a colleague-initiated booking that arrives with a
+        // spurious `relaxed:true` (the model is told to retry that way after a soft
+        // refusal, so it is reachable; zero occurrences in any log on disk, so it is
+        // unevidenced) now gets the dense-packing counter-offer instead of skipping
+        // it. That is not new behaviour — it is exactly what the same booking gets
+        // today without the flag, and the counter-offer is only produced when the
+        // earlier back-to-back start is rule-clean AND free for every attendee. The
+        // case that MUST keep the suppression keeps it: an approved
+        // policy_exception replay runs on a synthetic owner context
+        // (deferredActionReplay), so `grantRelaxed` grants it and the approved time
+        // is booked exactly as approved.
+        if (args.keep_requested_time !== true && bookingRequest.relaxed !== true) {
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const density = require('../../../../utils/calendarDensity') as typeof import('../../../../utils/calendarDensity');

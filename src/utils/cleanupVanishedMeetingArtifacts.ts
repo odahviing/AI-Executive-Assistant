@@ -20,6 +20,7 @@
  */
 
 import { getDb } from '../db';
+import { getOpenRescheduleOutreach } from '../db/jobs';
 import { getOpenRequestsForOwner } from '../db/requests';
 import { closeMeetingArtifacts } from './closeMeetingArtifacts';
 import { verifyEventDeleted } from '../connectors/graph/calendar';
@@ -68,17 +69,11 @@ function collectReferencedMeetingIds(ownerUserId: string): ArtifactRef[] {
     }
   }
 
-  // Reschedule outreach in-flight. The status filter is the open/closed
-  // sentinel described in db/jobs.ts (top block): rows sit at the default
-  // 'sent' until closeRequest cascades them to 'cancelled', so this scan
-  // depends on that cascade to stop following closed outreach.
-  const outreachRows = db.prepare(`
-    SELECT context_json FROM outreach_jobs
-    WHERE owner_user_id = ?
-      AND intent = 'meeting_reschedule'
-      AND status IN ('sent', 'no_response', 'replied')
-  `).all(ownerUserId) as Array<{ context_json: string | null }>;
-  for (const row of outreachRows) {
+  // Reschedule outreach still awaiting an outcome. #41 — openness is the linked
+  // REQUEST's state, asked once in db/jobs.ts. Rows this drops (settled, or
+  // pre-bridge with no request at all) are ones the cascade below could never act
+  // on, so following them only spent a Graph existence check per brief.
+  for (const row of getOpenRescheduleOutreach(ownerUserId)) {
     if (!row.context_json) continue;
     const ids = extractMeetingIds(row.context_json);
     for (const id of ids) {
