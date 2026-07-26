@@ -23,7 +23,7 @@ import { handleOutreachReply, findSlackUser } from '../coordinator';
 import { describeImage, downloadSlackImage, buildImageBlock, type AnthropicImageBlock } from '../../../vision';
 import logger from '../../../utils/logger';
 import type { SenderRole, SlackAppContext, ProcessMessageParams } from './context';
-import { isOverloadError } from './helpers';
+import { failureReply } from './helpers';
 
 // C1 — re-attach a recent thread image on a follow-up owner turn. Image bytes
 // are multimodal ONLY on the turn they arrive; later turns saw just a lossy
@@ -516,7 +516,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
       // batch, possibly aborting if a fresh message arrives mid-turn
       // before any write tool fires.
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { enqueueMessage } = require('../inboundQueue') as typeof import('../inboundQueue');
+      const { enqueueMessage, isMergeAbort } = require('../inboundQueue') as typeof import('../inboundQueue');
       enqueueMessage({
         channelId,
         threadTs,
@@ -531,192 +531,237 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
         senderName: colleagueName,
         meta: {},
         runner: async ({ mergedText, signal, markWrite }) => {
-          // v2.6.1 (D4) — recent-outbound context lookup for colleague 1:1 DMs.
-          // When a colleague replies to Maelle in their DM (top-level OR thread
-          // reply on a Maelle-sent message), check for an open outbound from
-          // her to them within 24h. Attach as priorOutboundContext so the
-          // orchestrator sees "RECENT OUTBOUND TO THIS COLLEAGUE" before
-          // drafting. Closes the D4 amnesia (Isaac's "Ok" 2 min after Maelle's
-          // heads-up landing as "Hey, what can I help you with?"). Skipped
-          // for owner DMs, MPIMs, channels, and owner-in-group contexts —
-          // those have their own continuity surfaces.
-          let priorOutboundContext: string | undefined;
-          if (role === 'colleague' && !isMpim && !isChannel && !isOwnerInGroup) {
-            try {
-              const { getRecentOutboundContext, closeFollowupForMessageTs, buildThreadReplyContextBlock } =
-                await import('../recentOutboundContext');
-              // Path A — thread reply on a Maelle-sent DM. threadTs !== ts means
-              // this is a reply inside a thread, parent ts === threadTs. If
-              // that parent matches an outreach_jobs.dm_message_ts, it's an
-              // explicit reply (no LLM needed).
-              if (threadTs && threadTs !== ts) {
-                const job = closeFollowupForMessageTs({ messageTs: threadTs, reason: 'thread_reply' });
-                if (job) {
-                  priorOutboundContext = buildThreadReplyContextBlock(job);
-                  logger.info('priorOutboundContext set via thread_reply', {
-                    jobId: job.id, colleague: colleagueName, threadTs,
-                  });
+          // Did anything from this turn actually reach the person? Set by the
+          // delivery pipeline (postReply's onDelivered), read only by the
+          // failure handler at the bottom of this closure.
+          let delivered = false;
+          try {
+            // v2.6.1 (D4) — recent-outbound context lookup for colleague 1:1 DMs.
+            // When a colleague replies to Maelle in their DM (top-level OR thread
+            // reply on a Maelle-sent message), check for an open outbound from
+            // her to them within 24h. Attach as priorOutboundContext so the
+            // orchestrator sees "RECENT OUTBOUND TO THIS COLLEAGUE" before
+            // drafting. Closes the D4 amnesia (Isaac's "Ok" 2 min after Maelle's
+            // heads-up landing as "Hey, what can I help you with?"). Skipped
+            // for owner DMs, MPIMs, channels, and owner-in-group contexts —
+            // those have their own continuity surfaces.
+            let priorOutboundContext: string | undefined;
+            if (role === 'colleague' && !isMpim && !isChannel && !isOwnerInGroup) {
+              try {
+                const { getRecentOutboundContext, closeFollowupForMessageTs, buildThreadReplyContextBlock } =
+                  await import('../recentOutboundContext');
+                // Path A — thread reply on a Maelle-sent DM. threadTs !== ts means
+                // this is a reply inside a thread, parent ts === threadTs. If
+                // that parent matches an outreach_jobs.dm_message_ts, it's an
+                // explicit reply (no LLM needed).
+                if (threadTs && threadTs !== ts) {
+                  const job = closeFollowupForMessageTs({ messageTs: threadTs, reason: 'thread_reply' });
+                  if (job) {
+                    priorOutboundContext = buildThreadReplyContextBlock(job);
+                    logger.info('priorOutboundContext set via thread_reply', {
+                      jobId: job.id, colleague: colleagueName, threadTs,
+                    });
+                  }
                 }
-              }
-              // Path B — top-level DM reply. Run the time-window logic
-              // (deterministic <10min / LLM 10min-24h / auto-expire >24h).
-              if (!priorOutboundContext) {
-                const ctx = await getRecentOutboundContext({
-                  ownerUserId: profile.user.slack_user_id,
-                  colleagueSlackId: senderId,
-                  colleagueName: colleagueName ?? senderId,
-                  ownerFirstName: profile.user.name.split(' ')[0],
-                  inboundText: mergedText,
-                });
-                if (ctx.matched && ctx.contextBlock) {
-                  priorOutboundContext = ctx.contextBlock;
-                  logger.info('priorOutboundContext set via lookup', {
-                    matchedVia: ctx.matchedVia, jobId: ctx.matchedJobId, colleague: colleagueName,
+                // Path B — top-level DM reply. Run the time-window logic
+                // (deterministic <10min / LLM 10min-24h / auto-expire >24h).
+                if (!priorOutboundContext) {
+                  const ctx = await getRecentOutboundContext({
+                    ownerUserId: profile.user.slack_user_id,
+                    colleagueSlackId: senderId,
+                    colleagueName: colleagueName ?? senderId,
+                    ownerFirstName: profile.user.name.split(' ')[0],
+                    inboundText: mergedText,
                   });
+                  if (ctx.matched && ctx.contextBlock) {
+                    priorOutboundContext = ctx.contextBlock;
+                    logger.info('priorOutboundContext set via lookup', {
+                      matchedVia: ctx.matchedVia, jobId: ctx.matchedJobId, colleague: colleagueName,
+                    });
+                  }
                 }
-              }
-            } catch (err) {
-              logger.warn('priorOutboundContext lookup threw — proceeding without context', {
-                err: String(err).slice(0, 200),
-              });
-            }
-          }
-          // v2.7.7 (Module D) — thread-bound approval auto-resolve.
-          // When the owner replies in a thread that uniquely matches a
-          // pending approval AND a Haiku classifier reads the reply as a
-          // clean approve/reject (NOT amend, NOT topic-change), call
-          // resolveRequest directly and skip the orchestrator entirely.
-          // Latency drops from ~3s to ~300ms; saves a ~50k-token Sonnet turn.
-          // Fails open: any mismatch / ambiguity / classifier error →
-          // falls through to runOrchestrator as before.
-          if (
-            profile.behavior?.deterministic_approval_resolve === true
-            && role === 'owner'
-            && threadTs
-            && mergedText
-            && mergedText.trim().length > 0
-          ) {
-            try {
-              const { tryAutoResolveThreadBoundApproval } = await import('../../../utils/threadBoundApprovalAutoResolve');
-              const autoResolve = await tryAutoResolveThreadBoundApproval({
-                message: mergedText,
-                threadTs,
-                ownerUserId: senderId,
-                profile,
-                app,
-              });
-              if (autoResolve.resolved) {
-                // Acknowledge with a reaction on the owner's message; the
-                // resolver itself runs downstream effects (booking, requester
-                // DM, closeRequest cascade) which post their own confirmations
-                // where relevant. No text reply from us — avoids duplication
-                // with whatever the resolver posts.
-                const emoji = autoResolve.verdict === 'approve' ? 'white_check_mark' : 'x';
-                client.reactions.add({ channel: channelId, timestamp: ts, name: emoji }).catch(() => {});
-                logger.info('Module D — orchestrator skipped via auto-resolve', {
-                  senderId, threadTs, requestId: autoResolve.request_id, verdict: autoResolve.verdict,
+              } catch (err) {
+                logger.warn('priorOutboundContext lookup threw — proceeding without context', {
+                  err: String(err).slice(0, 200),
                 });
-                markWrite();
-                return;
               }
-              logger.debug('Module D — auto-resolve declined, falling through to orchestrator', {
-                reason: autoResolve.reason,
-              });
-            } catch (err) {
-              logger.warn('Module D — auto-resolve threw, falling through to orchestrator', {
-                err: String(err).slice(0, 200),
-              });
             }
-          }
+            // v2.7.7 (Module D) — thread-bound approval auto-resolve.
+            // When the owner replies in a thread that uniquely matches a
+            // pending approval AND a Haiku classifier reads the reply as a
+            // clean approve/reject (NOT amend, NOT topic-change), call
+            // resolveRequest directly and skip the orchestrator entirely.
+            // Latency drops from ~3s to ~300ms; saves a ~50k-token Sonnet turn.
+            // Fails open: any mismatch / ambiguity / classifier error →
+            // falls through to runOrchestrator as before.
+            if (
+              profile.behavior?.deterministic_approval_resolve === true
+              && role === 'owner'
+              && threadTs
+              && mergedText
+              && mergedText.trim().length > 0
+            ) {
+              try {
+                const { tryAutoResolveThreadBoundApproval } = await import('../../../utils/threadBoundApprovalAutoResolve');
+                const autoResolve = await tryAutoResolveThreadBoundApproval({
+                  message: mergedText,
+                  threadTs,
+                  ownerUserId: senderId,
+                  profile,
+                  app,
+                });
+                if (autoResolve.resolved) {
+                  // Acknowledge with a reaction on the owner's message; the
+                  // resolver itself runs downstream effects (booking, requester
+                  // DM, closeRequest cascade) which post their own confirmations
+                  // where relevant. No text reply from us — avoids duplication
+                  // with whatever the resolver posts.
+                  const emoji = autoResolve.verdict === 'approve' ? 'white_check_mark' : 'x';
+                  client.reactions.add({ channel: channelId, timestamp: ts, name: emoji }).catch(() => {});
+                  logger.info('Module D — orchestrator skipped via auto-resolve', {
+                    senderId, threadTs, requestId: autoResolve.request_id, verdict: autoResolve.verdict,
+                  });
+                  markWrite();
+                  return;
+                }
+                logger.debug('Module D — auto-resolve declined, falling through to orchestrator', {
+                  reason: autoResolve.reason,
+                });
+              } catch (err) {
+                logger.warn('Module D — auto-resolve threw, falling through to orchestrator', {
+                  err: String(err).slice(0, 200),
+                });
+              }
+            }
 
-          logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== userMessage, hasPriorOutboundContext: !!priorOutboundContext });
-          const result = await runOrchestrator({
-            userMessage: mergedText,
-            conversationHistory: history,
-            threadTs,
-            channelId,
-            userId: senderId,
-            senderRole: role,
-            senderName: colleagueName,
-            channel: 'slack' as ChannelId,
-            profile,
-            app,
-            isMpim,
-            isChannel,
-            isOwnerInGroup,
-            mpimMemberIds,
-            images: images?.length ? images : reattachedImages,
-            forceToolOnFirstTurn,
-            signal,
-            onWriteExecuted: () => markWrite(),
-            priorOutboundContext,
-          });
-          logger.info('Orchestrator completed', { senderId, threadTs, hasApproval: result.requiresApproval, actionCount: result.slackActions?.length ?? 0 });
+            logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== userMessage, hasPriorOutboundContext: !!priorOutboundContext });
+            const result = await runOrchestrator({
+              userMessage: mergedText,
+              conversationHistory: history,
+              threadTs,
+              channelId,
+              userId: senderId,
+              senderRole: role,
+              senderName: colleagueName,
+              channel: 'slack' as ChannelId,
+              profile,
+              app,
+              isMpim,
+              isChannel,
+              isOwnerInGroup,
+              mpimMemberIds,
+              images: images?.length ? images : reattachedImages,
+              forceToolOnFirstTurn,
+              signal,
+              onWriteExecuted: () => markWrite(),
+              priorOutboundContext,
+            });
+            logger.info('Orchestrator completed', { senderId, threadTs, hasApproval: result.requiresApproval, actionCount: result.slackActions?.length ?? 0 });
 
-      // ── Reply pipeline (v1.6.2) ──────────────────────────────────────────────
-      // normalize → owner claim-check (+ retry) → colleague security gate →
-      // audio-or-text send → optional approval footer. Full flow lives in
-      // postReply.ts so changes don't force re-reading this 1200-line file.
-      const { postOrchestratorReply } = await import('../postReply');
-      await postOrchestratorReply({
-        app,
-        profile,
-        result,
-        say: say as (msg: { text: string; thread_ts?: string }) => Promise<unknown>,
-        role,
-        colleagueName,
-        senderId,
-        channelId,
-        threadTs,
-        // v2.6.2 — pass the user's message ts so postReply can react 👍
-        // on it for ack-class replies (replacing "Got it" text with a
-        // reaction).
-        userMessageTs: ts,
-        history,
-        userMessage,
-        isMpim,
-        isChannel,
-        isOwnerInGroup,
-        mpimMemberIds,
-        voiceInput,
-      });
+            // ── Reply pipeline (v1.6.2) ──────────────────────────────────────────────
+            // normalize → owner claim-check (+ retry) → colleague security gate →
+            // audio-or-text send → optional approval footer. Full flow lives in
+            // postReply.ts so changes don't force re-reading this 1200-line file.
+            const { postOrchestratorReply } = await import('../postReply');
+            await postOrchestratorReply({
+              app,
+              profile,
+              result,
+              say: say as (msg: { text: string; thread_ts?: string }) => Promise<unknown>,
+              role,
+              colleagueName,
+              senderId,
+              channelId,
+              threadTs,
+              // v2.6.2 — pass the user's message ts so postReply can react 👍
+              // on it for ack-class replies (replacing "Got it" text with a
+              // reaction).
+              userMessageTs: ts,
+              history,
+              userMessage,
+              isMpim,
+              isChannel,
+              isOwnerInGroup,
+              mpimMemberIds,
+              voiceInput,
+              // The one signal the failure handler below needs: has the person seen
+              // anything from this turn yet?
+              onDelivered: () => { delivered = true; },
+            });
 
-      // ── Dispatch background Slack actions AFTER reply is delivered ───────────
-      // These are fire-and-forget — owner already got their reply above.
-      // find_slack_user is the only exception: its result feeds back into context.
-      if (result.slackActions && result.slackActions.length > 0) {
-        for (const action of result.slackActions) {
-          // find_slack_user must stay synchronous — result feeds into conversation context
-          if (action.action === 'find_slack_user') {
+            // ── Dispatch background Slack actions AFTER reply is delivered ───────────
+            // These are fire-and-forget — owner already got their reply above.
+            // find_slack_user is the only exception: its result feeds back into context.
+            if (result.slackActions && result.slackActions.length > 0) {
+              for (const action of result.slackActions) {
+                // find_slack_user must stay synchronous — result feeds into conversation context
+                if (action.action === 'find_slack_user') {
+                  try {
+                    const users = await findSlackUser(app, assistant.slack.bot_token, action.name as string);
+                    appendToConversation(threadTs, channelId, {
+                      role: 'assistant',
+                      content: users.length > 0
+                        ? `Found: ${users.map((u: any) => `${u.real_name} (ID: ${u.id}, tz: ${u.tz})`).join(', ')}`
+                        : `No Slack user found matching "${action.name}". Ask the user to @mention them.`,
+                    });
+                  } catch (err) {
+                    logger.error('Slack action failed', { err, action: action.action });
+                  }
+                  continue;
+                }
+
+                // v1.8.11 — `send_outreach_dm` and `post_to_channel` actions
+                // removed: message_colleague now sends synchronously inside its tool
+                // handler via Connection. v3.4.x — coordinate_meeting /
+                // finalize_coord_meeting actions removed with the coord subsystem.
+                // find_slack_user (handled above) is the only Slack action left.
+              }
+            }
+          } catch (err) {
+            // THE failure handler for the reply path, and it has to live in here.
+            // This closure runs from scheduleRun's timer, long after
+            // processMessage returned, so the try/catch below — the one that
+            // lexically encloses these very lines — never sees a throw from
+            // inside it. Since v2.4.3 put the turn behind the queue, everything
+            // past `enqueueMessage` has failed into one log line and total
+            // silence: 2026-07-20 09:12, a 529 mid-turn, Elan asked to book a
+            // slot in his DM and Maelle never said a word.
+            //
+            // An ABORT is not a failure — the queue killed this turn on purpose
+            // to merge a message that landed while we were thinking (S8), and a
+            // superseded turn apologising would be a brand-new bug. Re-throw so
+            // the queue's abort branch restarts the debounce exactly as before.
+            if (isMergeAbort(err, signal)) throw err;
+            logger.error('Turn failed after the queue took the message', {
+              err, senderId, channelId, threadTs, role, delivered,
+            });
+            // Already answered, and then something in the tail threw (the
+            // approval footer's own send, the threadActivity import). Do NOT
+            // stack "something's off" on top of an answer the person is reading
+            // — a broken trailer's audience is the log, not them.
+            if (delivered) return;
             try {
-              const users = await findSlackUser(app, assistant.slack.bot_token, action.name as string);
-              appendToConversation(threadTs, channelId, {
-                role: 'assistant',
-                content: users.length > 0
-                  ? `Found: ${users.map((u: any) => `${u.real_name} (ID: ${u.id}, tz: ${u.tz})`).join(', ')}`
-                  : `No Slack user found matching "${action.name}". Ask the user to @mention them.`,
+              await say({ text: failureReply(err), thread_ts: threadTs });
+            } catch (sendErr) {
+              // Slack itself is refusing us; there is nothing left to try. Log
+              // the ORIGINAL cause here so it survives into error-*.log instead
+              // of being replaced by the send failure at the queue's backstop.
+              logger.error('Failure reply could not be delivered either — the person is left with silence', {
+                cause: String(err).slice(0, 300), sendErr: String(sendErr).slice(0, 200),
+                channelId, threadTs,
               });
-            } catch (err) {
-              logger.error('Slack action failed', { err, action: action.action });
             }
-            continue;
           }
-
-          // v1.8.11 — `send_outreach_dm` and `post_to_channel` actions
-          // removed: message_colleague now sends synchronously inside its tool
-          // handler via Connection. v3.4.x — coordinate_meeting /
-          // finalize_coord_meeting actions removed with the coord subsystem.
-          // find_slack_user (handled above) is the only Slack action left.
-        }
-      }
         },  // ← close runner async function (v2.4.3 A1)
       });  // ← close enqueueMessage call
 
     } catch (err) {
+      // PRE-QUEUE failures only — everything from the addressee gate down to the
+      // synchronous `enqueueMessage` call above (the summary-session read, the
+      // module require). Once the queue has the message the turn runs on its own
+      // timer and owns its failures in the runner catch above; this one cannot
+      // see them.
       logger.error('Failed to process message', { err, assistant: assistant.name, channelId });
-      const text = isOverloadError(err)
-        ? `Quick coffee break, ping me again in a couple of minutes?`
-        : `Something's off on my end, give me a minute and try again?`;
-      await say({ text, thread_ts: threadTs });
+      await say({ text: failureReply(err), thread_ts: threadTs });
     }
 }

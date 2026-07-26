@@ -118,6 +118,26 @@ function getOrCreate(key: string): ThreadState {
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
+ * Is this throw the queue's own deliberate merge-abort rather than a failure?
+ *
+ * Exported because the RUNNER has to ask the same question the queue asks, and
+ * two copies of the predicate would eventually disagree. A runner that reports
+ * a failure to the person must consult this FIRST and re-throw on true: an
+ * aborted turn was superseded on purpose (S8), a fresh turn is already queued
+ * behind it, and a superseded turn apologising would be a brand-new bug.
+ *
+ * `signal.aborted` is part of the test, not just the error shape: an abort can
+ * land in the same tick as a real error (a 529 throwing while the person types
+ * again), and in that case the merged turn still runs and still answers — so
+ * silence here is correct, not a swallow.
+ */
+export function isMergeAbort(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  const e = err as { name?: string; message?: string } | null | undefined;
+  return e?.name === 'AbortError' || e?.message === 'aborted_for_merge';
+}
+
+/**
  * The runner the queue calls when it's time to process a batch. Receives
  * the merged user message + meta from the FIRST pending message (channel,
  * threadTs, etc. don't change within a thread). Receives an AbortSignal it
@@ -125,6 +145,13 @@ function getOrCreate(key: string): ThreadState {
  *
  * The runner ALSO receives a `markWrite` callback. Call it the moment any
  * write tool starts executing, so the queue knows abort is no longer safe.
+ *
+ * CONTRACT — the runner OWNS its own failures. It is the only party in this
+ * flow that can reach the person (it holds `say`, the channel and the thread);
+ * the queue holds none of that and never will. So anything that throws inside
+ * a turn must be caught, judged and answered THERE. A throw that escapes to
+ * `scheduleRun` is a bug in the runner, not a supported path — see the catch
+ * down there for what it does with one.
  */
 export type TurnRunner = (params: {
   mergedText: string;
@@ -269,7 +296,7 @@ async function scheduleRun(key: string): Promise<void> {
       markWrite: () => { state.hasWriteFired = true; },
     });
   } catch (err: any) {
-    if (err?.name === 'AbortError' || err?.message === 'aborted_for_merge' || controller.signal.aborted) {
+    if (isMergeAbort(err, controller.signal)) {
       logger.info('inboundQueue — turn aborted for merge', { key });
       // The new arrival that triggered the abort is already in pending.
       // Restart debounce so any further arrivals also collect into the batch.
@@ -280,7 +307,16 @@ async function scheduleRun(key: string): Promise<void> {
       }, DEBOUNCE_MS);
       return;
     }
-    logger.warn('inboundQueue — runner threw (non-abort) — proceeding', {
+    // BACKSTOP, never the control. The runner owns its failures (see the
+    // TurnRunner contract) and answers the person itself; reaching here means
+    // its own handler threw too, so nobody told them anything. It stays because
+    // scheduleRun is invoked as `void scheduleRun(key)` — without it a runner
+    // throw is an unhandled rejection that can take the process down and leave
+    // `inFlight` set. Logged at ERROR, not warn: this is a person staring at a
+    // thread that will never answer, and error-*.log is kept 30 days for
+    // exactly that postmortem. It used to be a warn, which is how the 529 on
+    // 2026-07-20 09:12 (Elan, D0ARUSTT6EN) went unnoticed.
+    logger.error('inboundQueue — a turn threw past its own handler; the person got NOTHING', {
       key, err: String(err).slice(0, 300),
     });
   } finally {

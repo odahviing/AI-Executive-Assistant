@@ -81,12 +81,36 @@ const VERDICTS = {
           },
           rootCause: { type: 'string', description: 'file:line — proven, not guessed' },
           fix: { type: 'string', description: 'files touched, +/- lines, plain English' },
+          // Forwarded to the verify so it spends its budget on what you did NOT
+          // cover. Without it the verifier re-derives ground you already walked.
+          traced: {
+            type: 'string',
+            description:
+              'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the verifier; one you quietly omit gets checked by nobody.',
+          },
           dependencyAgent: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer', ''] },
           dependencyAsk: { type: 'string' },
           notes: { type: 'string' },
         },
         required: ['id', 'verdict'],
       },
+    },
+  },
+  required: ['results'],
+}
+
+// The verify returns its verdicts AND what it settled, so the next run can be
+// told not to re-audit it. Nothing else persists that: the report is emptied at
+// wrap, so today every pass starts from zero on ground an earlier one proved.
+const VERIFY_OUT = {
+  type: 'object',
+  properties: {
+    results: VERDICTS.properties.results,
+    verifiedClean: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'what you PROVED correct and would not spend budget on again — one specific claim per line, each naming the file/behaviour and why it holds. Not "the meeting lane is fine": "checkSlot rule ordering is verdict-preserving — reordering a first-violation-wins ladder cannot change passes". Only claims you actually established; a false entry here silences a future check.',
     },
   },
   required: ['results'],
@@ -300,19 +324,35 @@ if (tail.length || resumes.length) {
 // here deliberately, to inherit the session model rather than drop to sonnet.
 phase('Verify')
 let verified = results
+let verifiedClean = []
 if (VERIFY) {
   const built = results.filter((r) => r.verdict === 'built')
   if (built.length) {
+    // Two things are forwarded so nothing is derived twice:
+    //   • each fix's own `traced` — what the builder already walked, so the
+    //     verifier attacks the GAPS instead of re-covering covered ground.
+    //   • `priorClean` — what earlier verifies proved, carried in by the Manager
+    //     from the report. Without it every pass re-audits settled ground.
+    // Both are leads, not truth: a builder's coverage claim and a past pass's
+    // conclusion are exactly the kind of relay Shared rule 6 exists for, and the
+    // prompt says so. Spot-check cheaply; spend the budget on what is NOT there.
+    const priorClean = Array.isArray(A.priorClean) ? A.priorClean : []
     const check = await agent(
       `Adversarially verify this wave's COMBINED change before the owner wraps it. **Findings only — build nothing, edit nothing, commit nothing.**\n\n` +
         `Calibrate to ONE question: **is this safe to ship to real people?** Not "what could be better." A finding that makes Maelle lie, leak, or take a wrong action counts. A finding that makes the code nicer does not.\n\n` +
         `**Attack the seams first — that is why this is one pass and not ${built.length}.** Each fix below was already built and self-checked by the lane that owns it, so re-litigating one in isolation is wasted effort. What no lane could see is the interaction: two fixes that are each correct alone and wrong together, a shared helper one lane changed and another depends on, a contract altered on one side of a seam only, or a fix whose own change introduced a regression a later fix then built on.\n\n` +
+        `**Each fix carries \`traced\` — the scenarios its builder already walked. Do not re-run those. Go at what is missing from that list**, and at anything the builder named as deliberately uncovered. If a \`traced\` claim looks wrong, spot-check that one cheaply and say so; do not re-derive the whole set on suspicion.\n\n` +
+        (priorClean.length
+          ? `**ALREADY PROVEN by earlier verify passes — do NOT re-audit these.** They are excluded so your budget goes somewhere new. If the current diff genuinely invalidates one, say which and why; otherwise treat it as settled:\n${priorClean.map((c) => `  • ${c}`).join('\n')}\n\n`
+          : '') +
         `Read the ACTUAL diff (\`git diff\`, \`git status\`) — verify against the code on disk, never against the summaries below. Those summaries are the lanes' own claims about their work; treat them as leads. Confirm \`npx tsc --noEmit\` is green.\n\n` +
         `**Budget: keep this under ~60 tool calls.** If the diff is too large to cover at that depth, say so and name what you did NOT cover rather than thinning every check to nothing. An honest gap beats uniform shallowness.\n\n` +
         `Return one row per issue id: \`built\` if that fix holds in combination with all the others, otherwise \`needs-owner-decision\` with notes saying precisely what breaks and how. If a fix is fine alone but broken by another, flag the one that should change and say why.\n\n` +
+        `Also return \`verifiedClean\`: what you PROVED and would not spend budget on again. The next run is told not to re-check it, so put nothing there you did not actually establish — a false entry silences a future check permanently.\n\n` +
         `FIXES IN THIS WAVE:\n${JSON.stringify(built, null, 2)}`,
-      { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'guard', effort: 'xhigh', schema: VERDICTS },
+      { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'guard', effort: 'xhigh', schema: VERIFY_OUT },
     )
+    verifiedClean = (check && check.verifiedClean) || []
     const overturned = new Map(
       ((check && check.results) || [])
         .filter((x) => x.verdict && x.verdict !== 'built')
@@ -343,4 +383,8 @@ return {
   results: verified,
   flagged,
   pending,
+  // Persist under "Verified clean" in report.md and pass straight back as
+  // `priorClean` next run. It is the only thing that stops each verify starting
+  // from zero on ground an earlier one already proved.
+  verifiedClean,
 }

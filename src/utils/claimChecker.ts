@@ -19,8 +19,12 @@
  *     do with a detected false claim (force a retry, drop the sentence, etc).
  *     That separation is what kept the old verifier leaking meta-text.
  *
- * Owner-only by design — colleague drafts go through securityGate, which is a
- * different concern (leak filtering, not honesty).
+ * Scoped to turns the OWNER is acting on — his 1:1 DM, and his own turns in a
+ * group DM (where it runs alongside securityGate, not instead of it: honesty and
+ * leak-filtering are different concerns and a group reply needs both). A
+ * colleague's own turn doesn't run it: the check exists so the person who can go
+ * and chase an un-done action finds out it didn't happen, and that person is the
+ * owner. The MPIM branch below (mpimContext) serves exactly the group case.
  */
 
 import Anthropic from '@anthropic-ai/sdk';

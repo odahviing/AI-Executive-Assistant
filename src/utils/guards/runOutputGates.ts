@@ -21,13 +21,16 @@
  *      claims nothing, and its safe failure is SILENCE, not a rewrite. It
  *      therefore returns a ship/drop verdict and cannot alter the text at all.
  *
- * Order inside runOutputGates:
- *   3/3a/3b  OWNER (or owner-in-group): claim-check + humanGate + date-verify,
- *            probed concurrently, exact serial chain on any flag.
- *   3b       NON-OWNER: date-verify.
- *   4/4a     NON-OWNER: security gate, then colleague humanGate.
- * Owner-only concerns (claim-checker) and colleague-only concerns (security
- * gate) are mutually exclusive by role, so there's no stage where both run.
+ * WHICH gates run is decided by TWO axes, never one role test — see the
+ * derivation at the top of runOutputGates. Order:
+ *   OWNER-PRIVATE (a 1:1 DM; only the owner ever reads it): claim-check +
+ *     humanGate('owner') + date-verify, probed concurrently, exact serial chain
+ *     on any flag.
+ *   COLLEAGUE-READABLE (a colleague DM, a channel, or the owner in a group DM):
+ *     claim-check (only when the owner is the one acting) → date-verify →
+ *     security gate → humanGate('internal'). Voice runs LAST so every earlier
+ *     rewrite is voice-checked, and the leak scrub runs after every rewriter
+ *     that could emit an internal token.
  *
  * NOTHING here re-runs the orchestrator (G4). Every remedy is either a
  * deterministic edit or a single tool-less rewrite pass.
@@ -71,23 +74,94 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   const {
     profile, result,
     role, colleagueName,
-    senderId, threadTs,
+    senderId, channelId, threadTs,
     history, userMessage, isMpim, isOwnerInGroup, mpimMemberIds,
   } = ctx;
   let cleanReply = draft;
 
-  // Steps 3 / 3a / 3b — owner-facing guard stack: claim-check + humanGate +
-  // date-verify. v4.0.x PROBE/parallelize: these three are side-effect-free cores
-  // (the rewrite + appendToConversation live in the wrappers below,
-  // not the cores), and a rewrite is RARE. Run all three CONCURRENTLY on the
-  // post-concision text; if NONE wants a change (>95% of turns) ship as-is —
-  // byte- AND side-effect-identical to the serial chain, which on a clean turn
-  // also rewrites nothing and appends nothing. If ANY flags, fall back to the
-  // untouched serial chain → byte-identical to the pre-4.0 behavior (the probe's
-  // Haiku calls are wasted on that rare turn). Fail-safe: a probe error falls
-  // through to serial. Collapses 3 serial round-trips → 1 wall-clock on the
-  // common path. NO coverage change — every guard still runs.
-  if (role === 'owner' || isOwnerInGroup) {
+  // ── Which gates apply: TWO axes, not one role test ────────────────────────
+  // This pair IS the gate policy. It used to be a single `role === 'owner' ||
+  // isOwnerInGroup` test plus its exact complement, and that one test was being
+  // asked two different questions:
+  //
+  //   ownerIsActing     — the AUTHENTICATED owner is the one being answered.
+  //                       Decides the phantom-action honesty check: the
+  //                       claim-checker exists so the person who can go and
+  //                       chase an un-done action learns it didn't happen.
+  //   colleagueReadable — somebody other than the owner will read this text.
+  //                       Decides the leak gate and the humanGate voice frame.
+  //
+  // In a 1:1 owner DM and in a colleague's DM those two answers are exact
+  // negations of each other, which is why one test carried both for so long. In
+  // a GROUP DM they come apart: `role` is already clamped to 'colleague'
+  // (processMessage.ts:122) precisely because every colleague in the room reads
+  // the reply, while `isOwnerInGroup` says the owner is the one typing. The old
+  // single test read that as "owner-facing", so the one colleague-readable
+  // surface in the system shipped with NO leak gate and the wrong voice frame —
+  // and the SAME room was gated differently depending on who had spoken last.
+  //
+  // colleagueReadable keys on `role` — the clamp's own answer to "who can see
+  // this" — which keeps it fail-closed for a future 'unknown' sender too. The
+  // `|| isOwnerInGroup` arm is redundant TODAY (the clamp already sets role to
+  // 'colleague' in any MPIM) and is written anyway so the predicate is true on
+  // its own terms: a group DM has other members by definition, so if that clamp
+  // ever moves this fails CLOSED — it adds the leak gate rather than dropping it.
+  const ownerIsActing = role === 'owner' || isOwnerInGroup === true;
+  const colleagueReadable = role !== 'owner' || isOwnerInGroup === true;
+  // ONE frame decision, shared by every humanGate call below, and the same
+  // convention runCodaGates already uses: anything that is not the authenticated
+  // owner gets the colleague frame. In a group room the 'owner' frame is not
+  // merely unnecessary, it is WRONG. Its single distinguishing rule is "NEVER
+  // refer to him in third person" (humanGate.ts:97) — but naming the owner to
+  // the colleagues in the room is exactly what the drafting prompt asks for
+  // there (systemPrompt.ts:466 "SPEAK TO THE GROUP"), and 'internal' endorses
+  // that shape verbatim (humanGate.ts:171). Every other rule in the gate is
+  // identical across the two frames, so on a group reply the 'owner' frame could
+  // only ever rewrite correct text — a G6 corruption, not a safe miss.
+  const audience: HumanGateAudience = colleagueReadable ? 'internal' : 'owner';
+
+  // (v3.6.x — the "booked-date honesty" backstop that used to run between the
+  // two legs was RETIRED. It was a 4th output-path LLM call on every booking
+  // reply, it depended on a clean ISO instant it didn't reliably get
+  // (booked_start sometimes arrives as a display string → a false correction of
+  // a correct reply, 2026-07-05), and its job — the wrong-day WRITE — is already
+  // stopped upstream by the meeting-core weekday guard. Backstop with a bad data
+  // source + zero real catches + one false alarm = not worth the call. G2 / G8.)
+
+  // (v4.1.x — the v1.8.4 colleague "mutation-contradiction" step is RETIRED, and
+  // it is the clearest G4 violation the stack had: its remedy was
+  // `runOrchestrator(...)`, a SECOND full agentic turn on the reply path, to
+  // reword a draft. G4 names re-running the orchestrator as never allowed — an
+  // unbounded regeneration can differ from the vetted draft in any way, and it
+  // cost seconds of latency plus a whole turn's tokens on the colleague path.
+  // Its trigger was also English-only natural-language regex ("flagged it for",
+  // "he'll decide") — G7-banned, and useless in Hebrew or Russian. And it never
+  // caught anything: ZERO `Colleague draft defers to owner after mutation
+  // succeeded` warns across every log on disk.
+  //
+  // The job it was doing is owned UPSTREAM, where it belongs (G1/G3): the
+  // mutation tools return their own `action_summary` / `_must_reply_with` for the
+  // drafting turn to narrate (skills/outreach.ts:348, :496) and the pinned action
+  // tape replays confirmed mutations into the system prompt (turnHelpers.ts
+  // extractActionTape). A draft that contradicts a mutation is a DRAFTING bug, so
+  // it gets fixed where the draft is made, not policed afterwards.)
+
+  if (!colleagueReadable) {
+    // ── OWNER-PRIVATE — a 1:1 DM with the authenticated owner ───────────────
+    // Claim-check + humanGate('owner') + date-verify. Nobody else ever reads
+    // this text, so there is nothing to leak-scrub and the direct-address voice
+    // frame is the right one.
+    //
+    // v4.0.x PROBE/parallelize: these three are side-effect-free cores
+    // (the rewrite + appendToConversation live in the wrappers below,
+    // not the cores), and a rewrite is RARE. Run all three CONCURRENTLY on the
+    // post-concision text; if NONE wants a change (>95% of turns) ship as-is —
+    // byte- AND side-effect-identical to the serial chain, which on a clean turn
+    // also rewrites nothing and appends nothing. If ANY flags, fall back to the
+    // untouched serial chain → byte-identical to the pre-4.0 behavior (the probe's
+    // Haiku calls are wasted on that rare turn). Fail-safe: a probe error falls
+    // through to serial. Collapses 3 serial round-trips → 1 wall-clock on the
+    // common path. NO coverage change — every guard still runs.
     let ownerGuardsClean = false;
     try {
       const [{ checkReplyClaims }, { runHumanGate }, { verifyDates }] = await Promise.all([
@@ -103,7 +177,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
           ownerFirstName: profile.user.name.split(' ')[0],
           mpimContext: isMpim ? { isMpim: true, participantSlackIds: mpimMemberIds ?? [] } : undefined,
         }),
-        runHumanGate(cleanReply, profile, 'owner'),
+        runHumanGate(cleanReply, profile, audience, channelId),
         verifyDates(cleanReply, profile, userMessage),
       ]);
       // Each flag mirrors EXACTLY its wrapper's "would this rewrite the text?"
@@ -122,7 +196,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
       cleanReply = await runClaimCheckAndMaybeRewrite(ctx, cleanReply);
       try {
         const { runHumanGate } = await import('../humanGate');
-        const verdict = await runHumanGate(cleanReply, profile, 'owner');
+        const verdict = await runHumanGate(cleanReply, profile, audience, channelId);
         if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
           cleanReply = formatForSlack(verdict.rewrite);
         }
@@ -132,55 +206,73 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
       cleanReply = await runDateVerifierAndMaybeRetry(ctx, cleanReply);
     }
   } else {
-    // Step 3b — date-verifier for the NON-owner path (the owner's date-verify is
-    // handled in the probe/serial above, so it runs exactly once either way).
-    // Catches "Thursday 11 June" when the 11th is a Wednesday, in any language —
-    // a wrong date to a colleague is just as bad.
+    // ── COLLEAGUE-READABLE — a colleague's DM, a channel, or a GROUP DM ─────
+    // Everything here is decided by the reader, not the sender, with one
+    // exception: the honesty check, which is decided by who is acting.
+    //
+    // claim-check (owner acting only) → date-verify → security gate →
+    // humanGate('internal'). Voice LAST so every earlier rewrite gets
+    // voice-checked, and the leak scrub after every rewriter that could emit an
+    // internal token.
+
+    // The phantom-action honesty check, kept for the owner's own turn in a
+    // shared room. A straight "route the group DM to the colleague leg" would
+    // have dropped it, and that trades one hole for another: the owner is IN the
+    // room, he is the one directing the work, and he is the only person who can
+    // go and chase an action Maelle said she'd done and hadn't. The checker was
+    // also BUILT for exactly this surface — its MPIM branch (claimChecker.ts:45,
+    // :124, :260, "inline mentions of these participants are LEGITIMATE
+    // addressing") is reachable on no other path, so dropping it here would make
+    // that branch dead. Its owner-only-ness (claimChecker.ts:22) is a statement
+    // of scope, not of safety: the remedy is a tool-less own-the-miss rewrite
+    // with its own keep-veto, so a wrong fire is a safe miss (G4/G6). Running it
+    // FIRST also means its Sonnet-written prose is scrubbed and voice-checked by
+    // the two gates below, which the owner-private leg cannot offer it.
+    if (ownerIsActing) {
+      cleanReply = await runClaimCheckAndMaybeRewrite(ctx, cleanReply);
+    }
+
+    // Date-verify. Catches "Thursday 11 June" when the 11th is a Wednesday, in
+    // any language — a wrong date to a colleague is just as bad.
     cleanReply = await runDateVerifierAndMaybeRetry(ctx, cleanReply);
-  }
 
-  // (v3.6.x — the "booked-date honesty" backstop that used to run here was
-  // RETIRED. It was a 4th output-path LLM call on every booking reply, it
-  // depended on a clean ISO instant it didn't reliably get (booked_start
-  // sometimes arrives as a display string → a false correction of a correct
-  // reply, 2026-07-05), and its job — the wrong-day WRITE — is already stopped
-  // upstream by the meeting-core weekday guard. Backstop with a bad data source
-  // + zero real catches + one false alarm = not worth the call. R1 / R9.)
-
-  // (v4.1.x — the v1.8.4 colleague "mutation-contradiction" step that used to run
-  // here is RETIRED, and it is the clearest G4 violation the stack had: its remedy
-  // was `runOrchestrator(...)`, a SECOND full agentic turn on the reply path, to
-  // reword a draft. G4 names re-running the orchestrator as never allowed — an
-  // unbounded regeneration can differ from the vetted draft in any way, and it
-  // cost seconds of latency plus a whole turn's tokens on the colleague path.
-  // Its trigger was also English-only natural-language regex ("flagged it for",
-  // "he'll decide") — G7-banned, and useless in Hebrew or Russian. And it never
-  // caught anything: ZERO `Colleague draft defers to owner after mutation
-  // succeeded` warns across every log on disk.
-  //
-  // The job it was doing is owned UPSTREAM, where it belongs (G1/G3): the mutation
-  // tools return their own `action_summary` / `_must_reply_with` for the drafting
-  // turn to narrate (skills/outreach.ts:348, :496) and the pinned action tape
-  // replays confirmed mutations into the system prompt (turnHelpers.ts
-  // extractActionTape). A draft that contradicts a mutation is a DRAFTING bug, so
-  // it gets fixed where the draft is made, not policed afterwards.)
-
-  // Step 4 — colleague-facing security gate (leak filter + identity-spoof).
-  // v3.8.x — fail-closed on role: any non-owner (colleague, or a future 'unknown'
-  // sender role) runs the strict leak gate. getSenderRole only returns owner|
-  // colleague today so this is zero behavior change now, but it stops a future
-  // 'unknown' path from shipping ungated (SenderRole allows 'unknown').
-  if (role !== 'owner' && !isOwnerInGroup) {
+    // Security gate (leak filter + identity-spoof). This is the gate a group DM
+    // never had: every disclosure trigger — self_ai_claim, self_internals,
+    // model_leak, json_echo, tool_tag_echo, role_header_echo, inject_marker,
+    // internal_ref_id (req_/task_), slack_channel_ref — was skipped on the
+    // owner's turns in a room full of colleagues, leaving scrubInternalLeakage
+    // (inside formatForSlack) as the only thing between an internal token and a
+    // colleague's screen.
+    //
     // v3.0.5 — pull verified colleague email from people_memory (written at
     // message-arrival in app.ts via users.info → upsertPersonMemory). Extract
     // the last few user-role turns from history for the spoof scan. Both feed
-    // the new identity check inside filterColleagueReply.
-    const { getPersonMemory } = await import('../../db');
-    const verifiedSenderEmail = getPersonMemory(senderId)?.email ?? undefined;
-    const recentUserMessages = history
-      .filter(h => h.role === 'user')
-      .slice(-5)
-      .map(h => h.content);
+    // the identity check inside filterColleagueReply.
+    //
+    // Those spoof inputs are WITHHELD when the owner is the one acting, and that
+    // is deliberate rather than incidental. The identity half asks "is this
+    // sender claiming to be someone else?" — a question with no meaning when the
+    // sender is the Slack-authenticated owner, while every on-domain address he
+    // types ("add alex@… to the invite") is a normal instruction that would trip
+    // its structured trigger. Its remedy REPLACES the whole reply with an "as far
+    // as I can see you're <name>" line, so a wrong fire there is corruption, not
+    // a miss. filterColleagueReply runs leak-scan-only when they are absent, so
+    // withholding them is the control (shared rule 10 — scope the payload; don't
+    // hand a check inputs it must not act on). Today colleagueName is undefined
+    // for an owner-in-group turn anyway (processMessage.ts:366) — this stops that
+    // cross-lane accident from being the only thing holding the branch shut.
+    let verifiedSenderEmail: string | undefined;
+    let recentUserMessages: string[] | undefined;
+    let ownerEmail: string | undefined;
+    if (!ownerIsActing) {
+      const { getPersonMemory } = await import('../../db');
+      verifiedSenderEmail = getPersonMemory(senderId)?.email ?? undefined;
+      recentUserMessages = history
+        .filter(h => h.role === 'user')
+        .slice(-5)
+        .map(h => h.content);
+      ownerEmail = profile.user.email;
+    }
     // v4.1.x — normalize the gate's output like every OTHER rewrite path in this
     // file does. This was the one rewrite that shipped raw: securityGate's Sonnet
     // rewriter and its Haiku identity-refusal composer both emit free text, and it
@@ -197,13 +289,13 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
       assistantName: profile.assistant.name,
       ownerFirstName: profile.user.name.split(' ')[0],
       verifiedSenderEmail,
-      ownerEmail: profile.user.email,
+      ownerEmail,
       recentUserMessages,
     }));
 
-    // Step 4a (v2.6.5) — colleague-facing humanness gate. Same Sonnet-pass
-    // gate that runs on owner-path (Step 3a above), now also on colleague-
-    // path. Catches Maelle framing herself as having technical infrastructure
+    // (v2.6.5) — colleague-facing humanness gate. Same gate that runs on the
+    // owner-private leg above, in the reader's frame.
+    // Catches Maelle framing herself as having technical infrastructure
     // ("I have a technical issue preventing me", "my system can't process this"),
     // including the abdication shape ("you can send the invite directly")
     // worded as machine-state. Owner direction (2026-05-10): "it's ok if
@@ -213,9 +305,10 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     try {
       const { runHumanGate } = await import('../humanGate');
       // v2.9 — Slack-side colleagues are same-domain by definition (workspace
-      // membership). audience='internal'. When EmailConnection lands, its
-      // sendReply path will pass 'external' for off-domain recipients.
-      const verdict = await runHumanGate(cleanReply, profile, 'internal');
+      // membership), so `audience` resolves to 'internal' here. When
+      // EmailConnection lands, its sendReply path will pass 'external' for
+      // off-domain recipients.
+      const verdict = await runHumanGate(cleanReply, profile, audience, channelId);
       if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
         cleanReply = formatForSlack(verdict.rewrite);
       }

@@ -135,12 +135,35 @@ const VERDICTS = {
             enum: ['built', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'already-fixed'],
           },
           fix: { type: 'string', description: 'files touched, +/- lines, plain English' },
+          // Forwarded to the verify so it spends its budget on what you did NOT
+          // cover, instead of re-deriving ground you already walked.
+          traced: {
+            type: 'string',
+            description:
+              'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the verifier; one you quietly omit gets checked by nobody.',
+          },
           dependencyAgent: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer', ''] },
           dependencyAsk: { type: 'string' },
           notes: { type: 'string' },
         },
         required: ['id', 'verdict'],
       },
+    },
+  },
+  required: ['results'],
+}
+
+// Verdicts PLUS what the pass settled, so the next run can be told not to
+// re-audit it. The report is emptied at wrap, so nothing else carries this.
+const VERIFY_OUT = {
+  type: 'object',
+  properties: {
+    results: VERDICTS.properties.results,
+    verifiedClean: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'what you PROVED and would not spend budget on again — one specific claim per line naming the file/behaviour and why it holds. Only what you actually established; a false entry here silences a future check.',
     },
   },
   required: ['results'],
@@ -342,19 +365,26 @@ if (resumes.length) {
 // waves, because the pieces were deliberately split across lanes to serve one idea.
 phase('Verify')
 let verified = results
+let verifiedClean = []
 const built = results.filter((r) => r.verdict === 'built')
 if (built.length && A.verify !== false) {
+  const priorClean = Array.isArray(A.priorClean) ? A.priorClean : []
   const check = await agent(
     `Adversarially verify this FEATURE wave's COMBINED change before the owner wraps it. **Findings only — build nothing, edit nothing, commit nothing.**\n\n` +
       `Calibrate to: **is this safe to ship to real people, and does it actually deliver what was approved?** Both halves matter here — unlike a bug wave, a feature can be perfectly safe and still not do the thing.\n\n` +
       `**Attack the seams first.** These pieces were split across lanes to serve ONE idea, so they are unusually likely to disagree at the joins: a contract changed on one side only, a shared helper two lanes both touched, a surface where two pieces each assume the other handles something.\n\n` +
+      `**Each piece carries \`traced\` — what its builder already walked. Do not re-run those; go at what is missing from that list**, and at anything named as deliberately uncovered. If a \`traced\` claim looks wrong, spot-check that one cheaply rather than re-deriving the set.\n\n` +
+      (priorClean.length
+        ? `**ALREADY PROVEN by earlier passes — do NOT re-audit.** Excluded so your budget goes somewhere new. If this diff genuinely invalidates one, say which and why:\n${priorClean.map((c) => `  • ${c}`).join('\n')}\n\n`
+        : '') +
       `Read the ACTUAL diff (\`git diff\`, \`git status\`) — verify against the code on disk, never the summaries below; those are the lanes' own claims. Confirm \`npx tsc --noEmit\` is green.\n\n` +
       `**Budget: keep this under ~60 tool calls.** If the diff is too large to cover at that depth, say what you did NOT cover rather than thinning every check. An honest gap beats uniform shallowness.\n\n` +
-      `Return one row per piece id: \`built\` if it holds in combination, otherwise \`needs-owner-decision\` with notes on exactly what breaks.\n\n` +
+      `Return one row per piece id: \`built\` if it holds in combination, otherwise \`needs-owner-decision\` with notes on exactly what breaks. Also return \`verifiedClean\` — what you PROVED and would not spend budget on again; the next run is told not to re-check it, so put nothing there you did not establish.\n\n` +
       `APPROVED INTENT:\n${JSON.stringify(approved.map((p) => ({ id: p.id, whatChanges: p.whatChanges, productDecision: p.productDecision })), null, 2)}\n\n` +
       `WHAT WAS BUILT:\n${JSON.stringify(built, null, 2)}`,
-    { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'guard', effort: 'xhigh', schema: VERDICTS },
+    { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'guard', effort: 'xhigh', schema: VERIFY_OUT },
   )
+  verifiedClean = (check && check.verifiedClean) || []
   const overturned = new Map(((check && check.results) || []).filter((x) => x.verdict && x.verdict !== 'built').map((x) => [x.id, x.notes || '']))
   verified = results.map((r) =>
     overturned.has(r.id) ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [wave-verify overturned: ${overturned.get(r.id)}]`.trim() } : r,
@@ -375,5 +405,6 @@ return {
   },
   results: verified,
   earnedRules,
+  verifiedClean, // persist under "Verified clean" in report.md; pass back as `priorClean` next run
   note: 'Uncommitted in the working tree. The owner wraps.',
 }

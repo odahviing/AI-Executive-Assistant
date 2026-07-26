@@ -69,6 +69,20 @@ export interface PostReplyInput {
   isOwnerInGroup?: boolean;
   mpimMemberIds?: string[];
   voiceInput?: boolean;
+  /**
+   * Fired the instant something from this turn is in front of the person — the
+   * reply text, the audio clip, or the 👍 that stands in for a one-word ack.
+   * Nothing else counts: not a tool that DM'd a third party, not a history row.
+   *
+   * Its one consumer is the caller's failure handler. A throw AFTER delivery is
+   * reachable (the approval footer's own `say`, the threadActivity import at the
+   * tail of sendReply), and an "I'm having trouble" posted on top of an answer
+   * the person is already reading is a worse bug than the one it apologises for.
+   * A callback rather than a return value because a return value cannot survive
+   * the throw it is needed for — same shape, same reason, as the queue's
+   * `markWrite`.
+   */
+  onDelivered?: () => void;
 }
 
 /**
@@ -361,6 +375,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     role, colleagueName,
     senderId, channelId, threadTs,
     history, userMessage, isMpim, isChannel, isOwnerInGroup, mpimMemberIds, voiceInput,
+    onDelivered,
   } = input;
   const { assistant } = profile;
 
@@ -415,10 +430,12 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   }
 
   // Step 3 — the output-time GATE STACK (guard lane, utils/guards/runOutputGates).
-  // Owner path: claim-check + humanGate + date-verify (probed concurrently,
-  // exact serial chain on any flag). Colleague path: date-verify → security gate
-  // → humanGate. Every gate fails OPEN, so a throw in there returns the draft we
-  // handed it, and no gate can re-enter the orchestrator.
+  // Owner-private path (1:1 DM): claim-check + humanGate + date-verify (probed
+  // concurrently, exact serial chain on any flag). Colleague-READABLE path — a
+  // colleague DM, a channel, or the owner speaking in a group DM: claim-check
+  // (owner's own turn only) → date-verify → security gate → humanGate. Every
+  // gate fails OPEN, so a throw in there returns the draft we handed it, and no
+  // gate can re-enter the orchestrator.
   cleanReply = await runOutputGates(cleanReply, {
     profile, result,
     history, userMessage,
@@ -436,6 +453,11 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // (can't react), already an emoji-only reply.
   const userMsgTs = (input as PostReplyInput).userMessageTs;
   if (!voiceInput && userMsgTs && isPureAckReply(cleanReply)) {
+    // Same shape as the audio branch below, for the same reason: this catch
+    // FALLS THROUGH TO A TEXT SEND, so nothing that runs after the reaction has
+    // landed may sit inside the try — a throw in there would post the same
+    // answer a second time.
+    let ackPosted = false;
     try {
       await app.client.reactions.add({
         token: assistant.slack.bot_token,
@@ -443,9 +465,19 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
         timestamp: userMsgTs,
         name: '+1',
       });
+      ackPosted = true;
+    } catch (err) {
+      logger.warn('Ack-replacement reaction failed — falling back to text', {
+        err: String(err).slice(0, 200),
+      });
+      // Fall through to send text.
+    }
+    if (ackPosted) {
       logger.debug('Ack-class reply replaced with 👍 reaction', {
         senderId, threadTs, replyPreview: cleanReply.slice(0, 40),
       });
+      // The reaction IS the reply, so this is a delivery like any other.
+      onDelivered?.();
       // The reaction IS the reply and it landed, so the coda's beat starts here
       // too. Without this the ack path — which returns before Step 5 — would
       // silently swallow every coda that rode a one-word task confirmation.
@@ -455,11 +487,6 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
         isMpim: isMpim === true, isChannel: isChannel === true,
       });
       return;  // No text post; the reaction IS the reply.
-    } catch (err) {
-      logger.warn('Ack-replacement reaction failed — falling back to text', {
-        err: String(err).slice(0, 200),
-      });
-      // Fall through to send text.
     }
   }
 
@@ -517,13 +544,14 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     }
   }
 
-  // Step 5 — audio vs text.
+  // Step 5 — audio vs text. The answer itself; everything below is a trailer.
   await sendReply({
     app, botToken: assistant.slack.bot_token,
     channelId, threadTs,
     cleanReply,
     voiceInput: voiceInput === true,
     say,
+    onDelivered,
   });
 
   // Step 6 — approval footer, if any.
@@ -559,6 +587,7 @@ async function sendReply(opts: {
   cleanReply: string;
   voiceInput: boolean;
   say: (msg: { text: string; thread_ts?: string; unfurl_links?: boolean; unfurl_media?: boolean }) => Promise<unknown>;
+  onDelivered?: () => void;
 }): Promise<void> {
   const useAudio = shouldRespondWithAudio({
     inputWasVoice: opts.voiceInput,
@@ -566,6 +595,11 @@ async function sendReply(opts: {
   });
 
   if (useAudio && config.OPENAI_API_KEY) {
+    // `audioSent` rather than a `return` inside the try, because the delivery
+    // callback has to fire OUTSIDE it: anything thrown between here and the
+    // return gets read as "audio failed" and falls through to a text send, so a
+    // callback raising in there would post the same answer twice.
+    let audioSent = false;
     try {
       const audioBuffer = await textToSpeech(opts.cleanReply);
       await sendAudioMessage({
@@ -575,7 +609,7 @@ async function sendReply(opts: {
         threadTs: opts.threadTs,
         audioBuffer,
       });
-      return;
+      audioSent = true;
     } catch (audioErr) {
       if (opts.voiceInput) {
         logger.warn('Audio response failed — falling back to text', { err: String(audioErr) });
@@ -583,6 +617,10 @@ async function sendReply(opts: {
         logger.debug('Audio TTS unavailable — using text', { err: String(audioErr) });
       }
       // Fall through to text.
+    }
+    if (audioSent) {
+      opts.onDelivered?.();
+      return;
     }
   }
   // v2.6.5 — capture the posted message ts and record it on threadActivity.
@@ -599,6 +637,11 @@ async function sendReply(opts: {
   // a wall of previews. Cited links stay clickable; they just don't auto-expand.
   const sayRes = await opts.say({ text: opts.cleanReply, thread_ts: opts.threadTs, unfurl_links: false, unfurl_media: false }) as
     | { ts?: string; ok?: boolean } | undefined;
+  // The answer is in the thread. Signalled here and not at the end of the
+  // function on purpose — the threadActivity import below is a bookkeeping tail
+  // that can still reject, and a reply the person is reading must never be
+  // followed by an apology for it.
+  opts.onDelivered?.();
   if (sayRes?.ts) {
     const { recordMaelleMessage } = await import('../../utils/threadActivity');
     recordMaelleMessage(opts.threadTs, opts.channelId, sayRes.ts);

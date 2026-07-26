@@ -1,7 +1,21 @@
 {
-  "lastSeenIso": "2026-07-26T09:30:00+0300",
+  "lastSeenIso": "2026-07-26T11:00:00+0300",
   "lastRun": { "id": "manual-checkslot-verify", "status": "complete" },
-  "lastWrapIso": "2026-07-26T09:30:00+0300",
+  "lastWrapIso": "2026-07-26T11:00:00+0300",
   "openIssues": [],
-  "pendingOverflow": []
+  "pendingOverflow": [],
+
+  "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. DROP an entry the moment a wave changes the code it describes — a stale 'proven clean' silences a real check, which is worse than having no list. When in doubt, drop it.",
+  "verifiedClean": [
+    "checkSlot rule ordering is verdict-preserving — reordering a first-violation-wins ladder cannot change `passes`, only which violation is reported (proved 2026-07-26 over all 6 call sites)",
+    "`viewer` is default-deny at every checkSlot call site; the only two passing 'owner' are planMeeting (owner AND not MPIM) and tasks/skill.ts (owner-bound label, traced to its only readers)",
+    "The walker's ISO-week event fetch is a strict SUPERSET of the searched range — startOf(week) of the first day, endOf(week) of the last — so a multi-week search cannot validate against a partial calendar",
+    "`RuleCheckResult.level` has exactly one construction site (checkSlot) and is computed unconditionally before any return — no literal default can assert 'free' where the scan did not run",
+    "The `mutated=` marker port is faithful: all 22 alternations of the old tool-name matcher are present in MUTATION_DOMAIN, and MUTATION_OK_RE leaves the pinned tool tape byte-identical",
+    "runCodaGates fails CLOSED on both legs and returns a verdict carrying no text, so it is structurally incapable of corrupting a coda",
+    "The date verifier cannot corrupt a reply — it swaps only the weekday token inside the detector's own matched span, and is a no-op when the lookup agrees",
+    "pickSpreadSlots `anchorMode:'first_round'` is byte-equivalent to the pre-2026-07-26 behaviour for both existing callers (the move handler and the must-be recovery)",
+    "The deleted softOccupied pass is faithfully replaced by the hoisted occupancy scan, and is strictly better: it additionally honours excludeEventIds and masks a private subject",
+    "`payload.honest_hard_reason` has exactly one writer (code-derived, model input deleted pre-gate) and one reader (owner-facing composer); no colleague path reads it"
+  ]
 }

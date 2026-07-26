@@ -109,3 +109,25 @@ export function isOverloadError(err: unknown): boolean {
     return /overloaded|rate[_ ]?limit/i.test(msg);
   }
 
+/**
+ * What Maelle says when a turn dies before she could answer.
+ *
+ * TWO lines, and only two, because two is all we can honestly tell apart from
+ * an error object. `isOverloadError` reads a real 529 / `overloaded_error` off
+ * the wire, so "I'm busy, come back in a minute" is a claim we can back. Every
+ * other failure — a DB read that threw, a guard module that wouldn't import, a
+ * Slack 5xx — we cannot name from here, so we don't name it: the second line
+ * admits a fault on our side and asks for a retry without inventing a cause.
+ * Deliberately NOT "I'm busy" (that would be a false claim) and NOT "I'm
+ * broken, don't bother" (unknowable — most of these are transient, and either
+ * way the person's only lever is to try again or go to Idan).
+ *
+ * Single source for both catches in processMessage (pre-queue and in-runner)
+ * so the wording can never drift between the two halves of the same turn.
+ */
+export function failureReply(err: unknown): string {
+  return isOverloadError(err)
+    ? `Quick coffee break, ping me again in a couple of minutes?`
+    : `Something's off on my end, give me a minute and try again?`;
+}
+

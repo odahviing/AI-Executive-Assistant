@@ -423,6 +423,13 @@ function safeFallback(draft: string, audience: HumanGateAudience, reason: string
  *   - 'internal' — same-domain colleague; can reference owner by name
  *   - 'external' — different-domain recipient; no owner-name reference
  *
+ * `channelId` is DIAGNOSTIC only — it never affects a verdict. It rides the
+ * rewrite log lines so a fire can be attributed to a SURFACE (1:1 DM vs group
+ * DM vs channel), not just to an audience frame. Without it the "rewrote draft"
+ * line could not answer "did this gate ever rewrite a group-DM reply?", which is
+ * exactly the question the audience-frame bug raised. Optional: the coda gate
+ * has no channel of its own to report.
+ *
  * Fails open: any API / parse error → return { ok: true, rewrite: null } so
  * the original draft posts unchanged. Same defensive contract as the other
  * output-pass gates.
@@ -431,6 +438,7 @@ export async function runHumanGate(
   draft: string,
   profile: UserProfile,
   audience: HumanGateAudience = 'internal',
+  channelId?: string,
 ): Promise<HumanGateResult> {
   if (!draft || draft.trim().length === 0) {
     return { ok: true, rewrite: null };
@@ -505,7 +513,7 @@ export async function runHumanGate(
         } catch (_) { /* retry failed — handled below */ }
 
         if (retry && !rewriteDroppedAFact(draft, retry)) {
-          logger.info('humanGate — re-rewrite preserved the dropped content; using it', { audience });
+          logger.info('humanGate — re-rewrite preserved the dropped content; using it', { audience, channelId });
           return { ok: false, rewrite: retry };
         }
         // Still imperfect after one pinned retry — the rewrite keeps dropping a
@@ -527,6 +535,7 @@ export async function runHumanGate(
         if (audience === 'owner') {
           logger.warn('humanGate — rewrite kept dropping load-bearing content after one retry (owner path); shipping the ORIGINAL draft, not a corrupted rewrite (R7 safe-miss)', {
             audience,
+            channelId,
             originalPreview: draft.slice(0, 120),
           });
           return { ok: true, rewrite: null };
@@ -534,6 +543,7 @@ export async function runHumanGate(
         const best = retry && retry.trim().length > 0 ? retry : parsed.rewrite;
         logger.warn('humanGate — rewrite still dropped content after one retry (colleague path); shipping cleaned rewrite, NOT the flagged original', {
           audience,
+          channelId,
           originalPreview: draft.slice(0, 120),
           shippedPreview: best.slice(0, 120),
         });
@@ -541,6 +551,7 @@ export async function runHumanGate(
       }
       logger.info('humanGate — rewrote draft', {
         audience,
+        channelId,
         originalPreview: draft.slice(0, 120),
         rewritePreview: parsed.rewrite.slice(0, 120),
       });
