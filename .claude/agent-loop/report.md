@@ -1,72 +1,84 @@
 # Agent-loop report
 
-_Cumulative since the last wrap. Nothing here is committed until the owner says **wrap** — the agents build in the working tree and stop._
-
-**Every row is written from the chat's point of view first** — what a person saw happen — then the bug, the fix, the agent, the risk. If a row can't be told as something that happened in a chat, it isn't ready to be a row.
-
-**Last wrap: 2026-07-26 → `v4.2.0` (second wave, same version).** The `checkSlot` verify wave: four build rounds, five adversarial passes, 18 files, +1,637/−626. Verdict was WRAP — every destructive path traced fails closed. Full narrative in `CHANGELOG.md`; per-dispatch history in `ledger.jsonl`.
-
-**Nothing is currently built and awaiting review.** The tables below are open work only.
+**Every row is written from the chat's point of view first** — what a person saw happen — then the bug, the lane, and the status. If a row can't be told as something that happened in a chat, it isn't ready to be a row.
 
 ---
 
-## 🔴 Needs the owner
+## 🟢 Status: nothing is waiting for your commit
 
-| # | What happened (in chat) | The bug | Why it's his call | Agent |
-|---|---|---|---|---|
-| D7 | Colleague asks *"what about Thursday?"*, Thursday is full → zero slots, and she never offers to look wider | A named narrow window deliberately never widens. The **opposite** gap from the one just fixed, on the surface it didn't touch | Same call he already made for the rule-violation path (*"you can suggest to wide the search"*). **Deferred to the next batch 2026-07-26** — not undecided, just not being fixed piecemeal | meeting |
-| #14 | — | Internal vs external boundary: the workspace has guests, no code enforces the distinction anywhere | Genuinely unresolved, not declined. A product question | — |
+**Built and committed today:** `af19500` (scheduling core) · `221c805` + `e137515` (framework) · `ac11dd6` (reply path) · `87b4f17` (intake merge rule). All 4.2.0 — same version, finishing the work.
+
+**Built and awaiting commit: NOTHING.** The tree is clean.
+
+**Everything below is UNBUILT and waiting on you.** Nothing here has been touched.
+
+> Two categories will reach you, and they are not the same:
+> - **This file** — found, understood, *deliberately not built*. You decide whether it's worth doing.
+> - **Tonight's Bugger run** — will produce rows that are **already built and uncommitted**, awaiting your review + wrap. Those appear under a separate "Built" heading with the risk to eyeball.
 
 ---
 
-## 🅿️ Parked — found, understood, deliberately not fixed (2026-07-26)
+## 🔴 A person sees something wrong
 
-_Owner's call: **"we need to stop changing… if it flag we can fix them later."** None is fixed. They re-enter the queue only if they bite in production or he picks one up. Each carries enough reasoning to act on without re-deriving it._
+| # | What happened (in chat) | The bug | Lane |
+|---|---|---|---|
+| P1 | A colleague counters your approval — changing only the subject — you get the follow-up, tick ✅, and it **books over a meeting you already have without ever naming the clash** | `resolver.ts:1043` is a **third** owner decision surface. It re-stamps the terminal message so ✅ resolves, and it never carries a hard reason | requests |
+| P2 | She truthfully sends you a file, says so — then corrects herself: *"that didn't go through yet"* | `deliver_file` is a legal claim type but not a `MutationDomain`, so `mutated=deliver_file` can never be true → shield off → the checker "corrects" a **true** claim. Same for `hold_slot`, `revert_last_auto_move`, `set_work_schedule_override` | guard |
+| P3 | A colleague sees a **raw internal id** | The scrubber *detected* it and couldn't wrap it — detector is `[A-Z0-9]{7,}`, wrapper is `[A-Z0-9]{7,10}` — and `securityGate` then ships the original anyway, on a fail-open justified by a re-wrap that is a no-op. **This is the 2026-07-01 Oran leak shape** | guard |
+| P4 | She correctly tells a colleague *"let me check with Idan and come back to you"* — and the whole reply is sent to Sonnet to have "planning narration" stripped. Separately, a Hebrew planning leak is never caught at all | `DELIBERATION_RE` is the sole trigger and it is English-only; the veto that protects the rewrite only guards @mentions, times, dates and questions, so a commitment sentence can be deleted | guard |
+| P5 | An API blip mid-turn and your entire answer becomes *"Sorry — I hit a snag on this one"* | `humanGate` `safeFallback` fires on any throw when the draft contains a request id — which you legitimately see. The probe makes one outage hit it twice | guard |
+| P6 | *"The OpenAI meeting moved to 3"* comes back as an English error message | `securityGate`'s `model_leak` trigger matches bare vendor names and is disclosure-class, so an unsalvageable draft becomes the safe-fallback | guard |
+| P7 | A Hebrew or Russian speaker hits an error and gets an **English** apology | The new reply-path failure lines are English-only — and this one **cannot** use an LLM, because on the 529 path the model is exactly what is unavailable. Needs `detectMessageLanguage` + a static table | slack |
+| P8 | Graph goes down at the network level: instead of *"Idan's calendar is offline"* she surfaces a raw error and improvises | Graph's SDK erases the cause chain and sets `statusCode: -1`, so the transport-errno branch of `isOutageShaped` is unreachable. **Fails closed — nothing books** | meeting |
+| P9 | You ask what's on your calendar during an outage and she improvises off a raw error string | `get_calendar` is the one meeting surface the offline refusal deliberately didn't cover | meeting |
+| P10 | Graph is down, a colleague asks *"is Idan free at 3?"* — she answers with **no verdict behind it** | The pre-check injects nothing on failure. Safe (silence, not a wrong answer), but only the model choosing to call a tool protects the colleague | guard |
+| P11 | On a vacation day she's told *"do NOT say he's booked"* and then handed the exact sentence *"he's booked then"* | `availabilityPreCheck.ts:653` contradicts its own footer at `:663`. Wording only — the verdict is a correct no | guard |
+| P12 | She offers you a Thursday slot sitting over an optional meeting and doesn't mention it | The alternatives payload drops the `over_optional` tag. Pre-existing; the anchor change raised its likelihood | meeting |
+| P13 | A time that has **already passed** is described to a colleague as *"excluded by day-load protections"* and they're invited to ask you to override it | `in_the_past → within_lead_time` mapping, and nothing clamps `search_from` to now | meeting |
+| P14 | Two rounds of options, then *"the 11:00 you offered"* doesn't resolve | Two full 8-slot offers evict the oldest 4 from the 12-slot stash | meeting |
+| P15 | A malformed calendar request reads as *"nobody is busy"* | Three fail-opens left in `getFreeBusy`. **Deliberately not fixed** — they're malformed-request classes, and refusing would recreate the #137 mis-escalation in reverse | meeting |
+| P16 | You override onto a vacation day and the search offers nothing | The day-level OOO gate isn't relaxed-aware. Direct `create_meeting(relaxed)` still books. Reads as your stated intent — flagged as a delta | meeting |
+| P17 | She's handed a new reason code the prompt never taught her, and an existing line argues against narrating it correctly | `owner_out_of_office` missing from `meetings.ts:197-206` | context |
+| P18 | In a real **channel**, nothing checks whether she claimed to have done something she didn't | `isChannel` never reaches the gate stack, so `claimChecker` doesn't run there. Separate from the group-DM bug, which is fixed | guard |
+| P19 | A leak she caught and scrubbed is **stored unscrubbed**, replayed to the model next turn, and fed to the coda generator | The colleague leg never writes the post-gate text back to history | guard |
+| P20 | A rewrite introduces a wrong weekday and nothing re-checks it | On the colleague leg `dateVerifier` runs *before* the two rewriters | guard |
 
-| What would happen | Where | Why parked |
+## 🟡 Latent — nothing visible today, but one edit away
+
+| # | What would happen | The bug | Lane |
+|---|---|---|---|
+| P21 | A colleague reads private meeting subjects and attendee emails | `list_pending_approvals` ships the whole payload. Owner-only today, blocked at two chokepoints — but nothing in that tool needs more than id/kind/subject/dates | requests |
+| P22 | A colleague-path `move_meeting` sets the override flag directly, so *"`allowRelaxed` implies the owner"* is true in the comment and false in the code | `moveMeeting.ts:1094`, the one exception in a 7-site enumeration. Neutralised today by the strict pre-gate above it, and nothing branches on the invariant | meeting |
+| P23 | A 429 or rolling-restart 503 reads as a full outage more often than needed | The offline retry has no backoff — two calls, same tick | meeting |
+| P24 | A health check dumps a raw Graph error into her context during an outage | `calendarHealth` isn't routed through the offline wrapper. Fail-closed is right; only the wording is inconsistent | meeting |
+| P25 | Out-of-hours occupied slots outrank the true in-hours blocker in day narration | They now return rule 8 instead of rule 5, escaping the noise filter | meeting |
+
+## ⚪ Wrong comments and drift risk — no behaviour
+
+| # | The bug | Lane |
 |---|---|---|
-| A counter that changed only subject or duration leaves a still-valid clash **unnamed** on a surface where ✅ books | `resolver.ts:1043` `notifyOwnerOfColleaguePushback` — a **third** owner decision surface, never named in any brief | All three message parts genuinely differ from the other two surfaces, and the reject branch must carry no consequence. Needs his judgment: re-name a clash on a counter he has already seen once? |
-| The pending-approvals list ships the **whole payload** — rule label with a private subject, attendee emails, the hard reason | `skill.ts:1343` | Owner-only today, blocked for colleagues at two chokepoints (verified). But nothing in that tool needs more than id/kind/subject/dates — it is one allowlist edit from a leak |
-| **A colleague-path `move_meeting` can still set `relaxed` raw** — so the invariant *"`allowRelaxed` implies the owner"* is documentation-true, not code-true | `moveMeeting.ts:1094`, the one exception in a 7-site enumeration | Neutralised today by the strict pre-gate above it: relaxed can only apply to a window that already passed every rule strictly, and **nothing branches on the invariant**. Unchanged by this wave. Fix is one conjunct: `&& context.senderRole === 'owner'` |
-| **The "calendar is offline" refusal never appears for a real network outage** | Graph's SDK sets `statusCode: -1` and copies only `.stack`, erasing the `cause` chain — so the transport-errno set is unreachable | Every path **fails closed**; nothing books. One is strictly better than baseline, where a failed read returned `[]` and the move proceeded on a falsely-clean verdict. Settled by one real 5xx in the logs |
-| A 429 or rolling-restart 503 reads as "offline" more often than needed | the retry has no backoff — two calls, same tick | Pessimistic, not wrong |
-| An outage in `check_calendar_health` / `auto_move` surfaces a raw Graph string into model context | `calendarHealth` is not routed through the offline wrapper | Fail-closed on an autonomous move is right; only the wording is inconsistent. Owner-only surface |
-| During an outage the colleague pre-check injects **nothing** — a colleague asking "is Idan free at 3?" is protected only by the model choosing to call a tool | `availabilityPreCheck.ts:385` | Safe failure (silence, not a wrong verdict). The fix is upstream of the guard lane |
-| The OOO pre-check says *"do NOT say he's booked"* and its own footer then supplies exactly that sentence | `availabilityPreCheck.ts:653` vs `:663` | Wording only — the verdict is a correct no |
-| `owner_out_of_office` is a reason code the prompt doesn't know, and an existing line argues against narrating it correctly | `meetings.ts:197-206` | Context-lane lag behind a code change |
-| An *Optional* slot on the requested day can be offered ahead of a *Free* slot elsewhere, unannotated | `planMeeting.ts:695-701` — `asAlternative` projects to `{start,end,label}` only | Pre-existing; the anchor change raised its likelihood. Belongs with whoever next touches the M3 annotation plumbing, as one change |
-| A **relaxed** search on an OOO day now returns zero slots where it previously surfaced them | the day-level gate sits above the walk and isn't gated on `relaxed` | Reads as his stated intent (*"it should be blocked anyway"*). Direct `create_meeting(relaxed)` still books. A delta, not a defect |
-| The soft-block hint can name an already-passed time as "excluded by day-load protections" | `in_the_past → within_lead_time` at `findAvailableSlots.ts:667`; nothing clamps `search_from` to now | The mapping is pre-existing; only the sharper claim around it is new |
-| Two full 8-slot offers evict the 4 oldest from the 12-slot stash, where `6+6` used to fit | `MAX_OFFERED = 12` vs `offered_slot_count = 8` | Worst case is a re-derive on a pick from the first batch — not a wrong booking, still better than before |
-| Two copies of the all-day-OOF predicate that agree exactly today | `scheduleRules.ts:409`, inline at `analysis.ts:367` | Drift risk only |
-| `getFreeBusy` reads three **malformed-request** faults as "nobody is busy" | `calendarReads.ts:406-410`, `:412-417`, `:503-508` | Not outages. Converting them would recreate the #137 mis-escalation in reverse |
-| `get_calendar` during an outage reaches the model as a raw error string and it improvises | `handleGetCalendar` | The one meeting surface the offline work deliberately did not cover |
-| `analysis.ts:346` — the day-off push path doesn't carry `outOfOfficeAllDay` | meeting's file | Not live: the renderer skips day-off rows. An asymmetry a future consumer could trip on |
-| **Two product deltas beyond the literal ask** — the soft-rule offer grew from a hard 3 to `offered_slot_count` (**8**); and an empty-requested-day + non-empty-widening now **proposes autonomously** where it used to escalate | `planMeeting.ts:930` | Both follow from his two decisions. Named so they aren't discovered later. Restoring the escalation is a one-line call |
+| P26 | `runOutputGates.ts:35` still states *"Every gate FAILS OPEN"*. False on the colleague leg — two unwrapped paths. Today's fix means a throw reaches the person as a sentence, but the contract is still wrong | guard |
+| P27 | `inboundQueue.ts:199-201` says an aborted turn's message "is still in pending". It isn't — `scheduleRun` clears it. No information is lost; the comment describes a mechanism that doesn't exist | slack |
+| P28 | A third copy of the overload string at `handlers.ts:182`. Different shape, so deliberately not folded into `failureReply` | slack |
+| P29 | Two copies of the all-day-OOF predicate (`scheduleRules.ts:409`, inline at `analysis.ts:367`). They agree exactly today | meeting |
+| P30 | `analysis.ts:346` — the day-off push path doesn't carry `outOfOfficeAllDay`. Not live: the renderer skips day-off rows | meeting |
+| P31 | The occupancy scan is now unconditional — roughly **3× the scan work** on a 21-day search. **Unmeasured**; needs a wall-clock delta, not a code read | meeting |
+| P32 | All-day `workingElsewhere` counts as a hard commitment in one place and explicitly doesn't in another. Pre-existing, zero occurrences in the logs | meeting |
 
-**From the reply-path audit (2026-07-26).** Its two HIGHs were built and shipped; these are the rest. It also corrected a premise worth keeping: the `989→348` restructure was **4.1.0 (`6fe4251`)**, not the 4.2.0 wave — so this path had never had a scoped pass at all — and the 640 "deleted" lines were a **move** into `runOutputGates.ts`, not a loss.
+## 🔵 Product calls, not defects
 
-| What would happen | Where | Why parked |
+| # | The question | Lane |
 |---|---|---|
-| **A Hebrew deliberation leak is never caught; and *"let me check with Idan and come back to you"* — the canonical correct colleague escalation — is sent to Sonnet to have "planning narration" stripped** | `runOutputGates.ts:637` `DELIBERATION_RE`, sole trigger, runs on **every** reply | Shipped 01:49 on 26 Jul → **zero fires in the logs, and that silence is not evidence**. The `rewriteDroppedAFact` veto only protects @mentions, times, dates and questions, so a commitment sentence carrying none can be deleted. G7: an English regex as the only eye. Replaying it over the ~200 replies already in the logs would size the false-positive rate today |
-| A truthful *"I sent the file"* is rewritten into *"that didn't go through yet"* | `deliver_file` is a legal `ClaimActionType` but not a `MutationDomain`, so `mutated=deliver_file` can never be true. Same for `hold_slot`, `revert_last_auto_move`, `set_work_schedule_override` | Missing marker → shield off → the claim-checker **corrects a true claim**. Only backstop is its own Sonnet veto. Adjacent to open bug #144. The port itself was verified faithful, 22/22 alternations |
-| A colleague sees a raw internal id: the scrubber failed to wrap it, and the fallback ships the original anyway | `securityGate.ts:474-480` fail-open, justified by "runOutputGates re-wraps" — but that second `formatForSlack` is a no-op on an unchanged string. Reachable via a real bound mismatch: detector `[A-Z0-9]{7,}` vs wrapper `[A-Z0-9]{7,10}` in `textScrubber.ts` | Any id 12+ chars is detected but never wrapped. **This is the 2026-07-01 Oran leak shape.** The gate's narrowing was verified correct — the defect is the circular rationale plus the bound |
-| A leak `securityGate` scrubbed is stored **unscrubbed**, replayed to the model next turn, and fed to the coda generator | `postReply.ts:389-392` persists the pre-gate text; the colleague leg never writes back. Owner leg self-repairs | Pre-existing. The gate catches it once and memory re-emits it |
-| A correct owner reply is replaced wholesale by *"Sorry — I hit a snag on this one"* during an API blip | `humanGate.ts:400-413` `safeFallback` fires on any throw when the draft contains a request id — which the owner legitimately sees | Deliberate trade, but the trigger is an outage and the failure mode is destroying a good answer. The probe amplifies it: one outage hits the branch twice |
-| `runOutputGates.ts:35` still states *"Every gate FAILS OPEN"* | Two colleague-leg paths are unwrapped (`await import('../../db')` + a sync `getPersonMemory`; `runSecurityGate`) | Today's reply-path fix means a throw there reaches the person as a sentence instead of silence — but the module's stated contract is still wrong |
-| *"The OpenAI meeting moved to 3"* becomes the English safe-fallback | `securityGate.ts:59` `model_leak` is `disclosure`-class and matches bare vendor names | Pre-existing on every colleague reply; the MPIM fix extends it to the owner's turns in that room. Wants a self-referential frame like its sibling `model_self_ref` |
-| Owner in a **real channel** gets no `claimChecker` | `isChannel` never reaches the gate stack, so `ownerIsActing` is false there | A separate coverage gap, not the MPIM bug — that path already gets `securityGate` + the `'internal'` frame. Needs `isChannel` on `OutputGateContext` |
-| A `securityGate` or `humanGate` rewrite is never re-date-verified | On the colleague leg `dateVerifier` runs **before** the two rewriters | Pre-existing. Unifying the order would change the owner-1:1 leg |
-| The new reply-path failure lines are **English only** | `failureReply()` in `slack/app/helpers.ts` | Hebrew and Russian speakers hit this path too — and it **cannot** be fixed with an LLM, because on the 529 path the model is exactly what is unavailable. Needs `detectMessageLanguage` + a static table |
-| A third copy of the overload string | `handlers.ts:182`, the file-ingest ladder | Different shape (boolean, different non-overload branch), so deliberately not folded into `failureReply` |
-| `inboundQueue.ts:199-201`'s comment says an aborted turn's message "is still in pending" | `scheduleRun:244-245` clears `pending` when the batch starts | No information is lost (the message was already appended to history), but the comment describes a mechanism that does not exist. Comment-only |
+| D7 | A colleague names a day, it's full → zero slots, and she never offers to look wider. **The same call you already made** for the rule-violation path (*"you can suggest to wide the search"*), on the surface it didn't touch. Deferred to this batch, not undecided | meeting |
+| D8 | Two deltas beyond your literal ask, already live: the soft-rule offer grew from a hard **3 to 8**, and an empty requested day now **proposes other days itself** where it used to escalate to you. Both follow from your two decisions. Restoring the escalation is one line | meeting |
+| #14 | Internal vs external boundary — the workspace has guests, no code enforces the distinction anywhere. Genuinely unresolved, not declined | — |
 
 ---
 
-## ⏳ Carried forward from earlier waves — not yet built
+## ⏳ Carried forward from earlier waves
 
 **people lane** — from the v4.1.0 person-store verify. None can fire on today's data.
-1. `src/db/people.ts` (~962) — the md merge sits **outside** the row transaction. Process death between the row commit and the md fold orphans a file the migration sweep never revisits. **The only non-self-healing residue — first.**
+1. `src/db/people.ts` (~962) — the md merge sits **outside** the row transaction; process death between the row commit and the md fold orphans a file the sweep never revisits. **The only non-self-healing residue — first.**
 2. `v4_0_4` migration (66-78) — a `refused` group re-dumps a backup JSON every boot.
 3. `src/memory/peopleMemory.ts` (~184) — mixed legacy-filename case can orphan a legacy file permanently.
 4. `src/db/people.ts` (~911) — `gender_confirmed` set outside the provenance pick. One row today, inert.
@@ -82,7 +94,7 @@ _Owner's call: **"we need to stop changing… if it flag we can fix them later."
 
 ## ✔️ Closed as correct — do not re-litigate
 
-#13 channel continuation · #46 the 20-message window (charter amended instead) · #47 DM queue coalescing · #50 meaning-classifiers in the transport · #5 · #21 · #24 · #52 · F1 barber vs opaque block · F2 stale coda topic. Plus, from this wave: **rule 1 (`vacation_or_off_day`) having no relaxed gate is correct** — its current behaviour is what the owner asked for.
+#13 channel continuation · #46 the 20-message window (charter amended instead) · #47 DM queue coalescing · #50 meaning-classifiers in the transport · #5 · #21 · #24 · #52 · F1 barber vs opaque block · F2 stale coda topic · **rule 1 (`vacation_or_off_day`) having no relaxed gate** — its current behaviour is what the owner asked for.
 
 ## 📌 Known and accepted
 
@@ -94,8 +106,8 @@ Coverage is bounded by the charters, not the code. **`news` · `summary` · `ven
 
 ## 📌 Standing notes for the next run
 
-- **The scheduling core has no runtime evidence.** Everything the second 4.2.0 wave changed is derived from reading code — she had handled zero scheduling turns when it shipped. The next log review is the first real test; weight it accordingly.
-- **Pre-flight activity check must count real turns** — count `Orchestrator invoked` events, not raw log lines.
-- **Backticks in `bugger.js` prompts must be escaped** — an unescaped one surfaces misleadingly as `Workflow "bugger" not found`.
+- **Where these 30 came from.** Not the 68 — those were the charter audit, ~40 built and shipped in `34ee3e7`. These are **new, found 2026-07-26** by four verify passes on the scheduling core (~18) and one scoped audit of the reply path (~12). Most are **pre-existing**, not from any recent wave: the reply-path items live in 4.1.0 code that had never been examined. Two subsystems at this depth yielded 30 items — assume similar density elsewhere.
+- **The scheduling core and the reply path have almost no runtime evidence.** Only the gap-probe fix had real log tape. Everything else is derived from reading. The next log review is the first real test — weight it accordingly.
+- **`state.json` carries `verifiedClean`** — 10 things today's passes proved, passed back as `priorClean` so a verify skips them. **Drop any entry a wave invalidates**; a stale "proven clean" silences a real check.
 - **Cron** job `638d42b0` armed daily at 18:00; session-only, **auto-expires 2026-08-01** → re-run `/manager watch` before then.
-- **Verify discipline now lives in the Manager charter** — one pass per wave, clean list carried forward, depth scaled to risk, tool budget stated. Written against this wave's measured 44%.
+- **Backticks in `bugger.js` prompts must be escaped** — an unescaped one surfaces misleadingly as `Workflow "bugger" not found`. Syntax-check with the runtime's async wrapper before shipping a prompt edit.
