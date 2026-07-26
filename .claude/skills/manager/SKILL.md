@@ -1,6 +1,6 @@
 ---
 name: manager
-description: 'Control panel for Maelle''s bug loop. COMMANDS — report (what needs you) · status · ledger · run (full pass now) · build <ids> (build parked rows) · feature (improvements) · resend <id> <feedback> · wrap · watch (nightly 18:00). Bare /manager prints the menu + status. Orchestrates the seven charter-bound lanes (meeting/requests/guard/people/context/slack/outer): GitHub Bug issues + the 24h log review → triage → parallel builds, context last → one combined verify → cumulative report. NEVER commits — only the owner wraps. Also triggered by "open the manager", "run the loop", "show the report", "wrap up and close".'
+description: 'Control panel for Maelle''s bug loop. COMMANDS — report (what needs you) · status · ledger · run (full pass now) · build <ids> (build parked rows) · feature (improvements) · resend <id> <feedback> · wrap · watch (nightly 18:00). Bare /manager prints the menu + status and is READ-ONLY — only an explicit "run" or "build" ever dispatches agents or writes files, never a question about state. Orchestrates the seven charter-bound lanes (meeting/requests/guard/people/context/slack/outer): GitHub Bug issues + the 24h log review → triage → parallel builds, context last → one combined verify → cumulative report. NEVER commits — only the owner wraps. Also triggered by "open the manager", "run the loop", "show the report", "wrap up and close".'
 ---
 
 # Manager — the agent-loop control panel
@@ -64,6 +64,8 @@ Context loads **once per lane per run** — never per bug, never every 10 minute
 ## Commands
 
 Invoke as `/manager <command>` (e.g. `/manager run`), or just say the command once the Manager is open.
+
+**Bare `/manager` is READ-ONLY. It prints the menu and the status and stops there** — it never starts a run, never dispatches a lane, never writes a file, and **never reads "it is past 18:00" as permission to do any of that.** Someone glancing at the state is not asking to spend money and write to the working tree. If today's run hasn't happened, *say so in one line* and wait to be asked.
 
 **Bare `/manager` — or `help`, `options`, `menu`, `what can you do` — PRINTS THE MENU BELOW, then the status.** He should never have to open this file to find out what he can ask for. Print it exactly like this, compact, then the status underneath. Mark a row **(n/a)** with a one-clause reason when it cannot do anything right now — "nothing parked", "no run yet today" — so the menu doubles as a state read:
 
@@ -154,7 +156,22 @@ Bulletproof upgrade (survives restarts, no open chat, no weekly re-arm): a Windo
 If a legacy `sleep`-loop timer from an earlier session is still running, stop it (`TaskStop`) before arming the cron, so the night can't fire twice.
 
 ## Running the loop
-1. **Resume check FIRST (also the overlap lock).** If `state.lastRun.status !== 'complete'`, resume it: `Workflow({ name:'bugger', resumeFromRunId: state.lastRun.id })` — completed agent work replays from cache; it continues from exactly where a credit-lock / kill stopped it. This doubles as the anti-overlap lock: a poll tick that sees a run already in progress **resumes** it rather than starting a second concurrent run. Only start fresh when there is nothing to resume.
+
+### PRE-FLIGHT — three hard stops, checked BEFORE anything else
+
+A run dispatches lanes that **write to the working tree**. That makes an unwanted run a hazard, not merely an expense. All three of these are refusals, not warnings — say why and stop.
+
+**STOP 1 · The tree has uncommitted work.** Run `git status --porcelain`. If modified files under `src/` exist, **do not run.** The owner is either reviewing that work or editing it by hand, and a lane dispatched now is a **second writer on the same files** — that is lost or corrupted work, not wasted tokens. Say: *"N source files are uncommitted. Wrap or revert first, or tell me to run anyway."* Only an explicit "run anyway" overrides it.
+
+*(This happened on 2026-07-26 at 20:30: a run started in the chat where the owner was hand-fixing bugs, with 17 modified files in the tree. Nothing existed to stop it.)*
+
+**STOP 2 · A run is already in flight.** If `state.lastRun.status === 'running'`, **do not start a second one** — resume that runId or wait. Two concurrent workflows put six lanes each into the same tree. Never treat a running run as absent because it is slow.
+
+**STOP 3 · Only `run` starts a run.** `report`, `status`, `ledger`, and bare `/manager` are **strictly read-only**. They may *state* that today's run hasn't happened; they must **never start one**, and must never interpret "it's past 18:00" as permission. A passive question is not a request to spend money and write files. The nightly cadence fires from `watch`/cron with an explicit `/manager run` — never from someone glancing at the report.
+
+### Then
+
+1. **Resume check (also the overlap lock).** If `state.lastRun.status !== 'complete'`, resume it: `Workflow({ name:'bugger', resumeFromRunId: state.lastRun.id })` — completed agent work replays from cache; it continues from exactly where a credit-lock / kill stopped it. This doubles as the anti-overlap lock: a poll tick that sees a run already in progress **resumes** it rather than starting a second concurrent run. Only start fresh when there is nothing to resume.
 2. **Invoke the engine:** `Workflow({ name:'bugger', args:{ sources:['github','logs'], sinceIso:state.lastSeenIso, capBuilds:100, verify:true, priorClean:state.verifiedClean, alreadyBuilt:<from the ledger — see below> } })`. Immediately record the returned `runId` into `state.lastRun` with `status:'running'` (so a mid-run lock is resumable).
 
    **`alreadyBuilt` is what makes unattended multi-day running work.** Derive it from `ledger.jsonl`: every entry whose fix is **not yet in the running build**, passed as `[{ref, symptom, rootCause, state}]`. Production keeps emitting a symptom until the fix is *deployed* — not merely committed — so the log review honestly re-finds it every night. The lane does catch it and return `already-fixed`, but only after a full dispatch: the entire price of the bug, paid again, for no result. Three nights away is three times. Passing refs rather than prose turns the match from a guess into a lookup.
