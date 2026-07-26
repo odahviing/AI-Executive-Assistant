@@ -101,7 +101,57 @@ if (openOnly) {
   // inflating a 25-item backlog to 31 and burying the real decisions. A verdict
   // that means "this happened" must never appear in a list that means "act".
   const CLOSED = new Set(['built', 'already-fixed', 'audit']);
-  const open = scoped.filter((r) => !CLOSED.has(r.verdict));
+
+  // ── COLLAPSE BY REF ────────────────────────────────────────────────────────
+  // The ledger is APPEND-ONLY, so one item legitimately has several rows: parked
+  // on Monday, built on Tuesday. Filtering row-by-row therefore reported items as
+  // open that had already shipped — 37 "open" when the true number was 6. Two
+  // distinct causes, both handled here:
+  //
+  //   1. Same ref, later row closes it (P24, P25, P32, gh#148).
+  //   2. The closing row used a COMBINED ref because one dispatch covered several
+  //      items — `P29+P30`, `A2+A3`, `P27+P28+gate-order`, `gh#41-step1`. Those
+  //      never string-matched the original, so the item looked untouched.
+  //
+  // Tokenising handles both. Matching is exact per token, never substring, so
+  // `P2` is not closed by `P24`.
+  const refTokens = (ref) => {
+    const out = new Set();
+    const raw = String(ref || '').trim();
+    if (!raw) return out;
+    out.add(raw);
+    for (const part of raw.split(/[+,/]| and /i).map((s) => s.trim()).filter(Boolean)) {
+      out.add(part);
+      // `gh#41-step1` / `P19-part2` / `A2-1` → also close the base item
+      const m = part.match(/^(.+?)[-–_](?:step|part|phase)?\s*\d+$/i);
+      if (m && m[1].length > 1) out.add(m[1]);
+    }
+    return out;
+  };
+
+  const closedBy = new Map(); // ref token -> the row that closed it
+  for (const r of scoped) {
+    if (!CLOSED.has(r.verdict)) continue;
+    for (const t of refTokens(r.ref)) if (!closedBy.has(t)) closedBy.set(t, r);
+  }
+
+  // Keep the LATEST row per ref, so a re-raised item shows once with its newest state.
+  const latest = new Map();
+  const refless = [];
+  for (const r of scoped) {
+    if (CLOSED.has(r.verdict)) continue;
+    if (!r.ref) { refless.push(r); continue; }
+    latest.set(r.ref, r); // ledger is chronological, so last write wins
+  }
+  const collapsed = [];
+  const open = [];
+  for (const r of latest.values()) {
+    const closer = closedBy.get(r.ref);
+    if (closer) collapsed.push({ r, closer });
+    else open.push(r);
+  }
+  // A row with no ref cannot be collapsed — that is exactly what `ref` is for.
+  open.push(...refless);
   if (!open.length) {
     console.log('\nNothing open. Every ledger row is built or already-fixed.\n');
     process.exit(0);
@@ -122,6 +172,15 @@ if (openOnly) {
     }
     console.log('');
   }
+  if (collapsed.length) {
+    console.log(`Collapsed ${collapsed.length} row(s) that a later row already closed — shown so a WRONG collapse is visible:`);
+    for (const { r, closer } of collapsed) {
+      const via = closer.ref === r.ref ? 'same ref' : `via "${closer.ref}"`;
+      console.log(`  ${r.ref} → ${closer.verdict} (${via})`);
+    }
+    console.log('');
+  }
+  if (refless.length) console.log(`! ${refless.length} open row(s) carry NO ref, so nothing can ever close them automatically. Give every ledger row a ref.\n`);
   console.log(`To build a lane's list:  say "build the <lane> ones" and the Manager dispatches that lane directly.`);
   console.log(`Anything you do not want: say so and it is recorded as declined, not silently left open.\n`);
   process.exit(0);
