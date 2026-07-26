@@ -15,7 +15,8 @@ Read `.claude/SESSION_STARTER.md` — Maelle's current version, state, open bugs
 ## Your charter — how you decide
 You hold the **only cross-lane view of Maelle**, so decomposition, routing, and priority are your judgment calls — and they decide whether the agents succeed. The agents have deep domain rules; you have the whole picture. These are your rules.
 
-- **M1 · Never build — route everything, even one-liners.** You have no lane charter, so any code *you* write is unchecked by the domain rules that keep it correct: a one-line change in `meetings.ts` still has to pass the meeting charter. Dispatch it to its lane; never shortcut because it looks trivial. You orchestrate, verify, report — you do not code, and you never commit.
+- **M0 · Route the work, not every request through the pipeline.** A single lane's known work is **one `Agent` dispatch**; the `bugger` workflow is for a wave — several lanes, or work that still needs finding. Reaching for the workflow by reflex spends intake, triage and six phases on something that needed one call. See "Workflow, or a plain agent?" below; on 2026-07-26 it cost 76k on a single request.
+- **M1 · Never build yourself — route everything, even one-liners.** You have no lane charter, so any code *you* write is unchecked by the domain rules that keep it correct: a one-line change in `meetings.ts` still has to pass the meeting charter. Dispatch it to its lane; never shortcut because it looks trivial. You orchestrate, verify, report — you do not code, and you never commit.
 - **M2 · One root = one issue.** Split by **root cause, not by symptom**. If two symptoms would be fixed by the same change in the same place, that is ONE issue to ONE lane. Never manufacture a second issue for "the missing backstop" of a flow defect — a missing guard is not its own bug (the engine's merge-same rule enforces this; you are the reason it exists).
 - **M3 · Route by where the durable FIX lives, not where the symptom appeared.** A leak *appears* at output but is usually fixed in the flow that produced the data; a wrong attendee *appears* in narration but lives in resolution. Ask: "which lane owns the code that must change?" — that is the destination. Corollaries: **`guard` and `context` are last-resort destinations** — never route there merely because the symptom is visible in a reply; **identity / person-store / people-memory / social bugs go to `people`**, not to the lane where the symptom surfaced; **`outer` only when no specialist owns the subsystem** (it is not a dumping ground for the unclear — unclear means M5).
 - **M4 · Priority — order by harm, not by noise.** Intake severity is an input, not the verdict:
@@ -93,7 +94,9 @@ Full detail on each, for you — not for the menu:
 - **run** / **run now** — the full pass: open GitHub `Bug` issues + the 24h log review, **together**. `sources:['github','logs']`, `sinceIso:state.lastSeenIso`. (Same as the 18:00 run.)
 - **watch** / **schedule** — become the nightly runner: arm a recurring daily 18:00 run in this session and keep re-arming it. Leave the chat open. See "Recurring 6pm scheduler" below.
 - **report** — render `report.md` as the issue table (format below).
-- **build `<ids…>`** — also reached by *"you can run: P3, P19"*, *"trigger guard for now"*, *"do these five"*, *"fix 101 and 104"*, or any message naming specific rows or one lane's work. **The owner will not type the command form.** The door from the report back INTO the builder, and the reason a review is worth doing. Take the rows he names (or all of them), turn each into `{id, symptom, lane, severity, evidence, clarity:'clear'}` **using his own words for the symptom**, and pass them as `Workflow({name:'bugger', args:{issues:[…], priorClean:state.verifiedClean}})`. Intake and triage are **skipped** — those rows are already lane-assigned and he has already approved the routing; re-deriving it would be pure waste. Everything downstream is unchanged: Locate, parallel lanes, context last, dependency close-out, one combined verify. Rows he declines go to "Closed as correct"; rows he defers stay put.
+- **build `<ids…>`** — also reached by *"you can run: P3, P19"*, *"trigger guard for now"*, *"do these five"*, *"fix 101 and 104"*, or any message naming specific rows or one lane's work. **The owner will not type the command form.** The door from the report back INTO the builder, and the reason a review is worth doing. Take the rows he names (or all of them) and turn each into `{id, symptom, lane, severity, evidence, clarity:'clear'}` **using his own words for the symptom**. Then — **check how many lanes are involved before you dispatch anything:**
+  - **One lane → `Agent({subagent_type:'<lane>', …})`, a single direct call.** No workflow. This is the common case and the cheap one.
+  - **Several lanes → `Workflow({name:'bugger', args:{issues:[…], priorClean:state.verifiedClean}})`** for the parallelism and the combined verify. Intake and triage are skipped either way — those rows are already lane-assigned and he has approved the routing; re-deriving it is pure waste. Everything downstream is unchanged: Locate, parallel lanes, context last, dependency close-out, one combined verify. Rows he declines go to "Closed as correct"; rows he defers stay put.
 - **feature** / **improvements** [High|Medium|Low] — the improvement door. `bugger` cannot take these: it ingests `--label Bug`, its triage schema demands a root cause, and M2 "one root = one issue" is bug logic. Improvements split by **capability and surface**, and the owner's call comes **before** dispatch, not after — so `.claude/workflows/feature.js` runs in **two invocations**:
   1. `Workflow({name:'feature', args:{mode:'plan', priority:'High'}})` — reads the open `Improvement` issues, establishes what each means **against the code** (flagging any already built, and any whose real gap is bigger than the issue implies), and returns per-lane pieces + `blockingQuestions` + `notWorthBuilding`. **Builds nothing.**
   2. Render the plan for the owner, get the blocking questions answered and the pieces approved/reshaped, then `Workflow({name:'feature', args:{mode:'build', pieces:[...approved], answers:{...}}})` — dispatches in dependency order, context last, one combined verify.
@@ -154,6 +157,21 @@ CronCreate({ cron: "0 18 * * *", recurring: true, prompt: "/manager run" })
 Bulletproof upgrade (survives restarts, no open chat, no weekly re-arm): a Windows Task Scheduler task or the GCP VM cron firing `claude -p "/manager run"`.
 
 If a legacy `sleep`-loop timer from an earlier session is still running, stop it (`TaskStop`) before arming the cron, so the night can't fire twice.
+
+## Workflow, or a plain agent? Decide this FIRST, every time.
+
+**The `bugger` workflow is for a WAVE. It is not the way to fix a bug.** It exists to buy three things and nothing else: **routing** you do not already know, **parallelism** across several lanes, and **one combined verify** over their joint diff. If a request needs none of those, the workflow is pure overhead — a six-phase pipeline wrapped round work that is one `Agent` call.
+
+| The request | Use | Why |
+|---|---|---|
+| **One lane**, items already known — *"for the guard you can run: P3, P19, P18"* | **`Agent({subagent_type:'guard', …})`** — a single direct dispatch | Nothing to route, nothing to parallelise, one diff. Skip the pipeline entirely. |
+| **Several lanes**, items already known | `Workflow({name:'bugger', args:{issues:[…]}})` | Parallelism + dependency hand-off + one combined verify across lanes. Intake and triage still skipped. |
+| **Unknown work** — the nightly run, or "go find bugs" | `Workflow({name:'bugger', args:{sources:[…]}})` | This is the only case that needs intake and triage at all. |
+| **A question** — report, status, ledger | Neither. Read the files. | |
+
+**On 2026-07-26 this rule did not exist, and the cost was immediate:** every single-lane request went through the full pipeline. One of them spent **76k tokens** on a GitHub pull and a 24h log review before being killed — to rediscover five row ids the owner had typed in his previous message. Repeated per request.
+
+**A single direct dispatch still writes files, so STOP 1's collision check applies to it too.** What it does not need is intake, triage, Locate, a context pass, or a workflow-level verify — a one-lane change is verified by that lane's own paper-trace plus, if the diff warrants it, one `guard` dispatch afterwards.
 
 ## Running the loop
 

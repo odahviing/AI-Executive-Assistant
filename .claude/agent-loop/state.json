@@ -1,6 +1,7 @@
 {
   "lastSeenIso": "2026-07-26T19:19:00+0300",
-  "lastRun": { "id": "wf_40d78c7e-80b", "status": "complete" },
+  "_lastRunNote": "status MUST be one of complete | running | stopped. `stopped` exists because a run the owner kills leaves `running` set forever, and the resume rule then re-fired on every subsequent turn — a restart loop that spawned wf_79ce66bb-efc while wf_62f4811d-7fe was already dead. NEVER auto-resume: a dead run and a slow one are indistinguishable from this file, so resuming is a guess. Report the state and ask.",
+  "lastRun": { "id": "wf_62f4811d-7fe", "status": "stopped", "note": "owner-stopped 2026-07-26 ~20:31, 4 agents started / 3 returned. wf_79ce66bb-efc started at 20:34 as a restart-loop artefact, not a request." },
   "lastWrapIso": "2026-07-26T11:00:00+0300",
   "openIssues": [],
   "pendingOverflow": [],
