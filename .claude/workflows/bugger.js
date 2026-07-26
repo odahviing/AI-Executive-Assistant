@@ -1,7 +1,7 @@
 export const meta = {
   name: 'bugger',
   description:
-    'Bugger — Maelle bug loop. Intake (open GitHub Bug issues + a 24h chat-quality review) -> lightweight atomic triage/routing -> build via the code lanes in parallel, then context last -> chain dependencies (ping-pong) -> optional guard-verify -> return a structured report. Builds in the working tree; NEVER commits (the owner wraps). The Manager invokes this and writes the results to disk.',
+    'Bugger — builds a set of atomic issues across SEVERAL lanes, with dependency hand-off and ONE combined verify. Pass `args.issues` (already lane-assigned, e.g. rows the owner approved from report.md) and it goes straight to work — intake and triage are SKIPPED. Only pass `args.sources` for the nightly discovery run, which is the sole case needing a GitHub pull or a 24h log review. For ONE lane whose items are already known, do NOT use this at all — dispatch that lane directly with the Agent tool; the pipeline buys nothing and costs a full intake. Core loop: rounds of [code lanes in parallel -> context last] until no dependency asks remain, then one adversarial verify over the combined diff. Builds in the working tree; NEVER commits (the owner wraps).',
   phases: [
     { title: 'Intake' },
     { title: 'Triage' },
@@ -378,83 +378,101 @@ if (cited.length) {
   log(`Locate: ${found.size}/${cited.length} citation(s) resolved${found.size < cited.length ? ' — the rest the lanes will find themselves' : ''}.`)
 }
 
-// ---- 3. Build — code lanes in parallel (disjoint files, safe to run together) ----
-phase('Build')
-const codeOut = await parallel(
-  CODE_LANES.map((lane) => () => {
-    const b = buildable.filter((i) => i.lane === lane)
-    return b.length ? dispatch(lane, b).then((r) => (r && r.results) || []) : null
-  }),
-)
-let results = codeOut.filter(Boolean).flat()
+// ---- 3. THE BUILD LOOP — rounds until nothing is pending ------------------
+// Replaces a fixed Build → Context → single-tail sequence, which capped
+// dependency chains at DEPTH TWO: a lane raised an ask, the tail round built it,
+// and if that lane raised a NEW ask nothing ever read it. With six asks already
+// lost tonight to a filter, a silent depth limit is the next quiet loss waiting.
+//
+// Each round: every lane with pending work builds in parallel, `context` runs
+// LAST within the round, then the asks and resumes that round produced become the
+// next round's pending work. `feature.js` already proved this shape; bugger kept
+// the older fixed one, so the two engines behaved differently for no reason.
+//
+// Ids encode depth and stay unique: `1` → `1>dep` → `1>dep>dep`. A RESUME reuses
+// the original id (it replaces that row) and is tracked separately so it cannot
+// re-fire forever.
+const MAX_ROUNDS = 6
+let results = []
+let queue = buildable
+const dispatchedIds = new Set()
+const resumedIds = new Set()
+let rounds = 0
 
-// ---- 4. Context — LAST: its own issues + dependency asks raised by the code lanes ----
-phase('Context')
-const toContext = buildable.filter((i) => i.lane === 'context').concat(depAsksFor('context', results))
-if (toContext.length) {
-  const cr = await dispatch('context', toContext)
-  results = results.concat((cr && cr.results) || [])
-}
+while (queue.length && rounds < MAX_ROUNDS) {
+  rounds += 1
+  const codeWork = queue.filter((i) => i.lane !== 'context')
+  const ctxWork = queue.filter((i) => i.lane === 'context')
+  log(`Round ${rounds}: ${codeWork.length} code-lane + ${ctxWork.length} context item(s) — ${[...new Set(queue.map((i) => i.lane))].join(', ')}`)
 
-// ---- 4b. Close the loop on dependencies — BOTH directions, one bounded pass ----
-// Two things happen here, and (b) used to not happen at all:
-//   (a) a dependency context raised BACK to a code lane (rare).
-//   (b) the ORIGINATING lane is re-dispatched to FINISH its own issue now that the
-//       thing it was waiting on exists. Without this, A's issue sat at
-//       `needs-dependency` forever: B built exactly what A asked for and nobody
-//       ever told A, so the owner read a half-done wave as blocked. That is a
-//       correctness hole, not just a wasted round trip.
-// Both are batched per lane — one dispatch per lane, never one per issue — and the
-// resume carries what the dependency lane ACTUALLY DID, so the originator spends
-// its turn finishing rather than re-discovering.
-const satisfied = new Map() // originating issue id -> the dependency result that closed it
-for (const r of results) {
-  if (r.verdict === 'built' && typeof r.id === 'string' && r.id.endsWith('>dep')) {
-    satisfied.set(r.id.slice(0, -'>dep'.length), r)
+  // Code lanes in parallel — disjoint files, safe together.
+  if (codeWork.length) {
+    phase('Build')
+    const out = await parallel(
+      CODE_LANES.map((lane) => () => {
+        const b = codeWork.filter((i) => i.lane === lane)
+        return b.length ? dispatch(lane, b).then((r) => (r && r.results) || []) : null
+      }),
+    )
+    results = results.concat(out.filter(Boolean).flat())
   }
+
+  // `context` LAST within the round — including asks the code lanes just raised
+  // at it, so a prompt change lands in the same round as the code it describes.
+  const ctxAsks = depAsksFor('context', results).filter((a) => !dispatchedIds.has(a.id))
+  const toContext = ctxWork.concat(ctxAsks)
+  if (toContext.length) {
+    phase('Context')
+    const cr = await dispatch('context', toContext)
+    results = results.concat((cr && cr.results) || [])
+    ctxAsks.forEach((a) => dispatchedIds.add(a.id))
+  }
+  queue.forEach((i) => dispatchedIds.add(i.id))
+
+  // ── what this round produced becomes next round's pending work ──
+  // (a) fresh asks aimed at a code lane, never dispatched before.
+  const nextAsks = CODE_LANES.flatMap((lane) => depAsksFor(lane, results)).filter((a) => !dispatchedIds.has(a.id))
+
+  // (b) originators whose dependency has now LANDED, re-dispatched to finish.
+  // Without this an issue sat at `needs-dependency` forever: the other lane built
+  // exactly what was asked and nobody ever told the originator, so a finished
+  // wave read as blocked.
+  const satisfied = new Map()
+  for (const r of results) {
+    if (r.verdict === 'built' && typeof r.id === 'string' && r.id.endsWith('>dep')) satisfied.set(r.id.slice(0, -'>dep'.length), r)
+  }
+  const resumes = results
+    .filter((r) => r.verdict === 'needs-dependency' && satisfied.has(r.id) && !resumedIds.has(r.id))
+    .map((r) => {
+      const dep = satisfied.get(r.id)
+      const orig = [...buildable, ...nextAsks].find((i) => i.id === r.id) || {}
+      resumedIds.add(r.id)
+      return {
+        ...orig,
+        id: r.id,
+        lane: orig.lane || '',
+        symptom: orig.symptom || r.notes || '',
+        severity: orig.severity || 'high',
+        clarity: 'clear',
+        _dependencyResolved: {
+          youAsked: `${r.dependencyAgent}: ${r.dependencyAsk || ''}`,
+          theyDelivered: dep.fix || dep.notes || 'see the working tree',
+          rootCause: dep.rootCause || '',
+        },
+      }
+    })
+  if (resumes.length) log(`  dependencies closed: ${resumes.length} originator(s) will finish next round`)
+
+  // A resumed issue REPLACES its earlier needs-dependency row — same id.
+  const replaced = new Set(resumes.map((i) => i.id))
+  if (replaced.size) results = results.filter((r) => !(replaced.has(r.id) && r.verdict === 'needs-dependency'))
+
+  queue = [...nextAsks, ...resumes].filter((i) => i.lane && (KNOWN_LANES.has(i.lane) || i.lane === 'context'))
 }
-const resumes = results
-  .filter((r) => r.verdict === 'needs-dependency' && satisfied.has(r.id))
-  .map((r) => {
-    const dep = satisfied.get(r.id)
-    const orig = buildable.find((i) => i.id === r.id) || {}
-    return {
-      ...orig,
-      id: r.id,
-      lane: orig.lane || '',
-      symptom: orig.symptom || r.notes || '',
-      severity: orig.severity || 'high',
-      clarity: 'clear',
-      _dependencyResolved: {
-        youAsked: `${r.dependencyAgent}: ${r.dependencyAsk || ''}`,
-        theyDelivered: dep.fix || dep.notes || 'see the working tree',
-        rootCause: dep.rootCause || '',
-      },
-    }
-  })
-const tail = CODE_LANES.flatMap((lane) => depAsksFor(lane, results))
-if (tail.length || resumes.length) {
-  phase('Build')
-  if (resumes.length) log(`Dependencies closed: resuming ${resumes.length} originating issue(s) to finish.`)
-  const round2 = await parallel(
-    CODE_LANES.map((lane) => () => {
-      const fresh = tail.filter((i) => i.lane === lane)
-      const back = resumes.filter((i) => i.lane === lane)
-      if (!fresh.length && !back.length) return null
-      const note = back.length
-        ? `\n\nSome of these carry \`_dependencyResolved\` — that issue is NOT new. You returned \`needs-dependency\` on it earlier in this run and the lane you named has now built what you asked for. FINISH your own fix. Per Shared rule 6, RE-DERIVE their change from the code before you build on it — do not trust the summary in the payload.`
-        : ''
-      return agent(
-        `You are dispatched a batch of atomic issues in your lane. For EACH: prove the root cause from code + logs (cite file:line), build the deep fix within your charter, run \`npm run typecheck\`, paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract.${note}\nISSUES:\n${JSON.stringify([...fresh, ...back], null, 2)}`,
-        { label: `build:${lane}${back.length ? ':resume' : ''}`, phase: 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
-      ).then((r) => (r && r.results) || [])
-    }),
-  )
-  const round2Results = round2.filter(Boolean).flat()
-  // A resumed issue REPLACES its earlier needs-dependency row — same id, new verdict.
-  const resumedIds = new Set(resumes.map((i) => i.id))
-  const replaced = new Set(round2Results.filter((r) => resumedIds.has(r.id)).map((r) => r.id))
-  results = results.filter((r) => !replaced.has(r.id)).concat(round2Results)
+// Silent truncation reads as "everything got done". If the cap stopped us with
+// work still queued, that is a fact the owner must be told.
+if (queue.length) {
+  log(`! ROUND CAP: ${queue.length} item(s) still pending after ${MAX_ROUNDS} rounds — ${queue.map((i) => `${i.id}→${i.lane}`).join(', ')}. NOT built.`)
 }
 
 // ---- 5. Verify — ONE adversarial pass over the COMBINED diff, never one per fix ----
