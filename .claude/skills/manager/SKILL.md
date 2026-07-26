@@ -99,7 +99,20 @@ Full detail on each, for you — not for the menu:
 - **ledger** / **stats** — `node scripts/ledger-stats.cjs` (`--lane <name>`, `--since <date>`, `--runs`). Per-lane pushback ratios from `ledger.jsonl` — the only way to tell whether the charters are *working* rather than merely existing. Read the header note before quoting a number: `push%` is over **build asks only**, excluding findings-only verify runs, because counting those made the first version report a lane as ungoverned when all its rows were verify passes doing exactly their job.
 - **resend `<id>` [feedback]** — the owner has a question or correction on an item. Re-dispatch that issue to its lane agent with `{original finding + the owner's feedback}` (a fresh Agent call to that `agentType`, schema-forced), then update that row in the report. If it's a GitHub issue, remove its `Agent` label so the work is cleanly re-done.
 - **status** — mid-run OR post-run snapshot. Read the live `journal.jsonl` in the current run's transcript dir (`<project>/subagents/workflows/<state.lastRun.id>/journal.jsonl`) and print: findings count, the triaged atomic bugs (id · lane · severity · symptom), and each verdict so far (built / needs-dependency / blocked-charter / needs-owner-decision / already-fixed). Also show last-run time + whether it's incomplete (resumable). **Works while a run is in progress** — the journal streams as agents finish.
-- **wrap** / **wrap up and close (patch|minor)** — the ONLY commit path. Invoke the `wrap` skill. Default **patch** unless the owner says minor. After a clean wrap: **append every wrapped row to `ledger.jsonl` FIRST**, then set `lastWrapIso`, clear the built rows and reset `report.md` to empty. Never clear the report before the ledger append — that is the only moment the history can be lost.
+- **wrap** / **wrap up and close (patch|minor)** — the ONLY commit path. Invoke the `wrap` skill. Default **patch** unless the owner says minor. After a clean wrap: **append every wrapped row to `ledger.jsonl` FIRST**, then set `lastWrapIso`, then **close the GitHub issues** (below), then clear the built rows and reset `report.md` to empty. Never clear the report before the ledger append — that is the only moment the history can be lost.
+
+  **Closing the GitHub issues is part of wrapping** (owner's instruction, 2026-07-26: *"after the verify succeed and I committed the code, the workflow should close the github ticket"*). This replaces the `Agent` label entirely — a closed issue leaves `--state open` and is never re-pulled, which is what the label was trying to approximate and never did.
+
+  For every ledger row being wrapped that carries a `gh#<n>` ref:
+  ```bash
+  gh issue close <n> --comment "Fixed in <commit-sha> (v<version>). <one line on what changed>"
+  ```
+  **Three conditions, all required:**
+  1. The verdict is **`built`** — never close a row the verify overturned to `needs-owner-decision`, and never one the owner hasn't decided. Those stay open, because they are not done.
+  2. The commit **exists** — close after the push, never before, so the sha in the comment is real.
+  3. **The owner said wrap.** Closing an issue is outward-facing and irreversible-ish; it happens only inside his explicit wrap, never on a nightly run and never autonomously.
+
+  If one issue had several findings (e.g. #147 → B1–B4), close it once and name all of them. If only *some* of an issue's findings shipped, **leave it open** and say in the comment which parts landed — a half-fixed issue that reads as closed is worse than one still open.
 
 ## Cost control — WITHOUT stopping the build
 
