@@ -24,11 +24,18 @@ const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 100 // severity-firs
 // These are already lane-assigned, so intake and triage are skipped entirely —
 // paying to re-derive routing he has already approved is pure waste.
 const PRESET = Array.isArray(A.issues) && A.issues.length ? A.issues : null
-// Symptoms already built and sitting UNCOMMITTED. Builds never deploy, so
-// production keeps emitting the same tape every night and each unattended run
-// re-finds bugs the previous one already fixed. The lane catches it and returns
-// `already-fixed`, but only after a full dispatch — so tell triage up front.
+// Bugs already FIXED but not yet in the running build. Production keeps
+// emitting the same tape until a fix is deployed, so every unattended night the
+// log review honestly re-finds work the previous run already did. The lane does
+// catch it and return `already-fixed` — but only after a full dispatch, which is
+// the whole cost of the bug paid again for no result.
+//
+// Read from `ledger.jsonl`, which is why each line carries a `ref` and a proven
+// `rootCause`: prose alone makes this a fuzzy guess, a ref makes it a lookup.
+// Shape: [{ref, symptom, rootCause, state}].
 const ALREADY_BUILT = Array.isArray(A.alreadyBuilt) ? A.alreadyBuilt : []
+const describeBuilt = (b) =>
+  typeof b === 'string' ? `  • ${b}` : `  • ${b.symptom || '(no symptom)'}${b.ref ? `  [ref: ${b.ref}]` : ''}${b.rootCause ? `  — root cause already fixed at ${b.rootCause}` : ''}`
 // COLLECT mode — find and record, build nothing. **Explicit opt-in only.**
 // Building every night the owner is away IS the product: he leaves, the loop
 // fixes, and the work is waiting for approval when he opens his laptop. An
@@ -213,7 +220,7 @@ phase('Triage')
 const triaged = await agent(
   `Split these findings into ATOMIC issues and route each to a lane (meeting / requests / guard / context / people / slack / outer — \`context\` owns everything Maelle is TOLD (system prompt, tool descriptions, learned prefs) and runs LAST; \`requests\` owns the async work-item spine: approvals, outreach, reminders, follow-ups, timers/expiry and the requester close-loop; \`people\` owns identity, the person store, people memory and social; \`slack\` owns the transport — inbound routing, threading, DM/MPIM/channel behavior, authority-by-authenticated-sender, dedup/catch-up, the delivery pipeline; use \`other\` only for a subsystem NO lane owns: news, brief, routines, Graph plumbing, core orchestrator, DB, health, config, scripts). LIGHTWEIGHT only — id, symptom, lane, a why-hypothesis, severity, and carry clarity forward. Do NOT build the plan or prove the root cause; that is the lane agent's job.\nMERGE same-root issues: if two issues would be fixed by the SAME change / at the same place, emit ONE issue routed to the lane that owns the real fix. **When a GitHub issue and a log finding describe the same event, they are the same issue — merge them, and keep BOTH halves: the owner's own words are the ask (they carry his product judgment about what SHOULD have happened, which the transcript cannot), and the log moment is the evidence (it carries the proof, which his issue may not). Never let the merge drop his framing in favour of a bare symptom** — a lane handed "Maelle booked Friday" builds something different from one handed "Maelle booked Friday without asking me, and she should always ask before an off-day booking". NEVER split a flow defect into "the bug" + "a missing backstop guard for it" — that is ONE bug; route it to the flow lane (meeting / requests / people / slack / context / other). Only raise a GUARD-lane issue when a guard itself misfires, leaks, or is wrong — never as a backstop for a flow defect (the flow fix IS the fix).\n${
     ALREADY_BUILT.length
-      ? `\n**ALREADY FIXED IN THE WORKING TREE, awaiting the owner's commit.** Builds are never deployed, so production keeps emitting the same symptom every night and the log review re-finds it. If a finding below is one of these, **DROP it** — do not emit an issue for it. Only keep it if the evidence shows something genuinely different from what was already fixed, and say what differs.\n${ALREADY_BUILT.map((s) => `  • ${s}`).join('\n')}\n`
+      ? `\n**ALREADY FIXED, not yet in the running build.** Production keeps emitting these symptoms until the owner deploys, so the log review honestly re-finds them every night. **DROP any finding that matches one of these — do not emit an issue for it.** Dispatching it costs a full lane turn to be told "already-fixed", which is the entire price of the bug paid again for nothing.\n\nMatch in this order: (1) same \`ref\`; (2) evidence pointing at the same \`rootCause\` file:line; (3) the same user-visible failure described differently — a log finding is a symptom, so the same bug WILL read differently from one night to the next, and you should still recognise it.\n\nKeep it only if it is genuinely a DIFFERENT failure that happens to look similar — and if you keep one, say in \`whyHypothesis\` what distinguishes it from the entry it resembles, so a lane is not sent to re-fix a fix.\n${ALREADY_BUILT.map(describeBuilt).join('\n')}\n`
       : ''
   }\nFINDINGS:\n${JSON.stringify(findings, null, 2)}`,
   { label: 'triage', phase: 'Triage', effort: 'low', model: 'sonnet', schema: ATOMIC },
