@@ -20,10 +20,16 @@
  * Read-only. Never writes.
  *
  * Usage:
- *   node scripts/ledger-stats.cjs                 # all history
+ *   node scripts/ledger-stats.cjs --open          # THE OPEN BACKLOG — start here
+ *   node scripts/ledger-stats.cjs                 # per-lane pushback ratios
  *   node scripts/ledger-stats.cjs --since 2026-07-01
  *   node scripts/ledger-stats.cjs --lane meeting  # one lane, with its findings
  *   node scripts/ledger-stats.cjs --runs          # per-run summary
+ *
+ * `--open` exists because the backlog IS the ledger — every row whose verdict is
+ * not `built` is still open, so a separate backlog file is a second copy that
+ * drifts. Owner's call, 2026-07-26: "audit backlog is the ledger, so you should
+ * update there."
  */
 
 const fs = require('fs');
@@ -39,6 +45,7 @@ const argOf = (flag) => {
 const since = argOf('--since');
 const laneFilter = argOf('--lane');
 const byRun = argv.includes('--runs');
+const openOnly = argv.includes('--open');
 
 if (!fs.existsSync(LEDGER)) {
   console.error(`No ledger at ${LEDGER}`);
@@ -84,6 +91,41 @@ if (!scoped.length) {
 const PUSHBACK = new Set(['needs-dependency', 'blocked-charter', 'needs-owner-decision']);
 const FINDINGS_ONLY = new Set(['flagged-for-owner']);
 const VERDICTS = ['built', 'already-fixed', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'flagged-for-owner'];
+
+// ── --open: THE BACKLOG. Every row still awaiting the owner. ────────────────
+// A row is open unless it was built or proven already-fixed. Grouped by lane so
+// he can hand one lane its whole list in a single dispatch.
+if (openOnly) {
+  // `audit` is a record that a findings-only pass RAN — not something to decide.
+  // Six such rows sat in the open list on 2026-07-26 under `flagged-for-owner`,
+  // inflating a 25-item backlog to 31 and burying the real decisions. A verdict
+  // that means "this happened" must never appear in a list that means "act".
+  const CLOSED = new Set(['built', 'already-fixed', 'audit']);
+  const open = scoped.filter((r) => !CLOSED.has(r.verdict));
+  if (!open.length) {
+    console.log('\nNothing open. Every ledger row is built or already-fixed.\n');
+    process.exit(0);
+  }
+  console.log(`\nOPEN — ${open.length} row(s) awaiting you\n`);
+  const laneGroups = new Map();
+  for (const r of open) {
+    const k = r.lane || '(no lane)';
+    if (!laneGroups.has(k)) laneGroups.set(k, []);
+    laneGroups.get(k).push(r);
+  }
+  for (const [lane, rows] of [...laneGroups.entries()].sort((a, b) => b[1].length - a[1].length)) {
+    console.log(`${lane}  (${rows.length})`);
+    for (const r of rows) {
+      const ref = r.ref ? `[${r.ref}] ` : '';
+      console.log(`  ${r.verdict === 'needs-owner-decision' ? 'DECIDE' : r.verdict === 'flagged-for-owner' ? 'FLAGGED' : r.verdict.toUpperCase()}  ${ref}${(r.finding || '').slice(0, 110)}`);
+      if (r.rootCause) console.log(`          ${r.rootCause.slice(0, 100)}`);
+    }
+    console.log('');
+  }
+  console.log(`To build a lane's list:  say "build the <lane> ones" and the Manager dispatches that lane directly.`);
+  console.log(`Anything you do not want: say so and it is recorded as declined, not silently left open.\n`);
+  process.exit(0);
+}
 
 const dates = scoped.map((r) => r.date).filter(Boolean).sort();
 const runs = new Set(scoped.map((r) => r.runId).filter(Boolean));
