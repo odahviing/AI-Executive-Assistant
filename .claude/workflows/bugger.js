@@ -16,7 +16,19 @@ export const meta = {
 const A = args || {}
 const SOURCES = A.sources || ['github', 'logs'] // the one 19:00 run does BOTH; manual runs too
 const SINCE = A.sinceIso || 'the last run' // watermark for the log review
-const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 25 // severity-first build cap per run
+const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 100 // severity-first build cap per run
+// A pre-triaged list — the door from `report.md` back INTO the builder. Without
+// it the parked items had no path in at all: intake reads GitHub and the logs,
+// and neither can see the report. The owner would have had to re-file 30 issues
+// by hand to act on his own review, which makes the review pointless.
+// These are already lane-assigned, so intake and triage are skipped entirely —
+// paying to re-derive routing he has already approved is pure waste.
+const PRESET = Array.isArray(A.issues) && A.issues.length ? A.issues : null
+// Symptoms already built and sitting UNCOMMITTED. Builds never deploy, so
+// production keeps emitting the same tape every night and each unattended run
+// re-finds bugs the previous one already fixed. The lane catches it and returns
+// `already-fixed`, but only after a full dispatch — so tell triage up front.
+const ALREADY_BUILT = Array.isArray(A.alreadyBuilt) ? A.alreadyBuilt : []
 const VERIFY = A.verify !== false // guard-verify each built fix unless explicitly off
 const CODE_LANES = ['meeting', 'requests', 'guard', 'people', 'slack', 'outer'] // run in parallel; context runs LAST, separately
 const EFFORT = { meeting: 'xhigh', context: 'xhigh', slack: 'xhigh', requests: 'xhigh', outer: 'high', people: 'high', guard: 'high' } // reasoning effort per lane (owner-set)
@@ -162,7 +174,13 @@ const depAsksFor = (lane, rs) =>
     .filter((r) => r.verdict === 'needs-dependency' && r.dependencyAgent === lane)
     .map((r) => ({ id: `${r.id}>dep`, symptom: r.dependencyAsk, lane, severity: 'high', clarity: 'clear', from: r.id }))
 
-// ---- 1. Intake (sources in parallel) ----
+// ---- 1. Intake (sources in parallel) — SKIPPED entirely for a preset list ----
+let findings = []
+let allIssues = []
+if (PRESET) {
+  log(`Preset: ${PRESET.length} pre-triaged issue(s) from the owner's review — skipping intake and triage.`)
+  allIssues = PRESET
+} else {
 phase('Intake')
 const intake = await parallel(
   SOURCES.map((src) => () => {
@@ -178,16 +196,21 @@ const intake = await parallel(
     )
   }),
 )
-const findings = intake.filter(Boolean).flatMap((r) => (r && r.findings) || [])
+findings = intake.filter(Boolean).flatMap((r) => (r && r.findings) || [])
 log(`Intake: ${findings.length} raw findings from ${SOURCES.join(' + ')}`)
 
 // ---- 2. Triage: split into atomic issues + route (lightweight; the lane agent does the deep work) ----
 phase('Triage')
 const triaged = await agent(
-  `Split these findings into ATOMIC issues and route each to a lane (meeting / requests / guard / context / people / slack / outer — \`context\` owns everything Maelle is TOLD (system prompt, tool descriptions, learned prefs) and runs LAST; \`requests\` owns the async work-item spine: approvals, outreach, reminders, follow-ups, timers/expiry and the requester close-loop; \`people\` owns identity, the person store, people memory and social; \`slack\` owns the transport — inbound routing, threading, DM/MPIM/channel behavior, authority-by-authenticated-sender, dedup/catch-up, the delivery pipeline; use \`other\` only for a subsystem NO lane owns: news, brief, routines, Graph plumbing, core orchestrator, DB, health, config, scripts). LIGHTWEIGHT only — id, symptom, lane, a why-hypothesis, severity, and carry clarity forward. Do NOT build the plan or prove the root cause; that is the lane agent's job.\nMERGE same-root issues: if two issues would be fixed by the SAME change / at the same place, emit ONE issue routed to the lane that owns the real fix. **When a GitHub issue and a log finding describe the same event, they are the same issue — merge them, and keep BOTH halves: the owner's own words are the ask (they carry his product judgment about what SHOULD have happened, which the transcript cannot), and the log moment is the evidence (it carries the proof, which his issue may not). Never let the merge drop his framing in favour of a bare symptom** — a lane handed "Maelle booked Friday" builds something different from one handed "Maelle booked Friday without asking me, and she should always ask before an off-day booking". NEVER split a flow defect into "the bug" + "a missing backstop guard for it" — that is ONE bug; route it to the flow lane (meeting / requests / people / slack / context / other). Only raise a GUARD-lane issue when a guard itself misfires, leaks, or is wrong — never as a backstop for a flow defect (the flow fix IS the fix).\nFINDINGS:\n${JSON.stringify(findings, null, 2)}`,
+  `Split these findings into ATOMIC issues and route each to a lane (meeting / requests / guard / context / people / slack / outer — \`context\` owns everything Maelle is TOLD (system prompt, tool descriptions, learned prefs) and runs LAST; \`requests\` owns the async work-item spine: approvals, outreach, reminders, follow-ups, timers/expiry and the requester close-loop; \`people\` owns identity, the person store, people memory and social; \`slack\` owns the transport — inbound routing, threading, DM/MPIM/channel behavior, authority-by-authenticated-sender, dedup/catch-up, the delivery pipeline; use \`other\` only for a subsystem NO lane owns: news, brief, routines, Graph plumbing, core orchestrator, DB, health, config, scripts). LIGHTWEIGHT only — id, symptom, lane, a why-hypothesis, severity, and carry clarity forward. Do NOT build the plan or prove the root cause; that is the lane agent's job.\nMERGE same-root issues: if two issues would be fixed by the SAME change / at the same place, emit ONE issue routed to the lane that owns the real fix. **When a GitHub issue and a log finding describe the same event, they are the same issue — merge them, and keep BOTH halves: the owner's own words are the ask (they carry his product judgment about what SHOULD have happened, which the transcript cannot), and the log moment is the evidence (it carries the proof, which his issue may not). Never let the merge drop his framing in favour of a bare symptom** — a lane handed "Maelle booked Friday" builds something different from one handed "Maelle booked Friday without asking me, and she should always ask before an off-day booking". NEVER split a flow defect into "the bug" + "a missing backstop guard for it" — that is ONE bug; route it to the flow lane (meeting / requests / people / slack / context / other). Only raise a GUARD-lane issue when a guard itself misfires, leaks, or is wrong — never as a backstop for a flow defect (the flow fix IS the fix).\n${
+    ALREADY_BUILT.length
+      ? `\n**ALREADY FIXED IN THE WORKING TREE, awaiting the owner's commit.** Builds are never deployed, so production keeps emitting the same symptom every night and the log review re-finds it. If a finding below is one of these, **DROP it** — do not emit an issue for it. Only keep it if the evidence shows something genuinely different from what was already fixed, and say what differs.\n${ALREADY_BUILT.map((s) => `  • ${s}`).join('\n')}\n`
+      : ''
+  }\nFINDINGS:\n${JSON.stringify(findings, null, 2)}`,
   { label: 'triage', phase: 'Triage', effort: 'low', model: 'sonnet', schema: ATOMIC },
 )
-const allIssues = (triaged && triaged.issues) || []
+allIssues = (triaged && triaged.issues) || []
+}
 
 // Ambiguous findings are shown to the owner, NEVER auto-built.
 const flagged = allIssues.filter((i) => i.clarity === 'ambiguous')
