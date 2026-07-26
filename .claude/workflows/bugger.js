@@ -114,10 +114,24 @@ const ATOMIC = {
           lane: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer'] },
           whyHypothesis: { type: 'string' },
           severity: { type: 'string', enum: ['high', 'medium', 'low'] },
+          // KIND is what drives cost, not count. 15-20 atomic items is a normal
+          // night; ONE product-shaped item can dominate it — issue 41 cost 411k
+          // across four lanes on 2026-07-26, and #147 arrived as a bug but was a
+          // design change whose stated premise was false in the code.
+          kind: {
+            type: 'string',
+            enum: ['atomic', 'needs-shaping'],
+            description:
+              "`atomic` = known root, ONE lane, one edit — dispatch it. `needs-shaping` = it touches TWO OR MORE lanes, or the fix is a product decision rather than a repair, or the issue's premise does not survive contact with the code. A `needs-shaping` item is NOT dispatched: it goes to the owner with a proposed shape so he rules before a lane spends anything. Dispatching one as a bug does not fail loudly — it ping-pongs across lanes, burns the night, and still ends up needing his judgement afterwards, which is the most expensive possible order.",
+          },
+          shapingQuestion: {
+            type: 'string',
+            description: 'needs-shaping only: the ONE thing the owner must decide, in a sentence he can answer. Plus what you checked in the code that the issue got wrong, if anything.',
+          },
           evidence: { type: 'string' },
           clarity: { type: 'string', enum: ['clear', 'ambiguous'] },
         },
-        required: ['id', 'symptom', 'lane', 'severity', 'clarity'],
+        required: ['id', 'symptom', 'lane', 'severity', 'clarity', 'kind'],
       },
     },
   },
@@ -282,7 +296,7 @@ log(`Intake: ${findings.length} raw findings from ${SOURCES.join(' + ')}`)
 // ---- 2. Triage: split into atomic issues + route (lightweight; the lane agent does the deep work) ----
 phase('Triage')
 const triaged = await agent(
-  `Split these findings into ATOMIC issues and route each to a lane (meeting / requests / guard / context / people / slack / outer — \`context\` owns everything Maelle is TOLD (system prompt, tool descriptions, learned prefs) and runs LAST; \`requests\` owns the async work-item spine: approvals, outreach, reminders, follow-ups, timers/expiry and the requester close-loop; \`people\` owns identity, the person store, people memory and social; \`slack\` owns the transport — inbound routing, threading, DM/MPIM/channel behavior, authority-by-authenticated-sender, dedup/catch-up, the delivery pipeline; use \`other\` only for a subsystem NO lane owns: news, brief, routines, Graph plumbing, core orchestrator, DB, health, config, scripts). LIGHTWEIGHT only — id, symptom, lane, a why-hypothesis, severity, and carry clarity forward. Do NOT build the plan or prove the root cause; that is the lane agent's job.\nMERGE same-root issues: if two issues would be fixed by the SAME change / at the same place, emit ONE issue routed to the lane that owns the real fix. **When a GitHub issue and a log finding describe the same event, they are the same issue — merge them, and keep BOTH halves: the owner's own words are the ask (they carry his product judgment about what SHOULD have happened, which the transcript cannot), and the log moment is the evidence (it carries the proof, which his issue may not). Never let the merge drop his framing in favour of a bare symptom** — a lane handed "Maelle booked Friday" builds something different from one handed "Maelle booked Friday without asking me, and she should always ask before an off-day booking". NEVER split a flow defect into "the bug" + "a missing backstop guard for it" — that is ONE bug; route it to the flow lane (meeting / requests / people / slack / context / other). Only raise a GUARD-lane issue when a guard itself misfires, leaks, or is wrong — never as a backstop for a flow defect (the flow fix IS the fix).\n${
+  `Split these findings into ATOMIC issues and route each to a lane (meeting / requests / guard / context / people / slack / outer — \`context\` owns everything Maelle is TOLD (system prompt, tool descriptions, learned prefs) and runs LAST; \`requests\` owns the async work-item spine: approvals, outreach, reminders, follow-ups, timers/expiry and the requester close-loop; \`people\` owns identity, the person store, people memory and social; \`slack\` owns the transport — inbound routing, threading, DM/MPIM/channel behavior, authority-by-authenticated-sender, dedup/catch-up, the delivery pipeline; use \`other\` only for a subsystem NO lane owns: news, brief, routines, Graph plumbing, core orchestrator, DB, health, config, scripts). LIGHTWEIGHT only — id, symptom, lane, a why-hypothesis, severity, and carry clarity forward. Do NOT build the plan or prove the root cause; that is the lane agent's job.\n**CLASSIFY \`kind\` on every issue — this is the single most consequential call you make.** \`atomic\` = known root, ONE lane, one edit; dispatch it, and fifteen of these is a normal night. \`needs-shaping\` = it touches TWO OR MORE lanes, OR the fix is a product decision rather than a repair, OR the issue's premise looks wrong against the code. A \`needs-shaping\` item is **NOT built** — it goes to the owner with a \`shapingQuestion\` he can answer in a sentence. **Err toward \`needs-shaping\` when unsure:** a wrongly-shaped item costs one question, a wrongly-dispatched one ping-pongs across lanes and burns the night before landing back on his desk anyway. Measured 2026-07-26: one such item cost 411k across four lanes, and another arrived as a bug whose stated premise was false in the code, so the fix was nothing like what the issue asked for.\nMERGE same-root issues: if two issues would be fixed by the SAME change / at the same place, emit ONE issue routed to the lane that owns the real fix. **When a GitHub issue and a log finding describe the same event, they are the same issue — merge them, and keep BOTH halves: the owner's own words are the ask (they carry his product judgment about what SHOULD have happened, which the transcript cannot), and the log moment is the evidence (it carries the proof, which his issue may not). Never let the merge drop his framing in favour of a bare symptom** — a lane handed "Maelle booked Friday" builds something different from one handed "Maelle booked Friday without asking me, and she should always ask before an off-day booking". NEVER split a flow defect into "the bug" + "a missing backstop guard for it" — that is ONE bug; route it to the flow lane (meeting / requests / people / slack / context / other). Only raise a GUARD-lane issue when a guard itself misfires, leaks, or is wrong — never as a backstop for a flow defect (the flow fix IS the fix).\n${
     ALREADY_BUILT.length
       ? `\n**ALREADY FIXED, not yet in the running build.** Production keeps emitting these symptoms until the owner deploys, so the log review honestly re-finds them every night. **DROP any finding that matches one of these — do not emit an issue for it.** Dispatching it costs a full lane turn to be told "already-fixed", which is the entire price of the bug paid again for nothing.\n\n` +
         `**(1) MATCH THE \`ref\` FIRST, and treat these as the SAME ref: \`#147\` = \`gh#147\` = \`147\`.** A GitHub finding's ref is bare (\`#147\`); the ledger stores it prefixed (\`gh#147\`). They are one issue. This exact-match step is the reliable one — do it before you think about the wording at all.\n\n` +
@@ -316,8 +330,19 @@ if (misrouted.length) {
 }
 
 // Ambiguous findings are shown to the owner, NEVER auto-built.
+// A `needs-shaping` item is NOT dispatched. It spans lanes, or its fix is a
+// product call, or the issue's premise did not survive the code — so the owner
+// rules on the SHAPE before a lane spends anything. Dispatching one as a bug
+// does not fail loudly: it ping-pongs, burns the night, and still lands on his
+// desk needing judgement, which is the most expensive possible order.
+// A PRESET item is exempt — he has already approved that routing by naming it.
+const needsShaping = PRESET ? [] : allIssues.filter((i) => i.kind === 'needs-shaping' && i.clarity === 'clear')
 const flagged = allIssues.filter((i) => i.clarity === 'ambiguous')
-let buildable = allIssues.filter((i) => i.clarity === 'clear')
+let buildable = allIssues.filter((i) => i.clarity === 'clear' && !needsShaping.includes(i))
+if (needsShaping.length) {
+  log(`${needsShaping.length} item(s) need SHAPING before anyone builds — not dispatched:`)
+  needsShaping.forEach((i) => log(`  ? ${i.id} [${i.lane}] ${i.shapingQuestion || i.symptom}`))
+}
 
 // Severity-first cap so a heavy day cannot overrun the window; the rest is reported as pending.
 const RANK = { high: 0, medium: 1, low: 2 }
@@ -600,6 +625,10 @@ return {
   },
   results: verified,
   flagged,
+  // Deliberately NOT built — the owner rules on the shape first. Render these in
+  // the report as `pending owner` with the shapingQuestion, and dispatch whatever
+  // he approves via `args.issues`, where the preset path exempts them.
+  needsShaping,
   pending,
   // Persist under "Verified clean" in report.md and pass straight back as
   // `priorClean` next run. It is the only thing that stops each verify starting

@@ -24,7 +24,20 @@ Three rules follow:
 - **A backlog lives in the ledger, never in the report.** Every non-`built` row is open by definition; render it with `ledger-stats --open` when he asks. A copy in `report.md` is a second source that drifts.
 - **Burn a backlog down 3–5 items a night inside the normal run.** Same total cost, no spike, and every batch gets a real verify. A 30-item wave cannot be made cheap by any engine change — the cost is per item, ~30–90k, and that is the floor for careful work in a codebase this size.
 
-**More than ~10 buildable items in one run is a signal, not a big night.** It means an audit leaked into the loop, or triage failed to merge same-root findings. `capBuilds` is 100 so nothing is ever silently truncated — it is a safety net, not a target.
+### Count is not the cost. KIND is.
+
+**1–5 reported bugs legitimately decompose into 15–20 atomic items, and that is fine.** An atomic item has a known root, one lane, one edit — the lane resolves it directly and cheaply. Twenty of those is a normal night, not a warning sign.
+
+What costs is a **product-shaped** item: one that spans lanes, or whose fix is a design decision rather than a repair, or where the issue's own premise needs checking first. Those need **ping-pong** — and one of them dominates a night whatever else is in it. Measured on 2026-07-26: **issue 41 alone cost 411k across four lanes**, and #147 arrived as a bug but was a product change — the owner's stated premise ("the organizer will get an Outlook cancel email") was **false in the code**, so the real fix was a Graph verb change plus deleting an entire relay path, not the deletion the issue asked for.
+
+**So triage must classify KIND, not just severity, and the two are handled differently:**
+
+- **`atomic`** — dispatch it. This is the cheap majority.
+- **`needs-shaping`** — **do NOT dispatch.** Surface it to the owner with a proposed shape and the premise you checked, and let him rule before a lane spends anything. The tells: it would touch **two or more lanes**; the fix is a **product decision** rather than a repair; or **the issue's premise does not survive contact with the code** — which is common and is exactly the moment to stop, not to build around.
+
+This is M5 with a mechanism. A product-shaped item dispatched as a bug does not fail loudly — it ping-pongs, burns a night, and lands as something he then has to judge after the fact, which is the most expensive possible order.
+
+**`capBuilds` is 100 so nothing is ever silently truncated — a safety net, not a target.** The number to watch is not how many items there are; it is **how many need shaping.** More than one or two of those in a night means the run should have stopped and asked.
 
 ## Your charter — how you decide
 You hold the **only cross-lane view of Maelle**, so decomposition, routing, and priority are your judgment calls — and they decide whether the agents succeed. The agents have deep domain rules; you have the whole picture. These are your rules.
