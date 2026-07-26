@@ -210,13 +210,28 @@ This is a hard rule because the alternative already failed: runs invented `B1`, 
 4. **Lane** — who owns it.
 5. **Detail** — the bug, the fix, the risk, the `file:line`. One cell, as long as it needs to be. **This is reference material, not the thing he reads first.**
 
-### Order
+### Order — action at the top level, harm INSIDE the backlog
 
-**Group by the action column, in this order** — most-actionable first, so the top of the report is always his to-do list:
-1. `Answer:` rows — he is the blocker.
-2. `Check before wrap:` rows.
-3. `Say "build n"` rows.
-4. `Nothing` rows — the built work, collapsed if long.
+Two groupings, each used only where it actually separates things. **They are not alternatives and neither replaces the other:**
+
+- **Action** discriminates for work that is *done or blocked* — one row needs an answer, another needs an eyeball, another needs nothing.
+- **Harm** discriminates for the *backlog*, where the action is `Say "build n"` on every single row. A column with one value in it is noise; what varies there is whether it hurts.
+
+So the report is, in this order:
+
+1. **`## Needs you`** — the `Answer:` and `Check before wrap:` rows. He is the blocker. Order by harm within it. Full five columns.
+2. **`## Built — awaiting wrap`** — the `Nothing` rows. Full five columns; collapse the Detail if the list is long. Tiers are meaningless here: it is already built.
+3. **`## Backlog — say "build <n>"`** — everything found and not built. **Drop the action column** (it is the same for every row) and group by the M4 harm tiers, most harmful first, with a count per tier:
+   - **Tier 1 — security / privacy**: a leak, a disclosure, an authority bypass.
+   - **Tier 2 — wrong real-world action**: wrong booking, wrong invitee, double-send; anything external or hard to undo.
+   - **Tier 3 — silent wrongness**: a confidently wrong answer, a false "done", a fabricated reason. Trust damage he cannot see.
+   - **Tier 4 — visible failure**: an error, a missing answer, a stall. Bad, but honest.
+   - **Tier 5 — polish**: narration, tone, wording, wrong comments.
+
+   Columns there: **`#` · `What a person saw` · `Lane`** — that is enough to choose from. He asks for the detail on the ones he picks.
+4. Prose below: the watch list, carried-forward items, and the runtime-evidence caveat.
+
+**Within a tier, a root that explains several rows goes first** — leverage beats count (M4).
 
 **If a row cannot be told as something that happened in a chat, it is not ready to be a row.** A finding with no scene goes in the prose watch-list below the tables.
 
@@ -230,7 +245,7 @@ This is a hard rule because the alternative already failed: runs invented `B1`, 
 | `built` but carrying a risk to eyeball | `Check before wrap: <what>` |
 | `needs-owner-decision` · `blocked-charter` | `Answer: <the question>` |
 | `flagged-for-owner` (ambiguous log finding) | `Answer: is this a bug?` — never auto-fixed |
-| parked / audit backlog / `pending` | `Say "build <n>"` |
+| parked / audit backlog / `pending` | `Say "build <n>"` — goes in the Backlog section, tiered by harm, action column omitted |
 | `already-fixed` | drop the row; note it in the manifest line only |
 
 Below the tables, in prose: a **watch** list (real but not actionable now), anything **carried forward**, and — always — whether there is **runtime evidence** for the fixes or whether they are reasoning from code. A wave with no evidence must say so plainly; name the cheapest check that would settle it.
