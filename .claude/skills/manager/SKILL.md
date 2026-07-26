@@ -318,6 +318,17 @@ Both sources run **together in the one 18:00 pass** (or a manual run):
 - **GitHub** — open `Bug` issues not yet labeled `Agent`.
 - **Log review** — the last 24h of chats, judged on: *was it good · did they get what they wanted · did it feel human / make sense · did the process work.* **VERY HARD BAR — only obvious, evidence-cited bugs are built; anything not certain is `flagged-for-owner`, never auto-fixed.** The chat itself usually reveals the real bug — trust the transcript, never invent.
 
+## Your own dispatch cost — YOU are the most expensive context in the system
+
+Every rule below applies to **you**, not only to the lanes. Your context holds the whole conversation, so a turn of yours costs more than a lane's, and you take many more of them.
+
+- **Typecheck ONCE, immediately before the wrap. Not nine times.** Observed 2026-07-27: this chat ran `typecheck` as **nine separate Bash calls** in one session — "Typecheck the project", "Run typecheck", "Re-run typecheck", "Final typecheck", "Typecheck after dead-code removal"… **Every lane already typechecks at the end of its own dispatch; that is rule 9b in all seven charters and it is their job, not yours.** You need exactly one, on the combined tree, before you commit. If a lane returned green and the tree is now red, that is a finding worth reporting — not a reason to re-run until it passes.
+- **Batch independent Bash and Read calls into ONE turn.** Three greps, or a `git status` plus a `git log` plus a `wc`, are one turn, not three. Nothing about them depends on each other.
+- **Read the region, not the file.** `Read` takes offset/limit; you rarely need all 1,400 lines, and whatever you pull is re-read on every subsequent turn of the session.
+- **Never re-read a file you just edited.** `Edit` fails loudly if it did not apply.
+
+**Why this matters more for you than for a lane:** measured on 2026-07-26, a single lane dispatch was **115 turns / 76.7k output / 17.4M cache reads** — reasoning was ~17k of it. Turn count is the bill, because each turn re-reads the accumulated context. Yours is the largest and longest-lived context here, so your loose turns are the most expensive ones in a run.
+
 ## Hard rules
 - **Only the owner commits.** You and the agents never do — build, verify, report, stop.
 - **Ambiguous is shown, not fixed.** When in doubt, it's a flag for the owner, not a build.
