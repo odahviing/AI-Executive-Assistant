@@ -49,6 +49,21 @@ The largest single finding was not on the list. Chasing a duplicate colleague pi
 - **Two changes here are load-bearing on each other and must never be reverted independently:** promoting the occupancy rule above the work-hours rule, and demoting all-day Working-Elsewhere. Without the demotion, the promotion would turn every WE day into a hard *not bookable* on the colleague pre-check instead of an escalatable "outside his hours". Correct together; neither is correct alone. Only a combined pass could see it.
 - Fail-closed behaviour on every destructive path is unchanged. Slot search, candidate-check and booking still share one validator.
 
+### Fixed after the wrap, same version — a proposal is never a time he is already on
+Caught in a real conversation minutes before the restart: asked for 25 minutes with a colleague on a packed day, Maelle offered 15:30 and 16:00 as *"clean for both of you"*, then reported after booking that each **double-booked the owner** against his own meetings — twice, before finally surfacing the one genuinely free gap on the third try.
+
+**Not a 4.2.x regression.** It dates to v3.7.3 (the #142d landing): the relaxed recovery called the validator with `allowRelaxed`, which waives the **hard** owner-collision rule, and the only compensating filter dropped a slot **solely when an attendee was outside the owner's email domain** — so an internal collision was offered. What made it newly visible is the 3.7.5 density ranking: a slot buried *inside* a meeting reads as connective on both sides and scores the maximum, so the double-booked times were the **top** picks. The 4.2.0 occupancy hoist actually helped — it put the truth on every verdict, where the search had simply never read it.
+
+The dishonesty was worse than silence: the offered candidate was byte-identical to a free slot, and the recovery note claimed only soft rules had been bypassed while pointing the model at a per-day summary from the *strict* pass that said nothing about the offered times. She had no way to be honest, and the write path had the collision in hand the whole time.
+
+- **A proposal is never a time he is already committed on** — one read of the single validator's own verdict, replacing a hand-rolled domain-scoped re-scan. Keyed on the commitment itself rather than the rule tier, so an *optional* overlap (a timed Working-Elsewhere marker, a standup) is still offered and tagged rather than hidden.
+- Out-of-hours slots are excluded on the recovery path, and each relaxed slot now carries **its own** broken-rule sentence from that same validator — owner-only, so a colleague never sees his scheduling mechanisms.
+- Deleted a post-hoc work-day clip that ran *after* the search budget was spent and had been silently emptying recoveries (a live run that accepted 8 slots kept 0).
+- Same root, third symptom: asking whether a committed time is available under `relaxed` answered *yes*. It now answers no, with the real reason.
+- The tool description that told the model `relaxed:true` bypasses hard rules is corrected — it licensed the model to disbelieve the neighbouring guarantee that an untagged slot is verified free.
+
+On the fixed path the same request answers with the free 17:30 gap **first**, alongside a 13:00 labelled "no room for your lunch" — the offers are now attendable and their trade-offs are stated.
+
 ### Not changed
 - Five findings from the final pass are parked deliberately, none reachable without a second fault: a file-side deferral that reports as an identity refusal, an unlinked reschedule row that no longer suppresses an autofix, equal date-only free/busy windows still reading as free, non-outage Graph faults reaching her context as raw text, and a walker-side narration label.
 - Nothing in this version is runtime-proven — it is code, log and DB evidence only. Four events settle most of it: an attendee-side cancel, a health pass that writes a category question, a reply in a routine thread, and a colleague-reply turn.

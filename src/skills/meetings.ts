@@ -1145,7 +1145,7 @@ ${(() => {
   lines.push(`- A cross-timezone overlap is NORMAL EA work — NEVER ask ${firstName} permission for it. "OK booking on EST time?" / "can you take a late slot in that range?" are nonsense to him; his own afternoon or evening isn't a favour to grant. Compute the overlap, propose the concrete slots, and let him say if a specific one doesn't work.`);
   if (tp) lines.push(`- Within that overlap, lean toward the preference above (same-timezone → ${tp.local_participants}; cross-timezone → ${tp.remote_participants}).`);
   lines.push(`- These are PREFERENCES not rules — if nothing in the preferred window works, propose outside it and NARRATE the trade-off (*"Nothing in your usual window; best I have is Wed 11:30"*). Never refuse on a soft preference alone.`);
-  lines.push(`- ${firstName} can override any preference at any time. The tool's \`relaxed:true\` flag bypasses these AND hard rules; each returned slot carries \`broken_rule_label\` so you narrate what's bypassed.`);
+  lines.push(`- ${firstName} can override any of these at any time with \`relaxed:true\`: it bends the rules about his own day, and each slot it returns carries the \`broken_rule_label\` it bends. A proposal is still a time he is free — he books over a commitment by naming it to \`create_meeting\`.`);
   return lines.join('\n');
 })()}`}${categoriesBlock}
 

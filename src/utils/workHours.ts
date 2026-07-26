@@ -55,9 +55,9 @@ function parseRange(rangeStr: string): WorkHourRange | null {
   // day, exclusive). Yaml authors use 23:59 to mean "work runs through
   // the end of the day" — but the literal endMin=1439 left a 1-minute
   // dead zone at the boundary where isWithinOwnerWorkHours returned false
-  // at 23:59:00 while isSlotInWorkHours accepted a slot ending at 23:59.
-  // With endMin=1440, both functions agree the boundary minute is
-  // in-window (1439 < 1440, 1439 <= 1440).
+  // at 23:59:00 while a slot-fit test accepted a slot ending at 23:59.
+  // With endMin=1440, both agree the boundary minute is in-window
+  // (1439 < 1440, 1439 <= 1440).
   if (endMin === 1439) endMin = 1440;
   return { startMin, endMin };
 }
@@ -204,20 +204,6 @@ export function slotDayMinutes(slotStart: DateTime, slotEnd: DateTime): { startM
   const startMin = slotStart.hour * 60 + slotStart.minute;
   const durationMin = Math.max(0, Math.round(slotEnd.diff(slotStart, 'minutes').minutes));
   return { startMin, endMin: startMin + durationMin };
-}
-
-/**
- * True iff [slotStartMin, slotEndMin) fits fully inside ANY window in the day.
- */
-export function isSlotInWorkHours(
-  windows: WorkHourRange[],
-  slotStartMin: number,
-  slotEndMin: number,
-): boolean {
-  for (const w of windows) {
-    if (slotStartMin >= w.startMin && slotEndMin <= w.endMin) return true;
-  }
-  return false;
 }
 
 /**

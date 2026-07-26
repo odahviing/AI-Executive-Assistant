@@ -6,6 +6,29 @@ import { scoreSlotDensity, densityConfigFromProfile, prefersDensePacking } from 
 import type { MeetingMode, CalendarEvent } from './calendarTypes';
 import { getFreeBusy, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped } from './calendarReads';
 
+/**
+ * ONE offered-slot shape. Was written out inline three times (the return type,
+ * the accumulator, the per-day buckets), so adding a field meant editing three
+ * literals and the walker could push a field the signature didn't promise.
+ */
+type SlotCandidate = {
+  start: string;
+  end: string;
+  day_type?: 'office' | 'home' | 'other';
+  disturbs_floating_block?: boolean;
+  over_optional?: string;
+  /**
+   * The owner-rule this slot BREAKS, in his own words — set only on a `relaxed`
+   * search, which is the only pass that returns a rule-breaking slot at all.
+   * Quoted verbatim from `checkSlot`'s own `violation_label` (never re-derived),
+   * so what the model narrates is what the validator decided. Owner-viewer only:
+   * these labels name his mechanisms ("below the 120-min floor"), which a
+   * colleague must never see.
+   */
+  broken_rule_label?: string;
+  attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }>;
+};
+
 // ── Slot-rule helpers ────────────────────────────────────────────────────────
 
 export async function findAvailableSlots(params: {
@@ -66,7 +89,11 @@ export async function findAvailableSlots(params: {
   // no slot is clean for everyone. Requires attendeeBusyEmails/attendeeAvailability
   // to be passed (that's what populates the conflict data). No effect otherwise.
   tagAttendeeConflicts?: boolean;
-  // Owner-override "show me everything" mode. When true:
+  // Owner-override "show me everything" mode. It bends the owner's SOFT rules
+  // only — it can never surface a slot a real commitment already holds. See the
+  // proposal guard below the checkSlot call: `allowRelaxed` waives rule 8 for the
+  // WRITE path (his informed one-step book-through), and the search does not
+  // inherit that waiver. When true:
   //   - skips focus-time protection (free_time_per_office/home_day_hours)
   //   - skips floating-block feasibility check (lunch/coffee/etc. windows)
   //   - on owner-path with attendees: drops the attendee busy filter
@@ -85,6 +112,21 @@ export async function findAvailableSlots(params: {
   // Caller is expected to narrate to the owner that these slots break their
   // soft rules ("outside your focus protection / lunch window / normal hours").
   relaxed?: boolean;
+  // Relax the owner's soft DAY-LOAD rules without extending his working DAY.
+  // Opt-in, and exactly one caller sets it: find_available_slots' automatic
+  // relaxed recovery, which exists to surface "13:00 lands on your lunch —
+  // anyway?" and must never answer "how about 02:00".
+  //
+  // It used to be a post-filter in the handler that re-derived the day's windows
+  // (getEffectiveWorkDay + isSlotInWorkHours) and dropped out-of-hours slots
+  // AFTER this function had already spent its per-day budget on them — so a
+  // recovery whose top-ranked candidates were all nocturnal returned NOTHING
+  // (logs/maelle-2026-07-26.log 06:59:36: `relaxedAccepted: 8` → `kept: 0`).
+  // Now the decision is here, above the cap, reading the validator's own
+  // `outsideWorkHours` fact rather than a second copy of the window arithmetic
+  // (which, computed in the SEARCH zone instead of the day's effective zone,
+  // could disagree with checkSlot on an away day — M2).
+  keepWorkHours?: boolean;
   // v4.1.x (M12) — WHO the returned annotations are for. The only annotation
   // that carries free text is `over_optional` (the optional-join event's
   // subject), and find_available_slots is colleague-allowed, so a private
@@ -162,7 +204,7 @@ export async function findAvailableSlots(params: {
     // model's to correct, a bad window is not.
     attendeesNotChecked?: string[];
   };
-}): Promise<Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }>> {
+}): Promise<SlotCandidate[]> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
   const maxSearchDays = params.maxSearchDays ?? 21;
@@ -193,7 +235,7 @@ export async function findAvailableSlots(params: {
   const absoluteCap = initialFrom.plus({ days: maxSearchDays });
   let currentTo = initialTo;
 
-  let candidates: Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }> }> = [];
+  let candidates: SlotCandidate[] = [];
 
   while (true) {
     candidates = [];
@@ -657,7 +699,7 @@ export async function findAvailableSlots(params: {
           .filter(b => b.email === ownerEmailLower)
           .map(b => ({ start: b.start.getTime(), end: b.end.getTime() }))
       : [];
-    const dayBuckets: Map<string, Array<{ start: string; end: string; day_type?: 'office' | 'home' | 'other'; disturbs_floating_block?: boolean; over_optional?: string; attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }>; density?: number }>> = new Map();
+    const dayBuckets: Map<string, Array<SlotCandidate & { density?: number }>> = new Map();
 
     // v2.3.6 (#71a) — diagnostic rejection counters. Helps debug "why was 17:45
     // rejected?" by showing the per-rule breakdown at the end of the search.
@@ -1028,18 +1070,20 @@ export async function findAvailableSlots(params: {
       // floating-block movability, travel buffer, owner-busy, and the daily
       // focus-time floor all live in checkSlot, fed the SAME owner CalendarEvents
       // the book path uses — so search can never offer a slot the book path then
-      // refuses (the Eli + Isaac search-vs-book root). allowRelaxed (owner
-      // override) bypasses checkSlot's soft+hard owner rules (rule 11). ──
+      // refuses (the Eli + Isaac search-vs-book root). `allowRelaxed` (owner
+      // override) bypasses checkSlot's SOFT owner rules; the two guards below keep
+      // the hard ones — a real commitment and the day's bounds — out of the offer
+      // whatever the caller asked for. ──
       let verdictOverOptional: string | undefined;
+      let verdictBrokenRuleLabel: string | undefined;
       if (profile) {
-        const verdict = checkSlot({
+        const slotCheckInput = {
           profile,
           slotStartIso: cursorLocal.toISO()!,
           slotEndIso: slotEndLocal.toISO()!,
           category: params.category ?? null,
           events: ownerEventsForFb,
           excludeEventIds: params.excludeEventIds,
-          allowRelaxed: params.relaxed,
           // v4.1.x (M2) — the booking lead time comes from the ONE validator now,
           // fed the caller's role-resolved hours, instead of a walker-only gate
           // the write path knew nothing about.
@@ -1052,7 +1096,8 @@ export async function findAvailableSlots(params: {
           // v3.7.x (#143) — the SAME effective day the walker gated on, so search
           // and book evaluate work-hours / floor in the same windows + timezone.
           effectiveDay: effectiveDay ?? undefined,
-        });
+        };
+        const verdict = checkSlot({ ...slotCheckInput, allowRelaxed: params.relaxed });
         verdictOverOptional = verdict.overOptional;
         if (!verdict.passes) {
           trackReject(
@@ -1065,34 +1110,52 @@ export async function findAvailableSlots(params: {
           cursor = new Date(cursor.getTime() + step);
           continue;
         }
-        // v3.7.2 (#142d) — PROPOSALS never offer a slot where the owner is
-        // committed to an EXTERNAL meeting, even under relaxed. `relaxed` lets the
-        // owner bypass his own SOFT rules in the SEARCH; an external commitment is
-        // not soft and is never a real "option" — surfacing a 13:00 slot the owner
-        // had an external attorney meeting on, then booking it, was the 2026-07-14
-        // break. checkSlot drops ALL owner-busy when NOT relaxed, so this only
-        // bites the relaxed pass. INTERNAL double-book stays offerable (the owner's
-        // call); only EXTERNAL is hard-excluded from proposals. He can still
-        // DIRECTLY book over it via create_meeting — a separate chain, owner-only,
-        // deliberately untouched here.
-        if (params.relaxed) {
-          const ownerDomain = ownerEmailLower.includes('@') ? ownerEmailLower.split('@')[1] : '';
-          const overlapsExternalOwnerMtg = ownerDomain !== '' && (ownerEventsForFb ?? []).some(ev => {
-            if (ev.isCancelled) return false;
-            if ((ev as any).showAs === 'free') return false;
-            if (!(ev as any).isAllDay && (ev as any).showAs === 'workingElsewhere') return false;
-            const evS = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
-            const evE = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
-            if (!evS.isValid || !evE.isValid) return false;
-            if (!(evS.toMillis() < slotEnd.getTime() && evE.toMillis() > cursor.getTime())) return false;
-            const addrs = [ev.organizer?.emailAddress?.address, ...(ev.attendees ?? []).map(a => a.emailAddress?.address)];
-            return addrs.some(a => { const e = (a ?? '').toLowerCase().trim(); return e.includes('@') && !e.endsWith('@' + ownerDomain); });
-          });
-          if (overlapsExternalOwnerMtg) {
-            trackReject('owner_busy_collision', cursorDt.toISO()!);
-            cursor = new Date(cursor.getTime() + step);
-            continue;
-          }
+        // ── A PROPOSAL IS NEVER A TIME HE IS ALREADY COMMITTED ON (M3, #142d) ──
+        // `allowRelaxed` waives checkSlot rule 8 for the WRITE path — that waiver
+        // is the owner's informed one-step book-through, where planMeeting turns
+        // the same `overCommitment` into "booked, heads up, this double-books you
+        // over X". The SEARCH must not inherit it: an offer carries no heads-up,
+        // and a time he cannot attend is not an option to choose from. M3's
+        // Unfiltered tier needs an approval, and a list of suggestions is not one.
+        //
+        // This reads the ONE validator's own occupancy fact. It REPLACES a
+        // hand-rolled re-scan of the same events that dropped only slots held by
+        // an EXTERNAL commitment (#142d, 2026-07-14) — a second derivation of
+        // occupancy (its own showAs / all-day / overlap rules, none of them
+        // `occupancyRoleOf`) and a carve-out that cost the owner two double-books
+        // in one conversation: 2026-07-26 19:17Z, "Need 25 mins tomorrow with
+        // Maayan" → strict 0 → the relaxed recovery offered 15:30 (his "Daniel &
+        // Idan, Weekly", 15:30–15:55) and then 16:00 ("Daily Stand-up", 16:00–
+        // 16:30) as "clean for both of you", because both are internal. The
+        // carve-out was made when the surfaced conflict was still an owner "maybe";
+        // his answer on 2026-07-26 was that a time he can't come to is not an
+        // option. The DIRECT-book chain is untouched and still total: he names the
+        // time, create_meeting books it, and says what it lands on.
+        if (verdict.overCommitment) {
+          trackReject('owner_busy_collision', cursorDt.toISO()!, verdict.outsideWorkHours === true);
+          cursor = new Date(cursor.getTime() + step);
+          continue;
+        }
+        // Relaxing a soft block is not extending his day (see `keepWorkHours`).
+        if (params.keepWorkHours && verdict.outsideWorkHours) {
+          trackReject('outside_owner_work_hours', cursorDt.toISO()!, true);
+          cursor = new Date(cursor.getTime() + step);
+          continue;
+        }
+        // A relaxed pass is the only one that returns a rule-BREAKING slot, so it
+        // is the only one that owes the owner which rule. Ask the SAME validator
+        // the strict question and carry its sentence verbatim (M11/M14): pre-fix
+        // the payload said nothing per slot and pointed the model at
+        // `day_summary.top_reasons` — a per-DAY top-2 from the STRICT pass, which
+        // on the 2026-07-26 Maayan search was ["outside_attendee_work_hours",
+        // "attendee_busy_collision"] and said nothing about the offered slots at
+        // all. The system prompt already promises this field exists
+        // (skills/meetings.ts: "each returned slot carries broken_rule_label");
+        // this is what makes that true. Owner-viewer only — the labels name his
+        // mechanisms, and the colleague path has its own mechanism-free hint.
+        if (params.relaxed && params.viewer === 'owner') {
+          const strictVerdict = checkSlot({ ...slotCheckInput, allowRelaxed: false });
+          if (!strictVerdict.passes) verdictBrokenRuleLabel = strictVerdict.violation_label;
         }
       } else {
         // No-profile fallback (degenerate callers with no UserProfile): only
@@ -1135,6 +1198,7 @@ export async function findAvailableSlots(params: {
         day_type: dayType,
         disturbs_floating_block: disturbsBlock,
         ...(verdictOverOptional ? { over_optional: verdictOverOptional } : {}),
+        ...(verdictBrokenRuleLabel ? { broken_rule_label: verdictBrokenRuleLabel } : {}),
         ...(attendeeConflicts.length ? { attendee_conflicts: attendeeConflicts } : {}),
         ...(packingDense ? { density: scoreSlotDensity(slotStartMs, slotEndMs, ownerBusyMs, densityCfg).score } : {}),
       });

@@ -999,7 +999,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             const strictDaySummary = diagnosticsOut.daySummary;
             // Owner-tagged backstop wins over relaxing soft rules: his genuinely
             // open times (attendee-conflicted) beat times that break his focus /
-            // lunch / work-hours. Only relax when he has no open slot at all.
+            // lunch / category limits. Only relax when he has no open slot at all.
             if (shouldRecover && ownerAttendeeTaggedSlots.length === 0) {
               try {
                 relaxedRecoverySlots = await findAvailableSlots({
@@ -1022,13 +1022,22 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // a comment claiming "#128 must-be searches at HIS lead"; the
                   // recovery has never honoured any lead floor, and the slots it
                   // surfaces go to the OWNER as approval candidates anyway.)
-                  relaxed: true,  // bypass focus/lunch/work-hours; attendee busy still enforced
+                  relaxed: true,       // bypass focus / lunch / category — his soft day-load rules
+                  keepWorkHours: true, // …but relaxing a soft block is not extending his day
                   excludeEventIds: Array.isArray(args.moving_event_ids)
                     ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
                     : undefined,
                   category: args.category as string | undefined,
                   autoExpand: false,  // recovery stays inside the user's window
                 });
+                // v3.1.7 — the recovery is clipped to the owner's working DAY, and
+                // that clip now lives INSIDE the walker (`keepWorkHours`), above
+                // its per-day cap. It used to run out here, re-deriving the day's
+                // windows from getEffectiveWorkDay + isSlotInWorkHours AFTER the
+                // walker had already spent its 8-slot budget ranking nocturnal
+                // candidates — so a recovery could report 8 accepted and hand back
+                // 0 (this same log, 06:59:36). One work-hours decision, taken by
+                // the validator, before anything is discarded.
                 logger.info('find_available_slots — relaxed recovery', {
                   strictAccepted: 0,
                   relaxedAccepted: relaxedRecoverySlots.length,
@@ -1037,33 +1046,6 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               } catch (recErr) {
                 logger.warn('find_available_slots — relaxed recovery threw', {
                   err: String(recErr).slice(0, 200),
-                });
-              }
-              // v3.1.7 — clip the AUTO-recovery to the owner's working DAY. The
-              // recovery relaxes IN-DAY soft blocks (focus / lunch / category) so
-              // it can surface "13:00 breaks your lunch — book anyway?" — but it
-              // must NEVER offer a slot outside his working hours (pre-start /
-              // post-end). Relaxing a soft block ≠ extending his day.
-              // (When the OWNER explicitly names an off-hours time, that call
-              // passes relaxed=true directly and never enters this
-              // auto-recovery branch.)
-              if (relaxedRecoverySlots.length > 0) {
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const wh = require('../../../../utils/workHours') as typeof import('../../../../utils/workHours');
-                const durMin = args.duration_minutes as number;
-                relaxedRecoverySlots = relaxedRecoverySlots.filter(s => {
-                  const sd = DateTime.fromISO(s.start, { zone: timezone });
-                  if (!sd.isValid) return true;
-                  // v3.7.x (#143) — clip to the date's EFFECTIVE work-hour
-                  // windows so an override (custom hours / day off) governs the
-                  // recovery, not raw weekday yaml.
-                  const windows = wh.getEffectiveWorkDay(sd.toFormat('yyyy-MM-dd'), context.profile).windows;
-                  if (windows.length === 0) return false; // day off → never offer
-                  const startMin = sd.hour * 60 + sd.minute;
-                  return wh.isSlotInWorkHours(windows, startMin, startMin + durMin);
-                });
-                logger.info('find_available_slots — recovery clipped to work-day', {
-                  kept: relaxedRecoverySlots.length,
                 });
               }
               if (relaxedRecoverySlots.length === 0) {
@@ -1220,8 +1202,9 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // v4.1.x (M10/M11) — set when the named time is NOT offerable, so the
             // result can say WHY instead of letting the model infer "unavailable"
             // from absence. Never merged into `slots`: an excluded slot is still
-            // excluded (#142d — a slot the owner has an EXTERNAL commitment on is
-            // deliberately never PROPOSED). The bug was the silence, not the drop.
+            // excluded (#142d / M3 — a slot a real commitment already holds is
+            // deliberately never PROPOSED, whoever else is on it). The bug was the
+            // silence, not the drop.
             let preferredSlotStatus: Record<string, unknown> | undefined;
             if (preferredSlot) {
               const matchingCandidate = candidateSet.find(s => {
@@ -1285,10 +1268,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                       ? { broken_rule: brokenRule, broken_rule_label: humanizeViolationLabel(brokenRule, ownerFirstPref) }
                       : {}),
                     _note: prefAvailable
-                      // Passed the engine yet isn't in the offered set → it was
-                      // excluded by a PROPOSAL-only policy (#142d external
-                      // commitment) or fell outside the returned window. Say so.
-                      ? `The specific time asked for (${preferredSlot}) is not in the offered list even though it clears ${ownerFirstPref}'s rules — it sits on a commitment ${ownerFirstPref} has with someone outside the company, so it is never offered as an option. Say that plainly rather than implying the time is free or staying silent about it. ${ownerFirstPref} can still choose to book straight over it if he tells you to.`
+                      // Passed the engine yet isn't in the offered set → it is
+                      // genuinely bookable and simply didn't make the list (the
+                      // per-day cap / the spread filled it with other times, or it
+                      // sits outside the window the list was drawn from). It used to
+                      // read "it sits on a commitment with someone outside the
+                      // company" — a guess dressed as a fact, and now a wrong one:
+                      // a slot held by ANY real commitment fails this very re-check
+                      // and lands in the branch below with the true label.
+                      ? `The specific time asked for (${preferredSlot}) clears every one of ${ownerFirstPref}'s rules and nothing is booked on it — it just didn't make the offered list. Treat it as available and offer it alongside \`slots\`; never imply it's blocked, and never stay silent about it.`
                       : `The specific time asked for (${preferredSlot}) is NOT bookable: ${humanizeViolationLabel(brokenRule, ownerFirstPref)}. Say this plainly and in human terms — never let it just be missing from the list. Then offer the alternatives in \`slots\`. If ${ownerFirstPref} says to do it anyway, that is his call: re-book with relaxed=true.`,
                   };
                   logger.info('find_available_slots — preferred_slot not offered, annotated with its real reason', {
@@ -1518,6 +1506,12 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // (the tier holds them back otherwise), so their appearance IS the
             // signal to narrate the trade-off.
             const hasOverOptional = annotatedSlots.some((s: any) => typeof s.over_optional === 'string' && s.over_optional.length > 0);
+            // Does the payload actually CARRY the per-slot rule it breaks? The
+            // walker emits `broken_rule_label` for the owner's own view only, so a
+            // note that promised it unconditionally would, on any other view, tell
+            // the model to quote a field that isn't there — and a model told to name
+            // a reason it cannot read is a model that invents one (M11).
+            const hasBrokenRuleLabel = annotatedSlots.some((s: any) => typeof s.broken_rule_label === 'string' && s.broken_rule_label.length > 0);
             if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               // #148 — grounded timezone strings so Sonnet quotes the conversion, never recomputes it.
@@ -1560,9 +1554,25 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               if (isRecoveryResult) {
                 // Flag so Sonnet knows these slots break soft rules — she
                 // should narrate the trade-off, not present as clean options.
+                //
+                // This note used to say the retry "bypassed soft rules (free-time
+                // floor / lunch / work-hours)" and to read `day_summary.top_reasons`
+                // for "WHICH rule each slot is breaking". Both were wrong, and
+                // together they are how a double-booked 15:30 got narrated as
+                // "clean for both of you" (2026-07-26 19:17Z): the retry ALSO
+                // waived his own hard busy, and day_summary is a per-DAY top-2 from
+                // the STRICT pass, which on that search blamed the attendee and
+                // said nothing about the offered times. The walker now excludes
+                // committed and out-of-hours slots outright and tags each surfaced
+                // slot with the rule it actually breaks, so this note can point at
+                // a real per-slot fact.
                 result._relaxed_recovery = true;
                 result._recovery_note =
-                  'Strict pass returned 0 in the named window. These slots come from a relaxed retry that bypassed soft rules (free-time floor / lunch / work-hours). Read day_summary.top_reasons to see WHICH rule each slot is breaking, and present with that trade-off explicitly ("X fits but dips under the free-time floor — book anyway?"). Owner gets the final say.';
+                  'Strict pass returned 0 in the named window. These slots come from a relaxed retry that bends ONLY the owner\'s soft day-load rules (free-time floor / lunch or another floating block / category limit / booking lead time). They are inside his working hours and NONE of them collides with a meeting he already has — a time he is committed on is never offered here. '
+                  + (hasBrokenRuleLabel
+                    ? 'Each slot carries `broken_rule_label`: the exact rule it breaks, in his own words. QUOTE that per slot and present the trade-off explicitly ("17:30 works, heads up it dips under your free-time floor — book anyway?"); never present one as clean, and never guess a reason that isn\'t in the label. '
+                    : 'Which specific rule each one bends is NOT in this payload, so do not name one — say only that his day is loaded around then and these are the times that could still work. ')
+                  + 'A slot may ALSO carry `attendee_conflicts` — say who is busy on top of the rule. He gets the final say.';
               }
               if (usedColleagueOwnerOnly) {
                 result._attendee_unverified_note =
