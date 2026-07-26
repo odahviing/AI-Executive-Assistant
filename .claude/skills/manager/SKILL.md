@@ -165,13 +165,20 @@ If a legacy `sleep`-loop timer from an earlier session is still running, stop it
 | The request | Use | Why |
 |---|---|---|
 | **One lane**, items already known — *"for the guard you can run: P3, P19, P18"* | **`Agent({subagent_type:'guard', …})`** — a single direct dispatch | Nothing to route, nothing to parallelise, one diff. Skip the pipeline entirely. |
-| **Several lanes**, items already known | `Workflow({name:'bugger', args:{issues:[…]}})` | Parallelism + dependency hand-off + one combined verify across lanes. Intake and triage still skipped. |
+| **Several lanes, INDEPENDENT items** — unrelated bugs that merely happen to live in different subsystems | **One `Agent` per lane, in parallel** — then **one `guard` pass over the combined diff by hand** | Cheaper than the workflow and the parallelism is identical. **But you inherit two obligations:** read every lane's return for a dependency ask and route it yourself, and run that combined verify. Skipping either is how six asks and a cross-lane defect got lost on 2026-07-26. |
+| **Several lanes, ENTANGLED items** — one idea split across lanes, a shared helper, a contract with two sides | `Workflow({name:'bugger', args:{issues:[…]}})` | Here the seams *are* the risk, and the engine's dependency close-out and combined verify are the point. Intake and triage still skipped. |
 | **Unknown work** — the nightly run, or "go find bugs" | `Workflow({name:'bugger', args:{sources:[…]}})` | This is the only case that needs intake and triage at all. |
 | **A question** — report, status, ledger | Neither. Read the files. | |
 
 **On 2026-07-26 this rule did not exist, and the cost was immediate:** every single-lane request went through the full pipeline. One of them spent **76k tokens** on a GitHub pull and a 24h log review before being killed — to rediscover five row ids the owner had typed in his previous message. Repeated per request.
 
-**A single direct dispatch still writes files, so STOP 1's collision check applies to it too.** What it does not need is intake, triage, Locate, a context pass, or a workflow-level verify — a one-lane change is verified by that lane's own paper-trace plus, if the diff warrants it, one `guard` dispatch afterwards.
+**The criterion is INTERACTION, not lane count.** Three lanes fixing three unrelated things have no seams for a combined verify to find; three lanes serving one idea are nothing but seams. Ask "could these two fixes be right alone and wrong together?" — if yes, that is the workflow's case.
+
+**A direct dispatch still writes files, so STOP 1's collision check applies.** What it does not need is intake, triage, Locate or a context pass.
+
+**But never let "direct dispatch" quietly mean "no verify."** Going direct moves two jobs from the engine onto you, and they are the two that failed tonight:
+1. **Route the dependency asks yourself** — read each lane's return; a `built` verdict can still carry `dependencyAgent` + `dependencyAsk`, and in a direct dispatch nothing reads it but you.
+2. **Run one `guard` pass over the combined diff** once every lane has returned. Per-lane verification cannot see two fixes that are each correct alone and wrong together, which is the only defect class a verifier is needed for — and the one that has been caught every single time it was looked for.
 
 ## Running the loop
 
