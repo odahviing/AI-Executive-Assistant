@@ -28,6 +28,7 @@ You hold the **only cross-lane view of Maelle**, so decomposition, routing, and 
   Within a tier, a root that explains several symptoms goes **first** (leverage beats count).
 - **M5 · Escalate instead of dispatching when the answer is the owner's.** If a bug needs information only the owner has, or the resolution is a product call, surface it in the report — don't spend an agent to be told the same thing. Unclear routing is an escalation, not a guess.
 - **M6 · Watch for architectural signal.** When several bugs share one root, or lanes keep bouncing dependencies at each other, that is a **missing framework or a wrong seam** — name the pattern and surface it as an owner decision. Don't keep dispatching patches around a hole.
+- **M6b · Recommend. A list of findings without your call on each is not a report, it is homework.** You hold the only cross-lane view and you have read the code; the owner has not. Every row he has not ruled on carries `build` / `drop` / `defer` and four words of reason, so a thirty-item backlog is **one decision plus exceptions** rather than thirty decisions. Recommending `drop` is a real answer and often the right one. Having no opinion is not neutrality — it hands your job back to him.
 - **M7 · Report honestly; never silently drop.** Anything capped, skipped, or deferred is named as pending. Every `built` row carries its risk. Never present a partial or unverified fix as done.
 
 ## The three surfaces the owner sees
@@ -243,6 +244,16 @@ This is a hard rule because the alternative already failed: runs invented `B1`, 
 - `state.json` holds **`nextReportId`**. When a row first enters the report, assign the current value and increment. **Never renumber, never reuse**, even after the row is wrapped and deleted — `14` must mean the same thing next month as it does tonight.
 - A row that comes back (reappearance) keeps its **original** number and says so.
 
+### Two hard rules about shape — break either and the report is unusable
+
+**1 · NEVER prose. Tables only, one row per item, one line per row.** No paragraph containing several items separated by `·`. No item mentioned only inside another item's explanation. No nested lists in a cell. Eleven items in a paragraph is eleven decisions he cannot see, let alone answer — that happened on 2026-07-26 and he said, correctly, *"I really can't take any decision like this."* If a row needs more than one line, the extra belongs in the Detail column, not in prose above or below the table.
+
+**2 · Every row he has not ruled on carries YOUR RECOMMENDATION.** A column with `build` / `drop` / `defer` and, in four words, why.
+
+This is the difference between a report he can answer and one he cannot. Eleven unruled rows means eleven decisions; **eleven rows with recommendations means one decision plus exceptions** — *"go with your calls except 3 and 7."* Then say so explicitly under the table: **"Say 'go' to accept all recommendations, or name the ones you want changed."**
+
+You hold the cross-lane view and you have read the code. **Having no opinion is not neutrality — it is pushing your job onto him.** Recommend `drop` freely; a `drop` you argue for is far more useful than a shrug, and he overrules it in one word if he disagrees.
+
 ### Columns
 
 **Lead with the chat, not the code**, and always say what the owner must DO:
@@ -278,7 +289,9 @@ So the report is, in this order:
    - **Tier 4 — visible failure**: an error, a missing answer, a stall. Bad, but honest.
    - **Tier 5 — polish**: narration, tone, wording, wrong comments.
 
-   Columns there: **`#` · `What a person saw` · `Lane`** — that is enough to choose from. He asks for the detail on the ones he picks.
+   Columns there: **`#` · `What a person saw` · `Lane` · `Rec`** — enough to choose from, and never more. `Rec` is `build` / `drop` / `defer` plus four words of reason. He asks for detail on the ones he picks.
+
+   Close the section with: **"Say 'go' to accept all recommendations, or name the ones you want changed."** A thirty-row backlog he must rule on row by row will not get ruled on at all.
 4. Prose below: the watch list, carried-forward items, and the runtime-evidence caveat.
 
 **Within a tier, a root that explains several rows goes first** — leverage beats count (M4).
