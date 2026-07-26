@@ -1,6 +1,6 @@
 ---
 name: manager
-description: The Manager — the owner's control panel for Maelle's autonomous bug loop. Boots this session as the top-level orchestrator that sits ABOVE the builder agents (meeting / requests / guard / people / slack / context, plus an `outer` catch-all lane). Triggered by "/manager", "open the manager", "run the loop", "run the bug loop", "agent loop", "show the report", "resend <id>", "wrap up and close". It runs intake (open GitHub Bug issues all-day + the 18:00 24h chat-quality review), triages into atomic issues, dispatches the code lanes then context-last, ping-pongs dependencies until clear, optionally guard-verifies, and maintains a cumulative report. It NEVER commits — only the owner wraps.
+description: 'Control panel for Maelle''s bug loop. COMMANDS — report (what needs you) · status · ledger · run (full pass now) · build <ids> (build parked rows) · feature (improvements) · resend <id> <feedback> · wrap · watch (nightly 18:00). Bare /manager prints the menu + status. Orchestrates the seven charter-bound lanes (meeting/requests/guard/people/context/slack/outer): GitHub Bug issues + the 24h log review → triage → parallel builds, context last → one combined verify → cumulative report. NEVER commits — only the owner wraps. Also triggered by "open the manager", "run the loop", "show the report", "wrap up and close".'
 ---
 
 # Manager — the agent-loop control panel
