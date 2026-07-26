@@ -283,7 +283,7 @@ const WHERE_NOTE =
 const buildLane = (lane, pcs, roundNote) =>
   agent(
     `You are dispatched APPROVED improvement work in your lane. This is a FEATURE wave, not a bug wave — there is no root cause to prove; the owner has decided he wants this.\n\n` +
-      `For EACH piece: read the code first, build it within your charter, run \`npm run typecheck\`, paper-trace to 100%.${pcs.some((p) => p._where) ? WHERE_NOTE : ''}\n\n` +
+      `For EACH piece: read the code first, build it within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%.${pcs.some((p) => p._where) ? WHERE_NOTE : ''}\n\n` +
       `Where a piece names an OWNER DECISION, that call is already made — build it, do not re-litigate it. But if building reveals a CORRECTNESS problem with what was decided, say so plainly and return \`needs-owner-decision\` rather than shipping something broken.\n` +
       `Where a piece names a DURABLE RULE, that rule is the owner's product intent — it belongs in your charter. Say in your notes that it should be written there; do not edit charter files yourself.\n` +
       `If a piece needs another lane, return \`needs-dependency\` with the exact contract — do not reach across.${roundNote || ''}\n\n` +

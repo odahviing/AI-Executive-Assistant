@@ -225,7 +225,7 @@ const WHERE_NOTE =
 
 const dispatch = (lane, issues) =>
   agent(
-    `You are dispatched a batch of atomic issues in your lane. For EACH: prove the root cause from code + logs (cite file:line), build the deep fix within your charter, run \`npm run typecheck\`, paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract.${issues.some((i) => i._where) ? WHERE_NOTE : ''}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
+    `You are dispatched a batch of atomic issues in your lane. For EACH: prove the root cause from code + logs (cite file:line), build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract.${issues.some((i) => i._where) ? WHERE_NOTE : ''}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
     { label: `build:${lane}`, phase: lane === 'context' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
   )
 
