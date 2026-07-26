@@ -338,55 +338,86 @@ if (remaining.length) {
 const DISPATCHABLE_DEP = new Set(['built', 'needs-dependency', 'already-fixed'])
 const hasAsk = (r) => r.dependencyAgent && String(r.dependencyAsk || '').trim().length > 0
 
-// context LAST — always, and including anything the code lanes asked it for.
-phase('Context')
-const ctxDeps = results
-  .filter((r) => hasAsk(r) && r.dependencyAgent === 'context' && DISPATCHABLE_DEP.has(r.verdict))
-  .map((r) => ({ id: `${r.id}>dep`, ref: '', lane: 'context', whatChanges: r.dependencyAsk, whyThisLane: 'raised by a code lane', dependsOn: [], size: 'small' }))
-const ctxPieces = approved.filter((p) => p.lane === 'context').concat(ctxDeps)
-if (ctxPieces.length) results = results.concat(await buildLane('context', ctxPieces))
+// ---- Dependency rounds — the SAME loop bugger.js runs, for the same reasons ---
+// This block previously had two bugs that only a real run would have shown, and
+// tomorrow was going to be that run:
+//
+//   1. `satisfied` was computed BEFORE the cross-lane asks were dispatched, so a
+//      lane that asked another lane for something never got resumed — the ask was
+//      built and the originator was never told, which is the exact hole this code
+//      was written to close.
+//   2. It ran ONCE, so a chain deeper than one hop died silently. A → B → C lost C.
+//
+// Now: rounds of [code lanes in parallel → context LAST], where each round's
+// asks and newly-satisfied originators become the next round's work, capped, and
+// loudly reported if the cap is hit. Ids encode depth: `p1` → `p1>dep` → `p1>dep>dep`.
+const MAX_DEP_ROUNDS = 5
+const dispatchedDepIds = new Set()
+const resumedPieceIds = new Set()
+let depRounds = 0
+let depQueue = approved.filter((p) => p.lane === 'context') // context's own pieces seed round 1
 
-// Close dependencies back to the originating lane — same hole bugger.js had: the
-// dependency gets built and the originator is never told, so its piece sits at
-// `needs-dependency` and the owner reads a finished wave as blocked.
-const satisfied = new Map()
-for (const r of results) {
-  if (r.verdict === 'built' && typeof r.id === 'string' && r.id.endsWith('>dep')) satisfied.set(r.id.slice(0, -'>dep'.length), r)
-}
-// Non-context lanes named as a dependency target, dispatched in the same pass.
-const otherDeps = results
-  .filter((r) => hasAsk(r) && r.dependencyAgent !== 'context' && DISPATCHABLE_DEP.has(r.verdict))
-  .map((r) => ({ id: `${r.id}>dep`, ref: '', lane: r.dependencyAgent, whatChanges: r.dependencyAsk, whyThisLane: 'raised by another lane', dependsOn: [], size: 'small' }))
-if (otherDeps.length) {
-  phase('Build')
-  log(`Cross-lane asks: ${otherDeps.length} → ${[...new Set(otherDeps.map((p) => p.lane))].join(', ')}`)
-  const out = await parallel(CODE_LANES.map((lane) => () => {
-    const pcs = otherDeps.filter((p) => p.lane === lane)
-    return pcs.length ? buildLane(lane, pcs) : null
-  }))
-  results = results.concat(out.filter(Boolean).flat())
-}
+for (;;) {
+  // (a) asks raised by anything already returned, never dispatched before
+  const asks = results
+    .filter((r) => hasAsk(r) && DISPATCHABLE_DEP.has(r.verdict) && !dispatchedDepIds.has(`${r.id}>dep`))
+    .map((r) => ({ id: `${r.id}>dep`, ref: '', lane: r.dependencyAgent, whatChanges: r.dependencyAsk, whyThisLane: 'raised by another lane', dependsOn: [], size: 'small' }))
 
-const resumes = results
-  .filter((r) => r.verdict === 'needs-dependency' && satisfied.has(r.id))
-  .map((r) => {
-    const orig = approved.find((p) => p.id === r.id) || { id: r.id, lane: '', whatChanges: r.notes || '', ref: '', whyThisLane: '', dependsOn: [], size: 'small' }
-    const dep = satisfied.get(r.id)
-    return { ...orig, _dependencyResolved: { youAsked: r.dependencyAsk || '', theyDelivered: dep.fix || dep.notes || 'see the working tree' } }
-  })
-if (resumes.length) {
-  phase('Build')
-  log(`Dependencies closed: resuming ${resumes.length} piece(s) to finish.`)
-  const note = `\n\nSome pieces carry \`_dependencyResolved\`: you returned \`needs-dependency\` on them earlier in this run and the lane you named has now delivered. FINISH your own piece. Per Shared rule 6, RE-DERIVE their change from the code before building on it — do not trust the summary.`
-  const out = await parallel(
-    CODE_LANES.map((lane) => () => {
-      const pcs = resumes.filter((p) => p.lane === lane)
-      return pcs.length ? buildLane(lane, pcs, note) : null
-    }),
-  )
-  const round2 = out.filter(Boolean).flat()
-  const replaced = new Set(round2.map((r) => r.id))
-  results = results.filter((r) => !replaced.has(r.id) || !resumes.some((p) => p.id === r.id)).concat(round2)
+  // (b) originators whose dependency has NOW landed — recomputed every round, which
+  //     is the fix for bug 1: a dep built this round can resume its originator next.
+  const satisfied = new Map()
+  for (const r of results) {
+    if (r.verdict === 'built' && typeof r.id === 'string' && r.id.endsWith('>dep')) satisfied.set(r.id.slice(0, -'>dep'.length), r)
+  }
+  const resumes = results
+    .filter((r) => r.verdict === 'needs-dependency' && satisfied.has(r.id) && !resumedPieceIds.has(r.id))
+    .map((r) => {
+      const orig = approved.find((p) => p.id === r.id) || { id: r.id, lane: '', whatChanges: r.notes || '', ref: '', whyThisLane: '', dependsOn: [], size: 'small' }
+      const dep = satisfied.get(r.id)
+      resumedPieceIds.add(r.id)
+      return { ...orig, _dependencyResolved: { youAsked: r.dependencyAsk || '', theyDelivered: dep.fix || dep.notes || 'see the working tree' } }
+    })
+
+  const round = [...depQueue, ...asks, ...resumes].filter((p) => p.lane && (CODE_LANES.includes(p.lane) || p.lane === 'context'))
+  depQueue = []
+  if (!round.length) break
+  if (++depRounds > MAX_DEP_ROUNDS) {
+    log(`! DEP ROUND CAP: ${round.length} item(s) NOT dispatched after ${MAX_DEP_ROUNDS} rounds — ${round.map((p) => `${p.id}→${p.lane}`).join(', ')}`)
+    break
+  }
+  const resumeNote = resumes.length
+    ? `\n\nSome pieces carry \`_dependencyResolved\`: you returned \`needs-dependency\` on them earlier in this run and the lane you named has now delivered. FINISH your own piece. Per Shared rule 6, RE-DERIVE their change from the code before building on it — do not trust the summary.`
+    : ''
+  log(`Dep round ${depRounds}: ${round.length} item(s) — ${[...new Set(round.map((p) => p.lane))].join(', ')}${resumes.length ? ` (${resumes.length} resumed)` : ''}`)
+
+  // code lanes in parallel, then context LAST within the round
+  const codeRound = round.filter((p) => p.lane !== 'context')
+  if (codeRound.length) {
+    phase('Build')
+    const out = await parallel(CODE_LANES.map((lane) => () => {
+      const pcs = codeRound.filter((p) => p.lane === lane)
+      return pcs.length ? buildLane(lane, pcs, resumeNote) : null
+    }))
+    results = results.concat(out.filter(Boolean).flat())
+  }
+  const ctxRound = round.filter((p) => p.lane === 'context')
+  if (ctxRound.length) {
+    phase('Context')
+    results = results.concat(await buildLane('context', ctxRound, resumeNote))
+  }
+  round.forEach((p) => dispatchedDepIds.add(p.id))
+
+  // A resumed piece REPLACES its earlier needs-dependency row — same id.
+  if (resumes.length) {
+    const ids = new Set(resumes.map((p) => p.id))
+    const seen = new Set()
+    results = results.filter((r) => {
+      if (!ids.has(r.id) || r.verdict !== 'needs-dependency') return true
+      if (seen.has(r.id)) return true
+      seen.add(r.id)
+      return false
+    })
+  }
 }
 
 // ONE combined-diff verify — same reasoning as bugger.js: a per-piece pass cannot
@@ -433,7 +464,8 @@ const featureManifest = {
   wavesRun: wave,
   neverDispatched: remaining.map((p) => p.id),
   crossLaneAsks: { attached: results.filter((r) => hasAsk(r)).length, dispatched: results.filter((r) => String(r.id).endsWith('>dep')).length },
-  resumed: resumes.length,
+  resumed: resumedPieceIds.size,
+  depRounds,
   earnedRules: earnedRules.length,
   verify: A.verify === false ? { ran: false } : { ran: !!built.length, overturned: results.filter((r, i) => verified[i] && r.verdict !== verified[i].verdict).length, verifiedCleanReturned: verifiedClean.length },
 }
