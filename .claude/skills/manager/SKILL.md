@@ -1,6 +1,6 @@
 ---
 name: manager
-description: 'Control panel for Maelle''s bug loop. COMMANDS — report (what needs you) · status · ledger · run (full pass now) · build <ids> (build parked rows) · feature (improvements) · resend <id> <feedback> · wrap · watch (nightly 18:00). Bare /manager prints the menu + status and is READ-ONLY — only an explicit "run" or "build" ever dispatches agents or writes files, never a question about state. Orchestrates the seven charter-bound lanes (meeting/requests/guard/people/context/slack/outer): GitHub Bug issues + the 24h log review → triage → parallel builds, context last → one combined verify → cumulative report. NEVER commits — only the owner wraps. Also triggered by "open the manager", "run the loop", "show the report", "wrap up and close".'
+description: 'Control panel for Maelle''s bug loop. COMMANDS — report (what needs you) · status · ledger (--open = the backlog) · run (full pass now) · build <ids> (build parked rows) · feature (improvements) · resend <id> <feedback> · verify (one adversarial pass over the uncommitted diff, before wrapping) · wrap · watch (nightly 18:00). Bare /manager prints the menu + status and is READ-ONLY — only an explicit "run" or "build" ever dispatches agents or writes files, never a question about state. Orchestrates the seven charter-bound lanes (meeting/requests/guard/people/context/slack/outer): GitHub Bug issues + the 24h log review → triage → parallel builds, context last → one combined verify → cumulative report. NEVER commits — only the owner wraps. Also triggered by "open the manager", "run the loop", "show the report", "wrap up and close".'
 ---
 
 # Manager — the agent-loop control panel
@@ -84,6 +84,9 @@ WORK
   resend <id> <what was wrong>    send it back to its lane with your words
                   e.g. resend P14 this should ask me first, not book it
 
+CHECK
+  verify          one adversarial pass over everything uncommitted, before you wrap
+
 FINISH
   wrap [patch|minor]   the only commit path. Ledger first, then clear the report
 
@@ -102,6 +105,19 @@ Full detail on each, for you — not for the menu:
   1. `Workflow({name:'feature', args:{mode:'plan', priority:'High'}})` — reads the open `Improvement` issues, establishes what each means **against the code** (flagging any already built, and any whose real gap is bigger than the issue implies), and returns per-lane pieces + `blockingQuestions` + `notWorthBuilding`. **Builds nothing.**
   2. Render the plan for the owner, get the blocking questions answered and the pieces approved/reshaped, then `Workflow({name:'feature', args:{mode:'build', pieces:[...approved], answers:{...}}})` — dispatches in dependency order, context last, one combined verify.
   Each piece names the `productDecision` it embeds and, where the decision should outlive the wave, a `charterRule`. **A bug never earns a charter rule; an improvement often should** — the build return surfaces `earnedRules` so none is lost. Agents never edit charter files; the owner decides what becomes permanent.
+- **verify** / **check before wrap** / **verify the diff** — one adversarial pass over **everything uncommitted**, run before a wrap. This is **`Agent({subagent_type:'guard', …})` with a findings-only brief** — the same guard agent that owns the output gates, wearing its other hat as the framework's verifier. Nothing is special-cased; the job lives entirely in the prompt.
+
+  **Always needed after hand-dispatched work**, because the workflow's own verify only covers what the workflow built. Nine direct dispatches leave nine self-checked diffs and nothing that looked at them together.
+
+  The brief must say, every time:
+  - **Findings only — build nothing, edit nothing, commit nothing.**
+  - **Attack the SEAMS.** Each lane already self-checked its own change, so re-litigating one in isolation is wasted. What no lane could see is the interaction: two fixes each correct alone and wrong together, a shared helper two lanes both touched, a contract altered on one side only, or one fix built on top of another's regression.
+  - Read the **actual `git diff`**, never the lanes' summaries — those are their own claims. Confirm `npx tsc --noEmit`.
+  - **Calibrate to "is this safe to ship to real people"**, not "what could be better."
+  - A **tool budget** (~60 calls), and instructions to name what it did *not* cover rather than thinning every check.
+  - Pass `state.verifiedClean` as already-settled ground, and each lane's `traced` so it attacks gaps rather than re-treading.
+
+  **Never run it while a lane is still building** — it would read a moving tree and report on code that is about to change.
 - **ledger** / **stats** — `node scripts/ledger-stats.cjs` (`--lane <name>`, `--since <date>`, `--runs`). Per-lane pushback ratios from `ledger.jsonl` — the only way to tell whether the charters are *working* rather than merely existing. Read the header note before quoting a number: `push%` is over **build asks only**, excluding findings-only verify runs, because counting those made the first version report a lane as ungoverned when all its rows were verify passes doing exactly their job.
 - **resend `<id>` [feedback]** — the owner has a question or correction on an item. Re-dispatch that issue to its lane agent with `{original finding + the owner's feedback}` (a fresh Agent call to that `agentType`, schema-forced), then update that row in the report. If it's a GitHub issue, remove its `Agent` label so the work is cleanly re-done.
 - **status** — mid-run OR post-run snapshot. Read the live `journal.jsonl` in the current run's transcript dir (`<project>/subagents/workflows/<state.lastRun.id>/journal.jsonl`) and print: findings count, the triaged atomic bugs (id · lane · severity · symptom), and each verdict so far (built / needs-dependency / blocked-charter / needs-owner-decision / already-fixed). Also show last-run time + whether it's incomplete (resumable). **Works while a run is in progress** — the journal streams as agents finish.
