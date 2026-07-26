@@ -29,6 +29,14 @@ const PRESET = Array.isArray(A.issues) && A.issues.length ? A.issues : null
 // re-finds bugs the previous one already fixed. The lane catches it and returns
 // `already-fixed`, but only after a full dispatch — so tell triage up front.
 const ALREADY_BUILT = Array.isArray(A.alreadyBuilt) ? A.alreadyBuilt : []
+// COLLECT mode — find and record, build nothing. Building is ~80% of a run's
+// cost, and its whole value is that work is already done when the owner looks.
+// Once the report has gone unread for a couple of nights that value is gone:
+// we would be spending the expensive part to produce findings he was going to
+// review and batch anyway. So keep the cheap half (intake + triage, which is
+// how new bugs are discovered at all) and drop the expensive half until he is
+// back. He then dispatches whatever he approves through `args.issues`.
+const MODE = A.mode === 'collect' ? 'collect' : 'full'
 const VERIFY = A.verify !== false // guard-verify each built fix unless explicitly off
 const CODE_LANES = ['meeting', 'requests', 'guard', 'people', 'slack', 'outer'] // run in parallel; context runs LAST, separately
 const EFFORT = { meeting: 'xhigh', context: 'xhigh', slack: 'xhigh', requests: 'xhigh', outer: 'high', people: 'high', guard: 'high' } // reasoning effort per lane (owner-set)
@@ -191,7 +199,7 @@ const intake = await parallel(
       )
     }
     return agent(
-      `Review Maelle's conversations since ${SINCE} from logs/maelle-<today>.log (read-only). WORK CHEAP-FIRST — do NOT full-read every conversation.\n1. Grep the log for HARD trouble signals (language-neutral): error/exception lines, guard fires (claimChecker/humanGate/dateVerifier/securityGate flagged or rewrote), "truncated at max_tokens", tool retries/failures, findAvailableSlots rejection breakdowns, approval-escalation misfires, abnormally long threads.\n2. Scan shallowly for SOFT signals that leave no error: a reply that doesn't match what was asked, an attendee/time/detail that silently changed between turns, a confidently-worded answer on a partial result.\n3. DEEP-read (full turns) ONLY the conversations that tripped step 1 or looked off in step 2.\nJudge those on four lenses: (1) was it good, (2) did the person get what they wanted, (3) did it feel human / make sense, (4) did the process work.\nVERY HARD BAR: surface a finding ONLY if it is an OBVIOUS, CLEAR bug, and you MUST cite the exact transcript moment as evidence. If not certain, set clarity:"ambiguous" (owner decides; never auto-fixed). Never invent issues from good chats. Return findings {source:"logs", ref, symptom, evidence:<quoted moment>, clarity}.`,
+      `Review Maelle's conversations since ${SINCE} from logs/maelle-<today>.log (read-only). WORK CHEAP-FIRST — do NOT full-read every conversation.\n**0. ACTIVITY CHECK, BEFORE ANYTHING ELSE.** Count \`Orchestrator invoked\` events since ${SINCE}. If there are ZERO, she handled no turns — return {findings:[]} immediately and stop. Do not read further, do not scan, do not reason about it. Count that event specifically: \`Catch-up: scanning DMs\` is an idle heartbeat that fires whether or not anyone spoke, and reading it as activity is what made a zero-finding run cost 124k.\n1. Grep the log for HARD trouble signals (language-neutral): error/exception lines, guard fires (claimChecker/humanGate/dateVerifier/securityGate flagged or rewrote), "truncated at max_tokens", tool retries/failures, findAvailableSlots rejection breakdowns, approval-escalation misfires, abnormally long threads.\n2. Scan shallowly for SOFT signals that leave no error: a reply that doesn't match what was asked, an attendee/time/detail that silently changed between turns, a confidently-worded answer on a partial result.\n3. DEEP-read (full turns) ONLY the conversations that tripped step 1 or looked off in step 2.\nJudge those on four lenses: (1) was it good, (2) did the person get what they wanted, (3) did it feel human / make sense, (4) did the process work.\nVERY HARD BAR: surface a finding ONLY if it is an OBVIOUS, CLEAR bug, and you MUST cite the exact transcript moment as evidence. If not certain, set clarity:"ambiguous" (owner decides; never auto-fixed). Never invent issues from good chats. Return findings {source:"logs", ref, symptom, evidence:<quoted moment>, clarity}.`,
       { label: 'intake:logs', phase: 'Intake', effort: 'medium', model: 'sonnet', schema: FINDINGS },
     )
   }),
@@ -225,6 +233,25 @@ if (pending.length) log(`Cap ${CAP}: ${pending.length} lower-severity issues def
 log(`Triage: ${buildable.length} clear to build, ${flagged.length} flagged for owner, ${pending.length} pending.`)
 buildable.forEach((i) => log(`  • build [${i.lane}/${i.severity}] ${i.id} — ${(i.symptom || '').slice(0, 90)}`))
 flagged.forEach((i) => log(`  • flagged-for-owner ${i.id} — ${(i.symptom || '').slice(0, 90)}`))
+
+// ---- 2c. COLLECT mode stops here — found and recorded, nothing built ----
+// Everything above is the cheap half. Everything below (Locate, six lanes,
+// context, dependency close-out, one xhigh verify) is the expensive half, and
+// it only pays for itself if the owner is going to look. When he is not, the
+// findings still land in the report and he dispatches the ones he wants
+// through `args.issues` — so nothing is lost, only deferred.
+if (MODE === 'collect') {
+  log(`Collect mode: ${buildable.length} issue(s) recorded, ${flagged.length} flagged. NOTHING built — the owner batches these when he is back.`)
+  return {
+    mode: 'collect',
+    counts: { findings: findings.length, atomic: allIssues.length, built: 0, needsOwner: 0, flagged: flagged.length, pending: 0 },
+    results: [],
+    collected: buildable, // pass straight back as `args.issues` to build them
+    flagged,
+    pending: [],
+    verifiedClean: [],
+  }
+}
 
 // ---- 2b. Locate — resolve the cited file:line ONCE, cheaply, for everyone ----
 // Every builder used to open with the same hunt: grep, read a 1,400-line file,

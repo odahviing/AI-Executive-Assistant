@@ -67,6 +67,25 @@ Invoke as `/manager <command>` (e.g. `/manager run`), or just say the command on
 - **status** — mid-run OR post-run snapshot. Read the live `journal.jsonl` in the current run's transcript dir (`<project>/subagents/workflows/<state.lastRun.id>/journal.jsonl`) and print: findings count, the triaged atomic bugs (id · lane · severity · symptom), and each verdict so far (built / needs-dependency / blocked-charter / needs-owner-decision / already-fixed). Also show last-run time + whether it's incomplete (resumable). **Works while a run is in progress** — the journal streams as agents finish.
 - **wrap** / **wrap up and close (patch|minor)** — the ONLY commit path. Invoke the `wrap` skill. Default **patch** unless the owner says minor. After a clean wrap: **append every wrapped row to `ledger.jsonl` FIRST**, then set `lastWrapIso`, clear the built rows and reset `report.md` to empty. Never clear the report before the ledger append — that is the only moment the history can be lost.
 
+## Spend less the longer he is away — the escalation ladder
+
+Building is roughly **80% of a run's cost**, and its only value is that work is already done when he looks. Once the report has gone unread, that value is gone: you are paying the expensive part to produce work he was going to review and batch anyway. So the run gets cheaper the longer he stays away, and eventually stops.
+
+**Decide the mode from `state.lastWrapIso` and the count of BUILT-but-uncommitted rows in `report.md`:**
+
+| Situation | Mode | What it costs |
+|---|---|---|
+| Report is fresh — he wrapped recently, or ≤1 unreviewed run | **full** | intake → triage → build → verify. Work is waiting for him. |
+| **≥2 unreviewed runs** stacked | **`mode:'collect'`** | intake → triage → report. **No builds, no verify.** Findings still accumulate; he dispatches the ones he wants via `args.issues`. |
+| **7+ days** since `lastWrapIso` with unreviewed work | **STOP — do not run** | Post one line saying the loop is paused and why. Nothing is lost: `lastSeenIso` does not advance, so the next run picks up everything since. |
+
+Two more that cost nothing to honour:
+
+- **Zero real turns → no log review.** The log-intake agent now counts `Orchestrator invoked` before anything else and exits immediately on zero. Count that event specifically — `Catch-up: scanning DMs` is an idle heartbeat that fires whether or not anyone spoke, and reading it as activity is what made a zero-finding run cost 124k.
+- **`alreadyBuilt`** stops triage re-emitting a symptom already fixed in the tree (see below).
+
+**Audits do not belong in this loop.** The 2026-07-26 audit put ~30 items into `report.md`, which is why the parked list looks nothing like a normal day. Day-to-day is **1–5 bugs**. A deep audit is a dedicated session with its own scope and its own wrap — run it deliberately, ship it as its own wave, and keep the nightly report for what the nightly loop actually finds. A report that mixes both is a report he cannot triage.
+
 ## Recurring 6pm scheduler (the always-on chat)
 `/manager watch` turns this open chat into the nightly runner. **Use `CronCreate`** — NOT a background `sleep` loop (a sleep loop shows a permanent "Running" background-task chip, which reads as "a run is in progress" when it is only waiting — confusing, so don't use it):
 
