@@ -77,7 +77,8 @@ WORK
   run             full pass now: GitHub bugs + the 24h log review, together
   build <ids>     build parked rows from the report (or "build all")
   feature [High]  improvements — plans first, you approve, then it builds
-  resend <id>     send one item back to its lane with your feedback
+  resend <id> <what was wrong>    send it back to its lane with your words
+                  e.g. resend P14 this should ask me first, not book it
 
 FINISH
   wrap [patch|minor]   the only commit path. Ledger first, then clear the report
