@@ -1,5 +1,6 @@
 import { getDb } from '../db';
 import { getActiveOutreachForThread } from '../db/jobs';
+import { reactActivityComplete } from '../utils/threadActivity';
 import logger from '../utils/logger';
 import type { Task, TaskType, TaskStatus } from './types';
 
@@ -59,41 +60,13 @@ export function createTask(params: Omit<Task, 'id' | 'created_at' | 'updated_at'
       target_slack_id: params.target_slack_id,
     });
   }
-  // v2.6.5 (Bug 8.3) — when a task is created already in `completed` status
-  // (outreach skill does this for fire-and-forget non-await sends), still
-  // fire the ✅-on-Maelle's-last-message hook. Pre-fix the hook only fired
-  // from completeTask(), so direct create-with-completed bypassed it. Owner
-  // saw "Done!" replies with no ✅ on direct booking + outreach-send turns.
-  if (params.status === 'completed' && params.owner_thread_ts && params.owner_user_id) {
-    fireCompletionReact(params.owner_user_id, params.owner_thread_ts, id);
-  }
+  // v4.2.x — the create-with-status='completed' react hook that used to sit here
+  // went with its only caller. message_colleague was the one path that created a
+  // task already completed (fire-and-forget send) purely to trigger the ✅ tick;
+  // it now calls reactActivityComplete directly and mints no row. Every remaining
+  // createTask caller opens with status='new', so a completed-on-create task is
+  // no longer reachable.
   return id;
-}
-
-/**
- * v2.6.5 — fire-and-forget react ✅ on Maelle's most recent message in the
- * task's thread. Extracted so both completeTask() and createTask(status=
- * 'completed') trigger the same behavior. Wrapped in setImmediate so DB
- * operations return to the caller without waiting on Slack API. Failures
- * are non-fatal.
- */
-function fireCompletionReact(ownerUserId: string, ownerThreadTs: string, taskId: string): void {
-  setImmediate(async () => {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getLastMaelleMessage } = require('../utils/threadActivity') as typeof import('../utils/threadActivity');
-      const msg = getLastMaelleMessage(ownerThreadTs);
-      if (!msg) return;
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
-      const conn = getConnection(ownerUserId, 'slack');
-      if (conn?.reactToMessage) {
-        await conn.reactToMessage(msg.channelId, msg.messageTs, 'white_check_mark');
-      }
-    } catch (err) {
-      logger.warn('completion react ✅ failed — non-fatal', { taskId, err: String(err).slice(0, 200) });
-    }
-  });
 }
 
 export function updateTask(id: string, updates: Partial<Omit<Task, 'id' | 'created_at'>>): void {
@@ -160,12 +133,10 @@ export function completeTask(id: string): void {
   // of truth for "activity complete" replaces the v2.6.2 unconditional react
   // in postReply.ts. Tasks created without an owner_thread_ts (system tasks,
   // background routines) skip silently — nothing to react on.
-  // Bug 8.3 fix: react logic extracted to fireCompletionReact() so
-  // createTask(status='completed') also triggers it, not just this path.
   const before = getDb().prepare(`SELECT * FROM tasks WHERE id = ?`).get(id) as Task | undefined;
   updateTask(id, { status: 'completed', completed_at: new Date().toISOString() });
   if (before?.owner_thread_ts && before.owner_user_id) {
-    fireCompletionReact(before.owner_user_id, before.owner_thread_ts, id);
+    reactActivityComplete(before.owner_user_id, before.owner_thread_ts, id);
   }
 }
 

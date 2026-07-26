@@ -606,8 +606,8 @@ export function loadUserProfile(profileName: string): UserProfile {
   // got committed. With this synthesis it's automatic. If yaml also has an
   // explicit work_hours entry for the same day, the night_shift range is
   // APPENDED (split-shift), not replaced — so day + night both work.
-  // hours_end="00:00" is treated as "23:59" so isSlotInWorkHours doesn't
-  // wrap around midnight (we never bookwork past local midnight).
+  // hours_end="00:00" is treated as "23:59" so a slot-fit test doesn't wrap
+  // around midnight (we never book work past local midnight).
   const ns = sched.night_shift;
   if (ns?.typical_day && ns.hours_start && ns.hours_end) {
     const day = ns.typical_day;

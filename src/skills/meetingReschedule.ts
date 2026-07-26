@@ -28,7 +28,6 @@ import type { OutreachJob } from '../db/jobs';
 import { createOutreachJob, updateOutreachJob, getLinkedRequestIdForOutreach } from '../db/jobs';
 import { updateRequest } from '../db/requests';
 import { calcResponseDeadline } from '../utils/responseDeadline';
-import { getDb } from '../db';
 import { updateMeeting, findAvailableSlots } from '../connectors/graph/calendar';
 import { appendToConversation } from '../db';
 import { config } from '../config';
@@ -50,6 +49,11 @@ export interface RescheduleContext {
   // escalate to the owner WITH a revert option (the event is at proposed_*, not
   // original_*), and a counter is handled as usual.
   already_moved?: boolean;
+  // v4.2.x (owner decision "option C") — this notice CORRECTS an earlier notice
+  // for the same meeting whose stated time a later calendar write voided. Marks
+  // the payload so the once-per-event-per-day cap can count corrections off
+  // history (db/jobs.ts → countCorrectionNoticesSince) instead of a new column.
+  correction?: boolean;
 }
 
 interface RescheduleClassification {
@@ -201,10 +205,6 @@ export async function handleRescheduleReply(
         `${job.colleague_name} is fine with the moved time for "${ctx.meeting_subject}" (${proposedStartLocal}).`,
         { threadTs: job.owner_thread_ts ?? undefined });
       updateOutreachJob(job.id, { status: 'replied', reply_text: replyText, conversation_json: JSON.stringify(conversation) });
-      getDb().prepare(
-        `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
-         WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague')`,
-      ).run(job.id);
       return true;
     }
     try {
@@ -274,11 +274,6 @@ export async function handleRescheduleReply(
       reply_text: replyText,
       conversation_json: JSON.stringify(conversation),
     });
-    // Close the user-facing outreach task
-    getDb().prepare(
-      `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
-       WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague')`,
-    ).run(job.id);
     return true;
   }
 
@@ -333,10 +328,6 @@ export async function handleRescheduleReply(
       reply_text: replyText,
       conversation_json: JSON.stringify(conversation),
     });
-    getDb().prepare(
-      `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
-       WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague')`,
-    ).run(job.id);
     return true;
   }
 
@@ -468,10 +459,6 @@ export async function handleRescheduleReply(
                   reply_text: replyText,
                   conversation_json: JSON.stringify(conversation),
                 });
-                getDb().prepare(
-                  `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
-                   WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague')`,
-                ).run(job.id);
                 return true;
               }
             }
@@ -511,7 +498,9 @@ export async function handleRescheduleReply(
  * `already_moved` so the colleague's reply routes back through
  * `handleRescheduleReply`: "fine" → no-op confirm; "doesn't work" → owner
  * approval w/ revert; a counter → auto-accept (same-week, rule-compliant) or ask.
- * Best-effort; never throws (a notify failure must not unwind the move).
+ * Best-effort; never throws (a notify failure must not unwind the move). Returns
+ * whether the DM actually reached the colleague — v4.2.x, so the option-C
+ * correction relay can't report a correction it never delivered.
  *
  * R4/R5 — this ask ENDS ON ITS OWN. It is `await_reply: 1`, so it needs the two
  * things that make silence a complete outcome instead of an orphan: a
@@ -531,22 +520,46 @@ export async function notifyColleagueOfMove(params: {
   colleagueTz?: string;
   meetingId: string;
   meetingSubject: string;
-  originalStartIso: string;
-  originalEndIso: string;
+  /**
+   * The time the meeting is moving FROM. Optional (v4.2.x): a CORRECTION relay
+   * doesn't have a meaningful "original" to offer — the time it is correcting is
+   * one the owner just undid, so naming it as the revert target on a "doesn't
+   * work" reply would offer him back the thing he rejected. Omitted → the decline
+   * branch says "the original time" generically.
+   */
+  originalStartIso?: string;
+  originalEndIso?: string;
   newStartIso: string;
   newEndIso: string;
   conflictReason?: string;
-}): Promise<void> {
+  /**
+   * v4.2.x (owner decision "option C") — set when this notice CORRECTS a time
+   * this colleague was already told for this meeting: the ISO instant from the
+   * voided outreach's `ctx.proposed_start`. Rewords the notice as an explicit
+   * correction and marks the payload `correction: true`.
+   *
+   * Only a genuinely DIFFERENT time reaches here — the caller
+   * (utils/closeMeetingArtifacts.ts → relayVoidedNotices) compares instants
+   * first, because re-confirming an unchanged time is the chasing the owner
+   * ruled against.
+   */
+  correctsToldStartIso?: string;
+}): Promise<boolean> {
   try {
     const { profile } = params;
     const conn = getConnection(profile.user.slack_user_id, 'slack');
-    if (!conn) return;
+    if (!conn) return false;
     const tz = profile.user.timezone;
     const newLocal = DateTime.fromISO(params.newStartIso, { zone: tz }).toFormat('EEEE d MMM \'at\' HH:mm');
     const ownerFirst = profile.user.name.split(' ')[0];
     const colleagueFirst = params.colleagueName.split(' ')[0];
     const because = params.conflictReason ? ` — it clashed with ${params.conflictReason}` : '';
-    const message = `Hi ${colleagueFirst}, I moved our "${params.meetingSubject}" to ${newLocal}${because}. If that doesn't work for you, just say the word and I'll sort it out with ${ownerFirst}.`;
+    const toldLocal = params.correctsToldStartIso
+      ? DateTime.fromISO(params.correctsToldStartIso, { zone: tz }).toFormat('EEEE d MMM \'at\' HH:mm')
+      : null;
+    const message = toldLocal
+      ? `Hi ${colleagueFirst}, quick correction on "${params.meetingSubject}" — I told you ${toldLocal}, and that's changed: it's now ${newLocal}. Sorry for the back-and-forth. If the new time doesn't work for you, say the word and I'll sort it out with ${ownerFirst}.`
+      : `Hi ${colleagueFirst}, I moved our "${params.meetingSubject}" to ${newLocal}${because}. If that doesn't work for you, just say the word and I'll sort it out with ${ownerFirst}.`;
 
     const ctx: RescheduleContext = {
       meeting_id: params.meetingId,
@@ -556,6 +569,7 @@ export async function notifyColleagueOfMove(params: {
       original_start: params.originalStartIso,
       original_end: params.originalEndIso,
       already_moved: true,
+      ...(params.correctsToldStartIso ? { correction: true } : {}),
     };
 
     const jobId = createOutreachJob({
@@ -598,7 +612,7 @@ export async function notifyColleagueOfMove(params: {
       logger.warn('notifyColleagueOfMove — DM not delivered, ask cancelled (move stands)', {
         jobId, colleague: params.colleagueName, meetingId: params.meetingId, reason: res.reason,
       });
-      return;
+      return false;
     }
     // Delivered. `ts` is optional — without it we just can't thread follow-ups to
     // the DM; the ask itself stays live and the reply still routes by colleague
@@ -629,9 +643,12 @@ export async function notifyColleagueOfMove(params: {
     }
 
     logger.info('notifyColleagueOfMove — sent move notice', {
-      jobId, colleague: params.colleagueName, meetingId: params.meetingId, newStart: params.newStartIso,
+      jobId, colleague: params.colleagueName, meetingId: params.meetingId,
+      newStart: params.newStartIso, correction: !!params.correctsToldStartIso,
     });
+    return true;
   } catch (err) {
     logger.warn('notifyColleagueOfMove threw — move stands, notice not sent', { err: String(err).slice(0, 200) });
+    return false;
   }
 }

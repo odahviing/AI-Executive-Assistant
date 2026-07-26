@@ -27,7 +27,7 @@ import {
   upsertPersonMemory,
 } from '../db';
 import { getLinkedRequestIdForOutreach } from '../db/jobs';
-import { createTask } from '../tasks';
+import { reactActivityComplete } from '../utils/threadActivity';
 import { updateRequest, getOpenRequestsForColleague } from '../db/requests';
 import { calcResponseDeadline } from '../utils/responseDeadline';
 import { getConnection } from '../connections/registry';
@@ -247,23 +247,11 @@ Only send messages the user explicitly asks for — never reach out to people on
           // the spine timer: createOutreachJob set the paired request's
           // next_check_handler='send_scheduled_outreach' (see db/jobs.ts +
           // core/requests/runner.ts:runSendScheduledOutreach). No separate
-          // outreach_send task. Below is just the user-facing tracking row for
-          // get_my_tasks.
-          createTask({
-            owner_user_id: userId,
-            owner_channel: context.channelId,
-            owner_thread_ts: context.threadTs,
-            type: 'outreach',
-            status: 'pending_colleague',
-            title: `Scheduled message to ${args.colleague_name as string}`,
-            due_at: sendAt,
-            skill_ref: jobId,
-            context: JSON.stringify({ jobId, colleague: args.colleague_name }),
-            who_requested: context.userId,
-            pending_on: JSON.stringify([colleagueSlackId]),
-            created_context: context.isMpim ? `mpim:${context.channelId}` : 'dm',
-            skill_origin: 'outreach',
-          });
+          // outreach_send task, and (v4.2.x) no `tasks` tracking row either —
+          // get_my_tasks reads the requests spine (tasks/skill.ts:get_my_tasks →
+          // getOpenRequestsForOwner), so the row it was supposedly "for" was
+          // never read there; all it added was a second due_at with no
+          // dispatcher behind it.
           return {
             scheduled: true,
             jobId,
@@ -273,38 +261,31 @@ Only send messages the user explicitly asks for — never reach out to people on
           };
         }
 
-        // Not scheduled — send path. Track the person, create tasks.
+        // Not scheduled — send path. Track the person.
         upsertPersonMemory({
           slackId:  colleagueSlackId,
           name:     args.colleague_name as string,
           timezone: args.colleague_tz as string | undefined,
         });
-        // v1.6.8 — DON'T write to interaction_log here. The outreach_jobs +
-        // tasks rows already track this message end-to-end (status, reply,
+        // v1.6.8 — DON'T write to interaction_log here. The outreach_jobs row and
+        // its paired request already track this message end-to-end (state, reply,
         // follow-up). Writing "Sent message: '...'" into people_memory makes
         // the LLM re-surface the message forever when asked about the person,
         // even after the outreach is resolved. Operational state belongs in
         // the operational tables; interaction_log is for social + relationship
         // context only.
 
-        // User-facing task row so it shows up in get_my_tasks
-        createTask({
-          owner_user_id: userId,
-          owner_channel: context.channelId,
-          owner_thread_ts: context.threadTs,
-          type: 'outreach',
-          status: args.await_reply ? 'pending_colleague' : 'completed',
-          title: args.await_reply
-            ? `Waiting for reply from ${args.colleague_name as string}`
-            : `Messaged ${args.colleague_name as string}`,
-          due_at: args.await_reply ? deadline : undefined,
-          skill_ref: jobId,
-          context: JSON.stringify({ jobId, colleague: args.colleague_name }),
-          who_requested: context.userId,
-          pending_on: args.await_reply ? JSON.stringify([colleagueSlackId]) : undefined,
-          created_context: context.isMpim ? `mpim:${context.channelId}` : 'dm',
-          skill_origin: 'outreach',
-        });
+        // v4.2.x — a fire-and-forget send (await_reply=false) ticks ✅ on Maelle's
+        // last message in the owner's thread. This used to ride a `tasks` row
+        // created with status='completed' just to trip createTask's react hook —
+        // a third work-item record beside the request (lifecycle) and the
+        // outreach_job (payload), with its own status enum and its own due_at that
+        // no dispatcher served. The tick is the only thing that row did, so it
+        // moved here and the row is gone. Two deliberate differences from the old
+        // hook: the tick fires only AFTER a confirmed send (the createTask call
+        // ran before it, so a send that then failed still got a ✅), and an
+        // await_reply send still gets no tick — nothing is done yet.
+        const tickThreadTs = args.await_reply ? undefined : context.threadTs;
 
         // v3.1 (Path 2 Stage 6) — reply-deadline expiry is a spine timer:
         // createOutreachJob armed the paired request's
@@ -335,6 +316,7 @@ Only send messages the user explicitly asks for — never reach out to people on
               : `Channel post failed: ${outcome.detail ?? outcome.reason}`;
             return { ok: false, error: outcome.reason, detail: hint };
           }
+          if (tickThreadTs) reactActivityComplete(userId, tickThreadTs, jobId);
           logger.info('message_colleague — channel post sent', {
             jobId,
             channel: args.channel_name ?? args.channel_id,
@@ -481,6 +463,7 @@ Only send messages the user explicitly asks for — never reach out to people on
             }
           }
         }
+        if (tickThreadTs) reactActivityComplete(userId, tickThreadTs, jobId);
         logger.info('message_colleague — DM sent', {
           jobId,
           colleague: args.colleague_name,

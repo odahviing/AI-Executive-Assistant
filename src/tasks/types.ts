@@ -1,9 +1,20 @@
 /**
- * Unified task system — every async job Maelle does is a Task.
+ * The engine-internal task table. NOT the work-item spine — everything an owner
+ * or a colleague is actually waiting on lives in `requests` (one state machine,
+ * one timer via next_check_handler, one closure). What is left here is the set of
+ * background jobs that fire on their own due_at and answer to nobody: routines,
+ * calendar re-checks, summary action follow-ups, the social maintenance passes.
+ *
+ * A type belongs in this union ONLY if something creates rows of it AND
+ * `dispatchers/index.ts` has an entry to execute it. A type with no dispatcher is
+ * a stranded timer: getTasksDueNow picks the row up at its due_at and
+ * runner.ts:83-86 marks it 'failed' with nothing else happening. That is exactly
+ * what the v4.2.x deletion of `outreach` removed — message_colleague minted a
+ * third work-item row per send (beside the request and the outreach_job) whose
+ * only real effect was that bogus 'failed' write.
  *
  * Task types:
  *   coordination  — reach out to find meeting time, book it
- *   outreach      — send a message, wait for reply, report back
  *   reminder      — remind user (or someone) about something at a future time
  *   follow_up     — check back on something after X days
  *   research      — look something up, compile summary
@@ -14,7 +25,6 @@
 
 export type TaskType =
   | 'coordination'
-  | 'outreach'
   | 'reminder'
   | 'follow_up'
   | 'research'
@@ -69,14 +79,14 @@ export interface Task {
   description?: string;
   due_at?: string;
   completed_at?: string;
-  skill_ref?: string;          // links to outreach_jobs/approvals/calendar_dismissed_issues ID
+  skill_ref?: string;          // links to the originating skill's own row (summary_sessions, calendar_dismissed_issues)
   context: string;             // JSON blob with task-specific data
   who_requested: string;       // slack_user_id of requester, or 'system'
   pending_on?: string;         // JSON array of slack_user_ids we're waiting on
   created_context?: string;    // 'dm' | 'mpim:{channel_id}' | 'channel:{channel_id}'
   routine_id?: string;         // links to routine that spawned this task
-  skill_origin?: string;       // v1.6.0 — which skill created this task (e.g. 'meetings', 'calendar_health', 'outreach', 'tasks', 'memory', 'system')
+  skill_origin?: string;       // v1.6.0 — which skill created this task (e.g. 'summary', 'calendar_health', 'system')
   // v1.7.2 — counterpart resolution for "what's open with X?" queries
-  target_slack_id?: string;    // 1:1 counterpart for outreach + summary_action_followup tasks
+  target_slack_id?: string;    // 1:1 counterpart for summary_action_followup tasks
   target_name?: string;        // display name of the counterpart
 }

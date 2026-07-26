@@ -24,6 +24,12 @@
  *      is skipped (it never changes the time), and 'deleted' closes 'cancelled'
  *      rather than 'resolved'. See the step for why.
  *
+ *      2a. (v4.2.x, owner decision "option C") FIRST, if `newStartIso` says this
+ *      write landed on a different instant than one of those colleagues was told,
+ *      relay the correction to him — closing an ask records the outcome on our
+ *      side, it does not un-say what Maelle told a human. Capped at once per event
+ *      per day; absent `newStartIso` ⇒ no relay. See the step for the 07-13 case.
+ *
  *   3. Cancel open follow_up / reminder tasks whose payload_json references
  *      this meeting_id. These are Sonnet-created "remind me to update Yael"
  *      style tasks; the cascade fires when meeting_id is in the payload.
@@ -45,6 +51,7 @@
  */
 import { getDb } from '../db';
 import { resolveCalendarIssuesForMeeting } from '../db/calendarIssues';
+import type { OutreachJob } from '../db/jobs';
 import logger from './logger';
 
 export type MeetingArtifactReason = 'created' | 'moved' | 'updated' | 'deleted';
@@ -53,6 +60,8 @@ export interface CloseMeetingArtifactsResult {
   tasksCancelled: number;
   outreachClosed: number;
   calendarIssuesResolved: number;
+  /** v4.2.x — colleagues told that the time they were given no longer holds. */
+  correctionsRelayed: number;
 }
 
 export async function closeMeetingArtifacts(params: {
@@ -84,11 +93,30 @@ export async function closeMeetingArtifacts(params: {
    * cascade normally.
    */
   fulfillingRequestId?: string;
+  /**
+   * v4.2.x (owner decision "option C") — the instant this write ACTUALLY landed
+   * on: post-snap, post-`verifyEventMoved`. Supplied only by mutations that moved
+   * the event to a new time (the two `reason:'moved'` sites in
+   * skills/meetings/ops/handlers/moveMeeting.ts).
+   *
+   * Its only consumer is step 2a: when a colleague has already been DM'd a time
+   * for this meeting and this write contradicts it, Maelle corrects him instead of
+   * silently closing his ask as "resolved".
+   *
+   * FAIL-SAFE BY DESIGN — absent (or `newEndIso` absent) means NO relay at all, so
+   * a call site that doesn't pass it behaves exactly as it did before. The other
+   * three reasons don't supply it and shouldn't: `'updated'` never changes the time
+   * (and is skipped wholesale below), `'created'` is the first write for that event
+   * id so it cannot void a prior notice, and `'deleted'` has no new time to state.
+   */
+  newStartIso?: string;
+  newEndIso?: string;
 }): Promise<CloseMeetingArtifactsResult> {
   const result: CloseMeetingArtifactsResult = {
     tasksCancelled: 0,
     outreachClosed: 0,
     calendarIssuesResolved: 0,
+    correctionsRelayed: 0,
   };
 
   if (!params.meetingId) return result;
@@ -124,6 +152,33 @@ export async function closeMeetingArtifacts(params: {
         .filter(row => payloadReferencesMeeting(row.context_json, params.meetingId));
 
       if (matchingOutreach.length > 0) {
+        // 2a. (v4.2.x — owner decision "option C") CORRECT THE COLLEAGUE BEFORE
+        // CLOSING HIS ASK. The closure below records the outcome on OUR side; it
+        // does not un-say what Maelle already told a human.
+        //
+        // 2026-07-13, one event id across three writes: 04:35 the active-mode
+        // autofix moved "Ysrael & Idan - BiWeekly" to Tue 14 Jul 12:45 and DM'd
+        // Ysrael that time (outreach out_1783917319399_5ilp, ctx.proposed_start
+        // 2026-07-14T12:45:00.000+03:00). 04:51 the owner moved it back to Mon
+        // 13:30 via move_meeting — this cascade fired, matched that outreach, and
+        // closed req_1783917319400_u1uu1 as `resolved / meeting_moved` (all four
+        // values verified on disk). Ysrael was never told, so he held a time that
+        // no longer existed, and the request recorded SUCCESS for an ask whose
+        // answer had just been thrown away. 10:01 the next sweep moved it back to
+        // Tue 12:45 and re-DM'd him.
+        //
+        // The expiry-tombstone fix on this class (reply_deadline +
+        // owner_dm_channel, skills/meetingReschedule.ts) made the ask genuinely
+        // end — but expiry tells the OWNER "he never replied". It cannot correct
+        // the colleague. This is that missing half.
+        //
+        // The owner's rule, and why this needed his ruling at all: correcting a
+        // false statement Maelle made to a human is not chasing; re-confirming an
+        // unchanged time is. So it fires ONLY when the executed instant differs
+        // from what that colleague was actually told, and at most once per event
+        // per day.
+        result.correctionsRelayed = await relayVoidedNotices(params, matchingOutreach);
+
         // v3.1.1 — close the linked REQUEST for each match: the request owns the
         // lifecycle, so closing it IS closing the outreach, and it is what drops the
         // row out of the scan above on the next pass. `request_id` is non-null by
@@ -389,7 +444,8 @@ export async function closeMeetingArtifacts(params: {
       });
     }
 
-    if (result.tasksCancelled > 0 || result.outreachClosed > 0 || result.calendarIssuesResolved > 0) {
+    if (result.tasksCancelled > 0 || result.outreachClosed > 0 || result.calendarIssuesResolved > 0
+        || result.correctionsRelayed > 0) {
       logger.info('closeMeetingArtifacts — cascade fired', {
         meetingId: params.meetingId,
         reason: params.reason,
@@ -404,6 +460,147 @@ export async function closeMeetingArtifacts(params: {
   }
 
   return result;
+}
+
+/**
+ * What a colleague was actually TOLD, read off the outreach payload that carried
+ * the notice — never re-derived from thread context. `notifyColleagueOfMove`
+ * writes exactly the time it states into `ctx.proposed_start`, so this is the
+ * record of the claim Maelle made to that human.
+ */
+function readToldNotice(payloadJson: string | null | undefined): { start?: string; subject?: string } {
+  if (!payloadJson) return {};
+  try {
+    const p = JSON.parse(payloadJson) as { proposed_start?: unknown; meeting_subject?: unknown };
+    return {
+      start: typeof p.proposed_start === 'string' ? p.proposed_start : undefined,
+      subject: typeof p.meeting_subject === 'string' ? p.meeting_subject : undefined,
+    };
+  } catch (_) {
+    return {};
+  }
+}
+
+/**
+ * Option C — tell each colleague whose stated time THIS write just voided, then
+ * let the caller close their asks.
+ *
+ * Ordering is load-bearing: the caller snapshots the matching open notices, calls
+ * this, and only then closes them. So the correction is sent while the record of
+ * what was said still counts as open, and the NEW notice this creates (a fresh
+ * outreach + request pair) is not in that snapshot and is therefore not closed by
+ * the same pass — it becomes the new record of what the colleague was last told.
+ *
+ * Returns the number of colleagues actually told.
+ */
+async function relayVoidedNotices(
+  params: {
+    ownerUserId: string;
+    meetingId: string;
+    subject?: string;
+    newStartIso?: string;
+    newEndIso?: string;
+  },
+  openNotices: OutreachJob[],
+): Promise<number> {
+  // FAIL-SAFE. A call site that supplies no executed time cannot tell us whether
+  // anything was voided, so nothing is said. This is what makes the two halves of
+  // option C safe to land in either order.
+  if (!params.newStartIso || !params.newEndIso) return 0;
+  const newMs = new Date(params.newStartIso).getTime();
+  if (!Number.isFinite(newMs)) return 0;
+
+  // Only notices this write actually CONTRADICTS. Instants, not strings: the told
+  // value carries an offset ("...T12:45:00.000+03:00") and the executed value is
+  // formatted independently, so identical moments routinely differ as text — a
+  // string compare would relay "corrections" that change nothing, which is exactly
+  // the chasing the owner ruled against.
+  const contradicted: Array<{ row: OutreachJob; told: string; subject?: string }> = [];
+  for (const row of openNotices) {
+    if (!row.colleague_slack_id) continue;
+    const { start: told, subject } = readToldNotice(row.context_json);
+    if (!told) continue;  // never stated a time → nothing to correct
+    const toldMs = new Date(told).getTime();
+    if (!Number.isFinite(toldMs) || toldMs === newMs) continue;
+    contradicted.push({ row, told, subject });
+  }
+  if (contradicted.length === 0) return 0;
+
+  // The owner's cap: at most ONE correction per event per day. Checked ONCE, before
+  // the loop — a meeting with three notified attendees is one correction pass, not
+  // three. Measured as a rolling 24h window so a flip-flop either side of midnight
+  // can't slip a second correction through, and so the cap needs neither a new
+  // column nor the owner's timezone.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { countCorrectionNoticesSince } = require('../db/jobs') as typeof import('../db/jobs');
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  if (countCorrectionNoticesSince(params.ownerUserId, params.meetingId, since) > 0) {
+    logger.info('closeMeetingArtifacts — correction already relayed for this event today, staying quiet', {
+      meetingId: params.meetingId, wouldHaveTold: contradicted.length,
+    });
+    return 0;
+  }
+
+  // Profile carries the owner's name + timezone for the notice. Cached behind
+  // loadUserProfile's profileCache, and reached only after every gate above, so
+  // this costs one readdir at most once per event per day.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { loadAllProfiles } = require('../config/userProfile') as typeof import('../config/userProfile');
+  const profile = [...loadAllProfiles().values()].find(p => p.user.slack_user_id === params.ownerUserId);
+  if (!profile) {
+    logger.warn('closeMeetingArtifacts — no profile for owner, voided notice NOT relayed', {
+      ownerUserId: params.ownerUserId, meetingId: params.meetingId, wouldHaveTold: contradicted.length,
+    });
+    return 0;
+  }
+
+  // Not a hand-rolled send: the SAME function that sent the notice being corrected.
+  // So the correction writes an outreach_job + its paired request (one spine, one
+  // expiry, one close-loop — R2/R4), is tagged intent='meeting_reschedule' +
+  // already_moved so a "that doesn't work" reply still routes through
+  // handleRescheduleReply back to the owner, and cancels itself through the spine
+  // if the DM never lands.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { notifyColleagueOfMove } = require('../skills/meetingReschedule') as
+    typeof import('../skills/meetingReschedule');
+
+  let relayed = 0;
+  for (const { row, told, subject } of contradicted) {
+    try {
+      const delivered = await notifyColleagueOfMove({
+        profile,
+        // Channel ONLY — never this row's owner_thread_ts. On the autofix path that
+        // is the pseudo-key `brief_health_<ownerId>` (tasks/briefs.ts), not a Slack
+        // ts, and it would be handed straight to chat.postMessage.
+        ownerChannel: row.owner_channel,
+        colleagueSlackId: row.colleague_slack_id,
+        colleagueName: row.colleague_name,
+        colleagueTz: row.colleague_tz ?? undefined,
+        meetingId: params.meetingId,
+        // The name he already saw, so the correction is recognisably about the same
+        // meeting even if the event has since been retitled.
+        meetingSubject: subject ?? params.subject ?? 'our meeting',
+        newStartIso: params.newStartIso,
+        newEndIso: params.newEndIso,
+        correctsToldStartIso: told,
+      });
+      // Count only what actually landed — an undelivered notice cancels its own
+      // ask through the spine and must not be reported as a correction made.
+      if (delivered) relayed++;
+    } catch (err) {
+      // One colleague failing must not silence the rest.
+      logger.warn('closeMeetingArtifacts — voided-notice relay threw for one colleague, continuing', {
+        meetingId: params.meetingId, colleague: row.colleague_name, err: String(err).slice(0, 200),
+      });
+    }
+  }
+
+  if (relayed > 0) {
+    logger.info('closeMeetingArtifacts — corrected the time for colleagues whose notice this write voided', {
+      meetingId: params.meetingId, count: relayed, newStart: params.newStartIso,
+    });
+  }
+  return relayed;
 }
 
 function payloadReferencesMeeting(payloadJson: string | null | undefined, meetingId: string): boolean {

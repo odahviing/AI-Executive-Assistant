@@ -1,39 +1,40 @@
 # Agent-loop report
 
-**Wrapped: 4.2.1** — the 4.2.0 parked backlog cleared plus GitHub #147/#148, seven lanes, 53 files. Combined adversarial verify returned **safe to ship**. Full history in `ledger.jsonl`; the narrative is in `CHANGELOG.md`.
+**Nothing is waiting for you.** Every item raised today is shipped, declined, or dispatched. The durable record is `ledger.jsonl` — query it with `node scripts/ledger-stats.cjs --open`, which is now the authoritative list.
 
-## Needs you: NOTHING.
-## Waiting for your commit: NOTHING — the tree is clean.
-
----
-
-## ⏸ Parked by the owner 2026-07-26 — he may fix these later today
-
-Five findings from the final combined verify. **None is reachable without a second fault**, which is why they were parked rather than built. Ordered by what I would do first.
-
-| # | Lane | What happens | Severity |
-|---|---|---|---|
-| **V3** | meeting | **P15 does not cover equal date-only windows.** `handleGetFreeBusy` passes model args straight through, so `start_date === end_date` hits the instant branch, gets midnight-covering blocks, and reads as *"they're free"* with **no `notChecked` flag.** Not a regression — an empty map read as free before tonight too — but it is the most likely malformed input on that tool and the P15 fix leaves it uncovered | **low-med** |
-| V1 | people | **`mergePersonRows` `false` now means two things.** `setPersonEmail` reads a *file-side deferral* as an identity refusal, logs *"address held by another identity"* — a false reason — and drops the email. Filesystem fault only; fails in the recoverable direction | low |
-| V4 | meeting | Non-outage Graph faults now escape `handleCheckHealth` to the registry as raw text in her context, where they used to be a clean `{error}`. A deliberate consequence of removing P24's causeless local catch. Both callers are crash-guarded — context hygiene, not breakage | low |
-| V2 | meeting/requests | An **unlinked** reschedule row no longer suppresses the overlap autofix: if the bridge throws, `request_id` is NULL and the JOIN drops it, so the autofix can re-move and re-DM. Backstopped by the 12h `recentlyAutoMovedIds`, so it needs **two** faults to reach a person | low |
-| V5 | meeting | Walker-side `trackReject` calls omit the noise flag, so a walker-rejected out-of-window cursor lands under `owner_busy_collision`. Narration cosmetics | low |
+**Shipped: `4.2.1`** — commits `846f11a` (the 4.2.0 parked backlog + GitHub #147/#148, seven lanes, 53 files) and `fca4b11` (the proposal-path fix, version deliberately held). Both pushed. GitHub #147 and #148 closed. `CHANGELOG.md` carries the narrative.
 
 ---
 
-## ⚠️ Two things to remember about 4.2.1
+## In flight — three lanes, dispatched on tonight's decisions
 
-1. **The migration is ONE-WAY.** `outreach_jobs.status` drops on the next boot. `ADD COLUMN status` is deliberately absent from the column migrations, so reverting to status-writing code would throw.
-2. **Two changes are load-bearing on each other** and must never be reverted independently: promoting the occupancy rule above the work-hours rule (P25), and demoting all-day Working-Elsewhere (P32). Without P32, P25 turns every WE day into a hard *not bookable* on the colleague pre-check. Correct together; neither correct alone.
+| Lane | Items |
+|---|---|
+| **meeting** | **The autofix-revert suppression** — *"if I change the autofix, don't change it again"* · plumb the executed new start/end into `closeMeetingArtifacts` (data only) · **F2b** re-check against P22 · **V3** equal date-only free/busy windows · **V5** walker-side noise flag |
+| **requests** | **Delete the third work-item lifecycle**, keeping the ✅-on-last-message reaction by rehoming the hook |
+| **people** | **CF2** — gate the migration backup on at least one mergeable pair |
 
-## Nothing in 4.2.1 is runtime-proven — nothing is deployed
-Four events settle most of it after `npm run deploy`:
+**Sequenced deliberately:** the revert-relay (option C) is requests' but waits for meeting's plumbing. Building both halves in parallel is what nearly went wrong on the `#41` chain tonight, when two "independent" steps turned out to be order-dependent and only landed safely by luck.
+
+---
+
+## ⚠️ Two things that outlive this session
+
+1. **The `4.2.1` migration is ONE-WAY.** `outreach_jobs.status` drops on boot — already applied, confirmed 27 columns and no `status`. There is deliberately no `ADD COLUMN` path back, so reverting to status-writing code would throw.
+2. **Two changes are load-bearing on each other and must never be reverted independently:** the occupancy-above-work-hours promotion (P25) and the all-day-Working-Elsewhere demotion (P32). Without P32, P25 turns every WE day into a hard *not bookable* on the colleague pre-check. Only the combined verify could see it.
+
+## Deployment state
+The running build is `846f11a` (boot stamp verified `4.2.1`). **`fca4b11`'s proposal fix is committed but NOT deployed** — until the next `npm run deploy`, a packed day with an unavailable attendee can still offer a time the owner is booked on.
+
+Four events settle what code alone cannot prove, once deployed:
 - an **attendee-side cancel** → `grep 'declineMeeting — /decline rejected'` (the `/decline` verb has never run against a live tenant)
 - a **health pass writing a category question** → `grep 'set_event_category — category question closed'`
 - a **reply in a routine thread** → expect `historyLength:1`, not `0`
-- a **colleague-reply turn** → the stored assistant row should equal the logged `rewritePreview`, not `originalPreview`
-- plus one schema check: `node scripts/db-query.cjs --schema outreach_jobs` → no `status` column, and no `initSchema` error in the boot log
+- a **colleague-reply turn** with a gate rewrite → the stored assistant row should equal the logged `rewritePreview`
 
-## Still open, not in 4.2.1 — see `ledger.jsonl --open`
-Owner-declined tonight and not to be re-raised: P2 · P4 · P5 · P6 · P7 · P8 · P9 · P10 · P12 · P14 · P16 · P21 · P23 · P31 · A1 · A7 · CF2 · CF3 · CF5 · #48 · #56 · D7 · D8 · #14 · the private-channel name exposure.
-Open owner decisions carried forward: whether Maelle should DM a colleague when a later calendar write **voids** a notice he already received (recommended: yes, but only when the time differs) · whether an autofix may re-propose a move the owner reverted the same day · the seven owner-facing relays posting to a pseudo thread ts.
+---
+
+## A process lesson from today, worth keeping
+Twenty-four owner decisions were recorded **as prose in this file** — *"not to be re-raised: P2 · P4 · P5…"* — while nothing closed them in the ledger. This file is a to-do that gets emptied at wrap; the ledger is what the tooling reads. So `--open` was right to list all 24, and tomorrow's run would have re-raised **every one of them**. A sentence asking to be obeyed cannot be obeyed by something that can't read it.
+
+**The rule:** a decision lands in `ledger.jsonl` as a row, immediately, with `verdict: "declined"` (which closes a row as firmly as `built`). Never as prose here.

@@ -298,44 +298,25 @@ export function updateOutreachJob(id: string, updates: Partial<OutreachJob> & { 
   // the outreach but the D4 followup tracker stays open, and a SECOND inbound DM from
   // the same colleague would falsely match the already-consumed row. Idempotent —
   // preserves an existing followup_close_reason if D4's own paths already closed it.
-  const terminalForFollowup = updates.status === 'replied' || updates.status === 'cancelled';
-  if (terminalForFollowup) {
+  const isTerminal = updates.status === 'replied' || updates.status === 'cancelled';
+  if (isTerminal) {
     db.prepare(`
       UPDATE outreach_jobs
       SET followup_closed_at = COALESCE(followup_closed_at, datetime('now')),
           followup_close_reason = COALESCE(followup_close_reason, 'pipeline_consumed')
       WHERE id = ?
     `).run(id);
-  }
-
-  // v2.2.4 — defensive linked-task closure. Every outreach has a parent task
-  // created by message_colleague (skill_origin='outreach', skill_ref=jobId).
-  // When the outreach reaches a terminal transition, the parent task should
-  // follow. Most call sites already do this explicitly, but not all — leaving
-  // stranded pending tasks that the v2.2.4 tasks-first brief would re-surface
-  // forever. Idempotent: tasks already in a terminal state won't be touched (the
-  // IN clause narrows it). A reply completes the task; a cancel cancels it.
-  const terminalTask: 'completed' | 'cancelled' | null =
-    updates.status === 'replied' ? 'completed'
-    : updates.status === 'cancelled' ? 'cancelled'
-    : null;
-  if (terminalTask) {
-    if (terminalTask === 'completed') {
-      db.prepare(
-        `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
-         WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague','pending_owner')`
-      ).run(id);
-    } else {
-      db.prepare(
-        `UPDATE tasks SET status = 'cancelled', updated_at = datetime('now')
-         WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague','pending_owner')`
-      ).run(id);
-    }
 
     // v2.7.0 — bridge to requests spine. When the legacy outreach_job
     // transitions to terminal, close the linked request row too so the brief
     // narrates closure cleanly. Reason carries the legacy status verbatim
     // so audit can trace which path closed it.
+    //
+    // v4.2.x — the v2.2.4 `UPDATE tasks ... WHERE skill_ref = <jobId>` pair that
+    // used to run first is gone with the row it closed. message_colleague no
+    // longer mints a per-send `tasks` row, so nothing links a task to an outreach
+    // job and closing the request IS the closure — it is what the brief,
+    // get_my_tasks and the thread-context injection all read.
     const linkedRequestId = getLinkedRequestIdForOutreach(id);
     if (linkedRequestId) {
       const requestState: 'resolved' | 'cancelled' =
@@ -468,6 +449,45 @@ export function getOpenRescheduleOutreach(ownerUserId: string): OutreachJob[] {
       AND r.state IN ${OPEN_REQUEST_STATES}
     ORDER BY oj.created_at DESC
   `).all(ownerUserId) as OutreachJob[];
+}
+
+/**
+ * v4.2.x (owner decision "option C") — how many CORRECTION notices have already
+ * gone out for this meeting since `sinceIso`.
+ *
+ * Backs the owner's "at most once per event per day" cap on correcting a
+ * colleague whose stated time a later calendar write voided
+ * (utils/closeMeetingArtifacts.ts → relayVoidedNotices). Deliberately counted off
+ * history in the payload table rather than a new column or a new table: the
+ * correction relay already writes an outreach_jobs row tagged `correction: true`
+ * in its context_json, so the cap needs no state of its own.
+ *
+ * `sent_at` (not created_at) because the relay stamps it as a full ISO-8601 UTC
+ * string, directly comparable to the caller's window boundary — created_at is
+ * SQLite's own 'YYYY-MM-DD HH:MM:SS' and would silently mis-compare.
+ */
+export function countCorrectionNoticesSince(
+  ownerUserId: string,
+  meetingId: string,
+  sinceIso: string,
+): number {
+  const rows = getDb().prepare(`
+    SELECT context_json FROM outreach_jobs
+    WHERE owner_user_id = ?
+      AND intent = 'meeting_reschedule'
+      AND sent_at IS NOT NULL
+      AND sent_at >= ?
+  `).all(ownerUserId, sinceIso) as Array<{ context_json: string | null }>;
+
+  let n = 0;
+  for (const row of rows) {
+    if (!row.context_json) continue;
+    try {
+      const ctx = JSON.parse(row.context_json) as { meeting_id?: unknown; correction?: unknown };
+      if (ctx.correction === true && ctx.meeting_id === meetingId) n++;
+    } catch (_) { /* unparseable payload can't be counted either way */ }
+  }
+  return n;
 }
 
 // v3.1 (Path 2 Stage 6/7) — getExpiredOutreachJobs / closeFireAndForgetOutreach

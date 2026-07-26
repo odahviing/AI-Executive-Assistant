@@ -640,6 +640,33 @@ export async function getFreeBusy(
   if (!parsedStart.isValid || !parsedEnd.isValid) {
     return nothingChecked('unparseable date param');
   }
+  // V3 (v4.2.x) — A DATE-ONLY `endDate` MEANS THE END OF THAT DAY, not its first
+  // instant. "Is she free Thursday" is what a model turns into
+  // start_date === end_date === '2026-07-30' — and correctly so: the tool asks for
+  // "a date range in ISO 8601" (skills/meetings.ts), so a bare date is the
+  // schema-shaped answer. Both parsed to 00:00, which made the pair an INSTANT: the
+  // branch below widened it to 00:00–01:00 and kept only the blocks covering
+  // midnight, so a fully-booked day came back as everyone free — and with
+  // `notChecked` EMPTY, because a read did happen, of the wrong moment. The same
+  // off-by-a-day silently truncated every multi-day date-only range ('07-30' →
+  // '07-31' read the 30th only).
+  //
+  // WIDENED, not refused. A whole-day question wearing an instant's shape needs
+  // answering (P15's own reasoning) and this one can be answered exactly: the
+  // window IS that day, so nothing is invented, and `notChecked`'s claim — "the
+  // window could not be queried" — would simply be false. The recursion re-enters
+  // with a time-bearing end, so it happens exactly once; a REAL instant
+  // (availabilityPreCheck normalizing "יש משהו אחרי 17:00?" to one moment) carries
+  // a time and still takes the instant branch; an inverted date-only pair still
+  // lands on `nothingChecked` below. Tested on the ISO date shape — a structured
+  // string, never prose.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(endDate.trim())) {
+    return getFreeBusy(
+      callerEmail, emails, startDate,
+      parsedEnd.endOf('day').toISO()!,
+      timezone, forceRefresh, diagnostics,
+    );
+  }
   const windowMinutes = parsedEnd.diff(parsedStart, 'minutes').minutes;
   // P15 — an INSTANT, i.e. start === end. This is the branch with all the real
   // traffic: availabilityPreCheck normalizes a colleague's "יש משהו אחרי 17:00?"

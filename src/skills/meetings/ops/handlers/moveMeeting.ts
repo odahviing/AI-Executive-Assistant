@@ -987,6 +987,20 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                     subject: args.meeting_subject as string | undefined,
                     bookingThreadTs: context.threadTs,
                     fulfillingRequestId: args._fulfilling_request_id as string | undefined,
+                    // v4.2.x (option C) — the instant this write landed on, post-snap
+                    // (the quarter-grid alignment just above). Unlike the main move
+                    // path this branch has no `verifyEventMoved` read-back, so the
+                    // claim it supports is "Graph accepted this PATCH", not "the
+                    // calendar reads back this time". Harmless here and not worth a
+                    // second Graph round-trip: the branch only fires for a FLOATING
+                    // BLOCK, a block has no attendees, and every writer of
+                    // `ctx.proposed_start` is a notice to an attendee
+                    // (skills/meetingReschedule.ts ← calendarHealth/autoMove.ts, whose
+                    // solo-event guard refuses an event with no non-owner attendee) —
+                    // so no open notice can reference a block's event id and step 2a
+                    // finds nothing to correct.
+                    newStartIso: effectiveStart,
+                    newEndIso: effectiveEnd,
                   });
                   // v3.2.1 (#120 / 120b) — return the vacated slot here too. The
                   // floating-block move (e.g. lunch) is exactly the case where
@@ -1315,7 +1329,80 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           subject: args.meeting_subject as string | undefined,
           bookingThreadTs: context.threadTs,
           fulfillingRequestId: args._fulfilling_request_id as string | undefined,
+          // v4.2.x (option C) — the instant this move ACTUALLY landed on, which is
+          // the only kind of time a correction to a human may quote. `effectiveStart`
+          // is post-snap (grid alignment + floating-block realignment above, not the
+          // raw `args.new_start` hint) and this line is past the `verifyEventMoved`
+          // read-back, which fail-fast-returns above when Graph accepted the PATCH
+          // without applying it — so the value handed on is one the calendar holds.
+          // The comparison, the once-per-event-per-day cap and the DM are the
+          // requests lane's (utils/closeMeetingArtifacts.ts, step 2a); this is only
+          // the fact it needs, and absent it that step is a no-op by construction.
+          newStartIso: effectiveStart,
+          newEndIso: effectiveEnd,
         });
+        // v4.2.x — WHEN HE CHANGES AN AUTOFIX, THAT IS THE DECISION (owner
+        // 2026-07-26: "if i change the auto fix, don't change it again").
+        //
+        // 2026-07-13: active mode moved Ysrael's weekly to Tue 12:45 and DM'd him
+        // (04:35:18, audit_log 7548); the owner moved it back to today 13:30 through
+        // THIS handler (04:51:38, audit_log 7556 — action `move_meeting`, actor the
+        // owner, NOT `revert_last_auto_move`); at 10:01:20 the next sweep moved it
+        // to Tue 12:45 again and sent a byte-identical second DM (audit_log 7594 —
+        // same event id on all three writes). An autonomous action repeated
+        // something he had explicitly undone, and messaged a colleague twice.
+        //
+        // The durable "if I said no, it's no" record lived ONLY on the explicit
+        // tool: `revert_last_auto_move` writes a terminal dismissal
+        // (handlers/calendarReads.ts) and was its only caller. The conversational
+        // undo — what he actually does — wrote nothing, leaving one protection:
+        // `getRecentlyAutoMovedEventIds`' 12h window, timed from MY move instead of
+        // HIS decision (undo it 13h after the autofix and the next sweep re-does
+        // it), off a record whose write is explicitly best-effort. So his decision
+        // is now recorded where every mover already looks — `getSuppressedEventIds`,
+        // read by the double-booking pair scan, the dead-gap scan and all three
+        // defrag paths (calendarHealth/handlers/checkHealth.ts) — which is what
+        // makes it hold "regardless of which detector would fire next".
+        //
+        // BOUNDED, because it is INFERRED from an action rather than stated
+        // (OWNER_UNDO_SUPPRESSION_HOURS): after the window a genuinely different,
+        // later problem on the same event is detected, tracked and narrated again.
+        // Keyed on the event HE touched — never its peer (that meeting he did not
+        // touch), and never an autofix he left alone: the trigger is the recent
+        // auto-move record for THIS id. Owner-authenticated senderRole only, never a
+        // claim in a message; a colleague's move already answers to its own
+        // rule-compliance gate above. (The floating-block owner-move branch earlier
+        // in this handler needs none of this: blocks are rebalanced, never
+        // auto-moved — calendarHealth/autoMove.ts — so no block id can be in the
+        // record set.)
+        if (context.senderRole === 'owner') {
+          try {
+            const movedId = args.meeting_id as string;
+            const ownerUserId = context.profile.user.slack_user_id;
+            const { getRecentlyAutoMovedEventIds } = await import('../../../../db/requests');
+            if (getRecentlyAutoMovedEventIds(ownerUserId).has(movedId)) {
+              const { dismissOverlapIssue, OWNER_UNDO_SUPPRESSION_HOURS } =
+                await import('../../../../db/calendarIssues');
+              const windowEndMs = Date.now() + OWNER_UNDO_SUPPRESSION_HOURS * 60 * 60 * 1000;
+              const eventEndMs = DateTime.fromISO(effectiveEnd, { zone: timezone }).toMillis();
+              dismissOverlapIssue({
+                ownerUserId,
+                eventId: movedId,
+                eventDate: DateTime.fromISO(effectiveStart, { zone: timezone }).toFormat('yyyy-MM-dd'),
+                eventEndMs: Math.min(eventEndMs, windowEndMs),
+                notes: `owner moved this himself after an autofix moved it — leave it alone for ${OWNER_UNDO_SUPPRESSION_HOURS}h`,
+              });
+              logger.info('move_meeting — owner changed a recent autofix; autofix suppressed for this event', {
+                meetingId: movedId, suppressionHours: OWNER_UNDO_SUPPRESSION_HOURS,
+                until: new Date(Math.min(eventEndMs, windowEndMs)).toISOString(),
+              });
+            }
+          } catch (err) {
+            logger.warn('move_meeting — autofix-suppression write threw, move already landed', {
+              err: String(err).slice(0, 160),
+            });
+          }
+        }
         // #30 — the move landed on this slot, so release any hold overlapping it
         // (overlap, not exact-start: a move target may not begin exactly at the
         // held slot). If held by someone ELSE (owner moved over it via
