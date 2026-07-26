@@ -29,13 +29,14 @@ const PRESET = Array.isArray(A.issues) && A.issues.length ? A.issues : null
 // re-finds bugs the previous one already fixed. The lane catches it and returns
 // `already-fixed`, but only after a full dispatch — so tell triage up front.
 const ALREADY_BUILT = Array.isArray(A.alreadyBuilt) ? A.alreadyBuilt : []
-// COLLECT mode — find and record, build nothing. Building is ~80% of a run's
-// cost, and its whole value is that work is already done when the owner looks.
-// Once the report has gone unread for a couple of nights that value is gone:
-// we would be spending the expensive part to produce findings he was going to
-// review and batch anyway. So keep the cheap half (intake + triage, which is
-// how new bugs are discovered at all) and drop the expensive half until he is
-// back. He then dispatches whatever he approves through `args.issues`.
+// COLLECT mode — find and record, build nothing. **Explicit opt-in only.**
+// Building every night the owner is away IS the product: he leaves, the loop
+// fixes, and the work is waiting for approval when he opens his laptop. An
+// earlier version of this flag switched on automatically after two unreviewed
+// nights "to save tokens" — which meant a three-day absence produced one night
+// of fixes and two nights of homework, converting finished work back into a
+// to-do list. Never select it from a timer or a staleness heuristic. Use it
+// only when the owner asks for findings without work.
 const MODE = A.mode === 'collect' ? 'collect' : 'full'
 const VERIFY = A.verify !== false // guard-verify each built fix unless explicitly off
 const CODE_LANES = ['meeting', 'requests', 'guard', 'people', 'slack', 'outer'] // run in parallel; context runs LAST, separately
@@ -235,11 +236,10 @@ buildable.forEach((i) => log(`  • build [${i.lane}/${i.severity}] ${i.id} — 
 flagged.forEach((i) => log(`  • flagged-for-owner ${i.id} — ${(i.symptom || '').slice(0, 90)}`))
 
 // ---- 2c. COLLECT mode stops here — found and recorded, nothing built ----
-// Everything above is the cheap half. Everything below (Locate, six lanes,
-// context, dependency close-out, one xhigh verify) is the expensive half, and
-// it only pays for itself if the owner is going to look. When he is not, the
-// findings still land in the report and he dispatches the ones he wants
-// through `args.issues` — so nothing is lost, only deferred.
+// Reached ONLY when the owner explicitly asked for findings without work. The
+// default is and must stay `full`: he is away, so the fixes should exist by the
+// time he is back. See the MODE comment above for why this must never be
+// selected automatically.
 if (MODE === 'collect') {
   log(`Collect mode: ${buildable.length} issue(s) recorded, ${flagged.length} flagged. NOTHING built — the owner batches these when he is back.`)
   return {

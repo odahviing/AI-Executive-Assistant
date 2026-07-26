@@ -67,22 +67,22 @@ Invoke as `/manager <command>` (e.g. `/manager run`), or just say the command on
 - **status** — mid-run OR post-run snapshot. Read the live `journal.jsonl` in the current run's transcript dir (`<project>/subagents/workflows/<state.lastRun.id>/journal.jsonl`) and print: findings count, the triaged atomic bugs (id · lane · severity · symptom), and each verdict so far (built / needs-dependency / blocked-charter / needs-owner-decision / already-fixed). Also show last-run time + whether it's incomplete (resumable). **Works while a run is in progress** — the journal streams as agents finish.
 - **wrap** / **wrap up and close (patch|minor)** — the ONLY commit path. Invoke the `wrap` skill. Default **patch** unless the owner says minor. After a clean wrap: **append every wrapped row to `ledger.jsonl` FIRST**, then set `lastWrapIso`, clear the built rows and reset `report.md` to empty. Never clear the report before the ledger append — that is the only moment the history can be lost.
 
-## Spend less the longer he is away — the escalation ladder
+## Cost control — WITHOUT stopping the build
 
-Building is roughly **80% of a run's cost**, and its only value is that work is already done when he looks. Once the report has gone unread, that value is gone: you are paying the expensive part to produce work he was going to review and batch anyway. So the run gets cheaper the longer he stays away, and eventually stops.
+**Build every night he is away. That is the whole product.** He leaves, the loop finds and fixes, and when he opens his laptop the work is done and waiting for approval. A run that finds a bug and does not fix it has converted finished work into a to-do list — the exact opposite of the point. **Never trade building away to save tokens.**
 
-**Decide the mode from `state.lastWrapIso` and the count of BUILT-but-uncommitted rows in `report.md`:**
+Save it everywhere else instead:
 
-| Situation | Mode | What it costs |
+| Situation | What runs | Cost |
 |---|---|---|
-| Report is fresh — he wrapped recently, or ≤1 unreviewed run | **full** | intake → triage → build → verify. Work is waiting for him. |
-| **≥2 unreviewed runs** stacked | **`mode:'collect'`** | intake → triage → report. **No builds, no verify.** Findings still accumulate; he dispatches the ones he wants via `args.issues`. |
-| **7+ days** since `lastWrapIso` with unreviewed work | **STOP — do not run** | Post one line saying the loop is paused and why. Nothing is lost: `lastSeenIso` does not advance, so the next run picks up everything since. |
+| **Zero real turns** since `lastSeenIso` | Log review exits on the count. Nothing else to do | ~free |
+| **Any activity** | **FULL — intake → triage → build → verify. Always.** | full |
+| **7+ days** unreviewed | **STOP — do not run.** Post one line saying the loop is paused and why | zero |
 
-Two more that cost nothing to honour:
-
-- **Zero real turns → no log review.** The log-intake agent now counts `Orchestrator invoked` before anything else and exits immediately on zero. Count that event specifically — `Catch-up: scanning DMs` is an idle heartbeat that fires whether or not anyone spoke, and reading it as activity is what made a zero-finding run cost 124k.
-- **`alreadyBuilt`** stops triage re-emitting a symptom already fixed in the tree (see below).
+- **Zero real turns → no log review.** The log-intake agent counts `Orchestrator invoked` before anything else and exits immediately on zero. Count that event specifically — `Catch-up: scanning DMs` is an idle heartbeat that fires whether or not anyone spoke, and reading it as activity is what made a zero-finding run cost 124k.
+- **`alreadyBuilt`** stops triage re-emitting a symptom already fixed in the tree, so an unattended stretch does not re-pay for the same fix every night. This is the real saving on a multi-day absence, and it costs nothing in coverage.
+- **The 7-day stop is the owner's own call** — *"if I'm ignoring for a week, the process will stop and that also makes sense as we are wasting tokens."* Nothing is lost: `lastSeenIso` does not advance, so the next run picks up everything since.
+- **`mode:'collect'`** (intake + triage, no builds) exists as an **explicit manual option** — use it only when he asks for findings without work. **Never select it automatically**; an earlier version switched to it after two unreviewed nights and that was wrong, because it meant a three-day absence produced one night of fixes and two nights of homework.
 
 **Audits do not belong in this loop.** The 2026-07-26 audit put ~30 items into `report.md`, which is why the parked list looks nothing like a normal day. Day-to-day is **1–5 bugs**. A deep audit is a dedicated session with its own scope and its own wrap — run it deliberately, ship it as its own wave, and keep the nightly report for what the nightly loop actually finds. A report that mixes both is a report he cannot triage.
 
