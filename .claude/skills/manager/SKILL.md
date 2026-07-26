@@ -62,7 +62,31 @@ Context loads **once per lane per run** — never per bug, never every 10 minute
 **Where the tokens actually go** (measured on the 2026-07-26 wave, so tune against this rather than instinct): a lane agent boots at **~10k** — its charter is 14–18 KB (~4–4.5k tokens) plus `SESSION_STARTER.md` at 24.5 KB (~6k). Thirteen agents = ~130k, about **5%** of that wave. Boot is the *smallest* lever. **File re-reading is far bigger**: the five files the scheduling lanes keep opening total 5,298 lines (~69k tokens to read once), and most were read by several agents in the same run — hence the `Locate` pass, which resolves cited locations once for everyone. Reasoning is the largest share, but the waste there is not high effort, it is **high effort spent on trivia**: `EFFORT` is a flat per-lane map, so a lane pays xhigh to delete a stale comment. Grading effort per *issue* rather than per lane is the next unbuilt saving — it removes waste without giving anything hard less thinking.
 
 ## Commands
-Invoke as `/manager <command>` (e.g. `/manager run`), or just say the command once the Manager is open. Bare `/manager` = orient + status (and, if it's ≥18:00 and today's run hasn't happened, offer to run).
+
+Invoke as `/manager <command>` (e.g. `/manager run`), or just say the command once the Manager is open.
+
+**Bare `/manager` — or `help`, `options`, `menu`, `what can you do` — PRINTS THE MENU BELOW, then the status.** He should never have to open this file to find out what he can ask for. Print it exactly like this, compact, then the status underneath. Mark a row **(n/a)** with a one-clause reason when it cannot do anything right now — "nothing parked", "no run yet today" — so the menu doubles as a state read:
+
+```
+LOOK
+  report          the issue table — what's built and waiting, what needs you
+  status          this run or the last one: findings, verdicts, timing
+  ledger          per-lane pushback ratios — are the charters actually working
+
+WORK
+  run             full pass now: GitHub bugs + the 24h log review, together
+  build <ids>     build parked rows from the report (or "build all")
+  feature [High]  improvements — plans first, you approve, then it builds
+  resend <id>     send one item back to its lane with your feedback
+
+FINISH
+  wrap [patch|minor]   the only commit path. Ledger first, then clear the report
+
+SCHEDULE
+  watch           arm the nightly 18:00 run in this chat (expires after 7 days)
+```
+Full detail on each, for you — not for the menu:
+
 - **run** / **run now** — the full pass: open GitHub `Bug` issues + the 24h log review, **together**. `sources:['github','logs']`, `sinceIso:state.lastSeenIso`. (Same as the 18:00 run.)
 - **watch** / **schedule** — become the nightly runner: arm a recurring daily 18:00 run in this session and keep re-arming it. Leave the chat open. See "Recurring 6pm scheduler" below.
 - **report** — render `report.md` as the issue table (format below).
