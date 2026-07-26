@@ -162,42 +162,107 @@ if (toContext.length) {
   results = results.concat((cr && cr.results) || [])
 }
 
-// ---- 4b. Tail — any dependency context raised back to a code lane (rare; one bounded pass) ----
+// ---- 4b. Close the loop on dependencies — BOTH directions, one bounded pass ----
+// Two things happen here, and (b) used to not happen at all:
+//   (a) a dependency context raised BACK to a code lane (rare).
+//   (b) the ORIGINATING lane is re-dispatched to FINISH its own issue now that the
+//       thing it was waiting on exists. Without this, A's issue sat at
+//       `needs-dependency` forever: B built exactly what A asked for and nobody
+//       ever told A, so the owner read a half-done wave as blocked. That is a
+//       correctness hole, not just a wasted round trip.
+// Both are batched per lane — one dispatch per lane, never one per issue — and the
+// resume carries what the dependency lane ACTUALLY DID, so the originator spends
+// its turn finishing rather than re-discovering.
+const satisfied = new Map() // originating issue id -> the dependency result that closed it
+for (const r of results) {
+  if (r.verdict === 'built' && typeof r.id === 'string' && r.id.endsWith('>dep')) {
+    satisfied.set(r.id.slice(0, -'>dep'.length), r)
+  }
+}
+const resumes = results
+  .filter((r) => r.verdict === 'needs-dependency' && satisfied.has(r.id))
+  .map((r) => {
+    const dep = satisfied.get(r.id)
+    const orig = buildable.find((i) => i.id === r.id) || {}
+    return {
+      ...orig,
+      id: r.id,
+      lane: orig.lane || '',
+      symptom: orig.symptom || r.notes || '',
+      severity: orig.severity || 'high',
+      clarity: 'clear',
+      _dependencyResolved: {
+        youAsked: `${r.dependencyAgent}: ${r.dependencyAsk || ''}`,
+        theyDelivered: dep.fix || dep.notes || 'see the working tree',
+        rootCause: dep.rootCause || '',
+      },
+    }
+  })
 const tail = CODE_LANES.flatMap((lane) => depAsksFor(lane, results))
-if (tail.length) {
+if (tail.length || resumes.length) {
   phase('Build')
-  const tailOut = await parallel(
+  if (resumes.length) log(`Dependencies closed: resuming ${resumes.length} originating issue(s) to finish.`)
+  const round2 = await parallel(
     CODE_LANES.map((lane) => () => {
-      const b = tail.filter((i) => i.lane === lane)
-      return b.length ? dispatch(lane, b).then((r) => (r && r.results) || []) : null
+      const fresh = tail.filter((i) => i.lane === lane)
+      const back = resumes.filter((i) => i.lane === lane)
+      if (!fresh.length && !back.length) return null
+      const note = back.length
+        ? `\n\nSome of these carry \`_dependencyResolved\` — that issue is NOT new. You returned \`needs-dependency\` on it earlier in this run and the lane you named has now built what you asked for. FINISH your own fix. Per Shared rule 6, RE-DERIVE their change from the code before you build on it — do not trust the summary in the payload.`
+        : ''
+      return agent(
+        `You are dispatched a batch of atomic issues in your lane. For EACH: prove the root cause from code + logs (cite file:line), build the deep fix within your charter, run \`npm run typecheck\`, paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract.${note}\nISSUES:\n${JSON.stringify([...fresh, ...back], null, 2)}`,
+        { label: `build:${lane}${back.length ? ':resume' : ''}`, phase: 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
+      ).then((r) => (r && r.results) || [])
     }),
   )
-  results = results.concat(tailOut.filter(Boolean).flat())
+  const round2Results = round2.filter(Boolean).flat()
+  // A resumed issue REPLACES its earlier needs-dependency row — same id, new verdict.
+  const resumedIds = new Set(resumes.map((i) => i.id))
+  const replaced = new Set(round2Results.filter((r) => resumedIds.has(r.id)).map((r) => r.id))
+  results = results.filter((r) => !replaced.has(r.id)).concat(round2Results)
 }
 
-// ---- 5. Verify (optional) — guard adversarially checks each BUILT fix before it counts as done ----
+// ---- 5. Verify — ONE adversarial pass over the COMBINED diff, never one per fix ----
+// This used to fan out N per-fix verifies. That shape is both more expensive and
+// strictly blinder: a per-fix pass cannot see the only defect class that actually
+// needs a verifier — two lanes whose fixes are each correct alone and wrong
+// together. Every cross-lane defect this framework has caught came from a
+// combined-diff pass (the 4.2.0 wrap; the 2026-07-26 checkSlot wave, where a
+// combined pass caught a regression a fix had introduced ONE ROUND earlier).
+// None came from a per-fix one. Going from N calls to 1 also pays for a stronger
+// model on the single highest-judgment step in the loop — so `model` is omitted
+// here deliberately, to inherit the session model rather than drop to sonnet.
 phase('Verify')
 let verified = results
 if (VERIFY) {
   const built = results.filter((r) => r.verdict === 'built')
-  const checks = await parallel(
-    built.map((r) => () =>
-      agent(
-        `Adversarially verify this BUILT fix against the code on disk: does it regress a correct behavior or bend a charter rule? Read the actual diff. Return results:[{id, verdict:"built" if it holds, otherwise "needs-owner-decision" with notes on why}].\nFIX:\n${JSON.stringify(r)}`,
-        { label: `verify:${r.id}`, phase: 'Verify', agentType: 'guard', effort: EFFORT.guard, model: 'sonnet', schema: VERDICTS },
-      ),
-    ),
-  )
-  const overturned = new Set(
-    checks
-      .filter(Boolean)
-      .flatMap((c) => (c.results || []).filter((x) => x.verdict !== 'built').map((x) => x.id)),
-  )
-  verified = results.map((r) =>
-    overturned.has(r.id)
-      ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [guard-verify overturned]`.trim() }
-      : r,
-  )
+  if (built.length) {
+    const check = await agent(
+      `Adversarially verify this wave's COMBINED change before the owner wraps it. **Findings only — build nothing, edit nothing, commit nothing.**\n\n` +
+        `Calibrate to ONE question: **is this safe to ship to real people?** Not "what could be better." A finding that makes Maelle lie, leak, or take a wrong action counts. A finding that makes the code nicer does not.\n\n` +
+        `**Attack the seams first — that is why this is one pass and not ${built.length}.** Each fix below was already built and self-checked by the lane that owns it, so re-litigating one in isolation is wasted effort. What no lane could see is the interaction: two fixes that are each correct alone and wrong together, a shared helper one lane changed and another depends on, a contract altered on one side of a seam only, or a fix whose own change introduced a regression a later fix then built on.\n\n` +
+        `Read the ACTUAL diff (\`git diff\`, \`git status\`) — verify against the code on disk, never against the summaries below. Those summaries are the lanes' own claims about their work; treat them as leads. Confirm \`npx tsc --noEmit\` is green.\n\n` +
+        `**Budget: keep this under ~60 tool calls.** If the diff is too large to cover at that depth, say so and name what you did NOT cover rather than thinning every check to nothing. An honest gap beats uniform shallowness.\n\n` +
+        `Return one row per issue id: \`built\` if that fix holds in combination with all the others, otherwise \`needs-owner-decision\` with notes saying precisely what breaks and how. If a fix is fine alone but broken by another, flag the one that should change and say why.\n\n` +
+        `FIXES IN THIS WAVE:\n${JSON.stringify(built, null, 2)}`,
+      { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'guard', effort: 'xhigh', schema: VERDICTS },
+    )
+    const overturned = new Map(
+      ((check && check.results) || [])
+        .filter((x) => x.verdict && x.verdict !== 'built')
+        .map((x) => [x.id, x.notes || '']),
+    )
+    verified = results.map((r) =>
+      overturned.has(r.id)
+        ? {
+            ...r,
+            verdict: 'needs-owner-decision',
+            notes: `${r.notes || ''} [wave-verify overturned: ${overturned.get(r.id)}]`.trim(),
+          }
+        : r,
+    )
+  }
 }
 
 // ---- return the structured report; the Manager persists it (workflow scripts have no filesystem) ----

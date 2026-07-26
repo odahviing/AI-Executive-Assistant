@@ -1,0 +1,362 @@
+export const meta = {
+  name: 'feature',
+  description:
+    'Feature/improvement wave — the door bugger.js does not have. TWO invocations, deliberately: `mode:"plan"` reads open Improvement issues, works out what each actually means, and returns a DECOMPOSITION for the owner to approve — it builds nothing. `mode:"build"` takes the approved pieces, dispatches the lanes in dependency order, runs ONE combined-diff verify, and returns a report. Builds in the working tree; NEVER commits (the owner wraps).',
+  phases: [
+    { title: 'Intake' },
+    { title: 'Understand' },
+    { title: 'Decompose' },
+    { title: 'Build' },
+    { title: 'Context' },
+    { title: 'Verify' },
+  ],
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS IS NOT bugger.js
+//
+// A bug has a right answer: the code should do X and does Y. The orchestrator can
+// decompose it alone and show the owner the result, because "correct" is not a
+// matter of taste. An improvement IS a product decision, so the decomposition
+// itself needs the owner BEFORE anything is dispatched — approving builds after
+// the fact means approving work already done.
+//
+// A workflow cannot pause to ask. So this is two invocations with the owner's
+// judgment in between, rather than one run with a fake approval step inside it.
+//
+// Three more things bugger.js gets wrong for this shape, all load-bearing:
+//   • Its intake is `--label Bug`. An improvement is not there.
+//   • Its triage schema demands a root cause. An improvement has none.
+//   • Manager rule M2 ("one root = one issue") is bug logic. Improvements split
+//     by CAPABILITY and SURFACE — the same idea can legitimately land in three
+//     lanes at once, and that is not a merge candidate.
+//
+// And one thing only this flow can produce: a bug never earns a charter rule, but
+// an improvement often should. Every piece names the product decision it embeds
+// so those rules get written down instead of being absorbed silently into code.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const A = args || {}
+const MODE = A.mode === 'build' ? 'build' : 'plan'
+const PRIORITY = A.priority || null // 'High' | 'Medium' | 'Low' — the Improvement axis
+const REFS = Array.isArray(A.refs) ? A.refs : null // explicit issue numbers, skips the label query
+const CODE_LANES = ['meeting', 'requests', 'guard', 'people', 'slack', 'outer']
+const EFFORT = { meeting: 'xhigh', context: 'xhigh', slack: 'xhigh', requests: 'xhigh', outer: 'high', people: 'high', guard: 'high' }
+
+const LANE_MAP =
+  '`meeting` scheduling core · `requests` the async work-item spine (approvals, outreach, reminders, follow-ups, close-loop) · ' +
+  '`guard` output-time gates · `people` identity, person store, memory, social · `context` everything Maelle is TOLD ' +
+  '(system prompt, tool descriptions, learned prefs) and it runs LAST · `slack` the transport (routing, threading, ' +
+  'DM/MPIM/channel posture, authority-by-authenticated-sender, delivery) · `outer` only where NO lane owns the subsystem ' +
+  '(news, brief, routines, Graph plumbing, core orchestrator, DB, health, config, scripts)'
+
+// ---- schemas ----
+const RAW = {
+  type: 'object',
+  properties: {
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          ref: { type: 'string', description: 'github issue #' },
+          title: { type: 'string' },
+          priority: { type: 'string', enum: ['High', 'Medium', 'Low', 'unlabelled'] },
+          asks: { type: 'string', description: "what the issue literally asks for, in the owner's own framing" },
+        },
+        required: ['ref', 'title', 'asks'],
+      },
+    },
+  },
+  required: ['items'],
+}
+
+const UNDERSTOOD = {
+  type: 'object',
+  properties: {
+    ref: { type: 'string' },
+    todayBehaviour: { type: 'string', description: 'what the code ACTUALLY does now — cite file:line, do not assume' },
+    wantedBehaviour: { type: 'string', description: 'what it would do instead' },
+    gap: { type: 'string', description: 'the honest distance between the two — say if it is bigger than the issue implies' },
+    alreadyExists: { type: 'boolean', description: 'true if this is already built and the issue is stale' },
+    openQuestions: { type: 'array', items: { type: 'string' }, description: 'what only the owner can answer. Empty if genuinely none' },
+    surfaces: { type: 'array', items: { type: 'string' }, description: 'the user-visible surfaces this touches' },
+  },
+  required: ['ref', 'todayBehaviour', 'wantedBehaviour', 'gap', 'alreadyExists', 'openQuestions'],
+}
+
+const PLAN = {
+  type: 'object',
+  properties: {
+    pieces: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          ref: { type: 'string', description: 'the improvement this serves' },
+          lane: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer'] },
+          whatChanges: { type: 'string', description: 'concrete, in the chat POV where possible' },
+          whyThisLane: { type: 'string' },
+          dependsOn: { type: 'array', items: { type: 'string' }, description: 'piece ids that must land first' },
+          productDecision: { type: 'string', description: 'the owner call this embeds — empty string if it is purely mechanical' },
+          charterRule: { type: 'string', description: 'a durable rule this decision should become, or empty. Improvements CAN earn rules; bugs never do' },
+          risk: { type: 'string' },
+          size: { type: 'string', enum: ['small', 'medium', 'large'] },
+        },
+        required: ['id', 'ref', 'lane', 'whatChanges', 'whyThisLane', 'dependsOn', 'size'],
+      },
+    },
+    blockingQuestions: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'must be answered BEFORE any build. Do not guess to keep the list short',
+    },
+    notWorthBuilding: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'pieces you judge not worth the cost, with the reason. Saying so is a result',
+    },
+  },
+  required: ['pieces', 'blockingQuestions'],
+}
+
+const VERDICTS = {
+  type: 'object',
+  properties: {
+    results: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          verdict: {
+            type: 'string',
+            enum: ['built', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'already-fixed'],
+          },
+          fix: { type: 'string', description: 'files touched, +/- lines, plain English' },
+          dependencyAgent: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer', ''] },
+          dependencyAsk: { type: 'string' },
+          notes: { type: 'string' },
+        },
+        required: ['id', 'verdict'],
+      },
+    },
+  },
+  required: ['results'],
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLAN MODE — read, understand, decompose. Build NOTHING.
+// ═══════════════════════════════════════════════════════════════════════════
+if (MODE === 'plan') {
+  phase('Intake')
+  const query = REFS
+    ? `Run ONLY: \`gh issue view <n> --json number,title,body,labels\` for each of these issue numbers: ${REFS.join(', ')}`
+    : `Run ONLY this one command: \`gh issue list --label Improvement${PRIORITY ? ` --label ${PRIORITY}` : ''} --state open --json number,title,body,labels\``
+
+  const raw = await agent(
+    `${query} (read-only). Do NOT orient, explore the codebase, or read other files — just the command. SKIP any issue already labelled \`Agent\`. ` +
+      `Return each as {ref:"#<number>", title, priority:<High|Medium|Low|unlabelled from its labels>, asks:<what it literally asks for, in the owner's own framing — do not reinterpret or improve it>}. ` +
+      `If the list is empty return {items:[]} immediately.`,
+    { label: 'intake:improvements', phase: 'Intake', effort: 'low', model: 'haiku', schema: RAW },
+  )
+  const items = (raw && raw.items) || []
+  log(`Intake: ${items.length} open improvement(s)${PRIORITY ? ` at ${PRIORITY}` : ''}.`)
+  if (!items.length) return { mode: 'plan', items: [], pieces: [], blockingQuestions: [], note: 'Nothing open.' }
+  items.forEach((i) => log(`  • ${i.ref} [${i.priority || '?'}] ${(i.title || '').slice(0, 80)}`))
+
+  // Understand each against the CODE, in parallel. An improvement written months
+  // ago is often already half-built, or asks for something the code makes
+  // impossible — both are findings, and both are cheaper to learn now than after
+  // a lane has been dispatched.
+  phase('Understand')
+  const understood = (
+    await parallel(
+      items.map((it) => () =>
+        agent(
+          `Work out what this improvement ACTUALLY means against the code on disk. Read-only — build nothing.\n\n` +
+            `Establish: what the code does TODAY (cite file:line — do not assume, and do not trust the issue's description of current behaviour); what it would do instead; and the honest gap between them. ` +
+            `**Say so plainly if the gap is bigger than the issue implies** — an improvement that reads like one line and is really a subsystem is the single most useful thing you can surface here.\n\n` +
+            `If it is ALREADY BUILT, set alreadyExists:true and say where. Issues go stale.\n\n` +
+            `List openQuestions — things only the owner can decide. Be honest rather than tidy: an improvement is a product decision, so a short list is suspicious, not efficient. But do not manufacture questions the code already answers.\n\n` +
+            `IMPROVEMENT ${it.ref}: ${it.title}\n${it.asks}`,
+          { label: `understand:${it.ref}`, phase: 'Understand', effort: 'medium', schema: UNDERSTOOD },
+        ),
+      ),
+    )
+  ).filter(Boolean)
+
+  const stale = understood.filter((u) => u.alreadyExists)
+  const live = understood.filter((u) => !u.alreadyExists)
+  if (stale.length) log(`${stale.length} already built — stale issue(s): ${stale.map((s) => s.ref).join(', ')}`)
+
+  // Decompose — one pass over ALL of them together, because the cross-improvement
+  // view is the whole point: two improvements often want the same seam moved once.
+  phase('Decompose')
+  const plan = await agent(
+    `Decompose these understood improvements into per-lane pieces the owner can approve one by one.\n\n` +
+      `LANES: ${LANE_MAP}\n\n` +
+      `Rules that differ from bug triage — read these, they are the reason this is not the bugger loop:\n` +
+      `• Split by CAPABILITY and SURFACE, not by root cause. One improvement legitimately landing in three lanes is normal and is NOT a merge candidate.\n` +
+      `• Do the opposite too: where two improvements want the SAME seam moved, say so and emit ONE piece. That cross-view is why this is a single pass.\n` +
+      `• Every piece names the \`productDecision\` it embeds, or empty if genuinely mechanical. If you cannot name the decision, you have not understood the piece.\n` +
+      `• Where a decision should outlive this wave, write it as a \`charterRule\`. **A bug never earns a charter rule — an improvement often should.** This is the only flow that produces them, so do not skip it.\n` +
+      `• \`dependsOn\` is real ordering, not preference. \`context\` always lands last.\n` +
+      `• \`blockingQuestions\` are things that must be settled BEFORE building. Do NOT guess to keep the list short — a guess here becomes built code the owner never chose.\n` +
+      `• If a piece is not worth its cost, put it in \`notWorthBuilding\` with the reason. Declining is a result.\n\n` +
+      `UNDERSTOOD:\n${JSON.stringify(live, null, 2)}`,
+    { label: 'decompose', phase: 'Decompose', effort: 'xhigh', schema: PLAN },
+  )
+
+  const pieces = (plan && plan.pieces) || []
+  log(`Plan: ${pieces.length} piece(s) across ${new Set(pieces.map((p) => p.lane)).size} lane(s); ${((plan && plan.blockingQuestions) || []).length} blocking question(s).`)
+
+  // Deliberately returns WITHOUT building. The owner approves in chat, then the
+  // Manager re-invokes with {mode:'build', pieces:[approved]}.
+  return {
+    mode: 'plan',
+    items,
+    stale,
+    understood: live,
+    pieces,
+    blockingQuestions: (plan && plan.blockingQuestions) || [],
+    notWorthBuilding: (plan && plan.notWorthBuilding) || [],
+    next: 'Owner approves/reshapes the pieces and answers the blocking questions, then re-invoke: Workflow({name:"feature", args:{mode:"build", pieces:[...approved]}})',
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BUILD MODE — the owner has approved specific pieces. Dispatch in dep order.
+// ═══════════════════════════════════════════════════════════════════════════
+const approved = Array.isArray(A.pieces) ? A.pieces : []
+if (!approved.length) {
+  return { mode: 'build', error: 'No approved pieces. Run mode:"plan" first, get the owner\'s approval, then pass pieces:[...].' }
+}
+
+const answers = A.answers || {} // owner's answers to blockingQuestions, threaded to every builder
+const describe = (p) =>
+  `${p.id} [${p.ref}] ${p.whatChanges}` +
+  (p.productDecision ? `\n  OWNER DECISION THIS EMBEDS: ${p.productDecision}` : '') +
+  (p.charterRule ? `\n  DURABLE RULE: ${p.charterRule}` : '')
+
+const buildLane = (lane, pcs, roundNote) =>
+  agent(
+    `You are dispatched APPROVED improvement work in your lane. This is a FEATURE wave, not a bug wave — there is no root cause to prove; the owner has decided he wants this.\n\n` +
+      `For EACH piece: read the code first, build it within your charter, run \`npm run typecheck\`, paper-trace to 100%.\n\n` +
+      `Where a piece names an OWNER DECISION, that call is already made — build it, do not re-litigate it. But if building reveals a CORRECTNESS problem with what was decided, say so plainly and return \`needs-owner-decision\` rather than shipping something broken.\n` +
+      `Where a piece names a DURABLE RULE, that rule is the owner's product intent — it belongs in your charter. Say in your notes that it should be written there; do not edit charter files yourself.\n` +
+      `If a piece needs another lane, return \`needs-dependency\` with the exact contract — do not reach across.${roundNote || ''}\n\n` +
+      (Object.keys(answers).length ? `OWNER'S ANSWERS TO THE OPEN QUESTIONS:\n${JSON.stringify(answers, null, 2)}\n\n` : '') +
+      `PIECES:\n${pcs.map(describe).join('\n')}\n\nFULL PAYLOAD:\n${JSON.stringify(pcs, null, 2)}`,
+    { label: `build:${lane}`, phase: lane === 'context' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
+  ).then((r) => (r && r.results) || [])
+
+// Dependency-ordered waves. A piece runs only once everything it depends on has
+// landed — computed, not assumed, so the plan's own ordering is what executes.
+const done = new Set()
+const remaining = approved.filter((p) => p.lane !== 'context')
+let results = []
+let wave = 0
+
+phase('Build')
+while (remaining.length && wave < 6) {
+  wave += 1
+  const ready = remaining.filter((p) => (p.dependsOn || []).every((d) => done.has(d)))
+  if (!ready.length) {
+    log(`! Wave ${wave}: ${remaining.length} piece(s) have unmet dependencies — a cycle, or a dependsOn id that does not exist. Dispatching them anyway so nothing is silently dropped.`)
+    ready.push(...remaining)
+  }
+  log(`Wave ${wave}: ${ready.length} piece(s) — ${[...new Set(ready.map((p) => p.lane))].join(', ')}`)
+  const out = await parallel(
+    CODE_LANES.map((lane) => () => {
+      const pcs = ready.filter((p) => p.lane === lane)
+      return pcs.length ? buildLane(lane, pcs) : null
+    }),
+  )
+  results = results.concat(out.filter(Boolean).flat())
+  ready.forEach((p) => {
+    done.add(p.id)
+    const i = remaining.indexOf(p)
+    if (i >= 0) remaining.splice(i, 1)
+  })
+}
+
+// context LAST — always, and including anything the code lanes asked it for.
+phase('Context')
+const ctxDeps = results
+  .filter((r) => r.verdict === 'needs-dependency' && r.dependencyAgent === 'context')
+  .map((r) => ({ id: `${r.id}>dep`, ref: '', lane: 'context', whatChanges: r.dependencyAsk, whyThisLane: 'raised by a code lane', dependsOn: [], size: 'small' }))
+const ctxPieces = approved.filter((p) => p.lane === 'context').concat(ctxDeps)
+if (ctxPieces.length) results = results.concat(await buildLane('context', ctxPieces))
+
+// Close dependencies back to the originating lane — same hole bugger.js had: the
+// dependency gets built and the originator is never told, so its piece sits at
+// `needs-dependency` and the owner reads a finished wave as blocked.
+const satisfied = new Map()
+for (const r of results) {
+  if (r.verdict === 'built' && typeof r.id === 'string' && r.id.endsWith('>dep')) satisfied.set(r.id.slice(0, -'>dep'.length), r)
+}
+const resumes = results
+  .filter((r) => r.verdict === 'needs-dependency' && satisfied.has(r.id))
+  .map((r) => {
+    const orig = approved.find((p) => p.id === r.id) || { id: r.id, lane: '', whatChanges: r.notes || '', ref: '', whyThisLane: '', dependsOn: [], size: 'small' }
+    const dep = satisfied.get(r.id)
+    return { ...orig, _dependencyResolved: { youAsked: r.dependencyAsk || '', theyDelivered: dep.fix || dep.notes || 'see the working tree' } }
+  })
+if (resumes.length) {
+  phase('Build')
+  log(`Dependencies closed: resuming ${resumes.length} piece(s) to finish.`)
+  const note = `\n\nSome pieces carry \`_dependencyResolved\`: you returned \`needs-dependency\` on them earlier in this run and the lane you named has now delivered. FINISH your own piece. Per Shared rule 6, RE-DERIVE their change from the code before building on it — do not trust the summary.`
+  const out = await parallel(
+    CODE_LANES.map((lane) => () => {
+      const pcs = resumes.filter((p) => p.lane === lane)
+      return pcs.length ? buildLane(lane, pcs, note) : null
+    }),
+  )
+  const round2 = out.filter(Boolean).flat()
+  const replaced = new Set(round2.map((r) => r.id))
+  results = results.filter((r) => !replaced.has(r.id) || !resumes.some((p) => p.id === r.id)).concat(round2)
+}
+
+// ONE combined-diff verify — same reasoning as bugger.js: a per-piece pass cannot
+// see the only class that needs a verifier, which is two pieces that are each
+// right alone and wrong together. Feature waves are MORE exposed to this than bug
+// waves, because the pieces were deliberately split across lanes to serve one idea.
+phase('Verify')
+let verified = results
+const built = results.filter((r) => r.verdict === 'built')
+if (built.length && A.verify !== false) {
+  const check = await agent(
+    `Adversarially verify this FEATURE wave's COMBINED change before the owner wraps it. **Findings only — build nothing, edit nothing, commit nothing.**\n\n` +
+      `Calibrate to: **is this safe to ship to real people, and does it actually deliver what was approved?** Both halves matter here — unlike a bug wave, a feature can be perfectly safe and still not do the thing.\n\n` +
+      `**Attack the seams first.** These pieces were split across lanes to serve ONE idea, so they are unusually likely to disagree at the joins: a contract changed on one side only, a shared helper two lanes both touched, a surface where two pieces each assume the other handles something.\n\n` +
+      `Read the ACTUAL diff (\`git diff\`, \`git status\`) — verify against the code on disk, never the summaries below; those are the lanes' own claims. Confirm \`npx tsc --noEmit\` is green.\n\n` +
+      `**Budget: keep this under ~60 tool calls.** If the diff is too large to cover at that depth, say what you did NOT cover rather than thinning every check. An honest gap beats uniform shallowness.\n\n` +
+      `Return one row per piece id: \`built\` if it holds in combination, otherwise \`needs-owner-decision\` with notes on exactly what breaks.\n\n` +
+      `APPROVED INTENT:\n${JSON.stringify(approved.map((p) => ({ id: p.id, whatChanges: p.whatChanges, productDecision: p.productDecision })), null, 2)}\n\n` +
+      `WHAT WAS BUILT:\n${JSON.stringify(built, null, 2)}`,
+    { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'guard', effort: 'xhigh', schema: VERDICTS },
+  )
+  const overturned = new Map(((check && check.results) || []).filter((x) => x.verdict && x.verdict !== 'built').map((x) => [x.id, x.notes || '']))
+  verified = results.map((r) =>
+    overturned.has(r.id) ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [wave-verify overturned: ${overturned.get(r.id)}]`.trim() } : r,
+  )
+}
+
+// Charter rules the wave earned — surfaced, never written by an agent. The owner
+// decides what becomes a permanent rule; this only makes sure none is lost.
+const earnedRules = approved.filter((p) => p.charterRule).map((p) => ({ lane: p.lane, rule: p.charterRule, from: p.id }))
+
+return {
+  mode: 'build',
+  counts: {
+    approved: approved.length,
+    built: verified.filter((r) => r.verdict === 'built').length,
+    needsOwner: verified.filter((r) => r.verdict === 'needs-owner-decision' || r.verdict === 'blocked-charter').length,
+    stillBlocked: verified.filter((r) => r.verdict === 'needs-dependency').length,
+  },
+  results: verified,
+  earnedRules,
+  note: 'Uncommitted in the working tree. The owner wraps.',
+}
