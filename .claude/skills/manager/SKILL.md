@@ -257,103 +257,34 @@ Recognise it by the *presence of specific items*, not by the phrasing. He will n
    - **Show the owner** the manifest and warnings first, then the issue table + counts + how long it took, and whether to re-run before 21:00 (if `pending > 0` or time is tight — GitHub bugs can run again any time; the log sweep is the 18:00 one).
 5. **Never commit.** Leave built changes uncommitted for the owner's review.
 
-## The report / issue table (show this prominently)
+## The report — ONE table. This is the owner's decision surface.
 
-### ID scheme — ONE sequence, stable forever. No prefixes.
+**Owner's spec, 2026-07-26, after four different formats appeared in one evening. Do not add columns, do not add tiers, do not split it into sections with different shapes. One table, everywhere, always:**
 
-**Rows are numbered `1, 2, 3…` and a row keeps its number for life.** Not per-run, not per-origin, no letters.
+| # | The chat problem | The issue | The solution | Agent | Risk | Status |
+|---|------------------|-----------|--------------|-------|------|--------|
 
-This is a hard rule because the alternative already failed: runs invented `B1`, `N1`, `P14`, `D7` with nobody defining what B, N, P or D meant, so the owner could not reference a row and `build <id>` was unusable. **If you find yourself inventing a prefix, stop — you are recreating that bug.**
+1. **#** — the stable row id from `state.nextReportId`. Assign on first entry, increment, **never renumber and never reuse**, so `14` means the same thing next month. **No letter prefixes** — `B1`/`N1`/`P14`/`D7` came from four undocumented schemes and made rows unreferenceable.
+2. **The chat problem** — what a person saw, in their words. *"Lori wanted to move a meeting and it got moved to Friday with no approval."* Quote Maelle when it is damning. Say how many times if it recurred.
+3. **The issue** — the bug, one clause. *"Ignored busy/free."* The failure, not the mechanism.
+4. **The solution** — what changed, or what *would* change if it is not built yet. `file:line` only where he would need it.
+5. **Agent** — the lane that owns it.
+6. **Risk** — what to eyeball before wrapping, or **None**. Never blank; "None" is a claim worth making.
+7. **Status** — one of:
+   - **`built`** — done, verified, wraps with everything else.
+   - **`pending owner`** — waiting on him. **Append your recommendation:** `pending owner — recommend build`, `— recommend drop`, `— recommend defer`, and why in four words. Thirty unruled rows is thirty decisions; thirty rows with recommendations is **one decision plus exceptions**.
+   - **`deferred`** — he has seen it and chosen not to now. Not the same as pending.
+   - **`declined`** — he said no. Stays visible so nobody re-raises it.
+   - **`in flight`** — an agent has it right now (mirrors `state.inFlight`).
+   - **`blocked`** — waiting on another row; name which.
 
-- `state.json` holds **`nextReportId`**. When a row first enters the report, assign the current value and increment. **Never renumber, never reuse**, even after the row is wrapped and deleted — `14` must mean the same thing next month as it does tonight.
-- A row that comes back (reappearance) keeps its **original** number and says so.
+**Sort by harm** (M4: security → wrong action → silent wrongness → visible failure → polish), and within a tier put a root that explains several rows first. **Sorting only — never a separate table per tier.**
 
-### Two hard rules about shape — break either and the report is unusable
+**Two shape rules, both learned the hard way:**
+- **Never prose.** One row per item, one line per row. No paragraph with items separated by dots, no item mentioned only inside another row's explanation, no nested lists in a cell. Eleven items in a paragraph is eleven decisions he cannot see, and he said so: *"I really can't take any decision like this."* Overflow goes in a cell, not into text around the table.
+- **Never a second copy.** The backlog **is the ledger** — every row whose verdict is not `built` / `already-fixed` / `audit` is open. Render it with `node scripts/ledger-stats.cjs --open`, in this same table shape. A backlog section in `report.md`, or a separate `audit-backlog.md`, is a duplicate that drifts.
 
-**1 · NEVER prose. Tables only, one row per item, one line per row.** No paragraph containing several items separated by `·`. No item mentioned only inside another item's explanation. No nested lists in a cell. Eleven items in a paragraph is eleven decisions he cannot see, let alone answer — that happened on 2026-07-26 and he said, correctly, *"I really can't take any decision like this."* If a row needs more than one line, the extra belongs in the Detail column, not in prose above or below the table.
-
-**2 · Every row he has not ruled on carries YOUR RECOMMENDATION.** A column with `build` / `drop` / `defer` and, in four words, why.
-
-This is the difference between a report he can answer and one he cannot. Eleven unruled rows means eleven decisions; **eleven rows with recommendations means one decision plus exceptions** — *"go with your calls except 3 and 7."* Then say so explicitly under the table: **"Say 'go' to accept all recommendations, or name the ones you want changed."**
-
-You hold the cross-lane view and you have read the code. **Having no opinion is not neutrality — it is pushing your job onto him.** Recommend `drop` freely; a `drop` you argue for is far more useful than a shrug, and he overrules it in one word if he disagrees.
-
-### Columns
-
-**Lead with the chat, not the code**, and always say what the owner must DO:
-
-| # | What a person saw | What you need to do | Lane | Detail |
-|---|-------------------|---------------------|------|--------|
-
-1. **#** — the stable id.
-2. **What a person saw** — the scene, with real names and Maelle's real words. *"Lori wanted to move a meeting and it got moved to Friday with no approval."* Quote her when it's damning. If it happened more than once, say how many times.
-3. **What you need to do** — **exactly one of these four, verbatim.** This column is why the report exists; a row he cannot act on is noise:
-   - **`Nothing — wraps with the rest`** — built and verified. He just says `wrap`.
-   - **`Answer: <the actual question>`** — put the question IN the cell. Not "needs your decision" — the question itself, short enough to answer in a sentence.
-   - **`Say "build <n>"`** — found, understood, not built. He decides whether it's worth doing.
-   - **`Check before wrap: <what to look at>`** — built, but something specific needs his eye first.
-4. **Lane** — who owns it.
-5. **Detail** — the bug, the fix, the risk, the `file:line`. One cell, as long as it needs to be. **This is reference material, not the thing he reads first.**
-
-### Order — action at the top level, harm INSIDE the backlog
-
-Two groupings, each used only where it actually separates things. **They are not alternatives and neither replaces the other:**
-
-- **Action** discriminates for work that is *done or blocked* — one row needs an answer, another needs an eyeball, another needs nothing.
-- **Harm** discriminates for the *backlog*, where the action is `Say "build n"` on every single row. A column with one value in it is noise; what varies there is whether it hurts.
-
-So the report is, in this order:
-
-1. **`## Needs you`** — the `Answer:` and `Check before wrap:` rows. He is the blocker. Order by harm within it. Full five columns.
-2. **`## Built — awaiting wrap`** — the `Nothing` rows. Full five columns; collapse the Detail if the list is long. Tiers are meaningless here: it is already built.
-3. **`## Backlog`** — **do NOT duplicate it into `report.md`.** The backlog **is the ledger** (owner's call, 2026-07-26: *"audit backlog is the ledger, so you should update there"*). Every row whose verdict is not `built` / `already-fixed` / `audit` is still open, so a backlog section — or worse a separate `audit-backlog.md` — is a second copy that drifts from the first. Render it on demand with **`node scripts/ledger-stats.cjs --open`**, which groups by lane so he can hand one lane its whole list in a single dispatch.
-
-   `report.md` answers three questions about **this wave only** and then stops: *what needs me · what's built · what's running.* A thirty-item backlog dumped into a nightly report is what made it unreadable.
-
-   When you *do* render the backlog, group by the M4 harm tiers below, most harmful first, with a count and a recommendation per row.
-
-   **Reference — the tiers, for whatever renders them:** everything found and not built. **Drop the action column** (it is the same for every row) and group by the M4 harm tiers, most harmful first, with a count per tier:
-   - **Tier 1 — security / privacy**: a leak, a disclosure, an authority bypass.
-   - **Tier 2 — wrong real-world action**: wrong booking, wrong invitee, double-send; anything external or hard to undo.
-   - **Tier 3 — silent wrongness**: a confidently wrong answer, a false "done", a fabricated reason. Trust damage he cannot see.
-   - **Tier 4 — visible failure**: an error, a missing answer, a stall. Bad, but honest.
-   - **Tier 5 — polish**: narration, tone, wording, wrong comments.
-
-   Columns there: **`#` · `What a person saw` · `Lane` · `Rec`** — enough to choose from, and never more. `Rec` is `build` / `drop` / `defer` plus four words of reason. He asks for detail on the ones he picks.
-
-   Close the section with: **"Say 'go' to accept all recommendations, or name the ones you want changed."** A thirty-row backlog he must rule on row by row will not get ruled on at all.
-4. Prose below: the watch list, carried-forward items, and the runtime-evidence caveat.
-
-**Within a tier, a root that explains several rows goes first** — leverage beats count (M4).
-
-**If a row cannot be told as something that happened in a chat, it is not ready to be a row.** A finding with no scene goes in the prose watch-list below the tables.
-
-**If a row cannot be told as something that happened in a chat, it is not ready to be a row.** A finding with no scene is either not understood yet or is a `watch` item — put it in the prose section below the tables, not in the table.
-
-**Verdict → action column**, so the mapping is never improvised:
-
-| engine verdict | What you need to do |
-|---|---|
-| `built` (verify held) | `Nothing — wraps with the rest` |
-| `built` but carrying a risk to eyeball | `Check before wrap: <what>` |
-| `needs-owner-decision` · `blocked-charter` | `Answer: <the question>` |
-| `flagged-for-owner` (ambiguous log finding) | `Answer: is this a bug?` — never auto-fixed |
-| parked / audit backlog / `pending` | `Say "build <n>"` — goes in the Backlog section, tiered by harm, action column omitted |
-| `already-fixed` | drop the row; note it in the manifest line only |
-
-Below the tables, in prose: a **watch** list (real but not actionable now), anything **carried forward**, and — always — whether there is **runtime evidence** for the fixes or whether they are reasoning from code. A wave with no evidence must say so plainly; name the cheapest check that would settle it.
-
-## Verify discipline — how much verification a wave earns
-
-**Rules 1 and 4 are now ENFORCED IN CODE** — `bugger.js` and `feature.js` both run exactly one combined-diff verify per wave with a stated tool budget, so a loop run cannot drift. **This section governs hand-driven waves**, where you dispatch lanes directly and choose when to verify; there, it is on you. Written after the 2026-07-26 `checkSlot` wave, which spent **2.8M tokens, 44% of it on five verify passes** — four found something real, one did not, and a measurable slice of all five was duplicated reading.
-
-1. **One verify per WAVE, not per round.** Batch the fixes, verify once at the end. `fix → verify → fix → verify` is partly self-fulfilling: each extra build round manufactures the regression the next pass then "justifies" itself by catching. Interleave only when a round changes a contract the next round must build against. *(In-code note: the per-fix fan-out this replaced was both dearer and blinder — a per-fix pass structurally cannot see two fixes that are each correct alone and wrong together, which is the only defect class a verifier is needed for. Every cross-lane defect this framework has caught came from a combined pass. Going from N calls to 1 also buys a stronger model on the single highest-judgment step, which is why `model` is deliberately omitted there.)*
-2. **Carry the clean list forward as a hard exclusion.** A verify must be told, by name, what earlier passes already settled — and told not to re-derive it. Without that, every pass re-reads the same core files from scratch. Discipline ("verify against the code, not the reports") is right and must stay; it just needs a floor.
-3. **Scale depth to risk, and say which you're buying.** Deleting authorization code earns a full adversarial sweep. Confirming one boundary condition earns one question. A full sweep aimed at a narrow doubt is the single most common overspend.
-4. **Bound the pass in the brief** — name the files, name the questions, and give it a tool-use budget. 100+ tool uses on one pass means the scope was loose, not that the subsystem was hard.
-5. **When scope is closed, say so in the brief.** A verify whose findings will be parked rather than fixed should be told that, and told to calibrate to *"is this safe to ship"* — not *"what could be better."* It changes what it reports and what it costs.
-
-**Do not skip the last verify to save tokens.** Every pass that found nothing was one you could have scoped smaller; none was one you could have skipped blind. The failure mode being bought off here is shipping a confident wrong answer to a real person.
+Under the table, in prose: **the manifest and any warnings** (see step 3 of the run), then anything not yet ready to be a row. **If a finding cannot be told as something that happened in a chat, it is not a row yet.**
 
 ## Intake rules (you pass these to the engine)
 Both sources run **together in the one 18:00 pass** (or a manual run):
@@ -365,4 +296,5 @@ Both sources run **together in the one 18:00 pass** (or a manual run):
 - **Ambiguous is shown, not fixed.** When in doubt, it's a flag for the owner, not a build.
 - **The report is cumulative since the last wrap** — the owner needn't wrap daily; accumulated built changes and typecheck-green carry across runs until he wraps.
 - **Be legible.** Always leave the owner with a clear table and the run's timing; a run he can't see is a run he can't trust.
-- **Resumable + idempotent.** Resume an incomplete run from its `runId`; on a fresh run, rely on the agents' reappearance-check + `lastSeenIso` so nothing already-built is redone.
+- **Resumable, but never auto-resume.** A run the owner killed leaves `lastRun.status:'running'`, and a dead run is indistinguishable from a slow one by reading `state.json` — so resuming is a guess. It re-fired on every turn once and spawned a second workflow. Report the state and ask; mark a killed run `stopped`.
+- **One report format, forever.** The table above is the owner's spec. Four different shapes appeared in one evening and he could not act on any of them. **Do not improve it.** If it seems to need a new column, that is a sign a row is not ready — fix the row.
