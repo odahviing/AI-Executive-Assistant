@@ -250,6 +250,15 @@ interface DayAnalysis {
   day: string;
   dayType: 'office' | 'home' | 'day_off';
   isWorkDay: boolean;
+  /**
+   * D6 — his own calendar carries an all-day OUT OF OFFICE for this date. Kept
+   * separate from `isWorkDay` (which is the yaml/override answer and cannot see
+   * the calendar) so the `oof_with_meetings` issue still fires exactly as before;
+   * what it changes is the free-time maths below, which counted the whole
+   * untouched work window as focus time and told the owner he had "8h free"
+   * on a day he was away.
+   */
+  outOfOfficeAllDay?: true;
   events: ProcessedEvent[];   // sorted by start, mine only, not cancelled
   issues: CalendarIssue[];
   stats: {
@@ -351,6 +360,11 @@ export function analyzeCalendar(
 
     // Check for OOF event
     const oofEvent = myEvents.find(e => e.showAs === 'oof');
+    // D6 — an ALL-DAY OOF means the day is gone, whatever the yaml says about it
+    // being a work day. Not merged into `isWorkDay`: that would swap the
+    // `oof_with_meetings` issue for `work_on_day_off` and rewrite issue classes
+    // #146 depends on. It only gates the free-time maths at the end.
+    const outOfOfficeAllDay = myEvents.some(e => e.isAllDay && e.showAs === 'oof' && !e.isCancelled);
     const nonAllDayMeetings = myEvents.filter(e => !e.isAllDay && e.showAs !== 'oof');
 
     if (oofEvent && nonAllDayMeetings.length > 0) {
@@ -478,8 +492,14 @@ export function analyzeCalendar(
       if (trailing >= minChunk) freeMin += trailing;
     }
 
+    // D6 — on an all-day-OOF day there is no free time to report: the hours are
+    // not his to spend, so counting the untouched work window as focus time made
+    // "how packed is tomorrow?" answer "8h free" on a vacation day, and the
+    // free-time-floor issue below would be measuring a day that isn't happening.
+    if (outOfOfficeAllDay) freeMin = 0;
+
     const requiredFreeMin = requiredFreeMinutesForWorkDay(workTotalMin, profile.meetings.work_hours_per_free_hour);
-    if (requiredFreeMin > 0 && freeMin < requiredFreeMin) {
+    if (!outOfOfficeAllDay && requiredFreeMin > 0 && freeMin < requiredFreeMin) {
       issues.push({
         type: 'no_buffer',
         severity: 'high',
@@ -607,6 +627,7 @@ export function analyzeCalendar(
       day: dayName,
       dayType,
       isWorkDay: true,
+      ...(outOfOfficeAllDay ? { outOfOfficeAllDay: true as const } : {}),
       events: myEvents,
       issues,
       stats: {

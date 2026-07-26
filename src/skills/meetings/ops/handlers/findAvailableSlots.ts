@@ -25,6 +25,7 @@ import {
   verifyEventDeleted,
   updateMeeting,
   GraphPermissionError,
+  CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
 import {
   getDb,
@@ -579,7 +580,24 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           if (Array.isArray(args.candidate_slots) && args.candidate_slots.length > 0) {
             const ownerFirst = context.profile.user.name.split(' ')[0];
             const durationMin = args.duration_minutes as number;
-            const candidates = args.candidate_slots as Array<{ start: string; end?: string }>;
+            const candidates = args.candidate_slots as Array<{ start: string }>;
+            // The window each candidate is validated in is ALWAYS
+            // [start, start + duration_minutes] — derived here, never taken from
+            // the caller.
+            //
+            // It used to honour a model-supplied `end`, an unconstrained free
+            // string (unlike `duration_minutes`, which is an enum and is
+            // backstopped at :73). Two things were wrong with that. It was already
+            // incoherent: the walker validates a `durationMin` meeting whatever
+            // `end` says, and the verdict below matches on the START (±60s), so a
+            // caller `end` only ever moved the search bound — it could never change
+            // what was actually checked. And when the model emitted a 1–5 minute
+            // window, `getFreeBusy` derived an availabilityViewInterval ≥ the window
+            // itself (calendarReads: `windowMinutes >= 16 ? 15 : max(5, ...)`), which
+            // Graph rejects with a 400 — a deterministic failure on OUR malformed
+            // request that surfaced to a colleague as "his calendar is unreachable".
+            // A window narrower than the meeting cannot hold the meeting, so there is
+            // no reading under which the caller's `end` is the right bound.
             const normalized = candidates
               .filter(c => typeof c?.start === 'string' && c.start.length > 0)
               .map(c => {
@@ -593,14 +611,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 const startConv = searchWindowTz
                   ? reinterpretClockInZone(c.start, searchWindowTz, timezone)
                   : c.start;
-                let endIso = c.end
-                  ? (searchWindowTz ? reinterpretClockInZone(c.end, searchWindowTz, timezone) : c.end)
-                  : undefined;
-                if (!endIso) {
-                  const s = DateTime.fromISO(startConv, { zone: timezone });
-                  endIso = s.isValid ? (s.plus({ minutes: durationMin }).toISO() ?? startConv) : startConv;
-                }
-                return { start: startConv, end: endIso as string };
+                const s = DateTime.fromISO(startConv, { zone: timezone });
+                // An unparseable start yields end:'' — answered below as this
+                // candidate's own validation_error, with no Graph round-trip.
+                return {
+                  start: startConv,
+                  end: s.isValid ? s.plus({ minutes: durationMin }).toISO()! : '',
+                };
               });
 
             // Same rule-label mapping as Guard B uses; kept in sync (extract
@@ -614,6 +631,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               const diag: {
                 rejectedCounts?: Record<string, number>;
               } = {};
+              if (!cand.end) {
+                // Start didn't parse — a per-candidate fact, not a calendar fact.
+                logger.warn('candidate-slot validation — unparseable start, marking unavailable', {
+                  candidateStart: cand.start,
+                });
+                return { start: cand.start, end: cand.start, available: false, error: 'validation_error' };
+              }
               try {
                 const slots = await findAvailableSlots({
                   userEmail,
@@ -655,6 +679,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: labelFor(brokenRule) } : {}),
                 };
               } catch (err) {
+                // D4 — `available:false` is a factual claim about his calendar
+                // ("that time doesn't work"). When the calendar can't be read,
+                // that claim is unfounded and reads to the requester exactly
+                // like "he's busy" — the confident wrong "no" M11 forbids.
+                // Refuse the whole batch instead of answering every candidate
+                // with a fabricated verdict.
+                if (err instanceof CalendarOfflineError) throw err;
                 logger.warn('candidate-slot validation threw — marking unavailable', {
                   candidateStart: cand.start,
                   err: String(err).slice(0, 200),
@@ -764,12 +795,42 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // (the owner side of travel padding moved into checkSlot, which
             // labels it `travel_buffer_collision`); the attendee side keeps the
             // canonical label too. Same set of soft, owner-relaxable protections.
+            //
+            // D5 — this hint makes a FACTUAL CLAIM ("NOT by real meetings") and
+            // then invites the requester to push for an override on the strength
+            // of it, so it may only speak about times that genuinely were soft-
+            // blocked. Two things make that true now. (1) The labels it reads come
+            // from checkSlot's single ladder — a slot that is BOTH inside the lead
+            // time and booked solid now reports `owner_busy_collision`, so it can
+            // no longer arrive here wearing a soft label (the walker's competing
+            // pre-filter is gone). (2) The hint carries the actual soft-blocked
+            // INSTANTS from rejectedExamples instead of a vague "some times", so
+            // in a mixed window — three soft-held slots among forty real meetings —
+            // the model can only steer an override at a time that is on the list,
+            // and is told plainly that everything else was a real commitment.
             const SOFT_REJECT_PREFIXES = ['focus_time', 'travel_buffer_collision', 'floating_block_no_room', 'within_lead_time'];
             const softRejectLabels = Object.keys(diagnosticsOut.rejectedCounts ?? {})
               .filter(l => SOFT_REJECT_PREFIXES.some(p => l.startsWith(p)));
-            const colleagueSoftBlockHint = (!isOwnerInitiatedSearch && softRejectLabels.length > 0)
+            const softBlockedStarts = [...new Set(
+              softRejectLabels.flatMap(l => diagnosticsOut.rejectedExamples?.[l] ?? []),
+            )]
+              .map(iso => DateTime.fromISO(iso, { setZone: true }).setZone(timezone))
+              .filter(dt => dt.isValid)
+              .sort((a, b) => a.toMillis() - b.toMillis())
+              .map(dt => dt.toFormat('EEE d MMM HH:mm'));
+            // `rejectedExamples` keeps at most 5 per reason, so on a busy window
+            // the list can be a sample. Say which it is — "and only these" on a
+            // sample would be the same false claim in a smaller font.
+            const softRejectTotal = softRejectLabels
+              .reduce((n, l) => n + (diagnosticsOut.rejectedCounts?.[l] ?? 0), 0);
+            const softListIsComplete = softBlockedStarts.length >= softRejectTotal;
+            const ownerFirstName = context.profile.user.name.split(' ')[0];
+            const colleagueSoftBlockHint = (!isOwnerInitiatedSearch && softBlockedStarts.length > 0)
               ? {
-                  _colleague_soft_block_hint: `Some times in this window were excluded by ${context.profile.user.name.split(' ')[0]}'s day-load protections — NOT by real meetings. To the colleague, phrase those as "his day is pretty loaded around then" (never reveal the mechanism, never enumerate his calendar). If the requester INSISTS on one of those specific times, do NOT flatly refuse and do NOT book it: raise it via create_approval(kind=policy_exception) with the requested slot so he decides.`,
+                  _colleague_soft_block_hint: (softListIsComplete
+                    ? `Exactly these times were excluded by ${ownerFirstName}'s day-load protections rather than by a real meeting: ${softBlockedStarts.join(', ')}. Every OTHER time missing from this window was blocked by something real (a commitment, his working hours, an attendee) — never describe those as merely protective.`
+                    : `${softRejectTotal} times in this window were excluded by ${ownerFirstName}'s day-load protections rather than by a real meeting; these are examples: ${softBlockedStarts.join(', ')}. Other missing times may have been blocked by something real (a commitment, his working hours, an attendee) — do not assume a time was merely protective unless it is one of these.`
+                  ) + ` For a time in that set, phrase it to the colleague as "his day is pretty loaded around then" (never reveal the mechanism, never enumerate his calendar). If the requester INSISTS on one of those times, do NOT flatly refuse and do NOT book it: raise it via create_approval(kind=policy_exception) with the requested slot so he decides.`,
                 }
               : undefined;
             // v2.4.2 — narrow to 3 spread options before returning to Sonnet.
@@ -919,11 +980,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   meetingMode: mode as import('../../../../connectors/graph/calendar').MeetingMode,
                   travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
                   attendeeAvailability,
-                  // #128 — must-be: the owner overrides his own colleague booking
-                  // lead-time for an urgent ask, so the recovery searches at HIS lead.
-                  minBufferHours: mustBe ? bookingLeadTimeHours(context.profile, 'owner') : leadHours,
                   viewer,
                   profile: context.profile,
+                  // No `minBufferHours` — it would be set-but-never-read. `relaxed`
+                  // is a TOTAL owner override in both places that consume the lead
+                  // time: the walker's pre-filter collapses to "not in the past"
+                  // and checkSlot rule 0b is bypassed. (It used to be passed with
+                  // a comment claiming "#128 must-be searches at HIS lead"; the
+                  // recovery has never honoured any lead floor, and the slots it
+                  // surfaces go to the OWNER as approval candidates anyway.)
                   relaxed: true,  // bypass focus/lunch/work-hours; attendee busy still enforced
                   excludeEventIds: Array.isArray(args.moving_event_ids)
                     ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)

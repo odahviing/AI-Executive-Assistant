@@ -9,7 +9,7 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 import type { SkillContext } from '../../../types';
 
-import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, openQuestionsField } from '../../ops/helpers';
+import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, openQuestionsField, alternativesNote, recordProposedAlternatives } from '../../ops/helpers';
 import { humanizeViolationLabel } from '../../ops/violationLabels';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
@@ -25,6 +25,7 @@ import {
   verifyEventDeleted,
   updateMeeting,
   GraphPermissionError,
+  CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
 import {
   getDb,
@@ -436,51 +437,25 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             });
           }
 
-          // v2.8.6 (103D/F) — owner-in-MPIM deterministic override. When the
-          // owner is present in this MPIM and recently proposed THIS exact slot in chat (24h or 12h
-          // time format match against owner-typed messages in the recent
-          // history), treat his presence as the approval. Set relaxed=true on
-          // the args so the downstream Guard B check and planMeeting both bypass
-          // soft rules (work hours, focus, floating blocks). When the owner just
-          // typed "what about 10:30pm?" in the same thread, there's no reason to
-          // escalate it back to him as an approval.
-          if (context.isMpim === true && context.isOwnerInGroup === true && args.relaxed !== true) {
-            try {
-              const { ownerProposedSlot } = await import('../../../../utils/ownerProposedSlot');
-              const matched = ownerProposedSlot(
-                context.conversationHistory,
-                args.start as string,
-                context.profile.user.name,
-                timezone,
-              );
-              if (matched) {
-                logger.info('create_meeting colleague-path — owner-in-MPIM proposed this slot, applying relaxed=true', {
-                  start: args.start,
-                  subject: args.subject,
-                });
-                args.relaxed = true;
-              }
-            } catch (err) {
-              logger.warn('owner-in-MPIM check threw — proceeding without override', {
-                err: String(err).slice(0, 200),
-              });
-            }
-          }
-
           // (Email-required guard hoisted to run on EVERY path — see #137b above,
           // right after the attendee email auto-fill. Was colleague-only here.)
 
           // Guard B — slot rule-compliance via findAvailableSlots narrow window.
-          // v2.8.6 — skipped entirely when args.relaxed=true was set by the
-          // owner-in-MPIM override block above. Owner's presence is the
-          // authority; let planMeeting decide with allowRelaxed=true.
-          const skipGuardB = args.relaxed === true && context.isOwnerInGroup === true;
-          if (skipGuardB) {
-            logger.info('create_meeting colleague-path — skipping Guard B (owner-in-MPIM relaxed override)', {
-              start: args.start, subject: args.subject,
-            });
-          }
-          if (!skipGuardB) try {
+          //
+          // D7 — Guard B no longer has an owner-in-MPIM escape. The v2.8.6 block
+          // that used to sit here pre-stamped `args.relaxed = true` whenever the
+          // literal string "sender: <owner name>" plus a time plus an
+          // English/Hebrew proposal cue appeared in the recent history, and then
+          // skipped Guard B entirely on the strength of it. Two failures in one:
+          // it authorized on a claim carried inside a message rather than on the
+          // authenticated sender, and the group-DM clamp meant the resulting
+          // booking ran as a COLLEAGUE with eight rules waived and no heads-up
+          // possible (planMeeting's one-step notice is owner-initiator only).
+          // Owner 2026-07-26: "if i want to do something wrong in group chat,
+          // raise for approval or at least tell me" — so a group DM now takes the
+          // normal colleague route (alternatives, then policy_exception into his
+          // own DM), which is also what the MPIM clamp already decided.
+          try {
             const startDt = DateTime.fromISO(args.start as string, { zone: timezone });
             const endDt = DateTime.fromISO(args.end as string, { zone: timezone });
             if (startDt.isValid && endDt.isValid) {
@@ -538,6 +513,13 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 try {
                   validSlots = await runSlotCheck();
                 } catch (firstErr) {
+                  // D4 — the owner-event read owns its OWN retry now
+                  // (getOwnerEventsForDecision), so a CalendarOfflineError has
+                  // already been retried at the source and re-running the whole
+                  // check would only spend a second round-trip to reach the same
+                  // verdict. This retry stays exactly what it was built for: the
+                  // #137 free/busy fault class, which has no retry of its own.
+                  if (firstErr instanceof CalendarOfflineError) throw firstErr;
                   logger.warn('create_meeting colleague-path rule check threw — retrying once before escalating', {
                     err: String(firstErr).slice(0, 200),
                   });
@@ -595,6 +577,12 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               }
             }
           } catch (err) {
+            // D4 — "I couldn't verify, ask him to decide" is the right answer to
+            // a rule check that FAILED; it is the wrong answer to a calendar we
+            // cannot read at all. Escalating here would put an approval in front
+            // of the owner for a booking nobody can validate either — and he'd be
+            // approving blind too. Let it through to the offline refusal.
+            if (err instanceof CalendarOfflineError) throw err;
             logger.warn('create_meeting colleague-path rule check threw — escalating to approval', {
               err: String(err).slice(0, 200),
             });
@@ -839,15 +827,32 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // instead of escalating; only if the colleague insists (or none fit)
         // does Sonnet fall to create_approval.
         if (plan.action === 'propose_alternative') {
+          // D8 — these times are being SAID to the colleague, so they are offered
+          // times: stash them or "the Sunday one works" comes back as
+          // slot_not_offered and a bare weekday+time gets re-derived onto the
+          // wrong week.
+          recordProposedAlternatives({
+            channelId: context.channelId,
+            threadTs: context.threadTs,
+            timezone,
+            alternatives: plan.alternatives,
+            widenedAlternatives: plan.widenedAlternatives,
+          });
           return {
             success: false,
             error: 'soft_rule_offer_alternatives',
             violation_label: plan.violationLabel,
-            alternatives: plan.alternatives,
+            // D3 — the day they asked for and the widening are separate fields
+            // on purpose. Offer the requested day's options as THE answer; the
+            // other-day ones only exist because that day ran out, so they are
+            // offered as a widening, never merged into one list.
+            requested_day: plan.requestedDay,
+            alternatives_on_requested_day: plan.alternatives,
+            alternatives_other_days: plan.widenedAlternatives,
             suggested_ask_text: plan.suggestedAskText,
             ...openQuestionsField(plan.openQuestions),
             _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
-            _note: 'The proposed time breaks one of the owner\'s soft rules. Do NOT escalate yet. Offer these nearby rule-compliant slots (2 on the requested day + 1 after) and ask the colleague if one works. If they INSIST on the original time, or none of these work, THEN call create_approval(kind=policy_exception) with suggested_ask_text so the owner decides.',
+            _note: `The proposed time breaks one of the owner's soft rules. Do NOT escalate yet. ${alternativesNote(plan.requestedDay, plan.alternatives.length, plan.widenedAlternatives.length)} If they INSIST on the original time, or none of these work, THEN call create_approval(kind=policy_exception) with suggested_ask_text so the owner decides.`,
           };
         }
         // Early-return on non-book plans:

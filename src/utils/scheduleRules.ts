@@ -10,11 +10,20 @@
  * Each of those used to apply slightly different subsets of the same rules.
  * Now they all call `checkSlot(...)` and get one consistent verdict + label.
  *
- * Rules checked, in order. First violation wins (caller gets ONE label):
+ * Rules checked, in EVALUATION order. First violation wins (caller gets ONE
+ * label). Note (8) is evaluated SECOND, not eighth — see "OCCUPANCY vs RULES":
  *   0. in_the_past                — the slot start is already in the past
+ *   8. owner_busy_collision       — a REAL commitment holds the slot. Promoted
+ *                                   ahead of every soft rule: "is he already on
+ *                                   something?" is a fact about the calendar,
+ *                                   never a consequence of which rule tripped
+ *                                   first. Rule number kept at 8 so the
+ *                                   cross-file "rule 8" references still read.
  *   0b. within_lead_time          — inside the caller's booking lead time
  *                                   (bookingLeadTimeHours: owner vs colleague)
- *   1. vacation_or_off_day        — Friday/Saturday for Idan's profile
+ *   1. vacation_or_off_day        — Friday/Saturday for Idan's profile.
+ *                                   THE ONE RULE WITH NO allow_relaxed GATE —
+ *                                   see the note under the ladder.
  *   2. category_day_type          — category requires office_days but slot is home day
  *   3. category_per_day           — at-limit for this category on this day
  *   4. category_per_week          — at-limit for this category this ISO week
@@ -24,12 +33,30 @@
  *   6. floating_block_overlap     — lunch / focus block conflict in profile.meetings.floating_blocks
  *                                   (bypassed when allow_relaxed = true)
  *   7. travel_buffer_collision    — category.requires_travel_buffer & adjacent meeting too tight
- *   8. owner_busy_collision       — owner has a hard conflict (delegated to caller's getCalendarEvents)
- *                                   (bypassed when allow_relaxed = true OR isFloatingBlock = true —
- *                                    owner can override his own time; signals coexist with meetings)
+ *                                   (see (8) — the collision itself was already
+ *                                    reported, so this only sees ADJACENT events)
  *   9. focus_time_floor           — booking would drop the day below the configured
  *                                   length-based free-time floor (bypassed when
  *                                   allow_relaxed = true OR isFloatingBlock = true)
+ *
+ * NOTE on rule (1) and allow_relaxed — 0, 0b, 2–4, 5, 6, 7, 8 and 9 all bypass
+ * under `allowRelaxed`; rule (1) alone does not. Owner 2026-07-26, asked
+ * directly: LEAVE IT — its current behaviour is what he wants. What it does:
+ *   • OWNER path — `passes:false` is not a refusal (#127): planMeeting turns it
+ *     into a one-step heads-up and books, so the effect is "an off day is the
+ *     one fact he is re-told even after overriding everything else". The
+ *     double-book notice rides ALONGSIDE it (planMeeting.ts) instead of being
+ *     suppressed by the same `passes:false`.
+ *   • COLLEAGUE path — NO combination reaches here with `relaxed:true` and
+ *     `initiator:'colleague'` any more. The one that used to (owner-in-MPIM
+ *     proposed, gateRelaxed) is gone: D7 removed the grant, because the group-DM
+ *     clamp keeps his senderRole 'colleague', so it waived eight rules on
+ *     colleague authority with the owner heads-up unreachable. A deferred replay
+ *     is not one either — it runs on a synthetic owner context
+ *     (deferredActionReplay.ts:76). So `allowRelaxed` now implies the owner.
+ *   • SEARCH — unaffected either way: the walker's own workday gate skips
+ *     off-days before checkSlot is ever called, relaxed or not, so the two
+ *     cannot disagree (M2).
  *
  * NOTE on between-meeting buffer (v2.7.1) — the 5-min buffer is NOT enforced
  * as a collision rule. The allowed durations (10/25/40/55) and aligned starts
@@ -38,18 +65,31 @@
  * preferred shape, not a violation. (Prior wave had rule (9)
  * `owner_buffer_collision`; deleted v2.7.1.)
  *
- * ── OCCUPANCY vs RULES (v4.1.x — M3) ────────────────────────────────────────
- * Every verdict now also carries `level`, the M3 booking tier, computed ONCE
- * from a single scan of the owner's events:
+ * ── OCCUPANCY vs RULES (v4.1.x — M3; ordering fixed v4.2.x) ─────────────────
+ * Every verdict carries `level`, the M3 booking tier, computed ONCE from a
+ * single scan of the owner's events:
  *   free       — nothing holds this slot
  *   optional   — a TIMED workingElsewhere event holds it (join-if-free, soft)
  *   unfiltered — a real commitment holds it
- * It is ORTHOGONAL to the rule ladder: a slot can be `free` and still break
- * work hours. Pre-fix, the tier existed ONLY inside the slot walker (which
- * re-derived it from the same events), so a named-time create_meeting booking
- * straight over an optional standup produced no annotation at all, and the
- * write path had no way to tell "over a real commitment" from "broke a soft
- * own-day rule". The walker now READS this instead of re-deriving it.
+ * Pre-fix, the tier existed ONLY inside the slot walker (which re-derived it
+ * from the same events), so a named-time create_meeting booking straight over
+ * an optional standup produced no annotation at all. The walker now READS this
+ * instead of re-deriving it.
+ *
+ * THE SCAN RUNS FIRST, AND ITS COLLISION OUTRANKS THE SOFT RULES. v4.1.x put
+ * the scan at rule 8's position and returned on the first violation, so every
+ * earlier return (0/0b/1/2-4/5/6/7) carried NO occupancy AND reported a soft
+ * rule while a hard commitment sat on the slot:
+ *   • owner, 14:15, real 15:00 meeting, "book 20 min with Alex at 3" → rule 0b
+ *     fired first, so the one-step owner book-through (planMeeting #127) said
+ *     "heads up, that's too soon" and never mentioned the double-booking;
+ *   • the colleague pre-check treated the same slot as `within_lead_time`, i.e.
+ *     "NOT a hard conflict and it's Idan's to override", across a 4h window;
+ *   • check_join_availability had to carry a PRIVATE second occupancy scan to
+ *     answer "is he busy?" at all — a second validator, which is the M2 bug.
+ * Now: scan → rule 0 (a past slot is past, whatever holds it) → the hard
+ * collision → then the soft ladder. `level` is ALWAYS present, so no caller can
+ * claim a slot is clear without having looked (M11).
  */
 
 import { DateTime } from 'luxon';
@@ -197,15 +237,14 @@ export interface RuleCheckResult {
   violation_kind?: RuleViolationKind;
   violation_label?: string;          // short human phrase suitable for an approval ask_text
   /**
-   * M3 tier of the slot — what holds it. Orthogonal to passes/violation.
-   * PRESENT only when occupancy was actually evaluated: the slot reached the
-   * owner-busy stage (i.e. it passed rules 0–7, or it failed ON owner-busy).
-   * ABSENT means "not evaluated" — an earlier rule (off day, off hours,
-   * category cap…) short-circuited before the calendar scan. Deliberately not
-   * defaulted to 'free': claiming a slot is free without looking would be the
-   * same class of confident-wrong answer M11 forbids.
+   * M3 tier of the slot — what holds it. Orthogonal to passes/violation, and
+   * ALWAYS present: the scan is unconditional and runs before the rule ladder,
+   * so there is no verdict for which "we didn't look" is the honest answer.
+   * (It used to be optional, absent on every early return — which is exactly
+   * how a slot the owner was already committed on came back labelled "too
+   * soon" with no tier at all.)
    */
-  level?: BookingLevel;
+  level: BookingLevel;
   /** level==='optional' — the optional-join event's viewer-scoped subject. */
   overOptional?: string;
   /**
@@ -214,7 +253,19 @@ export interface RuleCheckResult {
    * (M3: booking over a real commitment is never the same as breaking a soft
    * own-day rule). Subject is viewer-scoped.
    */
-  overCommitment?: { subject: string; attendeeCount: number; window: string };
+  overCommitment?: {
+    subject: string;
+    attendeeCount: number;
+    window: string;
+    /**
+     * D6 — the commitment is an all-day OUT OF OFFICE, i.e. the whole day is
+     * gone, not this hour. Same tier and same rank (it is still a real
+     * commitment); a structured fact rather than a new violation kind, so no
+     * consumer that branches on `owner_busy_collision` silently stops firing.
+     * Callers that say WHY use it to avoid "he's booked then" on a vacation day.
+     */
+    allDayOutOfOffice?: true;
+  };
 }
 
 /**
@@ -233,11 +284,10 @@ export function bookingLeadTimeHours(
 }
 
 /**
- * THE lead-time predicate. checkSlot rule 0b is one caller; the slot walker is
- * the other, where it runs as a cheap pre-filter EARLY in the loop so
- * day_summary blames "too soon" rather than an attendee who happens to be busy
- * in a window that was never bookable anyway. Two call sites, ONE implementation
- * — they read the same value and cannot drift.
+ * THE lead-time predicate. checkSlot rule 0b is THE caller for every search and
+ * every write, so the label's rank comes from the one ladder — below a real
+ * commitment, above the soft own-day rules (D5). The slot walker calls it only
+ * on its no-UserProfile fallback path, which never reaches checkSlot.
  */
 export function isWithinBookingLeadTime(
   slotStartMs: number,
@@ -301,6 +351,86 @@ export function requiredFreeMinutesForWorkDay(
   return Math.ceil((workTotalMin / workHoursPerFreeHour) / 15) * 15;
 }
 
+/**
+ * occupancyRoleOf — THE single answer to "does this event hold the owner's
+ * time, and how hard?". One predicate, so the occupancy scan (rule 8) and the
+ * travel-buffer scan (rule 7) can never disagree about what counts.
+ *
+ *   ignore     — cancelled, a free-show (FYI / "Not Me"), or a floating block
+ *                (lunch / gym slides; rule 6 owns the "no room to shift" case)
+ *   optional   — a TIMED workingElsewhere event: join-if-free, skippable (M3)
+ *   commitment — everything else, INCLUDING an all-day busy / oof / all-day WE
+ *
+ * Rule 7 used to skip none of these — only `isCancelled` + excludeEventIds —
+ * which is a 4.2.0 regression: the walker's owner-side travel padding moved
+ * into this rule, and the walker's version read `allBusy`, where free-shows
+ * were already filtered and floating blocks carved out. So the rule padded
+ * against events the search never padded against, and search and book stopped
+ * agreeing on which `Outside` slots exist.
+ *
+ * This CHANGES THE OFFERED SLOT SET, not just the labels. The live case is
+ * LUNCH: a 25-min elastic block used to force a `travel_buffer_collision` on
+ * every `Outside` slot within the buffer either side of it, so a 30-min buffer
+ * erased the hour around lunch from the offer. Same for a free-show FYI and a
+ * timed optional-join. Now none of the three pad — matching `allBusy`.
+ *
+ * What it does NOT restore, despite the shape of the old failure: an ALL-DAY
+ * real commitment (busy / oof / all-day WE) still blocks its whole day. It just
+ * reports honestly now — the occupancy scan sees it first and returns
+ * `owner_busy_collision`, so rule 7 is never reached and nobody is told about
+ * an "adjacent meeting at 00:00". The all-day events this predicate calls
+ * `ignore` (a free-show marker, a floating-block-named all-day) DO become
+ * bookable again: they overlap every slot on their day, so under the old skip
+ * list one of them cost the entire day.
+ */
+export type OccupancyRole = 'ignore' | 'optional' | 'commitment';
+
+/**
+ * isAllDayOutOfOffice — THE predicate for "his own calendar says he is OUT for
+ * this whole day". D6, owner 2026-07-26: *"it doesn't [need] the
+ * owner_schedule_overrides. my calendar really block OOO for that entire day,
+ * it should be blocked anyway"* — the fact lives on the calendar and is honoured
+ * from there, with no per-date override required.
+ *
+ * `oof` only, deliberately:
+ *   • all-day `busy`            — far likelier a hold, a conference block or an
+ *                                 imported travel row than a day off. Calling a
+ *                                 held day "he's out" is a confident wrong reason.
+ *   • all-day `workingElsewhere`— explicitly NOT this: it is a WORKING day, just
+ *                                 elsewhere (and there is an open contradiction
+ *                                 about it — left alone).
+ *   • `free` / cancelled        — not a block at all.
+ *
+ * It does NOT change bookability — `occupancyRoleOf` already calls an all-day
+ * OOF a `commitment`, so every slot on the day collides. What it changes is what
+ * is SAID: a day off reported as forty separate "already busy" hits narrates as
+ * "fully booked", which is a false reason for a true refusal (M11).
+ */
+export function isAllDayOutOfOffice(ev: CalendarEvent): boolean {
+  if (ev.isCancelled) return false;
+  if (!(ev as any).isAllDay) return false;
+  return (ev as any).showAs === 'oof';
+}
+
+export function occupancyRoleOf(
+  ev: CalendarEvent,
+  floatingBlockDefs: ReturnType<typeof getFloatingBlocks>,
+): OccupancyRole {
+  if (ev.isCancelled) return 'ignore';
+  if ((ev as any).showAs === 'free') return 'ignore';   // free/tentative blocks don't collide
+  // v3.6.4 — a TIMED workingElsewhere event is an OPTIONAL-join (join only if
+  // free), NOT a hard commitment. This one classification is what lets the slot
+  // finder TAG a slot over it as WE-soft instead of dropping it, and lets a
+  // booking sit over it with no conflict flag. All-day WE (travel) is the
+  // spine's concern and is deliberately a commitment.
+  if (!(ev as any).isAllDay && (ev as any).showAs === 'workingElsewhere') return 'optional';
+  // A movable floating block (lunch / focus / gym) is NOT a hard collision:
+  // rule 6 already validated it can still fit elsewhere in its window, and
+  // `rebalanceFloatingBlocksAfterMutation` slides it after the write commits.
+  if (floatingBlockDefs.some(b => isFloatingBlockEvent(ev, b))) return 'ignore';
+  return 'commitment';
+}
+
 export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   const { profile } = input;
   const tz = profile.user.timezone;
@@ -316,6 +446,72 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // search (so search + book agree) or self-resolved from the slot's home-tz
   // date. Rules 1/5/9 read workday-ness, windows, location + timezone from it.
   const effectiveDay = input.effectiveDay ?? getEffectiveWorkDayForInstant(input.slotStartIso, profile);
+  const viewer: SubjectViewer = input.viewer ?? 'other';
+  const ownerFirst = profile.user.name.split(' ')[0];
+  // M11 — WHO reads the label this validator produces. The owner reads his own
+  // heads-up (planMeeting's one-step `overrideNotice`), a colleague reads about
+  // him. Pre-fix every label was third person, so the lead-time rule told Idan
+  // "Idan needs at least 1h notice for a new booking".
+  const ownerReads = viewer === 'owner';
+  const who = ownerReads ? 'you' : ownerFirst;
+  const whose = ownerReads ? 'your' : `${ownerFirst}'s`;
+
+  // ── OCCUPANCY SCAN (rule 8's data) — unconditional, BEFORE the ladder ────
+  // ONE scan answers two questions that used to be answered in two places:
+  //   (a) the M3 LEVEL of this slot — free / optional / unfiltered. The slot
+  //       walker used to re-derive the optional tier itself from the same
+  //       events (its own `softOccupied` pass) while the write path derived
+  //       nothing at all, which is why a named-time booking straight over the
+  //       owner's optional standup came back indistinguishable from booking a
+  //       genuinely free slot. The walker now reads `overOptional` from here.
+  //   (b) the owner_busy_collision violation, returned just below rule 0.
+  // Hoisted above the ladder because it costs nothing (a loop over events the
+  // caller already fetched — no I/O) and because leaving it at position 8 meant
+  // seven rules could short-circuit ahead of it and hand the caller a verdict
+  // with no tier and a soft reason for a hard conflict.
+  const floatingBlockDefs = getFloatingBlocks(profile);
+  const ownerEmailLower = profile.user.email.toLowerCase();
+  let level: BookingLevel = 'free';
+  let overOptional: string | undefined;
+  let overCommitment: RuleCheckResult['overCommitment'];
+  for (const ev of input.events) {
+    if (excludeSet.has(ev.id)) continue;
+    const role = occupancyRoleOf(ev, floatingBlockDefs);
+    if (role === 'ignore') continue;
+    const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
+    const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
+    if (!(evStart < slotEnd && evEnd > slotStart)) continue;
+    if (role === 'optional') {
+      if (level === 'free') {
+        level = 'optional';
+        overOptional = displaySubject(ev, profile, viewer) || 'an optional meeting';
+      }
+      continue;
+    }
+    // A real commitment. Highest tier wins — stop looking.
+    level = 'unfiltered';
+    overOptional = undefined;
+    overCommitment = {
+      subject: displaySubject(ev, profile, viewer) || 'meeting',
+      attendeeCount: (ev.attendees ?? []).filter(
+        a => (a?.emailAddress?.address ?? '').toLowerCase() !== ownerEmailLower,
+      ).length,
+      // An all-day block (vacation / OOF / conference) has no clock window —
+      // rendering it as "00:00–00:00" reads like a zero-length meeting. It only
+      // became visible here once the scan started reporting all-day commitments
+      // ahead of the work-hours rule.
+      window: (ev as any).isAllDay
+        ? 'all day'
+        : `${evStart.setZone(tz).toFormat('HH:mm')}–${evEnd.setZone(tz).toFormat('HH:mm')}`,
+      ...(isAllDayOutOfOffice(ev) ? { allDayOutOfOffice: true as const } : {}),
+    };
+    break;
+  }
+  const occupancy = {
+    level,
+    ...(overOptional ? { overOptional } : {}),
+    ...(overCommitment ? { overCommitment } : {}),
+  };
 
   // ── (0) in the past ─────────────────────────────────────────────────────
   // Never silently book a slot that has already started — a past / earlier-today
@@ -330,6 +526,37 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       passes: false,
       violation_kind: 'in_the_past',
       violation_label: 'that time has already passed',
+      ...occupancy,
+    };
+  }
+
+  // ── (8) owner busy collision — the HARD truth, ahead of the soft rules ──
+  // Position, not the check itself, is the fix. "Is he already committed?" is a
+  // fact about the calendar; reporting a soft rule instead — because it happens
+  // to sit earlier in the ladder — is a confident WRONG reason (M11) and, on
+  // the owner's one-step book-through, books a double-booking he was never told
+  // about (M3). Every consumer that already branches on `owner_busy_collision`
+  // (the join tool, the colleague pre-check's escalatable set, the approval
+  // re-derive, planMeeting) now gets the truthful verdict with no change of
+  // its own — which is the point: one validator, one answer.
+  // Two carve-outs skip the VIOLATION but NOT the scan — the level is still
+  // reported above so the caller can annotate:
+  //   • `allowRelaxed: true` — owner explicit override after a flag. Regular
+  //     create_meeting still flags overlaps the first time so Maelle doesn't
+  //     silently double-book a meeting with attendees.
+  //   • `isFloatingBlock: true` — focus / lunch / gym blocks are SIGNALS that
+  //     coexist with meetings by design; never block them on owner_busy.
+  if (!input.allowRelaxed && !input.isFloatingBlock && overCommitment) {
+    return {
+      passes: false,
+      violation_kind: 'owner_busy_collision',
+      // D6 — an all-day OOF is the same hard collision, but it is a day OFF, not
+      // a clash: "already busy at this time" invites "then what about 30 min
+      // later", which has the same answer all day.
+      violation_label: overCommitment.allDayOutOfOffice
+        ? `${ownerReads ? "you're" : `${ownerFirst} is`} out of office all day on ${slotStart.toFormat('EEEE d MMM')} ("${overCommitment.subject}")`
+        : `${ownerReads ? "you're" : `${ownerFirst} is`} already busy at this time ("${overCommitment.subject}" ${overCommitment.window})`,
+      ...occupancy,
     };
   }
 
@@ -344,11 +571,11 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // Instant-only comparison (no zone inference — M13 forbids the server clock
   // for zones, not for "what time is it now").
   if (!input.allowRelaxed && isWithinBookingLeadTime(slotStart.toMillis(), input.leadTimeHours)) {
-    const firstNameLead = profile.user.name.split(' ')[0];
     return {
       passes: false,
       violation_kind: 'within_lead_time',
-      violation_label: `that's too soon — ${firstNameLead} needs at least ${input.leadTimeHours}h notice for a new booking`,
+      violation_label: `that's too soon — ${who} need${ownerReads ? '' : 's'} at least ${input.leadTimeHours}h notice for a new booking`,
+      ...occupancy,
     };
   }
 
@@ -357,13 +584,13 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // normally-off yaml day read the same. No override → identical to the old
   // office/home name check.
   if (!effectiveDay.isWorkday) {
-    const firstName = profile.user.name.split(' ')[0];
     return {
       passes: false,
       violation_kind: 'vacation_or_off_day',
       violation_label: effectiveDay.hasOverride
-        ? `${firstName} has ${slotStart.toFormat('EEEE d MMM')} off`
-        : `${dayName} isn't one of ${firstName}'s working days`,
+        ? `${who} ha${ownerReads ? 've' : 's'} ${slotStart.toFormat('EEEE d MMM')} off`
+        : `${dayName} isn't one of ${whose} working days`,
+      ...occupancy,
     };
   }
 
@@ -389,6 +616,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
         passes: false,
         violation_kind: map[catCheck.rule_broken!] ?? 'category_day_type',
         violation_label: catCheck.human_explanation ?? `${input.category} category rule violated`,
+        ...occupancy,
       };
     }
   }
@@ -418,6 +646,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
         passes: false,
         violation_kind: 'outside_working_hours',
         violation_label: `Slot ${slotStartEff.toFormat('HH:mm')}–${slotEndEff.toFormat('HH:mm')}${zoneNote} is outside working hours (${windowsLabel})`,
+        ...occupancy,
       };
     }
   }
@@ -442,8 +671,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // there's no lunch/gym window to protect (and a normal meeting isn't blocked
   // for a block that won't be booked that day).
   if (!input.allowRelaxed && !effectiveDay.hasOverride) {
-    const blocks = getFloatingBlocks(profile);
-    for (const block of blocks) {
+    for (const block of floatingBlockDefs) {
       // v4.1.x — honor the block's DAY SCOPE. This rule read the raw yaml list
       // and ignored `block.days`, so a Thursday-only coffee block constrained
       // Monday bookings — while every OTHER floating-block surface (rebalance,
@@ -531,7 +759,8 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
         return {
           passes: false,
           violation_kind: 'floating_block_overlap',
-          violation_label: `Booking this would leave no room for ${profile.user.name.split(' ')[0]}'s ${block.name} (${blockDurationMin}min needed in ${block.preferred_start}–${block.preferred_end} window; only ${longestFreeMin}min free after this slot)`,
+          violation_label: `Booking this would leave no room for ${whose} ${block.name} (${blockDurationMin}min needed in ${block.preferred_start}–${block.preferred_end} window; only ${longestFreeMin}min free after this slot)`,
+          ...occupancy,
         };
       }
     }
@@ -551,8 +780,20 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
     const beforeWindowStart = slotStart.minus({ minutes: bufMin });
     const afterWindowEnd = slotEnd.plus({ minutes: bufMin });
     for (const ev of input.events) {
-      if (ev.isCancelled) continue;
       if (excludeSet.has(ev.id)) continue;
+      // Only a real commitment can cost him travel time — the SAME classifier
+      // the occupancy scan uses, so the two can't drift (a free-show FYI, a
+      // skippable optional-join and an elastic lunch block all used to count,
+      // and lunch alone erased the buffer-width band around it from every
+      // Outside offer).
+      if (occupancyRoleOf(ev, floatingBlockDefs) !== 'commitment') continue;
+      // All-day commitments have no travel geometry. An all-day event that
+      // overlaps THIS slot can't reach here at all (the scan saw it and rule 8
+      // returned), so what this skips is the one remaining shape: a NEIGHBOURING
+      // day's all-day event pulled into the buffer window by a slot near
+      // midnight — "adjacent meeting at 00:00", which is a midnight boundary,
+      // not a commute.
+      if ((ev as any).isAllDay) continue;
       const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
       const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
       if (evStart < afterWindowEnd && evEnd > beforeWindowStart) {
@@ -561,88 +802,10 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
           passes: false,
           violation_kind: 'travel_buffer_collision',
           violation_label: `${input.category ?? 'this meeting'} needs ${bufMin}min travel buffer on each side; adjacent meeting at ${evStart.setZone(tz).toFormat('HH:mm')} too close`,
+          ...occupancy,
         };
       }
     }
-  }
-
-  // ── (8) occupancy + hard busy collision ─────────────────────────────────
-  // ONE scan answers two questions that used to be answered in two places:
-  //   (a) the M3 LEVEL of this slot — free / optional / unfiltered. The slot
-  //       walker used to re-derive the optional tier itself from the same
-  //       events (its own `softOccupied` pass) while the write path derived
-  //       nothing at all, which is why a named-time booking straight over the
-  //       owner's optional standup came back indistinguishable from booking a
-  //       genuinely free slot. The walker now reads `overOptional` from here.
-  //   (b) the owner_busy_collision violation, exactly as before.
-  // Owner direction on (b): it's HIS calendar. Maelle flags a conflict ONCE
-  // (confirm_override path), then books. Two carve-outs skip the VIOLATION but
-  // NOT the scan — the level is still reported so the caller can annotate:
-  //   • `allowRelaxed: true` — owner explicit override after a flag.
-  //   • `isFloatingBlock: true` — focus / lunch / gym blocks are SIGNALS that
-  //     coexist with meetings by design; never block them on owner_busy.
-  const viewer: SubjectViewer = input.viewer ?? 'other';
-  const ownerEmailLower = profile.user.email.toLowerCase();
-  // A movable floating block (lunch / focus / gym) is NOT a hard collision.
-  // Rule 6 above already validated it can still fit elsewhere in its window,
-  // and after the booking commits `rebalanceFloatingBlocksAfterMutation`
-  // slides it automatically. Counting it as owner_busy here is what forced a
-  // spurious confirm_override ("want me to move lunch?") on every named-time
-  // booking that landed on the lunch slot — even though the block just shifts.
-  // Skip floating-block events: rule 6 owns the genuine "no room to shift"
-  // case (floating_block_overlap fires earlier), so no protection is lost.
-  const floatingBlockDefs = getFloatingBlocks(profile);
-  let level: BookingLevel = 'free';
-  let overOptional: string | undefined;
-  let overCommitment: RuleCheckResult['overCommitment'];
-  for (const ev of input.events) {
-    if (ev.isCancelled) continue;
-    if (excludeSet.has(ev.id)) continue;
-    if ((ev as any).showAs === 'free') continue;  // free/tentative blocks don't collide
-    const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
-    const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
-    if (!(evStart < slotEnd && evEnd > slotStart)) continue;
-    // v3.6.4 — a TIMED workingElsewhere event is an OPTIONAL-join (join only
-    // if free), NOT a hard commitment: it must never count as an owner-busy
-    // collision. This is the single validator for search AND booking, so this
-    // one skip is what lets the slot finder TAG a slot over it as WE-soft
-    // (instead of dropping it) and lets a booking sit over it with no conflict
-    // flag, leaving the optional event in place. All-day WE (travel) is the
-    // spine's concern and is deliberately NOT skipped here.
-    if (!(ev as any).isAllDay && (ev as any).showAs === 'workingElsewhere') {
-      if (level === 'free') {
-        level = 'optional';
-        overOptional = displaySubject(ev, profile, viewer) || 'an optional meeting';
-      }
-      continue;
-    }
-    if (floatingBlockDefs.some(b => isFloatingBlockEvent(ev, b))) continue;
-    // A real commitment. Highest tier wins — stop looking.
-    level = 'unfiltered';
-    overOptional = undefined;
-    overCommitment = {
-      subject: displaySubject(ev, profile, viewer) || 'meeting',
-      attendeeCount: (ev.attendees ?? []).filter(
-        a => (a?.emailAddress?.address ?? '').toLowerCase() !== ownerEmailLower,
-      ).length,
-      window: `${evStart.setZone(tz).toFormat('HH:mm')}–${evEnd.setZone(tz).toFormat('HH:mm')}`,
-    };
-    break;
-  }
-  const occupancy = {
-    level,
-    ...(overOptional ? { overOptional } : {}),
-    ...(overCommitment ? { overCommitment } : {}),
-  };
-  // Regular create_meeting still flags overlaps first time (allowRelaxed=false)
-  // so Maelle doesn't silently double-book a meeting with attendees.
-  if (!input.allowRelaxed && !input.isFloatingBlock && overCommitment) {
-    return {
-      passes: false,
-      violation_kind: 'owner_busy_collision',
-      violation_label: `${profile.user.name.split(' ')[0]} is already busy at this time ("${overCommitment.subject}" ${overCommitment.window})`,
-      ...occupancy,
-    };
   }
 
   // v2.7.1 — rule (9) owner_buffer_collision deleted. The 5-min between-meeting
@@ -716,7 +879,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
           return {
             passes: false,
             violation_kind: 'focus_time_floor',
-            violation_label: `Booking this leaves ${profile.user.name.split(' ')[0]} with ${Math.round(dayFreeMin)} min of free time on ${dayName} — below the ${requiredMin}-min floor for a ${workTotalMinForFloor}-min work day.`,
+            violation_label: `Booking this leaves ${who} with ${Math.round(dayFreeMin)} min of free time on ${dayName} — below the ${requiredMin}-min floor for a ${workTotalMinForFloor}-min work day.`,
             ...occupancy,
           };
         }

@@ -71,8 +71,14 @@ export function recordOfferedSlots(params: {
   // recorder — preserve-on-omit below keeps the spread fingerprint intact.
   searchFingerprint?: string;
 }): void {
+  // D8 — no per-call `slice(0, 6)`. It was a second, silent bound competing with
+  // MAX_OFFERED (the real cap, applied to the merged union below) and with the
+  // configured offered_slot_count (M6): a profile offering 8 slots recorded 6,
+  // and a proposed-alternatives payload — requested-day options THEN the widening
+  // — dropped exactly the widened ones, so a pick from the second list came back
+  // "I never offered you that". One cap, at the end, on the union.
   const fresh: OfferedSlot[] = [];
-  for (const s of params.slots.slice(0, 6)) {
+  for (const s of params.slots) {
     const dt = DateTime.fromISO(s.start, { setZone: true }).setZone(params.timezone);
     if (!dt.isValid) continue;
     fresh.push({ startIso: s.start, display: dt.toFormat('EEEE yyyy-MM-dd HH:mm') });

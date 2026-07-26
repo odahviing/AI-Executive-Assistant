@@ -19,11 +19,17 @@
  * Legacy bridge: callers still on `deferred_action` shape are transparently
  * mapped to `on_approve` via `extractCallbacks()`. We accept both for one
  * version window; new code writes `callbacks` directly.
+ *
+ * `composeOwnerAskText` (below) is the other half: the ONE assembly of the
+ * owner-facing ask these callbacks are verbalized into. It lives here because
+ * the consequence line it orders is this file's own `buildConsequenceText`.
  */
 
+import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
 import type { OwnerTravelContext } from '../../utils/workingElsewhere';
 import { renderWeDualClock } from '../../utils/weTimeResolver';
+import logger from '../../utils/logger';
 
 export interface ToolCallback {
   tool: string;
@@ -90,12 +96,12 @@ export function buildConsequenceText(
     try {
       const dt = new Date(iso);
       if (Number.isNaN(dt.getTime())) return iso;
-      // Best-effort local-time render; resolver doesn't have luxon imported here.
       const opts: Intl.DateTimeFormatOptions = {
         weekday: 'short', day: 'numeric', month: 'short',
         hour: '2-digit', minute: '2-digit', hour12: false,
         timeZone: profile.user.timezone,
       };
+      // Best-effort render in the owner's zone.
       return new Intl.DateTimeFormat('en-GB', opts).format(dt);
     } catch { return iso; }
   };
@@ -159,6 +165,102 @@ export async function resolveConsequenceTravel(
   } catch {
     return undefined;  // fail-open → home-zone render, never block the approval DM
   }
+}
+
+/**
+ * THE owner-facing approval ask — assembled in ONE place, for every surface
+ * that puts this ask in front of him to decide.
+ *
+ * Two surfaces call this, and both are LIVE DECISION SURFACES: the first raise
+ * (`create_approval`) and the re-ask revival, which re-posts the same ask into
+ * today's decision thread and re-stamps `terminal_dm_msg_ts` — so a ✅ there
+ * resolves the approval exactly as one on the original does. A second assembly
+ * site is precisely how the revival came to carry the bare `description`,
+ * naming neither the conflict he was overriding nor what a ✅ authorizes.
+ *
+ * Parts, in reading order:
+ *   1. `details.honest_hard_reason` (#142c) — checkSlot's owner-viewer label for
+ *      a HARD double-book, written ONLY by the code path that PROVED it (never
+ *      by the model). It LEADS, above whatever soft framing the ask prose chose.
+ *   2. `askText` — the ask itself.
+ *   3. the consequence (v2.9.1) — "If yes → I'll X", verbalized from the stored
+ *      on_approve with any stored counter merged in exactly as the resolver
+ *      merges it, so it always describes the action a ✅ actually replays. Last,
+ *      because it says what he is authorizing, not why it needs him.
+ * A missing part just drops out; it can never take another part with it.
+ *
+ * `reAsk` marks the revival. Both time-dependent parts are REPLAYED from the
+ * row, never re-derived: the ✅ replays the STORED action, so the ask must be
+ * described by the reason derived against THAT stored slot — re-checking the
+ * calendar here could only produce a reason for a different slot, or flip the
+ * lead line off mid-thread on a transient read. Replay can go stale (the
+ * collision may have cleared since), so the revival does not assert it in the
+ * present tense: it says when the check was made and lets him read it as of
+ * then. Honest either way, and no Graph call on a tool path.
+ */
+export async function composeOwnerAskText(input: {
+  askText: string;
+  /** The request row's parsed `details_json` — the one source for parts 1 and 3. */
+  details: Record<string, unknown> | null | undefined;
+  profile: UserProfile;
+  /** For the log line when the consequence build throws. */
+  requestId: string;
+  /** Present only on the re-ask revival of an ask already raised. */
+  reAsk?: { requesterFirst: string; raisedAt: string | null };
+}): Promise<string> {
+  const { askText, details, profile, requestId, reAsk } = input;
+
+  // A stored counter is what a ✅ ACTUALLY replays: resolveRequest merges
+  // `details.counter` into on_approve before running it (resolver.ts:415-425),
+  // for any amend round, owner's or colleague's. So the preview verbalizes the
+  // MERGED action — otherwise a revival of a countered row (bounced back to
+  // awaiting_owner, so revivable) would promise the ORIGINAL slot and book the
+  // counter's: the "I thought yes meant 14:00, got 16:00" failure.
+  const rawCounter = details?.counter;
+  const counter = rawCounter && typeof rawCounter === 'object' && !Array.isArray(rawCounter)
+    ? rawCounter as Record<string, unknown>
+    : null;
+  const countered = !!counter && Object.keys(counter).length > 0;
+
+  // The hard reason was derived against the STORED slot. Once a counter is in
+  // play the action a ✅ fires is a different one, so that reason may no longer
+  // describe what he'd be authorizing — and a lead line he acts on has to be
+  // true. Withhold rather than assert: the ask prose still carries the original
+  // framing, and the consequence below names the real merged action.
+  const stored = countered ? undefined : details?.honest_hard_reason;
+  const honest = typeof stored === 'string' ? stored.trim() : '';
+  let hardReason = honest;
+  if (honest && reAsk) {
+    // created_at is SQLite-UTC ('YYYY-MM-DD HH:MM:SS'); anything else renders
+    // invalid and simply drops the parenthetical rather than the reason.
+    const raised = reAsk.raisedAt
+      ? DateTime.fromSQL(reAsk.raisedAt, { zone: 'utc' }).setZone(profile.user.timezone)
+      : null;
+    const when = raised?.isValid ? ` (${raised.toFormat('EEE d MMM, HH:mm')})` : '';
+    hardReason = `Checked when I raised this${when}: ${honest}`;
+  }
+
+  let consequence: string | null = null;
+  try {
+    const callbacks = extractCallbacks(details);
+    const effective = (countered && counter && callbacks.on_approve)
+      ? { ...callbacks, on_approve: mergeAmendIntoApprove(callbacks.on_approve, counter) }
+      : callbacks;
+    // v3.5.x (WE preview) — resolve trip context so the preview clock matches
+    // the booked-confirmation on a trip day.
+    const travel = await resolveConsequenceTravel(effective, profile);
+    consequence = buildConsequenceText(effective, profile, travel);
+  } catch (err) {
+    logger.warn('composeOwnerAskText — consequence build threw; sending the ask without the "if yes" line', {
+      requestId, err: String(err).slice(0, 200),
+    });
+  }
+
+  const lead = reAsk
+    ? `${reAsk.requesterFirst} just asked again about this — still need your call:`
+    : '';
+
+  return [lead, hardReason, askText, consequence].filter(Boolean).join('\n\n');
 }
 
 /**

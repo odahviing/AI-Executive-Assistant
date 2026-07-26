@@ -4,7 +4,7 @@ import type { UserProfile } from '../../config/userProfile';
 import { slotDayMinutes } from '../../utils/workHours';
 import { scoreSlotDensity, densityConfigFromProfile, prefersDensePacking } from '../../utils/calendarDensity';
 import type { MeetingMode, CalendarEvent } from './calendarTypes';
-import { getFreeBusy, getCalendarEvents } from './calendarReads';
+import { getFreeBusy, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped } from './calendarReads';
 
 // ── Slot-rule helpers ────────────────────────────────────────────────────────
 
@@ -195,7 +195,37 @@ export async function findAvailableSlots(params: {
     const windowTo = currentTo.toISO()!;
 
     const fbDiag: { unresolved?: string[] } = {};
-    const busyMap = await getFreeBusy(params.userEmail, busyFilterEmails, windowFrom, windowTo, params.timezone, false, fbDiag);
+    // D4 — this call always carries the OWNER's own row (busyFilterEmails is
+    // [owner, ...attendees]) and getSchedule is one POST for all of them: a
+    // per-person failure comes back as a per-schedule `error` entry, so a THROW
+    // here means the whole read died, the owner's busy time with it. It already
+    // failed closed — it just failed closed as a raw error string with a Graph
+    // code in it, which the model then had to improvise around. Same blind spot,
+    // same typed refusal as the events read, so the two halves of "I can't see
+    // his calendar" can't produce two different answers.
+    //
+    // Only an OUTAGE-SHAPED fault (5xx / 429 / 408 / a transport errno) is that
+    // blind spot — `isOutageShaped` is the ONE taxonomy, shared with the events
+    // read, so the two halves of "I can't see his calendar" can't disagree about
+    // what counts. Everything deterministic keeps its own honest failure and
+    // travels up unchanged: GraphPermissionError (his calendar reads fine, only
+    // OTHER people's are denied), a 403 on his own, and — the case that made this
+    // a bug — a 400 on a MALFORMED WINDOW. A model-supplied candidate window
+    // narrower than the availabilityViewInterval 400s deterministically
+    // (`ErrorInvalidMergedFreeBusyInterval`, see getFreeBusy's #137 note); wrapping
+    // that as an outage told a colleague the whole calendar was unreachable
+    // because one candidate slot was 3 minutes wide. Malformed input is never
+    // infrastructure.
+    let busyMap: Record<string, import('./calendarTypes').FreeBusySlot[]>;
+    try {
+      busyMap = await getFreeBusy(params.userEmail, busyFilterEmails, windowFrom, windowTo, params.timezone, false, fbDiag);
+    } catch (err) {
+      if (!isOutageShaped(err)) throw err;
+      logger.error('findAvailableSlots — owner free/busy read failed; treating the calendar as OFFLINE', {
+        userEmail: params.userEmail, windowFrom, windowTo, err: String(err).slice(0, 300),
+      });
+      throw new CalendarOfflineError(String(err).slice(0, 300));
+    }
     if (params.diagnosticsOut) {
       const ownerLower = params.userEmail.toLowerCase();
       params.diagnosticsOut.unresolvedAttendees = (fbDiag.unresolved ?? []).filter(e => e !== ownerLower);
@@ -291,7 +321,7 @@ export async function findAvailableSlots(params: {
     // search can never offer a slot the book path then refuses. Lazy-required to
     // match this file's idiom and sidestep the type-only cycle with scheduleRules.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { checkSlot } = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
+    const { checkSlot, isAllDayOutOfOffice } = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
     // v3.7.x (#143) — the per-date effective work context, so the walker gates +
     // hours + tz come from the SAME accessor checkSlot validates against.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -303,52 +333,51 @@ export async function findAvailableSlots(params: {
     // WHICH busy slots are floating-block events (lunch, coffee break, etc).
     // getFreeBusy gives status-only, no subjects; to detect a block we need
     // subject/category. One fetch, cached for the whole slot walk.
-    // Non-fatal: if this fails, blocks are treated as non-elastic (safer).
     // v2.2.3 (scenario 9 row 7) — also used for the all-day-busy block
     // injection below, so fetch whenever a profile is available, not only
     // when floating blocks are configured.
+    //
+    // D4 — this read is NOT non-fatal, and used to be. It feeds checkSlot (the
+    // ONE validator) on every candidate, so an empty list on failure meant every
+    // slot was validated against an EMPTY CALENDAR and came back free — a Graph
+    // fault rendered as a wide-open day. The `getFreeBusy` call at the top of
+    // this same loop has always thrown on a real fault; this one swallowing was
+    // the odd read out. Both now fail closed, one posture for the walker, and
+    // `getOwnerEventsForDecision` owns the single retry.
     let ownerEventsForFb: CalendarEvent[] = [];
     if (profile) {
-      try {
-        // v2.6 — when a category is set, the rule-check needs to count
-        // category occurrences across the FULL day (per_day) and FULL week
-        // (per_week) containing each candidate slot. Narrow ±1min checks
-        // (create_meeting / move_meeting rule-compliance) would otherwise
-        // see 0 events and pass through any limit. Widen the fetch range
-        // to cover at least the ISO week containing searchFrom..searchTo.
-        // No-op when category is unset — preserves the cheap narrow fetch.
-        // v3.7.x — cover the CURRENT (possibly autoExpand-widened) window via
-        // currentTo, NOT the original params.searchTo. Pre-fix, when autoExpand
-        // widened the search to later days, checkSlot's owner-busy / focus-floor /
-        // floating-block rules still validated those expanded-day slots against
-        // owner events that only covered the ORIGINAL window — so an autoExpanded
-        // search silently ACCEPTED owner-busy slots on the later days (the auto-move
-        // "landed on an already-busy slot" bug). No expansion → currentTo ===
-        // params.searchTo → byte-identical fetch.
-        const effTo = currentTo.toISO()!;
-        let fetchFrom = params.searchFrom;
-        let fetchTo = effTo;
-        if (params.category) {
-          const sfDt = DateTime.fromISO(params.searchFrom, { zone: params.timezone });
-          const stDt = DateTime.fromISO(effTo, { zone: params.timezone });
-          if (sfDt.isValid && stDt.isValid) {
-            fetchFrom = sfDt.startOf('week').toISO()!;
-            fetchTo = stDt.endOf('week').toISO()!;
-          }
+      // v2.6 — when a category is set, the rule-check needs to count
+      // category occurrences across the FULL day (per_day) and FULL week
+      // (per_week) containing each candidate slot. Narrow ±1min checks
+      // (create_meeting / move_meeting rule-compliance) would otherwise
+      // see 0 events and pass through any limit. Widen the fetch range
+      // to cover at least the ISO week containing searchFrom..searchTo.
+      // No-op when category is unset — preserves the cheap narrow fetch.
+      // v3.7.x — cover the CURRENT (possibly autoExpand-widened) window via
+      // currentTo, NOT the original params.searchTo. Pre-fix, when autoExpand
+      // widened the search to later days, checkSlot's owner-busy / focus-floor /
+      // floating-block rules still validated those expanded-day slots against
+      // owner events that only covered the ORIGINAL window — so an autoExpanded
+      // search silently ACCEPTED owner-busy slots on the later days (the auto-move
+      // "landed on an already-busy slot" bug). No expansion → currentTo ===
+      // params.searchTo → byte-identical fetch.
+      const effTo = currentTo.toISO()!;
+      let fetchFrom = params.searchFrom;
+      let fetchTo = effTo;
+      if (params.category) {
+        const sfDt = DateTime.fromISO(params.searchFrom, { zone: params.timezone });
+        const stDt = DateTime.fromISO(effTo, { zone: params.timezone });
+        if (sfDt.isValid && stDt.isValid) {
+          fetchFrom = sfDt.startOf('week').toISO()!;
+          fetchTo = stDt.endOf('week').toISO()!;
         }
-        ownerEventsForFb = await getCalendarEvents(
-          params.userEmail,
-          fetchFrom,
-          fetchTo,
-          params.timezone,
-        );
-      } catch (err) {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const logger = require('../../utils/logger').default;
-        logger.warn('findAvailableSlots — owner-events fetch failed', {
-          err: String(err),
-        });
       }
+      ownerEventsForFb = await getOwnerEventsForDecision(
+        params.userEmail,
+        fetchFrom,
+        fetchTo,
+        params.timezone,
+      );
     }
 
     // v2.2.3 (scenario 9 row 7) — all-day busy events should block their
@@ -379,6 +408,24 @@ export async function findAvailableSlots(params: {
         const dayEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
           .setZone(params.timezone).endOf('day').toJSDate();
         allBusy.push({ start: dayStart, end: dayEnd, email: ownerEmailLower });
+      }
+    }
+
+    // D6 — the dates his own calendar marks as an all-day OUT OF OFFICE. Built
+    // once here from the same owner events checkSlot validates against, through
+    // the one shared predicate, so "is he out that day" has exactly one answer in
+    // the subsystem. Span-aware (a multi-day vacation covers every day it spans).
+    const oofDayKeys = new Set<string>();
+    for (const evt of ownerEventsForFb) {
+      if (!isAllDayOutOfOffice(evt)) continue;
+      const from = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' })
+        .setZone(params.timezone).startOf('day');
+      // Graph all-day end is EXCLUSIVE (midnight after the last covered day).
+      const toExclusive = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
+        .setZone(params.timezone).startOf('day');
+      if (!from.isValid || !toExclusive.isValid) continue;
+      for (let d = from; d < toExclusive; d = d.plus({ days: 1 })) {
+        oofDayKeys.add(d.toFormat('yyyy-MM-dd'));
       }
     }
 
@@ -722,6 +769,26 @@ export async function findAvailableSlots(params: {
         cursor = new Date(cursor.getTime() + step);
         continue;
       }
+      // D6 (owner 2026-07-26: "my calendar really block OOO for that entire day,
+      // it should be blocked anyway") — an all-day out-of-office on HIS OWN
+      // calendar takes the day out, straight off the calendar, with no per-date
+      // schedule override needed.
+      //
+      // This is a REASON fix, not a bookability one: `occupancyRoleOf` already
+      // calls an all-day OOF a commitment, so checkSlot rejected every slot on
+      // this day anyway. But it rejected them one at a time as
+      // `owner_busy_collision`, so day_summary reported an OOO Thursday exactly
+      // like a Thursday packed with meetings — Maelle told people he was "fully
+      // booked" while he was on vacation, and a colleague could reasonably ask her
+      // to try the following hour. Same verdict, true reason, and it AGREES with
+      // checkSlot rather than competing with it: both refuse, and the one
+      // predicate (`isAllDayOutOfOffice`) decides what counts as out. Placed above
+      // the meeting-mode gate because "he's away" outranks "wrong kind of day".
+      if (oofDayKeys.has(dayKey)) {
+        trackReject('owner_out_of_office', cursorDt.toISO()!);
+        cursor = new Date(cursor.getTime() + step);
+        continue;
+      }
       // meetingMode: in-person requires an office-type day; a home / away day in
       // in_person mode is a wrong-day-type exclusion (narrated in day_summary).
       if (effectiveDay && meetingMode === 'in_person' && dayType !== 'office') {
@@ -754,20 +821,38 @@ export async function findAvailableSlots(params: {
           continue;
         }
       }
-      // #128 — booking lead time. Labeled (not a silent skip) so day_summary can
-      // name "inside your booking lead time" instead of empty silence.
-      // v4.1.x (M2) — the RULE now lives in checkSlot (rule 0b), which is what
-      // finally gave the write path the same floor. This stays as a cheap
-      // pre-filter calling the SAME predicate — one implementation, two call
-      // sites, no possible drift — kept at this position so the rejection is
-      // blamed on "too soon" and not on an attendee who happens to be busy in a
-      // window that was never bookable anyway.
-      // A RELAXED pass is a total owner override and bypasses the lead time
-      // exactly as checkSlot does — but an OFFER is not a booking: a time that
-      // has already gone is not an option to choose from, so it floors at "now".
+      // #128 / D5 (owner 2026-07-26: "we need to have priority of reasons") —
+      // the booking lead time is checkSlot rule 0b and is now decided THERE,
+      // inside the validator's own ladder, where a real commitment (rule 8)
+      // outranks it. It used to run HERE, ahead of checkSlot, deliberately —
+      // "so the rejection is blamed on 'too soon'". That is exactly what broke:
+      // a same-day afternoon that was ALSO booked solid came back labelled
+      // `within_lead_time`, a SOFT prefix, so the colleague hint downstream told
+      // the requester those times were held by "day-load protections — NOT by
+      // real meetings" and invited him to push for an override on a full
+      // calendar. Round 1 fixed this ranking inside checkSlot; a second,
+      // independent ranking out here just re-opened it. One ladder now.
+      //
+      // What legitimately stays is the half checkSlot cannot express:
+      //   • RELAXED — a total owner override waives rule 0b AND rule 0, but an
+      //     OFFER is not a booking: a time that has already gone is not an option
+      //     to choose from, so a relaxed search still floors at "now". checkSlot
+      //     ranks `in_the_past` ABOVE the collision too, so this position agrees
+      //     with the ladder rather than competing with it.
+      //   • NO PROFILE — the degenerate no-UserProfile caller never reaches
+      //     checkSlot at all, so the floor has nowhere else to live.
+      //
+      // Side effect, checked and accepted: a same-day slot where an ATTENDEE is
+      // also busy now reports the attendee instead of "too soon", because the
+      // walker's attendee pass still sits above checkSlot. Both are true and
+      // neither is in SOFT_REJECT_PREFIXES, so neither can produce the
+      // "merely protective" claim this fix exists to kill. The attendee pass was
+      // NOT hoisted below checkSlot with the lead time: day_summary's per-attendee
+      // `blocked_by` attribution ("Isaac blocked 8 slots on Monday") is built from
+      // those labels, and owner rules shadowing them would silently empty it.
       const tooSoon = params.relaxed
         ? cursor.getTime() < Date.now()
-        : isWithinBookingLeadTime(cursor.getTime(), params.minBufferHours);
+        : (!profile && isWithinBookingLeadTime(cursor.getTime(), params.minBufferHours));
       if (tooSoon) {
         trackReject('within_lead_time', cursorDt.toISO()!);
         cursor = new Date(cursor.getTime() + step);
@@ -957,7 +1042,7 @@ export async function findAvailableSlots(params: {
       } else {
         // No-profile fallback (degenerate callers with no UserProfile): only
         // the work-hours window + owner busy can be evaluated. Lead time was
-        // already applied by the shared pre-filter above.
+        // applied by the pre-filter above, which is scoped to exactly this path.
         const inAnyWindow = dayHours.some(w => slotTotalMin >= w.startMin && slotEndMin <= w.endMin);
         if (!inAnyWindow) {
           trackReject('outside_owner_work_hours', cursorDt.toISO()!);

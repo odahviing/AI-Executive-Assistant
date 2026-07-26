@@ -91,17 +91,40 @@ If a legacy `sleep`-loop timer from an earlier session is still running, stop it
 
 ## The report / issue table (show this prominently)
 
-| # | Source | Symptom | Lane | Verdict | Root cause (file:line) | Reason & fix / comments |
-|---|--------|---------|------|---------|------------------------|-------------------------|
+**Lead with the chat, not the code.** Every row starts with *what a person saw happen* — a scene, with the real names and the real words Maelle said. Only then the bug, the fix, the agent, the risk. The owner reads this to judge harm; he cannot judge harm from a rule number or a file path.
+
+| # | What happened (in chat) | The bug | The fix | Agent | Risk |
+|---|-------------------------|---------|---------|-------|------|
+
+The five columns, exactly:
+1. **What happened (in chat)** — the scene. *"Lori wanted to move a meeting and it got moved to Friday with no approval."* Quote what Maelle actually said when it's damning. Name who was talking. If it happened more than once, say how many times and when.
+2. **The bug** — one clause, plain. *"Ignored busy/free."* Not the mechanism, the failure.
+3. **The fix** — what changed, in the same register. *"Moved the check earlier, added a chain."* Name the file only when he'd need it to review.
+4. **Agent** — the lane that built it.
+5. **Risk** — what to eyeball before wrap, or **None**. Never leave blank; "None" is a claim worth making.
+
+**If a row cannot be told as something that happened in a chat, it is not ready to be a row.** A finding with no scene is either not understood yet or is a `watch` item — put it in the prose section below the tables, not in the table.
 
 Order by what the owner must act on, most-actionable first:
-1. `needs-owner-decision` and `blocked-charter` — **the owner must act.**
+1. `needs-owner-decision` and `blocked-charter` — **the owner must act.** These swap the *Fix* column for **Why it's his call**, and drop *Risk*.
 2. `built` — done, awaiting his review + wrap.
 3. `flagged-for-owner` — ambiguous log findings; **shown, never fixed** (he decides / fixes these).
 4. `already-fixed` — verified as not reproducing.
 5. `pending` — deferred by the per-run cap; next run picks them up.
 
-Each `built` row carries: **what the bug was · why it happened · which agent fixed it · what the fix was · the risk to eyeball before wrap · comments**.
+Below the tables, in prose: a **watch** list (real but not actionable now), anything **carried forward** from earlier waves, and — always — whether there is **runtime evidence** for the fixes or whether they are reasoning from code. A wave with no evidence must say so plainly; name the cheapest check that would settle it.
+
+## Verify discipline — how much verification a wave earns
+
+The loop's own Verify phase (`bugger.js`) is per-fix and cheap. **This section governs hand-driven waves**, where you dispatch lanes directly and choose when to verify. Written after the 2026-07-26 `checkSlot` wave, which spent **2.8M tokens, 44% of it on five verify passes** — four found something real, one did not, and a measurable slice of all five was duplicated reading.
+
+1. **One verify per WAVE, not per round.** Batch the fixes, verify once at the end. `fix → verify → fix → verify` is partly self-fulfilling: each extra build round manufactures the regression the next pass then "justifies" itself by catching. Interleave only when a round changes a contract the next round must build against.
+2. **Carry the clean list forward as a hard exclusion.** A verify must be told, by name, what earlier passes already settled — and told not to re-derive it. Without that, every pass re-reads the same core files from scratch. Discipline ("verify against the code, not the reports") is right and must stay; it just needs a floor.
+3. **Scale depth to risk, and say which you're buying.** Deleting authorization code earns a full adversarial sweep. Confirming one boundary condition earns one question. A full sweep aimed at a narrow doubt is the single most common overspend.
+4. **Bound the pass in the brief** — name the files, name the questions, and give it a tool-use budget. 100+ tool uses on one pass means the scope was loose, not that the subsystem was hard.
+5. **When scope is closed, say so in the brief.** A verify whose findings will be parked rather than fixed should be told that, and told to calibrate to *"is this safe to ship"* — not *"what could be better."* It changes what it reports and what it costs.
+
+**Do not skip the last verify to save tokens.** Every pass that found nothing was one you could have scoped smaller; none was one you could have skipped blind. The failure mode being bought off here is shipping a confident wrong answer to a real person.
 
 ## Intake rules (you pass these to the engine)
 Both sources run **together in the one 18:00 pass** (or a manual run):

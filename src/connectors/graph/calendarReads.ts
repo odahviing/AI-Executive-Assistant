@@ -62,6 +62,38 @@ function toEndOfDayLocal(dateStr: string | undefined | null, timezone: string): 
     .toISO({ suppressMilliseconds: true })!;
 }
 
+export type SpreadSlot = {
+  start: string;
+  disturbs_floating_block?: boolean;
+  over_optional?: string;
+};
+
+// A slot's start read in the caller's zone. The ISO itself is offset-bearing
+// (the walker emits `cursorLocal.toISO()`), so the instant never depends on the
+// server clock — only the rendering zone does (M13).
+//
+// It used to consult a per-slot `away_tz` override. That field had NO producer
+// anywhere in the tree — the walker never emitted it — and round 3 carried it
+// into the newly-shared type along with a docstring about trip-tz days, which
+// described behaviour that could not occur. Deleted rather than implemented:
+// away days are per-date schedule overrides now (#143) and are walked in their
+// own zone, so a slot's emitted ISO already carries the right offset.
+function slotZonedStart(slot: SpreadSlot, timezone: string): DateTime {
+  return DateTime.fromISO(slot.start).setZone(timezone);
+}
+
+/**
+ * The local day a slot belongs to, in the caller's zone.
+ *
+ * Exported because "which day is this slot on" is asked in two places: the
+ * spreader's own grouping, and the caller that has to say which picks landed on
+ * the day the requester actually named (D3). One definition, so the split and
+ * the pick order can never disagree about what "Thursday" means.
+ */
+export function slotLocalDay(slot: SpreadSlot, timezone: string): string {
+  return slotZonedStart(slot, timezone).toFormat('yyyy-MM-dd');
+}
+
 /**
  * Spread rules:
  *   • At most `count` total — the caller's offered-slot budget
@@ -71,16 +103,25 @@ function toEndOfDayLocal(dateStr: string | undefined | null, timezone: string): 
  *   • ≥1h gap between same-day picks (relaxed on the final fill pass)
  *   • Day-diversity first — one pick per day per round, then depth
  *
- * Day walk order:
- *   • If `anchorDay` (yyyy-MM-dd) is set and has candidates → walk that day
- *     first, then the rest of the days in chronological order. This is the
- *     "move" shape — prefer same-day options for the meeting being moved,
- *     spill to other days to satisfy the ≥2 unique days rule.
- *   • Otherwise → pure chronological. The "new booking" shape — packs the
- *     earliest day's candidates up to 2, then spills to the next day.
+ * Day walk order — `anchorMode` decides, and the two modes are genuinely
+ * different products, which is why the argument exists instead of a default
+ * that quietly serves one caller badly:
+ *   • 'first_round' (default) — the MOVE shape. The anchor day picks FIRST in
+ *     each round, then the rest chronologically, but every day still gets at
+ *     most one pick per round. Diversity is the point: the meeting is being
+ *     moved, so "the day it currently sits on" is a preference, never the ask.
+ *   • 'exhaustive' — the REQUESTED-DAY shape (D3, owner 2026-07-26: "if he
+ *     asked thursday, its thursday"). The anchor day is drained through the
+ *     FULL tier ladder — gapped, then optional-tier, then relaxed-gap — up to
+ *     the whole budget, before any other day is considered at all. Other days
+ *     only appear once the requested day is exhausted or empty, and the caller
+ *     is expected to present them as an explicit widening (use `slotLocalDay`
+ *     to split the return).
+ *   • No `anchorDay` → pure chronological, both modes identical.
  *
- * Within each day: walk the day's candidates chronologically, take up to 2
- * with ≥1h gap from every already-chosen slot.
+ * Within each day: walk the day's candidates chronologically, taking each one
+ * that clears the ≥1h gap (and the duration non-overlap guard) against every
+ * already-chosen slot.
  *
  * Returns 1 or 2 slots if that's all the candidate list yields — caller's
  * search window may legitimately be narrow (e.g. owner asked "today between
@@ -89,7 +130,7 @@ function toEndOfDayLocal(dateStr: string | undefined | null, timezone: string): 
  * Output: chronological regardless of internal day walk order.
  */
 export function pickSpreadSlots(
-  slots: Array<{ start: string; disturbs_floating_block?: boolean; away_tz?: string; over_optional?: string }>,
+  slots: SpreadSlot[],
   timezone: string,
   count: number,
   anchorDay?: string,
@@ -97,11 +138,18 @@ export function pickSpreadSlots(
   // other (a later start landing inside an earlier slot is never a useful
   // option). Omitted → no overlap guard.
   durationMinutes?: number,
+  anchorMode: 'first_round' | 'exhaustive' = 'first_round',
 ): string[] {
   const MIN_GAP_HOURS = 1;
 
   const chosen: string[] = [];
   const chosenDts: DateTime[] = [];
+  // Identity dedupe. The gap / duration guards already reject a re-pick of an
+  // already-chosen start in every tier that HAS a guard — but the relaxed-gap
+  // tier runs with neither when `durationMinutes` is omitted, and the
+  // 'exhaustive' pre-pass deliberately walks the anchor day twice (once alone,
+  // once inside the full pool). One Set makes a duplicate impossible either way.
+  const chosenStarts = new Set<string>();
 
   // Fill `chosen` (up to `count`) from ONE tier of candidates, round-robin by
   // day: round 1 takes the first viable slot from EACH day (maximize distinct
@@ -112,12 +160,10 @@ export function pickSpreadSlots(
   // spreader for the regular, Working-Elsewhere-travel, and optional-join paths.
   const fillFrom = (pool: typeof slots, relaxGap = false) => {
     if (chosen.length >= count || pool.length === 0) return;
-    // Group candidates by their EFFECTIVE local day. WE-travel slot's day is its
-    // TRIP-tz day (away_tz set); home slots group by `timezone` exactly as
-    // before (zero regression).
+    // Group candidates by their local day in the caller's zone.
     const byDay = new Map<string, Array<{ start: string; dt: DateTime; disturbs: boolean }>>();
     for (const s of pool) {
-      const dt = DateTime.fromISO(s.start).setZone(s.away_tz ?? timezone);
+      const dt = slotZonedStart(s, timezone);
       const day = dt.toFormat('yyyy-MM-dd');
       let bucket = byDay.get(day);
       if (!bucket) { bucket = []; byDay.set(day, bucket); }
@@ -142,6 +188,7 @@ export function pickSpreadSlots(
         let i = cursor.get(day) ?? 0;
         for (; i < bucket.length; i++) {
           const { start, dt } = bucket[i];
+          if (chosenStarts.has(start)) continue;
           // ≥1h from anything already chosen. Only same-day picks can ever be
           // <1h away (cross-day diffs are far larger), so scanning the whole set
           // is safe and cheap.
@@ -149,6 +196,7 @@ export function pickSpreadSlots(
           if (durationMinutes && durationMinutes > 0
             && chosenDts.some(c => Math.abs(dt.diff(c, 'minutes').minutes) < durationMinutes)) continue;
           chosen.push(start);
+          chosenStarts.add(start);
           chosenDts.push(dt);
           i++;                       // consume this slot before recording the cursor
           progressed = true;
@@ -162,18 +210,32 @@ export function pickSpreadSlots(
   // v3.6.4 — TIER: clean slots FIRST. An optional-join (WE-soft) slot never
   // surfaces while clean slots satisfy the spread; only if the clean tier comes
   // up short do we complete the quota from WE-soft (each tagged "over your
-  // optional …"). Explicit priority: clean › book-over-optional. (The relaxed
-  // recovery — break a real rule — is a separate, lower tier handled upstream.)
-  fillFrom(slots.filter(s => !s.over_optional));
-  fillFrom(slots.filter(s => !!s.over_optional));
-  // #Ayala (2026-07-23) — RELAXED FILL. The ≥1h spread gap is right for diverse
-  // options across a week, but when the only clean slots are clustered in one
-  // narrow band (e.g. the single ET-afternoon window overlapping the owner's day
-  // for two ET attendees), it strands real openings and returns just ONE. If the
-  // spread came up short, fill the rest from the same clean slots WITHOUT the 1h
-  // gap — the durationMinutes non-overlap guard still blocks overlapping starts,
-  // so these stay genuine, bookable options (21:15 + 21:45, not just 21:15).
-  if (chosen.length < count) fillFrom(slots.filter(s => !s.over_optional), true);
+  // optional …"). Explicit priority: clean › book-over-optional (M3). (The
+  // relaxed recovery — break a real rule — is a separate, lower tier upstream.)
+  //
+  // #Ayala (2026-07-23) — the third pass is the RELAXED FILL. The ≥1h spread gap
+  // is right for diverse options across a week, but when the only clean slots
+  // are clustered in one narrow band (e.g. the single ET-afternoon window
+  // overlapping the owner's day for two ET attendees), it strands real openings
+  // and returns just ONE. If the spread came up short, fill the rest from the
+  // same clean slots WITHOUT the 1h gap — the durationMinutes non-overlap guard
+  // still blocks overlapping starts, so these stay genuine, bookable options
+  // (21:15 + 21:45, not just 21:15).
+  const runTiers = (pool: SpreadSlot[]) => {
+    fillFrom(pool.filter(s => !s.over_optional));
+    fillFrom(pool.filter(s => !!s.over_optional));
+    if (chosen.length < count) fillFrom(pool.filter(s => !s.over_optional), true);
+  };
+
+  // D3 — 'exhaustive' runs the SAME ladder over the requested day alone first,
+  // so that day is filled to the budget (including the relaxed-gap depth) before
+  // any other day is looked at. Not a second spreader: one ladder, run over a
+  // narrower pool. When the anchor day has nothing, both passes see the same
+  // pool and the behaviour is identical to 'first_round'.
+  if (anchorDay && anchorMode === 'exhaustive') {
+    runTiers(slots.filter(s => slotLocalDay(s, timezone) === anchorDay));
+  }
+  runTiers(slots);
 
   // Output chronological regardless of round-robin order.
   chosen.sort((a, b) => DateTime.fromISO(a).toMillis() - DateTime.fromISO(b).toMillis());
@@ -214,6 +276,148 @@ export async function getCalendarEvents(
     cache.setCachedEvents(cacheKey, data);
     return data;
   });
+}
+
+/**
+ * D4 (owner, 2026-07-26: "refuse all booking 'idan calendar is offline'").
+ *
+ * Thrown when the owner's own calendar cannot be read at all. It is NOT
+ * "he's busy" and it is NOT "nothing fits" — it means Maelle is blind, and a
+ * blind scheduler must refuse rather than guess. The whole reason it is a typed
+ * error and not a `[]` is that an empty event list is indistinguishable from a
+ * completely free calendar: every rule in checkSlot then passes, every slot
+ * reads open, and the search / booking paths hand back confident nonsense.
+ */
+export class CalendarOfflineError extends Error {
+  constructor(public readonly detail: string) {
+    super(`Owner calendar unreadable: ${detail}`);
+    this.name = 'CalendarOfflineError';
+  }
+}
+
+/**
+ * isOutageShaped — THE taxonomy behind "his calendar is offline". A POSITIVE
+ * predicate: a fault becomes `CalendarOfflineError` only when it is evidence
+ * that the transport or the service is down. Everything else keeps its own
+ * honest failure and travels up unchanged.
+ *
+ * D4 shipped the wrapper without one, so `getOwnerEventsForDecision` and the
+ * slot walker wrapped whatever they caught. That turned a 403 `ErrorAccessDenied`
+ * on the owner's own calendarView (a tenant-consent problem), a 404 from a wrong
+ * `profile.user.email`, a 400 from a malformed window, and our own TypeErrors all
+ * into "I can't reach his calendar right now — try again shortly": advice that
+ * cannot help, for a cause that is wrong. A wrong reason misleads the very
+ * decision it exists to inform (M11), and none of those four get better on a
+ * retry.
+ *
+ * IN — the fault is in the pipe or the service:
+ *   • HTTP 5xx            — Graph itself failed.
+ *   • HTTP 429            — throttled; "try again shortly" is literally the fix.
+ *   • HTTP 408            — the request timed out in transit.
+ *   • a transport errno   — ECONNRESET / ENOTFOUND / undici UND_ERR_* etc.,
+ *                           found ANYWHERE in the `cause` chain. Keyed on the
+ *                           errno, never on the wrapper's class name: node's
+ *                           fetch surfaces a dead socket as `TypeError: fetch
+ *                           failed` with the real code on `.cause`, and the
+ *                           evidence is the code, not the constructor.
+ *
+ * OUT — deliberate calls on the ambiguous middle:
+ *   • 401 — credentials, not weather. A retry with the same client credentials
+ *           fails identically; telling him to wait hides a config break.
+ *   • 400 / 403 / 404 / every other 4xx — we asked for something wrong, or we
+ *           are not allowed to ask. Deterministic; #137's lesson is that a
+ *           same-params retry cannot fix a malformed request.
+ *   • a plain Error with NO status and NO errno — unknown provenance is not
+ *           evidence of an outage. Withholding the claim is the safe default;
+ *           the original error still propagates, so nothing is swallowed.
+ *   • GraphPermissionError / CalendarOfflineError — already typed and already
+ *           carry their own true message.
+ */
+const TRANSPORT_ERRNOS = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ETIMEDOUT', 'ESOCKETTIMEDOUT',
+  'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'ENETDOWN', 'EHOSTUNREACH', 'EPIPE', 'EPROTO',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
+]);
+
+export function isOutageShaped(err: unknown): boolean {
+  if (err instanceof GraphPermissionError || err instanceof CalendarOfflineError) return false;
+  // Walk the cause chain (bounded) — the HTTP status or the errno may sit on a
+  // wrapper OR on what wrapped it.
+  let node: any = err;
+  for (let depth = 0; node && typeof node === 'object' && depth < 5; depth++) {
+    const status = typeof node.statusCode === 'number' ? node.statusCode
+      : typeof node.status === 'number' ? node.status
+      : typeof node.code === 'number' ? node.code
+      : undefined;
+    if (status !== undefined) {
+      if (status >= 500 && status <= 599) return true;
+      if (status === 429 || status === 408) return true;
+      return false;   // any other explicit HTTP status is a decided, non-outage answer
+    }
+    if (typeof node.code === 'string' && TRANSPORT_ERRNOS.has(node.code)) return true;
+    if (typeof node.errno === 'string' && TRANSPORT_ERRNOS.has(node.errno)) return true;
+    node = node.cause;
+  }
+  return false;
+}
+
+/**
+ * THE owner-event read behind every scheduling decision. Three callers, all of
+ * them feeding checkSlot: the slot walker's per-candidate rule pass, planMeeting's
+ * pre-book check, and check_join_availability's "can he make it" verdict.
+ *
+ * One retry, one place. `createMeeting`'s Guard B already learned (#137) that a
+ * transient Graph fault must not masquerade as a rule violation; the inverse —
+ * a fault masquerading as a CLEAR CALENDAR — had no protection anywhere: the two
+ * scheduling call sites caught, logged and returned `[]`. Now a blip gets exactly
+ * one fresh retry and a real outage throws.
+ *
+ * The retry passes `forceRefresh` deliberately: the per-turn memo caches the
+ * REJECTED promise under the plain key (turnCache.memoize stores the promise,
+ * not the value), so a second plain call inside one turn would hand back the
+ * same failure without ever touching Graph — a retry that cannot retry. The
+ * forced path skips both caches and repopulates the warm copy on success, so
+ * every later read in the turn sees the recovered data instead of the poisoned
+ * memo entry.
+ *
+ * Both the retry AND the offline verdict are gated on `isOutageShaped`: a
+ * deterministic fault (403 consent, 404 wrong mailbox, 400 bad window, our own
+ * TypeError) is neither retried — the same call fails the same way — nor
+ * relabelled as weather. It propagates untouched, keeping its own true reason.
+ */
+export async function getOwnerEventsForDecision(
+  userEmail: string,
+  startDate: string,
+  endDate: string,
+  timezone: string,
+): Promise<CalendarEvent[]> {
+  try {
+    return await getCalendarEvents(userEmail, startDate, endDate, timezone);
+  } catch (firstErr) {
+    if (!isOutageShaped(firstErr)) {
+      logger.error('owner-calendar read failed with a NON-outage fault — surfacing it as-is, no retry', {
+        userEmail, startDate, endDate, err: String(firstErr).slice(0, 300),
+      });
+      throw firstErr;
+    }
+    logger.warn('owner-calendar read failed — one fresh retry before declaring it offline', {
+      userEmail, startDate, endDate, err: String(firstErr).slice(0, 200),
+    });
+    try {
+      return await getCalendarEvents(userEmail, startDate, endDate, timezone, true);
+    } catch (secondErr) {
+      if (!isOutageShaped(secondErr)) {
+        logger.error('owner-calendar retry failed with a NON-outage fault — surfacing it as-is', {
+          userEmail, startDate, endDate, err: String(secondErr).slice(0, 300),
+        });
+        throw secondErr;
+      }
+      logger.error('owner-calendar read failed twice — treating the calendar as OFFLINE', {
+        userEmail, startDate, endDate, err: String(secondErr).slice(0, 300),
+      });
+      throw new CalendarOfflineError(String(secondErr).slice(0, 300));
+    }
+  }
 }
 
 /**

@@ -35,9 +35,10 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
-import { getCalendarEvents, getFreeBusy, findAvailableSlots, type CalendarEvent } from '../../connectors/graph/calendar';
+import { getOwnerEventsForDecision, getFreeBusy, findAvailableSlots, pickSpreadSlots, slotLocalDay, type CalendarEvent } from '../../connectors/graph/calendar';
 import { resolveLocation, type LocationVerdict } from '../../utils/resolveLocation';
-import { bookingLeadTimeHours, checkSlot, type RuleCheckResult } from '../../utils/scheduleRules';
+import { bookingLeadTimeHours, checkSlot, offeredSlotCount, type RuleCheckResult } from '../../utils/scheduleRules';
+import { getEffectiveWorkDay } from '../../utils/workHours';
 import type { SubjectViewer } from '../../utils/displaySubject';
 import { renderWeDualClock } from '../../utils/weTimeResolver';
 import { getTravelContextForInstant } from '../../utils/workingElsewhere';
@@ -207,7 +208,15 @@ export type PlanAction =
   | { action: 'find_slots'; category: string | null; reasoning: string }
   | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null }
   | { action: 'escalate_approval'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null }
-  | { action: 'propose_alternative'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; alternatives: Array<{ start: string; end: string; label: string }>; category: string | null }
+  /**
+   * D3 — two lists, never one. `alternatives` is what exists on the day the
+   * requester named; `widenedAlternatives` is what only exists if the search is
+   * widened past it. `requestedDay` (yyyy-MM-dd) names the day both are measured
+   * against. `alternatives` empty + `widenedAlternatives` non-empty is the exact
+   * shape of "nothing on Thursday — want me to look further out?", and it is a
+   * shape the caller cannot flatten by accident.
+   */
+  | { action: 'propose_alternative'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; alternatives: Array<{ start: string; end: string; label: string }>; widenedAlternatives: Array<{ start: string; end: string; label: string }>; requestedDay: string; category: string | null }
   | { action: 'decline_and_relay'; organizerName: string | null; organizerEmail: string | null; organizerSlackId: string | null; suggestedDmText: string }
   | { action: 'refuse_not_owners'; organizerName: string | null; organizerEmail: string | null }
   | { action: 'ask_location_mode'; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; reasoning: string }
@@ -369,8 +378,18 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // violation_label travelling in the same payload (rendered by checkSlot in
   // the day's EFFECTIVE zone, with a zone note) stated another.
   const gates: Array<{ kind: 'location' | 'rule' | 'attendee_busy' | 'room'; ask: string }> = [];
+  // WHO reads the clock this renders, on the SAME signal checkSlot frames its
+  // violation_label with — the two strings sit side by side in the rule ask
+  // below, so they must address the same person. Off-trip the dual clock is a
+  // single person-free clock and this changes nothing; on a trip day the
+  // owner-facing branch is hardcoded second person ("11:00 EDT where you are
+  // now / 15:00 your home time"), which is what a colleague was being told
+  // about someone else's trip. Unknown viewer → named (the colleague-safe
+  // reading), never "you".
+  const clockReader = input.viewer === 'owner' ? {} : { ownerName: profile.user.name.split(' ')[0] };
   const whenText = (startIso: string, endIso?: string): string =>
-    renderWeDualClock(startIso, getTravelContextForInstant(startIso, profile), profile.user.timezone, { endIso });
+    renderWeDualClock(startIso, getTravelContextForInstant(startIso, profile), profile.user.timezone,
+      { endIso, ...clockReader });
 
   // ── Resolve location ────────────────────────────────────────────────────
   let locationVerdict: LocationVerdict | null = null;
@@ -402,7 +421,12 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // to offer before escalating (#8). Both feed the single combined return.
   let ruleViolationLabel: string | undefined;
   let attendeeBusyLabel: string | undefined;
+  // D3 — the two sets are kept APART all the way to the caller. Options on the
+  // day the requester actually named are the answer; anything on a later day is
+  // a widening he has to be offered as a widening, not slipped into one list.
   let ruleAlternatives: Array<{ start: string; end: string; label: string }> = [];
+  let widenedAlternatives: Array<{ start: string; end: string; label: string }> = [];
+  let alternativesRequestedDay = '';
   let roomAskText: string | undefined;
   if (input.slotStartIso) {
     const ownerDomain = ownerEmail.split('@')[1].toLowerCase();
@@ -496,10 +520,27 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       // exempt: blocks coexist with meetings by design.
       optionalLevelNotice = `this books over your optional "${ruleResult.overOptional}" — you'd skip it; it stays on the calendar`;
     }
-    if (!input.isFloatingBlock && ruleResult.level === 'unfiltered' && ruleResult.overCommitment && ruleResult.passes) {
-      // Only reachable when the owner-busy rule was BYPASSED (explicit override
-      // or approved replay). Booking over a real commitment is M3's Unfiltered
-      // tier — say what it is and who else is on it, not just "a rule".
+    if (!input.isFloatingBlock && ruleResult.overCommitment) {
+      // THE double-booking notice, on every path that reaches a write. Booking
+      // over a real commitment is M3's Unfiltered tier — say WHAT is being
+      // double-booked and who else is on it, not just "a rule".
+      //
+      // The gate used to be `ruleResult.passes`, i.e. "only when the owner-busy
+      // rule was BYPASSED (explicit override / approved replay)". That silenced
+      // it on the one relaxed path that still fails: rule 1
+      // (vacation_or_off_day) is the only rule in the ladder with no
+      // allowRelaxed gate (scheduleRules.ts, rule 1 — see its ladder note), so a
+      // relaxed owner booking on a Friday returns passes:false with the
+      // collision sitting right there on
+      // `overCommitment` — and the owner heard "you have Friday 31 Jul off" and
+      // NOT that he was booking over a real meeting. A soft rule masking a hard
+      // commitment, the exact failure the validator's reorder exists to kill,
+      // surviving on one condition. The SOFT tier just above never had a passes
+      // gate either, so the skippable tier announced itself on failures while
+      // the hard one stayed silent — backwards.
+      // When the collision IS the reported violation, this notice REPLACES the
+      // rule label (see the owner branch below) rather than sitting beside it:
+      // one fact, one sentence, the more complete wording of the two.
       const c = ruleResult.overCommitment;
       const withWhom = c.attendeeCount > 0
         ? ` with ${c.attendeeCount} other ${c.attendeeCount === 1 ? 'person' : 'people'} on it`
@@ -531,7 +572,24 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       // "Booked — heads up, <rule>", instead of a blocking confirm_override that
       // cost a 2nd/3rd "yes". The attendee-busy gate below still confirms once —
       // double-booking a COLLEAGUE imposes on someone else, not just his own day.
-      ownerOverrideNotice = ruleResult.violation_label ?? 'a scheduling rule';
+      //
+      // Because he IS booked either way, these notices are the only thing
+      // standing between him and a silent double-booking — which is exactly what
+      // a mis-ranked violation cost: v4.1.x put the lead-time rule ahead of the
+      // occupancy scan, so "book 20 min with Alex at 3" at 14:15, on top of a
+      // real 15:00 meeting, booked and said "heads up, that's too soon". The
+      // validator now ranks the hard collision above every soft rule.
+      //
+      // A reported collision is NOT re-stated here: `unfilteredLevelNotice`
+      // above already carries that same fact with the attendee count the label
+      // doesn't have, and both would ride the one `overrideNotice` string — the
+      // owner reading the same heads-up twice in one sentence (M9). Suppressing
+      // it can never leave him with nothing: `owner_busy_collision` is only
+      // returned when `overCommitment` is set and isFloatingBlock is false,
+      // which is exactly the condition that set that notice.
+      if (ruleResult.violation_kind !== 'owner_busy_collision') {
+        ownerOverrideNotice = ruleResult.violation_label ?? 'a scheduling rule';
+      }
     } else if (!ruleResult.passes) {
       ruleViolationLabel = ruleResult.violation_label ?? 'rule violated';
       const label = ruleViolationLabel;
@@ -544,7 +602,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       gates.push({ kind: 'rule', ask: askText });
       // v3.2.x (#8) — colleague proposed a slot that breaks a rule. Instead of
       // jumping straight to owner approval (colleague waits), offer NEARBY
-      // rule-compliant alternatives first — 2 on the requested day + 1 after —
+      // rule-compliant alternatives first — the requested day, then forward —
       // via the SAME findAvailableSlots the booking flow uses (so they're
       // genuinely bookable). Whether the original time is a hard MUST is decided
       // AFTER, by the colleague's reply: if they insist (or none of these work),
@@ -553,7 +611,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       // Skipped when the LOCATION question is also open: that gate takes
       // precedence in the combined return (an approval replayed with an
       // unresolved location just re-asks), so alternatives computed here would
-      // be discarded — two Graph round-trips for nothing. The combined ask still
+      // be discarded — a Graph round-trip for nothing. The combined ask still
       // tells the colleague the rule is broken; the options come next round.
       if (!gates.some(g => g.kind === 'location')) try {
         const tzAlt = profile.user.timezone;
@@ -561,22 +619,96 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         const durMin = input.durationMin
           ?? Math.max(15, Math.round(DateTime.fromISO(input.slotEndIso).diff(DateTime.fromISO(input.slotStartIso), 'minutes').minutes));
         const dayIso = reqDay.toFormat('yyyy-MM-dd');
-        const after1 = reqDay.plus({ days: 1 }).toFormat('yyyy-MM-dd');
-        const after2 = reqDay.plus({ days: 2 }).toFormat('yyyy-MM-dd');
-        const base = { userEmail: profile.user.email, timezone: tzAlt, durationMinutes: durMin, profile };
-        const sameDay = await findAvailableSlots({ ...base, searchFrom: dayIso, searchTo: dayIso });
-        const later = await findAvailableSlots({ ...base, searchFrom: after1, searchTo: after2 });
-        const picks = [...sameDay.slice(0, 2), ...later.slice(0, 1)];
+        // How far forward "nearby" reaches, counted in days the owner actually
+        // WORKS — resolved through getEffectiveWorkDay, the same accessor the
+        // walker gates each cursor on (findAvailableSlots.ts:720) and the same
+        // one checkSlot rule 1 reads, so this can never reach for a day the
+        // search will refuse to walk.
+        //
+        // It used to be `+1 / +2 CALENDAR days`, which on Idan's Sun–Thu week is
+        // Friday and Saturday for every THURSDAY request: the walker skipped
+        // every cursor on both, the forward pass returned nothing, and a
+        // colleague whose Thursday time broke a rule got escalate_approval — no
+        // options at all — while the owner slept. It survived that long only
+        // because the window was zero-width and autoExpand silently widened both
+        // passes by +7d; closing that hole (correctly) exposed it.
+        const FORWARD_WORKDAYS = 2;
+        let lastDay = reqDay;
+        for (let i = 1, found = 0; i <= 14 && found < FORWARD_WORKDAYS; i++) {
+          const d = reqDay.plus({ days: i });
+          if (!getEffectiveWorkDay(d.toFormat('yyyy-MM-dd'), profile).isWorkday) continue;
+          lastDay = d;
+          found++;
+        }
+        // ONE search across [requested day … last forward workday], then THE
+        // spreader in its 'exhaustive' anchor mode. Two hand-sliced passes ("2
+        // same-day + 1 later") were a second copy of what pickSpreadSlots does
+        // better: the ≥1h gap keeps the options distinct and the budget is the
+        // configured offered_slot_count (M6) instead of two literals. One search
+        // also means one Graph round-trip instead of two.
+        //
+        // D3 — 'exhaustive', not the default. The default anchor mode is
+        // day-diversity round-robin (the MOVE shape): the anchor picks first in
+        // each round but every other day still takes one per round, so a budget
+        // of 8 over Thu/Sun/Mon hands a colleague who asked for THURSDAY roughly
+        // 3 Thu / 3 Sun / 2 Mon — five of his eight options on days he did not
+        // ask about, two of them across a weekend. Owner's call: "if he asked
+        // thursday, its thursday. if no options you can suggest to wide the
+        // search and offer more.. but thursday ask is thursday." So the
+        // requested day is filled to the budget first, later days only surface
+        // once it is exhausted or empty, and they travel back in their OWN list
+        // so the answer can name them as a widening.
+        //
+        // An alternative has to clear the SAME bars the requested slot was
+        // measured against — otherwise Maelle refuses a time and then offers
+        // something worse. Pre-fix this call carried only email/tz/duration/profile:
+        //   • no `minBufferHours` → the walker's lead-time pre-filter AND
+        //     checkSlot rule 0b were both off, so a colleague refused at 10:00
+        //     for "12:00, you need 4h notice" was offered 10:30 and 11:00 —
+        //     both SOONER, both looping straight back into the same refusal;
+        //   • no `category` → the alternatives could break the very per-day /
+        //     day-type cap the request broke (and the walker skips its
+        //     week-widened event fetch, so the cap can't even be counted);
+        //   • no `excludeEventIds` on a move → the meeting being moved blocks
+        //     every slot around its own current time.
+        const candidates = await findAvailableSlots({
+          userEmail: profile.user.email,
+          timezone: tzAlt,
+          durationMinutes: durMin,
+          profile,
+          minBufferHours: bookingLeadTimeHours(profile, initiator),
+          ...(category ? { category } : {}),
+          ...(input.existingEventId ? { excludeEventIds: [input.existingEventId] } : {}),
+          searchFrom: `${dayIso}T00:00:00`,
+          searchTo: `${lastDay.toFormat('yyyy-MM-dd')}T23:59:59`,
+          // Real day bounds (a bare `yyyy-MM-dd` on both ends is a ZERO-WIDTH
+          // window — both resolve to 00:00 local — so `cursor + duration <=
+          // searchEnd` never ran once), and the window stays where this caller
+          // put it: "nearby" is the whole point of the offer, so no autoExpand.
+          autoExpand: false,
+        });
+        const byStart = new Map(candidates.map(s => [s.start, s]));
+        const picks = pickSpreadSlots(candidates, tzAlt, offeredSlotCount(profile), dayIso, durMin, 'exhaustive')
+          .map(start => byStart.get(start))
+          .filter((s): s is NonNullable<typeof s> => !!s);
         if (picks.length > 0) {
-          ruleAlternatives = picks.map(s => ({
+          const asAlternative = (s: (typeof picks)[number]) => ({
             start: s.start,
             end: s.end,
             // M14 — alternative labels quote the same dual clock as everything
             // else in this payload, so a trip-day option can't read home-only.
             label: whenText(s.start, s.end),
-          }));
+          });
+          // slotLocalDay is the spreader's OWN day predicate — the same one that
+          // decided the anchor pass — so the split can never disagree with the
+          // pick order (a trip-day slot is classified by its trip day in both).
+          alternativesRequestedDay = dayIso;
+          ruleAlternatives = picks.filter(s => slotLocalDay(s, tzAlt) === dayIso).map(asAlternative);
+          widenedAlternatives = picks.filter(s => slotLocalDay(s, tzAlt) !== dayIso).map(asAlternative);
           logger.info('planMeeting — colleague soft-rule slot, offering nearby alternatives', {
-            label, count: ruleAlternatives.length, requested: input.slotStartIso,
+            label, requested: input.slotStartIso, requestedDay: dayIso,
+            onRequestedDay: ruleAlternatives.length, widened: widenedAlternatives.length,
+            searchTo: lastDay.toFormat('yyyy-MM-dd'), candidates: candidates.length,
           });
         }
       } catch (err) {
@@ -793,14 +925,17 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     }
     if (ruleViolationLabel) {
       // Colleague-path rule break (the owner's is a one-step notice, never a
-      // gate). Nearby compliant options first; escalate only if none fit.
-      return ruleAlternatives.length > 0
+      // gate). Nearby compliant options first; escalate only if none fit —
+      // "none" means neither the requested day NOR the widening produced one.
+      return (ruleAlternatives.length + widenedAlternatives.length) > 0
         ? {
             action: 'propose_alternative',
             violationLabel: ruleViolationLabel,
             suggestedAskText,
             openQuestions,
             alternatives: ruleAlternatives,
+            widenedAlternatives,
+            requestedDay: alternativesRequestedDay,
             category,
           }
         : {
@@ -849,18 +984,17 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+// D4 — no catch, deliberately. This is the event set checkSlot validates the
+// booking against; returning `[]` on a Graph fault told the validator the owner
+// had nothing on his calendar, so every rule passed and the write went straight
+// over whatever was really there. A read that fails now throws
+// CalendarOfflineError (one retry already spent inside), the tool surface turns
+// it into "his calendar is offline", and nothing is booked on a guess.
 async function loadEventsForCheck(profile: UserProfile, slotStartIso: string): Promise<CalendarEvent[]> {
   const tz = profile.user.timezone;
   const start = DateTime.fromISO(slotStartIso, { zone: tz, setZone: true }).setZone(tz).startOf('week');
   const end = start.plus({ weeks: 2 });
-  try {
-    return await getCalendarEvents(profile.user.email, start.toFormat('yyyy-MM-dd'), end.toFormat('yyyy-MM-dd'), tz);
-  } catch (err) {
-    logger.warn('planMeeting — loadEventsForCheck threw, returning empty list', {
-      err: String(err).slice(0, 200),
-    });
-    return [];
-  }
+  return getOwnerEventsForDecision(profile.user.email, start.toFormat('yyyy-MM-dd'), end.toFormat('yyyy-MM-dd'), tz);
 }
 
 function sameDayType(profile: UserProfile, isoA: string, isoB: string): boolean {

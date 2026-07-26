@@ -2,14 +2,15 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from './types';
 import type { UserProfile } from '../config/userProfile';
 import {
-  getCalendarEvents,
+  getOwnerEventsForDecision,
   updateMeeting,
+  CalendarOfflineError,
 } from '../connectors/graph/calendar';
 import { SchedulingSkill as _LegacyOpsSkill } from './meetings/ops';
 import logger from '../utils/logger';
 import { DateTime } from 'luxon';
 import { calendarListingFormatRule } from '../utils/calendarListingFormat';
-import { checkSlot } from '../utils/scheduleRules';
+import { checkSlot, occupancyRoleOf } from '../utils/scheduleRules';
 import { displaySubject, subjectViewerFor } from '../utils/displaySubject';
 
 /**
@@ -210,7 +211,7 @@ The search window auto-expands up to 21 days if fewer than 3 slots are found.
 
 PREFERRED SLOT (v2.9.2): when the requester names a SPECIFIC preferred time ("preferably 11:30", "around 14:00", "if 10:00 works"), pass that exact ISO datetime as \`preferred_slot\`. The tool will check that slot specifically and include it in the result if it's free — even when the spread-picker (1h gap rule, 2/day cap) would have filtered it out. Without this, the requester's asked time can vanish from the offered options and you end up narrating "X isn't clean" when X is actually free.
 
-CANDIDATE SLOTS — BATCH VALIDATION (v3.0.6): when you have MULTIPLE specific times to check ("can we do A, B, C, or D?" — requester or owner proposed N candidate times), pass them ALL in a single call as \`candidate_slots: [{start, end?}, ...]\` instead of N separate find_available_slots calls. The tool validates each candidate against ${profile.user.name.split(' ')[0]}'s calendar + attendee availability + your rules and returns a results array — one verdict per candidate.
+CANDIDATE SLOTS — BATCH VALIDATION (v3.0.6): when you have MULTIPLE specific times to check ("can we do A, B, C, or D?" — requester or owner proposed N candidate times), pass them ALL in a single call as \`candidate_slots: [{start}, ...]\` instead of N separate find_available_slots calls. The tool validates each candidate against ${profile.user.name.split(' ')[0]}'s calendar + attendee availability + your rules and returns a results array — one verdict per candidate.
 
 Return shape in this mode is DIFFERENT:
   { mode: 'candidate_validation', results: [{ start, end, available, broken_rule_label? }, ...] }
@@ -297,12 +298,11 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
             },
             candidate_slots: {
               type: 'array',
-              description: 'OPTIONAL. Use when checking MULTIPLE specific candidate times in one call ("can we do A, B, C, or D?"). Each item: { start: ISO datetime in user TZ, end?: ISO datetime (optional — derived from start + duration_minutes when omitted) }. The tool validates each candidate against ALL the same rules (busy collision, work hours, attendee availability, focus, category) and returns one verdict per candidate. Use this INSTEAD of N separate find_available_slots calls — much faster. See the CANDIDATE SLOTS section of the description for the result shape.',
+              description: 'OPTIONAL. Use when checking MULTIPLE specific candidate times in one call ("can we do A, B, C, or D?"). Each item: { start: ISO datetime in user TZ }. Each candidate is checked as a duration_minutes-long meeting starting at that instant, against ALL the same rules (busy collision, work hours, attendee availability, focus, category), and returns one verdict per candidate. Use this INSTEAD of N separate find_available_slots calls — much faster. See the CANDIDATE SLOTS section of the description for the result shape.',
               items: {
                 type: 'object',
                 properties: {
                   start: { type: 'string', description: 'ISO datetime of the candidate slot start, in user local timezone (e.g. "2026-06-09T19:00:00").' },
-                  end: { type: 'string', description: 'OPTIONAL. ISO datetime of the candidate slot end. When omitted, derived from start + duration_minutes.' },
                 },
                 required: ['start'],
               },
@@ -549,7 +549,46 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
     ];
   }
 
+  /**
+   * D4 — the ONE place a "his calendar is unreadable" fault becomes an answer.
+   *
+   * Every meeting tool the model can call arrives here, including the ones this
+   * class delegates to SchedulingSkill, so the refusal is written once and no
+   * individual handler can forget it or word it differently. The typed error
+   * comes from exactly two places, both of them a read of the OWNER's own
+   * calendar that a scheduling decision depends on: `getOwnerEventsForDecision`
+   * (his events) and the slot walker's free/busy read (his busy blocks). So this
+   * maps a genuine blind spot, never a routine "he's busy" or "nothing fits".
+   *
+   * Deliberately NOT a catch-all for Graph errors. A cancel, a floating-block
+   * op and a pure `get_calendar` read never take this path (a cancel carries no
+   * slot, so planMeeting never loads events for it), and refusing those because
+   * something else was unreadable would be over-reach.
+   */
   async executeToolCall(
+    toolName: string,
+    args: Record<string, unknown>,
+    context: SkillContext,
+  ): Promise<unknown | null> {
+    try {
+      return await this.dispatchToolCall(toolName, args, context);
+    } catch (err) {
+      if (err instanceof CalendarOfflineError) {
+        const ownerFirst = context.profile.user.name.split(' ')[0];
+        logger.error('meeting tool refused — owner calendar offline', {
+          toolName, requester: context.userId, detail: err.detail,
+        });
+        return {
+          success: false,
+          error: 'calendar_offline',
+          message: `I can't reach ${ownerFirst}'s calendar right now — it's offline on my side, so I genuinely cannot see what's on his day. Nothing was booked, moved or cancelled. This is NOT "he's busy" and NOT "no time fits": I have no information at all, so do not answer as if either were true, do not offer times, do not claim anything about his availability, and do not raise an approval (he would be deciding blind too). Say plainly that his calendar is unreachable at the moment and offer to try again shortly.`,
+        };
+      }
+      throw err;
+    }
+  }
+
+  private async dispatchToolCall(
     toolName: string,
     args: Record<string, unknown>,
     context: SkillContext,
@@ -586,18 +625,19 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // Fetch owner's calendar. Category rules count per-day AND per-ISO-week,
         // and the focus-time floor is measured across the day, so the validator
         // needs the whole WEEK — a single-day fetch made every weekly cap read 0.
-        let events;
-        try {
-          events = await getCalendarEvents(
-            userEmail,
-            startDt.startOf('week').toFormat('yyyy-MM-dd'),
-            startDt.endOf('week').toFormat('yyyy-MM-dd'),
-            timezone,
-          );
-        } catch (err) {
-          logger.error('check_join_availability: calendar fetch failed', { err });
-          return { error: 'Could not check calendar.' };
-        }
+        //
+        // D4 — through the shared owner-event read (one retry, then a typed
+        // offline error). This tool answers "can he join?" straight from these
+        // events, so a failed read is the same blind spot the search and write
+        // paths have; the local catch used to answer `Could not check calendar.`,
+        // a mechanical non-answer that told the colleague nothing about whether
+        // the problem was him, his day, or Maelle (M11).
+        const events = await getOwnerEventsForDecision(
+          userEmail,
+          startDt.startOf('week').toFormat('yyyy-MM-dd'),
+          startDt.endOf('week').toFormat('yyyy-MM-dd'),
+          timezone,
+        );
 
         const meetingStartMs = startDt.toMillis();
         const meetingEndMs = endDt.toMillis();
@@ -645,31 +685,38 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           events,
           viewer: joinViewer,
         });
-        // OCCUPANCY — decided by the calendar, never by which rule tripped first.
-        // Same skips as the validator's own scan so the two cannot disagree:
-        // free-shows don't collide; a TIMED workingElsewhere event is an optional
-        // join, not a commitment; and a floating block is elastic (it slides, and
-        // `pendingBlockMoves` below is what slides it) — counting any of these as
-        // a conflict is what made this handler and the booking path give different
-        // answers for one slot.
+        // The TIMED overlaps, for the partial-join carve below. Classified by the
+        // validator's OWN predicate (occupancyRoleOf) rather than a local copy of
+        // the skip list — free-shows don't collide, a TIMED workingElsewhere event
+        // is an optional join, a floating block is elastic (it slides, and
+        // `pendingBlockMoves` below is what slides it). All-day blocks are
+        // deliberately excluded HERE and only here: they are real commitments (the
+        // validator reports them on `overCommitment`), but they have no clock
+        // window to carve a "he could join the first 20 minutes" out of.
         const directConflicts = events.filter(ev => {
-          if (ev.isCancelled || ev.isAllDay || ev.showAs === 'free') return false;
-          if (ev.showAs === 'workingElsewhere') return false;
-          if (floatingBlocks.some(b => fb.isFloatingBlockEvent(
-            { subject: ev.subject, categories: ev.categories }, b,
-          ))) return false;
+          if (ev.isAllDay) return false;
+          if (occupancyRoleOf(ev, floatingBlocks) !== 'commitment') return false;
           const s = evTime(ev.start).toMillis();
           const e = evTime(ev.end).toMillis();
           return s < meetingEndMs && e > meetingStartMs;
         });
-        // Is he actually committed? `directConflicts` is the timed-overlap truth;
-        // checkSlot additionally catches commitments it can't see (an all-day busy
-        // / OOF block). Either one means "busy" — and that answer must NOT depend
-        // on rule ordering. checkSlot returns the FIRST violation and eight rules
-        // precede the busy check, so an off-hours ask over a real dinner used to
-        // fall through to the rule branch and tell the colleague "his calendar is
-        // clear at that time" while he had a hard commitment.
-        const ownerIsBusy = directConflicts.length > 0 || joinCheck.violation_kind === 'owner_busy_collision';
+        // Is he actually committed? ONE source: the validator's OCCUPANCY, not
+        // its violation. `overCommitment` comes from an unconditional scan ahead
+        // of the rule ladder, so it is present whenever a real commitment holds
+        // the slot — including on the `in_the_past` verdict — no matter which
+        // rule reported. Keying this on `violation_kind === 'owner_busy_collision'`
+        // was the bug: an all-day OOF on a Thursday evening tripped work-hours
+        // (rule 5) first, occupancy was never computed, and the colleague was
+        // told "his calendar is clear."
+        // `directConflicts` is NOT ORed in: it is a strict subset of what the
+        // scan sees (timed commitments only, same overlap math, same predicate,
+        // no exclude list on either side), so it can never be non-empty while
+        // `overCommitment` is undefined. Keeping it in the condition would be a
+        // second opinion that can only ever agree — the shape this handler is
+        // being taken OUT of (M2). It still earns its place below as the
+        // partial-join carve data, which needs every overlapping event's own
+        // bounds; `overCommitment` reports only the first one.
+        const ownerIsBusy = !!joinCheck.overCommitment;
 
         // v2.1 — floating blocks that apply on this day.
         // v4.1.x (M2) — the FEASIBILITY VERDICT ("is there still room for lunch
@@ -825,14 +872,12 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         }
 
         // ── He is committed ─────────────────────────────────────────────────────
-        // Occupancy is answered BEFORE the rule ladder, because "is he already on
-        // something?" is a fact about the calendar, not a consequence of which of
-        // nine rules happened to trip first. Gating this on
-        // `violation_kind === 'owner_busy_collision'` meant an ask at 21:00 over a
-        // real "Dinner with investors" tripped `outside_working_hours` (rule 5)
-        // first, skipped this branch, and told the colleague his calendar was
-        // clear. The old pre-rewrite code checked the overlap first; this restores
-        // that ordering with the validator's occupancy as a second source.
+        // Occupancy is answered BEFORE the rule ladder — inside checkSlot now, so
+        // this handler is no longer a second validator that could disagree with
+        // the booking path (M2). What stays local is join-SPECIFIC presentation
+        // the validator has no reason to produce: the PARTIAL-join window, which
+        // needs every overlapping event and their individual bounds
+        // (`overCommitment` reports only the first one, plus its subject/window).
         if (ownerIsBusy && directConflicts.length > 0) {
           const busyInMeeting = directConflicts.map(ev => ({
             start: Math.max(evTime(ev.start).toMillis(), meetingStartMs),
@@ -884,23 +929,36 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         }
         if (ownerIsBusy) {
           // The validator saw a commitment the timed-overlap scan cannot: an
-          // all-day busy / OOF block. No partial window to carve out of it —
-          // just the honest "he's committed", in the validator's own words.
+          // all-day busy / OOF block. No partial window to carve out of it — just
+          // the honest "he's committed". Built from `overCommitment` rather than
+          // `violation_label`, because the label belongs to whichever rule
+          // reported and that is not always this one (a past all-day slot reports
+          // "that time has already passed", which is not the answer to "is he
+          // free?"). Subject is viewer-scoped by the validator (M12).
+          const held = joinCheck.overCommitment;
           return {
             can_join: false,
             reason: 'busy',
             time: timeStr,
             subject,
-            conflict_with: joinCheck.overCommitment?.subject,
-            message: joinCheck.violation_label
-              ?? `${ownerFirst} has something on his calendar at that time.`,
+            conflict_with: held?.subject,
+            // D6 — an all-day OOF is not "he has something at that time", it is
+            // "he is away that day". The old wording invited the obvious next
+            // question ("could he do 30 min later?"), which has the same answer
+            // for every hour of the day.
+            message: held?.allDayOutOfOffice
+              ? `${ownerFirst} is out of office that whole day ("${held.subject}") — not just at that time, so a different hour on the same day won't help either. Offer another day.`
+              : held
+                ? `${ownerFirst} has "${held.subject}" on his calendar at that time.`
+                : `${ownerFirst} has something on his calendar at that time.`,
           };
         }
 
         // ── Calendar clear, but a rule of his stands in the way ─────────────────
-        // Reached ONLY when nothing occupies the slot (both occupancy sources
-        // agree), so the "clear at that time" claim below is now true by
-        // construction. Pre-rewrite this branch was reachable only for an
+        // Reached ONLY when nothing occupies the slot: the validator's scan is
+        // unconditional and ranks a real commitment above every soft rule, and
+        // the timed scan above agrees — so the "clear at that time" claim below
+        // is true by construction. Pre-rewrite this branch was reachable only for an
         // unsatisfiable floating block; it now covers every owner rule the
         // booking path enforces — work hours, category caps, the free-time floor,
         // travel buffer — so a 21:00 ask no longer answers "he's free at that

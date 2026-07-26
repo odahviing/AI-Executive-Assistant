@@ -5,6 +5,7 @@
  * ops.ts); the other two feed action_summary / vacated-slot formatting.
  */
 import { DateTime } from 'luxon';
+import logger from '../../../utils/logger';
 
 // Local alias for the profile type without adding another import — re-use the
 // one imported below. Ts hoists type-only imports so this works.
@@ -28,6 +29,81 @@ export function openQuestionsField(
     open_questions: openQuestions,
     _ask_all_at_once: `This booking needs ${openQuestions.length} things answered. Ask them ALL in ONE message (open_questions lists them) and wait for one reply — do NOT ask them one at a time across separate turns. Once answered, re-call with every answer applied together.`,
   };
+}
+
+/**
+ * D3 (owner, 2026-07-26: "if he asked thursday, its thursday. if no options you
+ * can suggest to wide the search and offer more.. but thursday ask is
+ * thursday"). The three shapes a proposed-alternatives payload can take, in the
+ * order the reply must present them. The split lives in the DATA — two separate
+ * arrays on the tool result, filled by planMeeting — and this only tells the
+ * model what the two arrays mean, so a widening is never narrated as if it were
+ * what the person asked for. ONE helper, both gate-bearing handlers, so
+ * create and move cannot drift.
+ */
+export function alternativesNote(
+  requestedDay: string,
+  onRequestedDay: number,
+  otherDays: number,
+): string {
+  if (onRequestedDay === 0) {
+    return `Nothing on ${requestedDay} itself clears his rules — \`alternatives_on_requested_day\` is EMPTY. Say that plainly first ("nothing works on <that day>"), then OFFER to widen and present \`alternatives_other_days\` as exactly that: later days you looked at because their day had nothing. Do NOT present them as if they were what was asked for, and do NOT quietly drop the fact that their own day came up empty.`;
+  }
+  if (otherDays === 0) {
+    return `\`alternatives_on_requested_day\` holds every option on ${requestedDay}, the day they asked for. Offer those and ask if one works.`;
+  }
+  return `Lead with \`alternatives_on_requested_day\` — those are on ${requestedDay}, the day they asked for, and they are the answer. \`alternatives_other_days\` is the widening: ${requestedDay} ran out at ${onRequestedDay} option${onRequestedDay === 1 ? '' : 's'}, so offer those separately and label them as other days ("...and if you can go later in the week, I also have..."). Two groups, never one merged list.`;
+}
+
+/**
+ * D8 (owner, 2026-07-26: *"ok record"*) — a proposed alternative IS an offer, so
+ * it goes into the same per-turn offered-slot stash the search path writes.
+ *
+ * `propose_alternative` never recorded, so times Maelle said out loud existed
+ * only as prose: a colleague replying "the Sunday one works" hit
+ * `slot_not_offered` on hold_slot (calendarReads.ts), and the next-turn binding
+ * block — the thing that stops a bare "Sunday 11:00" being re-derived onto the
+ * wrong week — had nothing to bind to. Nothing is HELD by this: no calendar
+ * time is blocked and no new persistence is introduced; the stash is the
+ * existing in-memory, TTL'd, per-conversation map.
+ *
+ * BOTH lists are recorded. They were both said aloud, so a pick from either has
+ * to bind, and the requested-day / widened distinction is a narration split, not
+ * a difference in whether the time was offered.
+ *
+ * `searchFingerprint` is deliberately omitted: these alternatives came from
+ * planMeeting's own nearby-search, not from a requester-shaped
+ * find_available_slots call. Omitting preserves whatever fingerprint a real
+ * search left (offeredSlotsStash's preserve-on-omit), so the "give me another
+ * option" exclusion keeps comparing like with like.
+ *
+ * ONE helper, both gate-bearing handlers, so create and move cannot drift.
+ */
+export function recordProposedAlternatives(params: {
+  channelId?: string;
+  threadTs?: string;
+  timezone: string;
+  alternatives: Array<{ start: string }>;
+  widenedAlternatives: Array<{ start: string }>;
+}): void {
+  if (!params.channelId) return;
+  const slots = [...params.alternatives, ...params.widenedAlternatives];
+  if (slots.length === 0) return;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { recordOfferedSlots } = require('../../../utils/offeredSlotsStash') as
+      typeof import('../../../utils/offeredSlotsStash');
+    recordOfferedSlots({
+      channelId: params.channelId,
+      threadTs: params.threadTs,
+      timezone: params.timezone,
+      slots,
+    });
+  } catch (err) {
+    logger.warn('recordProposedAlternatives — stash write failed, continuing', {
+      err: String(err).slice(0, 150),
+    });
+  }
 }
 
 // v1.8.3 — extract "HH:MM" from an ISO datetime string for action_summary

@@ -15,6 +15,7 @@ import {
 } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
 import { resolveRequest, type ResolveVerdict } from '../core/requests/resolver';
+import { composeOwnerAskText } from '../core/approvals/approvalCallbacks';
 import { judgeRequestDedup } from '../utils/requestDedup';
 import {
   getUnseenEvents,
@@ -579,10 +580,6 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         const subkind = args.kind as ApprovalSubkind;
         const payload = (args.payload as Record<string, unknown>) ?? {};
         const askText = args.ask_text as string;
-        // #142c — set to checkSlot's real label when the booked time fails on a
-        // HARD owner_busy_collision, so the owner DM below LEADS with the named
-        // double-book instead of a soft-sounding buffer framing.
-        let honestHardReason: string | undefined;
 
         // #145 — a CALENDAR change must never ride a freeform approval. Freeform
         // carries no action, so approving "Move GTM to Wed?" changes nothing and
@@ -638,6 +635,17 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         if (typeof payload.origin_channel !== 'string' && channelId) payload.origin_channel = channelId;
         if (typeof payload.origin_thread_ts !== 'string' && threadTs) payload.origin_thread_ts = threadTs;
         if (payload.origin_is_mpim === undefined && context.isMpim !== undefined) payload.origin_is_mpim = context.isMpim;
+
+        // #142c — `honest_hard_reason` is the line that LEADS his decision surface,
+        // so it is CODE-authored or absent: only the checkSlot re-derivation below
+        // may write it. Strip whatever arrived in the payload first — the model must
+        // never be able to author the sentence he decides on. (This is also why the
+        // lead line can't just be read off `rule`/`rule_label`: those are
+        // model-supplied by design and stay that way — an existing-event change
+        // skips the re-derivation entirely and carries whatever the refusing tool
+        // put there, e.g. req_1784117442212_mo7hh's model-written
+        // `rule: owner_busy_collision`.)
+        delete payload.honest_hard_reason;
 
         // ── The gate (R6 + R7) ────────────────────────────────────────────────
         // Nothing below this line runs for an ask that shouldn't reach him: no
@@ -812,10 +820,16 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
               const sonnetRule = typeof payload.rule === 'string' ? payload.rule : null;
               payload.rule = check.violation_kind ?? payload.rule;
               payload.rule_label = check.violation_label;
-              // Rule 7 — a HARD busy collision MUST be named to the owner. Flag it
-              // so the DM leads with the real reason (soft rules leave the ask as-is).
+              // Rule 7 — a HARD busy collision MUST be named to the owner. Persist it
+              // as its own structured field so the DM leads with the real reason (soft
+              // rules leave the ask as-is) — and so does every LATER surface that puts
+              // this same ask in front of him. It rides `details` (payload becomes
+              // details_json below, and every downstream details write spreads the
+              // existing object), NOT `description`: description is read by the brief,
+              // the dedup judge, the runner and get_my_tasks, and an owner-voiced
+              // sentence naming a private meeting's subject must not enter those.
               if (check.violation_kind === 'owner_busy_collision') {
-                honestHardReason = check.violation_label;
+                payload.honest_hard_reason = check.violation_label;
               }
               if (sonnetRule !== (check.violation_kind ?? null)) {
                 logger.info('create_approval — re-derived policy_exception reason differs from Sonnet-supplied', {
@@ -899,8 +913,24 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
               logger.warn('create_approval revival — no Slack connection', { requestId: existing.id });
               return;
             }
-            const requesterFirst = existing.requester_name?.split(' ')[0] ?? 'they';
-            const reviveText = `${requesterFirst} just asked again about this — still need your call:\n\n${existing.description ?? existing.subject}`;
+            // The SAME composer the first raise uses — this is the second surface
+            // where a ✅ resolves the approval (terminal_dm_msg_ts is re-stamped
+            // below), so it carries the same parts in the same order: the proven
+            // hard reason, the ask, and what a yes actually does. Pre-fix it posted
+            // the bare `description` — which is only the ask prose — so the one
+            // message he could sign named neither the double-book he was overriding
+            // nor the booking it would fire, and #45 had already moved it into
+            // TODAY's thread, days away from the full-text original.
+            const reviveText = await composeOwnerAskText({
+              askText: existing.description ?? existing.subject,
+              details: parseDetails(existing),
+              profile,
+              requestId: existing.id,
+              reAsk: {
+                requesterFirst: existing.requester_name?.split(' ')[0] ?? 'they',
+                raisedAt: existing.created_at,
+              },
+            });
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { postOwnerDecision } = require('../utils/ownerDailyThread') as
               typeof import('../utils/ownerDailyThread');
@@ -1101,29 +1131,21 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         // DM the owner. terminal_dm_msg_ts gets stamped from the response so
         // emoji ✅ on this DM resolves.
         //
-        // v2.9.1 — append "If yes → I'll X" consequence line when on_approve
-        // is set, so the owner sees what saying yes actually does.
-        // #142c — when the booked time is a HARD double-book, LEAD with the
-        // deterministic checkSlot label so the real conflict is the first thing
-        // the owner reads, above whatever soft framing the ask prose used.
-        let dmText = honestHardReason ? `${honestHardReason}\n\n${askText}` : askText;
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { extractCallbacks, buildConsequenceText, resolveConsequenceTravel } = require('../core/approvals/approvalCallbacks') as
-            typeof import('../core/approvals/approvalCallbacks');
-          const callbacks = extractCallbacks(row.details_json ? JSON.parse(row.details_json) : {});
-          // v3.5.x (WE preview) — resolve trip context so the preview clock
-          // matches the booked-confirmation on a trip day.
-          const travel = await resolveConsequenceTravel(callbacks, profile);
-          const consequence = buildConsequenceText(callbacks, profile, travel);
-          if (consequence) {
-            dmText = `${askText}\n\n${consequence}`;
-          }
-        } catch (err) {
-          logger.warn('create_approval — consequence text build threw, sending bare askText', {
-            err: String(err).slice(0, 200), requestId: row.id,
-          });
-        }
+        // The ask is composed ONCE, by the ONE composer every decision surface
+        // shares (composeOwnerAskText) — and that single composition IS the fix.
+        // Pre-fix the text was assembled twice HERE: a base (hard reason + ask)
+        // and then a REBUILD from askText alone to append the consequence, which
+        // silently undid #142c on the one surface where he actually decides. It
+        // undid it EVERY time, not occasionally: gateApprovalAsk refuses a
+        // policy_exception without a deferred_action, extractCallbacks aliases
+        // that to on_approve, and buildConsequenceText returns non-null for every
+        // on_approve — so a hard-collision ask always had a consequence line to be
+        // rebuilt by, and the named double-book was always the part thrown away.
+        // The revival is the same ask on the same terms, so it calls the same
+        // composer; a second assembly site is how that class of drift returns.
+        const dmText = await composeOwnerAskText({
+          askText, details: parseDetails(row), profile, requestId: row.id,
+        });
 
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports

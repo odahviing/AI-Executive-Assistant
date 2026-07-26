@@ -10,10 +10,11 @@
  * time conflicts that the rule-aware check catches.
  *
  * Fix: when a colleague-path inbound message contains specific time/date
- * patterns AND an availability-question marker, run `find_available_slots`
- * deterministically for each (date, time) pair BEFORE Sonnet answers.
- * Inject the rule-aware verdicts into the system prompt for that turn so
- * Sonnet's "free/busy" narration matches what the booking flow will accept.
+ * patterns AND an availability-question marker, run `checkSlot` — the SAME
+ * validator the booking path runs — deterministically for each (date, time)
+ * pair BEFORE Sonnet answers. Inject the rule-aware verdicts into the system
+ * prompt for that turn so Sonnet's "free/busy" narration matches what the
+ * booking flow will accept.
  *
  * Best-effort detector — fails open. If we miss a pattern, current behavior
  * stands (Sonnet eyeballs whatever tool she chooses). When we catch one, we
@@ -22,7 +23,7 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
-import { getCalendarEvents, findAvailableSlots } from '../connectors/graph/calendar';
+import { getCalendarEvents } from '../connectors/graph/calendar';
 import { bookingLeadTimeHours, checkSlot, type RuleViolationKind } from './scheduleRules';
 import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
@@ -223,10 +224,25 @@ interface SlotVerdict {
   time: string;        // HH:MM
   bookable: boolean;
   rejection_reason?: string;
-  /** v3.6.x — gap query ("how much is free there?"): maxFreeMinutes is the
-   * largest bookable standard duration from this start (null = nothing fits). */
+  /**
+   * v3.6.x — gap query ("how much is free there?"): maxFreeMinutes is the
+   * largest allowed duration that checkSlot passes FROM this exact start.
+   * null = every allowed duration was tested and each failed — an ESTABLISHED
+   * negative, with `rejection_reason` carrying the smallest duration's kind.
+   * A gap pair whose probe never completed pushes no verdict at all, so "null"
+   * can never mean "we didn't look".
+   */
   gapQuery?: boolean;
   maxFreeMinutes?: number | null;
+  /**
+   * D6 — the hard block is an all-day OUT OF OFFICE, not a clash. Without it the
+   * NOT BOOKABLE line carries no reason at all and the block's own instruction
+   * ("say so honestly — he's booked then") makes Maelle tell a colleague the
+   * owner is booked solid on a day he is on vacation: a confident wrong reason,
+   * and one that invites "then what about an hour later", which has the same
+   * answer all day. Read off checkSlot's occupancy, never re-derived.
+   */
+  outOfOfficeAllDay?: true;
 }
 
 export interface AvailabilityPreCheckResult {
@@ -243,9 +259,9 @@ export interface AvailabilityPreCheckResult {
 }
 
 /**
- * Detect (date, time) pairs in a colleague-path message and run
- * `find_available_slots` for each with a narrow window. Returns a result
- * object with verdicts + a pre-rendered prompt block.
+ * Detect (date, time) pairs in a colleague-path message and run `checkSlot`
+ * for each against that week's real events. Returns a result object with
+ * verdicts + a pre-rendered prompt block.
  *
  * Fails open: if anything throws, returns `{ ran: false, ... }`. The main
  * orchestrator path is unaffected.
@@ -352,6 +368,20 @@ export async function precheckAvailability(params: {
   // checkSlot evaluates against the slot's full WEEK of events (one
   // per-turn-memoized fetch per week), exactly like write-time validation —
   // verdict and booking can no longer disagree.
+  //
+  // v4.2.x (H3) — the GAP branch runs it too; it was the last caller of the
+  // narrow-window findAvailableSlots the paragraph above removed, and it had a
+  // third hole on top of (a) and (b): `searchFrom === searchTo` is a ZERO-WIDTH
+  // window, and the walker's `cursor + durationMs <= searchEnd` guard is false
+  // on entry for any non-zero duration (findAvailableSlots.ts:705). Zero
+  // iterations, every time — `maxFit` was structurally always null and EVERY
+  // gap question rendered "nothing bookable there". Runtime: 5 gap pairs on
+  // 2026-07-20/23/24, each preceded by 4× `getFreeBusy — zero or inverted
+  // window, returning empty` (one per allowed duration) and followed by
+  // `verdicts injected bookable:0`. A probe that cannot tell "I found nothing"
+  // from "I never looked" must not assert a negative — so a gap verdict now
+  // exists only once checkSlot has actually answered, and its null means every
+  // allowed duration was tested and each failed.
   const allowedDurations = params.profile.meetings.allowed_durations ?? [25];
   const eventsByWeek = new Map<string, import('../connectors/graph/calendar').CalendarEvent[]>();
   for (const pair of pairs.slice(0, 6)) {  // cap at 6 to bound cost
@@ -359,60 +389,25 @@ export async function precheckAvailability(params: {
       const startDt = DateTime.fromISO(`${pair.date}T${pair.time}`, { zone: tz });
       if (!startDt.isValid) continue;
 
-      // v3.6.x — GAP query ("how much is free there?"). Probe the LARGEST
-      // standard duration that fits from this start via findAvailableSlots
-      // (the SAME rule-aware engine the booking flow uses — R2/R4, no
-      // reimplemented rule logic), descending, first hit wins. Injecting the
-      // real free length stops the "said 10 min, it was 25" fabrication.
-      if (pair.gapQuery) {
-        let maxFit: number | null = null;
-        for (const d of [...allowedDurations].sort((a, b) => b - a)) {
-          const slots = await findAvailableSlots({
-            userEmail: params.profile.user.email,
-            timezone: tz,
-            durationMinutes: d,
-            searchFrom: startDt.toISO()!,
-            searchTo: startDt.toISO()!,   // zero-width → engine checks a d-min meeting AT this start
-            autoExpand: false,
-            profile: params.profile,
-            ...(detectedCategory ? { category: detectedCategory } : {}),
-          });
-          if (slots.length > 0) { maxFit = d; break; }
-        }
-        verdicts.push({ date: pair.date, time: pair.time, bookable: maxFit !== null, gapQuery: true, maxFreeMinutes: maxFit });
-        continue;
-      }
-
-      // Duration: the asked length when the colleague named one, snapped to
-      // allowed_durations exactly like create_meeting snaps (nearest). An
-      // "11:00-11:15" ask checks 11:00+10min — the same meeting booking
-      // would create — instead of a phantom default-25 window.
-      const askedMin = pair.durationMin ?? durationMinutes;
-      const snappedMin = allowedDurations.reduce(
-        (best, d) => (Math.abs(d - askedMin) < Math.abs(best - askedMin) ? d : best),
-        allowedDurations[0],
-      );
-      const endDt = startDt.plus({ minutes: snappedMin });
       const weekKey = startDt.startOf('week').toFormat('yyyy-MM-dd');
-      let events = eventsByWeek.get(weekKey);
-      if (!events) {
-        events = await getCalendarEvents(
-          params.profile.user.email,
-          startDt.startOf('week').toFormat("yyyy-MM-dd'T'00:00:00"),
-          startDt.endOf('week').toFormat("yyyy-MM-dd'T'23:59:59"),
-          tz,
-        );
-        eventsByWeek.set(weekKey, events);
-      }
+      const cachedEvents = eventsByWeek.get(weekKey);
+      const events = cachedEvents ?? await getCalendarEvents(
+        params.profile.user.email,
+        startDt.startOf('week').toFormat("yyyy-MM-dd'T'00:00:00"),
+        startDt.endOf('week').toFormat("yyyy-MM-dd'T'23:59:59"),
+        tz,
+      );
+      if (!cachedEvents) eventsByWeek.set(weekKey, events);
+
       // v3.7.x (#143) — no WE short-circuit. An away day is a per-date override
       // carrying a timezone; checkSlot self-resolves that effective day and
       // validates the slot against the stated hours IN the away tz, so the
       // colleague pre-check reports bookable correctly (away, in-hours = bookable)
       // and the booking path agrees.
-      const check = checkSlot({
+      const checkAt = (minutes: number) => checkSlot({
         profile: params.profile,
         slotStartIso: startDt.toISO()!,
-        slotEndIso: endDt.toISO()!,
+        slotEndIso: startDt.plus({ minutes }).toISO()!,
         category: detectedCategory,   // enforce the SAME category cap the search does (was null → cap skipped)
         events,
         // v4.1.x (M2) — this pre-check runs on the COLLEAGUE path, so it must
@@ -425,6 +420,52 @@ export async function precheckAvailability(params: {
         // verdict text (default masks; stated for the reader).
         viewer: 'other',
       });
+
+      // v3.6.x — GAP query ("how much is free there?"). The question is how much
+      // fits STARTING HERE, not what's free that day — so probe the allowed
+      // durations at this exact start, descending; the first that passes IS the
+      // largest bookable length. Injecting the real free length stops the "said
+      // 10 min, it was 25" fabrication. Nothing fits → the SMALLEST duration's
+      // violation is the honest reason (if even the shortest meeting can't sit
+      // here, that's why), and it renders through the same soft/hard ladder as
+      // any other verdict — a gap question landing outside his hours or over a
+      // category cap is HIS to override, not the flat refusal the old branch
+      // printed while planMeeting would have escalated it.
+      // allowed_durations is schema-guaranteed non-empty (userProfile.ts:178,
+      // `.min(1)`), so the loop always probes at least once: `maxFit === null`
+      // is therefore always an ANSWER, never an unrun check.
+      if (pair.gapQuery) {
+        let maxFit: number | null = null;
+        let blockedBy: RuleViolationKind | undefined;
+        let blockedByOoo = false;
+        for (const d of [...allowedDurations].sort((a, b) => b - a)) {
+          const probe = checkAt(d);
+          if (probe.passes) { maxFit = d; break; }
+          blockedBy = probe.violation_kind;
+          blockedByOoo = probe.overCommitment?.allDayOutOfOffice === true;
+        }
+        verdicts.push({
+          date: pair.date,
+          time: pair.time,
+          bookable: maxFit !== null,
+          gapQuery: true,
+          maxFreeMinutes: maxFit,
+          ...(maxFit === null && blockedBy ? { rejection_reason: blockedBy } : {}),
+          ...(maxFit === null && blockedByOoo ? { outOfOfficeAllDay: true as const } : {}),
+        });
+        continue;
+      }
+
+      // Duration: the asked length when the colleague named one, snapped to
+      // allowed_durations exactly like create_meeting snaps (nearest). An
+      // "11:00-11:15" ask checks 11:00+10min — the same meeting booking
+      // would create — instead of a phantom default-25 window.
+      const askedMin = pair.durationMin ?? durationMinutes;
+      const snappedMin = allowedDurations.reduce(
+        (best, d) => (Math.abs(d - askedMin) < Math.abs(best - askedMin) ? d : best),
+        allowedDurations[0],
+      );
+      const check = checkAt(snappedMin);
       if (check.passes) {
         verdicts.push({ date: pair.date, time: pair.time, bookable: true });
       } else {
@@ -432,7 +473,8 @@ export async function precheckAvailability(params: {
           date: pair.date,
           time: pair.time,
           bookable: false,
-          rejection_reason: (check.violation_kind as RuleViolationKind | undefined) ?? 'unknown',
+          rejection_reason: check.violation_kind ?? 'unknown',
+          ...(check.overCommitment?.allDayOutOfOffice ? { outOfOfficeAllDay: true as const } : {}),
         });
       }
     } catch (err) {
@@ -554,10 +596,15 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile): strin
     const when = fmt(v.date, v.time);
     // v3.6.x — gap query ("how much is free there?"): report the REAL largest
     // bookable length so the reply states it instead of estimating a smaller one.
-    if (v.gapQuery) {
-      return v.maxFreeMinutes && v.maxFreeMinutes > 0
-        ? `  - around ${when}: up to ${v.maxFreeMinutes} min is free per ${ownerFirst}'s rules — state THIS length, do not estimate a shorter one.`
-        : `  - around ${when}: nothing bookable there per ${ownerFirst}'s rules.`;
+    // v4.2.x (H3) — only the POSITIVE case is special-cased. A gap query that
+    // fits nothing falls through to the ladder below and carries checkSlot's
+    // real reason. The old flat "nothing bookable there" did two dishonest
+    // things: it claimed a NEIGHBOURHOOD ("there") when the probe only ever
+    // tests one exact start, and it collapsed owner-overridable rules into a
+    // refusal the booking path would have escalated. "from" for the same
+    // reason — the length is measured FROM this start, not around it.
+    if (v.gapQuery && v.maxFreeMinutes && v.maxFreeMinutes > 0) {
+      return `  - from ${when}: up to ${v.maxFreeMinutes} min is free per ${ownerFirst}'s rules — state THIS length, do not estimate a shorter one.`;
     }
     if (v.bookable) return `  - ${when}: BOOKABLE per ${ownerFirst}'s rules`;
     // v3.3.x — precheckAvailability runs ONLY on the colleague path
@@ -599,6 +646,11 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile): strin
           ? `${ownerFirst} is already at his limit for that kind of meeting that day`
           : `${ownerFirst}'s day is loaded around then`;
       return `  - ${when}: NOT CLEAN — ${why}; NOT a hard conflict and it's ${ownerFirst}'s to override. Phrase it high-level to the colleague (never name the rule or the limit). If they INSIST on this exact time, raise create_approval(kind=policy_exception) so ${ownerFirst} decides — don't refuse outright, don't book.`;
+    }
+    // D6 — an all-day out-of-office is a hard NO, but "he's booked then" is the
+    // wrong sentence for it and invites a pointless "an hour later?".
+    if (v.outOfOfficeAllDay) {
+      return `  - ${when}: NOT BOOKABLE — ${ownerFirst} is out of office that WHOLE day, not just at that hour. Say he's away that day and offer another day; do NOT say he's booked, and do NOT offer a different time on the same day.`;
     }
     return `  - ${when}: NOT BOOKABLE`;
   });

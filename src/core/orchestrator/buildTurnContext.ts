@@ -681,6 +681,22 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
           const meetingsHh = Math.floor(totalMin / 60);
           const meetingsMm = totalMin % 60;
           const meetingsStr = meetingsHh > 0 ? `${meetingsHh}h${meetingsMm > 0 ? `${String(meetingsMm).padStart(2, '0')}m` : ''}` : `${meetingsMm}m`;
+          // D6 — an all-day OOO zeroes freeMin upstream (ops/analysis.ts:499),
+          // so the numeric line renders "0m free / 0m in meetings across 0
+          // meetings" and reads as packed solid — the opposite of "he's away".
+          // Same second-person idiom the validator already uses for this state
+          // (scheduleRules.ts:557). The meeting count survives on purpose: an
+          // OOO day can still carry real bookings (that's the oof_with_meetings
+          // issue, analysis.ts:370) and dropping them would trade one wrong
+          // answer for another. dayType is omitted — office/home says where he
+          // works that day, which is moot when he isn't there.
+          if (d.outOfOfficeAllDay) {
+            const stillBooked = meetings > 0
+              ? `; ${meetings} ${meetings === 1 ? 'meeting is' : 'meetings are'} still booked on it (${meetingsStr})`
+              : '';
+            lines.push(`  - ${d.date} (${d.day}): you're out of office all day — the whole day is blocked on your calendar, so there is no free time to report${stillBooked}`);
+            continue;
+          }
           lines.push(`  - ${d.date} (${d.day}, ${d.dayType}): ${freeStr} free during work hours / ${meetingsStr} in meetings across ${meetings} ${meetings === 1 ? 'meeting' : 'meetings'}${noBuffer ? ' — flagged as BUSY (below your daily focus-time floor)' : ''}`);
         }
         if (lines.length > 0) {

@@ -9,7 +9,8 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 import type { SkillContext } from '../../../types';
 
-import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, openQuestionsField } from '../../ops/helpers';
+import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, openQuestionsField, alternativesNote, recordProposedAlternatives } from '../../ops/helpers';
+import { humanizeViolationLabel } from '../../ops/violationLabels';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getCalendarEvents,
@@ -24,6 +25,7 @@ import {
   verifyEventDeleted,
   updateMeeting,
   GraphPermissionError,
+  CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
 import {
   getDb,
@@ -704,22 +706,14 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   // (`attendee_busy_collision:<email>` /
                   // `outside_attendee_work_hours:<email>`) name the person; the
                   // rest are owner-rule violations. (ownerFirst from the gate above.)
-                  const labelFor = (reason: string | undefined): string => {
-                    switch (reason) {
-                      case 'outside_owner_work_hours': return `outside ${ownerFirst}'s work hours`;
-                      case 'owner_busy_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
-                      // legacy label name kept as alias in case any older diagnostics path still emits it
-                      case 'owner_busy_or_buffer_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
-                      case 'overlaps_meeting_being_moved': return `overlaps the meeting being moved`;
-                      case 'focus_time_office': return `would leave ${ownerFirst} under the free-time floor (office day)`;
-                      case 'focus_time_home': return `would leave ${ownerFirst} under the free-time floor (home day)`;
-                      case 'floating_block_no_room': return `would leave no room for one of ${ownerFirst}'s daily blocks (lunch / break / etc.)`;
-                      case 'category_day_type': return `wrong day type for this category (e.g. office-only category on a home day)`;
-                      case 'category_per_day': return `over ${ownerFirst}'s per-day limit for this category`;
-                      case 'category_per_week': return `over ${ownerFirst}'s per-week limit for this category`;
-                      default: return 'unknown';
-                    }
-                  };
+                  // THE shared humanizer (ops/violationLabels). This was the last
+                  // inline copy of the switch: it never learned the six reasons
+                  // 4.2.0 added, so a Friday target, a past target and a
+                  // travel-buffer rejection all humanized to 'unknown' and the
+                  // colleague was told "it doesn't pass his scheduling rules and I
+                  // can't tell which one" — the mechanical non-answer M11 forbids.
+                  const labelFor = (reason: string | undefined): string =>
+                    humanizeViolationLabel(reason, ownerFirst);
                   const nameForEmail = (em: string): string =>
                     requiredAttendees.find(a => a.email === em.toLowerCase())?.name?.split(/\s+/)[0] ?? 'another attendee';
                   const counts = diagnostics.rejectedCounts ?? {};
@@ -757,6 +751,10 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 }
               }
             } catch (err) {
+              // D4 — an unreadable calendar is not a "couldn't verify, he decides"
+              // case: the owner would be approving a move nobody can validate.
+              // Falls through to the offline refusal at the tool surface.
+              if (err instanceof CalendarOfflineError) throw err;
               logger.warn('move_meeting colleague-path rule check threw — escalating to approval', { err: String(err) });
               return {
                 needs_owner_approval: true,
@@ -1106,16 +1104,30 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // v3.2.x (#8) — colleague reschedule onto a soft-rule-breaking slot:
           // offer nearby rule-compliant alternatives before escalating.
           if (movePlan.action === 'propose_alternative') {
+            // D8 — same as create_meeting's branch: an alternative that gets said
+            // out loud is an offered slot, so it binds and can be held.
+            recordProposedAlternatives({
+              channelId: context.channelId,
+              threadTs: context.threadTs,
+              timezone,
+              alternatives: movePlan.alternatives,
+              widenedAlternatives: movePlan.widenedAlternatives,
+            });
             return {
               success: false,
               error: 'soft_rule_offer_alternatives',
               meeting_subject: args.meeting_subject,
               violation_label: movePlan.violationLabel,
-              alternatives: movePlan.alternatives,
+              // D3 — see the parallel return in create_meeting. The day they
+              // asked for and the widening stay in separate fields so the reply
+              // can name which is which.
+              requested_day: movePlan.requestedDay,
+              alternatives_on_requested_day: movePlan.alternatives,
+              alternatives_other_days: movePlan.widenedAlternatives,
               suggested_ask_text: movePlan.suggestedAskText,
               ...openQuestionsField(movePlan.openQuestions),
               _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
-              _note: 'The requested new time breaks one of the owner\'s soft rules. Do NOT escalate yet. Offer these nearby rule-compliant slots (2 on the requested day + 1 after) and ask if one works. If the colleague INSISTS on the original time, or none of these work, THEN call create_approval(kind=policy_exception) with suggested_ask_text so the owner decides.',
+              _note: `The requested new time breaks one of the owner's soft rules. Do NOT escalate yet. ${alternativesNote(movePlan.requestedDay, movePlan.alternatives.length, movePlan.widenedAlternatives.length)} If the colleague INSISTS on the original time, or none of these work, THEN call create_approval(kind=policy_exception) with suggested_ask_text so the owner decides.`,
             };
           }
           if (movePlan.action === 'confirm_override' || movePlan.action === 'escalate_approval') {
@@ -1191,6 +1203,12 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             }
           }
         } catch (err) {
+          // D4 — "proceed with a time-only move" is a fine degrade when
+          // planMeeting couldn't classify a CATEGORY or a location; it is not
+          // fine when the reason it failed is that his calendar is unreadable,
+          // because then the destination was never checked against anything.
+          // A move is a write: refuse it.
+          if (err instanceof CalendarOfflineError) throw err;
           logger.warn('move_meeting — planMeeting threw, proceeding with time-only move', {
             err: String(err).slice(0, 200), meetingId: args.meeting_id,
           });
