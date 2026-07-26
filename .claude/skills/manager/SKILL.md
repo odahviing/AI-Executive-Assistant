@@ -37,7 +37,7 @@ You hold the **only cross-lane view of Maelle**, so decomposition, routing, and 
 3. **The report file** — `.claude/agent-loop/report.md`, cumulative *since the last wrap*. It persists, so an unattended 18:00 run is waiting for the owner when he opens this chat at ~21:00.
 
 ## State you own
-- `.claude/agent-loop/state.json` — `lastSeenIso` (log-review watermark), `lastRun` (`{id,status}`, for resume), `lastWrapIso`, `pendingOverflow`, **`nextReportId`** (the stable row-id counter — see the ID scheme below; assign then increment, never renumber), `verifiedClean` (passed back as `priorClean`).
+- `.claude/agent-loop/state.json` — **mutable current state.** `lastSeenIso` (log-review watermark), `lastRun` (`{id,status}` where status is `complete｜running｜stopped`), `lastWrapIso`, `pendingOverflow`, **`nextReportId`** (stable row-id counter — assign then increment, never renumber), `verifiedClean` (passed back as `priorClean`), **`inFlight`** (`[{ref, lane, description, dispatchedAt}]` — what is being worked RIGHT NOW; add on dispatch, remove on return, and check it before dispatching so one item is never sent twice).
 - `.claude/agent-loop/report.md` — the cumulative **to-do**, rewritten each run and **cleared at wrap**.
 - `.claude/agent-loop/ledger.jsonl` — the durable **history**, append-only, **never cleared**. One line per verdict:
   `{"date","runId","lane","ref","finding","rootCause","verdict","state","note"}`
@@ -213,6 +213,14 @@ The hazard is two writers on the *same* files, not a dirty tree as such. So:
 
 **STOP 2 · A run is already in flight.** If `state.lastRun.status === 'running'`, **do not start a second one** — resume that runId or wait. Two concurrent workflows put six lanes each into the same tree. Never treat a running run as absent because it is slow.
 
+**STOP 1b · Check `state.inFlight` before dispatching ANYTHING, and never dispatch one item twice.** Hand-dispatching has no memory unless you keep it. On 2026-07-26, across nine direct dispatches: **P1 went to `requests` twice** (20:33, then again at 21:06 inside a batch), and **P19 went to `guard` and `slack` concurrently** — slack finished it at 21:12 while guard was still running with P19 in its batch, so one may have overwritten or redone the other.
+
+- **`state.inFlight`** is `[{ref, lane, description, dispatchedAt}]`. **Add an entry when you dispatch; remove it when the agent returns.** `state.json` is mutable state; the ledger is immutable history — in-flight belongs in the former.
+- **Before dispatching:** if the ref is in `inFlight`, do not dispatch — say who has it. If it is in the **ledger with any verdict**, it has already been worked; check whether new work is genuinely needed before sending it again.
+- An entry older than ~30 minutes with nothing running is probably a crashed or killed agent. **Say so and ask** — do not silently assume it died, and do not silently assume it lives.
+
+**STOP 1c · One item spanning two lanes must be SEQUENTIAL, not parallel.** Two lanes told to fix *the same defect* are two writers on one problem, even when they nominally own different files — the fix boundary is rarely as clean as the ownership boundary. Dispatch the first, wait, then dispatch the second **with what the first actually did**. Parallel is for *different* items in different lanes; that is the only case where lane ownership guarantees disjoint files.
+
 **STOP 2b · Named items NEVER trigger a full run.** If the owner names *any* specific rows — `build P3 P19`, *"you can run: P3, P19, P18"*, *"trigger guard for now"*, *"do the five guard ones"* — that is the **preset path**: `Workflow({name:'bugger', args:{issues:[…]}})`, intake and triage skipped. **He has already told you what to build and which lane owns it; re-deriving that costs a GitHub pull plus a full 24h log review to arrive back at the list he just handed you.**
 
 Recognise it by the *presence of specific items*, not by the phrasing. He will not type the command form — on 2026-07-26 he wrote *"for the guard you can run: P3, P19, P18, P20, P11"* and a full run fired instead, burning 76k on intake before he killed it. **If a message contains row ids or names a single lane's work, it is a build, not a run.**
@@ -298,7 +306,13 @@ So the report is, in this order:
 
 1. **`## Needs you`** — the `Answer:` and `Check before wrap:` rows. He is the blocker. Order by harm within it. Full five columns.
 2. **`## Built — awaiting wrap`** — the `Nothing` rows. Full five columns; collapse the Detail if the list is long. Tiers are meaningless here: it is already built.
-3. **`## Backlog — say "build <n>"`** — everything found and not built. **Drop the action column** (it is the same for every row) and group by the M4 harm tiers, most harmful first, with a count per tier:
+3. **`## Backlog`** — **do NOT duplicate it into `report.md`.** The backlog **is the ledger** (owner's call, 2026-07-26: *"audit backlog is the ledger, so you should update there"*). Every row whose verdict is not `built` / `already-fixed` / `audit` is still open, so a backlog section — or worse a separate `audit-backlog.md` — is a second copy that drifts from the first. Render it on demand with **`node scripts/ledger-stats.cjs --open`**, which groups by lane so he can hand one lane its whole list in a single dispatch.
+
+   `report.md` answers three questions about **this wave only** and then stops: *what needs me · what's built · what's running.* A thirty-item backlog dumped into a nightly report is what made it unreadable.
+
+   When you *do* render the backlog, group by the M4 harm tiers below, most harmful first, with a count and a recommendation per row.
+
+   **Reference — the tiers, for whatever renders them:** everything found and not built. **Drop the action column** (it is the same for every row) and group by the M4 harm tiers, most harmful first, with a count per tier:
    - **Tier 1 — security / privacy**: a leak, a disclosure, an authority bypass.
    - **Tier 2 — wrong real-world action**: wrong booking, wrong invitee, double-send; anything external or hard to undo.
    - **Tier 3 — silent wrongness**: a confidently wrong answer, a false "done", a fabricated reason. Trust damage he cannot see.

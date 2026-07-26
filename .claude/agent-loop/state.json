@@ -6,6 +6,9 @@
   "openIssues": [],
   "pendingOverflow": [],
 
+  "_inFlightNote": "What is being worked RIGHT NOW: [{ref, lane, description, dispatchedAt}]. Add on dispatch, remove on return, and CHECK IT BEFORE DISPATCHING — hand-dispatching has no memory unless it is kept here. On 2026-07-26 across nine direct dispatches, P1 went to requests twice and P19 ran in guard and slack concurrently; one may have overwritten the other. An entry older than ~30 min with nothing running is probably a dead agent: say so and ask, never silently assume either way.",
+  "inFlight": [],
+
   "_nextReportIdNote": "Stable report-row ids, ONE flat sequence, no letter prefixes. Assign the current value when a row FIRST enters report.md, then increment. NEVER renumber and NEVER reuse — even after a row is wrapped and deleted, so `14` means the same thing next month. A row that reappears keeps its original number. Starts at 100 deliberately: the rows written before 2026-07-26 evening carry legacy labels (P1-P32, D7-D8, B1-B6, N1-N2) from four undefined prefix schemes nobody documented, which is exactly why this counter exists. Those keep their labels until the next full report rewrite migrates them; new rows take 100+, so no collision is possible in the meantime.",
   "nextReportId": 100,
 
