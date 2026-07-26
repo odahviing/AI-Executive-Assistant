@@ -50,6 +50,8 @@ No all-day polling — that reloaded Maelle's full context every tick, pure toke
 
 Context loads **once per lane per run** — never per bug, never every 10 minutes.
 
+**Where the tokens actually go** (measured on the 2026-07-26 wave, so tune against this rather than instinct): a lane agent boots at **~10k** — its charter is 14–18 KB (~4–4.5k tokens) plus `SESSION_STARTER.md` at 24.5 KB (~6k). Thirteen agents = ~130k, about **5%** of that wave. Boot is the *smallest* lever. **File re-reading is far bigger**: the five files the scheduling lanes keep opening total 5,298 lines (~69k tokens to read once), and most were read by several agents in the same run — hence the `Locate` pass, which resolves cited locations once for everyone. Reasoning is the largest share, but the waste there is not high effort, it is **high effort spent on trivia**: `EFFORT` is a flat per-lane map, so a lane pays xhigh to delete a stale comment. Grading effort per *issue* rather than per lane is the next unbuilt saving — it removes waste without giving anything hard less thinking.
+
 ## Commands
 Invoke as `/manager <command>` (e.g. `/manager run`), or just say the command once the Manager is open. Bare `/manager` = orient + status (and, if it's ≥18:00 and today's run hasn't happened, offer to run).
 - **run** / **run now** — the full pass: open GitHub `Bug` issues + the 24h log review, **together**. `sources:['github','logs']`, `sinceIso:state.lastSeenIso`. (Same as the 18:00 run.)

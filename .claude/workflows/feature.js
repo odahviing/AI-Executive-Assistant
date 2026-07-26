@@ -222,17 +222,28 @@ if (MODE === 'plan') {
     pieces,
     blockingQuestions: (plan && plan.blockingQuestions) || [],
     notWorthBuilding: (plan && plan.notWorthBuilding) || [],
-    next: 'Owner approves/reshapes the pieces and answers the blocking questions, then re-invoke: Workflow({name:"feature", args:{mode:"build", pieces:[...approved]}})',
+    next: 'Owner approves/reshapes the pieces and answers the blocking questions, then re-invoke: Workflow({name:"feature", args:{mode:"build", pieces:[...approved], answers:{...}, understood}}). PASS `understood` BACK — it carries what each area does today with file:line, and without it every builder re-derives ground this pass already covered.',
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BUILD MODE — the owner has approved specific pieces. Dispatch in dep order.
 // ═══════════════════════════════════════════════════════════════════════════
-const approved = Array.isArray(A.pieces) ? A.pieces : []
-if (!approved.length) {
+const raw = Array.isArray(A.pieces) ? A.pieces : []
+if (!raw.length) {
   return { mode: 'build', error: 'No approved pieces. Run mode:"plan" first, get the owner\'s approval, then pass pieces:[...].' }
 }
+
+// Plan mode already established, against the code, what each improvement's area
+// does TODAY — with file:line. Passing `understood` back in hands that to the
+// builder instead of making it re-derive the same ground from scratch. Same
+// saving as bugger.js's Locate pass, except here the work is already done and was
+// simply being thrown away between the two invocations.
+const understood = Array.isArray(A.understood) ? A.understood : []
+const approved = raw.map((p) => {
+  const u = understood.find((x) => x && x.ref === p.ref)
+  return u ? { ...p, _where: { todayBehaviour: u.todayBehaviour, surfaces: u.surfaces || [] } } : p
+})
 
 const answers = A.answers || {} // owner's answers to blockingQuestions, threaded to every builder
 const describe = (p) =>
@@ -240,10 +251,16 @@ const describe = (p) =>
   (p.productDecision ? `\n  OWNER DECISION THIS EMBEDS: ${p.productDecision}` : '') +
   (p.charterRule ? `\n  DURABLE RULE: ${p.charterRule}` : '')
 
+const WHERE_NOTE =
+  `\n\nSome pieces carry \`_where\` — what the planning pass found this area does TODAY, with file:line. ` +
+  `That is a STARTING POINT, not the truth: it was established before this dispatch, another lane may have moved the code since, ` +
+  `and the planning pass can be wrong. **Open the file and read it.** Per Shared rule 6, re-derive it from the code before you build on it — ` +
+  `if \`_where\` disagrees with what you find, the file wins and say so in your notes. What this saves you is hunting for the location, not verifying it.`
+
 const buildLane = (lane, pcs, roundNote) =>
   agent(
     `You are dispatched APPROVED improvement work in your lane. This is a FEATURE wave, not a bug wave — there is no root cause to prove; the owner has decided he wants this.\n\n` +
-      `For EACH piece: read the code first, build it within your charter, run \`npm run typecheck\`, paper-trace to 100%.\n\n` +
+      `For EACH piece: read the code first, build it within your charter, run \`npm run typecheck\`, paper-trace to 100%.${pcs.some((p) => p._where) ? WHERE_NOTE : ''}\n\n` +
       `Where a piece names an OWNER DECISION, that call is already made — build it, do not re-litigate it. But if building reveals a CORRECTNESS problem with what was decided, say so plainly and return \`needs-owner-decision\` rather than shipping something broken.\n` +
       `Where a piece names a DURABLE RULE, that rule is the owner's product intent — it belongs in your charter. Say in your notes that it should be written there; do not edit charter files yourself.\n` +
       `If a piece needs another lane, return \`needs-dependency\` with the exact contract — do not reach across.${roundNote || ''}\n\n` +

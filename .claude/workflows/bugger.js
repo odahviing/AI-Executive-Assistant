@@ -5,6 +5,7 @@ export const meta = {
   phases: [
     { title: 'Intake' },
     { title: 'Triage' },
+    { title: 'Locate' },
     { title: 'Build' },
     { title: 'Context' },
     { title: 'Verify' },
@@ -91,10 +92,44 @@ const VERDICTS = {
   required: ['results'],
 }
 
+const LOCATED = {
+  type: 'object',
+  properties: {
+    located: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          file: { type: 'string', description: 'repo-relative path' },
+          line: { type: 'number' },
+          excerpt: { type: 'string', description: 'the cited line with ~30 lines either side, verbatim' },
+          neighbours: { type: 'string', description: 'who calls this / what it calls — names and file:line only, no prose' },
+          notFound: { type: 'boolean', description: 'true if the citation does not resolve — say so, never guess a location' },
+        },
+        required: ['id'],
+      },
+    },
+  },
+  required: ['located'],
+}
+
 // ---- helpers ----
+// `_where` is a STARTING POINT, never a substitute for reading the code. The
+// framing below is load-bearing: an excerpt is a snapshot, the tree moves under
+// it, and Shared rule 6 (never build on a claim you have not verified) applies to
+// it exactly as it does to a hand-off from another lane. What the Locate pass
+// removes is the SEARCH, not the reading.
+const WHERE_NOTE =
+  `\n\nSome issues carry \`_where\` — the cited location resolved for you, with an excerpt and its immediate neighbours. ` +
+  `That is a STARTING POINT, not the truth: it is a snapshot taken before this dispatch, another lane may have moved the code since, ` +
+  `and the citation itself came from triage and can be wrong. **Open the file and read it.** Per Shared rule 6, re-derive the defect from ` +
+  `the code on disk before you build on it — if \`_where\` disagrees with what you find, the file wins and say so in your notes. ` +
+  `What this saves you is hunting for the location, not verifying it.`
+
 const dispatch = (lane, issues) =>
   agent(
-    `You are dispatched a batch of atomic issues in your lane. For EACH: prove the root cause from code + logs (cite file:line), build the deep fix within your charter, run \`npm run typecheck\`, paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract.\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
+    `You are dispatched a batch of atomic issues in your lane. For EACH: prove the root cause from code + logs (cite file:line), build the deep fix within your charter, run \`npm run typecheck\`, paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract.${issues.some((i) => i._where) ? WHERE_NOTE : ''}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
     { label: `build:${lane}`, phase: lane === 'context' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
   )
 
@@ -143,6 +178,36 @@ if (pending.length) log(`Cap ${CAP}: ${pending.length} lower-severity issues def
 log(`Triage: ${buildable.length} clear to build, ${flagged.length} flagged for owner, ${pending.length} pending.`)
 buildable.forEach((i) => log(`  • build [${i.lane}/${i.severity}] ${i.id} — ${(i.symptom || '').slice(0, 90)}`))
 flagged.forEach((i) => log(`  • flagged-for-owner ${i.id} — ${(i.symptom || '').slice(0, 90)}`))
+
+// ---- 2b. Locate — resolve the cited file:line ONCE, cheaply, for everyone ----
+// Every builder used to open with the same hunt: grep, read a 1,400-line file,
+// read the wrong one, find the thing, then read it properly. Six lanes each
+// paying that discovery tax for locations triage already knew — measured at
+// ~5,300 lines across the five files the scheduling lanes keep re-reading, and
+// most of it re-read by several agents in the same run.
+//
+// One cheap pass resolves them all. This removes the SEARCH; the builder still
+// reads and verifies (see WHERE_NOTE) — an excerpt that were trusted blind would
+// just be the relay bug at framework scale.
+//
+// Skipped entirely when nothing carries a file citation (a pure log-review night),
+// so it never costs anything on a run it cannot help.
+const CITES_FILE = /[\w./-]+\.(?:ts|tsx|js|cjs|mjs|json|md|ya?ml)(?::\d+)?/i
+const cited = buildable.filter((i) => CITES_FILE.test(i.evidence || ''))
+if (cited.length) {
+  phase('Locate')
+  const loc = await agent(
+    `Resolve each cited code location to an excerpt. **Read-only — change nothing, and do NOT diagnose, judge or fix anything.** You are a lookup pass, not a reviewer.\n\n` +
+      `For each issue below, its \`evidence\` names a file (sometimes with a line). Open that file and return the cited line with **~30 lines either side, verbatim**, plus a \`neighbours\` string naming what calls it and what it calls — names and \`file:line\` only, no prose or opinion.\n\n` +
+      `If a citation does not resolve — wrong path, line past the end of the file, or the code plainly is not what the evidence describes — set \`notFound: true\` and move on. **Never guess a location or substitute one you think is more likely**; a wrong excerpt sends a builder to the wrong place with false confidence, which is worse than sending it nowhere.\n\n` +
+      `Work cheap: one targeted read per citation. Do not explore the codebase, do not follow interesting threads, do not read files nothing cited.\n\n` +
+      `ISSUES:\n${JSON.stringify(cited.map((i) => ({ id: i.id, evidence: i.evidence, symptom: i.symptom })), null, 2)}`,
+    { label: `locate(${cited.length})`, phase: 'Locate', effort: 'low', model: 'haiku', schema: LOCATED },
+  )
+  const found = new Map(((loc && loc.located) || []).filter((x) => x && x.id && !x.notFound && x.excerpt).map((x) => [x.id, x]))
+  if (found.size) buildable = buildable.map((i) => (found.has(i.id) ? { ...i, _where: found.get(i.id) } : i))
+  log(`Locate: ${found.size}/${cited.length} citation(s) resolved${found.size < cited.length ? ' — the rest the lanes will find themselves' : ''}.`)
+}
 
 // ---- 3. Build — code lanes in parallel (disjoint files, safe to run together) ----
 phase('Build')
