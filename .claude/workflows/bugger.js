@@ -57,6 +57,23 @@ const EFFORT = { meeting: 'xhigh', context: 'xhigh', slack: 'xhigh', requests: '
 const FINDINGS = {
   type: 'object',
   properties: {
+    // ── SELF-REPORT ─────────────────────────────────────────────────────────
+    // Every silent failure this engine has had was a mechanism that did nothing
+    // and looked like success: the watermark never filtered, the activity exit
+    // never fired, the Agent label never matched, dependency asks vanished into
+    // a `built` verdict. None was caught for weeks because nothing ever asserted
+    // that a step had actually happened.
+    //
+    // So each step now REPORTS ITS OWN WORK as numbers, and the run manifest
+    // prints them. A no-op stops being invisible and becomes a zero in a column
+    // where a zero is obviously wrong. These are diagnostics, never inputs to a
+    // decision — nothing branches on them.
+    cutoffLine: {
+      type: 'number',
+      description: 'log-review only: the line number the review STARTED from, after converting the watermark to UTC. 1 means the filter did nothing — the failure being watched for.',
+    },
+    cutoffUtc: { type: 'string', description: 'log-review only: the UTC instant you actually compared against, so a timezone slip is visible' },
+    turnsAfterCutoff: { type: 'number', description: 'log-review only: `Orchestrator invoked` events counted AFTER the cutoff (not in the whole file)' },
     findings: {
       type: 'array',
       items: {
@@ -78,6 +95,15 @@ const FINDINGS = {
 const ATOMIC = {
   type: 'object',
   properties: {
+    // Self-report, same reason as FINDINGS above. `alreadyBuilt` was passed six
+    // entries on 2026-07-26 and dropped none of the two that mattered, because
+    // `gh#147` never string-matched `#147`. Nothing noticed, because nothing was
+    // counting. Now the count is printed next to the number passed in.
+    droppedAsAlreadyBuilt: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'the ref or symptom of every finding you dropped because it is already fixed. Empty array if none — do NOT omit the field, an omission is indistinguishable from "the check did not run".',
+    },
     issues: {
       type: 'array',
       items: {
@@ -220,6 +246,8 @@ const deferredDepAsks = (rs) =>
 // ---- 1. Intake (sources in parallel) — SKIPPED entirely for a preset list ----
 let findings = []
 let allIssues = []
+let triageDropped = []
+let locateStats = { cited: 0, resolved: 0 }
 if (PRESET) {
   log(`Preset: ${PRESET.length} pre-triaged issue(s) from the owner's review — skipping intake and triage.`)
   allIssues = PRESET
@@ -239,11 +267,15 @@ const intake = await parallel(
       `  a. **Convert it to UTC first.** The watermark carries a local offset (e.g. \`+0300\`); every log line is UTC with a \`Z\`. \`2026-07-26T18:22:00+0300\` is \`2026-07-26T15:22:00Z\`. **Comparing the two as text without converting is wrong and silently reviews the whole day** — that is a real bug this instruction exists to prevent, measured at ~430k wasted tokens on 2026-07-26 when an 18:22 watermark let 04:32Z lines through.\n` +
       `  b. Find the **line number** of the first entry whose \`"timestamp"\` is >= that UTC instant. Everything above it is ALREADY REVIEWED — it is not yours, and re-finding a bug from it produces a duplicate the owner has seen.\n` +
       `  c. **Every grep and every read you do from here on must be bounded to that line number onward** (e.g. \`tail -n +<line>\`, or check the timestamp of each hit and discard earlier ones). A finding you cannot tie to a line at or after the cutoff must be dropped, however real it looks.\n` +
-      `  d. **ACTIVITY CHECK:** count \`Orchestrator invoked\` events **after the cutoff only**. If ZERO, she handled no turns since the last review — return {findings:[]} immediately and stop. Do not scan, do not reason further. Count that event specifically: \`Catch-up: scanning DMs\` is an idle heartbeat that fires whether or not anyone spoke, and reading it as activity is what made a zero-finding run cost 124k. Counting the whole file instead of the tail defeats this entirely — today's file holds 53 such events, so an unbounded count always looks busy.\n\n1. Grep the log for HARD trouble signals (language-neutral): error/exception lines, guard fires (claimChecker/humanGate/dateVerifier/securityGate flagged or rewrote), "truncated at max_tokens", tool retries/failures, findAvailableSlots rejection breakdowns, approval-escalation misfires, abnormally long threads.\n2. Scan shallowly for SOFT signals that leave no error: a reply that doesn't match what was asked, an attendee/time/detail that silently changed between turns, a confidently-worded answer on a partial result.\n3. DEEP-read (full turns) ONLY the conversations that tripped step 1 or looked off in step 2.\nJudge those on four lenses: (1) was it good, (2) did the person get what they wanted, (3) did it feel human / make sense, (4) did the process work.\nVERY HARD BAR: surface a finding ONLY if it is an OBVIOUS, CLEAR bug, and you MUST cite the exact transcript moment as evidence. If not certain, set clarity:"ambiguous" (owner decides; never auto-fixed). Never invent issues from good chats. Return findings {source:"logs", ref, symptom, evidence:<quoted moment>, clarity}.`,
+      `  **Report all three in your return: \`cutoffLine\` (the line you started at), \`cutoffUtc\` (the instant you compared against), \`turnsAfterCutoff\`.** These are printed in the run manifest so a filter that did nothing is visible as \`startedAtLine: 1\`. Omitting them is treated as "the watermark cannot be verified".\n` +
+        `  d. **ACTIVITY CHECK:** count \`Orchestrator invoked\` events **after the cutoff only**. If ZERO, she handled no turns since the last review — return {findings:[]} immediately and stop. Do not scan, do not reason further. Count that event specifically: \`Catch-up: scanning DMs\` is an idle heartbeat that fires whether or not anyone spoke, and reading it as activity is what made a zero-finding run cost 124k. Counting the whole file instead of the tail defeats this entirely — today's file holds 53 such events, so an unbounded count always looks busy.\n\n1. Grep the log for HARD trouble signals (language-neutral): error/exception lines, guard fires (claimChecker/humanGate/dateVerifier/securityGate flagged or rewrote), "truncated at max_tokens", tool retries/failures, findAvailableSlots rejection breakdowns, approval-escalation misfires, abnormally long threads.\n2. Scan shallowly for SOFT signals that leave no error: a reply that doesn't match what was asked, an attendee/time/detail that silently changed between turns, a confidently-worded answer on a partial result.\n3. DEEP-read (full turns) ONLY the conversations that tripped step 1 or looked off in step 2.\nJudge those on four lenses: (1) was it good, (2) did the person get what they wanted, (3) did it feel human / make sense, (4) did the process work.\nVERY HARD BAR: surface a finding ONLY if it is an OBVIOUS, CLEAR bug, and you MUST cite the exact transcript moment as evidence. If not certain, set clarity:"ambiguous" (owner decides; never auto-fixed). Never invent issues from good chats. Return findings {source:"logs", ref, symptom, evidence:<quoted moment>, clarity}.`,
       { label: 'intake:logs', phase: 'Intake', effort: 'medium', model: 'sonnet', schema: FINDINGS },
     )
   }),
 )
+// Capture the log review's self-report BEFORE the findings are flattened, so the
+// manifest can show whether the watermark actually cut anything.
+const logReport = intake.filter(Boolean).find((r) => r && typeof r.cutoffLine === 'number') || {}
 findings = intake.filter(Boolean).flatMap((r) => (r && r.findings) || [])
 log(`Intake: ${findings.length} raw findings from ${SOURCES.join(' + ')}`)
 
@@ -255,6 +287,7 @@ const triaged = await agent(
       ? `\n**ALREADY FIXED, not yet in the running build.** Production keeps emitting these symptoms until the owner deploys, so the log review honestly re-finds them every night. **DROP any finding that matches one of these — do not emit an issue for it.** Dispatching it costs a full lane turn to be told "already-fixed", which is the entire price of the bug paid again for nothing.\n\n` +
         `**(1) MATCH THE \`ref\` FIRST, and treat these as the SAME ref: \`#147\` = \`gh#147\` = \`147\`.** A GitHub finding's ref is bare (\`#147\`); the ledger stores it prefixed (\`gh#147\`). They are one issue. This exact-match step is the reliable one — do it before you think about the wording at all.\n\n` +
         `**(2) Then the root cause** — a finding whose evidence points into the same file:line as a \`rootCause\` below is the same bug.\n\n` +
+        `**Report every ref you drop in \`droppedAsAlreadyBuilt\`, and return an empty array if you drop none.** Omitting the field is indistinguishable from never running this check, which is how the check silently failed before.\n\n` +
         `**(3) Then the same user-visible failure described differently.** A symptom reads differently every night, and — this is the trap — **you will naturally form your OWN hypothesis about the cause, which will not match the hypothesis in the entry below.** That difference is not evidence of a different bug. Judge by what the PERSON experienced, never by whether your theory matches theirs. On 2026-07-26 both #147 and #148 slipped through this way: triage re-derived a fresh (and reasonable) theory for each, decided they looked new, and each cost a full lane dispatch to be told "already-fixed".\n\n` +
         `Keep one only if it is genuinely a DIFFERENT failure that merely looks similar — and then say in \`whyHypothesis\` what distinguishes it from the entry it resembles, so a lane is not sent to re-fix a fix.\n\n` +
         `**Special case — an entry marked \`state: "awaiting-owner"\`: DROP the finding and do not emit an issue, even if you can see remaining work.** Its fix is built but the owner has not accepted it. Building more on top of a decision he may reverse compounds the problem instead of helping.\n${ALREADY_BUILT.map(describeBuilt).join('\n')}\n`
@@ -263,6 +296,23 @@ const triaged = await agent(
   { label: 'triage', phase: 'Triage', effort: 'low', model: 'sonnet', schema: ATOMIC },
 )
 allIssues = (triaged && triaged.issues) || []
+triageDropped = (triaged && triaged.droppedAsAlreadyBuilt) || []
+}
+
+// A lane name outside the known set means the issue matches no lane in the Build
+// phase and no `context` pass either — it is silently dropped. That happened on
+// 2026-07-25: triage emitted lane `general`, which does not exist. It was
+// harmless only because that issue was flagged for the owner and never
+// dispatched. Route the unknown to `outer` (the catch-all, by definition) and
+// SAY SO, rather than losing the issue to a typo.
+const KNOWN_LANES = new Set([...CODE_LANES, 'context'])
+const misrouted = allIssues.filter((i) => !KNOWN_LANES.has(i.lane))
+if (misrouted.length) {
+  log(`! Triage emitted ${misrouted.length} unknown lane(s): ${misrouted.map((i) => `${i.id}→"${i.lane}"`).join(', ')} — re-routed to outer so they are not silently dropped.`)
+  misrouted.forEach((i) => {
+    i.notes = `[re-routed from unknown lane "${i.lane}"] ${i.notes || ''}`.trim()
+    i.lane = 'outer'
+  })
 }
 
 // Ambiguous findings are shown to the owner, NEVER auto-built.
@@ -324,6 +374,7 @@ if (cited.length) {
   )
   const found = new Map(((loc && loc.located) || []).filter((x) => x && x.id && !x.notFound && x.excerpt).map((x) => [x.id, x]))
   if (found.size) buildable = buildable.map((i) => (found.has(i.id) ? { ...i, _where: found.get(i.id) } : i))
+  locateStats = { cited: cited.length, resolved: found.size }
   log(`Locate: ${found.size}/${cited.length} citation(s) resolved${found.size < cited.length ? ' — the rest the lanes will find themselves' : ''}.`)
 }
 
@@ -474,8 +525,53 @@ if (VERIFY) {
   }
 }
 
+// ---- RUN MANIFEST — what each mechanism ACTUALLY did ---------------------
+// Not decoration. Every silent failure this engine has had was a step that did
+// nothing while the run reported success, and each one survived for weeks
+// because no number was ever printed next to it. The manifest exists so a
+// no-op shows up as a zero in a column where zero is obviously wrong, and
+// `warnings` says so in words for the ones we already know the shape of.
+//
+// Nothing here is an input to any decision — it is purely a record.
+const allDepAsks = verified.filter((r) => hasAsk(r)).length
+const deferredNow = [...deferredDepAsks(verified), ...verifyDepAsks]
+const manifest = {
+  mode: MODE,
+  preset: !!PRESET,
+  logReview: PRESET
+    ? 'skipped (preset issues)'
+    : {
+        watermarkGiven: SINCE,
+        cutoffUtcUsed: logReport.cutoffUtc ?? '(not reported)',
+        startedAtLine: logReport.cutoffLine ?? '(not reported)',
+        turnsAfterCutoff: logReport.turnsAfterCutoff ?? '(not reported)',
+      },
+  alreadyBuilt: { passedIn: ALREADY_BUILT.length, droppedByTriage: triageDropped.length, dropped: triageDropped },
+  locate: PRESET || !locateStats.cited ? 'no citations to resolve' : locateStats,
+  lanesDispatched: [...new Set(verified.map((r) => (buildable.find((i) => i.id === r.id) || {}).lane).filter(Boolean))],
+  misroutedLanes: misrouted.length,
+  dependencyAsks: { attached: allDepAsks, routedAndBuilt: verified.filter((r) => String(r.id).endsWith('>dep')).length, deferredToOwner: deferredNow.length },
+  verify: VERIFY ? { ran: true, overturned: results.filter((r, i) => r.verdict !== verified[i].verdict).length, verifiedCleanReturned: verifiedClean.length } : { ran: false },
+}
+// Known-shape sanity checks. These are the exact failures already paid for.
+const warnings = []
+if (!PRESET && logReport.cutoffLine === 1 && (findings.length || 0) > 0)
+  warnings.push('LOG WATERMARK LOOKS INERT — review started at line 1, so it re-read the whole day. Check the UTC conversion; this cost ~430k on 2026-07-26.')
+if (!PRESET && logReport.cutoffLine === undefined)
+  warnings.push('Log review did not report a cutoff line, so its watermark cannot be verified. Treat any log finding as possibly already-reviewed.')
+if (ALREADY_BUILT.length > 0 && triageDropped.length === 0)
+  warnings.push(`alreadyBuilt passed ${ALREADY_BUILT.length} entries and triage dropped NONE — either genuinely all-new, or ref matching failed again (gh#147 vs #147).`)
+if (verified.some((r) => r.verdict === 'already-fixed'))
+  warnings.push('A lane returned `already-fixed` — a duplicate reached a full dispatch. alreadyBuilt should have caught it earlier and cheaper.')
+if (misrouted.length) warnings.push(`${misrouted.length} issue(s) carried an unknown lane and were re-routed to outer.`)
+if (deferredNow.length) warnings.push(`${deferredNow.length} dependency ask(s) were NOT dispatched and MUST be rendered in the report — an unreported ask is indistinguishable from one that never happened.`)
+log(`Manifest — logCutoff:${manifest.logReview.startedAtLine ?? 'n/a'} alreadyBuilt:${triageDropped.length}/${ALREADY_BUILT.length} depAsks:${allDepAsks} deferred:${deferredNow.length} misrouted:${misrouted.length}`)
+warnings.forEach((w) => log(`! ${w}`))
+
 // ---- return the structured report; the Manager persists it (workflow scripts have no filesystem) ----
 return {
+  manifest,
+  warnings,
   counts: {
     findings: findings.length,
     atomic: allIssues.length,
@@ -497,5 +593,5 @@ return {
   // with a file:line. Dropping them silently is the bug this field exists to
   // close, and an unreported ask is indistinguishable from one that never
   // happened. Route the ones he approves via `args.issues` next run.
-  deferredDepAsks: [...deferredDepAsks(verified), ...verifyDepAsks],
+  deferredDepAsks: deferredNow,
 }

@@ -298,6 +298,7 @@ const done = new Set()
 const remaining = approved.filter((p) => p.lane !== 'context')
 let results = []
 let wave = 0
+let waveCapHit = false
 
 phase('Build')
 while (remaining.length && wave < 6) {
@@ -321,11 +322,26 @@ while (remaining.length && wave < 6) {
     if (i >= 0) remaining.splice(i, 1)
   })
 }
+// Silent truncation reads as "we did everything". If the wave cap stopped us
+// with pieces still queued, that is a fact the owner has to be told, not a
+// number to swallow.
+if (remaining.length) {
+  waveCapHit = true
+  log(`! WAVE CAP: ${remaining.length} approved piece(s) were NEVER DISPATCHED after ${wave} waves — ${remaining.map((p) => p.id).join(', ')}. Re-invoke with just these to finish them.`)
+}
+
+// A dependency ask is real work regardless of what the lane concluded about its
+// OWN piece. Requiring `needs-dependency` discarded every ask attached to a
+// `built` verdict — and "I finished my piece, this adjacent bit is yours" is the
+// common case. Six asks were lost that way in bugger.js on 2026-07-26 before
+// anyone noticed, because their parents said `built`. Same shape, same fix.
+const DISPATCHABLE_DEP = new Set(['built', 'needs-dependency', 'already-fixed'])
+const hasAsk = (r) => r.dependencyAgent && String(r.dependencyAsk || '').trim().length > 0
 
 // context LAST — always, and including anything the code lanes asked it for.
 phase('Context')
 const ctxDeps = results
-  .filter((r) => r.verdict === 'needs-dependency' && r.dependencyAgent === 'context')
+  .filter((r) => hasAsk(r) && r.dependencyAgent === 'context' && DISPATCHABLE_DEP.has(r.verdict))
   .map((r) => ({ id: `${r.id}>dep`, ref: '', lane: 'context', whatChanges: r.dependencyAsk, whyThisLane: 'raised by a code lane', dependsOn: [], size: 'small' }))
 const ctxPieces = approved.filter((p) => p.lane === 'context').concat(ctxDeps)
 if (ctxPieces.length) results = results.concat(await buildLane('context', ctxPieces))
@@ -337,6 +353,20 @@ const satisfied = new Map()
 for (const r of results) {
   if (r.verdict === 'built' && typeof r.id === 'string' && r.id.endsWith('>dep')) satisfied.set(r.id.slice(0, -'>dep'.length), r)
 }
+// Non-context lanes named as a dependency target, dispatched in the same pass.
+const otherDeps = results
+  .filter((r) => hasAsk(r) && r.dependencyAgent !== 'context' && DISPATCHABLE_DEP.has(r.verdict))
+  .map((r) => ({ id: `${r.id}>dep`, ref: '', lane: r.dependencyAgent, whatChanges: r.dependencyAsk, whyThisLane: 'raised by another lane', dependsOn: [], size: 'small' }))
+if (otherDeps.length) {
+  phase('Build')
+  log(`Cross-lane asks: ${otherDeps.length} → ${[...new Set(otherDeps.map((p) => p.lane))].join(', ')}`)
+  const out = await parallel(CODE_LANES.map((lane) => () => {
+    const pcs = otherDeps.filter((p) => p.lane === lane)
+    return pcs.length ? buildLane(lane, pcs) : null
+  }))
+  results = results.concat(out.filter(Boolean).flat())
+}
+
 const resumes = results
   .filter((r) => r.verdict === 'needs-dependency' && satisfied.has(r.id))
   .map((r) => {
@@ -395,8 +425,30 @@ if (built.length && A.verify !== false) {
 // decides what becomes a permanent rule; this only makes sure none is lost.
 const earnedRules = approved.filter((p) => p.charterRule).map((p) => ({ lane: p.lane, rule: p.charterRule, from: p.id }))
 
+// Same reasoning as bugger.js: a step that quietly did nothing must show up as a
+// number that is obviously wrong, not as a successful-looking run.
+const featureManifest = {
+  approved: approved.length,
+  understoodThreaded: approved.filter((p) => p._where).length,
+  wavesRun: wave,
+  neverDispatched: remaining.map((p) => p.id),
+  crossLaneAsks: { attached: results.filter((r) => hasAsk(r)).length, dispatched: results.filter((r) => String(r.id).endsWith('>dep')).length },
+  resumed: resumes.length,
+  earnedRules: earnedRules.length,
+  verify: A.verify === false ? { ran: false } : { ran: !!built.length, overturned: results.filter((r, i) => verified[i] && r.verdict !== verified[i].verdict).length, verifiedCleanReturned: verifiedClean.length },
+}
+const featureWarnings = []
+if (waveCapHit) featureWarnings.push(`WAVE CAP HIT — ${remaining.length} approved piece(s) never dispatched: ${remaining.map((p) => p.id).join(', ')}. They are NOT built.`)
+if (understood.length === 0) featureWarnings.push('`understood` was not passed back from the plan run, so every builder re-derived what its area does today. Pass it next time.')
+if (built.length && A.verify === false) featureWarnings.push('Verify was disabled on a run that built code.')
+if (results.some((r) => r.verdict === 'needs-dependency' && !satisfied.has(r.id)))
+  featureWarnings.push('A piece is still blocked on a dependency that never landed — it is unfinished, not built.')
+featureWarnings.forEach((w) => log(`! ${w}`))
+
 return {
   mode: 'build',
+  manifest: featureManifest,
+  warnings: featureWarnings,
   counts: {
     approved: approved.length,
     built: verified.filter((r) => r.verdict === 'built').length,

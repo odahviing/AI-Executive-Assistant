@@ -160,13 +160,27 @@ If a legacy `sleep`-loop timer from an earlier session is still running, stop it
    **`alreadyBuilt` is what makes unattended multi-day running work.** Derive it from `ledger.jsonl`: every entry whose fix is **not yet in the running build**, passed as `[{ref, symptom, rootCause, state}]`. Production keeps emitting a symptom until the fix is *deployed* — not merely committed — so the log review honestly re-finds it every night. The lane does catch it and return `already-fixed`, but only after a full dispatch: the entire price of the bug, paid again, for no result. Three nights away is three times. Passing refs rather than prose turns the match from a guess into a lookup.
 
    **`priorClean` closes a loop that is otherwise write-only.** The verify returns `verifiedClean` — what it PROVED and would not spend budget on again. Persist it in `state.json` and pass it straight back on the next run, and the next pass is told not to re-audit settled ground. Without this every verify starts from zero: on 2026-07-26 five passes each re-read the same core files because nothing carried their conclusions forward. **Do not let this list rot.** Drop an entry the moment a wave changes the code it describes — a stale "proven clean" silences a real check, which is strictly worse than having no list. When in doubt, drop it; re-proving something costs one pass, missing a regression costs a person.
-3. **On completion** take the returned `{counts, results, flagged, pending}` and:
+3. **FIRST, print the `manifest` and every `warnings` line — before the issue table, every single run.** This is not optional and not decoration.
+
+   Every silent failure this engine has had was a step that **did nothing while the run reported success**, and each survived for weeks because no number was ever printed beside it: the log watermark never filtered (a timezone slip — cost ~430k on 2026-07-26), the activity exit never fired, the `Agent` label never matched, dependency asks vanished into a `built` verdict, `alreadyBuilt` never matched `gh#147` against `#147`. Six instances of one class.
+
+   The manifest is the antidote: it makes a no-op show up as a zero where zero is obviously wrong. Read it as an operator, not a reader — **these are the tells:**
+   - `logReview.startedAtLine: 1` with findings present → the watermark is inert again; the whole day was re-reviewed.
+   - `alreadyBuilt.passedIn` high with `droppedByTriage: 0` → ref matching failed again.
+   - any `already-fixed` verdict → a duplicate reached a **full dispatch**; `alreadyBuilt` should have caught it cheaper.
+   - `dependencyAsks.attached` > `routedAndBuilt + deferredToOwner` → asks are being lost again.
+   - `misroutedLanes` > 0 → triage emitted a lane that does not exist.
+   - `verify.ran: false` on a run that built something → the safety net was skipped.
+
+   **A warning you do not surface is a bug the owner pays for twice.** Tell him plainly, in the same message as the table.
+
+4. **Then** take the returned `{counts, results, flagged, pending}` and:
    - **Rewrite `report.md`** — append to what's already there since the last wrap (cumulative). Run the agents' reappearance-check philosophy: don't duplicate rows for issues already built-and-listed.
    - **Render `deferredDepAsks` as its own section — this is not optional.** Each entry is a lane naming specific work in *another* lane's files, usually with a `file:line`, that the engine deliberately did not dispatch because its parent verdict is waiting on the owner. On 2026-07-26 four such asks were dropped by an engine bug and looked like success, because their parent issues said `built` — including the verify's own prescription for the harm it had just proved. **An unreported ask is indistinguishable from one that never happened.** Show each with its `from` id, `fromVerdict`, target lane and the ask itself, so he can route the ones he wants via `args.issues`.
    - **Update `state.json`** — advance `lastSeenIso`, store `pendingOverflow: pending`, merge the returned `verifiedClean` into `state.verifiedClean` (dropping any entry this wave's diff invalidates), set `lastRun.status:'complete'`.
-   - **Label handled GitHub issues** `Agent` (`gh issue edit <n> --add-label Agent`) — **best-effort visibility only, NOT the dedupe mechanism.** The `Agent` label **does not exist in this repo** (checked 2026-07-26: 13 labels, none of them `Agent`), so this command has failed on every run since 4.1.0 and the intake's "skip anything labelled Agent" has never matched a single issue. **Do not treat the failure as a problem, and never rely on the label to prevent re-work.** The real mechanism is the ledger: write a `gh#<n>` **`ref`** for every issue you build, and `alreadyBuilt` drops it next run. That works for log findings too, needs no repo state, and cannot silently stop working. Creating the label is a one-line owner decision worth having only for at-a-glance visibility in GitHub — it changes nothing functionally.
-   - **Show the owner** the issue table + counts + how long it took, and whether to re-run before 21:00 (if `pending > 0` or time is tight — GitHub bugs can run again any time; the log sweep is the 18:00 one).
-4. **Never commit.** Leave built changes uncommitted for the owner's review.
+   - **Do NOT label GitHub issues.** The owner declined it (2026-07-26) and the `Agent` label does not exist in the repo anyway — 13 labels, none of them `Agent` — so `gh issue edit --add-label Agent` has failed on every run since 4.1.0 and the intake's "skip anything labelled Agent" has never matched anything. **The ledger is the mechanism:** write a `gh#<n>` `ref` for every issue you build, and `alreadyBuilt` drops it next run. Issues are **closed at wrap**, which is stronger than any label — a closed issue leaves `--state open` and can never be re-pulled.
+   - **Show the owner** the manifest and warnings first, then the issue table + counts + how long it took, and whether to re-run before 21:00 (if `pending > 0` or time is tight — GitHub bugs can run again any time; the log sweep is the 18:00 one).
+5. **Never commit.** Leave built changes uncommitted for the owner's review.
 
 ## The report / issue table (show this prominently)
 
