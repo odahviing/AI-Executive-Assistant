@@ -100,7 +100,12 @@ if (openOnly) {
   // Six such rows sat in the open list on 2026-07-26 under `flagged-for-owner`,
   // inflating a 25-item backlog to 31 and burying the real decisions. A verdict
   // that means "this happened" must never appear in a list that means "act".
-  const CLOSED = new Set(['built', 'already-fixed', 'audit']);
+  // `declined` closes a row as firmly as `built` does. On 2026-07-26 the owner
+  // declined 24 items and the decline was recorded as PROSE in report.md — "not
+  // to be re-raised" — in a file nothing parses. So --open kept surfacing them
+  // and would have re-raised every one tomorrow, which is precisely what that
+  // sentence was trying to prevent. A decision is only durable once it is a row.
+  const CLOSED = new Set(['built', 'already-fixed', 'audit', 'declined']);
 
   // ── COLLAPSE BY REF ────────────────────────────────────────────────────────
   // The ledger is APPEND-ONLY, so one item legitimately has several rows: parked
