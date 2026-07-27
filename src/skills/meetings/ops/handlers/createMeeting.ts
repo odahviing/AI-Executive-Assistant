@@ -13,12 +13,12 @@ import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, openQuestionsFi
 import { humanizeViolationLabel } from '../../ops/violationLabels';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
-  getCalendarEvents,
+  getOwnerEventsForDecision,
   getEventEndInstant,
   findDuplicateEvent,
   findReschedulableSibling,
   type CalendarEvent,
-  getFreeBusy,
+  getFreeBusyForDecision,
   findAvailableSlots,
   createMeeting,
   deleteMeeting,
@@ -396,7 +396,15 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     .filter(e => e && e !== ownerEmailLower),
                 );
                 if (requestedAttendees.size > 0) {
-                  const weekEvents = await getCalendarEvents(userEmail, weekStart, weekEnd, timezone);
+                  // v4.2.2 — a DECISION read (ReadFreshness): its answer is
+                  // "refuse this booking" or "create it", so it must not come from
+                  // the cross-turn warm copy. Cached, it could miss an occurrence
+                  // added in the last few minutes and wave the duplicate through —
+                  // the exact booking this guard exists to stop. A
+                  // CalendarOfflineError lands in the catch below (this guard is a
+                  // heuristic, never the gate) and Guard B's own read refuses the
+                  // booking a few lines down, so nothing books blind.
+                  const weekEvents = await getOwnerEventsForDecision(userEmail, weekStart, weekEnd, timezone);
                   const match = weekEvents.find(ev => {
                     if (ev.isCancelled) return false;
                     // Skip the exact same start — covered by the early idempotency probe above.
@@ -656,7 +664,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // free/busy and refuse (with a did_you_mean) on any the directory can't
         // resolve, so Sonnet corrects the address instead of booking a ghost.
         // (External addresses skipped — Graph never has their data; the room
-        // mailbox is excluded. getFreeBusy is cached, so planMeeting reuses it.)
+        // mailbox is excluded. Per-turn memoized, so planMeeting's pre-book check
+        // shares this same getSchedule POST rather than firing a second one.)
         try {
           const ownerDomainLower = userEmail.includes('@') ? userEmail.split('@')[1].toLowerCase() : '';
           const roomLower = (roomEmail ?? '').toLowerCase();
@@ -665,7 +674,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             .filter(e => e && ownerDomainLower && e.endsWith('@' + ownerDomainLower) && e !== roomLower);
           if (internalAttendeeEmails.length > 0) {
             const fbDiag: { unresolved?: string[] } = {};
-            await getFreeBusy(userEmail, internalAttendeeEmails, args.start as string, args.end as string, timezone, false, fbDiag);
+            await getFreeBusyForDecision(userEmail, internalAttendeeEmails, args.start as string, args.end as string, timezone, fbDiag);
             const unresolvedInternal = (fbDiag.unresolved ?? []).filter(e => e.endsWith('@' + ownerDomainLower));
             if (unresolvedInternal.length > 0) {
               const entries = enrichUnresolvedInternal(unresolvedInternal, ownerDomainLower);
@@ -963,9 +972,19 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               const rs = reqStartIso ? DateTime.fromISO(reqStartIso, { zone: tzc, setZone: true }).setZone(tzc) : DateTime.invalid('no start');
               const re = reqEndIso ? DateTime.fromISO(reqEndIso, { zone: tzc, setZone: true }).setZone(tzc) : DateTime.invalid('no end');
               if (rs.isValid && re.isValid) {
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { getCalendarEvents } = require('../../../../connectors/graph/calendar') as typeof import('../../../../connectors/graph/calendar');
-                const dayEvents = await getCalendarEvents(
+                // v4.2.2 — this block has the LAST WORD on where the meeting
+                // lands, and it used to read `'cached'`. planMeeting validated the
+                // REQUESTED time live (:818); this then re-decides the start from
+                // its own copy of the day, and a warm copy up to
+                // CALENDAR_CACHE_TTL_SECONDS old is enough to double-book: ask
+                // "what's on Thursday" earlier in the thread, accept a 13:30 invite
+                // in Outlook, then say "book Simon 14:00" — planMeeting's live read
+                // clears 14:00 while the stale copy sees 13:30 free and pulls the
+                // meeting on top of it. One array feeds both
+                // `earlierConnectiveStart` and the `checkSlot` that blesses its
+                // candidate, so stale data is self-consistently wrong: nothing
+                // downstream can catch it. A decision read is 'live' (ReadFreshness).
+                const dayEvents = await getOwnerEventsForDecision(
                   context.profile.user.email,
                   rs.startOf('day').toFormat("yyyy-MM-dd'T'00:00:00"),
                   rs.endOf('day').toFormat("yyyy-MM-dd'T'23:59:59"),

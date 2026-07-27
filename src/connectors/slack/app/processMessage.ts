@@ -75,8 +75,25 @@ async function reattachRecentThreadImage(
 export async function processMessage(ctx: SlackAppContext, params: ProcessMessageParams): Promise<void> {
   const { app, profile, colleagueTestThreads, getSenderRole } = ctx;
   const { assistant, user } = profile;
-    const { senderId, text, channelId, ts, threadTs, say, client, isChannel, isMpim, isExplicitMention, voiceInput, mpimMemberIds, images, imageUrls } = params;
+    const { senderId, text, framing, channelId, ts, threadTs, say, client, isChannel, isMpim, isExplicitMention, voiceInput, mpimMemberIds, images, imageUrls } = params;
     const rawRole = getSenderRole(senderId);
+
+    // The MODEL-facing string for this turn, composed exactly once: the framing
+    // the handler declared (group-DM preamble, thread roster, thread-action
+    // directive, attached-file blocks) wrapped around the person's own words.
+    // From here down the choice between the two is by AUDIENCE, never by
+    // convenience — the model, history and the inbound queue's merge read
+    // `framedText`; everything a PERSON reads (log/audit previews, the briefing
+    // event, the addressee gate's subject, the owner's shadow mirror) reads
+    // `text`. GH #150 was the one place that had only the fused string.
+    //
+    // What we deliberately do NOT add to either: a `<<FROM …>>` / `[From: …]`
+    // sender wrapper. Every such marker we tried either collided with the
+    // injection scanner's owner_spoof regex or got flagged by the Haiku coord
+    // judge as a paste mimicking system syntax — we manufactured our own false
+    // positives. The orchestrator learns who is speaking from `senderName` plus
+    // the authorization line in the system prompt.
+    const framedText = `${framing?.prefix ?? ''}${text}${framing?.suffix ?? ''}`;
 
     // v3.3.x — a delivered inbound proves the socket is alive RIGHT NOW. Stamp
     // the recovery watermark here (the shared entry for DM/MPIM/mention). The
@@ -184,7 +201,9 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
       // Step 2: Check if this is a reply to an active outreach job
       try {
         const outreachHandled = await handleOutreachReply(app, {
-          senderId, text, profile,
+          // framedText, so the reply matcher's input is byte-identical to what it
+          // read before the framing split — requests owns what this reads.
+          senderId, text: framedText, profile,
           bot_token: assistant.slack.bot_token,
         });
         if (outreachHandled) {
@@ -282,9 +301,9 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
     }
     const persistedText = images && images.length > 0
       ? (imageUrls && imageUrls.length > 0
-          ? `[Image${imageDescPart} — file_urls: ${imageUrls.join(' ')}] ${text}`
-          : `[Image${imageDescPart}] ${text}`)
-      : text;
+          ? `[Image${imageDescPart} — file_urls: ${imageUrls.join(' ')}] ${framedText}`
+          : `[Image${imageDescPart}] ${framedText}`)
+      : framedText;
     appendToConversation(threadTs, channelId, { role: 'user', content: persistedText, ts });
 
     // ── Load actual Slack thread replies and merge with DB history ──────────
@@ -354,14 +373,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
     try {
 
       // For colleagues, resolve their real name so the orchestrator can pass it
-      // into the system prompt as `senderName`. We deliberately do NOT prepend
-      // any `<<FROM ...>>` or `[From: ...]` wrapper to the raw text — every such
-      // marker we've tried either collides with the injection scanner's
-      // owner_spoof regex or gets flagged by the Haiku coord judge as
-      // "suspicious paste mimicking system syntax" (we create our own false
-      // positives). The orchestrator already knows who's speaking via
-      // `senderName` + the authorization line in the system prompt.
-      const userMessage = text;
+      // into the system prompt as `senderName`.
       let colleagueName: string | undefined;
       if (role === 'colleague' && !isOwnerInGroup && !isOwnerInChannel) {
         try {
@@ -413,16 +425,16 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               )).filter(Boolean);
             } catch { /* best-effort */ }
           }
-          // v1.8.8 — strip the "<<GROUP DM — participants: ... >>" preamble
-          // that app.ts prepends for MPIM context. The preamble bloats the
-          // fast-path window (pushes "Maelle" past text.slice(0, 40)) and
-          // confuses the Sonnet classifier (it reads "participants: Swan,
-          // Dina" and votes HUMAN even when the actual message starts with
-          // "Maelle, ..."). The gate should judge the owner/colleague
-          // message itself, not Maelle's own framing.
-          const textForGate = text.replace(/^<<[\s\S]*?>>\n+/, '');
+          // The gate judges the PERSON's message, never Maelle's own framing.
+          // v1.8.8 it had to un-fuse the "<<GROUP DM — participants: … >>"
+          // preamble with a regex: the preamble pushed "Maelle" past the
+          // classifier's text.slice(0, 40) fast-path window and made it read
+          // "participants: Swan, Dina" and vote HUMAN on a message that opened
+          // with "Maelle, ...". Framing now arrives declared, so `text` already
+          // IS the person's words — which also covers the roster,
+          // thread-action and attached-file framing that regex never matched.
           const verdict = await classifyAddressee({
-            text: textForGate,
+            text,
             botUserId: botId,
             assistantName: assistant.name,
             ownerFirstName: profile.user.name.split(' ')[0],
@@ -493,9 +505,9 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
       // Cheap regex pre-filter inside isBriefRequest gates the LLM call.
       if (role === 'owner' && !isChannel && !isMpim && !images?.length) {
         try {
-          if (await isBriefRequest(userMessage)) {
+          if (await isBriefRequest(text)) {
             logger.info('Brief request detected — short-circuiting to sendMorningBriefing', {
-              senderId, channelId, preview: userMessage.slice(0, 80),
+              senderId, channelId, preview: text.slice(0, 80),
             });
             await sendMorningBriefing(app, profile, channelId, true, threadTs);
             return;
@@ -527,7 +539,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
         // channelId only. MPIMs / channels keep threadTs-scoping because
         // they have genuine parallel conversations.
         isOneOnOneDm: !isChannel && !isMpim,
-        text: userMessage,
+        text: framedText,
         senderName: colleagueName,
         meta: {},
         runner: async ({ mergedText, signal, markWrite }) => {
@@ -634,7 +646,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               }
             }
 
-            logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== userMessage, hasPriorOutboundContext: !!priorOutboundContext });
+            logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== framedText, hasPriorOutboundContext: !!priorOutboundContext });
             const result = await runOrchestrator({
               userMessage: mergedText,
               conversationHistory: history,
@@ -678,7 +690,9 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               // reaction).
               userMessageTs: ts,
               history,
-              userMessage,
+              // The person's own words — NOT framedText. Step 4.6 mirrors this
+              // string to the owner as `X said: "…"` (GH #150).
+              userMessage: text,
               isMpim,
               isChannel,
               isOwnerInGroup,

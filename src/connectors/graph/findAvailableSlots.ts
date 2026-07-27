@@ -4,7 +4,7 @@ import type { UserProfile } from '../../config/userProfile';
 import { slotDayMinutes } from '../../utils/workHours';
 import { scoreSlotDensity, densityConfigFromProfile, prefersDensePacking } from '../../utils/calendarDensity';
 import type { MeetingMode, CalendarEvent } from './calendarTypes';
-import { getFreeBusy, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped } from './calendarReads';
+import { getFreeBusyForDecision, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped } from './calendarReads';
 
 /**
  * ONE offered-slot shape. Was written out inline three times (the return type,
@@ -266,7 +266,7 @@ export async function findAvailableSlots(params: {
     // infrastructure.
     let busyMap: Record<string, import('./calendarTypes').FreeBusySlot[]>;
     try {
-      busyMap = await getFreeBusy(params.userEmail, busyFilterEmails, windowFrom, windowTo, params.timezone, false, fbDiag);
+      busyMap = await getFreeBusyForDecision(params.userEmail, busyFilterEmails, windowFrom, windowTo, params.timezone, fbDiag);
     } catch (err) {
       if (!isOutageShaped(err)) throw err;
       logger.error('findAvailableSlots — owner free/busy read failed; treating the calendar as OFFLINE', {

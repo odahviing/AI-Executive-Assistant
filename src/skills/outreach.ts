@@ -29,6 +29,7 @@ import {
 import { getLinkedRequestIdForOutreach } from '../db/jobs';
 import { reactActivityComplete } from '../utils/threadActivity';
 import { updateRequest, getOpenRequestsForColleague } from '../db/requests';
+import { toTimerInstant } from '../core/requests/types';
 import { calcResponseDeadline } from '../utils/responseDeadline';
 import { getConnection } from '../connections/registry';
 import logger from '../utils/logger';
@@ -179,8 +180,24 @@ Only send messages the user explicitly asks for — never reach out to people on
         }
         const colleagueSlackId = idResolution.slack_id;
 
-        const sendAt = args.send_at as string | undefined;
-        const isFuture = sendAt ? new Date(sendAt) > new Date() : false;
+        // #149 — send_at becomes the paired request's next_check_at (db/jobs.ts →
+        // runSendScheduledOutreach), and spine timers are UTC instants. The model
+        // writes a bare owner-local clock, which BOTH readers got wrong:
+        // `new Date(bare)` parses in the PROCESS zone, and the sweep compares
+        // against SQLite's UTC `now` — so a scheduled DM went out one owner-offset
+        // late. Anchor once, here, where the owner's zone is known.
+        const sendAtRaw = args.send_at as string | undefined;
+        const sendAt = sendAtRaw
+          ? (toTimerInstant(sendAtRaw, context.profile.user.timezone) ?? undefined)
+          : undefined;
+        if (sendAtRaw && !sendAt) {
+          return {
+            ok: false,
+            error: 'bad_send_at',
+            message: `send_at "${sendAtRaw}" isn't a parseable ISO 8601 datetime. Pass an owner-local wall-clock ("2026-07-28T09:00:00") or an explicit offset.`,
+          };
+        }
+        const isFuture = sendAt ? Date.parse(sendAt) > Date.now() : false;
 
         const colleagueTzForDeadline = (args.colleague_tz as string | undefined) ?? context.profile.user.timezone;
         const deadline = args.await_reply && !isFuture
@@ -216,7 +233,12 @@ Only send messages the user explicitly asks for — never reach out to people on
           status: isFuture ? 'pending_scheduled' : 'sent',
           sent_at: isFuture ? undefined : new Date().toISOString(),
           reply_deadline: deadline,
-          scheduled_at: sendAt,
+          // Only a DEFERRED send is "scheduled". Every other field here already
+          // forks on isFuture; this one didn't, so a send_at already in the past
+          // sent the DM immediately AND still armed send_scheduled_outreach at that
+          // past instant — the sweep then sent it a SECOND time, and the row sat in
+          // phase 'outreach:scheduled' forever (R4: never twice).
+          scheduled_at: isFuture ? sendAt : undefined,
           intent,
           context_json: contextPayload,
           proposed_slots: proposedSlotsJson,

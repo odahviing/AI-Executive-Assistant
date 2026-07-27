@@ -242,37 +242,73 @@ export function pickSpreadSlots(
   return chosen;
 }
 
+/**
+ * How fresh a calendar read has to be. THREE states, because the old boolean
+ * could not express the one that matters: a read whose answer becomes a
+ * COMMITMENT must never be served from the cross-turn warm copy, yet it must
+ * still dedupe inside a single turn.
+ *
+ *   'cached' — a warm cross-turn copy (≤ CALENDAR_CACHE_TTL_SECONDS) is fine.
+ *              Reading the calendar OUT: get_calendar, analyze_calendar, brief,
+ *              news, the turn context, narration. Nothing is decided from it.
+ *   'live'   — never the cross-turn copy. Per-turn memo, then Graph. EVERY read
+ *              a scheduling decision rests on — reached through
+ *              `getOwnerEventsForDecision` / `getFreeBusyForDecision`, never by
+ *              a call site remembering a flag. A proposal is a commitment:
+ *              offering a slot that was taken three minutes ago is the failure
+ *              this state exists to remove, and no tool wording can substitute.
+ *   'force'  — neither cache. "Go and look" (get_calendar's force_refresh), and
+ *              the one internal retry that must escape a memoized rejection.
+ */
+export type ReadFreshness = 'cached' | 'live' | 'force';
+
 export async function getCalendarEvents(
   userEmail: string,
   startDate: string,
   endDate: string,
   timezone: string = 'UTC',
-  // v3.2.x (#121) — force a fresh Graph read, bypassing both caches. Set when
-  // the user explicitly asks Maelle to LOOK at the calendar (see the tool
-  // descriptions). "If she's sent to the calendar, she goes to the calendar."
-  forceRefresh: boolean = false,
+  freshness: ReadFreshness = 'cached',
 ): Promise<CalendarEvent[]> {
-  const cacheKey = `getCalendarEvents|${userEmail}|${startDate}|${endDate}|${timezone}`;
+  // Key on the window Graph is ACTUALLY asked for, not on the strings the caller
+  // happened to write. calendarView is always queried as whole local days, so
+  // '2026-07-28', '2026-07-28T10:00:00' and '2026-07-28T23:59:00.000+03:00' are
+  // ONE query — and used to be three cache entries. That was not merely waste, it
+  // broke invalidation in both directions: get_calendar's forced refresh
+  // repopulated its own spelling while the slot finder went on reading a
+  // different entry (logs/maelle-2026-07-27.log:553 fetched 12 events for exactly
+  // the window :488 had fetched 11 from; the finder's next pass at :559 still
+  // answered from the 11-event copy, a byte-identical rejection breakdown), and
+  // one day could hold several disagreeing copies at once. One window, one entry.
+  // The normalization has to happen HERE rather than inside the impl: the key and
+  // the query must be derived from the same pair.
+  const cleanStart = toStartOfDayLocal(startDate, timezone);
+  const cleanEnd = toEndOfDayLocal(endDate, timezone);
+  const cacheKey = `getCalendarEvents|${userEmail}|${cleanStart}|${cleanEnd}|${timezone}`;
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const cache = require('./calendarCache') as typeof import('./calendarCache');
 
   // v3.2.x (#121) — cross-turn cache (default 300s TTL, write-invalidated).
-  // Force → straight to Graph, then repopulate so the warm copy is fresh.
-  if (forceRefresh) {
-    const data = await getCalendarEventsImpl(userEmail, startDate, endDate, timezone);
+  // 'force' → straight to Graph, then repopulate so the warm copy is fresh.
+  if (freshness === 'force') {
+    const data = await getCalendarEventsImpl(userEmail, cleanStart, cleanEnd, timezone);
     cache.setCachedEvents(cacheKey, data);
     return data;
   }
-  const cached = cache.getCachedEvents<CalendarEvent[]>(cacheKey);
-  if (cached) return cached;
+  if (freshness === 'cached') {
+    const cached = cache.getCachedEvents<CalendarEvent[]>(cacheKey);
+    if (cached) return cached;
+  }
 
-  // v2.4.3 (A3) — per-turn memoization wraps the cross-turn miss: concurrent
-  // callers within one turn share a single in-flight fetch. Outside a turn
-  // (background tasks) memoize bypasses and just fetches.
+  // v2.4.3 (A3) — per-turn memoization: concurrent or repeat callers within ONE
+  // turn share a single in-flight fetch. This is the only layer a 'live' read may
+  // use, and it is the scope where "the calendar isn't moving under her" is
+  // actually true. It also repopulates the cross-turn copy, so the readers that
+  // ARE allowed a warm one get the fresher data. Outside a turn (background
+  // tasks) memoize bypasses and just fetches.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { memoize } = require('../../utils/turnCache') as typeof import('../../utils/turnCache');
   return memoize(cacheKey, async () => {
-    const data = await getCalendarEventsImpl(userEmail, startDate, endDate, timezone);
+    const data = await getCalendarEventsImpl(userEmail, cleanStart, cleanEnd, timezone);
     cache.setCachedEvents(cacheKey, data);
     return data;
   });
@@ -362,9 +398,21 @@ export function isOutageShaped(err: unknown): boolean {
 }
 
 /**
- * THE owner-event read behind every scheduling decision. Three callers, all of
- * them feeding checkSlot: the slot walker's per-candidate rule pass, planMeeting's
- * pre-book check, and check_join_availability's "can he make it" verdict.
+ * THE owner-event read behind every scheduling decision — the slot walker's
+ * per-candidate rule pass, planMeeting's pre-book check,
+ * check_join_availability's "can he make it" verdict, the calendar-health scan
+ * and the floating-block ops. All of them feed checkSlot.
+ *
+ * ALWAYS 'live' (see ReadFreshness), and that is the whole reason this is a
+ * function rather than a flag: "this read backs a commitment" is a property of
+ * the read, not something five call sites have to remember. Pre-fix it took
+ * getCalendarEvents' default, so every proposal and every pre-book validation
+ * could be answered from a copy up to CALENDAR_CACHE_TTL_SECONDS old — a slot
+ * taken three minutes earlier was still offered, "can you check again?" could not
+ * check anything (the finder re-ran across three turns and re-served the
+ * identical stale answer — logs/maelle-2026-07-27.log:512 vs :559), and not even
+ * a forced get_calendar could reach it. The per-turn memo still dedupes repeat
+ * reads inside one turn, so this costs at most one Graph round-trip per turn.
  *
  * One retry, one place. `createMeeting`'s Guard B already learned (#137) that a
  * transient Graph fault must not masquerade as a rule violation; the inverse —
@@ -372,13 +420,12 @@ export function isOutageShaped(err: unknown): boolean {
  * scheduling call sites caught, logged and returned `[]`. Now a blip gets exactly
  * one fresh retry and a real outage throws.
  *
- * The retry passes `forceRefresh` deliberately: the per-turn memo caches the
- * REJECTED promise under the plain key (turnCache.memoize stores the promise,
- * not the value), so a second plain call inside one turn would hand back the
- * same failure without ever touching Graph — a retry that cannot retry. The
- * forced path skips both caches and repopulates the warm copy on success, so
- * every later read in the turn sees the recovered data instead of the poisoned
- * memo entry.
+ * The retry passes 'force' deliberately: the per-turn memo caches the REJECTED
+ * promise under the plain key (turnCache.memoize stores the promise, not the
+ * value), so a second 'live' call inside one turn would hand back the same
+ * failure without ever touching Graph — a retry that cannot retry. The forced
+ * path skips both caches and repopulates the warm copy on success, so every later
+ * read in the turn sees the recovered data instead of the poisoned memo entry.
  *
  * Both the retry AND the offline verdict are gated on `isOutageShaped`: a
  * deterministic fault (403 consent, 404 wrong mailbox, 400 bad window, our own
@@ -392,7 +439,7 @@ export async function getOwnerEventsForDecision(
   timezone: string,
 ): Promise<CalendarEvent[]> {
   try {
-    return await getCalendarEvents(userEmail, startDate, endDate, timezone);
+    return await getCalendarEvents(userEmail, startDate, endDate, timezone, 'live');
   } catch (firstErr) {
     if (!isOutageShaped(firstErr)) {
       logger.error('owner-calendar read failed with a NON-outage fault — surfacing it as-is, no retry', {
@@ -404,7 +451,7 @@ export async function getOwnerEventsForDecision(
       userEmail, startDate, endDate, err: String(firstErr).slice(0, 200),
     });
     try {
-      return await getCalendarEvents(userEmail, startDate, endDate, timezone, true);
+      return await getCalendarEvents(userEmail, startDate, endDate, timezone, 'force');
     } catch (secondErr) {
       if (!isOutageShaped(secondErr)) {
         logger.error('owner-calendar retry failed with a NON-outage fault — surfacing it as-is', {
@@ -507,18 +554,16 @@ export async function findReschedulableSibling(params: {
   return matches[0];
 }
 
+// `cleanStart` / `cleanEnd` are already the normalized full-day window (see
+// getCalendarEvents — the key and the query come from the same pair, so they can
+// never describe different windows).
 async function getCalendarEventsImpl(
   userEmail: string,
-  startDate: string,
-  endDate: string,
+  cleanStart: string,
+  cleanEnd: string,
   timezone: string,
 ): Promise<CalendarEvent[]> {
   const client = getClient();
-
-  // Normalise dates: strip Z/ms suffix so Graph uses the mailbox timezone
-  // Also ensure we always query the FULL day — never start mid-day
-  const cleanStart = toStartOfDayLocal(startDate, timezone);
-  const cleanEnd   = toEndOfDayLocal(endDate, timezone);
 
   logger.info('Querying calendar', { userEmail, start: cleanStart, end: cleanEnd });
 
@@ -571,7 +616,7 @@ async function getCalendarEventsImpl(
     }
     return events;
   } catch (err) {
-    logger.error('Failed to fetch calendar events', { err, userEmail, startDate, endDate });
+    logger.error('Failed to fetch calendar events', { err, userEmail, start: cleanStart, end: cleanEnd });
     throw err;
   }
 }
@@ -583,13 +628,50 @@ export class GraphPermissionError extends Error {
   }
 }
 
+/**
+ * The ONE wording for "nobody's availability was read in this window" — shared by
+ * getFreeBusy's pre-flight branches and Graph's own window rejection inside
+ * getFreeBusyImpl, so two routes to the same outcome can never describe it
+ * differently. Returns the address list the caller must report as unchecked.
+ */
+function logNothingChecked(
+  why: string, startDate: string, endDate: string, emails: string[],
+): string[] {
+  logger.warn(`getFreeBusy — ${why}; NO availability was read for anyone in this window`, {
+    startDate, endDate, emails,
+  });
+  return emails.map(e => e.toLowerCase());
+}
+
+/**
+ * One free/busy answer, whole: the busy blocks per address, the addresses Graph
+ * could not RESOLVE, and the addresses nobody was able to ASK about. The three
+ * travel together because they are one answer — a caller handed `{}` without
+ * knowing which of the three it is reads it as "everyone is free", which is P15's
+ * entire lesson. Keeping them in one cache entry also means the `unresolved` list
+ * can no longer be evicted independently of the data it describes.
+ */
+type FbRead = {
+  result: Record<string, FreeBusySlot[]>;
+  unresolved: string[];
+  notChecked: string[];
+};
+
+/**
+ * Graph's own getSchedule ceiling (62 days), stated ONCE and in ONE unit —
+ * absolute minutes, the same unit the window is measured in. Two spellings of the
+ * same limit is what the DST fixed point was: the test counted absolute minutes
+ * and the clamp counted calendar days.
+ */
+const MAX_FREEBUSY_WINDOW_MINUTES = 62 * 24 * 60;
+
 export async function getFreeBusy(
   callerEmail: string,
   emails: string[],
   startDate: string,
   endDate: string,
   timezone: string,
-  forceRefresh: boolean = false,
+  freshness: ReadFreshness = 'cached',
   // v3.3.7 (#124h) — optional by-reference diagnostics.
   //
   // `unresolved` — addresses Graph ANSWERED about and could not resolve to a
@@ -629,12 +711,21 @@ export async function getFreeBusy(
   //     `diagnostics.notChecked`, so a caller can say "I could not check" instead
   //     of "they are free".
   const parsedStart = DateTime.fromISO(startDate, { zone: timezone });
-  const parsedEnd = DateTime.fromISO(endDate, { zone: timezone });
+  let parsedEnd = DateTime.fromISO(endDate, { zone: timezone });
+  // The end that is actually QUERIED. Two pre-flight repairs move it in place — the
+  // whole-day widening below and the 62-day clamp further down — and everything
+  // downstream reads this one variable: the cache key, the log lines and the POST.
+  // The window we decided on and the window Graph is asked about cannot drift.
+  let queryEnd = endDate;
+  // The pre-flight branches below answer directly, so they write `diagnostics`
+  // themselves. Graph's own window rejection cannot: it happens inside the
+  // MEMOIZED fetch, where a side-effect write would leave a second caller in the
+  // same turn holding `{}` with no notChecked list — i.e. reading it as "everyone
+  // is free", the exact P15 failure. That one returns the list instead, and the
+  // single exit at the bottom applies it.
   const nothingChecked = (why: string): Record<string, FreeBusySlot[]> => {
-    if (diagnostics) diagnostics.notChecked = emails.map(e => e.toLowerCase());
-    logger.warn(`getFreeBusy — ${why}; NO availability was read for anyone in this window`, {
-      startDate, endDate, emails,
-    });
+    const notChecked = logNothingChecked(why, startDate, queryEnd, emails);
+    if (diagnostics) diagnostics.notChecked = notChecked;
     return {};
   };
   if (!parsedStart.isValid || !parsedEnd.isValid) {
@@ -651,23 +742,36 @@ export async function getFreeBusy(
   // off-by-a-day silently truncated every multi-day date-only range ('07-30' →
   // '07-31' read the 30th only).
   //
+  // V3b (v4.2.2) — the same whole-day question has a SECOND spelling, and V3's
+  // regex only recognized the first. `'2026-07-30T00:00:00'` for both start and end
+  // is what "a date range in ISO 8601" invites a model to write: it failed the
+  // date-only test, fell to the instant branch, and asked Graph about 00:00–01:00,
+  // so a day booked solid 09:00–18:00 came back FREE with `notChecked` empty — V3's
+  // own failure reached by a different route. So the recognizer is on the INSTANT
+  // now, not on the spelling: start === end AND that instant is midnight IN THE
+  // CALLER'S ZONE (`timezone`, never the server's — M13) is a whole day however it
+  // was typed. A REAL instant carries a time and is not midnight
+  // (availabilityPreCheck normalizing "יש משהו אחרי 17:00?" to one moment is
+  // untouched, still the instant branch); '…T00:00:00Z' is 03:00 in Jerusalem, a
+  // genuine instant there, and keeps that reading.
+  //
   // WIDENED, not refused. A whole-day question wearing an instant's shape needs
   // answering (P15's own reasoning) and this one can be answered exactly: the
   // window IS that day, so nothing is invented, and `notChecked`'s claim — "the
-  // window could not be queried" — would simply be false. The recursion re-enters
-  // with a time-bearing end, so it happens exactly once; a REAL instant
-  // (availabilityPreCheck normalizing "יש משהו אחרי 17:00?" to one moment) carries
-  // a time and still takes the instant branch; an inverted date-only pair still
-  // lands on `nothingChecked` below. Tested on the ISO date shape — a structured
-  // string, never prose.
-  if (/^\d{4}-\d{2}-\d{2}$/.test(endDate.trim())) {
-    return getFreeBusy(
-      callerEmail, emails, startDate,
-      parsedEnd.endOf('day').toISO()!,
-      timezone, forceRefresh, diagnostics,
-    );
+  // window could not be queried" — would simply be false. Widened IN PLACE, not by
+  // re-entry: nothing above this line depends on the end, every branch below reads
+  // `parsedEnd`, and a self-call that re-derives its own argument is the exact
+  // shape of the 62-day bug fixed further down. An inverted date-only pair still
+  // lands on `nothingChecked` below — widening its end only makes it more inverted.
+  // Tested on the ISO date shape — a structured string, never prose.
+  const endIsWholeDay = /^\d{4}-\d{2}-\d{2}$/.test(endDate.trim())
+    || (parsedEnd.toMillis() === parsedStart.toMillis()
+      && parsedEnd.toMillis() === parsedEnd.startOf('day').toMillis());
+  if (endIsWholeDay) {
+    parsedEnd = parsedEnd.endOf('day');
+    queryEnd = parsedEnd.toISO()!;
   }
-  const windowMinutes = parsedEnd.diff(parsedStart, 'minutes').minutes;
+  let windowMinutes = parsedEnd.diff(parsedStart, 'minutes').minutes;
   // P15 — an INSTANT, i.e. start === end. This is the branch with all the real
   // traffic: availabilityPreCheck normalizes a colleague's "יש משהו אחרי 17:00?"
   // to a single instant with no end and calls straight through, so a
@@ -683,7 +787,7 @@ export async function getFreeBusy(
   // preferred shape, M7), hence `start <= t < end`.
   if (parsedEnd.toMillis() === parsedStart.toMillis()) {
     const widenedEnd = parsedStart.plus({ minutes: 60 }).toISO()!;
-    const wide = await getFreeBusy(callerEmail, emails, startDate, widenedEnd, timezone, forceRefresh, diagnostics);
+    const wide = await getFreeBusy(callerEmail, emails, startDate, widenedEnd, timezone, freshness, diagnostics);
     const instantMs = parsedStart.toMillis();
     const atInstant: Record<string, FreeBusySlot[]> = {};
     // Iterate the RESULT's keys, not `emails`: "checked, free" must stay an empty
@@ -703,40 +807,131 @@ export async function getFreeBusy(
     // repair: there is no way to tell whether the start or the end is the typo.
     return nothingChecked('inverted window (end before start)');
   }
-  if (windowMinutes > 62 * 24 * 60) {
-    logger.warn('getFreeBusy — window > 62 days, clamping to 62 days', {
-      startDate, endDate, windowMinutes,
+  if (windowMinutes > MAX_FREEBUSY_WINDOW_MINUTES) {
+    // The limit and the clamp have to be ONE arithmetic. `windowMinutes` is
+    // ABSOLUTE (`diff`), while the clamp was `plus({ days: 62 })` — CALENDAR days,
+    // which hold the wall clock across a DST transition. A clamped window
+    // containing a fall-back is therefore 89,340 real minutes against an 89,280
+    // limit: still over — and the clamp, re-derived from the UNCHANGED start, comes
+    // out byte-identical, so the old recursion re-entered on the same window
+    // forever. Synchronously, so the stack died with a RangeError behind a flood of
+    // warn lines rather than hanging. Measured, not reasoned: start
+    // 2026-09-01T09:00 → end 2026-12-31T17:00 in Asia/Jerusalem clamps to
+    // 2026-11-02T09:00+02:00 = 89,340 min, then to the identical value again. Live
+    // for START dates 2026-08-24 … 2026-10-24 there, every year, and on its own
+    // dates in every tenant zone with a fall-back; reachable from get_free_busy
+    // with any model-supplied range and from find_available_slots, which chunks
+    // nothing and rethrows non-outage faults, so it took the whole tool down.
+    //
+    // Clamping in MINUTES makes end − start exactly the ceiling by construction,
+    // and narrowing in place removes the re-entry altogether — which is also what
+    // retires #124h here: that recursion had to remember to forward `freshness` and
+    // `diagnostics` (it once didn't, and a typo'd attendee inside a long window
+    // reported as resolved-and-free), and now there is nothing to forward them to.
+    // And the ceiling is TWO windows, not one: "62 days" in Graph's language is
+    // calendar days, "89,280 minutes" in ours is absolute, and across a transition
+    // those differ by an hour in opposite directions. So clamp to whichever is
+    // TIGHTER and both readings hold at once — never more than 62 calendar days for
+    // Graph, never more than the limit we just tested for ourselves. Off a
+    // transition the two are the same instant, so this is byte-identical to the old
+    // clamp everywhere except the window that was broken.
+    const byCalendar = parsedStart.plus({ days: 62 });
+    const byMinutes = parsedStart.plus({ minutes: MAX_FREEBUSY_WINDOW_MINUTES });
+    const clampedEnd = byCalendar.toMillis() <= byMinutes.toMillis() ? byCalendar : byMinutes;
+    parsedEnd = clampedEnd;
+    queryEnd = parsedEnd.toISO()!;
+    logger.warn('getFreeBusy — window > 62 days, clamping to the 62-day ceiling', {
+      startDate, requestedEnd: endDate, requestedWindowMinutes: windowMinutes,
+      clampedEnd: queryEnd,
     });
-    const clamped = parsedStart.plus({ days: 62 }).toISO()!;
-    // P15 — forward `forceRefresh` and `diagnostics`. This recursion used to drop
-    // both, so a >62-day call came back with `unresolved` (and now `notChecked`)
-    // permanently empty: a typo'd attendee inside a long window reported as
-    // resolved-and-free, the exact #124h failure, reachable by making the window
-    // wider. Same reason the instant branch above forwards them.
-    return getFreeBusy(callerEmail, emails, startDate, clamped, timezone, forceRefresh, diagnostics);
+    windowMinutes = parsedEnd.diff(parsedStart, 'minutes').minutes;
   }
 
   // v3.2.x (#121) — cross-turn free/busy cache (others' calendars change like
-  // ours → same write-invalidation + TTL + force-refresh). Key on the sorted
-  // attendee set + window so any caller order hits the same entry.
-  const fbKey = `getFreeBusy|${[...emails].sort().join(',')}|${startDate}|${endDate}|${timezone}`;
+  // ours → same write-invalidation + TTL). Key on the sorted attendee set + the
+  // RESOLVED window instants, not the caller's spelling: '2026-07-28T10:00:00'
+  // and '2026-07-28T10:00:00.000+03:00' are one question asked twice, and
+  // planMeeting's pre-book check and create_meeting's phantom-attendee probe do
+  // ask it in different spellings inside a single turn.
+  const fbKey = `getFreeBusy|${[...emails].map(e => e.toLowerCase()).sort().join(',')}`
+    + `|${parsedStart.toMillis()}|${parsedEnd.toMillis()}|${timezone}`;
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const fbCache = require('./calendarCache') as typeof import('./calendarCache');
-  if (!forceRefresh) {
-    const hit = fbCache.getCachedFreeBusy<Record<string, FreeBusySlot[]>>(fbKey);
+  if (freshness === 'cached') {
+    const hit = fbCache.getCachedFreeBusy<FbRead>(fbKey);
     if (hit) {
       if (diagnostics) {
-        diagnostics.unresolved = fbCache.getCachedFreeBusy<string[]>(`${fbKey}|unresolved`) ?? [];
+        diagnostics.unresolved = hit.unresolved;
         // P15 — only a SUCCESSFUL read is ever cached, so a hit means everyone in
         // this window was checked. Stated rather than left undefined: a caller
         // reusing one diagnostics object across windows must not inherit a
         // previous window's "not checked" and refuse to trust good data.
         diagnostics.notChecked = [];
       }
-      return hit;
+      return hit.result;
     }
   }
 
+  // Per-turn memo — the layer a 'live' read IS allowed, and the one this function
+  // never had. Dropping the cross-turn copy for decision reads without it would
+  // double the getSchedule POSTs on every booking: create_meeting's
+  // phantom-attendee probe and planMeeting's pre-book check ask the same question
+  // microseconds apart and relied on the warm copy to share one call. 'force'
+  // skips it too — a retry has to be able to escape a memoized rejection.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { memoize } = require('../../utils/turnCache') as typeof import('../../utils/turnCache');
+  const runRead = () => getFreeBusyImpl(callerEmail, emails, startDate, queryEnd, timezone, windowMinutes);
+  const read = freshness === 'force' ? await runRead() : await memoize(fbKey, runRead);
+  // ONE exit, so `unresolved` / `notChecked` land identically whether this caller
+  // made the call or is sharing another caller's memoized one.
+  if (diagnostics) {
+    diagnostics.unresolved = read.unresolved;
+    diagnostics.notChecked = read.notChecked;
+  }
+  // A window Graph refused says nothing about anyone's calendar — never keep that
+  // warm. A 'live' read DOES repopulate, so the readers that are allowed a warm
+  // copy get the fresher data.
+  if (read.notChecked.length === 0) fbCache.setCachedFreeBusy(fbKey, read);
+  return read.result;
+}
+
+/**
+ * THE free/busy read behind a scheduling decision — the slot walker's own
+ * availability pass, planMeeting's pre-book attendee check, create_meeting's
+ * phantom-attendee probe, the offered-slot annotation and the meeting-room check.
+ * Always 'live' (see ReadFreshness), for the same reason
+ * `getOwnerEventsForDecision` is: freshness belongs to the read, not to five call
+ * sites' memory. One of them used to set it by hand and only for override/replay
+ * (planMeeting's `allowRelaxed`), which meant every ORDINARY booking annotated
+ * "Simon is busy then" — or said nothing at all — off a copy up to
+ * CALENDAR_CACHE_TTL_SECONDS old.
+ */
+export function getFreeBusyForDecision(
+  callerEmail: string,
+  emails: string[],
+  startDate: string,
+  endDate: string,
+  timezone: string,
+  diagnostics?: { unresolved?: string[]; notChecked?: string[] },
+): Promise<Record<string, FreeBusySlot[]>> {
+  return getFreeBusy(callerEmail, emails, startDate, endDate, timezone, 'live', diagnostics);
+}
+
+/**
+ * The raw getSchedule POST. Mirrors getCalendarEventsImpl: the exported
+ * getFreeBusy owns window resolution, freshness and diagnostics; this owns the
+ * call and the shape of the answer. `windowMinutes` is handed in rather than
+ * recomputed, so the interval derivation cannot disagree with the window the
+ * caller already validated.
+ */
+async function getFreeBusyImpl(
+  callerEmail: string,
+  emails: string[],
+  startDate: string,
+  endDate: string,
+  timezone: string,
+  windowMinutes: number,
+): Promise<FbRead> {
   const client = getClient();
   try {
     // v3.7.x (#137) — availabilityViewInterval must be < the requested window or
@@ -779,10 +974,7 @@ export async function getFreeBusy(
       const present = Object.keys(result).some(k => k.toLowerCase() === lower);
       if (!present && !unresolved.includes(lower)) unresolved.push(lower);
     }
-    if (diagnostics) diagnostics.unresolved = unresolved;
-    fbCache.setCachedFreeBusy(fbKey, result);
-    fbCache.setCachedFreeBusy(`${fbKey}|unresolved`, unresolved);
-    return result;
+    return { result, unresolved, notChecked: [] };
   } catch (err: any) {
     logger.error('Failed to fetch free/busy', { err, emails });
 
@@ -819,7 +1011,13 @@ export async function getFreeBusy(
     const windowRejection = ['ErrorInvalidTimeInterval', 'ErrorInvalidMergedFreeBusyInterval']
       .find(code => err?.code === code || err?.body?.includes?.(code));
     if (windowRejection) {
-      return nothingChecked(`Graph rejected the window (${windowRejection})`);
+      return {
+        result: {},
+        unresolved: [],
+        notChecked: logNothingChecked(
+          `Graph rejected the window (${windowRejection})`, startDate, endDate, emails,
+        ),
+      };
     }
     throw err;
   }

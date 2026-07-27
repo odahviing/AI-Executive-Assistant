@@ -182,7 +182,10 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
           args.start_date as string,
           args.end_date as string,
           timezone,
-          args.force_refresh === true,  // v3.2.x (#121) — user asked to LOOK now → fresh
+          // v3.2.x (#121) — user asked to LOOK now → past both caches. The key is
+          // the normalized day window now, so this also refreshes the entry the
+          // slot finder reads instead of a parallel spelling of the same day.
+          args.force_refresh === true ? 'force' : 'cached',
         );
         // v4.1.x (M12) — the owner reading his OWN calendar in his own DM sees
         // his real subjects; every other surface (colleague, or the owner in an
@@ -561,7 +564,7 @@ export async function handleGetFreeBusy(args: Record<string, unknown>, ctx: OpCt
           // he free?" was an unqualified yes, from a call that never reached his
           // calendar. Reported as an explicit refusal-to-answer below, not as data.
           const fbDiag: { notChecked?: string[] } = {};
-          const raw = await getFreeBusy(userEmail, args.emails as string[], args.start_date as string, args.end_date as string, timezone, args.force_refresh === true, fbDiag);
+          const raw = await getFreeBusy(userEmail, args.emails as string[], args.start_date as string, args.end_date as string, timezone, args.force_refresh === true ? 'force' : 'cached', fbDiag);
           if ((fbDiag.notChecked ?? []).length > 0) {
             logger.warn('get_free_busy — the free/busy read never happened; refusing to report anyone as free', {
               emails: args.emails, start_date: args.start_date, end_date: args.end_date,

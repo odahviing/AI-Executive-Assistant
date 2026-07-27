@@ -15,6 +15,8 @@
  * The runner sweeps requests where next_check_at <= now and dispatches.
  */
 
+import { DateTime } from 'luxon';
+
 export type RequestKind =
   | 'approval'         // colleague→owner decision request (replaces approvals table)
   | 'outreach'         // send DM to colleague, optionally await reply
@@ -205,5 +207,28 @@ export interface CloseRequestInput {
 export function parseDetails<T = Record<string, unknown>>(row: RequestRow): T | null {
   if (!row.details_json) return null;
   try { return JSON.parse(row.details_json) as T; } catch { return null; }
+}
+
+/**
+ * Anchor an EXTERNALLY-SUPPLIED timer time and return it as a UTC instant.
+ *
+ * `next_check_at` / `expires_at` are UTC instants — `getDueRequests()` selects on
+ * `datetime(next_check_at) <= datetime('now')`, and SQLite's `now` is UTC. Every
+ * INTERNAL arming site satisfies that by construction (`DateTime.now().plus(…)
+ * .toUTC().toISO()`), so the invariant was never written down and never enforced.
+ * A MODEL-authored time does not satisfy it: `create_task.due_at` and
+ * `message_colleague.send_at` arrive as a bare wall-clock — "2026-07-27T10:32:00"
+ * — and stored verbatim the row only became due when UTC reached that clock, i.e.
+ * exactly one owner-offset late (#149: a 10:32 reminder delivered at 13:35, UTC+3).
+ *
+ * A bare clock means the OWNER's local time: that is the frame he and the model
+ * spoke in. An explicit offset / `Z` already denotes an instant and is preserved.
+ * Unparseable → null, so the caller REFUSES instead of arming a timer that can
+ * never fire (SQLite `datetime()` of a bad string is NULL → the row is invisible
+ * to the sweep forever, which is the silent-hang R4 forbids).
+ */
+export function toTimerInstant(raw: string, ownerTimezone: string): string | null {
+  const dt = DateTime.fromISO(raw, { zone: ownerTimezone });
+  return dt.isValid ? dt.toUTC().toISO() : null;
 }
 

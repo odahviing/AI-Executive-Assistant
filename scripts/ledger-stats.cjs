@@ -16,6 +16,9 @@
  *     wrong. That is an M6 architectural signal, not a lane misbehaving.
  *   • `needs-dependency` is the seam map: which lanes keep reaching across tells
  *     you where the ownership boundary is drawn in the wrong place.
+ *   • `source` (github / logs / both / owner / audit / verify) answers whether
+ *     each intake earns its cost. The log review is low-volume and is the ONLY
+ *     source for bugs nobody reported — judge it on what it catches.
  *
  * Read-only. Never writes.
  *
@@ -78,6 +81,18 @@ if (!scoped.length) {
   process.exit(0);
 }
 
+// A `converted` row that does not say WHERE it went is the prose-not-a-row
+// failure wearing a new hat: it closes the item here and leaves it findable
+// nowhere. The destination IS the state — without it, `converted` is just a
+// quieter `declined`. Checked on every invocation, including `--open`.
+const orphanConverted = scoped.filter((r) => r.verdict === 'converted' && !String(r.note || '').trim());
+if (orphanConverted.length)
+  console.error(
+    `! ${orphanConverted.length} \`converted\` row(s) record NO destination in \`note\` — closed here, findable nowhere: ${orphanConverted
+      .map((r) => r.ref || '(no ref)')
+      .join(', ')}\n`,
+  );
+
 // `built` and `already-fixed` are the lane doing the work it was asked to do.
 // The three PUSHBACK verdicts are the lane exercising judgment the charter gave
 // it — that is what we measure.
@@ -89,7 +104,19 @@ if (!scoped.length) {
 // being governed" — when all four of guard's rows were verify passes that did
 // exactly their job. A ratio over the wrong denominator is worse than no ratio.
 const PUSHBACK = new Set(['needs-dependency', 'blocked-charter', 'needs-owner-decision']);
-const FINDINGS_ONLY = new Set(['flagged-for-owner']);
+// NOT a build ask, so never in the pushback denominator:
+//   `flagged-for-owner` / `audit` — a findings-only pass; the lane was never
+//     asked to build, so it had nothing to refuse.
+//   `declined` — the OWNER's verdict, not the lane's. It closes a row as firmly
+//     as `built`, but no lane was governed by anything.
+//   `converted` — the row LEFT the bug track for a named destination (usually a
+//     GitHub Improvement/Feature issue, sometimes another chat). No lane built
+//     it and no lane refused it.
+// Counting these produced a false alarm on 2026-07-27: the 24 declines the owner
+// backfilled carry no lane, so they landed as "(none): 24 build asks, ZERO
+// pushback — check the charter is actually loading." A signal that fires on a
+// clean state gets ignored, and then it is not a signal.
+const FINDINGS_ONLY = new Set(['flagged-for-owner', 'audit', 'declined', 'converted']);
 const VERDICTS = ['built', 'already-fixed', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'flagged-for-owner'];
 
 // ── --open: THE BACKLOG. Every row still awaiting the owner. ────────────────
@@ -105,7 +132,14 @@ if (openOnly) {
   // to be re-raised" — in a file nothing parses. So --open kept surfacing them
   // and would have re-raised every one tomorrow, which is precisely what that
   // sentence was trying to prevent. A decision is only durable once it is a row.
-  const CLOSED = new Set(['built', 'already-fixed', 'audit', 'declined']);
+  //
+  // `converted` closes a row that LEFT the bug track: a bug that turned out to be
+  // a design question and became a GitHub Improvement/Feature issue, or one
+  // handed to another chat. Added 2026-07-27 because there was no honest way to
+  // close one — it either sat open here forever, or got logged `declined`, which
+  // reads as a decision the owner made AGAINST it. Neither was true.
+  // Its `note` MUST name the destination; see the check below.
+  const CLOSED = new Set(['built', 'already-fixed', 'audit', 'declined', 'converted']);
 
   // ── COLLAPSE BY REF ────────────────────────────────────────────────────────
   // The ledger is APPEND-ONLY, so one item legitimately has several rows: parked
@@ -258,6 +292,49 @@ if (deps.length) {
 if (!noted && !deps.length) console.log('  · nothing anomalous.');
 const totalAsks = lanes.reduce((n, [, s]) => n + s.buildAsks, 0);
 if (totalAsks < 20) console.log(`  · only ${totalAsks} build asks so far — too thin to read a trend. Ratios need a few weeks.`);
+
+// ── By SOURCE — is each intake earning its keep? ────────────────────────────
+// Added 2026-07-27. Before this, "does the log review pay for itself?" could
+// only be answered by grepping old workflow journals — which gave 4 log
+// findings ever against 8 from GitHub. All four were real, and two were things
+// the owner had never reported (a phantom "the colleague has been notified",
+// and a required attendee silently dropped on a follow-up turn). That is the
+// class GitHub can never carry, because nobody noticed it to file it. So this
+// column is not a volume contest: a cheap source that finds the unreported is
+// worth keeping at low volume, and the judgement should come off a query.
+const bySource = new Map();
+for (const r of scoped) {
+  const k = r.source || '(unrecorded)';
+  if (!bySource.has(k)) bySource.set(k, { total: 0, shipped: 0, open: 0, moved: 0 });
+  const s = bySource.get(k);
+  s.total += 1;
+  if (r.verdict === 'built' || r.verdict === 'already-fixed') s.shipped += 1;
+  else if (r.verdict === 'converted') s.moved += 1;
+  else if (!FINDINGS_ONLY.has(r.verdict)) s.open += 1;
+}
+console.log('\nBy source');
+for (const [src, s] of [...bySource.entries()].sort((a, b) => b[1].total - a[1].total)) {
+  console.log(
+    `  ${pad(src, 14)}${lpad(s.total, 4)} raised · ${lpad(s.shipped, 3)} shipped · ${lpad(s.open, 3)} still open${s.moved ? ` · ${s.moved} moved off the bug track` : ''}`,
+  );
+}
+
+// What left the bug track, and where it went. A bug that turned out to be a
+// design question is not lost — it is a GitHub issue now — but only if the
+// pointer is printed somewhere the owner actually reads.
+const convertedRows = scoped.filter((r) => r.verdict === 'converted');
+if (convertedRows.length) {
+  console.log(`\nLeft the bug track (${convertedRows.length}) — these are NOT dropped, they moved`);
+  for (const r of convertedRows) console.log(`  ${pad(r.ref || '(no ref)', 16)} → ${(r.note || 'NO DESTINATION RECORDED').slice(0, 88)}`);
+}
+const unrec = bySource.get('(unrecorded)');
+if (unrec) console.log(`  ! ${unrec.total} row(s) carry no source — they predate the field. Every NEW row must have one, or this table goes back to being unanswerable.`);
+const logRows = bySource.get('logs');
+const bothRows = bySource.get('both');
+const logTotal = (logRows ? logRows.total : 0) + (bothRows ? bothRows.total : 0);
+if (logTotal && logTotal < 6)
+  console.log(`  · the log review has raised ${logTotal} — thin, but it is the only source for bugs nobody reported. Judge it on WHAT it catches, not how much.`);
+if (bothRows) console.log(`  · ${bothRows.total} row(s) merged a GitHub issue with a log moment — his words as the ask, the transcript as the proof. That merge working is the scout doing its job.`);
 
 if (byRun) {
   console.log('\nBy run');

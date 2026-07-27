@@ -36,13 +36,12 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
-import { getOwnerEventsForDecision, getFreeBusy, findAvailableSlots, pickSpreadSlots, slotLocalDay, type CalendarEvent } from '../../connectors/graph/calendar';
+import { getOwnerEventsForDecision, getFreeBusyForDecision, type CalendarEvent } from '../../connectors/graph/calendar';
 import { resolveLocation, type LocationVerdict } from '../../utils/resolveLocation';
-import { bookingLeadTimeHours, checkSlot, offeredSlotCount, type RuleCheckResult } from '../../utils/scheduleRules';
-import { getEffectiveWorkDay } from '../../utils/workHours';
+import { bookingLeadTimeHours, checkSlot, type RuleCheckResult } from '../../utils/scheduleRules';
 import type { SubjectViewer } from '../../utils/displaySubject';
-import { renderWeDualClock } from '../../utils/weTimeResolver';
-import { getTravelContextForInstant } from '../../utils/workingElsewhere';
+import { profileDualClock } from '../../utils/weTimeResolver';
+import { findNearbyAlternatives, type NearbyAlternative } from './nearbyAlternatives';
 import { detectCategory } from './detectCategory';
 import { findMeetingOwner, type MeetingOwnerInfo } from './findMeetingOwner';
 import { getCurrentTravel, searchPeopleMemory } from '../../db/people';
@@ -377,11 +376,10 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // owner-facing branch is hardcoded second person ("11:00 EDT where you are
   // now / 15:00 your home time"), which is what a colleague was being told
   // about someone else's trip. Unknown viewer → named (the colleague-safe
-  // reading), never "you".
-  const clockReader = input.viewer === 'owner' ? {} : { ownerName: profile.user.name.split(' ')[0] };
-  const whenText = (startIso: string, endIso?: string): string =>
-    renderWeDualClock(startIso, getTravelContextForInstant(startIso, profile), profile.user.timezone,
-      { endIso, ...clockReader });
+  // reading), never "you". The binding lives in the WE spine because the
+  // nearby-alternatives search renders the same instants for the same reader, and
+  // two identical closures are one edit away from disagreeing (M14).
+  const whenText = profileDualClock(profile, input.viewer);
 
   // ── Resolve location ────────────────────────────────────────────────────
   let locationVerdict: LocationVerdict | null = null;
@@ -605,108 +603,49 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       // unresolved location just re-asks), so alternatives computed here would
       // be discarded — a Graph round-trip for nothing. The combined ask still
       // tells the colleague the rule is broken; the options come next round.
-      if (!gates.some(g => g.kind === 'location')) try {
-        const tzAlt = profile.user.timezone;
-        const reqDay = DateTime.fromISO(input.slotStartIso, { zone: tzAlt });
+      if (!gates.some(g => g.kind === 'location')) {
+        const dayIso = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone })
+          .toFormat('yyyy-MM-dd');
         const durMin = input.durationMin
           ?? Math.max(15, Math.round(DateTime.fromISO(input.slotEndIso).diff(DateTime.fromISO(input.slotStartIso), 'minutes').minutes));
-        const dayIso = reqDay.toFormat('yyyy-MM-dd');
-        // How far forward "nearby" reaches, counted in days the owner actually
-        // WORKS — resolved through getEffectiveWorkDay, the same accessor the
-        // walker gates each cursor on (findAvailableSlots.ts:720) and the same
-        // one checkSlot rule 1 reads, so this can never reach for a day the
-        // search will refuse to walk.
-        //
-        // It used to be `+1 / +2 CALENDAR days`, which on Idan's Sun–Thu week is
-        // Friday and Saturday for every THURSDAY request: the walker skipped
-        // every cursor on both, the forward pass returned nothing, and a
-        // colleague whose Thursday time broke a rule got escalate_approval — no
-        // options at all — while the owner slept. It survived that long only
-        // because the window was zero-width and autoExpand silently widened both
-        // passes by +7d; closing that hole (correctly) exposed it.
-        const FORWARD_WORKDAYS = 2;
-        let lastDay = reqDay;
-        for (let i = 1, found = 0; i <= 14 && found < FORWARD_WORKDAYS; i++) {
-          const d = reqDay.plus({ days: i });
-          if (!getEffectiveWorkDay(d.toFormat('yyyy-MM-dd'), profile).isWorkday) continue;
-          lastDay = d;
-          found++;
-        }
-        // ONE search across [requested day … last forward workday], then THE
-        // spreader in its 'exhaustive' anchor mode. Two hand-sliced passes ("2
-        // same-day + 1 later") were a second copy of what pickSpreadSlots does
-        // better: the ≥1h gap keeps the options distinct and the budget is the
-        // configured offered_slot_count (M6) instead of two literals. One search
-        // also means one Graph round-trip instead of two.
-        //
-        // D3 — 'exhaustive', not the default. The default anchor mode is
-        // day-diversity round-robin (the MOVE shape): the anchor picks first in
-        // each round but every other day still takes one per round, so a budget
-        // of 8 over Thu/Sun/Mon hands a colleague who asked for THURSDAY roughly
-        // 3 Thu / 3 Sun / 2 Mon — five of his eight options on days he did not
-        // ask about, two of them across a weekend. Owner's call: "if he asked
-        // thursday, its thursday. if no options you can suggest to wide the
-        // search and offer more.. but thursday ask is thursday." So the
-        // requested day is filled to the budget first, later days only surface
-        // once it is exhausted or empty, and they travel back in their OWN list
-        // so the answer can name them as a widening.
-        //
-        // An alternative has to clear the SAME bars the requested slot was
-        // measured against — otherwise Maelle refuses a time and then offers
-        // something worse. Pre-fix this call carried only email/tz/duration/profile:
-        //   • no `minBufferHours` → the walker's lead-time pre-filter AND
-        //     checkSlot rule 0b were both off, so a colleague refused at 10:00
-        //     for "12:00, you need 4h notice" was offered 10:30 and 11:00 —
-        //     both SOONER, both looping straight back into the same refusal;
-        //   • no `category` → the alternatives could break the very per-day /
-        //     day-type cap the request broke (and the walker skips its
-        //     week-widened event fetch, so the cap can't even be counted);
-        //   • no `excludeEventIds` on a move → the meeting being moved blocks
-        //     every slot around its own current time.
-        const candidates = await findAvailableSlots({
-          userEmail: profile.user.email,
-          timezone: tzAlt,
-          durationMinutes: durMin,
+        // THE nearby-alternatives search (nearbyAlternatives.ts) — shared with the
+        // colleague point-check, which had been answering the same failing-slot
+        // question with a verdict and no options at all (M2, the 2026-07-27
+        // incident). It owns the workday-counted forward reach, the single
+        // window, the spreader's 'exhaustive' anchor mode for a named day, and
+        // the same-bars guarantee (lead time / category / exclusions) that keeps
+        // an alternative from being worse than the time it replaces.
+        const alt = await findNearbyAlternatives({
           profile,
-          minBufferHours: bookingLeadTimeHours(profile, initiator),
-          ...(category ? { category } : {}),
+          anchorDays: [dayIso],
+          durationMin: durMin,
+          initiator,
+          category,
           ...(input.existingEventId ? { excludeEventIds: [input.existingEventId] } : {}),
-          searchFrom: `${dayIso}T00:00:00`,
-          searchTo: `${lastDay.toFormat('yyyy-MM-dd')}T23:59:59`,
-          // Real day bounds (a bare `yyyy-MM-dd` on both ends is a ZERO-WIDTH
-          // window — both resolve to 00:00 local — so `cursor + duration <=
-          // searchEnd` never ran once), and the window stays where this caller
-          // put it: "nearby" is the whole point of the offer, so no autoExpand.
-          autoExpand: false,
+          viewer: input.viewer,
         });
-        const byStart = new Map(candidates.map(s => [s.start, s]));
-        const picks = pickSpreadSlots(candidates, tzAlt, offeredSlotCount(profile), dayIso, durMin, 'exhaustive')
-          .map(start => byStart.get(start))
-          .filter((s): s is NonNullable<typeof s> => !!s);
-        if (picks.length > 0) {
-          const asAlternative = (s: (typeof picks)[number]) => ({
-            start: s.start,
-            end: s.end,
-            // M14 — alternative labels quote the same dual clock as everything
-            // else in this payload, so a trip-day option can't read home-only.
-            label: whenText(s.start, s.end),
-          });
-          // slotLocalDay is the spreader's OWN day predicate — the same one that
-          // decided the anchor pass — so the split can never disagree with the
-          // pick order (a trip-day slot is classified by its trip day in both).
+        if (alt.onAnchorDays.length + alt.beyond.length > 0) {
+          // Narrow to the THREE fields this payload DECLARES (:221 / the two
+          // accumulators above). `NearbyAlternative` also carries `overOptional`,
+          // and this path has no reader for it while both handlers pass these
+          // objects WHOLESALE into a colleague-facing tool result
+          // (createMeeting.ts:849-850, moveMeeting.ts:1146-1147). TypeScript
+          // permits the wider object (not a fresh literal), so the field would
+          // have ridden into the model's context undeclared and unread, carrying a
+          // soft commitment's real subject whenever that event isn't private
+          // (displaySubject masks only private ones). A payload widened by
+          // accident is the wrong shape whether or not today's contents are
+          // sensitive — so it is stripped at the boundary, and the one surface
+          // that needs the flag reads it off findNearbyAlternatives directly.
+          const declared = (a: NearbyAlternative) => ({ start: a.start, end: a.end, label: a.label });
           alternativesRequestedDay = dayIso;
-          ruleAlternatives = picks.filter(s => slotLocalDay(s, tzAlt) === dayIso).map(asAlternative);
-          widenedAlternatives = picks.filter(s => slotLocalDay(s, tzAlt) !== dayIso).map(asAlternative);
+          ruleAlternatives = alt.onAnchorDays.map(declared);
+          widenedAlternatives = alt.beyond.map(declared);
           logger.info('planMeeting — colleague soft-rule slot, offering nearby alternatives', {
             label, requested: input.slotStartIso, requestedDay: dayIso,
             onRequestedDay: ruleAlternatives.length, widened: widenedAlternatives.length,
-            searchTo: lastDay.toFormat('yyyy-MM-dd'), candidates: candidates.length,
           });
         }
-      } catch (err) {
-        logger.warn('planMeeting — alternative search threw, falling back to escalate_approval', {
-          err: String(err).slice(0, 200),
-        });
       }
     }
 
@@ -740,11 +679,14 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           // either, and turning it into a confirm round would be #137 in reverse
           // (and would cost an M4 round on every Graph hiccup).
           const fbDiag: { notChecked?: string[] } = {};
-          const fb = await getFreeBusy(
+          // Always live. This used to read fresh ONLY on an override/replay
+          // (`input.allowRelaxed`), so every ordinary booking decided whether to
+          // tell him "Simon is busy then" from a copy up to five minutes old.
+          // Freshness belongs to the decision, not to the mood the request came in.
+          const fb = await getFreeBusyForDecision(
             ownerEmail, internalEmails,
             input.slotStartIso, input.slotEndIso,
             profile.user.timezone,
-            input.allowRelaxed === true,   // override/replay reads fresh — never annotate a stale "busy"
             fbDiag,
           );
           const notChecked = fbDiag.notChecked ?? [];

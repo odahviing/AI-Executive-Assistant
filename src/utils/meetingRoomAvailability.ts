@@ -25,7 +25,7 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
-import { getFreeBusy } from '../connectors/graph/calendar';
+import { getFreeBusyForDecision } from '../connectors/graph/calendar';
 import logger from './logger';
 
 export type RoomAvailabilityVerdict =
@@ -52,13 +52,12 @@ export async function checkMeetingRoomAvailability(params: {
     // reason that has to be TRUE; an unread calendar is not evidence of a free
     // room. Same outcome as the throw path below, which already declines to guess.
     const fbDiag: { notChecked?: string[] } = {};
-    const fb = await getFreeBusy(
+    const fb = await getFreeBusyForDecision(
       profile.user.email,
       [roomEmail],
       startIso,
       endIso,
       profile.user.timezone,
-      false,
       fbDiag,
     );
     if ((fbDiag.notChecked ?? []).length > 0) {

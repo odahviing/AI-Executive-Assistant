@@ -843,6 +843,14 @@ async function notifyRequesterOfDecision(
   const hi = requesterFirst
     ? (requesterLang === 'he' ? `היי ${requesterFirst}` : `Hey ${requesterFirst}`)
     : (requesterLang === 'he' ? 'היי' : 'Hey');
+  // #153-followup — the amend relay's classified parts, lifted out of the branch
+  // that builds them so the language composer below can PIN them. `pinned` is
+  // machine-labelled decision data (a duration, an instant, a venue) that must
+  // survive rephrasing character-for-character; `prose` is the owner's own wording,
+  // which may be translated; `withheld` is what this reader must not be shown.
+  let amendPinned: Array<{ key: string; value: string }> = [];
+  let amendProse: string[] = [];
+  let amendWithheld: string[] = [];
   let body: string;
   if (verdict === 'approve') {
     // wasAwaitingColleague=true → the COLLEAGUE (requester) just accepted
@@ -894,16 +902,52 @@ async function notifyRequesterOfDecision(
         || /^(what|when|where|who|why|how|which|can|could|would|should|do|does|did|is|are|was|were)\b/i.test(counterText)
         || /^(מה|מתי|איפה|מי|למה|איך|איזה|האם)\b/.test(counterText)  // Hebrew question-words
       );
+    // #153 — the owner's own rationale travels too. `reason` is accepted by
+    // resolve_approval and relayed on reject, but was silently dropped on amend —
+    // so a counter whose only human phrasing lived in `reason` reached the
+    // requester as a bare "a different approach". Deduped against the rendered
+    // counter, since the model often puts the same sentence in both.
+    const rationale = reason && reason.trim() ? reason.trim() : '';
     if (isQuestion) {
+      // Everything OTHER than the question still has to travel: a question bundled
+      // with a concrete change must not lose the change.
+      const rest = renderCounter(
+        Object.fromEntries(Object.entries(data ?? {}).filter(([k]) => k !== 'text')),
+        { audience: 'requester', formatInstant: formatStart },
+      );
+      amendWithheld = rest.withheld;
+      const tail = [rest.text, rationale && !rest.text.includes(rationale) ? rationale : '']
+        .filter(Boolean).join(' — ');
       body = requesterLang === 'he'
-        ? `${hi} — ${ownerFirst} שאל: ${counterText}`
-        : `${hi} — ${ownerFirst} asked: ${counterText}`;
+        ? `${hi} — ${ownerFirst} שאל: ${counterText}${tail ? ` (${tail})` : ''}`
+        : `${hi} — ${ownerFirst} asked: ${counterText}${tail ? ` (${tail})` : ''}`;
     } else {
-      const counterSummary = summarizeCounter(data);
+      const rendered = renderCounter(data, { audience: 'requester', formatInstant: formatStart });
+      amendWithheld = rendered.withheld;
+      amendPinned = rendered.pinned;
+      const counterSummary = rendered.text;
+      // The owner's rationale is prose for the composer too — deduped against the
+      // rendered counter exactly as the template line below dedupes it.
+      amendProse = rationale && !counterSummary.includes(rationale)
+        ? [...rendered.prose, rationale]
+        : rendered.prose;
+      const detail = [counterSummary, rationale && !counterSummary.includes(rationale) ? rationale : '']
+        .filter(Boolean).join(' — ');
       body = requesterLang === 'he'
-        ? `${hi} — ${ownerFirst} הציע משהו אחר${counterSummary ? ': ' + counterSummary : ''}. זה עובד לך?`
-        : `${hi} — ${ownerFirst} suggested a different approach${counterSummary ? ': ' + counterSummary : ''}. Does that work for you?`;
+        ? `${hi} — ${ownerFirst} הציע משהו אחר${detail ? ': ' + detail : ''}. זה עובד לך?`
+        : `${hi} — ${ownerFirst} suggested a different approach${detail ? ': ' + detail : ''}. Does that work for you?`;
     }
+  }
+
+  if (amendWithheld.length > 0) {
+    // R4 — a withheld counter key is never a SILENT omission. `resolve_approval`
+    // runs the same renderer before it stores anything and refuses an amend whose
+    // counter carries one of these (skill.ts), so this can only fire on a row
+    // written before that gate existed — and when it does, the key names are on the
+    // record here instead of quietly missing from her DM.
+    logger.warn('notifyRequesterOfDecision — counter key withheld from the requester relay (internal work-item id)', {
+      id: row.id, verdict, withheld: amendWithheld,
+    });
   }
 
   // 2.1 — the templates above are now a FALLBACK. Compose the requester relay as
@@ -911,9 +955,25 @@ async function notifyRequesterOfDecision(
   // reads as "okayed cancelling it", never "approved {meeting}" (which reads as
   // approving the meeting itself; Yael: "you mean approved to cancel?", 2026-06-15)
   // — and (b) writes in the requester's actual language instead of the rigid
-  // he/en branch. Approve + reject only; amend keeps its template (it carries the
-  // specific counter/question the composer wouldn't have). Fails open to `body`.
-  if (verdict === 'approve' || verdict === 'reject') {
+  // he/en branch. Fails open to `body`.
+  //
+  // #153-followup — AMEND composes too, and that closes the last relay that could
+  // not speak the reader's language. Its template interpolates machine-built ENGLISH
+  // labels ("55 minutes", "venue: Tel Aviv 3") into the Hebrew sentence, and no
+  // label table fixes that: #153 opened the counter key set on purpose, so the
+  // labels that need translating are exactly the ones nobody wrote prose for, and a
+  // he/en table covers neither them nor a Russian or Spanish requester. The composer
+  // needs no key knowledge at all.
+  //
+  // The reason amend was excluded is kept — in code, not by abstention: the decided
+  // values are handed over PRE-RENDERED and pinned, and a composition that dropped
+  // or altered one is discarded in favour of the template (amendCompositionFault).
+  // The LLM owns the phrasing, code owns the decision, so the number cannot drift.
+  // Two amend shapes deliberately stay on the template: a counter with no
+  // machine-labelled part (pure owner prose — already human words, nothing to
+  // relabel) and a question-shaped counter (his question must travel verbatim).
+  const composeAmend = verdict === 'amend' && amendPinned.length > 0;
+  if (verdict === 'approve' || verdict === 'reject' || composeAmend) {
     try {
       const rawAsk =
         (typeof details.question === 'string' && details.question.trim() ? details.question.trim() : '') ||
@@ -927,20 +987,40 @@ async function notifyRequesterOfDecision(
           : (deferredTool === 'move_meeting' || deferredTool === 'update_meeting') ? 'a change to an existing meeting'
             : (deferredTool === 'create_meeting') ? 'a booking'
               : undefined;
-      const outcome = verdict === 'approve'
-        ? `${ownerFirst} said yes`
-        : `${ownerFirst} can't make it work${reason && reason.trim() ? ` (${reason.trim()})` : ''}`;
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getAnthropicClient } = require('../../llm/client') as typeof import('../../llm/client');
       const anthropic = getAnthropicClient();
       const assistantName = ctx.profile.assistant?.name ?? 'the assistant';
-      const sys = `You are ${assistantName}, ${ownerFirst}'s executive assistant, sending ONE short, warm Slack message to ${requesterFirst ?? 'a colleague'} to close the loop on something they asked you to arrange with ${ownerFirst}.
+      // One definition of the language rule for both prompts.
+      const langRule = requesterLang === 'he'
+        ? 'write in Hebrew'
+        : 'match the language of their request below (English / Spanish / etc.)';
+      let sys: string;
+      let usr: string;
+      if (composeAmend) {
+        sys = `You are ${assistantName}, ${ownerFirst}'s executive assistant, sending ONE short Slack message to ${requesterFirst ?? 'a colleague'} with ${ownerFirst}'s counter-proposal on something they asked you to arrange.
 RULES:
-- Language: ${requesterLang === 'he' ? 'write in Hebrew' : 'match the language of their request below (English / Spanish / etc.)'}.
+- Language: ${langRule}.
+- The DECIDED VALUES below are ${ownerFirst}'s actual decision. Reproduce each value EXACTLY as written, character for character — never round it, convert it, recalculate it, spell it out in words, or restate a time or date in another format. Translate and rephrase the words AROUND them, including the label each value carries.
+- Say plainly that ${ownerFirst} can't do it exactly as asked and what he proposes instead, then ask whether that works for them. It is a proposal awaiting their yes or no, not a done deal.
+- Do NOT mention approvals, "policy", internal tools, or that you "asked ${ownerFirst}" — just the human proposal, EA-voiced and natural.
+- ONE or TWO sentences. A light "Hi ${requesterFirst ?? ''}" is fine; no sign-off.`;
+        usr = `Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''}
+${ownerFirst}'s counter — DECIDED VALUES, copy each one exactly as given:
+${amendPinned.map(p => `- ${p.key.replace(/_/g, ' ')} = ${p.value}`).join('\n')}${amendProse.length > 0 ? `\n${ownerFirst}'s own words (translate if you are writing in another language; keep the meaning): "${amendProse.join(' ')}"` : ''}
+Write the message.`;
+      } else {
+        const outcome = verdict === 'approve'
+          ? `${ownerFirst} said yes`
+          : `${ownerFirst} can't make it work${reason && reason.trim() ? ` (${reason.trim()})` : ''}`;
+        sys = `You are ${assistantName}, ${ownerFirst}'s executive assistant, sending ONE short, warm Slack message to ${requesterFirst ?? 'a colleague'} to close the loop on something they asked you to arrange with ${ownerFirst}.
+RULES:
+- Language: ${langRule}.
 - Name the ACTION clearly, zero ambiguity. If their request was to CANCEL something, say it's cancelled / being taken care of — NEVER phrase it as "${ownerFirst} approved {the meeting}", which reads like approving the meeting itself. If it was a booking, say it's booked${startFormatted ? ` for ${startFormatted}` : ''}.
 - Do NOT mention approvals, "policy", internal tools, or that you "asked ${ownerFirst}" — just the human outcome, EA-voiced and natural.
 - ONE sentence. A light "Hi ${requesterFirst ?? ''}" is fine; no sign-off.`;
-      const usr = `Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''} Outcome: ${outcome}.${startFormatted ? ` Scheduled for ${startFormatted}.` : ''} Write the message.`;
+        usr = `Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''} Outcome: ${outcome}.${startFormatted ? ` Scheduled for ${startFormatted}.` : ''} Write the message.`;
+      }
       const resp = await anthropic.messages.create({
         model: MODEL_HAIKU,
         max_tokens: 200,
@@ -948,7 +1028,16 @@ RULES:
         messages: [{ role: 'user', content: usr }],
       });
       const composed = ((resp.content[0] as { text?: string })?.text ?? '').trim();
-      if (composed) body = composed;
+      if (composed) {
+        const fault = composeAmend ? amendCompositionFault(composed, amendPinned) : null;
+        if (fault) {
+          logger.warn('notifyRequesterOfDecision — amend composition rejected, keeping the deterministic template', {
+            id: row.id, fault, composedPreview: composed.slice(0, 120),
+          });
+        } else {
+          body = composed;
+        }
+      }
     } catch (err) {
       logger.warn('notifyRequesterOfDecision — LLM relay compose failed, using template', { id: row.id, err: String(err).slice(0, 150) });
     }
@@ -1073,7 +1162,18 @@ async function notifyOwnerOfColleaguePushback(
       const stored = details.counter && typeof details.counter === 'object' && !Array.isArray(details.counter)
         ? details.counter as Record<string, unknown>
         : null;
-      const cnt = summarizeCounter(stored);
+      // Owner-facing, so instants render in HIS zone.
+      const ownerTz = ctx.profile.user.timezone;
+      const cnt = renderCounter(stored, {
+        // Nothing is withheld from the man whose own system minted these ids, on a
+        // surface no output gate scrubs anyway — and hiding a decided value from the
+        // DECIDER is the one failure worse than showing him a `req_…`.
+        audience: 'owner',
+        formatInstant: iso => {
+          const dt = DateTime.fromISO(iso, { zone: ownerTz });
+          return dt.isValid ? dt.toFormat("cccc d MMM, HH:mm") : '';
+        },
+      }).text;
       lead = `${requesterName} countered with ${cnt || 'an alternative'} on "${subject}". Approve, reject, or counter again?`;
     }
     const body = await composeOwnerAskText({
@@ -1119,10 +1219,179 @@ async function notifyOwnerOfColleaguePushback(
   }
 }
 
-function summarizeCounter(data: Record<string, unknown> | null): string {
-  if (!data) return '';
-  if (typeof data.text === 'string' && data.text.trim()) return data.text.trim();
-  if (typeof data.slot_iso === 'string') return `a different time (${data.slot_iso})`;
-  if (typeof data.to === 'string') return `move it to ${data.to}`;
+/** Counter keys whose value is already a human sentence — relayed verbatim, unlabelled. */
+const COUNTER_PROSE_KEYS = new Set(['text', 'message', 'reason', 'note', 'comment', 'question']);
+
+/**
+ * Readable phrasings for the counter keys this spine sees most. A key that is NOT
+ * listed still renders (as "<key with spaces>: <value>") — the guarantee here is
+ * that nothing is DROPPED, not that every possible key has hand-written prose.
+ *
+ * These labels are ENGLISH and deliberately stay that way: they are the wording of
+ * the deterministic FALLBACK template. The primary requester-facing path composes
+ * the whole sentence in the reader's own language (notifyRequesterOfDecision), which
+ * is the only mechanism that can label a key nobody anticipated — and #153 opened
+ * the key set on purpose. A per-language table here would cover he/en and only the
+ * keys someone thought of: half the readers, half the keys.
+ */
+const COUNTER_KEY_PHRASING: Record<string, (v: string) => string> = {
+  duration_min:     v => `${v} minutes`,
+  duration_minutes: v => `${v} minutes`,
+  slot_iso:         v => `a different time: ${v}`,
+  start:            v => `a different time: ${v}`,
+  new_start:        v => `a different time: ${v}`,
+  to:               v => `move it to ${v}`,
+  date:             v => `a different day: ${v}`,
+  day:              v => `a different day: ${v}`,
+};
+
+/** ISO datetime = a language-independent STRUCTURED string, so regex is fine here. */
+const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+
+/**
+ * An internal work-item id — the inverse of the four expressions that MINT one:
+ * `req_` (db/requests.ts:51), `task_` (tasks/index.ts:13), `out_` (db/jobs.ts:164),
+ * `ci_` (db/calendarIssues.ts:372). A structured token, so regex is the allowed kind.
+ *
+ * `req_`/`task_` match loosely: neither prefix begins an English word, and a model
+ * volunteering an id-SHAPED string it made up ("req_abc123") has to be caught too.
+ * `out_`/`ci_` require the minted `<epoch>_<base36>` tail, because a loose match
+ * there swallows ordinary words ("out_of_office").
+ *
+ * Why the definition lives HERE. The requester relay ships via conn.sendDirect, so
+ * the gate that owns this token class (securityGate's `internal_ref_id`) never sees
+ * it; and the one scrubber that DOES run on every outbound (scrubInternalLeakage,
+ * inside formatForSlack) has no rule for these ids — it wraps account ids into
+ * rendered mentions and strips Graph ids, IANA tokens, sentinels and tool names, all
+ * of which therefore need no veto here. These four prefixes are the exact residual
+ * gap on this path, and they are minted by this lane. The remedy is the payload one
+ * (rule 10): the value never enters the text and never enters the composer's
+ * context, rather than a scrub that runs after it has been written.
+ */
+const INTERNAL_WORK_ITEM_ID_RE = /\b(?:(?:req|task)_[a-z0-9][a-z0-9_]*|(?:out|ci)_\d{10,}_[a-z0-9]+)\b/i;
+
+function renderCounterValue(raw: unknown, formatInstant?: (iso: string) => string): string {
+  if (raw === null || raw === undefined) return '';
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (!s) return '';
+    return ISO_DATETIME_RE.test(s) ? (formatInstant?.(s) || s) : s;
+  }
+  if (typeof raw === 'number' || typeof raw === 'boolean') return String(raw);
+  if (Array.isArray(raw)) {
+    return raw.map(v => renderCounterValue(v, formatInstant)).filter(Boolean).join(', ');
+  }
+  if (typeof raw === 'object') {
+    return Object.entries(raw as Record<string, unknown>)
+      .map(([k, v]) => {
+        const inner = renderCounterValue(v, formatInstant);
+        if (!inner) return '';
+        return COUNTER_PROSE_KEYS.has(k) ? inner : `${k.replace(/_/g, ' ')} ${inner}`;
+      })
+      .filter(Boolean)
+      .join(', ');
+  }
   return '';
+}
+
+/**
+ * Who is going to read the rendered counter. The owner sees his own decision whole;
+ * a requester sees only what a colleague may be shown (rule 10 — the payload is
+ * scoped to the reader, so what must not leak never enters the text at all).
+ */
+export type CounterAudience = 'owner' | 'requester';
+
+/** The four views of ONE classification pass over the counter's keys. */
+export interface CounterRendering {
+  /** The deterministic sentence fragment — the fallback template's detail. */
+  text: string;
+  /**
+   * Machine-labelled DECISION data. A language composer must reproduce each `value`
+   * verbatim; that is what stops the decided number drifting when an LLM rewrites
+   * the sentence around it.
+   */
+  pinned: Array<{ key: string; value: string }>;
+  /** Values that are already human sentences — translatable, never pinned. */
+  prose: string[];
+  /** Keys withheld from THIS reader. Never silent: see the contract below. */
+  withheld: string[];
+}
+
+/**
+ * Render an owner (or colleague) counter for the surface that has to act on it, and
+ * decide in the SAME pass what that surface may be shown. One classification of the
+ * key set, four views of it — a second predicate over these keys, anywhere, is the
+ * drift this function exists to prevent.
+ *
+ * #153 — this used to be a three-key WHITELIST (text / slot_iso / to) over a
+ * payload that is open-ended BY DESIGN (R8: his resolution may differ wildly from
+ * the ask; R9: open-ended in KIND). Every other shape returned '' — so Maayan's
+ * 90→55 duration counter, stored as `{duration_min: 55, reason: "…"}`, was relayed
+ * to her as "Idan suggested a different approach." with the decision itself
+ * missing, and the owner-facing bounce-back said "countered with an alternative".
+ * You cannot answer a counter you were never told.
+ *
+ * The contract: NO key is ever dropped. Known keys get a human phrasing, any other
+ * key falls through to "<key with spaces>: <value>", nested objects/arrays recurse,
+ * and ISO datetimes are localised via `formatInstant` when the caller has a zone to
+ * render in (raw ISO is the fallback — ugly beats absent).
+ *
+ * #153-followup — ONE exception, and it is not a silent one. A part carrying an
+ * internal work-item id is WITHHELD from a requester and named in `withheld`;
+ * `resolve_approval` runs this same function before it stores anything and REFUSES
+ * the amend when `withheld` is non-empty, naming the key it choked on. So the id
+ * never reaches a colleague, the owner's decision is never quietly thinned on its
+ * way to her, and the model is told exactly what to restate. That is how the
+ * "allowlist what may be relayed" shape keeps its safety without re-creating the
+ * whitelist that swallowed Maayan's `duration_min`: nothing passes through
+ * unclassified, and a refusal is loud instead of an omission being quiet.
+ *
+ * Note the veto is on the RENDERED part (label + value), i.e. exactly the text that
+ * would have shipped — not on the key name and not on the raw value.
+ */
+export function renderCounter(
+  data: Record<string, unknown> | null | undefined,
+  opts: { audience: CounterAudience; formatInstant?: (iso: string) => string },
+): CounterRendering {
+  const out: CounterRendering = { text: '', pinned: [], prose: [], withheld: [] };
+  if (!data) return out;
+  const parts: string[] = [];
+  for (const [key, raw] of Object.entries(data)) {
+    const value = renderCounterValue(raw, opts.formatInstant);
+    if (!value) continue;
+    const isProse = COUNTER_PROSE_KEYS.has(key);
+    const phrase = COUNTER_KEY_PHRASING[key];
+    const part = isProse
+      ? value
+      : (phrase ? phrase(value) : `${key.replace(/_/g, ' ')}: ${value}`);
+    if (opts.audience === 'requester' && INTERNAL_WORK_ITEM_ID_RE.test(part)) {
+      out.withheld.push(key);
+      continue;
+    }
+    parts.push(part);
+    if (isProse) out.prose.push(value);
+    else out.pinned.push({ key, value });
+  }
+  out.text = parts.join('; ');
+  return out;
+}
+
+/**
+ * Why a composed amend relay may NOT be sent, or null when it holds.
+ *
+ * This is the whole reason an LLM is allowed on the amend path at all: the composer
+ * translates the labels and writes the sentence, but every decided value has to come
+ * out the other side character-for-character, and it must not have invented an
+ * internal id of its own (it was never shown one — a withheld part never enters the
+ * prompt). A fault means the deterministic template ships instead: clumsy labels beat
+ * a drifted number.
+ */
+function amendCompositionFault(
+  composed: string,
+  pinned: Array<{ key: string; value: string }>,
+): string | null {
+  const dropped = pinned.filter(p => !composed.includes(p.value)).map(p => p.key);
+  if (dropped.length > 0) return `decided value(s) not reproduced verbatim: ${dropped.join(', ')}`;
+  if (INTERNAL_WORK_ITEM_ID_RE.test(composed)) return 'composition carries an internal work-item id';
+  return null;
 }

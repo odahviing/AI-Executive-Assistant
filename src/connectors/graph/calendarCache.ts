@@ -11,8 +11,9 @@
  * THE INVARIANT: a read after a write must never return pre-write state. Every
  * calendar mutation (create/update/delete) calls `invalidateCalendarCache`,
  * which drops the owner's event ranges AND all free/busy entries (a write can
- * change an attendee's busy state too). The TTL is the backstop for changes we
- * can't observe (owner edits in Outlook, a colleague moving something).
+ * change an attendee's busy state too) — at BOTH read scopes: the cross-turn maps
+ * here and the per-turn memo in `turnCache`. The TTL is the backstop for changes
+ * we can't observe (owner edits in Outlook, a colleague moving something).
  *
  * Scope: both the owner's own events AND other people's free/busy are cached
  * (their calendars change like ours → same write-invalidation + TTL + the
@@ -24,6 +25,7 @@
  */
 
 import logger from '../../utils/logger';
+import { getTurnCache } from '../../utils/turnCache';
 
 interface CacheEntry<T> { data: T; fetchedAtMs: number; }
 
@@ -68,9 +70,27 @@ export function invalidateCalendarCache(userEmail: string, reason: string): void
   }
   const freeBusyDropped = freeBusyCache.size;
   freeBusyCache.clear();
-  if (eventsDropped > 0 || freeBusyDropped > 0) {
+  // The per-turn memo is a read cache too, and it survives a mutation that happens
+  // mid-turn — so the invariant has to hold at both scopes or a write followed by a
+  // read inside one turn hands back pre-write state (create_meeting →
+  // rebalanceFloatingBlocks re-reads the affected day in the same turn). It became
+  // load-bearing the moment the decision reads (getOwnerEventsForDecision /
+  // getFreeBusyForDecision) stopped consulting the cross-turn layer at all: the
+  // memo is now the only cache standing between a booking and the next validation
+  // of the slot it just filled. Same scoping as above — this owner's event windows,
+  // every free/busy entry. `memoize` has no callers outside the two calendar reads,
+  // so these two prefixes are the whole calendar surface of that Map.
+  let memoDropped = 0;
+  const turn = getTurnCache();
+  if (turn) {
+    for (const key of [...turn.keys()]) {
+      const ownerEvents = key.startsWith('getCalendarEvents|') && key.includes(`|${userEmail}|`);
+      if (ownerEvents || key.startsWith('getFreeBusy|')) { turn.delete(key); memoDropped++; }
+    }
+  }
+  if (eventsDropped > 0 || freeBusyDropped > 0 || memoDropped > 0) {
     logger.info('calendarCache — invalidated after mutation', {
-      userEmail, reason, eventsDropped, freeBusyDropped,
+      userEmail, reason, eventsDropped, freeBusyDropped, memoDropped,
     });
   }
 }

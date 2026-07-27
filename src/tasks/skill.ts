@@ -14,7 +14,7 @@ import {
   getRecentOutreachOwnerThread,
 } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
-import { resolveRequest, type ResolveVerdict } from '../core/requests/resolver';
+import { resolveRequest, renderCounter, type ResolveVerdict } from '../core/requests/resolver';
 import { composeOwnerAskText } from '../core/approvals/approvalCallbacks';
 import { judgeRequestDedup } from '../utils/requestDedup';
 import {
@@ -23,7 +23,7 @@ import {
   type MaelleEvent,
 } from '../db';
 import type { RequestKind, RequestRow } from '../core/requests/types';
-import { parseDetails } from '../core/requests/types';
+import { parseDetails, toTimerInstant } from '../core/requests/types';
 import logger from '../utils/logger';
 import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
@@ -393,7 +393,19 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
       case 'create_task': {
         const taskType = args.type as CreateTaskType;
         const title = args.title as string;
-        const dueAt = args.due_at as string;
+        // #149 — anchor the due time to a UTC instant HERE, the boundary where a
+        // model-authored wall-clock becomes a spine timer and the only place the
+        // owner's zone is in hand. Pre-fix `due_at` went onto next_check_at
+        // verbatim, so a bare "2026-07-27T10:32:00" only satisfied the sweep's
+        // `datetime(next_check_at) <= datetime('now')` (UTC) three hours later.
+        const dueAtRaw = args.due_at as string;
+        const dueAt = toTimerInstant(dueAtRaw, profile.user.timezone);
+        if (!dueAt) {
+          return {
+            error: 'bad_due_at',
+            message: `due_at "${dueAtRaw}" isn't a parseable ISO 8601 datetime. Pass an owner-local wall-clock ("2026-07-27T10:32:00") or an explicit offset — I won't create a task whose timer can never fire.`,
+          };
+        }
         const description = args.description as string | undefined;
         const targetSlackId = args.target_slack_id as string | undefined;
         const targetName = args.target_name as string | undefined;
@@ -450,9 +462,19 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         const patch: Parameters<typeof updateRequest>[1] = {};
         if (typeof args.title === 'string') patch.subject = args.title;
         if (typeof args.description === 'string') patch.description = args.description;
+        // #149 — same UTC anchoring as create_task, so a rescheduled reminder
+        // can't re-acquire the naive-clock delay.
+        let dueAtNormalized: string | null = null;
         if (typeof args.due_at === 'string') {
-          patch.nextCheckAt = args.due_at as string;
-          patch.details = { ...detailsCurrent, due_at: args.due_at };
+          dueAtNormalized = toTimerInstant(args.due_at, profile.user.timezone);
+          if (!dueAtNormalized) {
+            return {
+              error: 'bad_due_at',
+              message: `due_at "${args.due_at}" isn't a parseable ISO 8601 datetime.`,
+            };
+          }
+          patch.nextCheckAt = dueAtNormalized;
+          patch.details = { ...detailsCurrent, due_at: dueAtNormalized };
         }
         if (typeof args.message === 'string') {
           patch.details = { ...detailsCurrent, ...(patch.details ?? {}), message: args.message };
@@ -461,8 +483,8 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         updateRequest(id, patch);
         logger.info('Task edited via skill', { id, fields: Object.keys(patch) });
         const result: Record<string, unknown> = { updated: true, task_id: id };
-        if (typeof args.due_at === 'string') {
-          const dueDt = DateTime.fromISO(args.due_at).setZone(profile.user.timezone);
+        if (dueAtNormalized) {
+          const dueDt = DateTime.fromISO(dueAtNormalized).setZone(profile.user.timezone);
           result.new_due = dueDt.toFormat('EEEE, d MMMM') + ' at ' + dueDt.toFormat('HH:mm');
         }
         return result;
@@ -484,7 +506,12 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             state: r.state,
             subject: r.subject,
             description: r.description,
-            due_at: r.next_check_at,
+            // #149 — next_check_at is a UTC instant (see toTimerInstant). Hand the
+            // model the OWNER-LOCAL offset ISO so "due to fire today at 10:32"
+            // can't come out as 07:32; still an unambiguous instant for date math.
+            due_at: r.next_check_at
+              ? (DateTime.fromISO(r.next_check_at).setZone(profile.user.timezone).toISO() ?? r.next_check_at)
+              : null,
             requester_name: r.requester_name,
             target_name: r.target_name,
           };
@@ -1290,8 +1317,29 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           decision = { verdict: 'reject', reason: args.reason as string | undefined };
         } else if (verdict === 'amend') {
           const counter = (args.counter as Record<string, unknown>) ?? {};
-          if (Object.keys(counter).length === 0) {
-            return { error: 'missing_counter', reason: 'verdict=amend requires a non-empty counter payload.' };
+          // #153 — the gate is RELAYABILITY, not key-count. A counter that renders
+          // to nothing reaches the requester as "Idan suggested a different
+          // approach." with the decision missing, and leaves nothing for a later ✅
+          // to replay. Gated on the SAME renderer the relay uses, so the tool can
+          // never store a counter the relay would swallow.
+          //
+          // #153-followup — and the same call answers the other half: a key the relay
+          // would have to WITHHOLD (it carries one of our own req_/task_/out_/ci_
+          // ids) is refused HERE, before the counter is stored. That keeps the id out
+          // of a colleague's DM and out of the replayed args, without the relay ever
+          // having to drop a decided value quietly.
+          const relay = renderCounter(counter, { audience: 'requester' });
+          if (relay.withheld.length > 0) {
+            return {
+              error: 'unrelayable_counter',
+              reason: `verdict=amend can't carry an internal identifier to a colleague — counter key(s) ${relay.withheld.join(', ')} hold one of our own request/task ids, which mean nothing to them. Drop those keys (or restate the value in human terms) and send the counter again: the owner's alternative in \`counter\`, his words in \`reason\`.`,
+            };
+          }
+          if (!relay.text) {
+            return {
+              error: 'missing_counter',
+              reason: 'verdict=amend needs a counter the requester can actually act on — put the owner\'s alternative in `counter` (e.g. {"duration_min": 55}) and his words in `reason`.',
+            };
           }
           decision = { verdict: 'amend', counter, reason: args.reason as string | undefined };
         } else {

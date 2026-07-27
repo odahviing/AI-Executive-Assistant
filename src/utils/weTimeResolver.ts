@@ -22,6 +22,7 @@
 import { DateTime } from 'luxon';
 import { reinterpretClockInZone, renderClockInZone, isoHasExplicitZone } from './timezoneConvert';
 import type { OwnerTravelContext } from './workingElsewhere';
+import type { UserProfile } from '../config/userProfile';
 
 /**
  * What the owner NAMED about the zone of a stated time. The model's only job is
@@ -146,4 +147,41 @@ export function renderWeDualClock(
   const tripPart = `${tripStart}${endHHmm(endIso, travel.effectiveTz)} ${whereLabel}`;
   const homePart = `${homeStart.toFormat('HH:mm')}${endHHmm(endIso, homeTz)} ${homeLabel}`;
   return `${tripPart} / ${homePart}`;
+}
+
+/**
+ * THE profile-bound dual clock — `renderWeDualClock` with the travel lookup and
+ * the reader framing already resolved, so a caller renders an instant by handing
+ * over the instant and nothing else.
+ *
+ * Exists because M14 is about two surfaces never printing one instant two ways,
+ * and the binding (which travel context, second person vs named) is exactly where
+ * that drift would enter. It was written out inline in planMeeting and needed a
+ * second time the moment the point-check started offering alternatives; two
+ * identical closures are one edit away from disagreeing, so there is one.
+ *
+ * `viewer` picks the FRAMING only, never the data: 'owner' gets "where you are
+ * now / your home time", anything else (a colleague, or unknown) gets the named
+ * third-person form — the colleague-safe reading is the default, so an unset
+ * viewer can never tell a colleague about someone else's trip in second person.
+ */
+export function profileDualClock(
+  profile: UserProfile,
+  viewer?: 'owner' | 'other',
+): (startIso: string, endIso?: string) => string {
+  // Lazy require, not a top-level import: this module is the WE spine and
+  // `workingElsewhere` reaches back into it for types. Resolving the dependency
+  // at CALL time (never at module init) keeps the edge harmless in either
+  // direction — nothing here runs while the modules are still loading.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getTravelContextForInstant } = require('./workingElsewhere') as
+    typeof import('./workingElsewhere');
+  const reader = viewer === 'owner' ? {} : { ownerName: profile.user.name.split(' ')[0] };
+  return (startIso: string, endIso?: string): string =>
+    renderWeDualClock(
+      startIso,
+      getTravelContextForInstant(startIso, profile),
+      profile.user.timezone,
+      { endIso, ...reader },
+    );
 }

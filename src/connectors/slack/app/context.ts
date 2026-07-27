@@ -21,7 +21,33 @@ export type SenderRole = 'owner' | 'colleague';
 /** Params for the shared message processor. */
 export interface ProcessMessageParams {
     senderId: string;
+    /**
+     * What the PERSON actually typed for this turn (mentions resolved, voice
+     * transcribed). Machine framing never belongs in here — it goes in
+     * `framing` below. The split is load-bearing, not cosmetic: this is the
+     * string the owner's shadow mirror renders back to him as `X said: "…"`,
+     * so anything fused into it is read as the sender's own words.
+     */
     text: string;
+    /**
+     * The machine-written, MODEL-facing framing this turn carries: the MPIM
+     * `<<GROUP DM — participants: …>>` preamble, the `[THREAD PARTICIPANTS: …]`
+     * roster, the `<<THREAD ACTION …>>` directive, attached-file reference
+     * blocks. processMessage composes it around `text` exactly once, for the
+     * audiences that need it (the model, history, the inbound queue's merge)
+     * and for no one else.
+     *
+     * A handler that adds framing MUST declare it here instead of
+     * concatenating it into `text`. GH #150: the group-DM preamble was fused
+     * in, so the owner's shadow DM showed his colleague "saying" ~360
+     * characters of Maelle's own instructions — and since that overran the
+     * 350-char preview cap, the colleague's real words never appeared at all.
+     * Reverse-engineering the preamble back out at each consumer is not the
+     * answer: the thread-action directive's roster and TASK body carry no
+     * delimiters, so only the side that BUILT the framing can say where the
+     * person's words start.
+     */
+    framing?: { prefix?: string; suffix?: string };
     channelId: string;
     ts: string;
     threadTs: string;

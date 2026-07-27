@@ -59,6 +59,14 @@ export interface PostReplyInput {
   // claim-checker shield, the spoof scan, the date verifier's anchor). Passed
   // straight to runOutputGates.
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /**
+   * The sender's OWN words for this turn — transport framing excluded (see
+   * `ProcessMessageParams.framing` in app/context.ts). Handed to the gate stack,
+   * and — the reason the distinction is load-bearing — rendered back to the
+   * OWNER by the Step 4.6 mirror as `X said: "…"`. Pass the framed string here
+   * and the owner reads Maelle's own group-DM preamble as his colleague's
+   * sentence, with the real words pushed past the preview cap (GH #150).
+   */
   userMessage: string;
   isMpim?: boolean;
   // True when this turn arrived in a real channel (not a DM, not an MPIM). The

@@ -23,6 +23,11 @@
  *
  * WHICH gates run is decided by TWO axes, never one role test — see the
  * derivation at the top of runOutputGates. Order:
+ *   BOTH LEGS FIRST: the availability floor (utils/availabilityGate) — a time the
+ *     rule-aware check established as unavailable may not be sold as workable to
+ *     anyone, so it is decided by the calendar and not by the reader, and running
+ *     it first means its rewrite is scrubbed / voice-checked / date-verified by
+ *     whichever leg follows.
  *   OWNER-PRIVATE (a 1:1 DM; only the owner ever reads it): claim-check +
  *     humanGate('owner') + date-verify, probed concurrently, exact serial chain
  *     on any flag.
@@ -162,6 +167,18 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // identical across the two frames, so on a group reply the 'owner' frame could
   // only ever rewrite correct text — a G6 corruption, not a safe miss.
   const audience: HumanGateAudience = colleagueReadable ? 'internal' : 'owner';
+
+  // ── The availability floor — BOTH legs, before every rewriter ─────────────
+  // A time the rule-aware check ESTABLISHED as unavailable may not be described as
+  // workable to anyone, so this runs on one code path for the owner and the
+  // colleague alike (the 2026-07-27 incident produced both statements from the
+  // same room, three minutes apart, and the colleague-facing one is what caused an
+  // external invite). It sits ABOVE the leg split for two reasons: the decision is
+  // reader-independent — the calendar fact is the same fact — and its rewrite is
+  // then leak-scrubbed, voice-checked and date-verified by the gates below on
+  // whichever leg the reply is on. On a clean turn it costs nothing: the pre-filter
+  // is an empty in-memory ledger and no module is even loaded.
+  cleanReply = await runAvailabilityFloorAndMaybeRewrite(ctx, cleanReply);
 
   // (v3.6.x — the "booked-date honesty" backstop that used to run between the
   // two legs was RETIRED. It was a 4th output-path LLM call on every booking
@@ -720,6 +737,102 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
     logger.warn('Claim-checker threw — sending original reply', { err: String(err) });
   }
   return cleanReply;
+}
+
+/**
+ * The availability floor's POLICY half (the primitives live in
+ * utils/availabilityGate). Three deterministic conditions decide whether the
+ * detector runs at all, and each one is free:
+ *
+ *  1. There is at least one still-fresh slot that `checkSlot` established as hard-
+ *     blocked for this owner. Empty ledger ⇒ return immediately — which is every
+ *     turn that never asked about a specific time, i.e. almost all of them.
+ *  2. NO calendar mutation ran this turn. This is the false-fire that would matter:
+ *     the owner says "book it anyway", create_meeting fires, the draft truthfully
+ *     says "booked Tuesday 11:30" — and a ledger entry from two minutes ago still
+ *     says that instant is blocked. Correcting a true confirmation is exactly the
+ *     G6 corruption this guard must never commit, so a changed calendar stands the
+ *     floor down entirely. Read off the carried `mutated=` marker
+ *     (summarizeToolCall) and `bookingOccurred`, not a tool-name list (G3).
+ *  3. There is a draft to check.
+ *
+ * Then ONE Haiku classification, and a Sonnet rewrite only on a flag. Fails open at
+ * every step — any error, any veto, any keep verdict ships the draft it was handed.
+ *
+ * W2 — and the entries are RENDERED for this turn's reader before either LLM sees
+ * them. The ledger is keyed by owner and read across threads, so it stores the owner's
+ * clock only; "the same instant where THEY are" is a fact about whoever is being
+ * answered right now, and baking it in at record time listed a Brussels clock to a
+ * colleague in New York — as a number the rewriter is explicitly told to preserve.
+ */
+async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initialReply: string): Promise<string> {
+  const { profile, result } = ctx;
+  if (!initialReply || initialReply.trim().length === 0) return initialReply;
+
+  try {
+    const {
+      freshHardBlockedSlots, detectAffirmedBlockedSlots, rewriteBlockedSlotClaim,
+      forgetHardBlockedSlot, clearHardBlockedSlots, displayForAsker,
+    } = await import('../availabilityGate');
+
+    const stored = freshHardBlockedSlots(profile.user.email);
+    if (stored.length === 0) return initialReply;
+
+    const tape = (result.toolSummaries ?? []).join(' ');
+    if (result.bookingOccurred === true || tape.includes('mutated=book')) {
+      // B1 — CLEAR, don't merely stand down. Standing down protected this turn and
+      // left every entry armed for the next one, so "move that clash to 15:00" →
+      // (next turn) "so 11:30 is open now?" came back as a confident false refusal.
+      // A move vacates one slot and fills another, so no entry survives a completed
+      // mutation; the pre-check re-derives what is still true on the next question.
+      clearHardBlockedSlots(profile.user.email);
+      logger.info('Availability floor — a calendar mutation completed this turn; cleared the established blocks (they are no longer known-good)', {
+        senderId: ctx.senderId, threadTs: ctx.threadTs, clearedCount: stored.length,
+      });
+      return initialReply;
+    }
+
+    // The asker's zone for THIS turn, off the AUTHENTICATED sender and out of the
+    // same people-store field the pre-check reads when it builds the drafting block
+    // (buildTurnContext.ts:576) — so the two surfaces name a moment in the same clock.
+    // Below the mutation check on purpose: a turn that already stood the floor down
+    // pays for nothing. Absent zone, the owner's own turn, or an unusable value all
+    // leave the stored owner-local rendering untouched.
+    const { getPersonMemory } = await import('../../db');
+    const askerTz = getPersonMemory(ctx.senderId)?.timezone ?? undefined;
+    const blocks = stored.map(b => ({
+      ...b, display: displayForAsker(b, profile.user.timezone, askerTz),
+    }));
+
+    const affirmed = await detectAffirmedBlockedSlots(
+      initialReply, blocks, profile.user.name.split(' ')[0],
+    );
+    if (affirmed.length === 0) return initialReply;
+
+    logger.warn('⚠ Availability floor — the draft presents an ESTABLISHED-unavailable time as workable; rewriting', {
+      senderId: ctx.senderId,
+      threadTs: ctx.threadTs,
+      role: ctx.role,
+      isOwnerInGroup: ctx.isOwnerInGroup === true,
+      slots: affirmed.map(s => ({ when: s.display, kind: s.kind, reasonGiven: s.phrase ?? null })),
+      draftPreview: initialReply.slice(0, 300),
+    });
+
+    const rewritten = await rewriteBlockedSlotClaim({
+      draft: initialReply,
+      slots: affirmed,
+      ownerFirstName: profile.user.name.split(' ')[0],
+    });
+    if (!rewritten || rewritten.trim().length === 0) return initialReply;
+
+    // The correction has landed in the text the reader will get; keeping the entry
+    // would re-offer the same slot for correction on every later turn in the window.
+    for (const s of affirmed) forgetHardBlockedSlot(profile.user.email, s.instantIso);
+    return formatForSlack(rewritten);
+  } catch (err) {
+    logger.warn('Availability floor threw — sending the original draft', { err: String(err).slice(0, 200) });
+    return initialReply;
+  }
 }
 
 /**

@@ -701,7 +701,10 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
 
       processMessage({
         senderId: event.user as string,
-        text: groupContext + resolvedText,
+        text: resolvedText,
+        // Declared, never fused: the preamble is Maelle's own instructions to
+        // herself, and the owner's shadow mirror renders `text` to him verbatim.
+        framing: { prefix: groupContext },
         channelId: event.channel as string,
         ts,
         threadTs,
@@ -1219,7 +1222,15 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
       const resolvedText = await resolveSlackMentions(rawText);
       processMessage({
         senderId: event.user!,
-        text: threadActionDirective + mpimContext + threadContext + resolvedText + channelDocText,
+        text: resolvedText,
+        // Four machine blocks ride this turn — the thread-action directive, the
+        // MPIM preamble, the participant roster, and any attached file's text.
+        // All declared as framing: the model needs them, a person reading a
+        // mirror of this turn must never see them as the sender's words.
+        framing: {
+          prefix: threadActionDirective + mpimContext + threadContext,
+          suffix: channelDocText,
+        },
         channelId: event.channel,
         ts: event.ts,
         threadTs,

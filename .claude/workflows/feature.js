@@ -61,7 +61,10 @@ const RAW = {
         properties: {
           ref: { type: 'string', description: 'github issue #' },
           title: { type: 'string' },
-          priority: { type: 'string', enum: ['High', 'Medium', 'Low', 'unlabelled'] },
+          // Two tracks, two vocabularies: Improvement carries High/Medium/Low,
+          // Feature carries Roadmap/Next/Idea. Both are read here, so both sets
+          // are valid — an enum holding only one would reject half the backlog.
+          priority: { type: 'string', enum: ['High', 'Medium', 'Low', 'Roadmap', 'Next', 'Idea', 'unlabelled'] },
           asks: { type: 'string', description: "what the issue literally asks for, in the owner's own framing" },
         },
         required: ['ref', 'title', 'asks'],
@@ -135,6 +138,14 @@ const VERDICTS = {
             enum: ['built', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'already-fixed'],
           },
           fix: { type: 'string', description: 'files touched, +/- lines, plain English' },
+          // Structured, because the verify reads `git diff` and the tree
+          // routinely holds another chat's work as well. Same field and same
+          // reasoning as bugger.js — see the long note there.
+          filesTouched: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'repo-relative path of EVERY file you edited or created for this piece. A missing list makes the verify treat the whole tree as this wave: safe, wasteful.',
+          },
           // Forwarded to the verify so it spends its budget on what you did NOT
           // cover, instead of re-deriving ground you already walked.
           traced: {
@@ -159,6 +170,25 @@ const VERIFY_OUT = {
   type: 'object',
   properties: {
     results: VERDICTS.properties.results,
+    // An OVERTURN (a piece in this wave is broken) goes in `results`. A
+    // DISCOVERY — a pre-existing problem noticed while reading — goes here and
+    // is NOT built in-wave: building it changes the tree the verify just
+    // examined, invalidating the pass that found it. Same reasoning as
+    // bugger.js, where the loop was first observed.
+    discoveries: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          symptom: { type: 'string', description: 'what a person would see go wrong — not the mechanism' },
+          evidence: { type: 'string', description: 'file:line, REQUIRED' },
+          lane: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer'] },
+          severity: { type: 'string', enum: ['high', 'medium', 'low'] },
+        },
+        required: ['symptom', 'evidence'],
+      },
+      description: 'problems found that are NOT about the pieces under review. Empty array if none — never in `results`, and never suppressed to keep the wave clean.',
+    },
     verifiedClean: {
       type: 'array',
       items: { type: 'string' },
@@ -174,18 +204,29 @@ const VERIFY_OUT = {
 // ═══════════════════════════════════════════════════════════════════════════
 if (MODE === 'plan') {
   phase('Intake')
+  // BOTH tracks. Note the syntax: `--label A --label B` is an AND in gh and would
+  // match nothing, so this uses search, where `label:A,B` is an OR. Reading only
+  // `Improvement` was a trap — a design question filed as a `Feature` (which is
+  // what the owner naturally calls it) became invisible to this engine forever.
+  // The priority word narrows to whichever track uses it, which is the intent:
+  // `High` finds Improvements, `Roadmap` finds Features.
   const query = REFS
     ? `Run ONLY: \`gh issue view <n> --json number,title,body,labels\` for each of these issue numbers: ${REFS.join(', ')}`
-    : `Run ONLY this one command: \`gh issue list --label Improvement${PRIORITY ? ` --label ${PRIORITY}` : ''} --state open --json number,title,body,labels\``
+    : `Run ONLY this one command: \`gh issue list --search "is:open label:Improvement,Feature${PRIORITY ? ` label:${PRIORITY}` : ''}" --json number,title,body,labels\``
 
   const raw = await agent(
     `${query} (read-only). Do NOT orient, explore the codebase, or read other files — just the command. SKIP any issue already labelled \`Agent\`. ` +
-      `Return each as {ref:"#<number>", title, priority:<High|Medium|Low|unlabelled from its labels>, asks:<what it literally asks for, in the owner's own framing — do not reinterpret or improve it>}. ` +
+      `Return each as {ref:"#<number>", title, priority:<whichever priority label it carries — High|Medium|Low on an Improvement, Roadmap|Next|Idea on a Feature, else unlabelled>, asks:<what it literally asks for, in the owner's own framing — do not reinterpret or improve it>}. ` +
       `If the list is empty return {items:[]} immediately.`,
-    { label: 'intake:improvements', phase: 'Intake', effort: 'low', model: 'haiku', schema: RAW },
+    { label: 'intake:backlog', phase: 'Intake', effort: 'low', model: 'haiku', schema: RAW },
   )
   const items = (raw && raw.items) || []
-  log(`Intake: ${items.length} open improvement(s)${PRIORITY ? ` at ${PRIORITY}` : ''}.`)
+  log(`Intake: ${items.length} open item(s)${PRIORITY ? ` at ${PRIORITY}` : ''}.`)
+  // One `understand` agent PER ITEM, so an unfiltered pull of the whole backlog
+  // is a real spend — 32 were open on 2026-07-27. The owner works one at a time;
+  // `args.refs` names them and skips the listing entirely.
+  if (!REFS && items.length > 8)
+    log(`! ${items.length} items means ${items.length} understand agents. If you meant one, re-invoke with args.refs:['#<n>'].`)
   if (!items.length) return { mode: 'plan', items: [], pieces: [], blockingQuestions: [], note: 'Nothing open.' }
   items.forEach((i) => log(`  • ${i.ref} [${i.priority || '?'}] ${(i.title || '').slice(0, 80)}`))
 
@@ -198,7 +239,7 @@ if (MODE === 'plan') {
     await parallel(
       items.map((it) => () =>
         agent(
-          `Work out what this improvement ACTUALLY means against the code on disk. Read-only — build nothing.\n\n` +
+          `Work out what this item ACTUALLY means against the code on disk. Read-only — build nothing.\n\n` +
             `Establish: what the code does TODAY (cite file:line — do not assume, and do not trust the issue's description of current behaviour); what it would do instead; and the honest gap between them. ` +
             `**Say so plainly if the gap is bigger than the issue implies** — an improvement that reads like one line and is really a subsystem is the single most useful thing you can surface here.\n\n` +
             `If it is ALREADY BUILT, set alreadyExists:true and say where. Issues go stale.\n\n` +
@@ -283,7 +324,7 @@ const WHERE_NOTE =
 const buildLane = (lane, pcs, roundNote) =>
   agent(
     `You are dispatched APPROVED improvement work in your lane. This is a FEATURE wave, not a bug wave — there is no root cause to prove; the owner has decided he wants this.\n\n` +
-      `For EACH piece: read the code first, build it within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%.${pcs.some((p) => p._where) ? WHERE_NOTE : ''}\n\n` +
+      `For EACH piece: read the code first, build it within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%, and **list every file you edited in \`filesTouched\`** so the verify can tell your change from work already sitting in the tree.${pcs.some((p) => p._where) ? WHERE_NOTE : ''}\n\n` +
       `Where a piece names an OWNER DECISION, that call is already made — build it, do not re-litigate it. But if building reveals a CORRECTNESS problem with what was decided, say so plainly and return \`needs-owner-decision\` rather than shipping something broken.\n` +
       `Where a piece names a DURABLE RULE, that rule is the owner's product intent — it belongs in your charter. Say in your notes that it should be written there; do not edit charter files yourself.\n` +
       `If a piece needs another lane, return \`needs-dependency\` with the exact contract — do not reach across.${roundNote || ''}\n\n` +
@@ -354,6 +395,18 @@ const hasAsk = (r) => r.dependencyAgent && String(r.dependencyAsk || '').trim().
 const MAX_DEP_ROUNDS = 5
 const dispatchedDepIds = new Set()
 const resumedPieceIds = new Set()
+// Every piece ever dispatched, by id. The resume lookup below read `approved`
+// alone, which holds only the pieces the owner signed off — so a piece born
+// mid-run (an ask that itself raised an ask) fell to the placeholder, got
+// `lane: ''`, and was dropped by the round filter without a word. Same defect,
+// same fix, as bugger.js: MAX_DEP_ROUNDS=5 exists to allow that depth.
+const specById = new Map(approved.map((p) => [p.id, p]))
+// Every originator whose dependency landed, accumulated ACROSS rounds. The
+// closing warning below read the loop's own block-scoped `satisfied`, which does
+// not exist outside it — a ReferenceError thrown after every lane had already
+// built, losing the whole run's report while the work sat uncommitted in the
+// tree. Same shape as the `resumes` scoping bug fixed on 2026-07-26.
+const satisfiedIds = new Set()
 let depRounds = 0
 let depQueue = approved.filter((p) => p.lane === 'context') // context's own pieces seed round 1
 
@@ -369,10 +422,11 @@ for (;;) {
   for (const r of results) {
     if (r.verdict === 'built' && typeof r.id === 'string' && r.id.endsWith('>dep')) satisfied.set(r.id.slice(0, -'>dep'.length), r)
   }
+  satisfied.forEach((_v, k) => satisfiedIds.add(k))
   const resumes = results
     .filter((r) => r.verdict === 'needs-dependency' && satisfied.has(r.id) && !resumedPieceIds.has(r.id))
     .map((r) => {
-      const orig = approved.find((p) => p.id === r.id) || { id: r.id, lane: '', whatChanges: r.notes || '', ref: '', whyThisLane: '', dependsOn: [], size: 'small' }
+      const orig = specById.get(r.id) || { id: r.id, lane: '', whatChanges: r.notes || '', ref: '', whyThisLane: '', dependsOn: [], size: 'small' }
       const dep = satisfied.get(r.id)
       resumedPieceIds.add(r.id)
       return { ...orig, _dependencyResolved: { youAsked: r.dependencyAsk || '', theyDelivered: dep.fix || dep.notes || 'see the working tree' } }
@@ -405,7 +459,10 @@ for (;;) {
     phase('Context')
     results = results.concat(await buildLane('context', ctxRound, resumeNote))
   }
-  round.forEach((p) => dispatchedDepIds.add(p.id))
+  round.forEach((p) => {
+    dispatchedDepIds.add(p.id)
+    specById.set(p.id, p)
+  })
 
   // A resumed piece REPLACES its earlier needs-dependency row — same id.
   if (resumes.length) {
@@ -427,25 +484,49 @@ for (;;) {
 phase('Verify')
 let verified = results
 let verifiedClean = []
+// `agent()` returns null when a subagent dies after its retries, and every read
+// of `check` below is null-guarded — so a verify that never happened reported
+// identically to one that found nothing. Record what actually came back.
+let verifyRan = false
+let waveFiles = []
+let priorCleanDropped = []
+let discoveries = []
 const built = results.filter((r) => r.verdict === 'built')
 if (built.length && A.verify !== false) {
   const priorClean = Array.isArray(A.priorClean) ? A.priorClean : []
+  // Same two mechanisms as bugger.js, same reasoning — the tree holds more than
+  // this wave, and a `priorClean` entry describing code this wave changed is a
+  // stale "proven clean" that silences a real check.
+  waveFiles = [...new Set(built.flatMap((r) => (Array.isArray(r.filesTouched) ? r.filesTouched : [])).filter(Boolean))]
+  const touchedBases = new Set(waveFiles.map((f) => String(f).split('/').pop()).filter(Boolean))
+  priorCleanDropped = priorClean.filter((c) => [...touchedBases].some((b) => String(c).includes(b)))
+  const priorCleanKept = priorClean.filter((c) => !priorCleanDropped.includes(c))
+  if (priorCleanDropped.length) log(`priorClean: dropped ${priorCleanDropped.length} of ${priorClean.length} — this wave changed the code they described.`)
+
   const check = await agent(
     `Adversarially verify this FEATURE wave's COMBINED change before the owner wraps it. **Findings only — build nothing, edit nothing, commit nothing.**\n\n` +
       `Calibrate to: **is this safe to ship to real people, and does it actually deliver what was approved?** Both halves matter here — unlike a bug wave, a feature can be perfectly safe and still not do the thing.\n\n` +
       `**Attack the seams first.** These pieces were split across lanes to serve ONE idea, so they are unusually likely to disagree at the joins: a contract changed on one side only, a shared helper two lanes both touched, a surface where two pieces each assume the other handles something.\n\n` +
       `**Each piece carries \`traced\` — what its builder already walked. Do not re-run those; go at what is missing from that list**, and at anything named as deliberately uncovered. If a \`traced\` claim looks wrong, spot-check that one cheaply rather than re-deriving the set.\n\n` +
-      (priorClean.length
-        ? `**ALREADY PROVEN by earlier passes — do NOT re-audit.** Excluded so your budget goes somewhere new. If this diff genuinely invalidates one, say which and why:\n${priorClean.map((c) => `  • ${c}`).join('\n')}\n\n`
+      (priorCleanKept.length
+        ? `**ALREADY PROVEN by earlier passes — do NOT re-audit.** Excluded so your budget goes somewhere new; anything an earlier pass proved about code THIS wave changed has already been removed. If this diff genuinely invalidates one anyway, say which and why:\n${priorCleanKept.map((c) => `  • ${c}`).join('\n')}\n\n`
         : '') +
       `Read the ACTUAL diff (\`git diff\`, \`git status\`) — verify against the code on disk, never the summaries below; those are the lanes' own claims. Confirm \`npx tsc --noEmit\` is green.\n\n` +
+      (waveFiles.length
+        ? `**THE TREE HOLDS MORE THAN THIS WAVE. These ${waveFiles.length} files are ours:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n` +
+          `Anything else in \`git diff\` was already modified before this run started. **Do not audit it, and never blame this wave for a change it did not make.** If a pre-existing change genuinely breaks a piece below, say so and label it plainly as pre-existing.\n\n`
+        : `**No lane reported which files it touched, so treat the whole diff as this wave's** — over-checking rather than under-checking. Say in your notes that you could not separate this wave from what was already in the tree.\n\n`) +
       `**Budget: keep this under ~60 tool calls.** If the diff is too large to cover at that depth, say what you did NOT cover rather than thinning every check. An honest gap beats uniform shallowness.\n\n` +
+      `**Keep two outputs apart.** An **OVERTURN** — a piece in THIS wave is broken — goes in \`results\` and must be settled before shipping. A **DISCOVERY** — a pre-existing problem you noticed while reading, real but unrelated to these pieces — goes in \`discoveries\`. **A discovery is not built in this wave, deliberately:** building it changes the tree you just examined and invalidates this pass, which justifies another, which can discover something else. Report it as next run's input. Never suppress one to keep the wave clean, and never inflate one into an overturn to get it fixed tonight.\n\n` +
       `Return one row per piece id: \`built\` if it holds in combination, otherwise \`needs-owner-decision\` with notes on exactly what breaks. Also return \`verifiedClean\` — what you PROVED and would not spend budget on again; the next run is told not to re-check it, so put nothing there you did not establish.\n\n` +
       `APPROVED INTENT:\n${JSON.stringify(approved.map((p) => ({ id: p.id, whatChanges: p.whatChanges, productDecision: p.productDecision })), null, 2)}\n\n` +
       `WHAT WAS BUILT:\n${JSON.stringify(built, null, 2)}`,
     { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'guard', effort: 'xhigh', schema: VERIFY_OUT },
   )
+  verifyRan = !!check
   verifiedClean = (check && check.verifiedClean) || []
+  discoveries = (check && check.discoveries) || []
+  if (discoveries.length) log(`Verify found ${discoveries.length} NEW problem(s) unrelated to this wave — reported, NOT built.`)
   const overturned = new Map(((check && check.results) || []).filter((x) => x.verdict && x.verdict !== 'built').map((x) => [x.id, x.notes || '']))
   verified = results.map((r) =>
     overturned.has(r.id) ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [wave-verify overturned: ${overturned.get(r.id)}]`.trim() } : r,
@@ -467,13 +548,26 @@ const featureManifest = {
   resumed: resumedPieceIds.size,
   depRounds,
   earnedRules: earnedRules.length,
-  verify: A.verify === false ? { ran: false } : { ran: !!built.length, overturned: results.filter((r, i) => verified[i] && r.verdict !== verified[i].verdict).length, verifiedCleanReturned: verifiedClean.length },
+  verify:
+    A.verify === false
+      ? { ran: false, fixesToCheck: 0 }
+      : {
+          ran: verifyRan,
+          fixesToCheck: built.length,
+          waveFilesNamed: waveFiles.length, // 0 with pieces built = the verify could not tell this wave from the rest of the tree
+          priorCleanDropped: priorCleanDropped.length,
+          discoveries: discoveries.length, // NEW problems, deliberately not built this wave
+          overturned: results.filter((r, i) => verified[i] && r.verdict !== verified[i].verdict).length,
+          verifiedCleanReturned: verifiedClean.length,
+        },
 }
 const featureWarnings = []
 if (waveCapHit) featureWarnings.push(`WAVE CAP HIT — ${remaining.length} approved piece(s) never dispatched: ${remaining.map((p) => p.id).join(', ')}. They are NOT built.`)
 if (understood.length === 0) featureWarnings.push('`understood` was not passed back from the plan run, so every builder re-derived what its area does today. Pass it next time.')
 if (built.length && A.verify === false) featureWarnings.push('Verify was disabled on a run that built code.')
-if (results.some((r) => r.verdict === 'needs-dependency' && !satisfied.has(r.id)))
+if (built.length && A.verify !== false && !verifyRan)
+  featureWarnings.push(`THE VERIFY DID NOT RUN — ${built.length} built piece(s) are unchecked. Do NOT wrap without \`/manager verify\`.`)
+if (results.some((r) => r.verdict === 'needs-dependency' && !satisfiedIds.has(r.id)))
   featureWarnings.push('A piece is still blocked on a dependency that never landed — it is unfinished, not built.')
 featureWarnings.forEach((w) => log(`! ${w}`))
 
@@ -490,5 +584,7 @@ return {
   results: verified,
   earnedRules,
   verifiedClean, // persist under "Verified clean" in report.md; pass back as `priorClean` next run
+  priorCleanDropped, // **DELETE these from `state.verifiedClean`** — this wave changed the code they described, and a stale entry silences a real check forever
+  discoveries, // NEW problems unrelated to these pieces. Report as fresh rows at `pending owner`; build on the NEXT run, never this one
   note: 'Uncommitted in the working tree. The owner wraps.',
 }

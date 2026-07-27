@@ -563,12 +563,33 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { precheckAvailability } = require('../../utils/availabilityPreCheck') as
         typeof import('../../utils/availabilityPreCheck');
+      // v4.2.x — the zone the ASKER writes from. A clock time he states with no
+      // zone belongs to his zone, not the owner's: on 2026-07-27 a Brussels
+      // colleague's "16:00" was point-checked as 16:00 Asia/Jerusalem — an hour
+      // off both what he meant and what `find_available_slots` resolved for the
+      // same phrase, which is how one requested time produced two opposite
+      // availability verdicts and a false collision claim. Same row the search
+      // path already reads the attendee frame from (attendeeAvailability.ts:123);
+      // no stored timezone → undefined → the pre-check keeps the owner's zone.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getPersonMemory } = require('../../db') as typeof import('../../db');
+      const askerTimezone = input.userId ? (getPersonMemory(input.userId)?.timezone ?? undefined) : undefined;
       const result = await precheckAvailability({
         message: userMessage,
         profile,
+        requesterTimezone: askerTimezone,
         // v3.3.7 (#125b) — the day a bare time refers to often lives a
         // message earlier ("מחר... 17:00" → "13:00/13:30?").
         recentThread: conversationHistory.slice(-4),
+        // v4.2.x — thread identity for the alternatives block. When every tested
+        // slot comes back blocked, nearbyAlternatives offers concrete times and
+        // records them into the offered-slots stash (ops/helpers.ts:82). Must be
+        // the SAME (channelId, threadTs) pair the stash READ below uses: the
+        // stash keys group surfaces as `channelId|threadTs`, so passing only the
+        // channel would file an MPIM's alternatives under `C…|_none_` while the
+        // binding block looks up `C…|<ts>` — offered, never bindable.
+        channelId: input.channelId,
+        threadTs: input.threadTs,
       });
       if (result.ran && result.promptBlock) {
         availabilityPrecheckBlock = result.promptBlock;

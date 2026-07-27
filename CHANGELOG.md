@@ -2,6 +2,52 @@
 
 ---
 
+## 4.2.2 — options instead of permission, and a guard that had to be taught what it may not assert
+
+It started with *"all those dates are booked and I didn't know it, where is my options?"* — and the diagnosis was **wrong**. She had not fabricated anything: the three proposed times broke a soft day-load rule, not a booking, and she rendered that faithfully. The real bug was the second half of his sentence. When every time a colleague proposes comes back unbookable, she now **produces alternatives in the same reply** instead of asking permission to look for them. Three surfaces answered "can this time hold a meeting?" and only two of them ever offered a way forward.
+
+The fix for the first half — carrying the *reason* a time is blocked, so a hard conflict can never be narrated as a soft one — needed a new output gate to enforce it. **That gate then produced four separate false-refusal paths in a single day**, each found by a different verification pass, while catching nothing real. Its record is now written into its own header rather than the flattering version. This version is mostly the story of making one new assertion safe.
+
+### Added
+- **An output-time availability floor.** A time proven hard-blocked can no longer be described to anyone — owner or colleague — as workable. It corrects the draft once, above the reader split, so a rewrite is still leak-scrubbed, voice-checked and date-verified afterwards. Zero cost outside a live window; no new model call on a clean turn.
+- **Nearby alternatives as a first-class answer.** The search that produced them was *moved* out of the booking path rather than copied, so one implementation serves both surfaces — the booking path is 74 lines lighter. Alternatives clear the same bars the refused time was measured against, which is why this is arithmetic and not a prompt instruction.
+- **Two readings for an ambiguous clock.** A bare "16:00" from a colleague in another timezone is no longer silently resolved. Both candidate instants are judged, both are shown with their own clock, and the reply must say which one it answered. The store holds one colleague who means his own clock and another who means the owner's — no rule separates them, so the honest move is to stop guessing and say which reading was used.
+
+### Fixed — a colleague was told something untrue
+- **A wrong timezone frame became a stored fact, and the guard asserted it.** The model was doing the timezone arithmetic. A colleague in Brussels asked about 16:00, was told it clashed, and the hour was free — then the wrong instant was recorded as *proven* hard-blocked and used to overwrite a correct draft with a confident refusal. Code now owns the frame; the model returns the clock exactly as written.
+- **A guard citing evidence from the wrong day.** A question naming no clock time resolved to *today at midnight*, trivially past, and armed the floor — which then refused a draft about a date three weeks later. `in_the_past` is out of the arming set entirely: it is the one rejection kind that manufactures itself, and nothing it caught was harmful, since nobody books the past.
+- **A stale block outliving the fact.** Move the conflicting meeting away and she would still refuse the slot. Invalidation now has a stated contract with three rules rather than a TTL and two accidents.
+- **The arming test and the ledger's own tier list disagreed** across the whole overridable tier — so an ambiguous pair with one hard and one soft reading armed as if the frame were settled, and a fresh *soft* verdict neither recorded nor forgot. One shared predicate now decides both. Caught by the pre-deploy pass, which is the only reason it isn't in production.
+
+### Fixed — GitHub
+- **[#149](https://github.com/odahviing/AI-Executive-Assistant/issues/149) A reminder set for 10:32 fired at 13:35.** Model-authored times were stored as bare wall clocks while the sweep compares against UTC, so every one came due exactly the owner's offset late. One anchoring primitive now owns it, and an unparseable time is refused instead of arming a timer the query can never select — previously it hung open forever. Also closed a real double-send found on the way: a send time already in the past sent the DM *and* queued it again.
+- **[#150](https://github.com/odahviing/AI-Executive-Assistant/issues/150) The owner's private mirror of a group chat showed machine text, not what the colleague said.** Framing was fused onto the message, so only the model-facing string existed — and the framing alone was longer than the preview limit. Split by audience: what the model reads and what a person reads are now separate values, byte-identical on the model side.
+- **[#153](https://github.com/odahviing/AI-Executive-Assistant/issues/153) A counter-offer relayed without the counter.** The requester was told *"Idan suggested a different approach"* and never told what it was, because the renderer read three specific fields of a payload that is open by design. Nothing is dropped now; the storage gate uses the same test as the relay, so a counter that cannot be relayed can no longer be stored.
+
+### Changed
+- **Read freshness is explicit, and a proposal counts as a commitment.** Every read that backs a decision now goes live; reads that merely show the calendar stay cached. One named constant replaced two spellings of the free/busy window limit — having two was the bug below.
+- **The amend relay is written in the requester's own language.** The composer that already did this for approvals now covers amends, with the decided values **pinned**: they must survive verbatim or the composition is discarded and the plain template ships. Phrasing is the model's, the decision is code's, and a drifted sentence can never become a drifted booking because the replay reads the stored counter.
+- **Relayed text is built only from classified parts**, vetoed on the internal-id shapes this repo itself mints — an allowlist provably cannot separate a room name from a request id. The refusal moved to the *write*, naming the offending key, so a withheld value can never become a silent omission.
+- **When a group chat voids an owner override, he is told.** The refusal was always correct; only its invisibility was wrong. The check keys on authenticated identity rather than a per-surface flag, so it cannot be lost by an incomplete context.
+
+### Fixed — latent, would have fired on 24 August
+- **Any free/busy question spanning more than 62 days would have crashed the tool outright** — a stack overflow, not an error. The clamp used calendar arithmetic while the test used absolute, so across an autumn transition it re-derived the same value forever. Reachable annually from late August, in every timezone with a fall-back. Clamped to the tighter of both readings now, byte-identical away from a transition.
+- **A fully-booked day could read as free**, with nothing flagged unchecked, when both ends of the window were written as midnight of the same day. The whole-day test now keys on the instant rather than on how the date was spelled.
+
+### Tooling
+The nightly bug loop's intake was three agents and is now one `scout` that reads, merges, routes and classifies in a single pass — routing is the run's most consequential call and the agent that made it previously saw only a summary of the transcript. The ledger gained a `converted` verdict for a bug that turns out to be a design question, and it errors on one that does not name where it went.
+
+### Not changed
+- **The floor keeps its active form for now.** Softening it to *"I can't confirm that time"* trades a wrong reason for a useless one. It runs one measured window with clean inputs, and if it still catches nothing the honest answer is shadow mode, not gentler wording.
+- **The group-chat authority model is untouched** — [#154](https://github.com/odahviing/AI-Executive-Assistant/issues/154). Splitting visibility from authority needs a code-level guarantee for the privacy half, and nobody has one yet.
+- **Calendar health still cannot read a standing instruction** — [#155](https://github.com/odahviing/AI-Executive-Assistant/issues/155). It auto-categorized an event the owner had twice written must never be touched, four seconds after detecting it, because the scan writes before the model is consulted and the preference is free text only the prompt reads.
+- Two known gaps are deferred, not forgotten: reads that still decide from cache, and an internal id passing through the one relay field the new veto does not cover.
+
+### Migration
+None. No schema change anywhere in this version.
+
+---
+
 ## 4.2.1 — the parked backlog cleared, and a close-loop that could never close
 
 The 4.2.0 audit left ~30 findings parked. This version clears them, plus two GitHub bugs, across **seven lanes in parallel and 53 files** — the owner ruled on every item individually and declined about a third. One combined adversarial pass over the whole diff before shipping; it could not refute any of the eight cross-lane seams.

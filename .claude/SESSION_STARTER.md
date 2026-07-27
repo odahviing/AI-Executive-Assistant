@@ -46,6 +46,8 @@ Every lane takes the product requirement into a different area. At a glance:
 
 *Rule tags are one letter per lane:* **M**eeting · **R**equests · **G**uard · **P**eople · **C**ontext · **S**lack · **O**uter.
 
+**Not a lane — `scout`** (`.claude/agents/scout.md`). It owns no code and builds nothing: it pulls the open GitHub `Bug` issues, reviews the logs since the watermark, merges the two, and routes each atomic issue to the lane that owns the fix. Read-only (`Read · Grep · Glob · Bash`). **The lane table below is the map it routes against — keeping that table current is what keeps routing correct.**
+
 | Lane | Owns | Never touches |
 |---|---|---|
 | **meeting** | deterministic scheduling core — search / validate / book / move / cancel, free-busy, TZ + Working-Elsewhere, floating blocks, Graph + cache | the requests spine · the guards · prompt wording · transport |

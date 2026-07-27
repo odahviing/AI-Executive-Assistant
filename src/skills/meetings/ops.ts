@@ -37,6 +37,7 @@ import {
   handleDeleteMeeting,
 } from './ops/handlers/calendarReads';
 import type { OpCtx } from './ops/handlers/context';
+import { clampedRelaxedNotice } from './bookingRequest';
 
 /**
  * Internal ops helper. Not a registered skill (see file header). MeetingsSkill
@@ -53,6 +54,29 @@ export class SchedulingSkill {
   // `this.ops.executeToolCall(...)` from meetings.ts.
 
   async executeToolCall(
+    toolName: string,
+    args: Record<string, unknown>,
+    context: SkillContext,
+  ): Promise<unknown | null> {
+    const result = await this.dispatch(toolName, args, context);
+
+    // The owner's relaxed override, dropped by the group-DM clamp, used to be
+    // visible only in a log line — so he was answered un-relaxed and told
+    // nothing (2026-07-27; see clampedRelaxedNotice). Attached HERE, the one
+    // point every direct op returns through, so the disclosure rides EVERY
+    // branch of every relaxed-aware tool — booked, refused, rule_violation,
+    // needs_owner_approval — instead of three handlers each having to remember
+    // it at each of their own return sites. Mutated rather than spread so the
+    // result keeps its identity for downstream consumers; the array exclusion
+    // matters because JSON.stringify would drop a non-index key.
+    const notice = clampedRelaxedNotice(toolName, args, context);
+    if (notice && typeof result === 'object' && result !== null && !Array.isArray(result)) {
+      (result as Record<string, unknown>).owner_override_not_applied = notice;
+    }
+    return result;
+  }
+
+  private async dispatch(
     toolName: string,
     args: Record<string, unknown>,
     context: SkillContext,

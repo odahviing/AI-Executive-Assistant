@@ -17,7 +17,7 @@
  */
 
 import { DateTime } from 'luxon';
-import { getFreeBusy } from '../connectors/graph/calendar';
+import { getFreeBusyForDecision } from '../connectors/graph/calendar';
 import logger from './logger';
 
 export type AttendeeSlotStatus = 'free' | 'busy' | 'tentative' | 'oof' | 'unknown';
@@ -55,7 +55,7 @@ export async function annotateSlotsWithAttendeeStatus<S extends { start: string;
     // answered 'unknown' for exactly this situation; this is the same answer for
     // the same situation, arriving by a different route.
     const fbDiag: { notChecked?: string[] } = {};
-    const busyMap = await getFreeBusy(params.callerEmail, [params.attendeeEmail], earliest, latest, params.timezone, false, fbDiag);
+    const busyMap = await getFreeBusyForDecision(params.callerEmail, [params.attendeeEmail], earliest, latest, params.timezone, fbDiag);
     if ((fbDiag.notChecked ?? []).length > 0) {
       logger.warn('annotateSlotsWithAttendeeStatus: free/busy was never read — returning unknown', {
         attendeeEmail: params.attendeeEmail, earliest, latest,

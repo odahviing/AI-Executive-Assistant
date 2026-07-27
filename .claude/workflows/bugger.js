@@ -1,11 +1,9 @@
 export const meta = {
   name: 'bugger',
   description:
-    'Bugger — builds a set of atomic issues across SEVERAL lanes, with dependency hand-off and ONE combined verify. Pass `args.issues` (already lane-assigned, e.g. rows the owner approved from report.md) and it goes straight to work — intake and triage are SKIPPED. Only pass `args.sources` for the nightly discovery run, which is the sole case needing a GitHub pull or a 24h log review. For ONE lane whose items are already known, do NOT use this at all — dispatch that lane directly with the Agent tool; the pipeline buys nothing and costs a full intake. Core loop: rounds of [code lanes in parallel -> context last] until no dependency asks remain, then one adversarial verify over the combined diff. Builds in the working tree; NEVER commits (the owner wraps).',
+    'Bugger — builds a set of atomic issues across SEVERAL lanes, with dependency hand-off and ONE combined verify. Pass `args.issues` (already lane-assigned, e.g. rows the owner approved from report.md) and it goes straight to work — the scout is SKIPPED. Only pass `args.sources` for the nightly discovery run, which is the sole case needing a GitHub pull or a log review. For ONE lane whose items are already known, do NOT use this at all — dispatch that lane directly with the Agent tool; the pipeline buys nothing and costs a full intake. Core loop: rounds of [code lanes in parallel -> context last] until no dependency asks remain, then one adversarial verify over the combined diff. Builds in the working tree; NEVER commits (the owner wraps).',
   phases: [
-    { title: 'Intake' },
-    { title: 'Triage' },
-    { title: 'Locate' },
+    { title: 'Scout' },
     { title: 'Build' },
     { title: 'Context' },
     { title: 'Verify' },
@@ -14,8 +12,48 @@ export const meta = {
 
 // ---- args (all optional; the Manager passes them) ----
 const A = args || {}
-const SOURCES = A.sources || ['github', 'logs'] // the one 19:00 run does BOTH; manual runs too
+
+// ---- arg hygiene: a MALFORMED arg must never look like an ABSENT one -------
+// Every array arg used to be read as `Array.isArray(x) ? x : []`, which converts
+// "the caller passed something broken" into "the caller passed nothing" and says
+// nothing at all. On 2026-07-27 the Manager passed 11 `alreadyBuilt` refs, the
+// manifest printed `passedIn: 0`, and a lane was dispatched in full to answer
+// "already-fixed" — the entire price of a bug, paid for a shape error. The
+// Workflow tool warns that an array sent as a JSON *string* arrives as one
+// string, and `Array.isArray` on a string is false.
+//
+// `issues` is the dangerous one: malformed, it silently becomes null and the
+// engine runs a FULL GitHub pull and 24h log review instead of the rows the
+// owner named — the 76k-on-intake failure, reachable by typo.
+//
+// So: recover a stringified array if we can, and SAY SO either way.
+const argWarnings = []
+const asArray = (name, v) => {
+  if (v === undefined || v === null) return []
+  if (Array.isArray(v)) return v
+  if (typeof v === 'string') {
+    try {
+      const parsed = JSON.parse(v)
+      if (Array.isArray(parsed)) {
+        argWarnings.push(`\`${name}\` arrived as a JSON STRING rather than an array — recovered ${parsed.length} entr${parsed.length === 1 ? 'y' : 'ies'} by parsing it. Pass it as a real array in the tool call.`)
+        return parsed
+      }
+    } catch {
+      /* fall through to the loud path below */
+    }
+  }
+  argWarnings.push(`\`${name}\` was PASSED but is not an array (got ${typeof v}) — IGNORED, and whatever it held never reached the run.`)
+  return []
+}
+
+const sourcesArg = asArray('sources', A.sources)
+const SOURCES = sourcesArg.length ? sourcesArg : ['github', 'logs'] // the one 18:00 run does BOTH; manual runs too
 const SINCE = A.sinceIso || 'the last run' // watermark for the log review
+// The watermark in UTC, so the manifest can check the scout compared against the
+// right instant rather than guessing from a line number. Empty when no ISO
+// watermark was passed (the first run, or a manual one).
+const WATERMARK_UTC = Number.isFinite(Date.parse(SINCE)) ? new Date(Date.parse(SINCE)).toISOString() : ''
+const WATERMARK_DAY = WATERMARK_UTC ? SINCE.slice(0, 10) : '' // local day — log files are named by local date
 const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 100 // severity-first build cap per run
 // A pre-triaged list — the door from `report.md` back INTO the builder. Without
 // it the parked items had no path in at all: intake reads GitHub and the logs,
@@ -23,7 +61,8 @@ const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 100 // severity-firs
 // by hand to act on his own review, which makes the review pointless.
 // These are already lane-assigned, so intake and triage are skipped entirely —
 // paying to re-derive routing he has already approved is pure waste.
-const PRESET = Array.isArray(A.issues) && A.issues.length ? A.issues : null
+const presetArg = asArray('issues', A.issues)
+const PRESET = presetArg.length ? presetArg : null
 // Bugs already FIXED but not yet in the running build. Production keeps
 // emitting the same tape until a fix is deployed, so every unattended night the
 // log review honestly re-finds work the previous run already did. The lane does
@@ -33,7 +72,19 @@ const PRESET = Array.isArray(A.issues) && A.issues.length ? A.issues : null
 // Read from `ledger.jsonl`, which is why each line carries a `ref` and a proven
 // `rootCause`: prose alone makes this a fuzzy guess, a ref makes it a lookup.
 // Shape: [{ref, symptom, rootCause, state}].
-const ALREADY_BUILT = Array.isArray(A.alreadyBuilt) ? A.alreadyBuilt : []
+const ALREADY_BUILT = asArray('alreadyBuilt', A.alreadyBuilt)
+// Items the owner has SEEN and parked — deferred, or converted into a GitHub
+// issue where the design question is being worked. Distinct from ALREADY_BUILT
+// in the way that matters: nothing is fixed, so the symptom recurs INDEFINITELY
+// rather than only until the next deploy. Without this list a parked decision
+// comes back every night as a fresh bug, which is the failure that re-raised 24
+// of his rulings on 2026-07-26 — the same shape, one layer along.
+// Shape: [{ref, symptom, state, note}].
+const OPEN_KNOWN = asArray('openKnown', A.openKnown)
+const describeOpen = (o) =>
+  typeof o === 'string'
+    ? `  • ${o}`
+    : `  • **${o.ref || '(no ref)'}** — ${o.symptom || '(no symptom)'}${o.state ? ` [${o.state}]` : ''}` + `${o.note ? `\n      ${o.note}` : ''}`
 const describeBuilt = (b) =>
   typeof b === 'string'
     ? `  • ${b}`
@@ -54,51 +105,37 @@ const CODE_LANES = ['meeting', 'requests', 'guard', 'people', 'slack', 'outer'] 
 const EFFORT = { meeting: 'xhigh', context: 'xhigh', slack: 'xhigh', requests: 'xhigh', outer: 'high', people: 'high', guard: 'high' } // reasoning effort per lane (owner-set)
 
 // ---- schemas (force structured returns) ----
-const FINDINGS = {
+// ── SELF-REPORT ─────────────────────────────────────────────────────────────
+// Every silent failure this engine has had was a mechanism that did nothing and
+// looked like success: the watermark never filtered, the activity exit never
+// fired, the Agent label never matched, dependency asks vanished into a `built`
+// verdict, `alreadyBuilt` never matched `gh#147` against `#147`. None was caught
+// for weeks because nothing ever asserted that the step had happened.
+//
+// So the step REPORTS ITS OWN WORK, and the run manifest prints it. A no-op
+// stops being invisible and becomes a zero in a column where zero is obviously
+// wrong. Diagnostics only — nothing branches on them.
+const SCOUT = {
   type: 'object',
   properties: {
-    // ── SELF-REPORT ─────────────────────────────────────────────────────────
-    // Every silent failure this engine has had was a mechanism that did nothing
-    // and looked like success: the watermark never filtered, the activity exit
-    // never fired, the Agent label never matched, dependency asks vanished into
-    // a `built` verdict. None was caught for weeks because nothing ever asserted
-    // that a step had actually happened.
-    //
-    // So each step now REPORTS ITS OWN WORK as numbers, and the run manifest
-    // prints them. A no-op stops being invisible and becomes a zero in a column
-    // where a zero is obviously wrong. These are diagnostics, never inputs to a
-    // decision — nothing branches on them.
-    cutoffLine: {
-      type: 'number',
-      description: 'log-review only: the line number the review STARTED from, after converting the watermark to UTC. 1 means the filter did nothing — the failure being watched for.',
-    },
-    cutoffUtc: { type: 'string', description: 'log-review only: the UTC instant you actually compared against, so a timezone slip is visible' },
-    turnsAfterCutoff: { type: 'number', description: 'log-review only: `Orchestrator invoked` events counted AFTER the cutoff (not in the whole file)' },
-    findings: {
+    filesRead: {
       type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          source: { type: 'string', enum: ['github', 'logs'] },
-          ref: { type: 'string', description: 'github issue #, or a cited transcript moment' },
-          symptom: { type: 'string' },
-          evidence: { type: 'string', description: 'file:line or a quoted transcript moment — REQUIRED' },
-          clarity: { type: 'string', enum: ['clear', 'ambiguous'] },
-        },
-        required: ['source', 'ref', 'symptom', 'evidence', 'clarity'],
-      },
+      items: { type: 'string' },
+      description:
+        'every log file you opened, by name. The watermark routinely predates today, so a review that opened only one file has skipped the tail of the previous day — on a watermark older than this morning, a single-entry list IS that failure.',
     },
-  },
-  required: ['findings'],
-}
-
-const ATOMIC = {
-  type: 'object',
-  properties: {
-    // Self-report, same reason as FINDINGS above. `alreadyBuilt` was passed six
-    // entries on 2026-07-26 and dropped none of the two that mattered, because
-    // `gh#147` never string-matched `#147`. Nothing noticed, because nothing was
-    // counting. Now the count is printed next to the number passed in.
+    cutoffUtc: {
+      type: 'string',
+      description: 'the UTC instant you compared against, after converting the watermark. Checked against the watermark the engine passed you, so a timezone slip is visible rather than silent.',
+    },
+    turnsAfterCutoff: { type: 'number', description: '`Orchestrator invoked` events counted AFTER the cutoff, across every file you read' },
+    findingsSeen: { type: 'number', description: 'raw findings from both sources before merging — the count that used to come back from a separate intake pass' },
+    droppedAsOpenKnown: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'the ref of every finding you dropped because the owner has already seen and parked it. Empty array if none — do NOT omit the field, an omission is indistinguishable from "the check did not run".',
+    },
     droppedAsAlreadyBuilt: {
       type: 'array',
       items: { type: 'string' },
@@ -111,6 +148,14 @@ const ATOMIC = {
         properties: {
           id: { type: 'string' },
           symptom: { type: 'string' },
+          // Where this came from, carried all the way to the ledger. Without it
+          // "is the log review earning its keep?" can only be answered by
+          // digging through old workflow journals — which is how it was
+          // answered on 2026-07-27 (4 log findings ever, against 8 from
+          // GitHub, and all four were real bugs nobody had reported). A merged
+          // issue takes `both`; that IS the interesting case, because the
+          // owner's words carry the ask and the transcript carries the proof.
+          source: { type: 'string', enum: ['github', 'logs', 'both'] },
           lane: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer'] },
           whyHypothesis: { type: 'string' },
           severity: { type: 'string', enum: ['high', 'medium', 'low'] },
@@ -130,8 +175,22 @@ const ATOMIC = {
           },
           evidence: { type: 'string' },
           clarity: { type: 'string', enum: ['clear', 'ambiguous'] },
+          // Filled ONLY when the issue cites a code location. This was its own
+          // Haiku pass; the scout is already holding the issue, so it resolves
+          // the citation in the same turn instead of a second agent re-opening
+          // what the first just read.
+          where: {
+            type: 'object',
+            description: 'the cited code location, resolved. Omit entirely when the issue cites no file — most log findings do not.',
+            properties: {
+              file: { type: 'string', description: 'repo-relative path' },
+              line: { type: 'number' },
+              excerpt: { type: 'string', description: 'the cited line with ~30 lines either side, VERBATIM' },
+              neighbours: { type: 'string', description: 'who calls this and what it calls — names and file:line only, no prose' },
+            },
+          },
         },
-        required: ['id', 'symptom', 'lane', 'severity', 'clarity', 'kind'],
+        required: ['id', 'symptom', 'source', 'lane', 'severity', 'clarity', 'kind'],
       },
     },
   },
@@ -153,6 +212,20 @@ const VERDICTS = {
           },
           rootCause: { type: 'string', description: 'file:line — proven, not guessed' },
           fix: { type: 'string', description: 'files touched, +/- lines, plain English' },
+          // The STRUCTURED version of the same fact, and it is load-bearing in a
+          // way the prose is not. The verify reads `git diff`, which on a normal
+          // night also holds work from other chats — on 2026-07-27 seven `src/`
+          // files and five `.claude/` files were already modified before this
+          // engine wrote a line. Without knowing which files are its own, the
+          // verify can overturn a row for a change the wave never made, and the
+          // owner cannot tell which. `fix` is prose and cannot be parsed; this
+          // can. It also drives the `priorClean` prune below.
+          filesTouched: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'repo-relative path of EVERY file you edited or created for this issue. Omit only if you edited nothing — a missing list makes the verify treat the entire tree as this wave, which is safe but wasteful.',
+          },
           // Forwarded to the verify so it spends its budget on what you did NOT
           // cover. Without it the verifier re-derives ground you already walked.
           traced: {
@@ -178,6 +251,36 @@ const VERIFY_OUT = {
   type: 'object',
   properties: {
     results: VERDICTS.properties.results,
+    // ── OVERTURNS vs DISCOVERIES — two different things, and conflating them
+    // traps the run in a loop it cannot exit.
+    //
+    // An OVERTURN says a fix in THIS wave is broken: it belongs to this wave and
+    // must be settled before shipping. It goes in `results`.
+    //
+    // A DISCOVERY is a pre-existing bug the verifier happened to notice while
+    // reading. It has nothing to do with the fixes under review — and building
+    // it here would change the tree the verify just examined, invalidating the
+    // very pass that found it, which then justifies another pass. That is the
+    // loop: verify -> new row -> build -> re-verify -> new row. Observed
+    // 2026-07-27 with a cached-reads finding in checkSlot.
+    //
+    // So a discovery is REPORTED, never built in-wave. It is next run's input —
+    // shaped to drop straight into `args.issues`.
+    discoveries: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          symptom: { type: 'string', description: 'what a person would see go wrong — not the mechanism' },
+          evidence: { type: 'string', description: 'file:line, REQUIRED' },
+          lane: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer'] },
+          severity: { type: 'string', enum: ['high', 'medium', 'low'] },
+        },
+        required: ['symptom', 'evidence'],
+      },
+      description:
+        'problems you found that are NOT about the fixes under review. Return an empty array if none — do NOT put them in `results`, and do NOT stay quiet about one to keep the wave clean.',
+    },
     verifiedClean: {
       type: 'array',
       items: { type: 'string' },
@@ -186,28 +289,6 @@ const VERIFY_OUT = {
     },
   },
   required: ['results'],
-}
-
-const LOCATED = {
-  type: 'object',
-  properties: {
-    located: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          id: { type: 'string' },
-          file: { type: 'string', description: 'repo-relative path' },
-          line: { type: 'number' },
-          excerpt: { type: 'string', description: 'the cited line with ~30 lines either side, verbatim' },
-          neighbours: { type: 'string', description: 'who calls this / what it calls — names and file:line only, no prose' },
-          notFound: { type: 'boolean', description: 'true if the citation does not resolve — say so, never guess a location' },
-        },
-        required: ['id'],
-      },
-    },
-  },
-  required: ['located'],
 }
 
 // ---- helpers ----
@@ -219,13 +300,13 @@ const LOCATED = {
 const WHERE_NOTE =
   `\n\nSome issues carry \`_where\` — the cited location resolved for you, with an excerpt and its immediate neighbours. ` +
   `That is a STARTING POINT, not the truth: it is a snapshot taken before this dispatch, another lane may have moved the code since, ` +
-  `and the citation itself came from triage and can be wrong. **Open the file and read it.** Per Shared rule 6, re-derive the defect from ` +
+  `and the citation itself came from the scout and can be wrong. **Open the file and read it.** Per Shared rule 6, re-derive the defect from ` +
   `the code on disk before you build on it — if \`_where\` disagrees with what you find, the file wins and say so in your notes. ` +
   `What this saves you is hunting for the location, not verifying it.`
 
 const dispatch = (lane, issues) =>
   agent(
-    `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract.${issues.some((i) => i._where) ? WHERE_NOTE : ''}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
+    `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
     { label: `build:${lane}`, phase: lane === 'context' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
   )
 
@@ -257,72 +338,83 @@ const deferredDepAsks = (rs) =>
     .filter((r) => hasAsk(r) && !DISPATCHABLE_DEP.has(r.verdict))
     .map((r) => ({ from: r.id, fromVerdict: r.verdict, lane: r.dependencyAgent, ask: r.dependencyAsk }))
 
-// ---- 1. Intake (sources in parallel) — SKIPPED entirely for a preset list ----
-let findings = []
+// ---- 1. Scout — find the work AND shape it, in one pass -------------------
+// This was three agents: a GitHub pull, a log review, and a triage that routed
+// from their combined output. The split meant the agent making the run's most
+// consequential call — which lane owns this, and is it safe to dispatch at all —
+// worked from a one-line symptom and a quoted fragment, while the agent that had
+// actually read the transcript was already gone. Merging recovers that context.
+//
+// The routing and shaping DOCTRINE now lives in `.claude/agents/scout.md`, so
+// this prompt carries only the mechanics and the payload — the same split the
+// lane dispatches use, and the fix for two engines each holding their own
+// drifting copy of the lane map.
+//
+// SKIPPED entirely for a preset list: the owner has already named and routed it.
 let allIssues = []
 let triageDropped = []
-let locateStats = { cited: 0, resolved: 0 }
+let openKnownDropped = []
+let scoutReport = {}
+let findingsSeen = 0
+let locationsResolved = 0
 if (PRESET) {
-  log(`Preset: ${PRESET.length} pre-triaged issue(s) from the owner's review — skipping intake and triage.`)
+  log(`Preset: ${PRESET.length} pre-triaged issue(s) from the owner's review — skipping the scout.`)
   allIssues = PRESET
 } else {
-phase('Intake')
-const intake = await parallel(
-  SOURCES.map((src) => () => {
-    if (src === 'github') {
-      return agent(
-        'Run ONLY this one command: `gh issue list --label Bug --state open --json number,title,body,labels` (read-only). Do NOT orient, read other files, or explore — just this command. Skip any issue labelled `Agent` **if you see one** — that label does not currently exist in this repo, so expect it never to match; de-duplication is handled downstream by the ledger, not here, so do NOT go looking for another way to filter. Return each remaining open bug as a finding {source:"github", ref:"#<number>", symptom:<title>, evidence:<body **plus any file:line the body names, quoted verbatim** — the triage and Locate passes downstream can only use a citation you actually carry through>, clarity:"clear"}. If the list is empty, return {findings:[]} immediately.',
-        { label: 'intake:github', phase: 'Intake', effort: 'low', model: 'haiku', schema: FINDINGS },
-      )
-    }
-    return agent(
-      `Review Maelle's conversations from logs/maelle-<today>.log (read-only). WORK CHEAP-FIRST — do NOT full-read every conversation.\n\n` +
-      `**0. ESTABLISH THE CUTOFF, MECHANICALLY, BEFORE READING ANYTHING.** The watermark is \`${SINCE}\`.\n` +
-      `  a. **Convert it to UTC first.** The watermark carries a local offset (e.g. \`+0300\`); every log line is UTC with a \`Z\`. \`2026-07-26T18:22:00+0300\` is \`2026-07-26T15:22:00Z\`. **Comparing the two as text without converting is wrong and silently reviews the whole day** — that is a real bug this instruction exists to prevent, measured at ~430k wasted tokens on 2026-07-26 when an 18:22 watermark let 04:32Z lines through.\n` +
-      `  b. Find the **line number** of the first entry whose \`"timestamp"\` is >= that UTC instant. Everything above it is ALREADY REVIEWED — it is not yours, and re-finding a bug from it produces a duplicate the owner has seen.\n` +
-      `  c. **Every grep and every read you do from here on must be bounded to that line number onward** (e.g. \`tail -n +<line>\`, or check the timestamp of each hit and discard earlier ones). A finding you cannot tie to a line at or after the cutoff must be dropped, however real it looks.\n` +
-      `  **Report all three in your return: \`cutoffLine\` (the line you started at), \`cutoffUtc\` (the instant you compared against), \`turnsAfterCutoff\`.** These are printed in the run manifest so a filter that did nothing is visible as \`startedAtLine: 1\`. Omitting them is treated as "the watermark cannot be verified".\n` +
-        `  d. **ACTIVITY CHECK:** count \`Orchestrator invoked\` events **after the cutoff only**. If ZERO, she handled no turns since the last review — return {findings:[]} immediately and stop. Do not scan, do not reason further. Count that event specifically: \`Catch-up: scanning DMs\` is an idle heartbeat that fires whether or not anyone spoke, and reading it as activity is what made a zero-finding run cost 124k. Counting the whole file instead of the tail defeats this entirely — today's file holds 53 such events, so an unbounded count always looks busy.\n\n1. Grep the log for HARD trouble signals (language-neutral): error/exception lines, guard fires (claimChecker/humanGate/dateVerifier/securityGate flagged or rewrote), "truncated at max_tokens", tool retries/failures, findAvailableSlots rejection breakdowns, approval-escalation misfires, abnormally long threads.\n2. Scan shallowly for SOFT signals that leave no error: a reply that doesn't match what was asked, an attendee/time/detail that silently changed between turns, a confidently-worded answer on a partial result.\n3. DEEP-read (full turns) ONLY the conversations that tripped step 1 or looked off in step 2.\nJudge those on four lenses: (1) was it good, (2) did the person get what they wanted, (3) did it feel human / make sense, (4) did the process work.\nVERY HARD BAR: surface a finding ONLY if it is an OBVIOUS, CLEAR bug, and you MUST cite the exact transcript moment as evidence. If not certain, set clarity:"ambiguous" (owner decides; never auto-fixed). Never invent issues from good chats. Return findings {source:"logs", ref, symptom, evidence:<quoted moment>, clarity}.`,
-      { label: 'intake:logs', phase: 'Intake', effort: 'medium', model: 'sonnet', schema: FINDINGS },
-    )
-  }),
+phase('Scout')
+const scout = await agent(
+  `Find this run's work and shape it for the lanes. Sources: **${SOURCES.join(' + ')}**. Your charter holds the bar for a finding, the routing map, the merge rules and the \`kind\` call — this brief carries only the mechanics and the payload.\n\n` +
+    (SOURCES.includes('logs')
+      ? `## The log review\n\n` +
+        `**0. ESTABLISH THE CUTOFF MECHANICALLY, BEFORE READING ANYTHING.** The watermark is \`${SINCE}\`.\n` +
+        `  a. **Convert it to UTC first.** The watermark carries a local offset (e.g. \`+0300\`); every log line is UTC with a \`Z\`. \`2026-07-26T18:22:00+0300\` is \`2026-07-26T15:22:00Z\`. Comparing the two as text without converting silently reviews the whole day — measured at ~430k wasted on 2026-07-26, when an 18:22 watermark let 04:32Z lines through.\n` +
+        `  b. **READ EVERY DATED FILE FROM THE WATERMARK'S DATE THROUGH TODAY — not just today's.** Logs are one file per day (\`logs/maelle-YYYY-MM-DD.log\`) and the watermark is normally ~24h back, so it lands in YESTERDAY's file. Reviewing only today's leaves the previous evening unreviewed on every single run, which is exactly when she is used. \`ls logs/\` first, then take every dated file at or after the watermark's date. (\`logs/maelle.log\` is a stale legacy file — ignore it.)\n` +
+        `  c. In the EARLIEST of those files, start at the first entry whose \`"timestamp"\` is >= that UTC instant; everything above it is already reviewed and re-finding it produces a duplicate the owner has seen. Every later file is read from the top.\n` +
+        `  d. **ACTIVITY CHECK:** count \`Orchestrator invoked\` events after the cutoff, across all those files. If ZERO, she handled no turns since the last review — return \`{issues: []}\` immediately and stop. Do not scan, do not reason further. Count that event specifically: \`Catch-up: scanning DMs\` is an idle heartbeat that fires whether or not anyone spoke, and reading it as activity is what made a zero-finding run cost 124k.\n` +
+        `  **Report \`filesRead\`, \`cutoffUtc\` and \`turnsAfterCutoff\`.** The manifest prints them and checks \`cutoffUtc\` against the watermark, so a conversion slip or a one-file review shows up instead of passing silently.\n\n` +
+        `1. Grep for HARD trouble signals (language-neutral): error and exception lines, guard fires (claimChecker / humanGate / dateVerifier / securityGate flagged or rewrote), "truncated at max_tokens", tool retries and failures, findAvailableSlots rejection breakdowns, approval-escalation misfires, abnormally long threads.\n` +
+        `2. Scan shallowly for SOFT signals that leave no error: a reply that does not match what was asked, an attendee or time that silently changed between turns, a confidently-worded answer on a partial result.\n` +
+        `3. DEEP-read full turns ONLY for conversations that tripped step 1 or looked off in step 2.\n\n`
+      : '') +
+    (SOURCES.includes('github')
+      ? `## The GitHub pull\n\n` +
+        `Run \`gh issue list --label Bug --state open --json number,title,body,labels\` (read-only). One command — do not explore the repo for more. For each issue the ref is \`#<number>\` and the symptom is the title; the evidence is the body **plus any \`file:line\` it names, quoted verbatim**, because a citation you do not carry through cannot be used downstream. Do not filter by label beyond \`Bug\` — de-duplication is the ledger's job below, not yours.\n\n`
+      : '') +
+    `## Then shape it\n\n` +
+    `Merge the two sources, split into ATOMIC issues, route each to the lane that owns the FIX, and classify \`kind\` — all four per your charter. Carry \`clarity\` forward. Give a one-line \`whyHypothesis\`; do NOT prove root causes or design fixes, because the lane does that properly and will re-derive anything you assert anyway.\n\n` +
+    `**Where an issue cites a code location, resolve it once and fill \`where\`.** Open the file, take the cited line with ~30 lines either side verbatim, and name who calls it and what it calls. Six lanes otherwise each pay the same hunt for a location you are already looking at. **Never guess** — omit \`where\` rather than send a builder somewhere plausible with false confidence, which is worse than sending it nowhere. Most log findings cite no file; skip those, and do not go exploring for a citation an issue does not make.\n\n` +
+    `Report \`findingsSeen\` — the raw count before merging — so the manifest can show how much collapsed.\n` +
+    (ALREADY_BUILT.length
+      ? `\n## Already fixed, not yet deployed — DROP these\n\n` +
+        `Production keeps emitting these symptoms until the owner deploys, so an honest review re-finds them every night. Match them per your charter — **the \`ref\` exactly first** (\`#147\` = \`gh#147\` = \`147\`), then the root cause, then the same user-visible failure described differently. Dispatching one costs a full lane turn to be told "already-fixed": the entire price of the bug, paid again, for nothing.\n\n` +
+        `**Report every ref you drop in \`droppedAsAlreadyBuilt\`, and return an empty array if you drop none.** Omitting the field is indistinguishable from never running the check, which is how this check silently failed before.\n\n${ALREADY_BUILT.map(describeBuilt).join('\n')}\n`
+      : '') +
+    (OPEN_KNOWN.length
+      ? `\n## Already on his desk — DROP these too\n\n` +
+        `He has SEEN each of these and parked it: deferred for now, or converted into a GitHub issue where the design question is being worked. **Nothing is fixed**, so unlike the list above these do not stop recurring after a deploy — the symptom can reappear indefinitely and you WILL find it again. That is expected. It is not news.\n\n` +
+        `**Drop any finding that matches one, and list the refs in \`droppedAsOpenKnown\` (empty array if none).** Filing one as new puts a decision he has already made back on his desk as a fresh bug.\n\n` +
+        `**One exception — and report it under the SAME ref, never as a new issue:** if the recurrence carries materially new information (it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover), say so in \`whyHypothesis\` against that ref. A change in severity is worth knowing; a duplicate row is not.\n\n${OPEN_KNOWN.map(describeOpen).join('\n')}\n`
+      : ''),
+  { label: 'scout', phase: 'Scout', effort: 'medium', model: 'sonnet', agentType: 'scout', schema: SCOUT },
 )
-// Capture the log review's self-report BEFORE the findings are flattened, so the
-// manifest can show whether the watermark actually cut anything.
-const logReport = intake.filter(Boolean).find((r) => r && typeof r.cutoffLine === 'number') || {}
-findings = intake.filter(Boolean).flatMap((r) => (r && r.findings) || [])
-log(`Intake: ${findings.length} raw findings from ${SOURCES.join(' + ')}`)
-
-// ---- 2. Triage: split into atomic issues + route (lightweight; the lane agent does the deep work) ----
-phase('Triage')
-const triaged = await agent(
-  `Split these findings into ATOMIC issues and route each to a lane (meeting / requests / guard / context / people / slack / outer — \`context\` owns everything Maelle is TOLD (system prompt, tool descriptions, learned prefs) and runs LAST; \`requests\` owns the async work-item spine: approvals, outreach, reminders, follow-ups, timers/expiry and the requester close-loop; \`people\` owns identity, the person store, people memory and social; \`slack\` owns the transport — inbound routing, threading, DM/MPIM/channel behavior, authority-by-authenticated-sender, dedup/catch-up, the delivery pipeline; use \`other\` only for a subsystem NO lane owns: news, brief, routines, Graph plumbing, core orchestrator, DB, health, config, scripts). LIGHTWEIGHT only — id, symptom, lane, a why-hypothesis, severity, and carry clarity forward. Do NOT build the plan or prove the root cause; that is the lane agent's job.\n**CLASSIFY \`kind\` on every issue — this is the single most consequential call you make.** \`atomic\` = known root, ONE lane, one edit; dispatch it, and fifteen of these is a normal night. \`needs-shaping\` = it touches TWO OR MORE lanes, OR the fix is a product decision rather than a repair, OR the issue's premise looks wrong against the code. A \`needs-shaping\` item is **NOT built** — it goes to the owner with a \`shapingQuestion\` he can answer in a sentence. **Err toward \`needs-shaping\` when unsure:** a wrongly-shaped item costs one question, a wrongly-dispatched one ping-pongs across lanes and burns the night before landing back on his desk anyway. Measured 2026-07-26: one such item cost 411k across four lanes, and another arrived as a bug whose stated premise was false in the code, so the fix was nothing like what the issue asked for.\nMERGE same-root issues: if two issues would be fixed by the SAME change / at the same place, emit ONE issue routed to the lane that owns the real fix. **When a GitHub issue and a log finding describe the same event, they are the same issue — merge them, and keep BOTH halves: the owner's own words are the ask (they carry his product judgment about what SHOULD have happened, which the transcript cannot), and the log moment is the evidence (it carries the proof, which his issue may not). Never let the merge drop his framing in favour of a bare symptom** — a lane handed "Maelle booked Friday" builds something different from one handed "Maelle booked Friday without asking me, and she should always ask before an off-day booking". NEVER split a flow defect into "the bug" + "a missing backstop guard for it" — that is ONE bug; route it to the flow lane (meeting / requests / people / slack / context / other). Only raise a GUARD-lane issue when a guard itself misfires, leaks, or is wrong — never as a backstop for a flow defect (the flow fix IS the fix).\n${
-    ALREADY_BUILT.length
-      ? `\n**ALREADY FIXED, not yet in the running build.** Production keeps emitting these symptoms until the owner deploys, so the log review honestly re-finds them every night. **DROP any finding that matches one of these — do not emit an issue for it.** Dispatching it costs a full lane turn to be told "already-fixed", which is the entire price of the bug paid again for nothing.\n\n` +
-        `**(1) MATCH THE \`ref\` FIRST, and treat these as the SAME ref: \`#147\` = \`gh#147\` = \`147\`.** A GitHub finding's ref is bare (\`#147\`); the ledger stores it prefixed (\`gh#147\`). They are one issue. This exact-match step is the reliable one — do it before you think about the wording at all.\n\n` +
-        `**(2) Then the root cause** — a finding whose evidence points into the same file:line as a \`rootCause\` below is the same bug.\n\n` +
-        `**Report every ref you drop in \`droppedAsAlreadyBuilt\`, and return an empty array if you drop none.** Omitting the field is indistinguishable from never running this check, which is how the check silently failed before.\n\n` +
-        `**(3) Then the same user-visible failure described differently.** A symptom reads differently every night, and — this is the trap — **you will naturally form your OWN hypothesis about the cause, which will not match the hypothesis in the entry below.** That difference is not evidence of a different bug. Judge by what the PERSON experienced, never by whether your theory matches theirs. On 2026-07-26 both #147 and #148 slipped through this way: triage re-derived a fresh (and reasonable) theory for each, decided they looked new, and each cost a full lane dispatch to be told "already-fixed".\n\n` +
-        `Keep one only if it is genuinely a DIFFERENT failure that merely looks similar — and then say in \`whyHypothesis\` what distinguishes it from the entry it resembles, so a lane is not sent to re-fix a fix.\n\n` +
-        `**Special case — an entry marked \`state: "awaiting-owner"\`: DROP the finding and do not emit an issue, even if you can see remaining work.** Its fix is built but the owner has not accepted it. Building more on top of a decision he may reverse compounds the problem instead of helping.\n${ALREADY_BUILT.map(describeBuilt).join('\n')}\n`
-      : ''
-  }\nFINDINGS:\n${JSON.stringify(findings, null, 2)}`,
-  { label: 'triage', phase: 'Triage', effort: 'low', model: 'sonnet', schema: ATOMIC },
-)
-allIssues = (triaged && triaged.issues) || []
-triageDropped = (triaged && triaged.droppedAsAlreadyBuilt) || []
+allIssues = (scout && scout.issues) || []
+triageDropped = (scout && scout.droppedAsAlreadyBuilt) || []
+openKnownDropped = (scout && scout.droppedAsOpenKnown) || []
+findingsSeen = (scout && scout.findingsSeen) || allIssues.length
+scoutReport = scout || {}
+log(`Scout: ${findingsSeen} raw finding(s) from ${SOURCES.join(' + ')} → ${allIssues.length} atomic issue(s)`)
 }
 
 // A lane name outside the known set means the issue matches no lane in the Build
 // phase and no `context` pass either — it is silently dropped. That happened on
-// 2026-07-25: triage emitted lane `general`, which does not exist. It was
+// 2026-07-25: the router emitted lane `general`, which does not exist. It was
 // harmless only because that issue was flagged for the owner and never
 // dispatched. Route the unknown to `outer` (the catch-all, by definition) and
 // SAY SO, rather than losing the issue to a typo.
 const KNOWN_LANES = new Set([...CODE_LANES, 'context'])
 const misrouted = allIssues.filter((i) => !KNOWN_LANES.has(i.lane))
 if (misrouted.length) {
-  log(`! Triage emitted ${misrouted.length} unknown lane(s): ${misrouted.map((i) => `${i.id}→"${i.lane}"`).join(', ')} — re-routed to outer so they are not silently dropped.`)
+  log(`! Scout emitted ${misrouted.length} unknown lane(s): ${misrouted.map((i) => `${i.id}→"${i.lane}"`).join(', ')} — re-routed to outer so they are not silently dropped.`)
   misrouted.forEach((i) => {
     i.notes = `[re-routed from unknown lane "${i.lane}"] ${i.notes || ''}`.trim()
     i.lane = 'outer'
@@ -350,7 +442,7 @@ buildable.sort((a, b) => (RANK[a.severity] ?? 3) - (RANK[b.severity] ?? 3))
 const pending = buildable.slice(CAP)
 buildable = buildable.slice(0, CAP)
 if (pending.length) log(`Cap ${CAP}: ${pending.length} lower-severity issues deferred to next run.`)
-log(`Triage: ${buildable.length} clear to build, ${flagged.length} flagged for owner, ${pending.length} pending.`)
+log(`Queue: ${buildable.length} clear to build, ${flagged.length} flagged for owner, ${pending.length} pending.`)
 buildable.forEach((i) => log(`  • build [${i.lane}/${i.severity}] ${i.id} — ${(i.symptom || '').slice(0, 90)}`))
 flagged.forEach((i) => log(`  • flagged-for-owner ${i.id} — ${(i.symptom || '').slice(0, 90)}`))
 
@@ -363,7 +455,7 @@ if (MODE === 'collect') {
   log(`Collect mode: ${buildable.length} issue(s) recorded, ${flagged.length} flagged. NOTHING built — the owner batches these when he is back.`)
   return {
     mode: 'collect',
-    counts: { findings: findings.length, atomic: allIssues.length, built: 0, needsOwner: 0, flagged: flagged.length, pending: 0 },
+    counts: { findings: findingsSeen, atomic: allIssues.length, built: 0, needsOwner: 0, flagged: flagged.length, pending: 0 },
     results: [],
     collected: buildable, // pass straight back as `args.issues` to build them
     flagged,
@@ -372,36 +464,24 @@ if (MODE === 'collect') {
   }
 }
 
-// ---- 2b. Locate — resolve the cited file:line ONCE, cheaply, for everyone ----
+// ---- 2b. Locations — resolved by the scout, in the same turn ---------------
 // Every builder used to open with the same hunt: grep, read a 1,400-line file,
 // read the wrong one, find the thing, then read it properly. Six lanes each
-// paying that discovery tax for locations triage already knew — measured at
-// ~5,300 lines across the five files the scheduling lanes keep re-reading, and
-// most of it re-read by several agents in the same run.
+// paying that discovery tax — ~5,300 lines across the five files the scheduling
+// lanes keep re-reading, most of it read several times in one run.
 //
-// One cheap pass resolves them all. This removes the SEARCH; the builder still
-// reads and verifies (see WHERE_NOTE) — an excerpt that were trusted blind would
-// just be the relay bug at framework scale.
+// That used to be a separate Haiku pass. It could only fire when `evidence`
+// happened to carry a file path, and when it did it re-opened from scratch the
+// very issue the router had just been holding. The scout is already there with
+// the issue body and the transcript in hand, so it fills `where` as it goes and
+// the pass is gone.
 //
-// Skipped entirely when nothing carries a file citation (a pure log-review night),
-// so it never costs anything on a run it cannot help.
-const CITES_FILE = /[\w./-]+\.(?:ts|tsx|js|cjs|mjs|json|md|ya?ml)(?::\d+)?/i
-const cited = buildable.filter((i) => CITES_FILE.test(i.evidence || ''))
-if (cited.length) {
-  phase('Locate')
-  const loc = await agent(
-    `Resolve each cited code location to an excerpt. **Read-only — change nothing, and do NOT diagnose, judge or fix anything.** You are a lookup pass, not a reviewer.\n\n` +
-      `For each issue below, its \`evidence\` names a file (sometimes with a line). Open that file and return the cited line with **~30 lines either side, verbatim**, plus a \`neighbours\` string naming what calls it and what it calls — names and \`file:line\` only, no prose or opinion.\n\n` +
-      `If a citation does not resolve — wrong path, line past the end of the file, or the code plainly is not what the evidence describes — set \`notFound: true\` and move on. **Never guess a location or substitute one you think is more likely**; a wrong excerpt sends a builder to the wrong place with false confidence, which is worse than sending it nowhere.\n\n` +
-      `Work cheap: one targeted read per citation. Do not explore the codebase, do not follow interesting threads, do not read files nothing cited.\n\n` +
-      `ISSUES:\n${JSON.stringify(cited.map((i) => ({ id: i.id, evidence: i.evidence, symptom: i.symptom })), null, 2)}`,
-    { label: `locate(${cited.length})`, phase: 'Locate', effort: 'low', model: 'haiku', schema: LOCATED },
-  )
-  const found = new Map(((loc && loc.located) || []).filter((x) => x && x.id && !x.notFound && x.excerpt).map((x) => [x.id, x]))
-  if (found.size) buildable = buildable.map((i) => (found.has(i.id) ? { ...i, _where: found.get(i.id) } : i))
-  locateStats = { cited: cited.length, resolved: found.size }
-  log(`Locate: ${found.size}/${cited.length} citation(s) resolved${found.size < cited.length ? ' — the rest the lanes will find themselves' : ''}.`)
-}
+// This removes the SEARCH, never the reading: the builder still opens the file
+// and re-derives (see WHERE_NOTE), because an excerpt trusted blind is the relay
+// bug at framework scale.
+buildable = buildable.map((i) => (i.where && i.where.excerpt ? { ...i, _where: i.where } : i))
+locationsResolved = buildable.filter((i) => i._where).length
+if (locationsResolved) log(`Locations: ${locationsResolved} citation(s) resolved by the scout — the lanes skip the hunt.`)
 
 // ---- 3. THE BUILD LOOP — rounds until nothing is pending ------------------
 // Replaces a fixed Build → Context → single-tail sequence, which capped
@@ -422,10 +502,24 @@ let results = []
 let queue = buildable
 const dispatchedIds = new Set()
 const resumedIds = new Set()
+// Every dependency ask ever MINTED. Counting them off the surviving rows does
+// not work: a resume deletes the `needs-dependency` row that carried the ask,
+// so an ask that WORKED erases its own evidence before the manifest runs.
+const asksMinted = new Set()
 let rounds = 0
+// Every item ever dispatched, keyed by id. The resume lookup used to read
+// `[...buildable, ...nextAsks]` — round ONE plus the current round — so an
+// originator born in round two (an ask that itself raised an ask) resolved to
+// `{}`, lost its lane, and was silently dropped by the queue filter below,
+// AFTER the log line had already announced it would finish next round. The
+// manifest's `lanesDispatched` had the identical blind spot for the identical
+// reason, so both now read from here. MAX_ROUNDS=6 exists precisely to allow
+// that depth; the lookup and the cap disagreed.
+const specById = new Map(buildable.map((i) => [i.id, i]))
 
 while (queue.length && rounds < MAX_ROUNDS) {
   rounds += 1
+  queue.forEach((i) => specById.set(i.id, i))
   const codeWork = queue.filter((i) => i.lane !== 'context')
   const ctxWork = queue.filter((i) => i.lane === 'context')
   log(`Round ${rounds}: ${codeWork.length} code-lane + ${ctxWork.length} context item(s) — ${[...new Set(queue.map((i) => i.lane))].join(', ')}`)
@@ -445,6 +539,7 @@ while (queue.length && rounds < MAX_ROUNDS) {
   // `context` LAST within the round — including asks the code lanes just raised
   // at it, so a prompt change lands in the same round as the code it describes.
   const ctxAsks = depAsksFor('context', results).filter((a) => !dispatchedIds.has(a.id))
+  ctxAsks.forEach((a) => asksMinted.add(a.id))
   const toContext = ctxWork.concat(ctxAsks)
   if (toContext.length) {
     phase('Context')
@@ -457,6 +552,7 @@ while (queue.length && rounds < MAX_ROUNDS) {
   // ── what this round produced becomes next round's pending work ──
   // (a) fresh asks aimed at a code lane, never dispatched before.
   const nextAsks = CODE_LANES.flatMap((lane) => depAsksFor(lane, results)).filter((a) => !dispatchedIds.has(a.id))
+  nextAsks.forEach((a) => asksMinted.add(a.id))
 
   // (b) originators whose dependency has now LANDED, re-dispatched to finish.
   // Without this an issue sat at `needs-dependency` forever: the other lane built
@@ -470,7 +566,7 @@ while (queue.length && rounds < MAX_ROUNDS) {
     .filter((r) => r.verdict === 'needs-dependency' && satisfied.has(r.id) && !resumedIds.has(r.id))
     .map((r) => {
       const dep = satisfied.get(r.id)
-      const orig = [...buildable, ...nextAsks].find((i) => i.id === r.id) || {}
+      const orig = specById.get(r.id) || {}
       resumedIds.add(r.id)
       return {
         ...orig,
@@ -492,7 +588,12 @@ while (queue.length && rounds < MAX_ROUNDS) {
   const replaced = new Set(resumes.map((i) => i.id))
   if (replaced.size) results = results.filter((r) => !(replaced.has(r.id) && r.verdict === 'needs-dependency'))
 
-  queue = [...nextAsks, ...resumes].filter((i) => i.lane && (KNOWN_LANES.has(i.lane) || i.lane === 'context'))
+  // A dropped item here used to vanish in silence — and worse, the "dependencies
+  // closed" line above had already claimed it would be finished. Say it instead.
+  const unroutable = [...nextAsks, ...resumes].filter((i) => !KNOWN_LANES.has(i.lane))
+  if (unroutable.length)
+    log(`! ${unroutable.length} item(s) NOT carried into the next round — no resolvable lane: ${unroutable.map((i) => `${i.id}→"${i.lane || 'none'}"`).join(', ')}`)
+  queue = [...nextAsks, ...resumes].filter((i) => KNOWN_LANES.has(i.lane))
 }
 // Silent truncation reads as "everything got done". If the cap stopped us with
 // work still queued, that is a fact the owner must be told.
@@ -514,8 +615,20 @@ phase('Verify')
 let verified = results
 let verifiedClean = []
 let verifyDepAsks = []
+// `ran` used to be hardcoded `true` whenever the VERIFY flag was on. But
+// `agent()` returns null when a subagent dies after retries, and every read of
+// `check` below is null-guarded — so a verify that never happened produced
+// exactly the manifest of one that found nothing: `ran:true, overturned:0`.
+// The single thing the operator checklist watches for is a skipped verify, and
+// the field it watches could not report it. Now it reports what happened.
+let verifyRan = false
+let verifyAttempted = 0
+let waveFiles = []
+let priorCleanDropped = []
+let discoveries = []
 if (VERIFY) {
   const built = results.filter((r) => r.verdict === 'built')
+  verifyAttempted = built.length
   if (built.length) {
     // Two things are forwarded so nothing is derived twice:
     //   • each fix's own `traced` — what the builder already walked, so the
@@ -525,23 +638,57 @@ if (VERIFY) {
     // Both are leads, not truth: a builder's coverage claim and a past pass's
     // conclusion are exactly the kind of relay Shared rule 6 exists for, and the
     // prompt says so. Spot-check cheaply; spend the budget on what is NOT there.
-    const priorClean = Array.isArray(A.priorClean) ? A.priorClean : []
+    const priorClean = asArray('priorClean', A.priorClean)
+
+    // ── N2: which files are THIS wave's ────────────────────────────────────
+    // `git diff` shows every uncommitted change in the tree, and on a normal
+    // night that includes another chat's work — seven `src/` files and five
+    // `.claude/` files were already modified before the 2026-07-27 run wrote a
+    // line. Naming the wave's own files lets the verify attribute correctly
+    // instead of overturning a row for a change this run never made. A lane that
+    // reports nothing costs waste, not correctness: the fallback is "treat the
+    // whole tree as ours", which over-checks rather than under-checks.
+    waveFiles = [...new Set(built.flatMap((r) => (Array.isArray(r.filesTouched) ? r.filesTouched : [])).filter(Boolean))]
+
+    // ── N3: drop the `priorClean` entries this wave invalidated ────────────
+    // A stale "proven clean" silences a real check, which is strictly worse than
+    // having no list — hence the charter's rule to drop when in doubt: re-proving
+    // costs one pass, missing a regression costs a person. Until now this was the
+    // Manager remembering by hand. Matching is on basename, deliberately loose in
+    // the DROP direction for exactly that reason.
+    const touchedBases = new Set(waveFiles.map((f) => String(f).split('/').pop()).filter(Boolean))
+    priorCleanDropped = priorClean.filter((c) => [...touchedBases].some((b) => String(c).includes(b)))
+    const priorCleanKept = priorClean.filter((c) => !priorCleanDropped.includes(c))
+    if (priorCleanDropped.length)
+      log(`priorClean: dropped ${priorCleanDropped.length} of ${priorClean.length} — this wave changed the code they described.`)
+
     const check = await agent(
       `Adversarially verify this wave's COMBINED change before the owner wraps it. **Findings only — build nothing, edit nothing, commit nothing.**\n\n` +
         `Calibrate to ONE question: **is this safe to ship to real people?** Not "what could be better." A finding that makes Maelle lie, leak, or take a wrong action counts. A finding that makes the code nicer does not.\n\n` +
         `**Attack the seams first — that is why this is one pass and not ${built.length}.** Each fix below was already built and self-checked by the lane that owns it, so re-litigating one in isolation is wasted effort. What no lane could see is the interaction: two fixes that are each correct alone and wrong together, a shared helper one lane changed and another depends on, a contract altered on one side of a seam only, or a fix whose own change introduced a regression a later fix then built on.\n\n` +
         `**Each fix carries \`traced\` — the scenarios its builder already walked. Do not re-run those. Go at what is missing from that list**, and at anything the builder named as deliberately uncovered. If a \`traced\` claim looks wrong, spot-check that one cheaply and say so; do not re-derive the whole set on suspicion.\n\n` +
-        (priorClean.length
-          ? `**ALREADY PROVEN by earlier verify passes — do NOT re-audit these.** They are excluded so your budget goes somewhere new. If the current diff genuinely invalidates one, say which and why; otherwise treat it as settled:\n${priorClean.map((c) => `  • ${c}`).join('\n')}\n\n`
+        (priorCleanKept.length
+          ? `**ALREADY PROVEN by earlier verify passes — do NOT re-audit these.** They are excluded so your budget goes somewhere new. Anything an earlier pass proved about code THIS wave changed has already been removed from the list, so what remains is still standing. If the current diff genuinely invalidates one anyway, say which and why; otherwise treat it as settled:\n${priorCleanKept.map((c) => `  • ${c}`).join('\n')}\n\n`
           : '') +
         `Read the ACTUAL diff (\`git diff\`, \`git status\`) — verify against the code on disk, never against the summaries below. Those summaries are the lanes' own claims about their work; treat them as leads. Confirm \`npx tsc --noEmit\` is green.\n\n` +
+        (waveFiles.length
+          ? `**THE TREE HOLDS MORE THAN THIS WAVE. These ${waveFiles.length} files are ours:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n` +
+            `Anything else in \`git diff\` was already modified before this run started — another chat's work, or an earlier wave awaiting the same wrap. **Do not spend budget auditing it, and never return a verdict row blaming this wave for a change it did not make.** If a pre-existing change genuinely breaks one of the fixes below, that is worth saying — say it, and label it plainly as pre-existing so the owner knows which wave to look at. Everything in the list above is yours; treat the rest as the environment.\n\n`
+          : `**No lane reported which files it touched, so treat the whole diff as this wave's.** That over-checks rather than under-checks, which is the right way to be wrong here — but say in your notes that you could not separate this wave from anything else already in the tree.\n\n`) +
         `**Budget: keep this under ~60 tool calls.** If the diff is too large to cover at that depth, say so and name what you did NOT cover rather than thinning every check to nothing. An honest gap beats uniform shallowness.\n\n` +
+        `**TWO OUTPUTS, AND KEEPING THEM APART MATTERS MORE THAN IT SOUNDS.**\n` +
+        `  • An **OVERTURN** means a fix in THIS wave is broken. It goes in \`results\`, against that issue id, and it has to be settled before the owner ships.\n` +
+        `  • A **DISCOVERY** is a pre-existing problem you noticed while reading — real, worth fixing, and nothing to do with the fixes under review. It goes in \`discoveries\`, never in \`results\`. **It will not be built in this wave, deliberately:** building it would change the tree you just examined and invalidate this pass, which would then justify another pass, which could discover something else. That loop has no end. Report it and let it be the next run's first item.\n` +
+        `Do not suppress a discovery to keep the wave looking clean, and do not dress one up as an overturn to get it fixed tonight. Both corrupt the record, in opposite directions.\n\n` +
         `Return one row per issue id: \`built\` if that fix holds in combination with all the others, otherwise \`needs-owner-decision\` with notes saying precisely what breaks and how. If a fix is fine alone but broken by another, flag the one that should change and say why.\n\n` +
         `Also return \`verifiedClean\`: what you PROVED and would not spend budget on again. The next run is told not to re-check it, so put nothing there you did not actually establish — a false entry silences a future check permanently.\n\n` +
         `FIXES IN THIS WAVE:\n${JSON.stringify(built, null, 2)}`,
       { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'guard', effort: 'xhigh', schema: VERIFY_OUT },
     )
+    verifyRan = !!check
     verifiedClean = (check && check.verifiedClean) || []
+    discoveries = (check && check.discoveries) || []
+    if (discoveries.length) log(`Verify found ${discoveries.length} NEW problem(s) unrelated to this wave — reported, NOT built (building them would invalidate the pass that found them).`)
     // The verify's OWN dependency asks were being discarded here — the overturn
     // read only `verdict` and `notes`, so when the verifier said "this needs the
     // owner, and here is precisely what would fix it", the prescription was
@@ -576,8 +723,16 @@ if (VERIFY) {
 // `warnings` says so in words for the ones we already know the shape of.
 //
 // Nothing here is an input to any decision — it is purely a record.
-const allDepAsks = verified.filter((r) => hasAsk(r)).length
 const deferredNow = [...deferredDepAsks(verified), ...verifyDepAsks]
+// Counted from what was MINTED, not from what survived. This used to read
+// `verified.filter(hasAsk).length` — but a resume deletes the row carrying the
+// ask, so every ask that CLOSED had already erased its own evidence, and a run
+// whose dependency machinery worked perfectly reported `attached: 0`. That also
+// disabled the Manager's only tell for lost asks
+// (`attached > routedAndBuilt + deferredToOwner`): with a structural zero on the
+// left it could never fire. The counter was broken in the one direction that
+// hides the failure it exists to catch.
+const allDepAsks = asksMinted.size + deferredNow.length
 const manifest = {
   mode: MODE,
   preset: !!PRESET,
@@ -585,30 +740,76 @@ const manifest = {
     ? 'skipped (preset issues)'
     : {
         watermarkGiven: SINCE,
-        cutoffUtcUsed: logReport.cutoffUtc ?? '(not reported)',
-        startedAtLine: logReport.cutoffLine ?? '(not reported)',
-        turnsAfterCutoff: logReport.turnsAfterCutoff ?? '(not reported)',
+        watermarkUtc: WATERMARK_UTC || '(not an ISO watermark)',
+        cutoffUtcUsed: scoutReport.cutoffUtc ?? '(not reported)',
+        filesRead: scoutReport.filesRead ?? '(not reported)',
+        turnsAfterCutoff: scoutReport.turnsAfterCutoff ?? '(not reported)',
       },
   alreadyBuilt: { passedIn: ALREADY_BUILT.length, droppedByTriage: triageDropped.length, dropped: triageDropped },
-  locate: PRESET || !locateStats.cited ? 'no citations to resolve' : locateStats,
-  lanesDispatched: [...new Set(verified.map((r) => (buildable.find((i) => i.id === r.id) || {}).lane).filter(Boolean))],
+  // No warning on a zero here, deliberately. Unlike `alreadyBuilt` — where
+  // production keeps emitting until deploy, so a recurrence is near-certain — a
+  // parked item may simply not have come up tonight. Zero is a normal answer,
+  // and a warning that fires on the healthy path is the thing being fixed
+  // everywhere else in this file.
+  openKnown: { passedIn: OPEN_KNOWN.length, dropped: openKnownDropped.length, refs: openKnownDropped },
+  locationsResolved: PRESET ? 'n/a (preset)' : locationsResolved,
+  lanesDispatched: [...new Set(verified.map((r) => (specById.get(r.id) || {}).lane).filter(Boolean))],
   misroutedLanes: misrouted.length,
   dependencyAsks: { attached: allDepAsks, routedAndBuilt: verified.filter((r) => String(r.id).endsWith('>dep')).length, deferredToOwner: deferredNow.length },
-  verify: VERIFY ? { ran: true, overturned: results.filter((r, i) => r.verdict !== verified[i].verdict).length, verifiedCleanReturned: verifiedClean.length } : { ran: false },
+  verify: VERIFY
+    ? {
+        ran: verifyRan,
+        fixesToCheck: verifyAttempted,
+        waveFilesNamed: waveFiles.length, // 0 with fixes present = the verify could not tell this wave from the rest of the tree
+        priorCleanDropped: priorCleanDropped.length,
+        discoveries: discoveries.length, // NEW problems, deliberately not built this wave — next run's input
+
+        overturned: results.filter((r, i) => r.verdict !== verified[i].verdict).length,
+        verifiedCleanReturned: verifiedClean.length,
+      }
+    : { ran: false, fixesToCheck: 0 },
 }
 // Known-shape sanity checks. These are the exact failures already paid for.
-const warnings = []
-if (!PRESET && logReport.cutoffLine === 1 && (findings.length || 0) > 0)
-  warnings.push('LOG WATERMARK LOOKS INERT — review started at line 1, so it re-read the whole day. Check the UTC conversion; this cost ~430k on 2026-07-26.')
-if (!PRESET && logReport.cutoffLine === undefined)
-  warnings.push('Log review did not report a cutoff line, so its watermark cannot be verified. Treat any log finding as possibly already-reviewed.')
+// Arg problems go FIRST: an input that never arrived invalidates everything
+// reported below it, so it cannot be buried under the log-review tells.
+const warnings = [...argWarnings]
+const REVIEWED_LOGS = !PRESET && SOURCES.includes('logs')
+// This used to ask "did the review start at line 1?" — which is the CORRECT
+// answer whenever the watermark predates today's file, i.e. every normal night.
+// So it fired on the healthy path and stayed silent on the real failure. Ask the
+// question that actually matters: did the scout compare against the right instant?
+if (REVIEWED_LOGS && WATERMARK_UTC && typeof scoutReport.cutoffUtc === 'string') {
+  const got = Date.parse(scoutReport.cutoffUtc)
+  if (!Number.isFinite(got)) warnings.push(`Log review reported an unparseable cutoff (\`${scoutReport.cutoffUtc}\`) — its watermark cannot be verified.`)
+  else if (Math.abs(got - Date.parse(WATERMARK_UTC)) > 60000)
+    warnings.push(`LOG WATERMARK SLIPPED — the scout compared against ${scoutReport.cutoffUtc}, but the watermark ${SINCE} is ${WATERMARK_UTC}. A timezone slip here re-reviews the whole day; it cost ~430k on 2026-07-26.`)
+}
+if (REVIEWED_LOGS && scoutReport.cutoffUtc === undefined)
+  warnings.push('Log review did not report the instant it compared against, so its watermark cannot be verified. Treat any log finding as possibly already-reviewed.')
+// The watermark is normally ~24h back, so it lands in YESTERDAY's file. A review
+// that never opened that file skipped the previous evening — every night, in the
+// window she is actually used.
+if (REVIEWED_LOGS && WATERMARK_DAY && Array.isArray(scoutReport.filesRead) && scoutReport.filesRead.length && !scoutReport.filesRead.some((f) => String(f).includes(WATERMARK_DAY)))
+  warnings.push(`Log review never opened the watermark's own day (${WATERMARK_DAY}); it read ${scoutReport.filesRead.join(', ')}. Everything between ${SINCE} and midnight went unreviewed.`)
+if (REVIEWED_LOGS && !Array.isArray(scoutReport.filesRead))
+  warnings.push('Log review did not report which files it opened, so a single-file review — which skips the previous evening — cannot be ruled out.')
+if (VERIFY && verifyAttempted > 0 && verifyRan && waveFiles.length === 0)
+  warnings.push(
+    `No lane reported \`filesTouched\`, so the verify could not tell this wave from anything else uncommitted in the tree. It checked everything, which is safe but wasteful — and any overturned row may belong to work this run did not do.`,
+  )
+if (VERIFY && verifyAttempted > 0 && !verifyRan)
+  warnings.push(`THE VERIFY DID NOT RUN — ${verifyAttempted} built fix(es) are unchecked. \`agent()\` returns null when a subagent dies after its retries, and every read downstream is null-guarded, so this was previously indistinguishable from a clean pass. Do NOT wrap this run without \`/manager verify\`.`)
 if (ALREADY_BUILT.length > 0 && triageDropped.length === 0)
   warnings.push(`alreadyBuilt passed ${ALREADY_BUILT.length} entries and triage dropped NONE — either genuinely all-new, or ref matching failed again (gh#147 vs #147).`)
 if (verified.some((r) => r.verdict === 'already-fixed'))
   warnings.push('A lane returned `already-fixed` — a duplicate reached a full dispatch. alreadyBuilt should have caught it earlier and cheaper.')
 if (misrouted.length) warnings.push(`${misrouted.length} issue(s) carried an unknown lane and were re-routed to outer.`)
 if (deferredNow.length) warnings.push(`${deferredNow.length} dependency ask(s) were NOT dispatched and MUST be rendered in the report — an unreported ask is indistinguishable from one that never happened.`)
-log(`Manifest — logCutoff:${manifest.logReview.startedAtLine ?? 'n/a'} alreadyBuilt:${triageDropped.length}/${ALREADY_BUILT.length} depAsks:${allDepAsks} deferred:${deferredNow.length} misrouted:${misrouted.length}`)
+log(
+  `Manifest — cutoff:${(!PRESET && scoutReport.cutoffUtc) || 'n/a'} files:${(Array.isArray(scoutReport.filesRead) && scoutReport.filesRead.length) || 0}` +
+    ` alreadyBuilt:${triageDropped.length}/${ALREADY_BUILT.length} parked:${openKnownDropped.length}/${OPEN_KNOWN.length}` +
+    ` depAsks:${allDepAsks} deferred:${deferredNow.length} misrouted:${misrouted.length} verify:${verifyRan ? 'ran' : 'no'}`,
+)
 warnings.forEach((w) => log(`! ${w}`))
 
 // ---- return the structured report; the Manager persists it (workflow scripts have no filesystem) ----
@@ -616,7 +817,7 @@ return {
   manifest,
   warnings,
   counts: {
-    findings: findings.length,
+    findings: findingsSeen,
     atomic: allIssues.length,
     built: verified.filter((r) => r.verdict === 'built').length,
     needsOwner: verified.filter((r) => r.verdict === 'needs-owner-decision' || r.verdict === 'blocked-charter').length,
@@ -634,6 +835,18 @@ return {
   // `priorClean` next run. It is the only thing that stops each verify starting
   // from zero on ground an earlier one already proved.
   verifiedClean,
+  // `priorClean` entries this wave invalidated, already excluded from the verify
+  // it just ran. **The Manager must delete these from `state.verifiedClean`** —
+  // the engine cannot, and an entry left there silences a real check on every
+  // future run. This is the pruning that used to depend on remembering.
+  priorCleanDropped,
+  // NEW problems the verify found that are NOT about this wave's fixes. Render
+  // them in the report as fresh rows at `pending owner`, and dispatch whatever
+  // he approves via `args.issues` on the NEXT run. **Do not build them tonight**
+  // — that changes the tree the verify just examined, invalidates the pass that
+  // found them, and justifies another pass that can discover something else.
+  // Already shaped to drop straight into `args.issues`.
+  discoveries,
   // Dependency asks that were deliberately NOT dispatched, because their parent
   // verdict is waiting on the owner. **The Manager MUST render these in the
   // report** — every one is a lane naming specific work in another lane's files,

@@ -438,6 +438,86 @@ export function grantRelaxed(
   return { relaxed: false, relaxedReason: 'none' };
 }
 
+/**
+ * The tools whose behavior `grantRelaxed` actually decides — the three schemas
+ * that expose `relaxed` (meetings.ts). A stray `relaxed` arg anywhere else
+ * changes nothing, so telling the owner an override "didn't apply" there would
+ * be a false reason (M11).
+ */
+const RELAXED_AWARE_TOOLS = new Set(['find_available_slots', 'create_meeting', 'move_meeting']);
+
+/**
+ * The DISCLOSURE half of `grantRelaxed` (owner, 2026-07-27).
+ *
+ * `grantRelaxed` refuses relaxed on every non-owner context, and on a shared
+ * surface the owner IS a non-owner context: processMessage.ts:139 clamps his
+ * `senderRole` to 'colleague' for leak-safety. That refusal is correct and stays
+ * exactly as it is — the clamp is the anti-cheat boundary across all tools and
+ * nothing here re-grants clamped authority.
+ *
+ * What was wrong is that the refusal was SILENT. It went to the log line above
+ * and nowhere else, and `relaxedReason: 'none'` reads identically whether an
+ * override was never asked for or asked for and dropped — so no tool result
+ * could tell him. He asks to bend one of his own rules, the bend is discarded,
+ * and Maelle answers the un-relaxed question as though it had landed: he asked
+ * for one thing, a different thing happened, and he had no way to know.
+ *
+ * This returns the owner-facing disclosure; ops.ts attaches it to whatever the
+ * tool returns, so it rides the booked / refused / rule_violation branches
+ * alike from ONE site.
+ *
+ * WAS HIS AUTHORITY CLAMPED — decided from the authenticated identity, which is
+ * how `rawRole` itself is decided (slack/app.ts:95-97, the one definition) and
+ * how postReply already tells the clamped owner from a real colleague
+ * (postReply.ts:356, :568). Deliberately NOT `isOwnerInGroup`: that flag is one
+ * clamp surface of three and is OPTIONAL on SkillContext, so an absent flag
+ * read as "not clamped" is precisely how the channel surface stayed silent
+ * after the MPIM one was fixed. `userId` and `profile` are both REQUIRED, so
+ * this half cannot be lost by an incomplete context and cannot miss a surface
+ * added later. It is also the exact complement of the grant: `relaxed`
+ * requested while `senderRole !== 'owner'` IS the denied branch above, so this
+ * can never contradict an override that was granted.
+ *
+ * WHICH SURFACE — needed separately, because the disclosure must carry a true
+ * reason AND a true remedy (M11), and the remedy differs per surface. The three
+ * are ruled on individually, since a single conjunction that only happened to
+ * cover one of them is how the gap existed:
+ *   • MPIM — DISCLOSE. `isMpim` is on SkillContext, so "not in a group chat,
+ *     tell me in our DM" is both true and actionable.
+ *   • CHANNEL — SHOULD disclose, CANNOT yet. `isChannel` / `isOwnerInChannel`
+ *     (processMessage.ts:138) never reach SkillContext, and from here a
+ *     clamped-owner turn that is not an MPIM is INDISTINGUISHABLE from
+ *     colleague-test. Firing the group-chat wording would state a false reason
+ *     in colleague-test, and M11 makes a confident wrong reason worse than
+ *     silence — so it waits on the surface being plumbed. A named dependency,
+ *     not an oversight.
+ *   • COLLEAGUE-TEST (processMessage.ts:123) — DO NOT disclose, by decision.
+ *     He deliberately asked to be treated as a colleague in that thread to see
+ *     what colleagues experience; an owner-only notice injected into the reply
+ *     corrupts the very behaviour under test, and its remedy would be a lie —
+ *     he IS in a 1:1 DM there, so "tell me in our DM" is false.
+ *
+ * A 1:1 DM keeps `senderRole === 'owner'`, so the override genuinely works and
+ * this stays silent; no `relaxed` in the args means no override was attempted,
+ * so an ordinary shared-surface turn is never narrated at.
+ */
+export function clampedRelaxedNotice(
+  toolName: string,
+  args: Record<string, unknown>,
+  context: SkillContext,
+): string | undefined {
+  if (args.relaxed !== true) return undefined;
+  if (!RELAXED_AWARE_TOOLS.has(toolName)) return undefined;
+
+  const ownerClamped = context.senderRole === 'colleague'
+    && context.userId === context.profile.user.slack_user_id;
+  if (!ownerClamped) return undefined;
+  if (context.isMpim !== true) return undefined;
+
+  const ownerFirst = context.profile.user.name.split(' ')[0];
+  return `${ownerFirst} asked to bend one of his OWN scheduling rules here ("it can be tight" / "book it anyway" / "go ahead"), and that override did NOT take effect: a rule-bend counts only when he says it in your 1:1 DM with him, never in a group chat. So this result is the UN-overridden one — every one of his rules was still enforced. SAY THAT TO HIM in this reply, in one clause: his override didn't apply, what he's looking at is the strict answer, and if he wants it applied he should tell you in your DM. NEVER narrate as though it landed ("you're OK pushing through", "since you said it can be tight"), and never present these times as already bent to fit. It's for HIM — the others in this chat need no explanation of it.`;
+}
+
 function buildContext(
   _profile: UserProfile,
   context: SkillContext,
