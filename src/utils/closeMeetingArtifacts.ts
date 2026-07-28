@@ -556,7 +556,7 @@ async function relayVoidedNotices(
 
   // Not a hand-rolled send: the SAME function that sent the notice being corrected.
   // So the correction writes an outreach_job + its paired request (one spine, one
-  // expiry, one close-loop — R2/R4), is tagged intent='meeting_reschedule' +
+  // expiry, one close-loop — S2/S4), is tagged intent='meeting_reschedule' +
   // already_moved so a "that doesn't work" reply still routes through
   // handleRescheduleReply back to the owner, and cancels itself through the spine
   // if the DM never lands.

@@ -24,8 +24,27 @@
  *
  * In-memory by design — an offer is conversational state, not durable data.
  * A restart drops open offers; the cost is one re-search, same as today.
+ *
+ * v4.3.0 (#24 E7) — ONE exception: the email leg. A Slack pick round-trips in
+ * the same sitting (minutes); an email pick round-trips through a human
+ * forwarding a reply, hours or overnight — sharing Slack's 2h in-memory TTL
+ * would silently expire the offer mid-flight and push the picker back onto
+ * re-deriving the date from quoted prose (the exact class this module exists
+ * to prevent). So an offer's binding lifetime follows the conversation's
+ * TEMPO, not one global constant: email-channel keys (the stable
+ * `email:<conversationId>` key E4 mints) get a longer TTL AND survive a
+ * process restart (a redeploy mid-flight must not drop them either).
+ * Detected purely from the KEY PREFIX — no caller has to know or pass this;
+ * Slack keys never start with `email:` so their behavior is byte-for-byte
+ * unchanged. Persistence mirrors `connectors/slack/socketWatermark.ts`'s
+ * idiom (small JSON file in data/, loaded once lazily) rather than a new SQL
+ * table — email traffic is low-frequency, so a synchronous write on every
+ * mutation (record/clear) needs no debounce.
  */
 import { DateTime } from 'luxon';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import logger from './logger';
 
 export interface OfferedSlot {
   startIso: string;
@@ -42,13 +61,69 @@ interface Entry {
   searchFingerprint?: string;
 }
 
-/** Offers go stale with the conversation — 2h covers a same-sitting pick. */
+/** Offers go stale with the conversation — 2h covers a same-sitting Slack pick. */
 const TTL_MS = 2 * 60 * 60 * 1000;
+
+/** The email leg's round trip is a human forwarding mail, not a chat reply —
+ *  hours to overnight. ~48h per the owner's tempo-based call (#24 E7). */
+const EMAIL_TTL_MS = 48 * 60 * 60 * 1000;
+const EMAIL_KEY_PREFIX = 'email:';
+
+/** Every email-transport key is `email:<conversationId>` (E4) composed through
+ *  keyFor below — so a plain prefix test is a complete, caller-free signal. */
+function ttlForKey(key: string): number {
+  return key.startsWith(EMAIL_KEY_PREFIX) ? EMAIL_TTL_MS : TTL_MS;
+}
 
 const stash: Map<string, Entry> = new Map();
 
 function keyFor(channelId: string, threadTs?: string): string {
   return channelId.startsWith('D') ? channelId : `${channelId}|${threadTs ?? '_none_'}`;
+}
+
+// ── Restart-survival for the email leg only (#24 E7) ────────────────────────
+// Slack entries are never written here — losing them on restart is accepted
+// (documented above); email entries must survive one because a redeploy can
+// land mid-forward.
+const PERSIST_FILE = join(process.cwd(), 'data', 'offered-slots-email.json');
+let emailEntriesLoaded = false;
+
+function loadPersistedEmailEntries(): void {
+  if (emailEntriesLoaded) return;
+  emailEntriesLoaded = true;
+  try {
+    const raw = JSON.parse(readFileSync(PERSIST_FILE, 'utf8')) as Record<string, Entry>;
+    const now = Date.now();
+    for (const [key, entry] of Object.entries(raw)) {
+      // Defensive re-check — never resurrect something that expired while
+      // the process was down.
+      if (entry && entry.expiresAt > now) stash.set(key, entry);
+    }
+  } catch {
+    // No file yet (first run) or unreadable — treated as "nothing to restore".
+  }
+}
+
+/** Re-derives the persisted file from whatever email-prefixed keys are
+ *  currently in `stash` — called after every mutation that could touch one.
+ *  Cheap: the map is small and bounded (MAX_OFFERED per conversation). */
+function persistEmailEntries(): void {
+  try {
+    const out: Record<string, Entry> = {};
+    const now = Date.now();
+    for (const [key, entry] of stash.entries()) {
+      // Prune anything already expired so a thread nobody ever reads again
+      // (no further getLiveEntry call to trigger the usual evict-on-read)
+      // doesn't grow the file forever.
+      if (key.startsWith(EMAIL_KEY_PREFIX) && entry.expiresAt > now) out[key] = entry;
+    }
+    mkdirSync(join(process.cwd(), 'data'), { recursive: true });
+    writeFileSync(PERSIST_FILE, JSON.stringify(out), 'utf8');
+  } catch (err) {
+    logger.warn('offeredSlotsStash — email persist failed (non-fatal, in-memory copy still live)', {
+      err: String(err).slice(0, 150),
+    });
+  }
 }
 
 /** Max offered slots retained per conversation (the union across re-asks). */
@@ -85,6 +160,9 @@ export function recordOfferedSlots(params: {
   }
   if (fresh.length === 0) return;
   const key = keyFor(params.channelId, params.threadTs);
+  // Gate the lazy load on the key itself — a Slack-only deployment (or any
+  // turn on a Slack key) never touches the filesystem for this module at all.
+  if (key.startsWith(EMAIL_KEY_PREFIX)) loadPersistedEmailEntries();
   const prior = stash.get(key);
   const priorFresh = prior && Date.now() <= prior.expiresAt ? prior : undefined;
   const merged = priorFresh ? [...priorFresh.slots] : [];
@@ -94,21 +172,25 @@ export function recordOfferedSlots(params: {
   }
   stash.set(key, {
     slots: merged.slice(-MAX_OFFERED),
-    expiresAt: Date.now() + TTL_MS,
+    expiresAt: Date.now() + ttlForKey(key),
     // Preserve-on-omit: the point-check recorder omits searchFingerprint, so an
     // interleaved "is he free at X?" confirmation can't wipe the spread search's.
     searchFingerprint: params.searchFingerprint ?? priorFresh?.searchFingerprint,
   });
+  if (key.startsWith(EMAIL_KEY_PREFIX)) persistEmailEntries();
 }
 
 /** TTL-guarded entry lookup — evicts a stale conversation on read. ONE expiry
  *  rule, shared by the slot accessor and the fingerprint accessor (no dup). */
 function getLiveEntry(channelId: string, threadTs?: string): Entry | null {
   const key = keyFor(channelId, threadTs);
+  // Same gate as recordOfferedSlots — no filesystem touch for a Slack key.
+  if (key.startsWith(EMAIL_KEY_PREFIX)) loadPersistedEmailEntries();
   const entry = stash.get(key);
   if (!entry) return null;
   if (Date.now() > entry.expiresAt) {
     stash.delete(key);
+    if (key.startsWith(EMAIL_KEY_PREFIX)) persistEmailEntries();
     return null;
   }
   return entry;
@@ -136,5 +218,12 @@ export function getOfferedSearchFingerprint(channelId: string, threadTs?: string
  * next exchange.
  */
 export function clearOfferedSlots(channelId: string, threadTs?: string): void {
-  stash.delete(keyFor(channelId, threadTs));
+  const key = keyFor(channelId, threadTs);
+  if (key.startsWith(EMAIL_KEY_PREFIX)) {
+    loadPersistedEmailEntries();
+    stash.delete(key);
+    persistEmailEntries();
+    return;
+  }
+  stash.delete(key);
 }

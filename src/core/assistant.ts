@@ -1001,7 +1001,18 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { setCoreFieldWithProvenanceById, updatePersonProfileById } = require('../db') as typeof import('../db');
           const coreWrites: Array<[string, CoreFieldWrite]> = [];
-          if (timezone && timezone.trim()) coreWrites.push(['timezone', setCoreFieldWithProvenanceById(target.personId, 'timezone', timezone.trim(), setBy)]);
+          if (timezone && timezone.trim()) {
+            coreWrites.push(['timezone', setCoreFieldWithProvenanceById(target.personId, 'timezone', timezone.trim(), setBy)]);
+            // v4.2.x — externals never got this refresh (only the slack_id branch
+            // below did), so a known timezone with no working_hours_auto read as
+            // "unknown" to getEffectiveWorkingHours and attendeeAvailability
+            // silently dropped the person from the clip instead of using a
+            // default window for their zone. Same fix as setPersonTimezoneByEmail.
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { refreshAutoWorkingHoursById } = require('../utils/workingHoursDefault') as
+              typeof import('../utils/workingHoursDefault');
+            refreshAutoWorkingHoursById(target.personId);
+          }
           if (state && state.trim()) coreWrites.push(['state', setCoreFieldWithProvenanceById(target.personId, 'state', state.trim(), setBy)]);
           if (nameHe && nameHe.trim()) coreWrites.push(['name_he', setCoreFieldWithProvenanceById(target.personId, 'name_he', nameHe.trim(), setBy)]);
           updatePersonProfileById(target.personId, {

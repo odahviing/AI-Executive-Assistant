@@ -123,7 +123,7 @@ function getOrCreate(key: string): ThreadState {
  * Exported because the RUNNER has to ask the same question the queue asks, and
  * two copies of the predicate would eventually disagree. A runner that reports
  * a failure to the person must consult this FIRST and re-throw on true: an
- * aborted turn was superseded on purpose (S8), a fresh turn is already queued
+ * aborted turn was superseded on purpose (T8), a fresh turn is already queued
  * behind it, and a superseded turn apologising would be a brand-new bug.
  *
  * `signal.aborted` is part of the test, not just the error shape: an abort can

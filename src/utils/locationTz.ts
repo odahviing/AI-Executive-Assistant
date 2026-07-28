@@ -35,16 +35,34 @@ const STATIC_MAP: Record<string, string> = {
   'eastern us':     'America/New_York',
   'us eastern':     'America/New_York',
   'et':             'America/New_York',
+  // v4.3.0 (#24 row 129) — standard/daylight abbreviation pairs. A
+  // correspondent writes whichever is currently in effect ("EST" in winter,
+  // "EDT" in summer) and rarely knows which; both mean "that same US zone"
+  // for our purposes (email extraction never needs DST precision, only the
+  // IANA zone so luxon's own DST math takes over from there).
+  'est':            'America/New_York',
+  'edt':            'America/New_York',
   // US Central
   'chicago':        'America/Chicago',
   'austin':         'America/Chicago',
   'dallas':         'America/Chicago',
   'central us':     'America/Chicago',
   'ct':             'America/Chicago',
+  // Deliberately NO 'cst'/'cdt' entry (added 2026-07-28, removed 2026-07-29
+  // overturn): unlike EST/PST, "CST" is genuinely ambiguous — China Standard
+  // Time (14h off America/Chicago) or Cuba Standard Time — and a bare
+  // abbreviation gives this map nothing to disambiguate on. An unresolved
+  // token falls through to the caller's existing no-signal fallback (the
+  // owner's zone in attendeeAvailability.ts / inbound.ts), which is correct
+  // for this case. Do not re-add without an actual disambiguation signal
+  // (sender domain, explicit country, etc) — that would be a different,
+  // bigger fix, not a map entry.
   // US Mountain
   'denver':         'America/Denver',
   'salt lake city': 'America/Denver',
   'mountain us':    'America/Denver',
+  // Deliberately NO 'mst'/'mdt' entry — same reasoning as CST above; "MST"
+  // collides with Myanmar Standard Time.
   // US Pacific
   'san francisco':  'America/Los_Angeles',
   'sf':             'America/Los_Angeles',
@@ -53,6 +71,8 @@ const STATIC_MAP: Record<string, string> = {
   'seattle':        'America/Los_Angeles',
   'pacific':        'America/Los_Angeles',
   'pt':             'America/Los_Angeles',
+  'pst':            'America/Los_Angeles',
+  'pdt':            'America/Los_Angeles',
   // EU
   'london':         'Europe/London',
   'uk':             'Europe/London',

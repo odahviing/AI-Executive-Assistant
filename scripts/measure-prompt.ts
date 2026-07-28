@@ -4,8 +4,8 @@
 // are accurate enough for sizing decisions.
 
 import { loadAllProfiles } from '../src/config/userProfile';
-import { buildSystemPrompt } from '../src/core/orchestrator/systemPrompt';
-import { buildSkillsPromptSection, getActiveSkills } from '../src/skills/registry';
+import { buildSystemPrompt, buildSystemPromptParts } from '../src/core/orchestrator/systemPrompt';
+import { getActiveSkills } from '../src/skills/registry';
 import { formatPreferencesForPrompt, formatPeopleMemoryForPrompt } from '../src/db';
 import { formatPeopleCatalogSync } from '../src/memory/peopleMemory';
 import { getAwaitingOwnerRequests } from '../src/db/requests';
@@ -38,11 +38,9 @@ row('colleague DM', colleagueFull);
 row('owner-in-group (MPIM)', mpimFull);
 
 header('OWNER DM — DYNAMIC vs STATIC SPLIT (cacheable boundary)');
-const skillsSection = buildSkillsPromptSection(profile);
-const ownerStatic = skillsSection;
-const ownerDynamic = ownerFull.replace(skillsSection, '').trimEnd();
-row('dynamic (orchestrator/systemPrompt.ts)', ownerDynamic);
-row('static (all skill sections)', ownerStatic);
+const ownerParts = buildSystemPromptParts(profile, 'owner');
+row('static (cached: identity/rules/skills — buildSystemPromptParts)', ownerParts.static);
+row('dynamic (fresh per turn: date/prefs/approvals — buildSystemPromptParts)', ownerParts.dynamic);
 
 header('PER-SKILL SECTION SIZE');
 for (const skill of getActiveSkills(profile)) {

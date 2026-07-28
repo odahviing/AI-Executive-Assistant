@@ -586,8 +586,9 @@ async function runSelfCapture(
       // No SELF row — startup seed should have created it, but if a
       // migration / manual DB edit / race wiped it, re-seed now rather
       // than silently dropping the capture. seedAssistantSelf is
-      // idempotent (only upserts when missing or assistant name
-      // changes), so calling it here is safe.
+      // idempotent (only upserts when missing, or a core identity field —
+      // name / email / timezone — has drifted from the profile), so
+      // calling it here is safe.
       logger.warn('runSelfCapture: SELF row missing — re-seeding', { selfId });
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { seedAssistantSelf } = require('../core/assistantSelf') as

@@ -11,24 +11,40 @@ export const meta = {
 }
 
 // ---- args (all optional; the Manager passes them) ----
-const A = args || {}
-
 // ---- arg hygiene: a MALFORMED arg must never look like an ABSENT one -------
 // Every array arg used to be read as `Array.isArray(x) ? x : []`, which converts
 // "the caller passed something broken" into "the caller passed nothing" and says
 // nothing at all. On 2026-07-27 the Manager passed 11 `alreadyBuilt` refs, the
 // manifest printed `passedIn: 0`, and a lane was dispatched in full to answer
-// "already-fixed" — the entire price of a bug, paid for a shape error. The
-// Workflow tool warns that an array sent as a JSON *string* arrives as one
-// string, and `Array.isArray` on a string is false.
-//
-// `issues` is the dangerous one: malformed, it silently becomes null and the
-// engine runs a FULL GitHub pull and 24h log review instead of the rows the
-// owner named — the 76k-on-intake failure, reachable by typo.
-//
-// So: recover a stringified array if we can, and SAY SO either way.
+// "already-fixed" — the entire price of a bug, paid for a shape error.
 const argWarnings = []
-const asArray = (name, v) => {
+
+// N10 · GUARD THE CONTAINER, NOT ONLY THE VALUES. The Workflow tool can deliver
+// the whole `args` OBJECT as one string — and then every `A.<key>` below reads
+// `undefined`, nothing is "present but wrong-shaped", the per-key guard has
+// nothing to fire on, and the engine takes its default path in total silence.
+// That is how one described item became a 32-agent sweep in feature.js on
+// 2026-07-28. The first version of this fix guarded the values and missed the
+// container, which is why the bug survived a day after being "fixed".
+let A = args || {}
+if (typeof A === 'string') {
+  try {
+    A = JSON.parse(A)
+    argWarnings.push('`args` arrived as a JSON STRING rather than an object — recovered by parsing it. Pass args as an actual JSON value in the tool call, not an encoded string.')
+  } catch (e) {
+    throw new Error(`args arrived as a string and is not valid JSON, so nothing it named could be honoured: ${String((e && e.message) || e)}`)
+  }
+}
+
+// N11 · STOP where a silent default is EXPENSIVE; warn where it is cheap.
+// Owner, 2026-07-28: don't abort a wave, it is slow and costly. Correct — but
+// this runs before a single agent spawns, so stopping HERE is free, and the one
+// arg worth stopping for is `issues`: malformed, it silently becomes null and the
+// engine runs a FULL GitHub pull plus a log review instead of the rows he named.
+// That is the 76k-on-intake failure, reachable by a typo. Everything else
+// degrades cheaply — a lost `priorClean` only re-verifies settled ground — so it
+// warns and continues. Abort before the wave, never during it.
+const asArray = (name, v, critical) => {
   if (v === undefined || v === null) return []
   if (Array.isArray(v)) return v
   if (typeof v === 'string') {
@@ -39,15 +55,20 @@ const asArray = (name, v) => {
         return parsed
       }
     } catch {
-      /* fall through to the loud path below */
+      /* fall through */
     }
   }
+  if (critical)
+    throw new Error(
+      `args.${name} is present but is a ${typeof v}, not an array — refusing to fall back to a default that ignores it. ` +
+        `For \`${name}\` that default would run a full discovery pass instead of the work you named. Nothing has been dispatched; re-invoke with a real array.`,
+    )
   argWarnings.push(`\`${name}\` was PASSED but is not an array (got ${typeof v}) — IGNORED, and whatever it held never reached the run.`)
   return []
 }
 
 const sourcesArg = asArray('sources', A.sources)
-const SOURCES = sourcesArg.length ? sourcesArg : ['github', 'logs'] // the one 18:00 run does BOTH; manual runs too
+const SOURCES = sourcesArg.length ? sourcesArg : ['github', 'logs'] // a discovery run does BOTH; the owner triggers every run, there is no timer
 const SINCE = A.sinceIso || 'the last run' // watermark for the log review
 // The watermark in UTC, so the manifest can check the scout compared against the
 // right instant rather than guessing from a line number. Empty when no ISO
@@ -61,7 +82,7 @@ const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 100 // severity-firs
 // by hand to act on his own review, which makes the review pointless.
 // These are already lane-assigned, so intake and triage are skipped entirely —
 // paying to re-derive routing he has already approved is pure waste.
-const presetArg = asArray('issues', A.issues)
+const presetArg = asArray('issues', A.issues, true) // critical: the silent default is a full discovery pass
 const PRESET = presetArg.length ? presetArg : null
 // Bugs already FIXED but not yet in the running build. Production keeps
 // emitting the same tape until a fix is deployed, so every unattended night the
@@ -100,9 +121,10 @@ const describeBuilt = (b) =>
 // to-do list. Never select it from a timer or a staleness heuristic. Use it
 // only when the owner asks for findings without work.
 const MODE = A.mode === 'collect' ? 'collect' : 'full'
-const VERIFY = A.verify !== false // guard-verify each built fix unless explicitly off
-const CODE_LANES = ['meeting', 'requests', 'guard', 'people', 'slack', 'outer'] // run in parallel; context runs LAST, separately
-const EFFORT = { meeting: 'xhigh', context: 'xhigh', slack: 'xhigh', requests: 'xhigh', outer: 'high', people: 'high', guard: 'high' } // reasoning effort per lane (owner-set)
+const VERIFY = A.verify !== false // one combined verifier pass over the wave, unless explicitly off
+const CODE_LANES = ['matchmaker', 'shepherd', 'gatekeeper', 'profiler', 'transporter', 'outrider'] // run in parallel; context runs LAST, separately
+// Reasoning effort per lane (owner-set). Keys are agent names, renamed 2026-07-28.
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', transporter: 'xhigh', shepherd: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high' }
 
 // ---- schemas (force structured returns) ----
 // ── SELF-REPORT ─────────────────────────────────────────────────────────────
@@ -156,7 +178,7 @@ const SCOUT = {
           // issue takes `both`; that IS the interesting case, because the
           // owner's words carry the ask and the transcript carries the proof.
           source: { type: 'string', enum: ['github', 'logs', 'both'] },
-          lane: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer'] },
+          lane: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider'] },
           whyHypothesis: { type: 'string' },
           severity: { type: 'string', enum: ['high', 'medium', 'low'] },
           // KIND is what drives cost, not count. 15-20 atomic items is a normal
@@ -233,7 +255,7 @@ const VERDICTS = {
             description:
               'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the verifier; one you quietly omit gets checked by nobody.',
           },
-          dependencyAgent: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer', ''] },
+          dependencyAgent: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider', ''] },
           dependencyAsk: { type: 'string' },
           notes: { type: 'string' },
         },
@@ -273,13 +295,32 @@ const VERIFY_OUT = {
         properties: {
           symptom: { type: 'string', description: 'what a person would see go wrong — not the mechanism' },
           evidence: { type: 'string', description: 'file:line, REQUIRED' },
-          lane: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer'] },
+          lane: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider'] },
           severity: { type: 'string', enum: ['high', 'medium', 'low'] },
         },
         required: ['symptom', 'evidence'],
       },
       description:
         'problems you found that are NOT about the fixes under review. Return an empty array if none — do NOT put them in `results`, and do NOT stay quiet about one to keep the wave clean.',
+    },
+    // Work lands on open tickets by accident constantly: a bug fix turns out to
+    // be most of an Improvement nobody scheduled, the ticket sits open for
+    // months, and eventually it is built a second time. The verifier reads the
+    // FINISHED diff, so it is the only pass positioned to notice. `partial` is
+    // the valuable state — the owner can send it back for the remainder.
+    ticketCoverage: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          ref: { type: 'string', description: 'the issue, e.g. `#160`' },
+          state: { type: 'string', enum: ['satisfied', 'partial', 'contradicted'] },
+          whatLanded: { type: 'string', description: 'the change in this wave that touches it — point at it, do not assert it' },
+          whatIsMissing: { type: 'string', description: 'partial only: precisely what the ticket still asks for. Never a bare percentage.' },
+        },
+        required: ['ref', 'state', 'whatLanded'],
+      },
+      description: 'open GitHub issues this wave satisfied, partly satisfied, or contradicted. Empty array if none. You never close an issue yourself — that is outward-facing and happens at the wrap.',
     },
     verifiedClean: {
       type: 'array',
@@ -307,7 +348,15 @@ const WHERE_NOTE =
 const dispatch = (lane, issues) =>
   agent(
     `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
-    { label: `build:${lane}`, phase: lane === 'context' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
+    // No `model` here: the tier lives on the lane's charter frontmatter, so a
+    // hand-dispatched lane gets it too. Setting it in the engine only made it
+    // true on the engine path, which is the shape of failure this framework
+    // keeps repeating. Three things to watch, all instrumented here: turns per
+    // dispatch (a lighter model may explore more), `overturned` at verify (did
+    // fix quality drop), and the pushback ratio in `ledger-stats` — a lane that
+    // stops returning `blocked-charter` and `needs-owner-decision` has stopped
+    // being governed and is just building, which would NOT announce itself.
+    { label: `build:${lane}`, phase: lane === 'instructor' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
   )
 
 // A dependency ask is real work REGARDLESS of what the lane concluded about its
@@ -395,7 +444,7 @@ const scout = await agent(
         `**Drop any finding that matches one, and list the refs in \`droppedAsOpenKnown\` (empty array if none).** Filing one as new puts a decision he has already made back on his desk as a fresh bug.\n\n` +
         `**One exception — and report it under the SAME ref, never as a new issue:** if the recurrence carries materially new information (it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover), say so in \`whyHypothesis\` against that ref. A change in severity is worth knowing; a duplicate row is not.\n\n${OPEN_KNOWN.map(describeOpen).join('\n')}\n`
       : ''),
-  { label: 'scout', phase: 'Scout', effort: 'medium', model: 'sonnet', agentType: 'scout', schema: SCOUT },
+  { label: 'scout', phase: 'Scout', effort: 'medium', agentType: 'scout', schema: SCOUT },
 )
 allIssues = (scout && scout.issues) || []
 triageDropped = (scout && scout.droppedAsAlreadyBuilt) || []
@@ -411,13 +460,13 @@ log(`Scout: ${findingsSeen} raw finding(s) from ${SOURCES.join(' + ')} → ${all
 // harmless only because that issue was flagged for the owner and never
 // dispatched. Route the unknown to `outer` (the catch-all, by definition) and
 // SAY SO, rather than losing the issue to a typo.
-const KNOWN_LANES = new Set([...CODE_LANES, 'context'])
+const KNOWN_LANES = new Set([...CODE_LANES, 'instructor'])
 const misrouted = allIssues.filter((i) => !KNOWN_LANES.has(i.lane))
 if (misrouted.length) {
   log(`! Scout emitted ${misrouted.length} unknown lane(s): ${misrouted.map((i) => `${i.id}→"${i.lane}"`).join(', ')} — re-routed to outer so they are not silently dropped.`)
   misrouted.forEach((i) => {
     i.notes = `[re-routed from unknown lane "${i.lane}"] ${i.notes || ''}`.trim()
-    i.lane = 'outer'
+    i.lane = 'outrider'
   })
 }
 
@@ -520,8 +569,8 @@ const specById = new Map(buildable.map((i) => [i.id, i]))
 while (queue.length && rounds < MAX_ROUNDS) {
   rounds += 1
   queue.forEach((i) => specById.set(i.id, i))
-  const codeWork = queue.filter((i) => i.lane !== 'context')
-  const ctxWork = queue.filter((i) => i.lane === 'context')
+  const codeWork = queue.filter((i) => i.lane !== 'instructor')
+  const ctxWork = queue.filter((i) => i.lane === 'instructor')
   log(`Round ${rounds}: ${codeWork.length} code-lane + ${ctxWork.length} context item(s) — ${[...new Set(queue.map((i) => i.lane))].join(', ')}`)
 
   // Code lanes in parallel — disjoint files, safe together.
@@ -538,12 +587,12 @@ while (queue.length && rounds < MAX_ROUNDS) {
 
   // `context` LAST within the round — including asks the code lanes just raised
   // at it, so a prompt change lands in the same round as the code it describes.
-  const ctxAsks = depAsksFor('context', results).filter((a) => !dispatchedIds.has(a.id))
+  const ctxAsks = depAsksFor('instructor', results).filter((a) => !dispatchedIds.has(a.id))
   ctxAsks.forEach((a) => asksMinted.add(a.id))
   const toContext = ctxWork.concat(ctxAsks)
   if (toContext.length) {
     phase('Context')
-    const cr = await dispatch('context', toContext)
+    const cr = await dispatch('instructor', toContext)
     results = results.concat((cr && cr.results) || [])
     ctxAsks.forEach((a) => dispatchedIds.add(a.id))
   }
@@ -608,9 +657,10 @@ if (queue.length) {
 // together. Every cross-lane defect this framework has caught came from a
 // combined-diff pass (the 4.2.0 wrap; the 2026-07-26 checkSlot wave, where a
 // combined pass caught a regression a fix had introduced ONE ROUND earlier).
-// None came from a per-fix one. Going from N calls to 1 also pays for a stronger
-// model on the single highest-judgment step in the loop — so `model` is omitted
-// here deliberately, to inherit the session model rather than drop to sonnet.
+// None came from a per-fix one. Going from N calls to 1 also pays for the
+// strongest model on the single highest-judgment step in the loop, which is why
+// `opus` is PINNED below rather than inherited — and why it matters more now
+// that the lanes themselves run on Sonnet.
 phase('Verify')
 let verified = results
 let verifiedClean = []
@@ -626,6 +676,7 @@ let verifyAttempted = 0
 let waveFiles = []
 let priorCleanDropped = []
 let discoveries = []
+let ticketCoverage = []
 if (VERIFY) {
   const built = results.filter((r) => r.verdict === 'built')
   verifyAttempted = built.length
@@ -663,32 +714,39 @@ if (VERIFY) {
       log(`priorClean: dropped ${priorCleanDropped.length} of ${priorClean.length} — this wave changed the code they described.`)
 
     const check = await agent(
-      `Adversarially verify this wave's COMBINED change before the owner wraps it. **Findings only — build nothing, edit nothing, commit nothing.**\n\n` +
-        `Calibrate to ONE question: **is this safe to ship to real people?** Not "what could be better." A finding that makes Maelle lie, leak, or take a wrong action counts. A finding that makes the code nicer does not.\n\n` +
-        `**Attack the seams first — that is why this is one pass and not ${built.length}.** Each fix below was already built and self-checked by the lane that owns it, so re-litigating one in isolation is wasted effort. What no lane could see is the interaction: two fixes that are each correct alone and wrong together, a shared helper one lane changed and another depends on, a contract altered on one side of a seam only, or a fix whose own change introduced a regression a later fix then built on.\n\n` +
-        `**Each fix carries \`traced\` — the scenarios its builder already walked. Do not re-run those. Go at what is missing from that list**, and at anything the builder named as deliberately uncovered. If a \`traced\` claim looks wrong, spot-check that one cheaply and say so; do not re-derive the whole set on suspicion.\n\n` +
+      // The bar, the standard, the seams-first scope, the trace sampling, the
+      // budget, overturn-vs-discovery and the return contract all live in
+      // `.claude/agents/verifier.md` now. Restating them here would be a second
+      // copy that drifts — the same mistake the two engines made with the lane
+      // map. This brief carries the PAYLOAD only.
+      `Verify this wave's COMBINED change before the owner wraps it — ${built.length} fix(es) across the lanes below. **Your charter holds the bar, the standard, the budget and the return contract.**\n\n` +
         (priorCleanKept.length
-          ? `**ALREADY PROVEN by earlier verify passes — do NOT re-audit these.** They are excluded so your budget goes somewhere new. Anything an earlier pass proved about code THIS wave changed has already been removed from the list, so what remains is still standing. If the current diff genuinely invalidates one anyway, say which and why; otherwise treat it as settled:\n${priorCleanKept.map((c) => `  • ${c}`).join('\n')}\n\n`
+          ? `**ALREADY PROVEN by earlier passes — settled, do not re-audit.** Anything an earlier pass proved about code THIS wave changed has already been removed from this list, so what remains still stands:\n${priorCleanKept.map((c) => `  • ${c}`).join('\n')}\n\n`
           : '') +
-        `Read the ACTUAL diff (\`git diff\`, \`git status\`) — verify against the code on disk, never against the summaries below. Those summaries are the lanes' own claims about their work; treat them as leads. Confirm \`npx tsc --noEmit\` is green.\n\n` +
         (waveFiles.length
-          ? `**THE TREE HOLDS MORE THAN THIS WAVE. These ${waveFiles.length} files are ours:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n` +
-            `Anything else in \`git diff\` was already modified before this run started — another chat's work, or an earlier wave awaiting the same wrap. **Do not spend budget auditing it, and never return a verdict row blaming this wave for a change it did not make.** If a pre-existing change genuinely breaks one of the fixes below, that is worth saying — say it, and label it plainly as pre-existing so the owner knows which wave to look at. Everything in the list above is yours; treat the rest as the environment.\n\n`
-          : `**No lane reported which files it touched, so treat the whole diff as this wave's.** That over-checks rather than under-checks, which is the right way to be wrong here — but say in your notes that you could not separate this wave from anything else already in the tree.\n\n`) +
-        `**Budget: keep this under ~60 tool calls.** If the diff is too large to cover at that depth, say so and name what you did NOT cover rather than thinning every check to nothing. An honest gap beats uniform shallowness.\n\n` +
-        `**TWO OUTPUTS, AND KEEPING THEM APART MATTERS MORE THAN IT SOUNDS.**\n` +
-        `  • An **OVERTURN** means a fix in THIS wave is broken. It goes in \`results\`, against that issue id, and it has to be settled before the owner ships.\n` +
-        `  • A **DISCOVERY** is a pre-existing problem you noticed while reading — real, worth fixing, and nothing to do with the fixes under review. It goes in \`discoveries\`, never in \`results\`. **It will not be built in this wave, deliberately:** building it would change the tree you just examined and invalidate this pass, which would then justify another pass, which could discover something else. That loop has no end. Report it and let it be the next run's first item.\n` +
-        `Do not suppress a discovery to keep the wave looking clean, and do not dress one up as an overturn to get it fixed tonight. Both corrupt the record, in opposite directions.\n\n` +
-        `Return one row per issue id: \`built\` if that fix holds in combination with all the others, otherwise \`needs-owner-decision\` with notes saying precisely what breaks and how. If a fix is fine alone but broken by another, flag the one that should change and say why.\n\n` +
-        `Also return \`verifiedClean\`: what you PROVED and would not spend budget on again. The next run is told not to re-check it, so put nothing there you did not actually establish — a false entry silences a future check permanently.\n\n` +
+          ? `**THIS WAVE'S FILES. Everything else in the diff is the environment:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n`
+          : `**No lane reported which files it touched, so the whole diff is in scope.** Say in your return that you could not separate this wave from work already in the tree.\n\n`) +
+        // Your charter tells you to refuse an unfinished wave. On this path the
+        // engine KNOWS whether it finished, so it says so rather than leaving
+        // you to infer it from a report file — the round loop is the ping-pong,
+        // and hitting its cap is the one way it ends with work still owed.
+        (queue.length
+          ? `**THIS WAVE IS NOT FINISHED.** The dependency loop hit its ${MAX_ROUNDS}-round cap with ${queue.length} item(s) still owed: ${queue.map((i) => `${i.id}→${i.lane}`).join(', ')}. Verify what IS here, and open your return by saying plainly that the wave was truncated and which lanes still owe work — the owner must not read this as a finished pass.\n\n`
+          : `The dependency loop closed cleanly in ${rounds} round(s) with nothing owed, so this wave is complete.\n\n`) +
         `FIXES IN THIS WAVE:\n${JSON.stringify(built, null, 2)}`,
-      { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'guard', effort: 'xhigh', schema: VERIFY_OUT },
+      // No `model` here either — `verifier.md` pins Opus. Same reasoning as the
+      // lanes, one rung stronger: this is the single highest-judgment step, the
+      // only pass that sees the whole diff, and the backstop for Sonnet lanes'
+      // traces. Pinning it on the charter means neither the session model nor a
+      // hand dispatch can downgrade the one agent that must not be downgraded.
+      { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'verifier', effort: 'xhigh', schema: VERIFY_OUT },
     )
     verifyRan = !!check
     verifiedClean = (check && check.verifiedClean) || []
     discoveries = (check && check.discoveries) || []
+    ticketCoverage = (check && check.ticketCoverage) || []
     if (discoveries.length) log(`Verify found ${discoveries.length} NEW problem(s) unrelated to this wave — reported, NOT built (building them would invalidate the pass that found them).`)
+    ticketCoverage.forEach((t) => log(`  ticket ${t.ref}: ${t.state}${t.state === 'partial' && t.whatIsMissing ? ` — still missing: ${String(t.whatIsMissing).slice(0, 90)}` : ''}`))
     // The verify's OWN dependency asks were being discarded here — the overturn
     // read only `verdict` and `notes`, so when the verifier said "this needs the
     // owner, and here is precisely what would fix it", the prescription was
@@ -763,6 +821,7 @@ const manifest = {
         waveFilesNamed: waveFiles.length, // 0 with fixes present = the verify could not tell this wave from the rest of the tree
         priorCleanDropped: priorCleanDropped.length,
         discoveries: discoveries.length, // NEW problems, deliberately not built this wave — next run's input
+        ticketsTouched: ticketCoverage.length, // open GitHub issues this wave satisfied, partly satisfied or contradicted
 
         overturned: results.filter((r, i) => r.verdict !== verified[i].verdict).length,
         verifiedCleanReturned: verifiedClean.length,
@@ -812,10 +871,52 @@ log(
 )
 warnings.forEach((w) => log(`! ${w}`))
 
+// ---- N16 · WHAT MUST BE WRITTEN DOWN, pre-shaped -------------------------
+// The engine physically cannot write its own result — workflow scripts have no
+// filesystem access — so every run's durability depends on the Manager choosing
+// to persist it. That makes this the most load-bearing prompt-only step in the
+// whole framework, and on 2026-07-28 it failed: the verify overturned four
+// fixes, the engine returned them correctly as `needs-owner-decision`, and the
+// Manager reported them as PROSE IN CHAT while `report.md` still said "nothing
+// is waiting on you" and the ledger still had all eleven rows as `built`. Not a
+// missing row — a FALSE one, which is worse, because the owner acts on it.
+//
+// The write cannot be made structural. So it is made SMALL: hand over the
+// finished list plus a sentence that directly contradicts the wrong report,
+// instead of the ingredients and an instruction to compose. A copy happens far
+// more reliably than a composition — and when it does not, the finished text is
+// still sitting here for anyone to recover. Same doctrine as "don't return it"
+// for security and "carry, don't guess" for guards: hand over the answer.
+const notBuilt = verified
+  .filter((r) => r.verdict !== 'built' && r.verdict !== 'already-fixed')
+  .map((r) => ({ id: r.id, verdict: r.verdict, lane: (specById.get(r.id) || {}).lane || '', why: r.notes || r.fix || '' }))
+const persist = {
+  notBuilt,
+  // Quote this VERBATIM in the chat. It is written to be impossible to reconcile
+  // with a report that says nothing is pending.
+  assertion: notBuilt.length
+    ? `${notBuilt.length} of ${verified.length} row(s) are NOT built — ${notBuilt
+        .map((r) => `${r.id} (${r.verdict})`)
+        .join(', ')}. report.md MUST carry each as a row awaiting the owner and MUST NOT say nothing is waiting. The ledger MUST record each with its real verdict, never \`built\`.`
+    : `All ${verified.length} row(s) are built. report.md may say nothing is waiting.`,
+  // Counts of everything else that must reach the report, so an omission is
+  // countable rather than a matter of someone remembering the list.
+  mustAlsoAppear: {
+    discoveries: discoveries.length,
+    deferredDepAsks: deferredNow.length,
+    needsShaping: needsShaping.length,
+    flaggedForOwner: flagged.length,
+    ticketCoverage: ticketCoverage.length,
+    pendingOverCap: pending.length,
+  },
+}
+
 // ---- return the structured report; the Manager persists it (workflow scripts have no filesystem) ----
 return {
   manifest,
   warnings,
+  // Write `report.md` from THIS, before anything else, and quote `assertion`.
+  persist,
   counts: {
     findings: findingsSeen,
     atomic: allIssues.length,
@@ -847,6 +948,12 @@ return {
   // found them, and justifies another pass that can discover something else.
   // Already shaped to drop straight into `args.issues`.
   discoveries,
+  // Open GitHub issues this wave landed on without being asked to. **Render
+  // these** — `satisfied` closes at the wrap with everything else; `partial`
+  // is the one that matters, because the owner can send it back for the
+  // remainder while the lane still has the area in mind; `contradicted` is a
+  // decision he is about to make by accident. Never close one from here.
+  ticketCoverage,
   // Dependency asks that were deliberately NOT dispatched, because their parent
   // verdict is waiting on the owner. **The Manager MUST render these in the
   // report** — every one is a lane naming specific work in another lane's files,

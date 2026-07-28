@@ -646,15 +646,23 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
 
         // Remove the owner if Claude accidentally added them (owner is organizer)
         // Also strip the assistant if Claude added her despite instructions — she has calendar access
-        const filteredAttendees = attendees.filter(a =>
-          a.email !== ownerEmail && (!assistantEmail || a.email !== assistantEmail)
-        );
+        // Case-insensitive compare — ownerEmail/assistantEmail aren't case-normalized
+        // (no lowercase transform in CompanyEmailSchema) and an attendee's raw .email
+        // (Graph or hand-typed) can arrive in a different case. A raw compare here let
+        // a differently-cased owner/assistant address silently stay a booked attendee.
+        const filteredAttendees = attendees.filter(a => {
+          const email = (a.email ?? '').toLowerCase();
+          return email !== ownerEmail.toLowerCase() && (!assistantEmail || email !== assistantEmail.toLowerCase());
+        });
         attendees.length = 0;
         filteredAttendees.forEach(a => attendees.push(a));
 
         // If meeting room requested, add room email (configured per tenant in meetings.room_email)
         const roomEmail = context.profile.meetings.room_email;
-        if (args.add_room_email && roomEmail && !attendees.find(a => a.email === roomEmail)) {
+        // Case-insensitive — same raw-case gap as the filter above: roomEmail isn't
+        // case-normalized and an attendee's raw .email can differ in case, so a raw
+        // compare would miss an already-present room mailbox and add a case-variant duplicate.
+        if (args.add_room_email && roomEmail && !attendees.find(a => (a.email ?? '').toLowerCase() === roomEmail.toLowerCase())) {
           attendees.push({ name: 'Meeting Room', email: roomEmail });
         }
 

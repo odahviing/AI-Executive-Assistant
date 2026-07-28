@@ -173,7 +173,7 @@ const CODA_DELAY_MS = 10_000;
  * not a sentence. Composition and delivery both happen here, inside the beat.
  *
  * Contract:
- * - SAME thread (S3), always — never a new top-level message. It is a follow-on
+ * - SAME thread (T3), always — never a new top-level message. It is a follow-on
  *   to the reply, not a new topic.
  * - TEXT, never audio, even when the turn came in as a voice note. TTS exists so
  *   an answer comes back in the modality it was asked in; the coda was not asked
@@ -183,7 +183,7 @@ const CODA_DELAY_MS = 10_000;
  *   can never be followed by a cheerful aside about someone's weekend.
  * - Dropped if the person has typed again by the time it fires — the coda's
  *   premise is a lull, and a lull broken inside 10s wasn't one.
- * - 1:1 DM only (S4/S6). The orchestrator already restricts it; asserted again
+ * - 1:1 DM only (T4/T6). The orchestrator already restricts it; asserted again
  *   here so no future caller can put personal small-talk in a shared surface.
  * - Fire-and-forget: it cannot delay, fail or crash the turn. Nothing on this
  *   path is ever awaited by the person's reply — composition included, which is

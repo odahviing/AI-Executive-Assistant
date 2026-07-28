@@ -2,6 +2,47 @@
 
 ---
 
+## 4.3.0 — her first non-Slack transport, and he stays the gatekeeper
+
+Maelle can now be used *on* email without being *reachable* on email. He forwards a meeting-request thread to her own mailbox; she reads the whole chain, works out who is actually on it, computes options against his real calendar and rules, and replies **to him** — he forwards it onward himself. She never emails an external, and that single constraint is what let this ship as a narrow slice instead of the full two-way connector, which had been assessed as a project on the scale of the WhatsApp effort.
+
+The interesting half is what happened after it was built. It went live the same night, three real email threads went through it, and **seven findings came out of three runs** — including one where the reply could not be forwarded at all because it ended by asking him a question, and one where a client was offered 06:15 his own time. Those were fixed on top before anything was committed. The pre-commit verify then found that the one control the whole design rests on — *"the answer is ALWAYS to my email only"* — was validating an address the send never used.
+
+### Added
+- **The semi-manual email chain** (gh#24, a deliberately narrow v1 of [#5](https://github.com/odahviing/AI-Executive-Assistant/issues/5)). A Graph mail layer, a `~30s` delta poll on a durable `deltaLink`, an `EmailConnection`, and an inbound front door whose sender gate runs before any body read, participant parse or history write. A non-owner sender is dropped silently — but never silently in the log.
+- **Delegated OAuth rather than app-only**, decided on cloneability. App-only `Mail.*` is tenant-wide and the only way to narrow it is Exchange RBAC at org level, which would mean every deployment needs its own IT department. A delegated token is scoped to one mailbox by construction: one browser sign-in via `scripts/email-auth.mjs`, no admin.
+- **A channel axis on tool scoping.** `CHANNEL_TOOL_CLAMP` limits an email turn to exactly four tools — `find_available_slots`, `create_meeting`, `get_person_memory`, `log_interaction` — enforced at both the shipping filter and the dispatch chokepoint. No move, no cancel, no approval, no Slack-emitting tool. So the worst case under a forged forward is junk meetings, not a destroyed calendar.
+- **A two-part reply.** A `FOR YOU (delete before forwarding)` block carrying the timezone used, window searched, attendees extracted and any question for him, then a literal cut line, then the forwardable body. The frame's original premise was impossible: one string cannot be both the text a stranger reads and the place she asks him things.
+- **Attendee timezones are learnable.** A zone stated in the forwarded chain — or in his own note above it — is resolved and persisted on the person row through the existing provenance chain, so the next search uses their real hours. No signal, and his own zone still applies, which is his explicit ruling.
+- **A failure signal that reaches him.** Any throw in the handler now Slack-DMs him with the original sender and subject. Graph delta is consume-once, so without this a transient failure lost his request with no trace but a log line.
+
+### Changed
+- **The seven lane agents were renamed and re-scoped** — `matchmaker · shepherd · gatekeeper · profiler · instructor · transporter · outrider` (tags M·S·G·P·I·T·O). The Graph **mail** layer belongs to `transporter`; `outrider` keeps only the Graph **client** layer. Rule-tag citations inside `src/` comments were threaded through with the rename, so `S8→T8` and `R4→S4` still point where they claim to.
+- **Her reply is now a reply.** Sending was a fresh compose, so the chain was cut, he could not reply on it, and round-two offer binding could never work — his reply started a new Graph conversation, so the offered-slots key never matched. One root, three symptoms.
+- **Email extraction feeds the existing attendee route** rather than running beside it. Two answers to "who is in this conversation" was the one architectural gap not sanctioned: *"the only gap is second participant — please resolve and use the same format."*
+
+### Fixed
+- **The prompt taught tools the turn did not ship** — and the largest saving in this release has nothing to do with email. The owner branch of the skills-prose assembly had no reachability filter, so a scope-narrowed **Slack** owner turn rendered prose for skills whose tools had been filtered out. Measured: a `['tasks']` turn went from 55,183 characters of prose to 1,642, and a plain unscoped turn is byte-identical.
+- **She stopped sounding like herself on scheduling turns.** That same filter caught the persona block, whose tools live in the `people` scope. Restored as a deliberate exception on an identity-vs-capability axis: the filter exists so she does not promise tools she lacks, and identity promises nothing. Measured cost, ~2% of the saving.
+- **The one-address cap validated an address the send never used.** `sendDirect` checked the inbound `From` while `replyToMail` let Graph infer the recipient from the message id — so a `Reply-To` could have carried her reply, with his availability in it, somewhere the cap believed it had refused. The recipient is now PATCHed explicitly onto the draft; nothing is inferred.
+- **Two ambiguous timezone abbreviations reached the Slack path.** `CST` resolved confidently to Chicago (China Standard Time is 14 hours off) and `MST` to Denver. Removed, with a note saying why, so a future addition is not made blind.
+- **Gates claimed to act when they had not.** `humanGate` logged a rewrite with a preview truncated before the change, and the date verifier logged *"correcting deterministically"* on flag rather than on change — so a turn where the swap guard prevented any edit still reported one.
+- **Her own address was never recognised as hers.** `assistant.email` had been a value that never existed, so three filters keyed on it were permanent no-ops, and `seedAssistantSelf` could never reconcile the person row because it early-returned on the name. Fixed, and an external's timezone now refreshes their working hours — without which they were silently skipped from the availability clip entirely.
+- **Owner and assistant were excluded from attendee lists by raw-case comparison** — the one identity check in that file that did not lowercase. A differently-cased address stayed a booked attendee.
+
+### Removed
+- `sendMail` / `SendMailOptions` — replaced by the reply path, with no second send route left behind.
+- `buildSkillsPromptSection` — it lost its only production caller and was left measuring a prompt section production no longer emits, which is what `scripts/measure-prompt.ts` sized the budget against.
+
+### Migration
+The email path is inert without config. To enable: `channels.email.enabled` + `channels.email.mailbox` in the profile, delegated `Mail.ReadWrite` + `Mail.Send` on the existing Azure app registration (**not** application permissions), a `http://localhost:8734/callback` redirect URI, and a token written by `node scripts/email-auth.mjs <profile>`. Recommended alongside it: `Set-Mailbox <mailbox> -RequireSenderAuthenticationEnabled $true`, which closes the sender-spoof vector at the transport layer.
+
+### Not closed — known residuals on the email leg
+- `meetings.ts`'s ~400-line prose still renders in full on an email turn, because two of its nine tools survive the clamp. So she is still taught move, cancel and escalation tools the clamp blocks. Splitting that block into channel-aware paragraphs is its own piece of work.
+- `humanGate('external')` judges the new two-part reply as one string and can rewrite it wholesale, with nothing protecting the cut line — and its fact-preservation veto can push an owner-directed question back into the forwardable half.
+
+---
+
 ## 4.2.2 — options instead of permission, and a guard that had to be taught what it may not assert
 
 It started with *"all those dates are booked and I didn't know it, where is my options?"* — and the diagnosis was **wrong**. She had not fabricated anything: the three proposed times broke a soft day-load rule, not a booking, and she rendered that faithfully. The real bug was the second half of his sentence. When every time a colleague proposes comes back unbookable, she now **produces alternatives in the same reply** instead of asking permission to look for them. Three surfaces answered "can this time hold a meeting?" and only two of them ever offered a way forward.

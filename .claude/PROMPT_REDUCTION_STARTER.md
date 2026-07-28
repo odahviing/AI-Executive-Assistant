@@ -66,8 +66,12 @@ projects (Person Store, search rebuild) — not ours.
    (`skills/registry.ts`, `core/social/classifyTurn.ts`)
 3. **Prose lazy-loading.** Coordination ROUTE-1 details, SUMMARIES, KNOWLEDGE
    BASE, EXTERNAL VENUES, and CALENDAR-HEALTH prose render only when their scope
-   is active. `scopes` is plumbed through `buildSystemPromptParts` →
-   `buildSkillsPromptSection` → each skill's `getSystemPromptSection(profile, scopes)`.
+   is active. `scopes` is plumbed through `buildSystemPromptParts` → each skill's
+   `getSystemPromptSection(profile, scopes, isOwner, channel)`. (The intermediate
+   `buildSkillsPromptSection` helper was DELETED on 2026-07-28: once the assembly
+   loop gained a reachability filter and a `news` exception, the exported copy was a
+   second spelling of one job that no longer matched what production rendered — and
+   `scripts/measure-prompt.ts` was sizing the budget against that phantom.)
    `coord`/`calendar` deterministically union `meetings`; `freeTimeInquiry` unions `calendar`.
 4. **Static dedup/trim.** Removed the duplicate EVENT CATEGORIES block (kept the
    richer MeetingsSkill copy), collapsed the dead location decision tree

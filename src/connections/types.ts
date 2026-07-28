@@ -68,6 +68,18 @@ export interface SendOptions {
    * may ignore.
    */
   unfurl?: boolean;
+  /**
+   * v4.3.0 (#24 row 130) — email only. The transport-native id of the message
+   * this send REPLIES to. When present, EmailConnection.sendDirect uses
+   * Graph's native reply action (quoted chain, "Re:" prefix and threading
+   * headers all come from Graph) instead of composing a fresh message — the
+   * fix for "she cut the original email, keep the chain so I can reply
+   * again." Other transports ignore it. Email's v1 caller (connectors/email/
+   * inbound.ts) always has one available (the inbound message being
+   * answered); EmailConnection refuses rather than silently falling back to
+   * a chain-cutting compose when it's missing.
+   */
+  replyToMessageId?: string;
 }
 
 /**

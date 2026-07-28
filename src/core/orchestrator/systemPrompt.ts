@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
-import { buildSkillsPromptSection, getActiveSkills, getSkillTools } from '../../skills/registry';
+import type { ChannelId } from '../../skills/types';
+import { getActiveSkills, getSkillTools } from '../../skills/registry';
 import { formatSystemPromptPreferenceBlocks } from '../../utils/skillPreferences';
 import logger from '../../utils/logger';
 import { formatPreferencesCatalog, formatPeopleMemoryForPrompt, formatThreadPeopleBlock, getPersonMemory } from '../../db';
@@ -54,6 +55,13 @@ export function buildSystemPromptParts(
   // prose only when its scope is active.
   // Undefined → render everything (colleague path, classifier off, non-Slack).
   toolScopes?: string[],
+  // v4.3.0 (E9, #24) — the turn's inbound transport. Threaded into the
+  // internal getSkillTools call below so `shippedToolNames` reflects the
+  // SAME channel clamp buildTurnContext applies to the real tool array —
+  // otherwise a clamped channel's prompt could describe a capability
+  // (e.g. web_research) that isn't actually in the tools array this turn.
+  // Defaults to 'slack' — every existing caller keeps today's behavior.
+  channel: ChannelId = 'slack',
 ): { static: string; dynamic: string } {
   const { user, assistant } = profile;
   const firstName = user.name.split(' ')[0];
@@ -313,33 +321,70 @@ ${pendingApprovalsSection}` : '';
   // below that CLAIMS a capability derives from this set, so the prompt cannot
   // describe a tool the request omits, and cannot drift when the allowlist
   // changes.
-  const shippedToolNames = new Set(getSkillTools(profile, senderRole, toolScopes).map(t => t.name));
+  const shippedToolNames = new Set(getSkillTools(profile, senderRole, toolScopes, channel).map(t => t.name));
 
-  // #15 — a skill's prose ships only where the caller can reach one of its
-  // tools. On the colleague path the turn classifier never runs, so toolScopes
-  // is undefined and every skill's scope gate falls through
-  // (calendarHealth.ts:217, summary.ts:1170, venue.ts:361 all read
-  // `if (scopes && …) return ''`): a colleague was reading the full CALENDAR
-  // HEALTH / SUMMARIES / VENUE prose for tools COLLEAGUE_ALLOWED_TOOLS
-  // hard-blocks. Filtering on reachability fixes the class at the assembly, so
-  // a skill that never adds its own isOwner gate still cannot leak.
-  // Owner path keeps registry's assembly untouched: there the classifier
-  // already narrows the tools, and a skill may deliberately keep an always-on
-  // line while out of scope (news routing).
-  const skillsSection = isOwner
-    ? buildSkillsPromptSection(profile, toolScopes, isOwner)
-    : activeSkills
-        .map(skill => {
-          try {
-            if (!skill.getTools(profile).some(t => shippedToolNames.has(t.name))) return '';
-            return skill.getSystemPromptSection(profile, toolScopes, isOwner);
-          } catch (err) {
-            logger.warn(`Skill "${skill.name}" prompt section skipped`, { err: String(err) });
-            return '';
-          }
-        })
-        .filter(Boolean)
-        .join('\n\n');
+  // #15 / v4.3.0 (gh#24 row 121) — a skill's prose ships only where the
+  // caller can reach one of its tools. This used to be COLLEAGUE-only (the
+  // owner branch called buildSkillsPromptSection directly, unfiltered) on the
+  // theory that the classifier already narrows the owner's tools and each
+  // skill's own `if (scopes && …) return ''` self-gate (calendarHealth.ts:217,
+  // summary.ts:1170, venue.ts:361) covers the rest. That theory misses two
+  // real cases: (1) several active skills — meetings.ts, social.ts,
+  // outreach.ts, tasks/skill.ts — never added that self-gate at all, so their
+  // full prose always rendered regardless of scope; (2) NONE of those
+  // self-gates can see a CHANNEL clamp (CHANNEL_TOOL_CLAMP, e.g. the email
+  // leg's 4-tool allowlist) — they only compare scope NAMES, and are a no-op
+  // whenever scopes is undefined (every colleague turn, and the email leg,
+  // which never runs the Slack classifier). Net effect: a scope-narrowed OR
+  // channel-clamped OWNER turn still got EVERY active skill's full prose —
+  // she'd promise to DM a colleague (outreach), escalate for approval
+  // (tasks), or search the web (search), try the tool, and hit
+  // `not_permitted`. One reachability filter now guards both paths.
+  // 'news' stays a deliberate exception: news.ts always renders a cheap
+  // ALWAYS-ON routing line (config-teaching detection, e.g. "track X for my
+  // news") specifically so a scope-classifier miss can't silently drop it —
+  // see its own comment. That line's real dependency is
+  // update_my_preferences (cross-cutting, ALWAYS_ON_TOOLS), not the 'news'
+  // tool itself, so it's gated on THAT tool's reachability instead of
+  // requiring news's own scoped tool to be shipped.
+  //
+  // gh#24 row 124 (owner ruling) — 'social' is a SECOND deliberate exception,
+  // for a different reason than 'news'. The axis this filter polices is
+  // CAPABILITY prose: a promise to DM/research/escalate that dies on
+  // `not_permitted` when the backing tool didn't ship. social.ts:277's
+  // PERSONA block is IDENTITY prose — who she IS (friend-of-the-team
+  // warmth), not what she can do — and it self-gates on nothing, same as
+  // every turn before row 121 existed. Gating identity on tool reachability
+  // is a category error: a `['tasks']`/`['meetings']` scope narrowing, or the
+  // email channel clamp, has no bearing on whether she's still herself, and
+  // suppressing it made her read clipped and transactional on ordinary
+  // scheduling turns for no honesty gain. (The block's one embedded
+  // bookkeeping mention, note_about_person/note_about_self, is never surfaced
+  // to the user — the block itself says the save "never replaces your
+  // reply" — and a miss on a scope-narrowed turn is recovered by the
+  // end-of-chat capture pass, the same backstop that let those tools move out
+  // of ALWAYS_ON_TOOLS to begin with; see the people-scope comment above.) So
+  // unlike 'news', 'social' isn't gated on a proxy tool at all — it's simply
+  // exempt, on every scope and every channel including email. The next skill
+  // added to this exception list should sit on the IDENTITY side of that
+  // line, not merely be inconvenient to lose.
+  const skillsSection = activeSkills
+    .map(skill => {
+      try {
+        const reachable = skill.id === 'news'
+          ? shippedToolNames.has('update_my_preferences')
+          : skill.id === 'social'
+          ? true
+          : skill.getTools(profile).some(t => shippedToolNames.has(t.name));
+        if (!reachable) return '';
+        return skill.getSystemPromptSection(profile, toolScopes, isOwner, channel);
+      } catch (err) {
+        logger.warn(`Skill "${skill.name}" prompt section skipped`, { err: String(err) });
+        return '';
+      }
+    })
+    .filter(Boolean)
+    .join('\n\n');
 
   // The owner's learned free-text preferences for every area the SYSTEM PROMPT
   // is the reader for (PREF_INJECTION_SITE). Scope-gated per area; '' for a
@@ -506,7 +551,21 @@ INTERACTION MEMORY — log_interaction + note_about_person build the per-person 
   const channelsYouCanReach = (() => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { listConnections } = require('../../connections/registry') as typeof import('../../connections/registry');
-    const active = listConnections(profile.user.slack_user_id);
+    // gh#24 row 121 — this list answers "who can I message THIS turn," so a
+    // transport whose send tool the CHANNEL CLAMP stripped (the email leg
+    // excludes message_colleague) must not be offered here either. Pre-fix
+    // this always listed Slack once the connection was merely REGISTERED,
+    // regardless of whether message_colleague actually shipped this turn —
+    // on a clamped turn that's the same Maya/Comsec mistake the comment below
+    // describes, just gated on the wrong axis (registered vs reachable now).
+    // Owner-path only (`!isOwner ||` short-circuits for colleagues): a
+    // colleague turn never ships message_colleague at all — COLLEAGUE_ALLOWED_
+    // TOOLS omits it, unrelated to any channel clamp — so gating on it
+    // unconditionally would have dropped this bullet for EVERY colleague
+    // conversation instead of just the clamped-channel owner case this exists
+    // to fix (verified: it did, until this guard was added).
+    const active = listConnections(profile.user.slack_user_id)
+      .filter(id => id !== 'slack' || !isOwner || shippedToolNames.has('message_colleague'));
     if (active.length === 0) return '- (no channels currently registered — flag to ' + firstName + ' if you need to reach someone)';
     // v2.6.9 — each transport declares WHO it can reach. Pre-fix the block
     // listed transports as available without saying who they could reach,
@@ -516,7 +575,13 @@ INTERACTION MEMORY — log_interaction + note_about_person build the per-person 
     // transport names its reach criteria so Sonnet can map person → channel.
     return active.map(id => {
       if (id === 'slack')    return '- Slack — reaches INTERNAL workspace members only (need a slack_id in people_memory). External attendees (different email domain, gmail / company.com that isn\'t the owner\'s) are NOT on Slack and CANNOT be DMed.';
-      if (id === 'email')    return '- Email — reaches anyone with an email address (internal or external).';
+      // v4.3.0 (E10, #24) — was "reaches anyone with an email address
+      // (internal or external)" until #24 registered the transport and made
+      // that flatly false: EmailConnection.sendDirect hard-caps every send to
+      // the owner's own address(es) (connections/email/index.ts). Restating
+      // that as "reaches anyone" would repeat the exact Maya/Comsec mistake
+      // (line ~519 above) under a new transport's name.
+      if (id === 'email')    return `- Email — reaches ONLY ${firstName} himself, at the address he emailed from or a configured alias. It CANNOT contact a colleague or an external directly: he forwards you a chain, you find a slot and draft the reply to HIM, and he forwards it on to the real people himself.`;
       if (id === 'whatsapp') return '- WhatsApp — reaches anyone with a phone number on record.';
       return `- ${id}`;
     }).join('\n');
@@ -744,6 +809,82 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   })();
   const verifiedSenderSection = verifiedSenderBlock ? `\n\n${verifiedSenderBlock}` : '';
 
+  // v4.3.0 (E10, #24) — email-turn reply shape. Dynamic tier: fires ONLY when
+  // this turn's channel is 'email' (never billed on the Slack path). E3's
+  // one-address cap means the owner himself relays this reply on to the
+  // externals essentially unedited, so it must stand alone rather than open
+  // a back-and-forth. Also resolves a real ambiguity against the
+  // destination-artifact language rule above (composing FOR someone else) —
+  // here the forwarded chain itself IS this turn's message, so ordinary
+  // CURRENT-TURN-WINS already gives the right (the externals') language.
+  //
+  // gh#24 row 121 (Part B, the owner's own ask) — EXTENDED in place, not
+  // duplicated. The GATE already treats this text as external — runOutputGates
+  // routes transport:'email' to its own leg, which calls
+  // runHumanGate(..., 'external', ...) unconditionally (runOutputGates.ts:562)
+  // — but the PROMPT still read as an ordinary internal owner turn. Two more
+  // requirements, both his words: a voice that works on a stranger (no
+  // internal shorthand, no assuming the reader knows who's writing or that an
+  // assistant is involved), and CONSERVATIVE about offering — propose the
+  // times and nothing past them. Both are judgment/tone calls, not something a
+  // gate can enforce, so they belong here, not in code.
+  //
+  // gh#24 row 124 — this precedence clause never had to name what it beat,
+  // because until row 124 the PERSONA block (social.ts:277) was silently
+  // absent from every email turn (caught by the same channel clamp as its
+  // tools), so there was nothing to be ambiguous against in production. Now
+  // that PERSONA renders on email too, "the general chat rules above" is not
+  // an obvious pointer to an un-labeled identity block, so it's named
+  // explicitly below. This is a register instruction for the outgoing text
+  // only — it does not make her a different person on this leg, only a
+  // formal-with-a-stranger one (the owner's ruling: same personality,
+  // internal and external).
+  //
+  // gh#24 row 135 — split into TWO parts, proven necessary in production: the
+  // real reply that shipped ("...Which one works best for you? And should I
+  // loop in Philip Lewis, Jim Douglass, and Ali Momin on the invite?") ended
+  // by asking the OWNER two questions inside a message whose entire purpose
+  // is to be forwarded to a client verbatim — not a model slip, an impossible
+  // premise: one output string was asked to serve the stranger who reads it
+  // AND the place Maelle talks to the owner, and no wording serves both. The
+  // owner also had to ask why a 6am slot was offered — the timezone Maelle
+  // assumed was invisible in the reply, so he had no way to gate it before
+  // forwarding. PART 1 (FOR YOU) surfaces exactly what a validator needs —
+  // the zone assumed per candidate (now backed by a real per-slot field,
+  // presentation_local, so this is a fact to state, not a guess to hedge),
+  // the search window/duration, and the attendee set (now code-guaranteed
+  // clean by the shared resolvedMeetingAttendees route + owner/mailbox/
+  // assistant/non-human filter — nameable plainly, "none found" included, no
+  // qualifying) — plus any real question, so he can catch a wrong assumption
+  // BEFORE he forwards, not after he asks why. The literal cut line makes
+  // PART 2 trivial to select-and-forward. PART 2 keeps every existing voice/
+  // register/precedence rule verbatim, now correctly scoped to the part that
+  // actually ships to a stranger; the old "attendee set... so he corrects it"
+  // clause is gone from PART 2 because that validation job moved to PART 1,
+  // which is what let the owner-directed questions leak into forwardable text
+  // in the first place. Labeled lines, not a dash-prefixed list, per the
+  // PUNCTUATION rule (this file, static block) — that rule already binds
+  // every outbound message, so it isn't restated here.
+  const emailReplySection = channel === 'email' ? `
+
+EMAIL REPLY — this reply is two parts in ONE message: a short FOR YOU note first, then the forwardable email, always in that order. Skip PART 1 and the cut line entirely when there's truly nothing to assume or ask, and send just the forwardable part.
+
+PART 1 — a bold "FOR YOU (delete before forwarding):" line, then these labeled lines, in order:
+Zone: the zone each candidate time is shown in — presentation_local carries it on every slot; state theirs if stated, yours if defaulted, so a wrong guess is visible here, not asked about after he forwards it.
+Search: the window you searched and the duration you used.
+Attendees: who you pulled from the chain, stated plainly — "none found" is real information now too, not a gap to cover.
+Question: a real one for him, only if you have one (e.g. "loop in these three on the invite?") — otherwise leave this line out.
+
+Then output this literal line, unchanged: **===== FORWARD ONLY BELOW THIS LINE =====**
+
+PART 2 — everything after that line: this is a client email waiting to go out, not a Slack reply; let THAT set the register, not the general chat rules above — that includes the PERSONA layer's playful teammate voice, which is calibrated for Slack, not a stranger's inbox. Same person, just the register a stranger reads, not a colleague. ${firstName} forwards it straight to the externals essentially as-is, with no back-and-forth first, so write it the way he would write it himself: plain full names or roles for anyone you mention (never a first-name shorthand that assumes the reader already knows them), and nothing that signals an assistant helped draft it. Keep everything addressed to ${firstName} (assumptions, questions) up in PART 1 — this part speaks only to the externals.
+
+OFFER THE TIMES, NOTHING ELSE — the whole reply is the slot options. No added offer to help with anything else, no commitment on ${firstName}'s behalf beyond the times themselves, no line about what happens next. Under-offering is correct here; anything more becomes a promise a stranger will hold him to.
+✅ "Would either of these work: Tuesday 3pm your time, or Wednesday 10am?"
+❌ "Would either of these work? Happy to help coordinate anything else you need."
+
+Complete enough to forward untouched: each candidate time in every attendee's own local zone, the duration, and the subject and context — the attendee set and anything else he needs to verify already lives in PART 1, never repeated here. The forwarded chain IS this turn's message: reply in its language (the externals' own), same as any ordinary current-turn reply.` : '';
+
   // ── ASSEMBLE DYNAMIC (NOT cached) ─────────────────────────────────────────
   const dynamicContent = `Now: ${now} | Time of day: ${timeOfDay}
 When greeting: use "good ${timeOfDay}" — never use morning/afternoon/evening/night based on anything other than this. At night (after 21:00 or before 05:00) avoid time-of-day greetings entirely, just say "hi" or "hey".
@@ -755,7 +896,7 @@ WEEK BOUNDARIES (critical — use these when interpreting "this week" / "next we
 ${weekBoundaries}
 "Next Sunday" = ${nextWeekStart.toFormat('EEE d MMM')} (${nextWeekStart.toFormat('yyyy-MM-dd')})
 When fetching "next week's calendar" use the date range listed above for Next week.
-${ownerContextSection}${colleagueThreadApprovalsSection}${threadRequestStatusSection}${threadPeopleSection}${speakerMemorySection}${verifiedSenderSection}`;
+${ownerContextSection}${colleagueThreadApprovalsSection}${threadRequestStatusSection}${threadPeopleSection}${speakerMemorySection}${verifiedSenderSection}${emailReplySection}`;
 
   return { static: staticContent, dynamic: dynamicContent };
 }

@@ -47,8 +47,15 @@ export interface Skill {
    * `isOwner` (v3.3) — true when the turn is the owner's. A skill MAY use it to
    * append the owner's private free-text preference block (the style layer);
    * those prefs must NEVER render on a colleague turn.
+   *
+   * `channel` (v4.3.0, E9, #24, gh#24 row 121) — the turn's inbound transport.
+   * Only relevant to a skill that internally re-derives a shipped-tool check
+   * (search.ts: whether web_research ships, to decide if its prose paragraph
+   * should render) — pass it through so that check agrees with the actual
+   * CHANNEL_TOOL_CLAMP-clamped tool set instead of silently assuming 'slack'.
+   * Optional trailing param — every other skill ignores it, no changes needed.
    */
-  getSystemPromptSection(profile: UserProfile, scopes?: string[], isOwner?: boolean): string;
+  getSystemPromptSection(profile: UserProfile, scopes?: string[], isOwner?: boolean, channel?: ChannelId): string;
 }
 
 /**

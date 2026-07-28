@@ -2,6 +2,7 @@
 name: scout
 description: Finds the work and shapes it. Pulls open GitHub Bug issues, reviews Maelle's chat logs since the watermark, merges the two into atomic issues, routes each to the lane that owns the fix, and classifies what is safe to dispatch versus what needs the owner first. Read-only — it never builds. Use for the nightly discovery pass; for issues the owner has already named and routed, skip it entirely.
 tools: Read, Grep, Glob, Bash
+model: sonnet
 ---
 
 # Scout — the intake and triage lane
@@ -39,19 +40,19 @@ Never let the merge drop his framing for a bare symptom. A lane handed *"Maelle 
 
 | Lane | Owns |
 |---|---|
-| **meeting** | the scheduling core — search / validate / book / move / cancel, free-busy, timezone and Working-Elsewhere, floating blocks, the Graph calendar layer |
-| **requests** | the async work-item spine — anything with a row in `requests`: approvals, outreach, reminders, follow-ups, timers and expiry, the requester close-loop. Lifecycle only; what an item *does* when it fires belongs to its domain lane |
-| **people** | identity, the person store, people memory, social — including duplicate or drifting person records |
-| **slack** | the transport — inbound routing, threading, DM/MPIM/channel posture, authority by authenticated sender, dedup and catch-up, the delivery pipeline |
-| **guard** | the output-time gate stack itself |
-| **context** | everything Maelle is *told* — system prompt, tool descriptions, learned preferences. Runs LAST |
-| **outer** | only what no lane above owns — news, brief, routines, Graph plumbing beyond the calendar, the core orchestrator, the DB, health, config, scripts |
+| **Matchmaker** | the scheduling core — search / validate / book / move / cancel, free-busy, timezone and Working-Elsewhere, floating blocks, the Graph calendar layer |
+| **Shepherd** | the async work-item spine — anything with a row in `requests`: approvals, outreach, reminders, follow-ups, timers and expiry, the requester close-loop. Lifecycle only; what an item *does* when it fires belongs to its domain lane |
+| **Profiler** | identity, the person store, people memory, social — including duplicate or drifting person records |
+| **Transporter** | the transport — inbound routing, threading, DM/MPIM/channel posture, authority by authenticated sender, dedup and catch-up, the delivery pipeline, and the Graph MAIL layer (`connectors/graph/mail*.ts`, `scripts/email-auth.mjs`) |
+| **Gatekeeper** | the output-time gate stack itself |
+| **Instructor** | everything Maelle is *told* — system prompt, tool descriptions, learned preferences. Runs LAST |
+| **Outrider** | only what no lane above owns — news, brief, routines, the Graph CLIENT layer only (auth/tokens; calendar is Matchmaker, mail is Transporter), the core orchestrator, the DB, health, config, scripts |
 
 Three corollaries that decide most hard cases:
 
-- **`guard` and `context` are last-resort destinations.** A symptom being *visible in a reply* is not a reason to route there. A leak appears at output and is almost always fixed in the flow that produced the data.
-- **Anything about identity, the person store, people memory or social goes to `people`** — not to the lane where the symptom happened to surface.
-- **`outer` is for subsystems nobody owns, not for issues you are unsure about.** Unsure means `needs-shaping`.
+- **`gatekeeper` and `instructor` are last-resort destinations.** A symptom being *visible in a reply* is not a reason to route there. A leak appears at output and is almost always fixed in the flow that produced the data.
+- **Anything about identity, the person store, people memory or social goes to `profiler`** — not to the lane where the symptom happened to surface.
+- **`outrider` is for subsystems nobody owns, not for issues you are unsure about.** Unsure means `needs-shaping`.
 
 If no lane fits, say so in `whyHypothesis` rather than guessing — a wrong lane is a full dispatch spent learning it was the wrong lane.
 

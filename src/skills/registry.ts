@@ -1,12 +1,12 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { Skill, SkillId, SkillContext } from './types';
+import type { Skill, SkillId, SkillContext, ChannelId } from './types';
 import type { UserProfile } from '../config/userProfile';
 import logger from '../utils/logger';
 import { AssistantSkill } from '../core/assistant';
 import { OutreachCoreSkill } from './outreach';
 import { TasksSkill } from '../tasks/skill';
 import { CronsSkill } from '../tasks/crons';
-import { listConnections, getConnection } from '../connections/registry';
+import { getConnection } from '../connections/registry';
 
 // Core modules — always active, not toggled in user profile.
 // v1.6.0: MeetingsSkill (née CoordinationSkill) is now togglable.
@@ -225,17 +225,94 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
 };
 
 /**
+ * v4.3.0 (E9, #24) — per-CHANNEL tool clamp, keyed on the turn's inbound
+ * transport (not on scope, not on senderRole). The email transport's sender
+ * gate is a spoofable From-header string compare (owner-accepted risk —
+ * containment is that a spoofed sender only ever gets a reply to the OWNER'S
+ * OWN mailbox, never a disclosure elsewhere). But that containment does NOT
+ * cover WRITES: a forged forward could still book a real Outlook invite to
+ * real externals under the owner's name. So the email channel earns a much
+ * narrower ACTION set than the scope map would otherwise ship.
+ *
+ * gh#24 wave follow-up (combined verify + owner ruling) — at the time, the
+ * clamp was applied AFTER the ALWAYS_ON_TOOLS union (see filterToolsByScope
+ * below) — an ordering the row 122 follow-up below later replaced, because
+ * back then the original 2-tool clamp silently stripped get_person_memory /
+ * log_interaction too — an email turn could never read the person row E6
+ * writes on that same turn. Owner, verbatim: "get person memory is
+ * important, log intreaction as well. but create approval or move/cancel ->
+ * no need for now." The clamp is now an explicit 4-tool allowlist —
+ * find_available_slots + create_meeting ("find a slot and book it," the
+ * original owner instruction) plus get_person_memory + log_interaction
+ * (read/record who this is). Deliberately still excludes:
+ *   - create_approval / resolve_approval / list_pending_approvals — no
+ *     escalation on this leg for now.
+ *   - move_meeting / delete_meeting — this is the write clamp that bounds a
+ *     spoofed forward to "creates a junk meeting I can delete," never
+ *     "moves or cancels a real one."
+ *   - message_colleague / find_slack_user / find_slack_channel —
+ *     Slack-emitting; an email turn must never reach Slack.
+ *   - recall_interactions / create_task / manage_preference /
+ *     update_my_preferences / web_search — the owner named two memory
+ *     tools specifically, not the whole always-on family. Widening this set
+ *     again needs another explicit ruling, not an inferred "helpful" add.
+ * Applied INSIDE filterToolsByScope (below) — not a second, parallel filter
+ * living elsewhere — and mirrored at the executeSkillTool dispatch
+ * chokepoint (same constant, read directly) so a call can't reach a handler
+ * outside the allowlist regardless of how the tool_use got named.
+ *
+ * gh#24 row 122 follow-up (combined verify + owner ruling) — that AFTER-the-
+ * union ordering was itself a bug: any classifier scope pick that wasn't
+ * meetings/calendar/general already dropped find_available_slots/
+ * create_meeting from the pre-clamp set (they live only in the 'meetings'
+ * scope, not ALWAYS_ON_TOOLS), so the clamp intersection could only ever
+ * subtract further — down to just the two ALWAYS_ON memory tools, silently,
+ * on any classifier misfire. filterToolsByScope now treats a channel clamp as
+ * AUTHORITATIVE: when one applies, scope-narrowing is skipped entirely and
+ * the clamp is intersected with the full active tool set directly, so a
+ * clamped channel's shipped set is a fixed function of (active skills,
+ * channel) — never of the classifier's pick.
+ */
+const CHANNEL_TOOL_CLAMP: Partial<Record<ChannelId, Set<string>>> = {
+  email: new Set<string>([
+    'find_available_slots', 'create_meeting', 'get_person_memory', 'log_interaction',
+  ]),
+};
+
+/**
  * Decide which tools to ship for an owner turn given the scope set from
  * classifyTurn. Returns the union of always-on tools + tools in any
  * of the requested scopes. 'general' (or no scope) → all tools, no filter.
+ * Then applies the channel clamp above, regardless of scope outcome.
  */
 function filterToolsByScope(
   allTools: import('@anthropic-ai/sdk').default.Tool[],
   scopes: string[] | undefined,
+  channel: ChannelId = 'slack',
 ): import('@anthropic-ai/sdk').default.Tool[] {
+  // gh#24 row 122 (combined verify + owner ruling) — a channel clamp is a
+  // TRUST-BOUNDARY CEILING, not one more scope to AND against the classifier's
+  // pick. This used to run scope-narrowing FIRST (ALWAYS_ON ∪ scope tools) and
+  // intersect the clamp afterwards — since find_available_slots/create_meeting
+  // live only in the 'meetings' scope (not ALWAYS_ON), any classifier pick
+  // that wasn't meetings/calendar/general already dropped them from the
+  // pre-clamp set, silently leaving a clamped-channel turn with only whatever
+  // ALWAYS_ON tools the clamp happens to also allow (email: just the two
+  // memory tools — no way to check the calendar or book). On a clamped
+  // channel, scope-narrowing can only ever SUBTRACT from the already-small
+  // clamp set — it has no useful role to play — so skip it and return the
+  // clamp intersected with the full active tool set directly. Deterministic
+  // regardless of classifier output (misfire, timeout, exception, or a
+  // genuine non-meetings pick all resolve the same way). Non-clamped channels
+  // (today: 'slack', where CHANNEL_TOOL_CLAMP['slack'] is undefined) fall
+  // through to the scope logic below, unchanged.
+  const clamp = CHANNEL_TOOL_CLAMP[channel];
+  if (clamp) return allTools.filter(t => clamp.has(t.name));
+
   if (!scopes || scopes.length === 0 || scopes.includes('general')) {
     return allTools;
   }
+
   // v3.x — 'calendar' implies 'meetings': a calendar-review turn needs the
   // health/read tools (which live in the meetings scope). Expand deterministically
   // here so the turn is safe even if the classifier emits the sub-scope alone.
@@ -254,7 +331,7 @@ function filterToolsByScope(
   // catches the "forgot to map it" case so new tools don't disappear silently.
   const KNOWN_SCOPED = new Set<string>();
   for (const set of Object.values(SCOPE_TO_TOOLS)) for (const t of set) KNOWN_SCOPED.add(t);
-  const filtered = allTools.filter(t => {
+  return allTools.filter(t => {
     if (allowed.has(t.name)) return true;
     if (!KNOWN_SCOPED.has(t.name) && !ALWAYS_ON_TOOLS.has(t.name)) {
       // Unmapped → keep + log once (per process) so the omission is fixable.
@@ -263,7 +340,6 @@ function filterToolsByScope(
     }
     return false;
   });
-  return filtered;
 }
 
 const _unmappedLoggedOnce = new Set<string>();
@@ -485,11 +561,20 @@ export function getActiveSkills(profile: UserProfile): Skill[] {
  * (always-on core) ∪ (tools in any requested scope). Pass undefined (or
  * include 'general') to ship every tool. Colleagues always see the static
  * allowlist regardless of `scopes`.
+ *
+ * v4.3.0 (E9, #24) — `channel` is the turn's inbound transport. It scopes
+ * BOTH which Connection's tools are merged in (own-transport only — see
+ * below) AND, via CHANNEL_TOOL_CLAMP, which ACTIONS that transport's trust
+ * level earns (today: email → find_available_slots, create_meeting,
+ * get_person_memory, log_interaction only — see CHANNEL_TOOL_CLAMP above).
+ * Defaults to 'slack' — every existing call site that doesn't pass a channel
+ * keeps today's behavior byte-for-byte.
  */
 export function getSkillTools(
   profile: UserProfile,
   senderRole: 'owner' | 'colleague' = 'owner',
   scopes?: string[],
+  channel: ChannelId = 'slack',
 ): Anthropic.Tool[] {
   // Always include assistant and coordination skill tools regardless of config
   const assistantTools = CORE_MODULES.flatMap(s => s.getTools(profile));
@@ -506,16 +591,23 @@ export function getSkillTools(
   // v2.6.4 — Connection-bound tools (e.g. Slack's find_slack_channel) live
   // on the Connection itself, not as a separate skill. Merge them in here so
   // Sonnet sees one unified tool list. Same dedupe + colleague filter applies.
+  //
+  // v4.3.0 (E9, #24) — a connection's getTools() loads ONLY for its OWN
+  // transport. This used to loop every REGISTERED connection for the
+  // profile and merge ALL of their tools into EVERY turn regardless of
+  // which transport the turn arrived on — so once an email connection is
+  // registered, its tools (and any future WhatsApp connection's) would ship
+  // to a Slack turn too. The owner's words: "why email will ship to slack?
+  // the process need to be base of transport layer and load only what
+  // needed." Scoped to `channel` (the turn's inbound transport) instead.
   const profileId = profile.user.slack_user_id;
   const connectionTools: Anthropic.Tool[] = [];
-  for (const connId of listConnections(profileId)) {
-    const conn = getConnection(profileId, connId);
-    if (conn?.getTools) {
-      try {
-        connectionTools.push(...conn.getTools(profile));
-      } catch (err) {
-        logger.warn(`Connection "${connId}" getTools() failed`, { err: String(err) });
-      }
+  const ownConnection = getConnection(profileId, channel);
+  if (ownConnection?.getTools) {
+    try {
+      connectionTools.push(...ownConnection.getTools(profile));
+    } catch (err) {
+      logger.warn(`Connection "${ownConnection.id}" getTools() failed`, { err: String(err) });
     }
   }
 
@@ -530,13 +622,17 @@ export function getSkillTools(
 
   // Colleagues only get the explicitly allowed subset — block everything else.
   // Scope filter does NOT apply on the colleague path (the static allowlist is
-  // the hard limit; scope would be redundant).
+  // the hard limit; scope would be redundant). The channel clamp still does —
+  // a colleague turn on a clamped channel gets the intersection of both.
   if (senderRole === 'colleague') {
-    return deduped.filter(t => COLLEAGUE_ALLOWED_TOOLS.has(t.name));
+    const colleagueTools = deduped.filter(t => COLLEAGUE_ALLOWED_TOOLS.has(t.name));
+    const clamp = CHANNEL_TOOL_CLAMP[channel];
+    return clamp ? colleagueTools.filter(t => clamp.has(t.name)) : colleagueTools;
   }
 
-  // Owner-path Module G filter (no-op if scopes is undefined or includes 'general').
-  return filterToolsByScope(deduped, scopes);
+  // Owner-path Module G filter (no-op if scopes is undefined or includes 'general'),
+  // plus the channel clamp above.
+  return filterToolsByScope(deduped, scopes, channel);
 }
 
 /**
@@ -567,6 +663,21 @@ export async function executeSkillTool(
       tool: toolName, requesterId: context.userId,
     });
     return { error: 'not_permitted', reason: `Tool "${toolName}" is owner-only.` };
+  }
+
+  // v4.3.0 (E9, #24) — same defense-in-depth pattern, keyed on CHANNEL instead
+  // of role. getSkillTools already clamps a channel-restricted turn (today:
+  // email → the 4-tool allowlist in CHANNEL_TOOL_CLAMP) at SHIPPING time;
+  // this re-applies that same clamp at DISPATCH so a call on a clamped
+  // channel can't reach any handler outside it, regardless of how the
+  // tool_use got named. See CHANNEL_TOOL_CLAMP above for why this matters for
+  // email specifically (spoofable sender gate; the write clamp is the backstop).
+  const channelClamp = CHANNEL_TOOL_CLAMP[context.channel];
+  if (channelClamp && !channelClamp.has(toolName)) {
+    logger.warn('executeSkillTool: channel-path tool blocked at chokepoint', {
+      tool: toolName, channel: context.channel, requesterId: context.userId,
+    });
+    return { error: 'not_permitted', reason: `Tool "${toolName}" is not available on the ${context.channel} channel.` };
   }
 
   const activeSkills = getActiveSkills(context.profile);
@@ -604,43 +715,25 @@ export async function executeSkillTool(
     }
   }
 
-  // v2.6.4 — fall through to registered Connections (find_slack_channel etc.).
+  // v2.6.4 — fall through to the Connection for THIS transport (find_slack_channel
+  // etc.). v4.3.0 (E9, #24) — scoped to context.channel only, same seam-fix as
+  // getSkillTools above: a tool call that arrived on one transport must never
+  // dispatch to a DIFFERENT transport's Connection.
   const profileId = context.profile.user.slack_user_id;
-  for (const connId of listConnections(profileId)) {
-    const conn = getConnection(profileId, connId);
-    if (conn?.executeToolCall) {
-      try {
-        const result = await conn.executeToolCall(toolName, args);
-        if (result !== null) {
-          logger.info('Tool executed', { tool: toolName, connection: connId });
-          return result;
-        }
-      } catch (err) {
-        logger.error(`Connection "${connId}" threw during tool "${toolName}"`, { err: String(err) });
-        return { error: `Tool "${toolName}" failed: ${String(err)}` };
+  const conn = getConnection(profileId, context.channel);
+  if (conn?.executeToolCall) {
+    try {
+      const result = await conn.executeToolCall(toolName, args);
+      if (result !== null) {
+        logger.info('Tool executed', { tool: toolName, connection: conn.id });
+        return result;
       }
+    } catch (err) {
+      logger.error(`Connection "${conn.id}" threw during tool "${toolName}"`, { err: String(err) });
+      return { error: `Tool "${toolName}" failed: ${String(err)}` };
     }
   }
 
   logger.warn('No skill handled tool', { tool: toolName, user: context.profile.user.name });
   return { error: `No active skill handles tool: ${toolName}` };
-}
-
-/**
- * Build the skills section of the system prompt.
- * Each active skill contributes its own rules block.
- * Fails gracefully per skill — one bad skill doesn't blank the whole prompt.
- */
-export function buildSkillsPromptSection(profile: UserProfile, scopes?: string[], isOwner?: boolean): string {
-  return getActiveSkills(profile)
-    .map(skill => {
-      try {
-        return skill.getSystemPromptSection(profile, scopes, isOwner);
-      } catch (err) {
-        logger.warn(`Skill "${skill.name}" getSystemPromptSection() failed`, { err: String(err) });
-        return '';
-      }
-    })
-    .filter(Boolean)
-    .join('\n\n');
 }

@@ -1069,7 +1069,7 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
       // DMs use the owner-in-group authority model) and NOT for a start-of-
       // thread mention (threadTs === event.ts → engages like an MPIM, existing
       // behavior). His presence in the thread IS the authorization (invariant 1
-      // / S2): if the owner never posted here, Maelle does nothing — she's his
+      // / T2): if the owner never posted here, Maelle does nothing — she's his
       // EA, and a colleague can't drive her in a thread he isn't part of.
       // Reading the thread for this is ephemeral — no capture/people/interaction
       // writes (invariant 9); those drops live in the `message` handler.

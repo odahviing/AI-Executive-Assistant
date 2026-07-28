@@ -88,6 +88,20 @@ export interface OrchestratorInput {
    */
   inboundConnectionId?: import('../../connections/types').ConnectionId;
   /**
+   * v4.3.0 (#24 rows 132/133/137) — attendee email ADDRESSES a transport's
+   * own inbound extraction already resolved for this turn, to be unioned
+   * into the SAME `resolvedMeetingAttendees` route Slack's classifyTurn.
+   * meetingPeople + resolveNamedInternalAttendees populate from NAMES
+   * (buildTurnContext.ts). Slack never sets this — named-colleague
+   * resolution covers it. The email connector sets it from
+   * `connectors/email/extractParticipants.ts`'s forwarded-header extraction,
+   * which resolves genuine EXTERNAL addresses no internal-name lookup could
+   * ever produce (an external is never in people_memory under the owner's
+   * own domain). One authoritative attendee route, two contributors — never
+   * a second, competing spine.
+   */
+  extractedAttendeeEmails?: string[];
+  /**
    * v2.4.3 (A1) — abort signal honored by the tool loop. When triggered,
    * the orchestrator finishes any in-flight tool call but stops before
    * dispatching the next one, throws an AbortError. Used by the per-thread

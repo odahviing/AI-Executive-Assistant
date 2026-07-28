@@ -3,9 +3,11 @@ import { App } from '@slack/bolt';
 import { createSlackAppForProfile, startSocketWatchdog } from './connectors/slack/app';
 import { stampSocketAlive, flushSocketWatermark, getLastSocketAlive } from './connectors/slack/socketWatermark';
 import { startWhatsApp } from './connectors/whatsapp';
+import { startEmailChannel } from './connectors/email/inbound';
 import { loadAllProfiles, type UserProfile } from './config/userProfile';
 import { getDb } from './db';
 import { startBackgroundTimer, initProfile, catchUpMissedMessages } from './core/background';
+import { startMailPollTimer } from './connectors/graph/mailPoll';
 import { seedAssistantSelf } from './core/assistantSelf';
 import { seedOwnerSelf } from './core/ownerSelf';
 import logger from './utils/logger';
@@ -176,6 +178,21 @@ async function main(): Promise<void> {
     );
   }
 
+  // ── Phase 4b: start the email transport (optional, per-profile, gated) ───
+  // v4.3.0 (#24 E3/E4). startEmailChannel is a synchronous no-op when
+  // channels.email is absent or enabled:false — no Connection registered, no
+  // poll started, byte-identical to today. Wrapped defensively so a bad
+  // profile can never take down the rest of startup.
+  for (const [, profile] of profiles) {
+    try {
+      startEmailChannel(profile);
+    } catch (err) {
+      logger.error('startEmailChannel failed (continuing — Slack unaffected)', {
+        user: profile.user.name, err: String(err),
+      });
+    }
+  }
+
   // ── Socket watchdog — recovery on reconnect + restart-on-dead-socket ──────
   // v3.3.x. The socket just opened (Phase 3) → stamp the watermark, then start
   // the watchdog that polls connectivity, fires gap-scoped catch-up on a
@@ -215,6 +232,11 @@ async function main(): Promise<void> {
 
   // Background timer — runs every 5 minutes
   startBackgroundTimer(runningApps, profiles);
+
+  // Mailbox poll (#24 E2) — its OWN ~30s cadence, separate from the 5-min
+  // task tick above. No-ops entirely unless a profile has channels.email
+  // configured (see mailPoll.ts's gating doc).
+  startMailPollTimer(profiles);
 
   const shutdown = async (signal: string): Promise<void> => {
     logger.info('Shutting down', { signal });

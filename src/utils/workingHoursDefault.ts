@@ -45,10 +45,33 @@ export function defaultWorkingHoursForTz(iana: string | null | undefined): Pick<
  * Recompute and persist `working_hours_auto` for a person based on their
  * current timezone. Called from the same paths that write timezone (provenance
  * helper or upsert). Idempotent — silently no-ops when nothing's changed.
+ *
+ * Thin slack_id-keyed adapter over `refreshAutoWorkingHoursById` — kept for the
+ * (internal-only) callers that already hold a slack_id rather than a person_id.
  */
 export function refreshAutoWorkingHours(slackId: string): void {
   const db = getDb();
-  const row = db.prepare(`SELECT timezone FROM people_memory WHERE slack_id = ?`).get(slackId) as
+  const row = db.prepare(`SELECT person_id FROM people_memory WHERE slack_id = ?`).get(slackId) as
+    | { person_id: string }
+    | undefined;
+  if (!row) return;
+  refreshAutoWorkingHoursById(row.person_id);
+}
+
+/**
+ * v4.2.x — person_id-keyed sibling of `refreshAutoWorkingHours`, so it works
+ * for EXTERNALS too (no slack_id). Needed the moment a caller writes a
+ * timezone onto a pure-email person (#24 row 129b, James Avery/Kevel): without
+ * this, `working_hours_auto` stays NULL forever on an external row, and
+ * `getEffectiveWorkingHours` has no manual override to fall back to either —
+ * so a known timezone with no working-hours read as "unknown" and
+ * `attendeeAvailability`'s clip silently skips the person rather than using a
+ * sane default window for their zone. Same idempotent recompute-from-timezone
+ * as the slack_id version (now its delegate).
+ */
+export function refreshAutoWorkingHoursById(personId: string): void {
+  const db = getDb();
+  const row = db.prepare(`SELECT timezone FROM people_memory WHERE person_id = ?`).get(personId) as
     | { timezone: string | null }
     | undefined;
   if (!row || !row.timezone) return;
@@ -56,15 +79,15 @@ export function refreshAutoWorkingHours(slackId: string): void {
   const defaults = defaultWorkingHoursForTz(row.timezone);
   const json = JSON.stringify(defaults);
 
-  const existing = db.prepare(`SELECT working_hours_auto FROM people_memory WHERE slack_id = ?`).get(slackId) as
+  const existing = db.prepare(`SELECT working_hours_auto FROM people_memory WHERE person_id = ?`).get(personId) as
     | { working_hours_auto: string | null }
     | undefined;
 
   if (existing?.working_hours_auto === json) return;
 
-  db.prepare(`UPDATE people_memory SET working_hours_auto = ?, updated_at = datetime('now') WHERE slack_id = ?`)
-    .run(json, slackId);
-  logger.debug('Auto working_hours refreshed', { slackId, tz: row.timezone });
+  db.prepare(`UPDATE people_memory SET working_hours_auto = ?, updated_at = datetime('now') WHERE person_id = ?`)
+    .run(json, personId);
+  logger.debug('Auto working_hours refreshed', { personId, tz: row.timezone });
 }
 
 /**

@@ -344,10 +344,39 @@ function missingFacts(original: string, rewrite: string): string[] {
 }
 
 /**
+ * v4.2.x — log-honesty helper. A plain `.slice(0, N)` preview is only useful
+ * when an edit falls inside the first N characters; when the whole PREFIX is
+ * unchanged (a rewrite that only touches a clause further in — the common
+ * shape once a draft runs more than a sentence or two) two truncated previews
+ * come out byte-identical and a "rewrote draft" log reads as if nothing
+ * happened. Windowing the preview around the first point of actual divergence
+ * (rather than always from index 0) means a real edit is always visible in
+ * the log, wherever in the string it lands. Lengths ride along so even a
+ * reader who doesn't parse the preview can see the two strings differ.
+ */
+function rewriteDiffPreview(original: string, rewrite: string, window = 80): {
+  originalLength: number;
+  rewriteLength: number;
+  originalPreview: string;
+  rewritePreview: string;
+} {
+  const minLen = Math.min(original.length, rewrite.length);
+  let diffAt = 0;
+  while (diffAt < minLen && original[diffAt] === rewrite[diffAt]) diffAt++;
+  const start = Math.max(0, diffAt - 20);
+  return {
+    originalLength: original.length,
+    rewriteLength: rewrite.length,
+    originalPreview: original.slice(start, start + window),
+    rewritePreview: rewrite.slice(start, start + window),
+  };
+}
+
+/**
  * v4.0.x — forced structured-output verdict. The gate calls this `verdict` tool
  * instead of emitting free-text JSON, so parsing CAN'T fail (kills the old
  * reparse retry — Haiku mis-formatted the bare JSON ~half the time) and the
- * model's prose can never ship as the reply (R6). Same {ok, rewrite} semantics
+ * model's prose can never ship as the reply (G5). Same {ok, rewrite} semantics
  * the system prompt already describes — only the output transport is forced.
  */
 const HUMAN_GATE_VERDICT_TOOL = {
@@ -456,7 +485,7 @@ export async function runHumanGate(
     const model = MODEL_HAIKU;
     // v4.0.x — forced structured output (like concision / rewriteOwningTheMiss):
     // the verdict comes back as a `verdict` tool call, so parsing can't fail and
-    // the model's prose can never ship (R6). Kills the old free-text + reparse
+    // the model's prose can never ship (G5). Kills the old free-text + reparse
     // path (Haiku mis-formatted the bare JSON ~half the time). Judgment unchanged
     // — the system prompt is the same; only the output transport is forced.
     const resp = await anthropic.messages.create({
@@ -518,7 +547,7 @@ export async function runHumanGate(
         }
         // Still imperfect after one pinned retry — the rewrite keeps dropping a
         // load-bearing token (@mention / time / date) or flipped a question into
-        // a statement. We're now choosing between two bad drafts, and R7 decides:
+        // a statement. We're now choosing between two bad drafts, and G6 decides:
         // a dropped mention / wrong-or-missing time is a CORRUPTION, a residual
         // bot-tell is a MISS. Which is safe to ship depends on the audience.
         //   - owner → ship the ORIGINAL. A mild bot-tell to the operator is
@@ -533,7 +562,7 @@ export async function runHumanGate(
         //     a colleague-facing bot-tell is the worse harm there, so a clean but
         //     fact-dropped line still beats reverting to the flagged original.
         if (audience === 'owner') {
-          logger.warn('humanGate — rewrite kept dropping load-bearing content after one retry (owner path); shipping the ORIGINAL draft, not a corrupted rewrite (R7 safe-miss)', {
+          logger.warn('humanGate — rewrite kept dropping load-bearing content after one retry (owner path); shipping the ORIGINAL draft, not a corrupted rewrite (G6 safe-miss)', {
             audience,
             channelId,
             originalPreview: draft.slice(0, 120),
@@ -541,20 +570,36 @@ export async function runHumanGate(
           return { ok: true, rewrite: null };
         }
         const best = retry && retry.trim().length > 0 ? retry : parsed.rewrite;
+        const bestDiff = rewriteDiffPreview(draft, best);
         logger.warn('humanGate — rewrite still dropped content after one retry (colleague path); shipping cleaned rewrite, NOT the flagged original', {
           audience,
           channelId,
-          originalPreview: draft.slice(0, 120),
-          shippedPreview: best.slice(0, 120),
+          originalLength: bestDiff.originalLength,
+          shippedLength: bestDiff.rewriteLength,
+          originalPreview: bestDiff.originalPreview,
+          shippedPreview: bestDiff.rewritePreview,
         });
         return { ok: false, rewrite: best };
       }
-      logger.info('humanGate — rewrote draft', {
-        audience,
-        channelId,
-        originalPreview: draft.slice(0, 120),
-        rewritePreview: parsed.rewrite.slice(0, 120),
-      });
+      if (draft === parsed.rewrite) {
+        // The verdict said ok=false but the "rewrite" it returned is
+        // byte-identical to the input — nothing actually changed. Don't
+        // claim an edit that never happened; log what's true instead. Pure
+        // reporting fix: the return value below is UNCHANGED (same
+        // verdict/behavior as before this fix), so this never alters what
+        // ships — only what the log says about it.
+        logger.info('humanGate — verdict flagged the draft but the rewrite is identical to the input; no textual change', {
+          audience,
+          channelId,
+          length: draft.length,
+        });
+      } else {
+        logger.info('humanGate — rewrote draft', {
+          audience,
+          channelId,
+          ...rewriteDiffPreview(draft, parsed.rewrite),
+        });
+      }
       return { ok: false, rewrite: parsed.rewrite };
     }
 

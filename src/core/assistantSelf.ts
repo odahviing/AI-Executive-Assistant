@@ -29,13 +29,32 @@ export function selfSlackId(ownerSlackId: string): string {
 }
 
 /**
- * Ensure a people_memory row exists for Maelle herself.
- * Safe to call on every startup — upserts, never overwrites existing notes.
+ * Ensure a people_memory row exists for Maelle herself, and keep her core
+ * identity (name, email, timezone) reconciled with the profile.
+ * Safe to call on every startup — upserts identity, never overwrites
+ * existing notes / interaction history (upsertPersonMemory never touches
+ * those columns).
+ *
+ * v4.2.3 — pre-fix this early-returned whenever the row existed AND the name
+ * matched, which is true on literally every boot after the first (the
+ * assistant's name never changes). That froze email/timezone at whatever
+ * they were the day the row was created: a later yaml correction (e.g. a
+ * wrong assistant.email that never matched a real mailbox, corrected months
+ * later to one that does) never propagated, because upsertPersonMemory —
+ * which DOES reconcile all three safely (setPersonEmail's merge-safe
+ * overwrite, the timezone provenance chokepoint, the gender_confirmed guard)
+ * — was never called again after boot #1. Now every field is compared, and
+ * ANY drift re-runs the same safe upsert.
  */
 export function seedAssistantSelf(profile: UserProfile): void {
   const slackId = selfSlackId(profile.user.slack_user_id);
   const existing = getPersonMemory(slackId);
-  if (existing && existing.name === profile.assistant.name) return;
+
+  const driftedFromProfile = !existing
+    || existing.name !== profile.assistant.name
+    || (existing.email ?? '') !== (profile.assistant.email ?? '')
+    || (existing.timezone ?? '') !== (profile.user.timezone ?? '');
+  if (!driftedFromProfile) return;
 
   upsertPersonMemory({
     slackId,
@@ -44,9 +63,11 @@ export function seedAssistantSelf(profile: UserProfile): void {
     timezone: profile.user.timezone,
     // Default assumption — 'Maelle' reads as female. Owner can override via
     // confirm_gender if the assistant persona should be different.
+    // upsertPersonMemory never overwrites a confirmed gender
+    // (gender_confirmed=1), so re-asserting this on every reconcile is safe.
     gender: 'female',
   });
-  logger.info('Seeded assistant self-memory row', {
+  logger.info(existing ? 'Reconciled assistant self-memory identity from profile' : 'Seeded assistant self-memory row', {
     ownerId: profile.user.slack_user_id,
     assistantName: profile.assistant.name,
     slackId,

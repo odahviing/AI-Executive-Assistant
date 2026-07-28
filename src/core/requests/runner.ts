@@ -139,7 +139,7 @@ async function dispatchHandler(
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 /**
- * Generic expiry — close the request as expired + tell BOTH sides (R4).
+ * Generic expiry — close the request as expired + tell BOTH sides (S4).
  *
  * v2.9.1 — also notify the REQUESTER on approval-kind expiry (scenario A:
  * someone asks, owner never answers → without this the requester is left
@@ -150,7 +150,7 @@ async function dispatchHandler(
  * the owner has already decided and the request sits on the COLLEAGUE. Telling
  * the owner "I never heard back from you" and the requester "I couldn't get a
  * read from him" would then be a double lie about who ghosted whom — the exact
- * wrong-outcome failure R4 names. One expiry path, two truthful stories.
+ * wrong-outcome failure S4 names. One expiry path, two truthful stories.
  */
 async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed'> {
   // Read the side BEFORE closing — closeRequest moves state to 'expired'.
@@ -253,7 +253,7 @@ async function runApprovalReminder(row: RequestRow, profile: UserProfile): Promi
     return 'rearmed';
   }
 
-  // R5 — an owner-facing ping respects his work hours. The midpoint is plain
+  // S5 — an owner-facing ping respects his work hours. The midpoint is plain
   // wall-clock arithmetic laid over a WORKDAY-aware expiry (tasks/skill.ts), so
   // the two disagree the moment a weekend sits between them: a Thursday ask whose
   // 2-workday deadline lands on Monday midpoints onto SATURDAY, and the nag fired
@@ -269,7 +269,7 @@ async function runApprovalReminder(row: RequestRow, profile: UserProfile): Promi
   // NOW when he is inside work hours, else the next work-time start.
   //
   // Only the NUDGE defers. Expiry does not — a closure is an outcome both sides
-  // are owed on time (R4), not a nudge that can wait for Sunday.
+  // are owed on time (S4), not a nudge that can wait for Sunday.
   const nextWorkTime = workTimeBaseFromNow(profile);
   const deferMs = Date.parse(nextWorkTime);
   if (Number.isFinite(deferMs) && deferMs > Date.now() + 60_000) {

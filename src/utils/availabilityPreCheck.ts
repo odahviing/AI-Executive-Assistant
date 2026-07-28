@@ -45,7 +45,7 @@ const TIME_PATTERN = /\b(\d{1,2}):(\d{2})\b/g;
 const DATE_PATTERN = /\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b/g;
 
 // Language-NEUTRAL question mark (Latin + Hebrew share "?"; Arabic "؟"; CJK
-// "？"). Structural signal only — NO language words (R8). It just decides
+// "？"). Structural signal only — NO language words (G7). It just decides
 // whether to spend a Haiku call; the Haiku normalizer below is the real,
 // language-agnostic detector and returns empty for non-availability messages.
 // (Replaced the old English+Hebrew word regex — a clone-limiting check.)
@@ -291,7 +291,7 @@ Output EXACTLY ONE call to normalize_slots.`;
  * arithmetic — so an offset it emits anyway (habit, or a "helpful" conversion)
  * must not survive into the parse, or the frame this file chose would be silently
  * overridden by the model's. Structured ISO only; no natural language is matched
- * here (R8). Returns null when there is no parseable date+time head.
+ * here (G7). Returns null when there is no parseable date+time head.
  */
 const WALL_CLOCK_HEAD = /^(\d{4}-\d{2}-\d{2})[T ](\d{1,2}):(\d{2})/;
 function wallClockOnly(raw: string): string | null {
@@ -312,7 +312,7 @@ function wallClockOnly(raw: string): string | null {
  * open. Mapped to the real region zones here, before anything converts.
  * (`CET`/`EET`/`MET`/`WET` are bare IANA names too but DO carry the EU DST rules,
  * so they need no mapping; `UTC`/`GMT` are fixed on purpose.) A closed map over
- * IANA identifiers — no natural language is matched (R8).
+ * IANA identifiers — no natural language is matched (G7).
  */
 const LEGACY_FIXED_OFFSET_ZONES: Record<string, string> = {
   EST: 'America/New_York',
@@ -492,12 +492,12 @@ export async function precheckAvailability(params: {
 
   if (!params.message || params.message.trim().length === 0) return empty;
 
-  // Language-NEUTRAL cheap gate (R8 — no language words): spend a Haiku call
+  // Language-NEUTRAL cheap gate (G7 — no language words): spend a Haiku call
   // only when the message carries a schedulable signal — a time, a TZ cue, or a
   // question mark. That's the whole gate; the Haiku normalizer is the real,
   // language-agnostic detector and returns empty for non-availability messages.
   // A miss here → no pre-check → she answers as before (status quo), never a
-  // wrong injection (R7).
+  // wrong injection (G6).
   const hasSchedulableSignal =
     QUESTION_MARK.test(params.message)
     || TZ_CUE_PATTERN.test(params.message)

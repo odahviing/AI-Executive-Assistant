@@ -471,6 +471,30 @@ const UserProfileSchema = z.object({
     }),
     email: z.object({
       enabled: z.boolean(),
+      // v4.3.0 (#24, E1) — the mailbox Maelle signs into via DELEGATED OAuth
+      // (a separate auth mode from the app-only ClientSecretCredential path
+      // src/connectors/graph/graphClient.ts uses for calendar — that one
+      // stays untouched). Required once enabled:true; optional at the
+      // schema level so enabled:false profiles need no changes at all.
+      mailbox: z.string().email().optional(),
+      // Refresh-token SEED — same precedent as assistant.slack.* tokens: env
+      // wins (EMAIL_REFRESH_TOKEN below), yaml is the fallback, never
+      // committed (config/users/ is gitignored). This is only the INITIAL
+      // seed — once running, connectors/graph/mail.ts persists every
+      // rotated refresh token to data/graph-mail-token.<slack_user_id>.json
+      // (also gitignored), and that file wins over this field on every
+      // later boot. Normally populated by `node scripts/email-auth.mjs
+      // <profile>` writing straight to that file, so most setups never
+      // touch this field directly — it exists for parity with the Slack
+      // token pattern and as an explicit-env-injection option.
+      refresh_token: z.string().optional(),
+      // v4.3.0 (#24, E3/E4) — additional addresses that count as "the owner"
+      // for BOTH directions: the inbound sender gate (front door) and the
+      // outbound one-address send cap (EmailConnection.sendDirect). Owner
+      // decision: he may forward from more than one address (e.g. a personal
+      // account), and hardcoding a single string would silently drop or
+      // refuse those. Optional — most profiles need only `user.email`.
+      owner_aliases: z.array(z.string().email()).optional(),
     }).optional(),
     whatsapp: z.object({
       enabled: z.boolean(),
@@ -516,6 +540,20 @@ function applySlackTokenEnvOverrides(raw: unknown): void {
   if (signing) r.assistant.slack.signing_secret = signing;
 }
 
+// v4.3.0 (#24, E1) — same env-wins precedent as Slack tokens above, for the
+// email channel's refresh-token SEED. Only applied when the yaml already has
+// a `channels.email` block (enabled or not) — this never synthesizes the
+// email channel into existence out of an env var alone; `enabled` must be an
+// explicit yaml decision.
+function applyEmailTokenEnvOverride(raw: unknown): void {
+  const token = process.env.EMAIL_REFRESH_TOKEN;
+  if (!token) return;
+  if (typeof raw !== 'object' || raw === null) return;
+  const r = raw as { channels?: { email?: Record<string, unknown> } };
+  if (!r.channels?.email) return;
+  r.channels.email.refresh_token = token;
+}
+
 export function loadUserProfile(profileName: string): UserProfile {
   if (profileCache.has(profileName)) {
     return profileCache.get(profileName)!;
@@ -532,6 +570,7 @@ export function loadUserProfile(profileName: string): UserProfile {
 
   const raw = yaml.load(fs.readFileSync(filePath, 'utf-8'));
   applySlackTokenEnvOverrides(raw);
+  applyEmailTokenEnvOverride(raw);
   const parsed = UserProfileSchema.safeParse(raw);
 
   if (!parsed.success) {

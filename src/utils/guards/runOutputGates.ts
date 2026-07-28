@@ -21,8 +21,8 @@
  *      claims nothing, and its safe failure is SILENCE, not a rewrite. It
  *      therefore returns a ship/drop verdict and cannot alter the text at all.
  *
- * WHICH gates run is decided by TWO axes, never one role test — see the
- * derivation at the top of runOutputGates. Order:
+ * WHICH gates run on the SLACK transport is decided by TWO axes, never one
+ * role test — see the derivation at the top of runOutputGates. Order:
  *   BOTH LEGS FIRST: the availability floor (utils/availabilityGate) — a time the
  *     rule-aware check established as unavailable may not be sold as workable to
  *     anyone, so it is decided by the calendar and not by the reader, and running
@@ -38,6 +38,12 @@
  *     that could write like a machine, and date-verify LAST — after every
  *     rewriter, on both legs, because it is the only check whose subject
  *     (a weekday word) a REWRITER can introduce.
+ *
+ * `ctx.transport === 'email'` (gh#24 E5) skips both axes entirely and takes a
+ * dedicated THIRD leg, runEmailLegGates below — not because email is a third
+ * axis value, but because it has exactly one reader-frame ('external') by
+ * construction, so there is nothing for an axis test to derive. See that
+ * function's own doc comment for what runs and what does not.
  *
  * NOTHING here re-runs the orchestrator (G4). Every remedy is either a
  * deterministic edit or a single tool-less rewrite pass. And since v4.2.x nothing
@@ -96,6 +102,42 @@ export interface OutputGateContext {
   isMpim?: boolean;
   isOwnerInGroup?: boolean;
   mpimMemberIds?: string[];
+  /**
+   * Which delivery leg this draft is headed for. Defaults to 'slack' — every
+   * existing caller predates this field and stays byte-identical. 'email'
+   * (gh#24 E5) takes the dedicated EMAIL LEG below instead of the two-axis
+   * Slack policy: the reader is always external (the owner forwards the
+   * reply verbatim), so the frame follows the READER, not the fact that the
+   * only live recipient is the owner's own inbox (E3's one-address cap).
+   * Also decides whether a gate's rewrite gets normalized through
+   * `formatForSlack` mid-pipeline — see `normalizeForTransport` below for why
+   * the email leg deliberately does NOT get an equivalent mid-pipeline call.
+   */
+  transport?: 'slack' | 'email';
+}
+
+/**
+ * ctx.transport-aware outbound normalization for a gate's REWRITE (never for
+ * the untouched draft). Slack's own call sites keep calling formatForSlack
+ * directly since they can never see transport:'email' (runOutputGates
+ * returns early for it) — this is here only so the two rewrite helpers
+ * shared by both legs (claim-check, date-verify) don't have to know which
+ * transport they're running under.
+ *
+ * The email leg is a no-op here BY DESIGN, not an oversight: formatForEmail
+ * is NOT idempotent like formatForSlack — it markdown→HTML's the text and
+ * HTML-escapes it, so calling it here on a mid-pipeline rewrite and AGAIN at
+ * send time (EmailConnection.sendDirect's own `formatForEmail(text)` call,
+ * connections/email/formatting.ts's documented "single entry point before
+ * handing text to sendMail") would double-process whatever a gate rewrote —
+ * escaping the first pass's own `<p>`/`<strong>` tags into literal
+ * `&lt;p&gt;` text in the sent email. Leaving the email leg's rewrites as
+ * plain text costs nothing: sendDirect's one formatForEmail call still runs
+ * scrubInternalLeakage over whichever text — gated or not — ends up being
+ * sent, so nothing ships unscrubbed either way.
+ */
+function normalizeForTransport(ctx: OutputGateContext, text: string): string {
+  return ctx.transport === 'email' ? text : formatForSlack(text);
 }
 
 export async function runOutputGates(draft: string, ctx: OutputGateContext): Promise<string> {
@@ -106,6 +148,17 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     history, userMessage, isMpim, isOwnerInGroup, mpimMemberIds,
   } = ctx;
   let cleanReply = draft;
+
+  // ── EMAIL LEG — a forwarded reply, gated in the READER's frame (gh#24 E5) ──
+  // Bypasses the Slack two-axis policy below entirely: there is no
+  // owner-vs-colleague reader split to derive here, because the email leg has
+  // exactly ONE possible reader-frame — 'external' — regardless of who typed
+  // the forward (E4's sender gate already restricts that to the owner + his
+  // configured aliases). See runEmailLegGates' own doc comment for what runs
+  // and, as importantly, what does NOT.
+  if (ctx.transport === 'email') {
+    return runEmailLegGates(ctx, cleanReply);
+  }
 
   // ── Which gates apply: TWO axes, not one role test ────────────────────────
   // This pair IS the gate policy. It used to be a single `role === 'owner' ||
@@ -458,6 +511,66 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   return cleanReply;
 }
 
+/**
+ * The EMAIL LEG (gh#24 E5). A non-Slack entry into the same gate stack, so a
+ * transport that isn't `postReply` still gets gated at all — today this is
+ * the only path `runOutputGates` is reachable from besides Slack.
+ *
+ * Three checks, same relative order the owner-private Slack leg already uses
+ * (claim → humanGate → date-verify):
+ *
+ *  - claimChecker always runs (no `ownerIsActing` gate needed): E4's sender
+ *    authorization already restricts this whole leg to the owner + his
+ *    configured aliases (connectors/email/inbound.ts), so every draft here
+ *    IS the owner's own turn. A phantom "I've booked it" reaching externals
+ *    over his signature, with nothing between the LLM and Graph's send call,
+ *    is exactly the honesty gap the checker exists to catch.
+ *  - humanGate runs in the 'external' frame — a value the type has defined
+ *    since v2.9 (humanGate.ts:83) and that no caller had ever passed until
+ *    this one: no owner-name third-person reference, professional register,
+ *    because the reader is off-domain.
+ *  - dateVerifier is MANDATORY here, not merely nice-to-have: a forwarded
+ *    scheduling reply is almost entirely weekday-and-date claims, and this is
+ *    the only check standing between a wrong weekday and an external inbox
+ *    over the owner's own signature.
+ *
+ * Deliberately does NOT run the availability floor or the security gate.
+ * The floor's ledger is armed only by the Slack-only `availabilityPreCheck`
+ * (colleague path) and is empty here by construction — nothing to check. The
+ * security gate's leak-scrub half assumes a Slack colleague (a
+ * `people_memory` lookup keyed on a Slack sender id) that doesn't exist on
+ * this leg, and its identity-spoof half exists to ask "is this SENDER
+ * claiming to be someone else" — meaningless when the sender is already
+ * gated to the owner. The structured-id / raw-token scrub it would otherwise
+ * add is not lost: `EmailConnection.sendDirect` runs the SAME cross-cutting
+ * `scrubInternalLeakage` (inside `formatForEmail`, its documented single
+ * entry point) over whatever text this leg finally returns, gated or not —
+ * exactly once, at send time. That is also why this leg's own rewrites are
+ * NOT run through `formatForEmail` mid-pipeline the way Slack's are run
+ * through `formatForSlack` — see `normalizeForTransport`'s doc comment for
+ * why that would double-process the text.
+ *
+ * Fails open at every step — same contract as every other leg in this file.
+ */
+async function runEmailLegGates(ctx: OutputGateContext, initialReply: string): Promise<string> {
+  let cleanReply = initialReply;
+
+  cleanReply = await runClaimCheckAndMaybeRewrite(ctx, cleanReply);
+
+  try {
+    const { runHumanGate } = await import('../humanGate');
+    const verdict = await runHumanGate(cleanReply, ctx.profile, 'external', ctx.channelId);
+    if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
+      cleanReply = normalizeForTransport(ctx, verdict.rewrite);
+    }
+  } catch (err) {
+    logger.warn('humanGate (email leg) threw — leaving draft unchanged', { err: String(err).slice(0, 200) });
+  }
+
+  cleanReply = await runDateVerifierAndMaybeRetry(ctx, cleanReply);
+  return cleanReply;
+}
+
 // ── Social-coda gate ────────────────────────────────────────────────────────
 
 export interface CodaGateVerdict {
@@ -613,7 +726,7 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
     // them RAW for this reason: formatForSlack would strip the tool names this
     // shield matches on), so the matching tool's marker is in ctx.history — scan it
     // too. Over-suppressing a genuinely-phantom claim in a thread where a similar
-    // tool ran earlier is a safe MISS (R7); denying real work is not.
+    // tool ran earlier is a safe MISS (G6); denying real work is not.
     const priorAssistantText = (ctx.history ?? [])
       .filter(h => h.role === 'assistant')
       .map(h => h.content)
@@ -728,7 +841,7 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
       // twice. The rewrite is still made visible to the owner where it always was:
       // the warn above.
       if (rewritten && rewritten.trim().length > 0) {
-        cleanReply = formatForSlack(rewritten);
+        cleanReply = normalizeForTransport(ctx, rewritten);
       }
     } catch (rwErr) {
       logger.warn('Claim-checker rewrite errored — keeping original draft', { err: String(rwErr) });
@@ -900,12 +1013,6 @@ async function runDateVerifierAndMaybeRetry(ctx: OutputGateContext, initialReply
     const verdict = await verifyDates(cleanReply, profile, userMessage);
     if (verdict.ok || verdict.mismatches.length === 0) return cleanReply;
 
-    logger.warn('Date verifier: draft has wrong weekday/date pairs — correcting deterministically', {
-      senderId: ctx.senderId,
-      threadTs: ctx.threadTs,
-      mismatches: verdict.mismatches,
-    });
-
     // v3.4 — correct with a DETERMINISTIC weekday-token swap only. The old
     // LLM rewrite (rewriteWithCorrectDates) was removed: its riskiest edit —
     // reflowing events under a corrected day header — was never verified, so
@@ -942,7 +1049,28 @@ async function runDateVerifierAndMaybeRetry(ctx: OutputGateContext, initialReply
     // that had already been written one line above the gate stack; postReply now
     // persists once, after the gates (its Step 3b), so the corrected text is
     // what gets stored and a write here would only duplicate the row.
-    if (cleanReply !== initialReply) cleanReply = formatForSlack(cleanReply);
+    //
+    // v4.2.x — log AFTER the loop, keyed on the SAME `cleanReply !== initialReply`
+    // check that already gates normalization, not before it. The old log fired
+    // unconditionally the moment the extractor flagged ANY mismatch, claiming
+    // "correcting deterministically" even on a turn where every swap above was a
+    // no-op (written weekday === "correct" weekday — an extractor mislabel, not a
+    // real mismatch — or the matched span wasn't literally present in the draft).
+    // Report what actually happened, not what was attempted.
+    if (cleanReply !== initialReply) {
+      cleanReply = normalizeForTransport(ctx, cleanReply);
+      logger.warn('Date verifier: draft has wrong weekday/date pairs — corrected deterministically', {
+        senderId: ctx.senderId,
+        threadTs: ctx.threadTs,
+        mismatches: verdict.mismatches,
+      });
+    } else {
+      logger.warn('Date verifier: flagged weekday/date mismatches but no textual change resulted (every swap was a no-op)', {
+        senderId: ctx.senderId,
+        threadTs: ctx.threadTs,
+        mismatches: verdict.mismatches,
+      });
+    }
   } catch (err) {
     logger.warn('Date verifier threw — sending original reply', { err: String(err) });
   }

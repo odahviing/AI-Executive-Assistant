@@ -1296,6 +1296,102 @@ export function resolvePerson(input: ResolvePersonInput): ResolvedPerson | null 
 }
 
 /**
+ * v4.2.x — the outcome of `setPersonTimezoneByEmail`: every `CoreFieldWrite`
+ * value, plus two pre-flight rejections that never reach the provenance
+ * chokepoint at all.
+ */
+export type SetPersonTimezoneOutcome = CoreFieldWrite | 'invalid_email' | 'invalid_timezone';
+
+/**
+ * v4.2.x — persist a LEARNED timezone for a person identified by EMAIL, with
+ * no dependency on a slack_id. Built for #24 row 129b (James Avery/Kevel): a
+ * brand-new external has no people_memory row, so `attendeeAvailability`'s
+ * owner-zone fallback (utils/attendeeAvailability.ts) was the ONLY possible
+ * outcome for every external Maelle has never met — a fallback isn't a safety
+ * net when it's the sole path. This is the persistence half of that fix: give
+ * a caller that has already extracted/resolved a zone (an owner's forwarding
+ * note, or the chain itself stating "ET") somewhere to put it, so the NEXT
+ * slot search reads the real zone instead of the fallback.
+ *
+ * NOT this function's job: turning prose into an IANA zone. `locationTz.ts`
+ * already does that (`inferTimezoneFromStateStatic` / `inferTimezoneFromState`
+ * — its static map already resolves 'et' → 'America/New_York'); callers
+ * should resolve free text FIRST and pass the resolved IANA zone here. This
+ * function also does not classify WHICH authority tier a signal deserves
+ * (owner's own note vs. the chain's own text vs. nothing) — that judgment is
+ * the caller's (`by` is required, never defaulted).
+ *
+ * Resolves through `resolvePerson` (the identity chokepoint) — find-or-create
+ * by email, so a repeated external accumulates ONE row (P2), never a
+ * duplicate. Writes through `setCoreFieldWithProvenanceById` (owner > person >
+ * auto — P4/#46), so a caller passing `by:'auto'` (inferred from chain prose)
+ * can never clobber a stronger stored value, while `by:'owner'` (the owner
+ * said so in his forwarding note) always wins. Also refreshes
+ * `working_hours_auto` off whichever zone actually landed (the write above may
+ * have been refused as lower-authority) via `refreshAutoWorkingHoursById`, so
+ * `attendeeAvailability` has a default working window to clip against
+ * immediately — a fresh external otherwise has a timezone but no working-hours
+ * read at all, which drops them from the clip entirely instead of using a sane
+ * default for their zone.
+ *
+ * Rejects a non-strict-IANA `timezone` (same guard as `update_person_profile`
+ * — luxon resolves ambiguous abbreviations like "IST" to Asia/Kolkata) so a
+ * raw "ET"/"PST"-shaped string can never land on the row.
+ *
+ * Never throws — a bad extraction must never take down the caller.
+ *
+ * @returns `outcome` — 'applied' | 'already_set' | 'refused_lower_authority' |
+ *          'no_value' | 'no_person' (the `CoreFieldWrite` outcomes —
+ *          'no_person' is not expected in practice here since `resolvePerson`
+ *          creates the row) plus 'invalid_email' (empty / no '@') and
+ *          'invalid_timezone' (non-strict-IANA shape), both pre-flight
+ *          rejections that never touch the store. `personId` is the
+ *          resolved/created person_id, or null when nothing was resolved.
+ */
+export function setPersonTimezoneByEmail(
+  email: string,
+  timezone: string,
+  by: CoreFieldSetBy,
+  opts?: { name?: string; ownerDomain?: string },
+): { outcome: SetPersonTimezoneOutcome; personId: string | null } {
+  const e = (email ?? '').trim().toLowerCase();
+  if (!e || !e.includes('@')) {
+    logger.warn('setPersonTimezoneByEmail — invalid email, nothing resolved', { email });
+    return { outcome: 'invalid_email', personId: null };
+  }
+
+  const tz = (timezone ?? '').trim();
+  if (!tz) return { outcome: 'no_value', personId: null };
+
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { isStrictIana } = require('../utils/timezoneValidator') as typeof import('../utils/timezoneValidator');
+  if (!isStrictIana(tz)) {
+    logger.warn('setPersonTimezoneByEmail — rejected non-IANA timezone', { email: e, attempted: tz, by });
+    return { outcome: 'invalid_timezone', personId: null };
+  }
+
+  const resolved = resolvePerson({ email: e, name: opts?.name, ownerDomain: opts?.ownerDomain });
+  if (!resolved) return { outcome: 'no_person', personId: null };
+  const personId = resolved.person_id;
+
+  const outcome = setCoreFieldWithProvenanceById(personId, 'timezone', tz, by);
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { refreshAutoWorkingHoursById } = require('../utils/workingHoursDefault') as
+      typeof import('../utils/workingHoursDefault');
+    refreshAutoWorkingHoursById(personId);
+  } catch (err) {
+    logger.warn('setPersonTimezoneByEmail — working-hours refresh threw', {
+      personId, err: String(err).slice(0, 200),
+    });
+  }
+
+  logger.info('setPersonTimezoneByEmail', { email: e, personId, timezone: tz, by, outcome });
+  return { outcome, personId };
+}
+
+/**
  * v2.8.6 — render the "people Maelle is interacting with right now" data
  * block for the dynamic prompt section. Used by the colleague-path system
  * prompt so Sonnet sees email / tz / gender as DATA (no rules, no "never

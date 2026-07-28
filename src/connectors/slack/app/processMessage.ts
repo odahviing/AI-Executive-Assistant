@@ -742,7 +742,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
             // slot in his DM and Maelle never said a word.
             //
             // An ABORT is not a failure — the queue killed this turn on purpose
-            // to merge a message that landed while we were thinking (S8), and a
+            // to merge a message that landed while we were thinking (T8), and a
             // superseded turn apologising would be a brand-new bug. Re-throw so
             // the queue's abort branch restarts the debounce exactly as before.
             if (isMergeAbort(err, signal)) throw err;

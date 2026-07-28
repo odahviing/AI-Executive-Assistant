@@ -147,7 +147,25 @@ export async function buildTurnContext(input: OrchestratorInput) {
   let resolvedAttendeesBlock = '';
   // v3.2.6 (6.4) — never run the social directive/coda on a non-interactive
   // (routine/system) turn; a scheduled report isn't a conversation.
-  const needIntent = socialActive && input.interactive !== false && !!userMessage && userMessage.trim().length > 1;
+  // v4.3.0 (#24 row 131) — nor on a non-Slack transport. Both consumers keyed
+  // off this flag are Slack-only concepts: chooseSocialDirective below (feeds
+  // the system prompt and, on mode:'continue', calls markSubjectRaised
+  // immediately — not gated on delivery) and the end-of-turn coda in
+  // orchestrator/index.ts (gated on socialClassification?.kind === 'task',
+  // which stays null whenever needIntent is false — see the return at the
+  // bottom of this function). A coda is composed and delivered by the
+  // Slack transport's own 10s beat (connectors/slack/postReply.ts); email
+  // (and dormant whatsapp) have no such beat, so on those legs a directive
+  // was being computed, sometimes stamped, and then silently dropped —
+  // confirmed in production (run 3, #24): "Social coda DUE on a task turn"
+  // logged, nothing ever sent. Gating HERE, the single computation site,
+  // prevents the work rather than trying to catch the drop at every
+  // delivery point. Deliberately independent of needScopes / needMeetingPeople
+  // below — the email leg's attendee resolution rides needMeetingPeople and
+  // must keep running (see classifyTurn.ts: the three flags gate independent
+  // halves of the same classifier call).
+  const needIntent = socialActive && input.interactive !== false && !!userMessage && userMessage.trim().length > 1
+    && input.channel === 'slack';
   const needScopes = profile.behavior?.intent_aware_tools === true
     && isOwnerPath
     && !!userMessage
@@ -283,6 +301,38 @@ export async function buildTurnContext(input: OrchestratorInput) {
     }
   }
 
+  // v4.3.0 (#24 rows 132/133/137 — owner ruling: "the only gap is second
+  // participant -> please resolve and use the same format") — union in
+  // attendee addresses a TRANSPORT's own inbound extraction already resolved
+  // this turn (input.extractedAttendeeEmails). This is the SAME
+  // resolvedMeetingAttendees list the block above populates from NAMED
+  // internal colleagues — one authoritative route, two contributors — so
+  // find_available_slots / create_meeting's existing union logic picks these
+  // up completely unchanged, unaware of which channel supplied them. Slack
+  // never sets this field (its own named-colleague resolution above already
+  // covers it), so this is a no-op there. The email connector sets it from
+  // connectors/email/extractParticipants.ts's forwarded-header extraction,
+  // which resolves genuine EXTERNAL addresses no internal-name lookup could
+  // ever produce (an external is never in people_memory under the owner's
+  // own domain) — that gap is what rows 132/133/137 were.
+  const extractedExternalAttendees = (input.extractedAttendeeEmails ?? [])
+    .map(e => (e ?? '').trim().toLowerCase())
+    .filter(e => e.includes('@') && e !== profile.user.email.trim().toLowerCase());
+  if (extractedExternalAttendees.length > 0) {
+    const existingLower = new Set(resolvedMeetingAttendees.map(e => e.toLowerCase()));
+    const added = extractedExternalAttendees.filter(e => !existingLower.has(e));
+    if (added.length > 0) {
+      resolvedMeetingAttendees = [...resolvedMeetingAttendees, ...added];
+      resolvedAttendeesBlock = [
+        resolvedAttendeesBlock,
+        `Participant address(es) extracted from the forwarded email header — do NOT ask for these again, I have ALREADY added them to this turn's find_available_slots search: ${added.join(', ')}`,
+      ].filter(Boolean).join('\n\n');
+      logger.info('orchestrator — email header attendee extraction merged into resolvedMeetingAttendees', {
+        added, finalResolved: resolvedMeetingAttendees, senderRole: turnSenderRole,
+      });
+    }
+  }
+
   // Build the current turn. When images are attached (v1.7.1), the user
   // message becomes a content array `[image, ..., text]` so Sonnet sees the
   // actual pixels — much higher fidelity than a pre-described summary.
@@ -347,7 +397,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   const focusSlackIds = input.isMpim && input.mpimMemberIds
     ? new Set(input.mpimMemberIds.filter(id => id !== profile.user.slack_user_id))
     : undefined;
-  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs, input.userId, input.mpimMemberIds, toolScopes);
+  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs, input.userId, input.mpimMemberIds, toolScopes, input.channel);
 
   // Inject active jobs for this thread so Maelle knows what she already committed to.
   // This prevents her from treating follow-up messages as new requests.
@@ -636,17 +686,29 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // week silently). Coord stored offers on its job row; this is the same
   // protection for the direct path. Same injection rail as the pre-check.
   let offeredSlotsBlock = '';
-  if (input.senderRole === 'colleague' && input.channelId) {
+  // v4.3.0 (#24 E7) — also the email leg. Its turns always carry senderRole
+  // 'owner' (E4's sender gate), but the owner is only relaying an external's
+  // pick from a forwarded chain — the exact "bind, don't re-derive" problem
+  // the colleague path already solves. offeredSlotsStash gives the email key
+  // its own longer TTL by key prefix; this gate only needs to widen so the
+  // block actually gets injected on that leg.
+  if ((input.senderRole === 'colleague' || input.channel === 'email') && input.channelId) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getOfferedSlots } = require('../../utils/offeredSlotsStash') as
         typeof import('../../utils/offeredSlotsStash');
       const offered = getOfferedSlots(input.channelId, input.threadTs);
       if (offered && offered.length > 0) {
+        // Email vs. colleague-chat phrasing: on email the "requester" reading
+        // this is the owner relaying an external's pick from a forwarded
+        // chain, not a colleague typing directly — say so accurately (M11).
+        const whoPicks = input.channel === 'email'
+          ? 'whoever the forwarded chain quotes as picking a time'
+          : 'this colleague';
         offeredSlotsBlock = `## SLOTS ALREADY OFFERED IN THIS CONVERSATION (binding)
-These exact instants were offered to this colleague earlier and are still on the table:
+These exact instants were offered to ${whoPicks} earlier and are still on the table:
 ${offered.map(s => `- ${s.display} → start_iso ${s.startIso}`).join('\n')}
-If their message picks one of these — by time ("20:30"), weekday+time ("Tuesday 20:30"), or position ("the second one") — it means THAT exact instant: use its start_iso verbatim in any create_meeting / validation call. NEVER re-resolve the date from a weekday word; the offer above is the authoritative date.`;
+If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 20:30"), or position ("the second one") — it means THAT exact instant: use its start_iso verbatim in any create_meeting / validation call. NEVER re-resolve the date from a weekday word; the offer above is the authoritative date.`;
       }
     } catch (err) {
       logger.warn('offeredSlotsStash read threw — proceeding without block', {
@@ -941,7 +1003,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
   // Tools are collected from active skills — filtered by sender role and
   // (when Module G is on) by the classifier-picked scope set.
   // Colleagues get the static restricted subset; owner gets scope-filtered.
-  let tools = getSkillTools(profile, input.senderRole, toolScopes);
+  let tools = getSkillTools(profile, input.senderRole, toolScopes, input.channel);
 
   // v2.8.6 — prose-only mode strips every write tool. Used by the
   // dateVerifier retry path so a date-typo retry can't fire a fresh
@@ -1080,7 +1142,7 @@ If their message picks one of these — by time ("20:30"), weekday+time ("Tuesda
   // see Module G hits vs misses in production logs. Cheap; only on owner
   // turns when the flag is on.
   if (toolScopes !== undefined) {
-    const allOwnerToolsCount = getSkillTools(profile, 'owner', undefined).length;
+    const allOwnerToolsCount = getSkillTools(profile, 'owner', undefined, input.channel).length;
     logger.info('Module G — tool scope applied', {
       scopes: toolScopes,
       toolsShipped: tools.length,

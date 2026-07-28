@@ -33,7 +33,7 @@ import { MODEL_HAIKU } from '../../llm/models';
  * close — counted across BOTH directions (owner counters, colleague
  * counter-counters), because the ping-pong is what's bounded, not either side's
  * share of it. Round 1 and 2 relay; round 3 expires the request and both sides
- * are told (R4). Owner ruling 2026-07-25: two. It lives here, once — the two
+ * are told (S4). Owner ruling 2026-07-25: two. It lives here, once — the two
  * copies of this cap (relay + bounce-back) had drifted to 3 apiece behind a
  * stale dated comment, which is exactly how a rule ends up with two answers.
  */
@@ -57,7 +57,7 @@ const OWNER_DECISION_WORKDAYS = 2;
  * an amend handed the ball to the colleague. So the midpoint DM'd the owner
  * "Still waiting on your call here" about a call he had already made, and expiry
  * told BOTH parties he'd ghosted a decision the colleague was actually sitting
- * on — the precise pair of wrong outcomes R4 exists to prevent. Every transition
+ * on — the precise pair of wrong outcomes S4 exists to prevent. Every transition
  * between the two waiting states now goes through here.
  *
  * Handler is always `expiry`: runExpiry reads the row's state at fire time and
@@ -79,7 +79,7 @@ function timersForWaitingSide(
   if (side === 'colleague') {
     fresh = DateTime.now().plus({ hours: COLLEAGUE_COUNTER_WINDOW_HOURS }).toUTC();
   } else {
-    // Owner-facing deadlines respect his work hours (R5) — same helper pair the
+    // Owner-facing deadlines respect his work hours (S5) — same helper pair the
     // raise-time expiry uses, so a counter bounced back at 22:00 doesn't burn
     // the night.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -940,7 +940,7 @@ async function notifyRequesterOfDecision(
   }
 
   if (amendWithheld.length > 0) {
-    // R4 — a withheld counter key is never a SILENT omission. `resolve_approval`
+    // S4 — a withheld counter key is never a SILENT omission. `resolve_approval`
     // runs the same renderer before it stores anything and refuses an amend whose
     // counter carries one of these (skill.ts), so this can only fire on a row
     // written before that gate existed — and when it does, the key names are on the
@@ -1141,7 +1141,7 @@ RULES:
  * Reads the row FRESH: resolveRequest has just written `details.counter` (the
  * colleague's) and re-aimed the timers, and the `row` captured at entry predates
  * that. Reading it back is also what keeps the lead and the consequence on ONE
- * source — the stored counter that a ✅ will actually replay (R3).
+ * source — the stored counter that a ✅ will actually replay (S3).
  */
 async function notifyOwnerOfColleaguePushback(
   row: RequestRow,
@@ -1324,8 +1324,8 @@ export interface CounterRendering {
  * drift this function exists to prevent.
  *
  * #153 — this used to be a three-key WHITELIST (text / slot_iso / to) over a
- * payload that is open-ended BY DESIGN (R8: his resolution may differ wildly from
- * the ask; R9: open-ended in KIND). Every other shape returned '' — so Maayan's
+ * payload that is open-ended BY DESIGN (S8: his resolution may differ wildly from
+ * the ask; S9: open-ended in KIND). Every other shape returned '' — so Maayan's
  * 90→55 duration counter, stored as `{duration_min: 55, reason: "…"}`, was relayed
  * to her as "Idan suggested a different approach." with the decision itself
  * missing, and the owner-facing bounce-back said "countered with an alternative".

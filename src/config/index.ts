@@ -24,10 +24,24 @@ const configSchema = z.object({
   VERTEX_PROJECT_ID: z.string().optional().default(''),
   VERTEX_REGION: z.string().optional().default('us-east5'),
 
-  // Azure / Microsoft Graph (app-only service principal)
+  // Azure / Microsoft Graph — same app registration, TWO auth modes:
+  //   - app-only (ClientSecretCredential, graphClient.ts) for calendar —
+  //     tenant-wide free/busy, unchanged.
+  //   - delegated (authorization-code + refresh token, graph/mail.ts) for
+  //     mail — scoped to one signed-in mailbox by construction (#24 owner
+  //     decision: cloneable without an org IT/RBAC step). These three
+  //     values are the client id/secret/tenant BOTH modes authenticate
+  //     against; the mail refresh-token seed itself lives in
+  //     EMAIL_REFRESH_TOKEN / channels.email.refresh_token, not here.
   AZURE_TENANT_ID: z.string().uuid(),
   AZURE_CLIENT_ID: z.string().uuid(),
   AZURE_CLIENT_SECRET: z.string().min(1),
+
+  // v4.3.0 (#24) — optional env override for the email channel's refresh-
+  // token SEED (see userProfile.ts applyEmailTokenEnvOverride). Read via
+  // process.env directly there (profile-scoped, not infra-scoped), so it's
+  // intentionally NOT part of this zod schema — declaring it here would make
+  // it required-or-warned for every deploy even when channels.email is off.
 
   // Storage
   DB_PATH: z.string().default('./data/maelle.db'),

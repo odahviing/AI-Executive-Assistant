@@ -4,7 +4,7 @@ export const meta = {
     'Feature/improvement wave — the door bugger.js does not have. TWO invocations, deliberately: `mode:"plan"` reads open Improvement issues, works out what each actually means, and returns a DECOMPOSITION for the owner to approve — it builds nothing. `mode:"build"` takes the approved pieces, dispatches the lanes in dependency order, runs ONE combined-diff verify, and returns a report. Builds in the working tree; NEVER commits (the owner wraps).',
   phases: [
     { title: 'Intake' },
-    { title: 'Understand' },
+    { title: 'Recon' },
     { title: 'Decompose' },
     { title: 'Build' },
     { title: 'Context' },
@@ -36,19 +36,67 @@ export const meta = {
 // so those rules get written down instead of being absorbed silently into code.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const A = args || {}
+// N6 · A MALFORMED ARG MUST NEVER BE INDISTINGUISHABLE FROM AN ABSENT ONE.
+// The Workflow tool delivers a stringified object as ONE STRING, so every
+// `A.<key>` below reads undefined and the `Array.isArray(...) ? ... : null`
+// defaults swallow it in silence: a described item becomes null and the engine
+// runs the FULL GitHub sweep instead of the one thing it was handed. Not a
+// wrong answer — an expensive one. It cost 32 understand agents and 2.1M
+// tokens on 2026-07-28, and the same line in bugger.js cost a full dispatch on
+// 2026-07-27. This is the sixth instance of the class every silent failure in
+// this engine belongs to: A STEP THAT DID NOTHING WHILE THE RUN REPORTED
+// SUCCESS. So recover a string, and REFUSE a wrong shape rather than defaulting
+// past it — a loud stop costs one re-invocation, a silent default costs a wave.
+let A = args || {}
+if (typeof A === 'string') {
+  try {
+    A = JSON.parse(A)
+    log('! args arrived as a JSON string, not an object — recovered by parsing. Pass args as an actual JSON value, not an encoded string.')
+  } catch (e) {
+    throw new Error(`args arrived as a string and is not valid JSON, so nothing it named could be honoured: ${String((e && e.message) || e)}`)
+  }
+}
+for (const [key, want] of [
+  ['items', 'array'], ['refs', 'array'], ['pieces', 'array'],
+  ['priorClean', 'array'], ['understood', 'array'], ['answers', 'object'],
+]) {
+  const v = A[key]
+  if (v === undefined || v === null) continue
+  const ok = want === 'array' ? Array.isArray(v) : typeof v === 'object' && !Array.isArray(v)
+  if (!ok)
+    throw new Error(
+      `args.${key} is present but is a ${Array.isArray(v) ? 'array' : typeof v}, not ${want}. Refusing to fall back to a default that ignores what you passed.`,
+    )
+}
 const MODE = A.mode === 'build' ? 'build' : 'plan'
 const PRIORITY = A.priority || null // 'High' | 'Medium' | 'Low' — the Improvement axis
 const REFS = Array.isArray(A.refs) ? A.refs : null // explicit issue numbers, skips the label query
-const CODE_LANES = ['meeting', 'requests', 'guard', 'people', 'slack', 'outer']
-const EFFORT = { meeting: 'xhigh', context: 'xhigh', slack: 'xhigh', requests: 'xhigh', outer: 'high', people: 'high', guard: 'high' }
+// An idea that is NOT on GitHub yet — described straight into the engine.
+// Without this the only input was a ticket, so having an idea meant leaving the
+// conversation to run `gh issue create` and coming back, which is the friction
+// that makes someone skip the framework and hand-build instead. That costs the
+// lanes, the verifier and the record all at once.
+//
+// **The ticket is filed when the owner APPROVES the plan, not before** — at plan
+// time he may read what it actually costs and decide against it, and a ticket
+// for a rejected idea is litter. Filing at approval also means the issue arrives
+// with the decomposition already in it. Until then the ref is a placeholder.
+// Shape: [{title, asks, priority?}].
+const DESCRIBED = Array.isArray(A.items) && A.items.length ? A.items : null
+// The ONLY way to survey the whole board. Owner, 2026-07-28: "always do 1 unless
+// I'M SAYING more." Without this flag the engine plans at most one unnamed item.
+const SWEEP = A.sweep === true
+const CODE_LANES = ['matchmaker', 'shepherd', 'gatekeeper', 'profiler', 'transporter', 'outrider']
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', transporter: 'xhigh', shepherd: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high' }
 
 const LANE_MAP =
-  '`meeting` scheduling core · `requests` the async work-item spine (approvals, outreach, reminders, follow-ups, close-loop) · ' +
-  '`guard` output-time gates · `people` identity, person store, memory, social · `context` everything Maelle is TOLD ' +
-  '(system prompt, tool descriptions, learned prefs) and it runs LAST · `slack` the transport (routing, threading, ' +
-  'DM/MPIM/channel posture, authority-by-authenticated-sender, delivery) · `outer` only where NO lane owns the subsystem ' +
-  '(news, brief, routines, Graph plumbing, core orchestrator, DB, health, config, scripts)'
+  '`matchmaker` the scheduling core — finding a time that fits several calendars and rules · ' +
+  '`shepherd` the async work-item spine (approvals, outreach, reminders, follow-ups, close-loop); nothing raised gets lost · ' +
+  '`gatekeeper` the output-time gates — nothing leaves without passing them · `profiler` identity, person store, memory, social · ' +
+  '`instructor` everything Maelle is TOLD (system prompt, tool descriptions, learned prefs) and it runs LAST · ' +
+  '`transporter` the transport, whatever the channel (routing, threading, DM/MPIM/channel posture, ' +
+  'authority-by-authenticated-sender, delivery) · `outrider` only where NO lane owns the subsystem ' +
+  '(news, brief, routines, the Graph CLIENT layer only — calendar is matchmaker, mail is transporter — core orchestrator, DB, health, config, scripts)'
 
 // ---- schemas ----
 const RAW = {
@@ -98,16 +146,36 @@ const PLAN = {
         properties: {
           id: { type: 'string' },
           ref: { type: 'string', description: 'the improvement this serves' },
-          lane: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer'] },
-          whatChanges: { type: 'string', description: 'concrete, in the chat POV where possible' },
+          lane: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider'] },
+          // WHY this piece exists, in product terms. Added on the owner's ask
+          // 2026-07-28: the first plan he read gave him lane · change · deps ·
+          // size, and he could not decide from it because nothing said what any
+          // piece was FOR. A mechanism without a requirement is unrulable — he
+          // can tell you whether the code sounds right, not whether he wants it.
+          requirement: {
+            type: 'string',
+            description:
+              'the product requirement this piece serves: the outcome it buys, one line, from the point of view of whoever gets the benefit. NOT the mechanism (that is whatChanges) and NOT the decision it embeds (that is productDecision).',
+          },
+          whatChanges: {
+            type: 'string',
+            description:
+              'concrete and DETAILED — the file(s), what the code will do differently, and what a person would see change. Name what it REUSES and cite file:line where you have it; "reuses X" is the most valuable thing in this field.',
+          },
           whyThisLane: { type: 'string' },
           dependsOn: { type: 'array', items: { type: 'string' }, description: 'piece ids that must land first' },
           productDecision: { type: 'string', description: 'the owner call this embeds — empty string if it is purely mechanical' },
           charterRule: { type: 'string', description: 'a durable rule this decision should become, or empty. Improvements CAN earn rules; bugs never do' },
-          risk: { type: 'string' },
-          size: { type: 'string', enum: ['small', 'medium', 'large'] },
+          // Was optional, so it was simply absent from the first plan the owner
+          // read — while `size` sat in `required` and is read by nothing at all.
+          // He asked for this one by name and does not care about size.
+          risk: {
+            type: 'string',
+            description:
+              'what could go wrong, what is still unresolved, what he should eyeball before it ships. NEVER blank — "None" is a claim worth making, and a piece with no risk named reads as unexamined.',
+          },
         },
-        required: ['id', 'ref', 'lane', 'whatChanges', 'whyThisLane', 'dependsOn', 'size'],
+        required: ['id', 'ref', 'lane', 'requirement', 'whatChanges', 'whyThisLane', 'dependsOn', 'risk'],
       },
     },
     blockingQuestions: {
@@ -153,7 +221,7 @@ const VERDICTS = {
             description:
               'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the verifier; one you quietly omit gets checked by nobody.',
           },
-          dependencyAgent: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer', ''] },
+          dependencyAgent: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider', ''] },
           dependencyAsk: { type: 'string' },
           notes: { type: 'string' },
         },
@@ -182,12 +250,28 @@ const VERIFY_OUT = {
         properties: {
           symptom: { type: 'string', description: 'what a person would see go wrong — not the mechanism' },
           evidence: { type: 'string', description: 'file:line, REQUIRED' },
-          lane: { type: 'string', enum: ['meeting', 'requests', 'guard', 'context', 'people', 'slack', 'outer'] },
+          lane: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider'] },
           severity: { type: 'string', enum: ['high', 'medium', 'low'] },
         },
         required: ['symptom', 'evidence'],
       },
       description: 'problems found that are NOT about the pieces under review. Empty array if none — never in `results`, and never suppressed to keep the wave clean.',
+    },
+    // Same field and reasoning as bugger.js: work satisfies open tickets by
+    // accident, and only the pass reading the finished diff can notice.
+    ticketCoverage: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          ref: { type: 'string', description: 'the issue, e.g. `#160`' },
+          state: { type: 'string', enum: ['satisfied', 'partial', 'contradicted'] },
+          whatLanded: { type: 'string', description: 'the change in this wave that touches it' },
+          whatIsMissing: { type: 'string', description: 'partial only: precisely what the ticket still asks for. Never a bare percentage.' },
+        },
+        required: ['ref', 'state', 'whatLanded'],
+      },
+      description: 'open GitHub issues this wave satisfied, partly satisfied, or contradicted — OTHER than the ones it was built from. Empty array if none. Never close one yourself.',
     },
     verifiedClean: {
       type: 'array',
@@ -214,27 +298,69 @@ if (MODE === 'plan') {
     ? `Run ONLY: \`gh issue view <n> --json number,title,body,labels\` for each of these issue numbers: ${REFS.join(', ')}`
     : `Run ONLY this one command: \`gh issue list --search "is:open label:Improvement,Feature${PRIORITY ? ` label:${PRIORITY}` : ''}" --json number,title,body,labels\``
 
-  const raw = await agent(
-    `${query} (read-only). Do NOT orient, explore the codebase, or read other files — just the command. SKIP any issue already labelled \`Agent\`. ` +
-      `Return each as {ref:"#<number>", title, priority:<whichever priority label it carries — High|Medium|Low on an Improvement, Roadmap|Next|Idea on a Feature, else unlabelled>, asks:<what it literally asks for, in the owner's own framing — do not reinterpret or improve it>}. ` +
-      `If the list is empty return {items:[]} immediately.`,
-    { label: 'intake:backlog', phase: 'Intake', effort: 'low', model: 'haiku', schema: RAW },
-  )
-  const items = (raw && raw.items) || []
-  log(`Intake: ${items.length} open item(s)${PRIORITY ? ` at ${PRIORITY}` : ''}.`)
-  // One `understand` agent PER ITEM, so an unfiltered pull of the whole backlog
-  // is a real spend — 32 were open on 2026-07-27. The owner works one at a time;
-  // `args.refs` names them and skips the listing entirely.
-  if (!REFS && items.length > 8)
-    log(`! ${items.length} items means ${items.length} understand agents. If you meant one, re-invoke with args.refs:['#<n>'].`)
+  // A described item needs no intake at all — the owner already said what he
+  // wants, and re-reading it through an agent would only risk paraphrasing it.
+  // His words go through verbatim, which is the same reason the GitHub path is
+  // told not to reinterpret a body.
+  let items
+  if (DESCRIBED) {
+    items = DESCRIBED.map((it, n) => ({
+      ref: it.ref || `new-${n + 1}`, // placeholder; the real `gh#N` arrives when he approves and it is filed
+      title: it.title || (it.asks || '').slice(0, 60),
+      priority: it.priority || 'unlabelled',
+      asks: it.asks || it.title || '',
+    }))
+    log(`Plan: ${items.length} described item(s), not on GitHub yet — intake skipped. A ticket is filed if you approve, not before.`)
+  } else {
+    const raw = await agent(
+      `${query} (read-only). Do NOT orient, explore the codebase, or read other files — just the command. SKIP any issue already labelled \`Agent\`. ` +
+        `Return each as {ref:"#<number>", title, priority:<whichever priority label it carries — High|Medium|Low on an Improvement, Roadmap|Next|Idea on a Feature, else unlabelled>, asks:<what it literally asks for, in the owner's own framing — do not reinterpret or improve it>}. ` +
+        `If the list is empty return {items:[]} immediately.`,
+      { label: 'intake:backlog', phase: 'Intake', effort: 'low', model: 'haiku', schema: RAW },
+    )
+    items = (raw && raw.items) || []
+    log(`Intake: ${items.length} open item(s)${PRIORITY ? ` at ${PRIORITY}` : ''}.`)
+  }
   if (!items.length) return { mode: 'plan', items: [], pieces: [], blockingQuestions: [], note: 'Nothing open.' }
   items.forEach((i) => log(`  • ${i.ref} [${i.priority || '?'}] ${(i.title || '').slice(0, 80)}`))
 
-  // Understand each against the CODE, in parallel. An improvement written months
+  // ── N12 · ONE ITEM IS THE DEFAULT. A SWEEP MUST BE ASKED FOR. ─────────────
+  // Owner, 2026-07-28: "always do 1 unless I'M SAYING more."
+  //
+  // This was a LOG line: it printed "32 items means 32 agents" and then fanned
+  // out anyway, costing ~2.1M tokens the first time it fired. **A message is not
+  // a gate.** I named that exact hazard an hour before it happened and still
+  // wrote the weak version, which is the lesson of the whole day in one line.
+  //
+  // Naming `refs` or `items` IS him saying more, so those paths pass through at
+  // whatever count he chose. Reaching here means the ENGINE picked the list, and
+  // it does not get to pick 32. Recon is one Opus agent per item.
+  if (!REFS && !DESCRIBED && items.length > 1 && !SWEEP) {
+    log(`! ${items.length} open item(s), none named — STOPPING before Recon. One is the default; a sweep must be asked for.`)
+    return {
+      mode: 'plan',
+      needsChoice: true,
+      items: items.map(({ ref, title, priority }) => ({ ref, title, priority })),
+      pieces: [],
+      blockingQuestions: [],
+      note:
+        `${items.length} items are open and none were named, so NOTHING was planned. Recon is one Opus agent per item — 32 of them cost ~2.1M tokens on 2026-07-28. ` +
+        `Show the owner this list, ask which ONE he wants, and re-invoke with \`args.refs:['#<n>']\`. If he genuinely wants the whole board surveyed, re-invoke with \`args.sweep:true\`.`,
+    }
+  }
+
+  // RECON each item against the CODE, in parallel. Named `Recon` (owner,
+  // 2026-07-28) because the other phases are noun-shaped — Intake · Decompose ·
+  // Build · Context · Verify — and because rule 9c in every lane charter already
+  // says "RECON in 2-4 batched rounds", so it is vocabulary the framework speaks.
+  // "Planner" was rejected: it would leak into Decompose's job and this phase
+  // must establish what is TRUE before anyone proposes a shape.
+  //
+  // An improvement written months
   // ago is often already half-built, or asks for something the code makes
   // impossible — both are findings, and both are cheaper to learn now than after
   // a lane has been dispatched.
-  phase('Understand')
+  phase('Recon')
   const understood = (
     await parallel(
       items.map((it) => () =>
@@ -245,7 +371,12 @@ if (MODE === 'plan') {
             `If it is ALREADY BUILT, set alreadyExists:true and say where. Issues go stale.\n\n` +
             `List openQuestions — things only the owner can decide. Be honest rather than tidy: an improvement is a product decision, so a short list is suspicious, not efficient. But do not manufacture questions the code already answers.\n\n` +
             `IMPROVEMENT ${it.ref}: ${it.title}\n${it.asks}`,
-          { label: `understand:${it.ref}`, phase: 'Understand', effort: 'medium', schema: UNDERSTOOD },
+          // N15 · OPUS, on the owner's call. This pass establishes the ground
+          // truth every later piece stands on, and NOTHING backstops it: the
+          // verifier checks the diff, not whether the premise was right, and a
+          // bad code-read is the one thing he cannot spot by reading a plan. He
+          // runs one feature at a time, so this is a single agent.
+          { label: `recon:${it.ref}`, phase: 'Recon', effort: 'high', model: 'opus', schema: UNDERSTOOD },
         ),
       ),
     )
@@ -264,6 +395,9 @@ if (MODE === 'plan') {
       `Rules that differ from bug triage — read these, they are the reason this is not the bugger loop:\n` +
       `• Split by CAPABILITY and SURFACE, not by root cause. One improvement legitimately landing in three lanes is normal and is NOT a merge candidate.\n` +
       `• Do the opposite too: where two improvements want the SAME seam moved, say so and emit ONE piece. That cross-view is why this is a single pass.\n` +
+      `• **Every piece names its \`requirement\` — the product outcome it buys, in one line, from the point of view of whoever benefits.** This is the column the owner rules on. A piece described only as a mechanism is unrulable: he can tell you whether the code sounds right, but not whether he WANTS it. If you cannot state the requirement without restating the mechanism, the piece is not understood yet.\n` +
+      `• **Every piece names its \`risk\`** — what could go wrong, what is unresolved, what he should eyeball before it ships. Never blank; "None" is a claim worth making, and a piece with no risk named reads as unexamined.\n` +
+      `• \`whatChanges\` is DETAILED: the file(s), what the code will do differently, what a person would see change, and above all **what it REUSES** with a \`file:line\`. "Reuses X byte-for-byte" is worth more than any other sentence in that field.\n` +
       `• Every piece names the \`productDecision\` it embeds, or empty if genuinely mechanical. If you cannot name the decision, you have not understood the piece.\n` +
       `• Where a decision should outlive this wave, write it as a \`charterRule\`. **A bug never earns a charter rule — an improvement often should.** This is the only flow that produces them, so do not skip it.\n` +
       `• \`dependsOn\` is real ordering, not preference. \`context\` always lands last.\n` +
@@ -286,7 +420,16 @@ if (MODE === 'plan') {
     pieces,
     blockingQuestions: (plan && plan.blockingQuestions) || [],
     notWorthBuilding: (plan && plan.notWorthBuilding) || [],
-    next: 'Owner approves/reshapes the pieces and answers the blocking questions, then re-invoke: Workflow({name:"feature", args:{mode:"build", pieces:[...approved], answers:{...}, understood}}). PASS `understood` BACK — it carries what each area does today with file:line, and without it every builder re-derives ground this pass already covered.',
+    // Described items have no GitHub issue yet, and the Manager has to file one
+    // ON APPROVAL — before the build, so the ledger row and the wrap have a real
+    // `gh#N` to key on. Not before the plan: he may read the cost and decline,
+    // and a ticket for a rejected idea is litter.
+    needsTicket: DESCRIBED ? items.map((i) => ({ placeholderRef: i.ref, title: i.title, asks: i.asks, priority: i.priority })) : [],
+    next:
+      (DESCRIBED
+        ? 'THESE ARE NOT ON GITHUB YET. If the owner approves, FILE the issue first (see `needsTicket`) — title from the item, body carrying his own words plus the decomposition below, labelled `Improvement`+priority or `Feature`+horizon — then replace the `new-N` placeholder ref on each piece with the real `gh#N` before building, so the ledger and the wrap have something to key on. If he declines, file nothing. Then: '
+        : '') +
+      'Owner approves/reshapes the pieces and answers the blocking questions, then re-invoke: Workflow({name:"feature", args:{mode:"build", pieces:[...approved], answers:{...}, understood}}). PASS `understood` BACK — it carries what each area does today with file:line, and without it every builder re-derives ground this pass already covered.',
   }
 }
 
@@ -330,13 +473,14 @@ const buildLane = (lane, pcs, roundNote) =>
       `If a piece needs another lane, return \`needs-dependency\` with the exact contract — do not reach across.${roundNote || ''}\n\n` +
       (Object.keys(answers).length ? `OWNER'S ANSWERS TO THE OPEN QUESTIONS:\n${JSON.stringify(answers, null, 2)}\n\n` : '') +
       `PIECES:\n${pcs.map(describe).join('\n')}\n\nFULL PAYLOAD:\n${JSON.stringify(pcs, null, 2)}`,
-    { label: `build:${lane}`, phase: lane === 'context' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
+    // No `model` here: the tier is on the lane's charter, same as bugger.js.
+    { label: `build:${lane}`, phase: lane === 'instructor' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
   ).then((r) => (r && r.results) || [])
 
 // Dependency-ordered waves. A piece runs only once everything it depends on has
 // landed — computed, not assumed, so the plan's own ordering is what executes.
 const done = new Set()
-const remaining = approved.filter((p) => p.lane !== 'context')
+const remaining = approved.filter((p) => p.lane !== 'instructor')
 let results = []
 let wave = 0
 let waveCapHit = false
@@ -389,7 +533,7 @@ const hasAsk = (r) => r.dependencyAgent && String(r.dependencyAsk || '').trim().
 //      was written to close.
 //   2. It ran ONCE, so a chain deeper than one hop died silently. A → B → C lost C.
 //
-// Now: rounds of [code lanes in parallel → context LAST], where each round's
+// Now: rounds of [code lanes in parallel → Instructor LAST], where each round's
 // asks and newly-satisfied originators become the next round's work, capped, and
 // loudly reported if the cap is hit. Ids encode depth: `p1` → `p1>dep` → `p1>dep>dep`.
 const MAX_DEP_ROUNDS = 5
@@ -408,13 +552,13 @@ const specById = new Map(approved.map((p) => [p.id, p]))
 // tree. Same shape as the `resumes` scoping bug fixed on 2026-07-26.
 const satisfiedIds = new Set()
 let depRounds = 0
-let depQueue = approved.filter((p) => p.lane === 'context') // context's own pieces seed round 1
+let depQueue = approved.filter((p) => p.lane === 'instructor') // context's own pieces seed round 1
 
 for (;;) {
   // (a) asks raised by anything already returned, never dispatched before
   const asks = results
     .filter((r) => hasAsk(r) && DISPATCHABLE_DEP.has(r.verdict) && !dispatchedDepIds.has(`${r.id}>dep`))
-    .map((r) => ({ id: `${r.id}>dep`, ref: '', lane: r.dependencyAgent, whatChanges: r.dependencyAsk, whyThisLane: 'raised by another lane', dependsOn: [], size: 'small' }))
+    .map((r) => ({ id: `${r.id}>dep`, ref: '', lane: r.dependencyAgent, whatChanges: r.dependencyAsk, whyThisLane: 'raised by another lane', dependsOn: [] }))
 
   // (b) originators whose dependency has NOW landed — recomputed every round, which
   //     is the fix for bug 1: a dep built this round can resume its originator next.
@@ -426,13 +570,13 @@ for (;;) {
   const resumes = results
     .filter((r) => r.verdict === 'needs-dependency' && satisfied.has(r.id) && !resumedPieceIds.has(r.id))
     .map((r) => {
-      const orig = specById.get(r.id) || { id: r.id, lane: '', whatChanges: r.notes || '', ref: '', whyThisLane: '', dependsOn: [], size: 'small' }
+      const orig = specById.get(r.id) || { id: r.id, lane: '', whatChanges: r.notes || '', ref: '', whyThisLane: '', dependsOn: [] }
       const dep = satisfied.get(r.id)
       resumedPieceIds.add(r.id)
       return { ...orig, _dependencyResolved: { youAsked: r.dependencyAsk || '', theyDelivered: dep.fix || dep.notes || 'see the working tree' } }
     })
 
-  const round = [...depQueue, ...asks, ...resumes].filter((p) => p.lane && (CODE_LANES.includes(p.lane) || p.lane === 'context'))
+  const round = [...depQueue, ...asks, ...resumes].filter((p) => p.lane && (CODE_LANES.includes(p.lane) || p.lane === 'instructor'))
   depQueue = []
   if (!round.length) break
   if (++depRounds > MAX_DEP_ROUNDS) {
@@ -445,7 +589,7 @@ for (;;) {
   log(`Dep round ${depRounds}: ${round.length} item(s) — ${[...new Set(round.map((p) => p.lane))].join(', ')}${resumes.length ? ` (${resumes.length} resumed)` : ''}`)
 
   // code lanes in parallel, then context LAST within the round
-  const codeRound = round.filter((p) => p.lane !== 'context')
+  const codeRound = round.filter((p) => p.lane !== 'instructor')
   if (codeRound.length) {
     phase('Build')
     const out = await parallel(CODE_LANES.map((lane) => () => {
@@ -454,10 +598,10 @@ for (;;) {
     }))
     results = results.concat(out.filter(Boolean).flat())
   }
-  const ctxRound = round.filter((p) => p.lane === 'context')
+  const ctxRound = round.filter((p) => p.lane === 'instructor')
   if (ctxRound.length) {
     phase('Context')
-    results = results.concat(await buildLane('context', ctxRound, resumeNote))
+    results = results.concat(await buildLane('instructor', ctxRound, resumeNote))
   }
   round.forEach((p) => {
     dispatchedDepIds.add(p.id)
@@ -491,6 +635,7 @@ let verifyRan = false
 let waveFiles = []
 let priorCleanDropped = []
 let discoveries = []
+let ticketCoverage = []
 const built = results.filter((r) => r.verdict === 'built')
 if (built.length && A.verify !== false) {
   const priorClean = Array.isArray(A.priorClean) ? A.priorClean : []
@@ -504,29 +649,30 @@ if (built.length && A.verify !== false) {
   if (priorCleanDropped.length) log(`priorClean: dropped ${priorCleanDropped.length} of ${priorClean.length} — this wave changed the code they described.`)
 
   const check = await agent(
-    `Adversarially verify this FEATURE wave's COMBINED change before the owner wraps it. **Findings only — build nothing, edit nothing, commit nothing.**\n\n` +
-      `Calibrate to: **is this safe to ship to real people, and does it actually deliver what was approved?** Both halves matter here — unlike a bug wave, a feature can be perfectly safe and still not do the thing.\n\n` +
-      `**Attack the seams first.** These pieces were split across lanes to serve ONE idea, so they are unusually likely to disagree at the joins: a contract changed on one side only, a shared helper two lanes both touched, a surface where two pieces each assume the other handles something.\n\n` +
-      `**Each piece carries \`traced\` — what its builder already walked. Do not re-run those; go at what is missing from that list**, and at anything named as deliberately uncovered. If a \`traced\` claim looks wrong, spot-check that one cheaply rather than re-deriving the set.\n\n` +
+    // Bar, standard, seams-first scope, trace sampling, budget,
+    // overturn-vs-discovery and the return contract live in
+    // `.claude/agents/verifier.md`. Only the payload and the ONE thing that
+    // differs from a bug wave stay here.
+    `Verify this FEATURE wave's COMBINED change before the owner wraps it — ${built.length} piece(s). **Your charter holds the bar, the standard, the budget and the return contract.**\n\n` +
+      `**One thing differs from a bug wave: also ask whether it DELIVERS WHAT WAS APPROVED.** A feature can be perfectly safe and still not do the thing. Check the built pieces against the intent below, not only against the code. And these pieces were split across lanes to serve ONE idea, so the joins are where they are most likely to disagree.\n\n` +
       (priorCleanKept.length
-        ? `**ALREADY PROVEN by earlier passes — do NOT re-audit.** Excluded so your budget goes somewhere new; anything an earlier pass proved about code THIS wave changed has already been removed. If this diff genuinely invalidates one anyway, say which and why:\n${priorCleanKept.map((c) => `  • ${c}`).join('\n')}\n\n`
+        ? `**ALREADY PROVEN by earlier passes — settled, do not re-audit.** Anything an earlier pass proved about code THIS wave changed has already been removed from this list:\n${priorCleanKept.map((c) => `  • ${c}`).join('\n')}\n\n`
         : '') +
-      `Read the ACTUAL diff (\`git diff\`, \`git status\`) — verify against the code on disk, never the summaries below; those are the lanes' own claims. Confirm \`npx tsc --noEmit\` is green.\n\n` +
       (waveFiles.length
-        ? `**THE TREE HOLDS MORE THAN THIS WAVE. These ${waveFiles.length} files are ours:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n` +
-          `Anything else in \`git diff\` was already modified before this run started. **Do not audit it, and never blame this wave for a change it did not make.** If a pre-existing change genuinely breaks a piece below, say so and label it plainly as pre-existing.\n\n`
-        : `**No lane reported which files it touched, so treat the whole diff as this wave's** — over-checking rather than under-checking. Say in your notes that you could not separate this wave from what was already in the tree.\n\n`) +
-      `**Budget: keep this under ~60 tool calls.** If the diff is too large to cover at that depth, say what you did NOT cover rather than thinning every check. An honest gap beats uniform shallowness.\n\n` +
-      `**Keep two outputs apart.** An **OVERTURN** — a piece in THIS wave is broken — goes in \`results\` and must be settled before shipping. A **DISCOVERY** — a pre-existing problem you noticed while reading, real but unrelated to these pieces — goes in \`discoveries\`. **A discovery is not built in this wave, deliberately:** building it changes the tree you just examined and invalidates this pass, which justifies another, which can discover something else. Report it as next run's input. Never suppress one to keep the wave clean, and never inflate one into an overturn to get it fixed tonight.\n\n` +
-      `Return one row per piece id: \`built\` if it holds in combination, otherwise \`needs-owner-decision\` with notes on exactly what breaks. Also return \`verifiedClean\` — what you PROVED and would not spend budget on again; the next run is told not to re-check it, so put nothing there you did not establish.\n\n` +
+        ? `**THIS WAVE'S FILES. Everything else in the diff is the environment:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n`
+        : `**No lane reported which files it touched, so the whole diff is in scope.** Say in your return that you could not separate this wave from work already in the tree.\n\n`) +
       `APPROVED INTENT:\n${JSON.stringify(approved.map((p) => ({ id: p.id, whatChanges: p.whatChanges, productDecision: p.productDecision })), null, 2)}\n\n` +
       `WHAT WAS BUILT:\n${JSON.stringify(built, null, 2)}`,
-    { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'guard', effort: 'xhigh', schema: VERIFY_OUT },
+    // No `model` here: `verifier.md` pins Opus, so neither the session model nor
+    // a hand dispatch can downgrade the one agent that must not be downgraded.
+    { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'verifier', effort: 'xhigh', schema: VERIFY_OUT },
   )
   verifyRan = !!check
   verifiedClean = (check && check.verifiedClean) || []
   discoveries = (check && check.discoveries) || []
+  ticketCoverage = (check && check.ticketCoverage) || []
   if (discoveries.length) log(`Verify found ${discoveries.length} NEW problem(s) unrelated to this wave — reported, NOT built.`)
+  ticketCoverage.forEach((t) => log(`  ticket ${t.ref}: ${t.state}${t.state === 'partial' && t.whatIsMissing ? ` — still missing: ${String(t.whatIsMissing).slice(0, 90)}` : ''}`))
   const overturned = new Map(((check && check.results) || []).filter((x) => x.verdict && x.verdict !== 'built').map((x) => [x.id, x.notes || '']))
   verified = results.map((r) =>
     overturned.has(r.id) ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [wave-verify overturned: ${overturned.get(r.id)}]`.trim() } : r,
@@ -557,6 +703,7 @@ const featureManifest = {
           waveFilesNamed: waveFiles.length, // 0 with pieces built = the verify could not tell this wave from the rest of the tree
           priorCleanDropped: priorCleanDropped.length,
           discoveries: discoveries.length, // NEW problems, deliberately not built this wave
+          ticketsTouched: ticketCoverage.length, // open issues this wave satisfied, partly satisfied or contradicted
           overturned: results.filter((r, i) => verified[i] && r.verdict !== verified[i].verdict).length,
           verifiedCleanReturned: verifiedClean.length,
         },
@@ -586,5 +733,6 @@ return {
   verifiedClean, // persist under "Verified clean" in report.md; pass back as `priorClean` next run
   priorCleanDropped, // **DELETE these from `state.verifiedClean`** — this wave changed the code they described, and a stale entry silences a real check forever
   discoveries, // NEW problems unrelated to these pieces. Report as fresh rows at `pending owner`; build on the NEXT run, never this one
+  ticketCoverage, // open issues this wave landed on unasked — `satisfied` closes at the wrap, `partial` can go back to the lane for the remainder, `contradicted` is a decision about to be made by accident
   note: 'Uncommitted in the working tree. The owner wraps.',
 }

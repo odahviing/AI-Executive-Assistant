@@ -533,6 +533,30 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             }
           }
 
+          // #24 B2 (2026-07-29) — auto-default the presentation timezone. When
+          // the caller omits present_in_timezone but the loaded attendees name
+          // EXACTLY ONE distinct zone that differs from the owner's, use that
+          // zone as the default so every candidate still comes back with a
+          // presentation_local — the same "tool completes what the caller left
+          // implicit" shape as the attendee_emails auto-fill above (moving-event
+          // roster / @-mention / thread-recovery), applied to the OUTPUT side.
+          // Without it, a real run offered James Avery (Kevel, ET) "13:15 your
+          // time" — Israel clock, no ET rendering anywhere in the reply — and
+          // only the owner noticing "6am is absurd" caught a 90-minute error
+          // before it reached an external person; a subtler gap would not have
+          // been caught. Two or more DISTINCT non-owner zones → no single
+          // "their zone" to default to — leave it unset rather than guess, the
+          // same fallback-not-force philosophy as #M3 above. An explicit
+          // present_in_timezone from the caller always wins (each use site
+          // below checks it FIRST via `||`) — this only fills a gap, never
+          // overrides a stated value.
+          const nonOwnerAttendeeZones = [...new Set(
+            (attendeeAvailability ?? [])
+              .map(a => a.timezone)
+              .filter(tz => tz && tz !== timezone),
+          )];
+          const autoPresentTz = nonOwnerAttendeeZones.length === 1 ? nonOwnerAttendeeZones[0] : '';
+
           // #77 — owner-initiated path with attendees: auto-pass
           // attendeeBusyEmails so Graph free/busy filters the candidate pool,
           // not just work-hour clipping. Prior fixes (v2.2.3 #43, v2.3.6 #71)
@@ -636,7 +660,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
 
             // #148 — the zone the candidate times were STATED in (searchWindowTz), or an
             // explicit present_in_timezone, used to echo each result back in that zone.
-            const groundTz = searchWindowTz || (typeof args.present_in_timezone === 'string' ? args.present_in_timezone.trim() : '');
+            // #24 B2 — falls back to the auto-derived attendee zone (declared above) when
+            // neither was given; an explicit value here still wins outright.
+            const groundTz = searchWindowTz
+              || (typeof args.present_in_timezone === 'string' ? args.present_in_timezone.trim() : '')
+              || autoPresentTz;
             const results = await Promise.all(normalized.map(async (cand) => {
               const diag: {
                 rejectedCounts?: Record<string, number>;
@@ -1413,9 +1441,12 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // each slot in the requested zone deterministically. Ship only the
             // formatted string (with the short offset name, e.g. "EDT") — never
             // the raw IANA, to avoid the "America/New_York → New York" paste.
-            const presentTz = typeof args.present_in_timezone === 'string'
+            // #24 B2 — falls back to autoPresentTz (declared above) when the caller
+            // left this unset but exactly one loaded attendee zone differs from the
+            // owner's; an explicit value here still wins.
+            const presentTz = (typeof args.present_in_timezone === 'string'
               ? args.present_in_timezone.trim()
-              : '';
+              : '') || autoPresentTz;
             if (presentTz) {
               // v3.4.2 (A2) — shared renderer, same string create/move echo back.
               annotatedSlots = annotatedSlots.map((s: any) => {
@@ -1427,8 +1458,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // later pick ("Tuesday 20:30") binds to the offered instant instead
             // of re-deriving the date. The orchestrator injects these on
             // subsequent turns. Colleague-path only — the owner-path has its own
-            // correction loop.
-            if (!isOwnerInitiatedSearch && annotatedSlots.length > 0 && context.channelId) {
+            // correction loop. v4.3.0 (#24 E7) — ALSO the email channel: every
+            // email turn carries senderRole 'owner' (E4's sender gate), but the
+            // actual picker is the external on the other end of a forwarded
+            // chain, so the email leg needs the exact same binding the
+            // colleague path gets. offeredSlotsStash itself gives the email key
+            // the longer, restart-surviving TTL (by key prefix) — this call site
+            // only needs to widen WHEN it records.
+            const isEmailLeg = context.channel === 'email';
+            if ((!isOwnerInitiatedSearch || isEmailLeg) && annotatedSlots.length > 0 && context.channelId) {
               try {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const { recordOfferedSlots } = require('../../../../utils/offeredSlotsStash') as

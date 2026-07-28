@@ -107,7 +107,7 @@ Legacy YAML keys auto-migrate (`scheduling`/`coordination` → `meetings`, etc.)
 
 ## Connectors
 
-**Outlook Calendar** — Microsoft Graph API via Azure service principal. Required permission: `Calendars.ReadWrite` (application). Reads events, creates/updates/deletes, sets categories + sensitivity, free/busy lookup, slot search.
+**Outlook Calendar** — Microsoft Graph API via Azure service principal. Required permission: `Calendars.ReadWrite` (application). Reads events, creates/updates/deletes, sets categories + sensitivity, free/busy lookup, slot search. *(The mail path below uses the same app registration but a different auth mode — delegated, not application. Both live side by side.)*
 
 **Slack** — Socket Mode, no open ports. One Slack app per assistant identity. Handles four contexts:
 - **1:1 DM** — responds to every message from the authorised user
@@ -115,7 +115,13 @@ Legacy YAML keys auto-migrate (`scheduling`/`coordination` → `meetings`, etc.)
 - **Channel @mention** — responds when @mentioned; stays in the thread once engaged
 - **Channel posting** — can post to any channel on the owner's behalf with an @mention
 
-**WhatsApp / Email** — placeholders. Same orchestrator + skill set when implemented.
+**Email** — Microsoft Graph mail on a **delegated** OAuth token (one browser sign-in per deployment, scoped to one mailbox by construction — deliberately not app-only `Mail.*`, which is tenant-wide and would need org-level Exchange RBAC to narrow). Polls its own mailbox every ~30s on a Graph delta link.
+
+Deliberately **semi-manual**: the owner forwards a meeting-request thread to Maelle, she reads the whole chain, extracts the participants from the forwarded headers, computes options against his real calendar and rules, and replies **to him only** — he forwards it onward. She never emails an external. Enforced in code, not prompt: the send verb hard-caps the recipient, and an email turn is clamped to four tools (`find_available_slots`, `create_meeting`, `get_person_memory`, `log_interaction`) — no move, no cancel, no approval, nothing that can reach Slack.
+
+Same orchestrator, same scheduling core, same output gates as Slack. Email is transport, not a second brain.
+
+**WhatsApp** — placeholder. Same orchestrator + skill set when implemented.
 
 ---
 
@@ -193,17 +199,25 @@ npm run dev          # development with hot reload
 npm run build && npm start    # production
 ```
 
+**Optional — the email transport.** Off unless configured; absent the config nothing polls and no connection registers.
+
+1. Give the assistant a mailbox she can sign into (a licensed user account, not a shared mailbox — the sign-in is what scopes the token).
+2. On the **existing** app registration, add **delegated** `Mail.ReadWrite` + `Mail.Send` — *not* the Application variants, which are tenant-wide — and a `http://localhost:8734/callback` redirect URI under a Web platform.
+3. In the profile YAML: `channels.email.enabled: true` and `channels.email.mailbox: "<her address>"`.
+4. `node scripts/email-auth.mjs <profileName>` — signs in **as the mailbox**, writes a rotating refresh token under `data/` (gitignored). A delegated token belongs to whoever signs in, so signing in as the owner would point her at his own inbox.
+5. Recommended: `Set-Mailbox <her address> -RequireSenderAuthenticationEnabled $true`, so only authenticated tenant senders can reach her at all.
+
 PM2 (single fork-mode process) is configured in `ecosystem.config.js` for unattended operation; deploys are manual via `npm run deploy` (build → restart → tail logs). Startup logs a build stamp (version + git SHA) so `pm2 logs` shows which build is live.
 
 ---
 
 ## Roadmap
 
-**Next**: WhatsApp connector — first non-Slack `Connection` implementation. v3 was cut as the cleanup baseline; the v3.x line goes forward into WhatsApp work.
+**Shipped in 4.3.0**: the email transport — the first non-Slack `Connection` implementation, in its semi-manual form (owner forwards, she replies to him, he forwards onward).
 
 Tracked items:
 - **WhatsApp connector** — [#4](https://github.com/odahviing/AI-Executive-Assistant/issues/4)
-- **Email connector** — [#5](https://github.com/odahviing/AI-Executive-Assistant/issues/5). CC Maelle on a thread to have her handle it.
+- **Email connector, remaining half** — [#5](https://github.com/odahviing/AI-Executive-Assistant/issues/5). The transport, inbound parsing and reply path landed in 4.3.0. Still open by design: outbound to non-owner recipients — currently unreachable while the one-address cap stands, which is a product decision to revisit rather than a gap to fill — plus cross-channel coordination and inbox triage into the brief.
 - **Inbound workflows** — [#6](https://github.com/odahviing/AI-Executive-Assistant/issues/6). Listen for triggers (new lead lands in a channel) and run a skill end-to-end.
 - **Meeting prep skill** — [#110](https://github.com/odahviing/AI-Executive-Assistant/issues/110). Generalizable; interview is one shape, sales / customer / board / 1:1 are others.
 - **Google Places venue backend** — [#96](https://github.com/odahviing/AI-Executive-Assistant/issues/96). Structured booking metadata for the venue skill.
